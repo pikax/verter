@@ -132,7 +132,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let mut frames: Vec<LocatorBinderFrame> = base.binders.to_vec();
                 frames.push(frame);
                 let ctx =
-                    LocatorShapeCtx::new(scope, &frames, base.name_resolution, base.scope_payload);
+                    LocatorShapeCtx::new(scope, &frames, base.name_resolution, base.scope_payload)
+                        .with_optional_infer_source(base.infer_source);
                 lower_bound(index as u32, position, &ctx)
             };
             let constraint = if spec.has_constraint {
@@ -375,7 +376,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 has_default: param.default.is_some(),
             })
             .collect();
-        let base = LocatorShapeCtx::new(&scope, &[], name_resolution, scope_payload.as_ref());
+        let base = LocatorShapeCtx::new(&scope, &[], name_resolution, scope_payload.as_ref())
+            .with_infer_source(key.locator());
         let (frame, _binders) = self.build_type_param_binder_frame(
             &base,
             BinderIdentityMode::DeclHeader {
@@ -389,12 +391,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     TypeParamBoundPosition::Constraint => param.constraint.as_deref(),
                     TypeParamBoundPosition::Default => param.default.as_deref(),
                 }?;
-                Some(self.lower_type_expr_for_locator_shape(bound, bound_ctx))
+                let bound_source = locator_with_header_bound(key.locator(), ordinal, position);
+                let bound_ctx = (*bound_ctx).with_infer_source(&bound_source);
+                Some(self.lower_type_expr_for_locator_shape(bound, &bound_ctx))
             },
         );
         let frames = [frame];
         let shape_ctx =
-            LocatorShapeCtx::new(&scope, &frames, name_resolution, scope_payload.as_ref());
+            LocatorShapeCtx::new(&scope, &frames, name_resolution, scope_payload.as_ref())
+                .with_infer_source(key.locator());
 
         let node = match derefed.shape {
             DerefedBodyShape::Single(expr) => {
@@ -406,8 +411,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             DerefedBodyShape::Merged(contributors) => {
                 let ids: Vec<SemanticNodeId> = contributors
                     .iter()
-                    .map(|contributor| {
-                        self.lower_type_expr_for_locator_shape(contributor, &shape_ctx)
+                    .enumerate()
+                    .map(|(ordinal, contributor)| {
+                        let source = locator_with_path_step(
+                            key.locator(),
+                            verter_type_expr::locators::TypeBodyPathStep::MergedContributor {
+                                ordinal: u32::try_from(ordinal)
+                                    .expect("merged contributor ordinal exceeds u32"),
+                            },
+                        );
+                        let contributor_ctx = shape_ctx.with_infer_source(&source);
+                        self.lower_type_expr_for_locator_shape(contributor, &contributor_ctx)
                     })
                     .collect();
                 self.graph().intern_node_with_scope(
@@ -425,5 +439,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
             .into();
         output.with_observed_self_roots(observed_self_roots)
+    }
+}
+
+fn locator_with_header_bound(
+    locator: &AuthoredBodyLocator,
+    ordinal: u32,
+    position: TypeParamBoundPosition,
+) -> AuthoredBodyLocator {
+    locator_with_path_step(
+        locator,
+        verter_type_expr::locators::TypeBodyPathStep::TypeParamBound { ordinal, position },
+    )
+}
+
+fn locator_with_path_step(
+    locator: &AuthoredBodyLocator,
+    step: verter_type_expr::locators::TypeBodyPathStep,
+) -> AuthoredBodyLocator {
+    let append = |path: &Arc<[verter_type_expr::locators::TypeBodyPathStep]>| {
+        let mut next = Vec::with_capacity(path.len() + 1);
+        next.extend_from_slice(path);
+        next.push(step);
+        Arc::from(next.into_boxed_slice())
+    };
+    match locator {
+        AuthoredBodyLocator::DeclBody(slot) => {
+            AuthoredBodyLocator::DeclBody(verter_type_expr::locators::TypeBodySlot {
+                anchor: slot.anchor.clone(),
+                path: append(&slot.path),
+            })
+        }
+        AuthoredBodyLocator::AugmentationBody(body) => AuthoredBodyLocator::AugmentationBody(
+            verter_type_expr::locators::AugmentationBodyLocator {
+                anchor: body.anchor.clone(),
+                scope: body.scope.clone(),
+                path: append(&body.path),
+            },
+        ),
+        AuthoredBodyLocator::JsdocTypedefBody(body) => AuthoredBodyLocator::JsdocTypedefBody(
+            verter_type_expr::locators::JsdocTypedefBodyLocator {
+                anchor: body.anchor.clone(),
+                path: append(&body.path),
+            },
+        ),
+        AuthoredBodyLocator::MacroPayload(payload) => {
+            AuthoredBodyLocator::MacroPayload(payload.clone())
+        }
     }
 }

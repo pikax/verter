@@ -112,7 +112,10 @@ pub(super) fn result_and(a: RelationResult, b: RelationResult) -> RelationResult
         ) => {
             let mut merged: Vec<InferBinding> = a.iter().cloned().collect();
             for binding in b.iter() {
-                if !merged.iter().any(|existing| existing.name == binding.name) {
+                if !merged
+                    .iter()
+                    .any(|existing| existing.param == binding.param)
+                {
                     merged.push(binding.clone());
                 }
             }

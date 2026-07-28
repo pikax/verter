@@ -521,7 +521,7 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             Arc::from(format!("typeof {}", value_root.name))
         }
         SemanticNodeData::TypeParam { display_name, .. } => Arc::clone(display_name),
-        SemanticNodeData::Infer { name } | SemanticNodeData::InferRef { name } => {
+        SemanticNodeData::Infer { name, .. } | SemanticNodeData::InferRef { name, .. } => {
             Arc::from(format!("infer {name}"))
         }
         SemanticNodeData::Conditional { distributive, .. } => Arc::from(if *distributive {
@@ -1105,13 +1105,21 @@ impl StructuralEncoder<'_> {
                 // `SemanticNodeId` in any arm), so its `Debug` is content-only.
                 self.push_str(&format!("{err:?}"));
             }
-            SemanticNodeData::Infer { name } => {
+            SemanticNodeData::Infer { name, binder } => {
                 self.buf.push(VariantTag::Infer as u8);
                 self.push_str(name);
+                let fingerprint = binder.stable_fingerprint_bytes();
+                self.buf
+                    .extend_from_slice(&(fingerprint.len() as u64).to_le_bytes());
+                self.buf.extend_from_slice(&fingerprint);
             }
-            SemanticNodeData::InferRef { name } => {
+            SemanticNodeData::InferRef { name, binder } => {
                 self.buf.push(VariantTag::InferRef as u8);
                 self.push_str(name);
+                let fingerprint = binder.stable_fingerprint_bytes();
+                self.buf
+                    .extend_from_slice(&(fingerprint.len() as u64).to_le_bytes());
+                self.buf.extend_from_slice(&fingerprint);
             }
             SemanticNodeData::RawFallback { value } => {
                 self.buf.push(VariantTag::RawFallback as u8);

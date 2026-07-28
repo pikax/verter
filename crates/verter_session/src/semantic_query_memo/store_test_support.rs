@@ -9,7 +9,47 @@
 
 use super::*;
 
+/// Per-key error returned by `SemanticGraphStore::execute_cooperative_batch`.
+///
+/// The enum is re-exported through the test-support surface so integration
+/// tests can project per-key failures without losing their typed reason.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchExpandError {
+    /// Canonical content changed between the surface stamp and this read.
+    StaleContentChanged,
+    /// The canonical was deleted between stamp and read.
+    FileDeleted,
+    /// The declaration no longer exists under the current view.
+    DeclarationRemoved,
+    /// The semantic node was evicted and would require an unauthorized cold
+    /// rebuild.
+    EvictedNode,
+}
+
 impl SemanticGraphStore {
+    /// Resolve a test batch through validated warm reads without admitting
+    /// cold work. Missing or stale entries retain the typed per-key error.
+    #[cfg(test)]
+    pub(crate) fn execute_cooperative_batch(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        keys: &[crate::semantic_query::SemanticQueryKey],
+    ) -> Vec<Result<SemanticNodeId, BatchExpandError>> {
+        keys.iter()
+            .map(|key| {
+                if let Some(hit) = self.get_validated(key, ctx) {
+                    match hit.value {
+                        QueryResult::Value(node) | QueryResult::Recursive(node) => Ok(node),
+                        QueryResult::Error(_) => Err(BatchExpandError::EvictedNode),
+                    }
+                } else {
+                    Err(BatchExpandError::EvictedNode)
+                }
+            })
+            .collect()
+    }
+
     /// Test-only accessor: read the entry's [`ReadSetSignature`]
     /// carrier for `key`. Returns `None` when no entry is present.
     /// Surfaces the carrier's path-precise `facts` rail so integration
@@ -297,6 +337,26 @@ impl SemanticGraphStore {
         entries
             .get(&family)
             .map(|slots| slots.slot_candidate_generations_for_test(slot))
+            .unwrap_or_default()
+    }
+
+    /// Test-only probe: exact admission tokens in one candidate slot, in LRU
+    /// order. Concurrency tests use these tokens to distinguish an admitted
+    /// candidate from a same-discriminant ABA replacement.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn slot_candidate_admission_seqs_for_tests(&self, key: &SemanticQueryKey) -> Vec<u64> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .map(|slots| {
+                slots
+                    .snapshot_slot(slot)
+                    .iter()
+                    .map(|candidate| candidate.admission_seq)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }

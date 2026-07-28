@@ -1,121 +1,145 @@
-//! Extends-clause `infer` binder-name collection for the structural
-//! macro-argument producer: the recursive scan that discovers every
-//! `infer X` binder declared in a conditional's `extends` pattern so the
-//! seed frames can pre-declare them.
+//! Producer-private lexical binder context and canonical conditional-`infer`
+//! syntax identities.
 
-use std::sync::Arc;
+use std::{cell::Cell, sync::Arc};
 
-use verter_type_expr::{FunctionExpr, ObjectMember, TypeExpr};
+use rustc_hash::FxHashMap;
 
-/// Collect the `infer` binder names introduced by a conditional's `extends`
-/// clause (at any structural depth) into `out`, so the conditional's TRUE
-/// branch can bind each to the matching `Infer` carrier. Purely syntactic
-/// typed-IR walk — no resolution, allocation-free except the de-duplicated
-/// name push.
-///
-/// This descends EVERY `TypeExpr` child position where an `infer` is
-/// syntactically valid inside an `extends` clause, reaching at least the
-/// composite coverage of the eager binder
-/// `ProjectSemanticDispatch::collect_infer_bindings_into_env` (`Function` /
-/// `Object` param/return/member positions) so the dormant carrier binds the
-/// same names the eager path would: `Function` / `ConstructorType`
-/// (parameters, return, own type-parameter constraint/default), `Object`
-/// (property values, index-signature key/value, call/construct/method
-/// signatures), `TemplateLiteral` interpolations, `Ref` / `ImportType` type
-/// arguments, `TypeOf` instantiation arguments, and `Mapped` source / value /
-/// `as`-remap name-type.
-///
-/// ONE deliberate non-descent: it does NOT recurse into a nested
-/// `Conditional`, because an `infer` in an inner conditional's `extends` is
-/// scoped to THAT conditional's true branch, not this one's — matching the
-/// eager binder, which likewise has no `Conditional` arm.
-pub(super) fn collect_extends_infer_binder_names(expr: &TypeExpr, out: &mut Vec<Arc<str>>) {
-    match expr {
-        TypeExpr::Infer { name } => {
-            if !out.iter().any(|n| n.as_ref() == name.as_str()) {
-                out.push(Arc::from(name.as_str()));
-            }
-        }
-        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) | TypeExpr::KeyOf(inner) => {
-            collect_extends_infer_binder_names(inner, out)
-        }
-        TypeExpr::Array { element, .. } => collect_extends_infer_binder_names(element, out),
-        TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => arms
-            .iter()
-            .for_each(|a| collect_extends_infer_binder_names(a, out)),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .for_each(|e| collect_extends_infer_binder_names(&e.ty, out)),
-        TypeExpr::Ref { type_arguments, .. } | TypeExpr::ImportType { type_arguments, .. } => {
-            type_arguments
-                .iter()
-                .for_each(|a| collect_extends_infer_binder_names(a, out))
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            collect_extends_infer_binder_names(object, out);
-            collect_extends_infer_binder_names(index, out);
-        }
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            collect_function_infer_binder_names(func, out)
-        }
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                match member {
-                    ObjectMember::Property(prop) => {
-                        collect_extends_infer_binder_names(&prop.ty, out)
-                    }
-                    ObjectMember::IndexSignature(sig) => {
-                        collect_extends_infer_binder_names(&sig.key_type, out);
-                        collect_extends_infer_binder_names(&sig.value_type, out);
-                    }
-                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                        collect_function_infer_binder_names(func, out)
-                    }
-                    ObjectMember::Method(method) => {
-                        collect_function_infer_binder_names(&method.function, out)
-                    }
-                    ObjectMember::Spread(spread) => {
-                        collect_extends_infer_binder_names(&spread.ty, out)
-                    }
-                }
-            }
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => expressions
-            .iter()
-            .for_each(|e| collect_extends_infer_binder_names(e, out)),
-        TypeExpr::TypeOf(value_ref) => value_ref
-            .type_args
-            .iter()
-            .for_each(|a| collect_extends_infer_binder_names(a, out)),
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            collect_extends_infer_binder_names(source, out);
-            collect_extends_infer_binder_names(value, out);
-            if let Some(name_type) = name_type {
-                collect_extends_infer_binder_names(name_type, out);
-            }
-        }
-        _ => {}
+use crate::semantic_query::{
+    InferBinderFactory, MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeId,
+};
+
+pub(super) use crate::semantic_query::infer_binder_names::{
+    collect_extends_infer_declarations, InferSyntaxPathStep,
+};
+
+/// One lexical frame of type-parameter and conditional-`infer` bindings.
+#[derive(Debug, Default, Clone)]
+pub(super) struct BinderScope {
+    names: FxHashMap<Arc<str>, SemanticNodeId>,
+    infer_declarations: FxHashMap<Arc<str>, SemanticNodeId>,
+}
+
+impl BinderScope {
+    /// Bind a syntactic type-parameter name to its interned binder node.
+    pub(super) fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
+        self.names.insert(name, node);
+    }
+
+    /// Predeclare a literal conditional-`infer` declaration.
+    pub(super) fn bind_infer_declaration(&mut self, name: Arc<str>, node: SemanticNodeId) {
+        self.infer_declarations.insert(name, node);
+    }
+
+    fn lookup(&self, name: &str) -> Option<SemanticNodeId> {
+        self.names.get(name).copied()
+    }
+
+    fn lookup_infer_declaration(&self, name: &str) -> Option<SemanticNodeId> {
+        self.infer_declarations.get(name).copied()
     }
 }
 
-fn collect_function_infer_binder_names(func: &FunctionExpr, out: &mut Vec<Arc<str>>) {
-    for param in &func.parameters {
-        collect_extends_infer_binder_names(&param.ty, out);
-    }
-    if let Some(return_type) = &func.return_type {
-        collect_extends_infer_binder_names(return_type, out);
-    }
-    for tp in &func.type_parameters {
-        if let Some(constraint) = &tp.constraint {
-            collect_extends_infer_binder_names(constraint, out);
+/// Syntactic binder and provenance inputs to structural lowering.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct StructuralLowerContext<'a> {
+    pub(super) binders: &'a [BinderScope],
+    pub(super) merge_role: MergeRoleStamp,
+    pub(super) macro_own_body: MacroOwnBodyStamp,
+    mapper_ordinals: Option<&'a Cell<u16>>,
+    pub(super) infer_binders: Option<&'a InferBinderFactory>,
+    pub(super) infer_source: Option<&'a verter_type_expr::locators::AuthoredBodyLocator>,
+}
+
+impl<'a> StructuralLowerContext<'a> {
+    /// Construct a root context with neutral provenance.
+    pub(super) fn new(binders: &'a [BinderScope]) -> Self {
+        Self {
+            binders,
+            merge_role: MergeRoleStamp::NEUTRAL,
+            macro_own_body: MacroOwnBodyStamp::NEUTRAL,
+            mapper_ordinals: None,
+            infer_binders: None,
+            infer_source: None,
         }
-        if let Some(default) = &tp.default {
-            collect_extends_infer_binder_names(default, out);
+    }
+
+    pub(super) fn with_mapper_ordinals(mut self, ordinals: &'a Cell<u16>) -> Self {
+        self.mapper_ordinals = Some(ordinals);
+        self
+    }
+
+    pub(super) fn with_infer_binders(mut self, infer_binders: &'a InferBinderFactory) -> Self {
+        self.infer_binders = Some(infer_binders);
+        self
+    }
+
+    pub(super) fn with_infer_source(
+        mut self,
+        source: &'a verter_type_expr::locators::AuthoredBodyLocator,
+    ) -> Self {
+        self.infer_source = Some(source);
+        self
+    }
+
+    pub(super) fn next_mapper_ordinal(&self) -> u16 {
+        match self.mapper_ordinals {
+            Some(cell) => {
+                let next = cell.get();
+                cell.set(next.saturating_add(1));
+                next
+            }
+            None => 0,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_merge_role(mut self, merge_role: MergeRoleStamp) -> Self {
+        self.merge_role = merge_role;
+        self
+    }
+
+    pub(super) fn with_macro_own_body(mut self, macro_own_body: MacroOwnBodyStamp) -> Self {
+        self.macro_own_body = macro_own_body;
+        self
+    }
+
+    pub(super) fn with_binders<'b>(&self, binders: &'b [BinderScope]) -> StructuralLowerContext<'b>
+    where
+        'a: 'b,
+    {
+        StructuralLowerContext {
+            binders,
+            merge_role: self.merge_role,
+            macro_own_body: self.macro_own_body,
+            mapper_ordinals: self.mapper_ordinals,
+            infer_binders: self.infer_binders,
+            infer_source: self.infer_source,
+        }
+    }
+
+    pub(super) fn structural_provenance(&self) -> Self {
+        Self {
+            binders: self.binders,
+            merge_role: self.merge_role,
+            macro_own_body: MacroOwnBodyStamp::NEUTRAL,
+            mapper_ordinals: self.mapper_ordinals,
+            infer_binders: self.infer_binders,
+            infer_source: self.infer_source,
+        }
+    }
+
+    pub(super) fn lookup_binder(&self, name: &str) -> Option<SemanticNodeId> {
+        self.binders
+            .iter()
+            .rev()
+            .find_map(|frame| frame.lookup(name))
+    }
+
+    pub(super) fn lookup_infer_declaration(&self, name: &str) -> Option<SemanticNodeId> {
+        self.binders
+            .iter()
+            .rev()
+            .find_map(|frame| frame.lookup_infer_declaration(name))
     }
 }

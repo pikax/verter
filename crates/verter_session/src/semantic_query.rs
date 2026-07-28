@@ -76,6 +76,9 @@ pub mod query_key_spec;
 /// admission predicate is defined against.
 pub mod index_key;
 
+/// Canonical syntax identities for authored conditional-`infer` binders.
+pub(crate) mod infer_binder_names;
+
 /// The §18.2 cache-admission decision for an error-tolerant semantic result:
 /// [`admit_decision`](admit::admit_decision) maps a result's
 /// [`ResultTaint`] + its [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
@@ -118,6 +121,272 @@ pub type HashValue = Hash16;
 /// for one project generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticNodeId(pub u64);
+
+/// Canonical lexical identity of one conditional-`infer` declaration.
+///
+/// The representation is deliberately opaque. Production identities are
+/// minted only by [`InferBinderFactory`] from a stable authored source plus
+/// the declaration's exact typed child path; callers cannot forge a
+/// demand-order token or a display-name identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InferBinderId(std::sync::Arc<InferBinderIdentity>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum InferBinderIdentity {
+    Authored {
+        scope: NodeScopeId,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+        declaration_path: infer_binder_names::InferSyntaxPath,
+    },
+    Transient {
+        scope: NodeScopeId,
+        exact_typed_root: std::sync::Arc<[u8]>,
+        declaration_path: infer_binder_names::InferSyntaxPath,
+    },
+    #[cfg(test)]
+    Synthetic(u64),
+}
+
+/// Per-root authority for authored conditional-`infer` identities.
+///
+/// Authored roots use the content-free body/macro locator as their declaration
+/// anchor. Each binder then appends the exact typed child path of the written
+/// `infer` occurrence. Transient roots (synthetic facts and tests without an
+/// authored locator) retain the exact, domain-tagged `TypeExpr::Hash` event
+/// stream as a separate identity class. Neither class uses traversal counters.
+#[derive(Debug)]
+pub(crate) struct InferBinderFactory {
+    scope: NodeScopeId,
+    root: InferBinderRoot,
+    paths:
+        std::cell::RefCell<std::collections::HashMap<usize, infer_binder_names::InferSyntaxPath>>,
+}
+
+#[derive(Debug)]
+enum InferBinderRoot {
+    Authored(verter_type_expr::locators::AuthoredBodyLocator),
+    Transient(std::sync::Arc<[u8]>),
+}
+
+impl InferBinderFactory {
+    #[must_use]
+    pub(crate) fn new(scope: &NodeScopeId, root: &verter_type_expr::TypeExpr) -> Self {
+        use std::hash::Hash;
+
+        let mut recorder = ExactHashEventRecorder::default();
+        root.hash(&mut recorder);
+        let exact_typed_root = std::sync::Arc::from(recorder.into_bytes().into_boxed_slice());
+        Self::from_root(scope, root, InferBinderRoot::Transient(exact_typed_root))
+    }
+
+    #[must_use]
+    pub(crate) fn for_authored_locator(
+        scope: &NodeScopeId,
+        root: &verter_type_expr::TypeExpr,
+        locator: &verter_type_expr::locators::AuthoredBodyLocator,
+    ) -> Self {
+        Self::from_root(scope, root, InferBinderRoot::Authored(locator.clone()))
+    }
+
+    #[must_use]
+    pub(crate) fn for_authored_type_arg_locator(
+        scope: &NodeScopeId,
+        root: &verter_type_expr::TypeExpr,
+        locator: &verter_type_expr::locators::TypeArgLocator,
+    ) -> Self {
+        let locator = Self::authored_body_locator_for_type_arg(locator);
+        Self::for_authored_locator(scope, root, &locator)
+    }
+
+    #[must_use]
+    pub(crate) fn authored_body_locator_for_type_arg(
+        locator: &verter_type_expr::locators::TypeArgLocator,
+    ) -> verter_type_expr::locators::AuthoredBodyLocator {
+        let mut path = Vec::with_capacity(locator.path.len() + 1);
+        path.extend_from_slice(&locator.path);
+        path.push(verter_type_expr::locators::TypeBodyPathStep::TypeArgument {
+            ordinal: locator.arg_index,
+        });
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            verter_type_expr::locators::TypeBodySlot {
+                anchor: locator.anchor.clone(),
+                path: Arc::from(path.into_boxed_slice()),
+            },
+        )
+    }
+
+    fn from_root(
+        scope: &NodeScopeId,
+        root: &verter_type_expr::TypeExpr,
+        identity: InferBinderRoot,
+    ) -> Self {
+        Self {
+            scope: scope.clone(),
+            root: identity,
+            paths: std::cell::RefCell::new(infer_binder_names::index_type_expr_paths(root)),
+        }
+    }
+
+    /// Register a syntax-preserving temporary wrapper at the original
+    /// subtree's exact authored path.
+    pub(crate) fn register_equivalent_subtree(
+        &self,
+        alias: &verter_type_expr::TypeExpr,
+        original: &verter_type_expr::TypeExpr,
+    ) {
+        let original_path = self.path_for_expr(original);
+        infer_binder_names::index_alias_subtree(
+            alias,
+            &original_path,
+            &mut self.paths.borrow_mut(),
+        );
+    }
+
+    #[must_use]
+    pub(crate) fn path_for_expr(
+        &self,
+        expr: &verter_type_expr::TypeExpr,
+    ) -> infer_binder_names::InferSyntaxPath {
+        self.paths
+            .borrow()
+            .get(&(expr as *const verter_type_expr::TypeExpr as usize))
+            .cloned()
+            .expect("infer-bearing subtree was not indexed under its lowering root")
+    }
+
+    #[must_use]
+    pub(crate) fn binder_at(
+        &self,
+        declaration_path: &infer_binder_names::InferSyntaxPath,
+    ) -> InferBinderId {
+        let identity = match &self.root {
+            InferBinderRoot::Authored(locator) => InferBinderIdentity::Authored {
+                scope: self.scope.clone(),
+                locator: locator.clone(),
+                declaration_path: declaration_path.clone(),
+            },
+            InferBinderRoot::Transient(exact_typed_root) => InferBinderIdentity::Transient {
+                scope: self.scope.clone(),
+                exact_typed_root: std::sync::Arc::clone(exact_typed_root),
+                declaration_path: declaration_path.clone(),
+            },
+        };
+        InferBinderId(std::sync::Arc::new(identity))
+    }
+
+    #[must_use]
+    pub(crate) fn binder_for_expr(
+        &self,
+        declaration: &verter_type_expr::TypeExpr,
+    ) -> InferBinderId {
+        self.binder_at(&self.path_for_expr(declaration))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic(ordinal: u64) -> InferBinderId {
+        InferBinderId(std::sync::Arc::new(InferBinderIdentity::Synthetic(ordinal)))
+    }
+}
+
+impl InferBinderId {
+    /// Feed the complete opaque identity into a stable semantic fingerprint.
+    ///
+    /// Consumers never inspect or re-encode the private representation; the
+    /// same `Hash` implementation used by graph identity is the authority.
+    pub(crate) fn write_stable_fingerprint(&self, state: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.hash(state);
+    }
+
+    /// Exact domain-tagged hash-event bytes for audit payloads that need a
+    /// self-contained binder fingerprint rather than a caller-owned hasher.
+    #[must_use]
+    pub(crate) fn stable_fingerprint_bytes(&self) -> Vec<u8> {
+        let mut recorder = ExactHashEventRecorder::default();
+        self.write_stable_fingerprint(&mut recorder);
+        recorder.into_bytes()
+    }
+}
+
+/// Recording `Hasher` for an exact typed hash-event stream. Every method is
+/// domain-tagged, so (for example) `write_u16(1)` cannot alias two `write_u8`
+/// events. `finish` is irrelevant because the full stream, not a digest, is
+/// retained as identity.
+#[derive(Default)]
+struct ExactHashEventRecorder {
+    bytes: Vec<u8>,
+}
+
+impl ExactHashEventRecorder {
+    fn event(&mut self, tag: u8, bytes: &[u8]) {
+        self.bytes.push(tag);
+        self.bytes
+            .extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl std::hash::Hasher for ExactHashEventRecorder {
+    fn finish(&self) -> u64 {
+        0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.event(0, bytes);
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.event(1, &[value]);
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.event(2, &value.to_le_bytes());
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.event(3, &value.to_le_bytes());
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.event(4, &value.to_le_bytes());
+    }
+
+    fn write_u128(&mut self, value: u128) {
+        self.event(5, &value.to_le_bytes());
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.event(6, &(value as u64).to_le_bytes());
+    }
+
+    fn write_i8(&mut self, value: i8) {
+        self.event(7, &[value as u8]);
+    }
+
+    fn write_i16(&mut self, value: i16) {
+        self.event(8, &value.to_le_bytes());
+    }
+
+    fn write_i32(&mut self, value: i32) {
+        self.event(9, &value.to_le_bytes());
+    }
+
+    fn write_i64(&mut self, value: i64) {
+        self.event(10, &value.to_le_bytes());
+    }
+
+    fn write_i128(&mut self, value: i128) {
+        self.event(11, &value.to_le_bytes());
+    }
+
+    fn write_isize(&mut self, value: isize) {
+        self.event(12, &(value as i64).to_le_bytes());
+    }
+}
 
 /// Internal session hot handle wrapping a [`SemanticNodeId`] interned in
 /// the `semantic_query_memo` arena.
@@ -3361,6 +3630,34 @@ pub enum QueryError {
 }
 
 impl QueryError {
+    /// Whether this opaque payload says the represented type is unavailable.
+    ///
+    /// Recursive references and declaration placeholders are publishable type
+    /// carriers: the former is a settled recursion leaf, while the latter is
+    /// an addressable declaration shell. Every other variant represents a
+    /// failure, unresolved control state, or unrepresentable/open value and
+    /// therefore cannot contribute a recovered inference value.
+    #[must_use]
+    pub(crate) fn means_type_is_not_yet_known(&self) -> bool {
+        match self {
+            QueryError::RecursiveRef { .. } | QueryError::DeclPlaceholder { .. } => false,
+            QueryError::Miss
+            | QueryError::UnsupportedIntrinsic { .. }
+            | QueryError::BudgetExceeded(_)
+            | QueryError::Cancelled
+            | QueryError::UnstableState { .. }
+            | QueryError::AliasCycle { .. }
+            | QueryError::Other(_)
+            | QueryError::ValueDomainMismatch { .. }
+            | QueryError::RaiseAliasCycle
+            | QueryError::TypeParamCycle
+            | QueryError::RaiseMiss
+            | QueryError::UnrepresentableSurface
+            | QueryError::UnrepresentableSurfaceMember
+            | QueryError::OpenSurface => true,
+        }
+    }
+
     /// Whether this `Opaque(QueryError)` carrier is the §22 ERROR TYPE — a
     /// genuine "this type IS an error" result — as opposed to a transient
     /// CONTROL / recursion sentinel.
@@ -4664,7 +4961,7 @@ impl Default for FreshnessKey {
 /// A binding-producing relation runs inside the enclosing transaction's active
 /// `InferenceSession`; a judgement discharged under one session's setup must NOT
 /// warm-hit a judgement discharged under a different setup, so this projection
-/// is part of relation identity. The six axes are exactly the fields the active
+/// is part of relation identity. The seven axes are exactly the fields the active
 /// session carries (§4.2), projected content-free onto the cache key.
 ///
 /// **Content-free (R6).** Every axis is a node-set interning identity, a closed
@@ -4680,6 +4977,8 @@ pub struct InferenceContextKey {
     /// relation runs under (§4.0). Names the pass; does not settle measured
     /// variance.
     pub variance_phase: VariancePhase,
+    /// The inference algorithm enabled when the session opened.
+    pub pass_kind: InferencePassKind,
     /// Candidate priority — return-type vs argument vs naked-type-parameter
     /// inference position (§4.2).
     pub candidate_priority: InferenceCandidatePriority,
@@ -4690,6 +4989,18 @@ pub struct InferenceContextKey {
     /// Whether / how a contextual target drives inference in this session
     /// (§4.2).
     pub contextual_inference_mode: ContextualInferenceMode,
+}
+
+/// Inference algorithm selected from the relation pattern before a session
+/// opens. The pass is part of relation identity because reverse-projection
+/// targets change how indexed-access sub-relations deposit candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InferencePassKind {
+    /// Ordinary direct conditional-`infer` inference.
+    #[default]
+    Ordinary,
+    /// Exact `{ [P in keyof infer T]: X }` reverse projection.
+    ReverseHomomorphicMapped,
 }
 
 /// Content-free identity of the set of inferable (open) type parameters in an
@@ -4753,14 +5064,34 @@ pub enum VariancePhase {
 /// only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum InferenceCandidatePriority {
-    /// Ordinary argument-position inference — the baseline priority.
-    #[default]
-    Argument,
-    /// Return-type-position inference (lower priority than naked-type-parameter
-    /// inference, higher precedence semantics handled by the engine).
-    ReturnType,
     /// Naked-type-parameter inference (a bare `T` in the source position).
     NakedTypeParameter,
+    /// Return-type-position inference.
+    ReturnType,
+    /// Ordinary argument-position inference.
+    #[default]
+    Argument,
+    /// A complete reverse-homomorphic mapped candidate.
+    HomomorphicMapped,
+    /// A reverse-homomorphic candidate with one or more unrecovered
+    /// projections represented by `unknown`.
+    PartialHomomorphicMapped,
+}
+
+/// Closed candidate precedence ladder. A larger rank wins.
+///
+/// Every inference setup projection and candidate selection routes through
+/// this function so direct candidates always outrank reverse-mapped
+/// candidates, and complete reverse recovery always outranks partial recovery.
+#[must_use]
+pub const fn inference_candidate_precedence(priority: InferenceCandidatePriority) -> u8 {
+    match priority {
+        InferenceCandidatePriority::NakedTypeParameter => 4,
+        InferenceCandidatePriority::ReturnType => 3,
+        InferenceCandidatePriority::Argument => 2,
+        InferenceCandidatePriority::HomomorphicMapped => 1,
+        InferenceCandidatePriority::PartialHomomorphicMapped => 0,
+    }
 }
 
 /// The occurrence-local `NoInfer<T>` suppression mask in effect for a relation
@@ -5799,6 +6130,11 @@ mod query_key_tag_tests {
 /// substituted type; those bindings flow into the true branch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InferBinding {
+    /// Exact declaration node whose binder was fixed. This is deliberately
+    /// carried alongside the display name: nested conditional scopes may
+    /// declare the same name, and substitution must never guess identity
+    /// from that spelling.
+    pub param: SemanticNodeId,
     pub name: Arc<str>,
     pub bound: SemanticNodeId,
 }
@@ -6021,6 +6357,7 @@ pub enum SemanticNodeData {
     /// `true` branch will substitute the bound type into.
     Infer {
         name: Arc<str>,
+        binder: InferBinderId,
     },
     /// A true-branch REFERENCE to an in-scope `infer` binder — the node
     /// a `Ref { name }` occurrence resolves to through the conditional's
@@ -6035,6 +6372,7 @@ pub enum SemanticNodeData {
     /// TypeExpr-level consumers are unaffected.
     InferRef {
         name: Arc<str>,
+        binder: InferBinderId,
     },
     // Declaration identity is carried as the env-bearing, content-free
     // `ResolvedDeclSlotIdentity` slot in `SemanticQueryKey::Instantiate.base`
@@ -6209,15 +6547,17 @@ pub enum SemanticNodeData {
     /// The typed-IR mirror of
     /// [`TypeExpr::SyntheticSlotBinding`](verter_type_expr::TypeExpr::SyntheticSlotBinding).
     /// Identity is the content-free [`SyntheticBindingId`]; the `value_node`
-    /// arena ordinal is value-side provenance carried alongside so the
-    /// reverse boundary can re-hydrate the full
+    /// arena ordinal is value-side provenance carried alongside and a genuine
+    /// graph child that traversals must descend as `SemanticNodeId(value_node)`.
+    /// The reverse boundary uses the same ordinal to re-hydrate the full
     /// [`verter_type_expr::SyntheticCarrierKey`] for compat output, NOT part
     /// of the binding identity. Raises to `TypeExpr::SyntheticSlotBinding`.
     SyntheticBinding {
         /// The content-free binding identity.
         id: SyntheticBindingId,
-        /// Value-side provenance: the original `value_node` arena ordinal,
-        /// re-attached only for compat materialisation.
+        /// Raw arena ordinal of the original value node. This remains a graph
+        /// child for traversal and is also re-attached for compat
+        /// materialisation; it is not part of [`SyntheticBindingId`].
         value_node: u64,
     },
 }
@@ -6265,6 +6605,44 @@ impl SemanticNodeData {
             // Index 25 is intentionally unused so the surviving variants
             // keep stable bucket indices independent of declaration order.
             Self::SyntheticBinding { .. } => 27,
+        }
+    }
+
+    /// Whether this node says its type meaning is not yet known.
+    ///
+    /// This is a semantic-state classification, not a traversal-state check:
+    /// `DeclRef` and `InstantiationRef` identify resolvable declarations and
+    /// therefore return `false` even when a caller has not walked them yet.
+    /// The match is exhaustive so every new node variant must explicitly
+    /// decide whether it represents an unknown type meaning.
+    #[must_use]
+    pub(crate) fn means_type_is_not_yet_known(&self) -> bool {
+        match self {
+            Self::Opaque(error) => error.means_type_is_not_yet_known(),
+            Self::TypeOf(_) | Self::BareRef(_) | Self::ImportType(_) | Self::RawFallback { .. } => {
+                true
+            }
+            Self::Alias(_)
+            | Self::Object(_)
+            | Self::Union(_)
+            | Self::Intersection(_)
+            | Self::Primitive(_)
+            | Self::Literal(_)
+            | Self::Array { .. }
+            | Self::Tuple { .. }
+            | Self::TemplateLiteral { .. }
+            | Self::KeyOf { .. }
+            | Self::IndexedAccess { .. }
+            | Self::Mapped { .. }
+            | Self::TypeParam { .. }
+            | Self::Infer { .. }
+            | Self::InferRef { .. }
+            | Self::MergedDecl { .. }
+            | Self::Conditional { .. }
+            | Self::Signature { .. }
+            | Self::DeclRef { .. }
+            | Self::InstantiationRef { .. }
+            | Self::SyntheticBinding { .. } => false,
         }
     }
 }
@@ -6369,8 +6747,26 @@ impl PartialEq for SemanticNodeData {
                     display_name: _,
                 },
             ) => ad == bd && ai == bi && ac == bc && adf == bdf,
-            (Self::Infer { name: a }, Self::Infer { name: b }) => a == b,
-            (Self::InferRef { name: a }, Self::InferRef { name: b }) => a == b,
+            (
+                Self::Infer {
+                    name: a,
+                    binder: ab,
+                },
+                Self::Infer {
+                    name: b,
+                    binder: bb,
+                },
+            ) => a == b && ab == bb,
+            (
+                Self::InferRef {
+                    name: a,
+                    binder: ab,
+                },
+                Self::InferRef {
+                    name: b,
+                    binder: bb,
+                },
+            ) => a == b && ab == bb,
             (
                 Self::Conditional {
                     check: ack,
@@ -6505,11 +6901,13 @@ impl std::hash::Hash for SemanticNodeData {
                 constraint.hash(state);
                 default.hash(state);
             }
-            Self::Infer { name } => {
+            Self::Infer { name, binder } => {
                 name.hash(state);
+                binder.hash(state);
             }
-            Self::InferRef { name } => {
+            Self::InferRef { name, binder } => {
                 name.hash(state);
+                binder.hash(state);
             }
             Self::Conditional {
                 check,

@@ -11,7 +11,6 @@ use std::sync::Arc;
 use verter_type_expr::TypeExpr;
 
 use super::macro_type_arg_hot_ref;
-use super::MacroHotMirror;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     HotTypeRef, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
@@ -50,21 +49,6 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
             aliases: Vec::new(),
         })
         .unwrap();
-}
-
-impl MacroHotMirror {
-    /// Number of demanded (filled) macro cells — test observability only,
-    /// never a validity signal. A freshly published artifact reports `0`.
-    pub(crate) fn demanded_count(&self) -> usize {
-        self.cells
-            .get()
-            .map(|c| {
-                c.iter()
-                    .filter(|cell| cell.committed.get().is_some())
-                    .count()
-            })
-            .unwrap_or(0)
-    }
 }
 
 /// The 0-based index of the first macro in `canonical` (the SFCs below each

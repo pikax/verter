@@ -20,18 +20,30 @@
 //! backing, OFF the type-values surface.
 
 use super::*;
-
 /// The `satisfied_projection` every relation entry carries: the modeless
 /// [`ModeSlot::Single`] identity point at the empty path, so the family
 /// materialisation gates treat relation entries exactly like any other
 /// modeless family's (the gate never blocks a modeless hit).
-/// The SCC-union publish carrier of the relation ROOT's just-published
-/// family entry (see [`SemanticGraphStore::relation_published_carrier`]).
-#[derive(Debug, Clone)]
-pub(crate) struct RelationPublishedCarrier {
-    pub(crate) read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
-    pub(crate) self_root_canonicals: Arc<[Arc<str>]>,
-    pub(crate) validated_at_generation: u64,
+/// Test-observer name for a relation family's published candidate.
+#[cfg(test)]
+pub(crate) type RelationPublishedCarrier = PublishedMemoCandidate;
+
+/// Store-owned admission token for a relation member computed inline by
+/// another relation's transaction. Registering the token in the ordinary
+/// relation-family flight table lets a concurrent top-level request join the
+/// inline compute instead of starting duplicate cold work.
+#[derive(Clone)]
+pub(crate) struct InlineRelationFlight {
+    prepared: PreparedKeyHandle,
+    inflight: Arc<InflightEntry>,
+}
+
+impl std::fmt::Debug for InlineRelationFlight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InlineRelationFlight")
+            .field("key", self.prepared.key())
+            .finish_non_exhaustive()
+    }
 }
 
 fn relation_satisfied_projection() -> MaterializedSet {
@@ -42,6 +54,49 @@ fn relation_satisfied_projection() -> MaterializedSet {
 }
 
 impl SemanticGraphStore {
+    /// Claim the ordinary family flight for a non-binding relation member
+    /// that will be computed inline. `None` means another cold owner already
+    /// owns this exact full relation key.
+    pub(crate) fn begin_inline_relation_flight(
+        &self,
+        key: &crate::semantic_query::RelateMemoKey,
+    ) -> Option<InlineRelationFlight> {
+        debug_assert!(
+            key.inference_context.is_none(),
+            "binding relation roots use independently-owned cooperative flights"
+        );
+        let prepared = PreparedKeyHandle::prepare(key.to_query_key());
+        let inflight = Arc::new(InflightEntry::new());
+        inflight.state.lock().claimed = true;
+        let mut table = self.inflight.lock();
+        if table.contains_key(&prepared) {
+            return None;
+        }
+        table.insert(prepared.clone(), Arc::clone(&inflight));
+        Some(InlineRelationFlight { prepared, inflight })
+    }
+
+    /// Release an inline flight that cannot publish a decided member. Waiting
+    /// top-level callers wake on the abort sentinel and retry admission.
+    pub(crate) fn abort_inline_relation_flight(&self, flight: &InlineRelationFlight) {
+        {
+            let mut state = flight.inflight.state.lock();
+            state.aborted = true;
+            if state.completed.is_none() {
+                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                    "inline relation flight abandoned",
+                ))));
+                state.dep_signature = Some(empty_signature());
+            }
+            state.graph_carrier = None;
+            state.walker_diagnostics = None;
+            state.cache_suppress = true;
+            state.result_is_partial = true;
+        }
+        flight.inflight.ready.notify_all();
+        self.retire_inflight(&flight.prepared, &flight.inflight, false);
+    }
+
     /// Intern a relation proof, returning its opaque
     /// [`crate::semantic_query::RelationProofId`] (deduplicated by value).
     /// The proof rides the payload-side table — it is NOT a
@@ -159,6 +214,7 @@ impl SemanticGraphStore {
     /// family entry — the SCC-union carrier the batched member publish
     /// rides (design §2.3: the published fact set is the UNION of all SCC
     /// members' observed facts, never the bare per-member set).
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn relation_published_carrier(
         &self,
@@ -171,24 +227,19 @@ impl SemanticGraphStore {
         let slots = entries.get(&family)?;
         let snapshot = slots.snapshot_slot(ModeSlot::Single);
         let entry = snapshot.into_iter().next_back()?;
-        Some(RelationPublishedCarrier {
+        Some(PublishedMemoCandidate {
             read_set_signature: entry.read_set_signature.clone(),
             self_root_canonicals: Arc::clone(&entry.self_root_canonicals),
             validated_at_generation: entry.validated_at_generation,
+            admission_seq: entry.admission_seq,
         })
     }
 
-    /// Publish a DECIDED SCC member's payload under the SCC-union carrier
-    /// (design §2.3 step 4 batched admission). Only ever called with a
-    /// binary `Assignable`/`NotAssignable` payload by the relation
-    /// authority's drain — `Unknown` / `BudgetExceeded` never reach here.
-    ///
-    /// Retention rides the family rails (per-family cap with invalid-first
-    /// / LRU eviction, `memo_budget`, reverse-index registration), and the
-    /// `(entries slot, memo_budget record, reverse-index register)` triple
-    /// lands under the ONE `entries` lock — the family consistency-cluster
-    /// discipline.
-    pub(crate) fn publish_relation_member(
+    /// Publish a decided inline relation member through the same store-owned
+    /// admission fence as an ordinary family cold winner. On success any
+    /// concurrent top-level joiner receives this exact payload and carrier;
+    /// on invalidation/cancellation the publish is refused and joiners retry.
+    pub(crate) fn publish_relation_member_fenced(
         &self,
         ctx: Option<&dyn crate::resolver_core::ResolverContext>,
         key: crate::semantic_query::RelateMemoKey,
@@ -196,7 +247,9 @@ impl SemanticGraphStore {
         carrier: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         validated_at_generation: u64,
-    ) {
+        required_root: Option<(crate::semantic_query::RelateMemoKey, u64)>,
+        flight: Option<InlineRelationFlight>,
+    ) -> bool {
         debug_assert!(
             matches!(
                 payload.outcome,
@@ -205,6 +258,13 @@ impl SemanticGraphStore {
             ),
             "only decided binary relation payloads publish; {payload:?} must route ReturnOnly"
         );
+        debug_assert!(
+            flight
+                .as_ref()
+                .is_none_or(|flight| flight.prepared.key() == &key.to_query_key()),
+            "an inline relation flight must publish its own exact full key"
+        );
+        let completed = QueryResult::Value(SemanticQueryValue::Relation(payload.clone()));
         let family = FamilyKey::Relate { key: Box::new(key) };
         let slot = ModeSlot::Single;
         let admission_seq = self.alloc_candidate_admission_seq();
@@ -213,7 +273,7 @@ impl SemanticGraphStore {
             result: QueryResult::Value(SemanticQueryValue::Relation(payload)),
             read_set_signature: carrier.clone(),
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
-            self_root_canonicals,
+            self_root_canonicals: Arc::clone(&self_root_canonicals),
             walker_diagnostics: Arc::from([]),
             satisfied_projection: relation_satisfied_projection(),
             validated_at_generation,
@@ -226,7 +286,48 @@ impl SemanticGraphStore {
             }
             None => family::EvictionVictim::LruFront,
         };
+        #[cfg(any(test, feature = "test-support"))]
+        if flight.is_some() {
+            let gate = self.relation_member_pre_entries_gate.lock().clone();
+            if let Some(gate) = gate {
+                gate.wait();
+                gate.wait();
+            }
+        }
         let mut entries = self.entries_lock_diagnosed();
+        if let Some((root_key, root_admission_seq)) = required_root {
+            let root_family = FamilyKey::Relate {
+                key: Box::new(root_key),
+            };
+            let root_is_published = entries.get(&root_family).is_some_and(|slots| {
+                slots
+                    .snapshot_slot(ModeSlot::Single)
+                    .iter()
+                    .any(|entry| entry.admission_seq == root_admission_seq)
+            });
+            if !root_is_published {
+                drop(entries);
+                if let Some(flight) = flight.as_ref() {
+                    record_cold_abort_swept(&self.stats);
+                    self.abort_inline_relation_flight(flight);
+                }
+                return false;
+            }
+        }
+        if let Some(flight) = flight.as_ref() {
+            if self.force_cold_abort_sweep.load(Ordering::Relaxed) {
+                flight.inflight.state.lock().aborted = true;
+            }
+            if ctx.is_some_and(|ctx| ctx.is_cancelled()) {
+                flight.inflight.state.lock().aborted = true;
+            }
+            if flight.inflight.state.lock().aborted {
+                drop(entries);
+                record_cold_abort_swept(&self.stats);
+                self.abort_inline_relation_flight(flight);
+                return false;
+            }
+        }
         let family_was_new = !entries.contains_key(&family);
         let outcome = entries.entry(family.clone()).or_default().publish(
             slot,
@@ -256,6 +357,26 @@ impl SemanticGraphStore {
             admission_seq,
         );
         drop(entries);
+        if let Some(flight) = flight.as_ref() {
+            {
+                let mut state = flight.inflight.state.lock();
+                if state.aborted {
+                    drop(state);
+                    self.abort_inline_relation_flight(flight);
+                    return false;
+                }
+                state.completed = Some(completed);
+                state.dep_signature = Some(empty_signature());
+                state.graph_carrier = Some(Box::new(carrier));
+                state.self_root_canonicals = self_root_canonicals;
+                state.walker_diagnostics = Some(Arc::from([]));
+                state.cache_suppress = false;
+                state.result_is_partial = false;
+            }
+            flight.inflight.ready.notify_all();
+            self.retire_inflight(&flight.prepared, &flight.inflight, false);
+        }
+        true
     }
 
     /// Test-support enumeration of every published `Relate` family entry as
@@ -340,8 +461,8 @@ impl SemanticGraphStore {
     /// Test-support seed seam for relation fixtures (mirrors the retired
     /// `insert_relation` shape): publishes a DECIDED payload with the
     /// legacy no-view eviction policy (LRU front). Production writes route
-    /// through the relation authority's batched publish
-    /// ([`Self::publish_relation_member`]) or the family singleflight.
+    /// through the relation authority's fenced batched publish or the family
+    /// singleflight.
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_relation_payload_for_tests(
         &self,
@@ -351,14 +472,17 @@ impl SemanticGraphStore {
         payload: crate::semantic_query::RelationPayload,
         validated_at_generation: u64,
     ) {
-        self.publish_relation_member(
+        let published = self.publish_relation_member_fenced(
             None,
             key,
             payload,
             carrier,
             self_root_canonicals,
             validated_at_generation,
+            None,
+            None,
         );
+        debug_assert!(published, "an unfenced fixture publish cannot be aborted");
     }
 
     /// Host-view-aware variant of [`Self::insert_relation_payload_for_tests`]:
@@ -376,14 +500,17 @@ impl SemanticGraphStore {
         payload: crate::semantic_query::RelationPayload,
         validated_at_generation: u64,
     ) {
-        self.publish_relation_member(
+        let published = self.publish_relation_member_fenced(
             Some(host),
             key,
             payload,
             carrier,
             self_root_canonicals,
             validated_at_generation,
+            None,
+            None,
         );
+        debug_assert!(published, "an unfenced fixture publish cannot be aborted");
     }
 
     /// Test-support payload constructor: a decided outcome with a default

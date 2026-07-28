@@ -12,12 +12,12 @@ fn production_relation_admission_is_semantic_store_owned() {
 
     // Post-activation ownership: the family singleflight publishes the
     // relation ROOT's entry (its cold-build output IS the payload), and
-    // `SemanticGraphStore::publish_relation_member` is the ONLY raw
-    // relation write shape — the SCC batched-member publish the
-    // authority's drain rides. The store owns the write; the engine
-    // supplies only the computed payload + the SCC-union carrier.
+    // `SemanticGraphStore::publish_relation_member_fenced` is the SCC
+    // batched-member admission path the authority's drain rides. The store
+    // owns the write and its in-flight fence; the engine supplies only the
+    // computed payload + the SCC-union carrier.
     let owner_start = store_source
-        .find("\n    pub(crate) fn publish_relation_member")
+        .find("\n    pub(crate) fn publish_relation_member_fenced")
         .expect("SemanticGraphStore must own the relation member publish");
     let owner_body = &store_source[owner_start..];
     assert!(
@@ -33,13 +33,13 @@ fn production_relation_admission_is_semantic_store_owned() {
         "the relation engine must supply computation and roots, never reach a raw seed write"
     );
     assert!(
-        producer_source.contains("graph.publish_relation_member("),
-        "the authority's SCC drain must ride the store-owned member publish"
+        producer_source.contains("graph.publish_relation_member_fenced("),
+        "the authority's SCC drain must ride the store-owned fenced member publish"
     );
     assert!(
         store_source.lines().any(|line| line
             .trim_start()
-            .starts_with("pub(crate) fn publish_relation_member(")),
+            .starts_with("pub(crate) fn publish_relation_member_fenced(")),
         "the production relation write must be crate-private"
     );
 }
@@ -2381,6 +2381,241 @@ fn relation_family_entries_drain_via_reverse_index_on_invalidate_canonical() {
     );
 }
 
+#[test]
+fn binding_relate_cold_owners_do_not_join_but_share_store_admission_fences() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+    let relate = crate::semantic_query::RelateMemoKey {
+        inference_context: Some(crate::semantic_query::InferenceContextKey::default()),
+        ..crate::semantic_query::RelateMemoKey::assignable(
+            source,
+            target,
+            crate::semantic_query::RelationContext::default(),
+        )
+    };
+    let query = relate.to_query_key();
+    let builds = Arc::new(AtomicUsize::new(0));
+    let start = Arc::new(std::sync::Barrier::new(3));
+
+    let mut owners = Vec::new();
+    for _ in 0..2 {
+        let store = Arc::clone(&store);
+        let query = query.clone();
+        let builds = Arc::clone(&builds);
+        let start = Arc::clone(&start);
+        owners.push(thread::spawn(move || {
+            let host = ctx_host();
+            start.wait();
+            store.execute_cooperative_value(
+                &host,
+                query,
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while builds.load(Ordering::SeqCst) != 2 && std::time::Instant::now() < deadline
+                    {
+                        std::thread::yield_now();
+                    }
+                    assert_eq!(
+                        builds.load(Ordering::SeqCst),
+                        2,
+                        "both binding transactions must own independent cold builds"
+                    );
+                    (
+                        QueryResult::Value(SemanticQueryValue::Relation(
+                            store.relation_payload_for_tests(
+                                crate::semantic_query::RelationOutcome::Assignable,
+                            ),
+                        )),
+                        empty_signature(),
+                    )
+                },
+            )
+        }));
+    }
+    start.wait();
+    for (index, owner) in owners.into_iter().enumerate() {
+        let read = join_within(owner, &format!("binding owner {index}"));
+        assert!(matches!(
+            read.value,
+            QueryResult::Value(SemanticQueryValue::Relation(_))
+        ));
+    }
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        2,
+        "nonjoining changes only follower sharing, not store ownership"
+    );
+}
+
+#[test]
+fn inline_nonbinding_relation_flight_wakes_concurrent_top_level_joiner() {
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let flight = store
+        .begin_inline_relation_flight(&key)
+        .expect("the inline member must claim the vacant relation family flight");
+    let query = key.to_query_key();
+    let joiner_store = Arc::clone(&store);
+    let joiner = thread::spawn(move || {
+        let host = ctx_host();
+        joiner_store.execute_cooperative_value(
+            &host,
+            query,
+            || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(SemanticQueryValue::Relation(
+                        joiner_store.relation_payload_for_tests(
+                            crate::semantic_query::RelationOutcome::NotAssignable,
+                        ),
+                    )),
+                    empty_signature(),
+                )
+            },
+        )
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while store.test_joiner_on_condvar_count() == 0 && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        store.test_joiner_on_condvar_count() > 0,
+        "the concurrent top-level request must reach the family condvar"
+    );
+
+    let host = ctx_host();
+    assert!(
+        store.publish_relation_member_fenced(
+            Some(&host),
+            key,
+            store
+                .relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable,),
+            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            Arc::from(Vec::<Arc<str>>::new()),
+            host.project_type_store().current_project_generation(),
+            None,
+            Some(flight),
+        ),
+        "the inline member publish must retain its admission right"
+    );
+    let read = join_within(joiner, "inline relation joiner");
+    assert!(matches!(
+        read.value,
+        QueryResult::Value(SemanticQueryValue::Relation(payload))
+            if payload.outcome == crate::semantic_query::RelationOutcome::NotAssignable
+    ));
+}
+
+#[test]
+fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() {
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let canonical = Arc::<str>::from("/w/relation-scc-race.ts");
+    let whole_hash = [0x61; 16];
+    let scoped = |kind| {
+        store.intern_node_with_scope(
+            SemanticNodeData::Primitive(kind),
+            crate::semantic_query::NodeScopeId::File {
+                canonical_id: Arc::clone(&canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash,
+                local_scope: None,
+            },
+        )
+    };
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+    let root_key = crate::semantic_query::RelateMemoKey::assignable(
+        scoped(PrimitiveKind::String),
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let member_key = crate::semantic_query::RelateMemoKey::assignable(
+        scoped(PrimitiveKind::Number),
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
+        vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: whole_hash,
+        }]
+        .into_boxed_slice(),
+    ));
+    let roots = Arc::from(vec![Arc::clone(&canonical)].into_boxed_slice());
+    let published = store.publish_relation_member_fenced(
+        None,
+        root_key.clone(),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+        carrier.clone(),
+        Arc::clone(&roots),
+        0,
+        None,
+        None,
+    );
+    assert!(published, "unfenced relation fixture publish");
+    let flight = store
+        .begin_inline_relation_flight(&member_key)
+        .expect("member flight");
+    let root_admission_seq = store
+        .relation_published_carrier(&root_key)
+        .expect("published root carrier")
+        .admission_seq;
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = store.test_relation_member_pre_entries_gate(Arc::clone(&barrier));
+    let publisher_store = Arc::clone(&store);
+    let publisher = thread::spawn(move || {
+        publisher_store.publish_relation_member_fenced(
+            None,
+            member_key,
+            publisher_store
+                .relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+            carrier,
+            roots,
+            0,
+            Some((root_key, root_admission_seq)),
+            Some(flight),
+        )
+    });
+
+    barrier.wait();
+    assert_eq!(
+        store.invalidate_canonical(canonical.as_ref()),
+        1,
+        "the root snapshot must be invalidated before member publication resumes"
+    );
+    barrier.wait();
+    assert!(
+        !join_within(publisher, "raced relation member publisher"),
+        "a member whose SCC root was invalidated must lose publication authority"
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        0,
+        "neither the invalidated root nor a stale member may survive"
+    );
+    assert_eq!(
+        store.canonical_to_entries_count(&canonical),
+        0,
+        "the stale member must not leave a reverse-index registration"
+    );
+}
+
 /// RELATION FAMILY BOUNDED RETENTION — the per-family candidate cap with
 /// invalid-first / LRU eviction applies to the `Relate` family: at cap
 /// pressure the INVALID candidate (a carrier whose self-root fails
@@ -2536,13 +2771,15 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
             crate::semantic_query::BudgetExceededKind::RelationBudget,
         ));
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        store.publish_relation_member(
+        store.publish_relation_member_fenced(
             None,
             refuse_key.clone(),
             budget_payload,
             crate::fact_signature_helpers::ReadSetSignature::empty(),
             Arc::from(Vec::<Arc<str>>::new()),
             gen0,
+            None,
+            None,
         );
     }));
     assert!(
@@ -3107,6 +3344,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
             super::family::requested_point_for_key(&aborted_key),
         ),
         &aborted_parent,
+        false,
     );
     assert!(
         store.get_unvalidated(&aborted_key).is_none(),
@@ -3136,6 +3374,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
             super::family::requested_point_for_key(&healthy_key),
         ),
         &healthy_parent,
+        false,
     );
     assert!(
         store.get_unvalidated(&healthy_key).is_some(),

@@ -145,6 +145,11 @@ pub enum TypeBodyPathStep {
     MergedContributor { ordinal: u32 },
     /// Into an intersection arm of the body.
     IntersectionArm { ordinal: u32 },
+    /// Into one type argument of the current reference expression.
+    /// Heritage argument locators append this step to their argument-bearing
+    /// reference path so the argument ordinal participates in authored
+    /// binder identity and structural locator navigation.
+    TypeArgument { ordinal: u32 },
     /// Into the object / interface member at this ordinal.
     Member { ordinal: u32 },
     /// Into the value-type surface of the current member.

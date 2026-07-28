@@ -172,9 +172,14 @@ impl Drop for RecursionStackGuard {
 /// callers start a new build.
 pub(super) struct InflightPanicGuard<'a> {
     inflight: Arc<InflightEntry>,
-    inflight_table: &'a Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>,
+    registration: InflightRegistration<'a>,
     key: PreparedKeyHandle,
     finished: bool,
+}
+
+enum InflightRegistration<'a> {
+    Joining(&'a Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>),
+    Independent(&'a Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<InflightEntry>>>>),
 }
 
 impl<'a> InflightPanicGuard<'a> {
@@ -185,7 +190,20 @@ impl<'a> InflightPanicGuard<'a> {
     ) -> Self {
         Self {
             inflight,
-            inflight_table,
+            registration: InflightRegistration::Joining(inflight_table),
+            key,
+            finished: false,
+        }
+    }
+
+    pub(super) fn new_independent(
+        inflight: Arc<InflightEntry>,
+        inflight_table: &'a Mutex<FxHashMap<PreparedKeyHandle, Vec<Arc<InflightEntry>>>>,
+        key: PreparedKeyHandle,
+    ) -> Self {
+        Self {
+            inflight,
+            registration: InflightRegistration::Independent(inflight_table),
             key,
             finished: false,
         }
@@ -222,12 +240,25 @@ impl<'a> Drop for InflightPanicGuard<'a> {
         // a joiner cannot have forked off THIS build — but the guard
         // stays `ptr_eq`-correct for defence in depth and parity with
         // the normal-return step-7 retire.)
-        let mut table = self.inflight_table.lock();
-        if table
-            .get(&self.key)
-            .is_some_and(|entry| Arc::ptr_eq(entry, &self.inflight))
-        {
-            table.remove(&self.key);
+        match &self.registration {
+            InflightRegistration::Joining(table) => {
+                let mut table = table.lock();
+                if table
+                    .get(&self.key)
+                    .is_some_and(|entry| Arc::ptr_eq(entry, &self.inflight))
+                {
+                    table.remove(&self.key);
+                }
+            }
+            InflightRegistration::Independent(table) => {
+                let mut table = table.lock();
+                if let Some(entries) = table.get_mut(&self.key) {
+                    entries.retain(|entry| !Arc::ptr_eq(entry, &self.inflight));
+                    if entries.is_empty() {
+                        table.remove(&self.key);
+                    }
+                }
+            }
         }
     }
 }

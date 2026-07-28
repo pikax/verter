@@ -44,19 +44,37 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::semantic_query::{
-    ConstParamPolicy, ContextualInferenceMode, InferBinding, InferableParamSetId,
-    InferenceCandidatePriority, InferenceContextKey, NoInferMask, RecursionOrBudgetCap,
-    RelateMemoKey, RelationPayload, SemanticNodeId, VariancePhase, VariancePolicy,
+    ConstParamPolicy, ContextualInferenceMode, IndexSignature, InferBinding, InferableParamSetId,
+    InferenceCandidatePriority, InferenceContextKey, InferencePassKind, NoInferMask,
+    RecursionOrBudgetCap, RelateMemoKey, RelationPayload, SemanticNodeId, SurfaceMember,
+    TupleElement, VariancePhase, VariancePolicy,
 };
+use crate::semantic_query_memo::InlineRelationFlight;
 
 /// Transient per-transaction session token. Content-free; NEVER enters a
 /// published key, a `ReadSetSignature.facts` observation, or any fact
 /// signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct SessionId(pub(crate) u64);
+
+/// Transient inference occurrence carried by one in-flight relation frame.
+/// It affects session-local candidate deposits, but never the persistent
+/// `RelateMemoKey` or a published payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct InferenceOccurrence {
+    pub(crate) priority: InferenceCandidatePriority,
+    pub(crate) variance: VariancePhase,
+}
+
+impl InferenceOccurrence {
+    pub(crate) const ARGUMENT_COVARIANT: Self = Self {
+        priority: InferenceCandidatePriority::Argument,
+        variance: VariancePhase::Covariant,
+    };
+}
 
 /// Normalized typed strict-family configuration threaded into the
 /// transaction (RI-10): the reducer BRANCHES on it, and it folds into the
@@ -143,6 +161,8 @@ pub(crate) enum RelationStep {
 pub(crate) struct ReentryFrame {
     /// The full §2.7 identity this frame computes.
     pub(crate) key: RelateMemoKey,
+    /// Session-local occurrence axes for deposits made by this frame.
+    pub(crate) occurrence: InferenceOccurrence,
     /// Assumption edges recorded by this frame's subtree: stack indices of
     /// the frames this subtree ASSUMED hold (back-edges).
     pub(crate) assumption_targets: Vec<usize>,
@@ -160,6 +180,10 @@ pub(crate) struct ReentryFrame {
     pub(crate) budget_cap: Option<RecursionOrBudgetCap>,
     /// The session this frame OPENED (it is the binding root), if any.
     pub(crate) opened_session: Option<SessionId>,
+    /// Store-owned family admission claimed for a non-binding inline
+    /// relation. It follows the member through SCC deferral and is either
+    /// completed by the root's batched publish or explicitly aborted.
+    pub(crate) inline_flight: Option<InlineRelationFlight>,
     /// The `SccLedger` pending length at this frame's PUSH — the drain
     /// watermark. Everything deposited at `pending[watermark..]` was
     /// deposited by THIS frame's subtree (frames nest strictly), so an
@@ -175,14 +199,18 @@ pub(crate) struct ReentryFrame {
 #[derive(Debug, Default)]
 pub(crate) struct CheckerReentryStack {
     frames: Vec<ReentryFrame>,
-    index: FxHashMap<RelateMemoKey, usize>,
+    index: FxHashMap<(RelateMemoKey, InferenceOccurrence), usize>,
 }
 
 impl CheckerReentryStack {
-    /// The stack index of `key` when its full identity is already in
-    /// flight on THIS transaction.
-    pub(crate) fn find(&self, key: &RelateMemoKey) -> Option<usize> {
-        self.index.get(key).copied()
+    /// The stack index of `(key, occurrence)` when that transient relation
+    /// identity is already in flight on THIS transaction.
+    pub(crate) fn find(
+        &self,
+        key: &RelateMemoKey,
+        occurrence: InferenceOccurrence,
+    ) -> Option<usize> {
+        self.index.get(&(key.clone(), occurrence)).copied()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -195,18 +223,25 @@ impl CheckerReentryStack {
 
     /// Push a fresh frame for `key` with the SCC ledger's current pending
     /// length as its drain watermark; returns its stack index.
-    pub(crate) fn push(&mut self, key: RelateMemoKey, pending_watermark: usize) -> usize {
+    pub(crate) fn push(
+        &mut self,
+        key: RelateMemoKey,
+        occurrence: InferenceOccurrence,
+        pending_watermark: usize,
+    ) -> usize {
         let idx = self.frames.len();
         self.frames.push(ReentryFrame {
             key: key.clone(),
+            occurrence,
             assumption_targets: Vec::new(),
             min_open_target: None,
             session_delta: false,
             budget_cap: None,
             opened_session: None,
+            inline_flight: None,
             pending_watermark,
         });
-        self.index.insert(key, idx);
+        self.index.insert((key, occurrence), idx);
         idx
     }
 
@@ -214,7 +249,7 @@ impl CheckerReentryStack {
     /// transaction's execution model).
     pub(crate) fn pop(&mut self) -> ReentryFrame {
         let frame = self.frames.pop().expect("reentry stack underflow");
-        self.index.remove(&frame.key);
+        self.index.remove(&(frame.key.clone(), frame.occurrence));
         frame
     }
 
@@ -237,6 +272,10 @@ impl CheckerReentryStack {
         self.frames.last().map(|frame| &frame.key)
     }
 
+    pub(crate) fn frames_top_occurrence(&self) -> Option<InferenceOccurrence> {
+        self.frames.last().map(|frame| frame.occurrence)
+    }
+
     /// The session the frame at `idx` opened, if any.
     pub(crate) fn frame_opened_session(&self, idx: usize) -> Option<SessionId> {
         self.frames.get(idx).and_then(|frame| frame.opened_session)
@@ -249,9 +288,14 @@ impl CheckerReentryStack {
         }
     }
 
-    /// Mark the frame at `idx` as a session-local delta (row 7).
-    pub(crate) fn note_session_delta(&mut self, idx: usize) {
+    pub(crate) fn note_inline_flight(&mut self, idx: usize, flight: Option<InlineRelationFlight>) {
         if let Some(frame) = self.frames.get_mut(idx) {
+            frame.inline_flight = flight;
+        }
+    }
+
+    pub(crate) fn note_session_delta_range(&mut self, start: usize, end: usize) {
+        for frame in self.frames.get_mut(start..end).into_iter().flatten() {
             frame.session_delta = true;
         }
     }
@@ -328,6 +372,16 @@ pub(crate) enum InferenceSessionState {
 pub(crate) struct SessionCheckpoint {
     /// `candidates.len()` per [`InferenceInfo`], in info order.
     candidate_lens: Vec<usize>,
+    /// Registered reverse-projection targets are append-only.
+    projection_info_len: usize,
+    /// `candidates.len()` per existing reverse projection target.
+    projection_candidate_lens: Vec<usize>,
+    /// Recovered reverse members accumulated so far.
+    recovered_len: usize,
+    /// The reverse pass's full/partial status at the checkpoint.
+    reverse_partial: bool,
+    /// Aggregate candidates already deposited by the reverse pass.
+    aggregate_candidate_len: usize,
 }
 
 /// One inference candidate deposited for a type parameter (design §4.2).
@@ -343,26 +397,129 @@ pub(crate) struct InferenceCandidate {
     pub(crate) variance: VariancePhase,
 }
 
-/// Per-parameter inference state (design §4.2 `InferenceInfo`). The
-/// `// setup_axis`-tagged fields feed the GENERATED
-/// [`InferenceContextKey`] projection (R-b): the guard
-/// `inference_context_key_projects_every_session_setup_axis` diffs the
-/// tagged field set against the projection and fails on any
-/// untagged-or-unprojected axis.
+/// One registered indexed-access projection and the ordinary inference
+/// candidates deposited when relation descent reaches it.
 #[derive(Debug)]
-pub(crate) struct InferenceInfo {
+struct ProjectionInferenceInfo {
+    target_node: SemanticNodeId,
+    candidates: Vec<InferenceCandidate>,
+}
+
+/// Recovered source-shape entries accumulated by the reverse pass.
+#[derive(Debug, Clone)]
+pub(crate) enum ReverseRecoveredEntry {
+    ObjectMember { member: SurfaceMember },
+    ArrayElement { value: SemanticNodeId },
+    TupleElement { element: TupleElement },
+    IndexSignature { signature: IndexSignature },
+}
+
+/// Session-owned journals for exact reverse-homomorphic mapped inference.
+#[derive(Debug)]
+pub(crate) struct ReverseProjectionState {
+    spec: super::relation::ReverseHomomorphicSpec,
+    projection_infos: Vec<ProjectionInferenceInfo>,
+    recovered: Vec<ReverseRecoveredEntry>,
+    partial: bool,
+    aggregate_candidates: Vec<InferenceCandidate>,
+}
+
+impl ReverseProjectionState {
+    pub(crate) fn new(spec: super::relation::ReverseHomomorphicSpec) -> Self {
+        Self {
+            spec,
+            projection_infos: Vec::new(),
+            recovered: Vec::new(),
+            partial: false,
+            aggregate_candidates: Vec::new(),
+        }
+    }
+}
+
+/// Immutable setup for one inferable parameter. Candidate vectors deliberately
+/// do not live here: setup is frozen before the relation key is built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InferenceInfoSetup {
     /// The content-free identity of the parameter (its `Infer` node).
-    pub(crate) param_node: SemanticNodeId,
+    param_node: SemanticNodeId,
     /// The parameter's display name (bindings surface by name).
-    pub(crate) param_name: Arc<str>,
-    // setup_axis: candidate priority ladder rung this info collects under.
-    pub(crate) priority: InferenceCandidatePriority,
-    // setup_axis: `<const T>` const-ness propagation policy for this param.
-    #[allow(dead_code)] // projected into the fingerprint; read by the R-b guard
-    pub(crate) const_param_policy: ConstParamPolicy,
+    param_name: Arc<str>,
+}
+
+impl InferenceInfoSetup {
+    pub(crate) fn new(param_node: SemanticNodeId, param_name: Arc<str>) -> Self {
+        Self {
+            param_node,
+            param_name,
+        }
+    }
+}
+
+/// The single immutable authority for inference-session setup. The frozen
+/// context key and the parameter setup records are constructed together once;
+/// both relation-key construction and session opening consume this same value.
+/// Mutable candidates and reverse-projection journals live only on
+/// [`InferenceSession`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InferenceSessionSetup {
+    context_key: InferenceContextKey,
+    infos: Arc<[InferenceInfoSetup]>,
+}
+
+impl InferenceSessionSetup {
+    pub(crate) fn new(
+        infos: Arc<[InferenceInfoSetup]>,
+        variance_phase: VariancePhase,
+        pass_kind: InferencePassKind,
+        candidate_priority: InferenceCandidatePriority,
+        no_infer_mask: NoInferMask,
+        const_param_policy: ConstParamPolicy,
+        contextual_inference_mode: ContextualInferenceMode,
+    ) -> Self {
+        let mut seen = FxHashSet::default();
+        let infos: Arc<[InferenceInfoSetup]> = Arc::from(
+            infos
+                .iter()
+                .filter(|info| seen.insert(info.param_node))
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let inferable_params = InferableParamSetId::new(Arc::from(
+            infos
+                .iter()
+                .map(|info| info.param_node)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ));
+        Self {
+            context_key: InferenceContextKey {
+                inferable_params,
+                variance_phase,
+                pass_kind,
+                candidate_priority,
+                no_infer_mask,
+                const_param_policy,
+                contextual_inference_mode,
+            },
+            infos,
+        }
+    }
+
+    pub(crate) fn context_key(&self) -> &InferenceContextKey {
+        &self.context_key
+    }
+}
+
+/// Mutable per-parameter inference state. Every setup-affecting field lives in
+/// [`InferenceInfoSetup`]; this state owns candidate deltas only.
+#[derive(Debug)]
+struct InferenceInfo {
+    param_node: SemanticNodeId,
+    param_name: Arc<str>,
     /// Deposited candidates (session-local deltas — ReturnOnly, never
     /// published as-is).
-    pub(crate) candidates: Vec<InferenceCandidate>,
+    candidates: Vec<InferenceCandidate>,
 }
 
 /// The mutable inference session — cold-compute STATE of `execute`
@@ -380,67 +537,51 @@ pub(crate) struct InferenceSession {
     /// The transient per-transaction token (content-free, never a key).
     #[allow(dead_code)] // identity for ledger keying; retained for the session stack
     pub(crate) id: SessionId,
-    // setup_axis: which type parameters are open / inferable (the pattern's
-    // `Infer` nodes — NOT their bound bodies; bodies live in the VALUE).
-    pub(crate) inferable_params: Vec<SemanticNodeId>,
-    // setup_axis: the variance MEASUREMENT pass (conditional `infer`
-    // extraction runs the covariant pass).
-    pub(crate) variance_phase: VariancePhase,
-    // setup_axis: the highest candidate-priority rung the pattern contains.
-    pub(crate) candidate_priority: InferenceCandidatePriority,
-    // setup_axis: the occurrence-local `NoInfer` suppression mask in effect.
-    pub(crate) no_infer_mask: NoInferMask,
-    // setup_axis: whether / how a contextual target drives inference.
-    pub(crate) contextual_inference_mode: ContextualInferenceMode,
+    /// Frozen setup shared with the relation key that opened this session.
+    setup: InferenceSessionSetup,
     /// Per-parameter candidate state.
-    pub(crate) infos: Vec<InferenceInfo>,
+    infos: Vec<InferenceInfo>,
+    /// Reverse-projection journals, present only for a reverse-homomorphic
+    /// session selected at open.
+    reverse_projection: Option<ReverseProjectionState>,
     /// Session lifecycle.
     pub(crate) state: InferenceSessionState,
 }
 
 impl InferenceSession {
-    /// The content-free projection of the session's SETUP — the
-    /// [`InferenceContextKey`] fingerprint (R-b GENERATED: one line per
-    /// `// setup_axis`-tagged field across `InferenceSession` and
-    /// `InferenceInfo`, in declaration order; the diff guard fails on any
-    /// missing axis).
-    pub(crate) fn context_key(&self) -> InferenceContextKey {
-        // The session's ladder rung must equal the pattern's highest
-        // per-info rung (both are setup projections — the guard
-        // `inference_context_key_projects_every_session_setup_axis`
-        // fails a drift).
-        let highest_info_rung = self.infos.iter().map(|info| info.priority).fold(
-            InferenceCandidatePriority::Argument,
-            |acc, rung| match (acc, rung) {
-                (InferenceCandidatePriority::NakedTypeParameter, _)
-                | (_, InferenceCandidatePriority::NakedTypeParameter) => {
-                    InferenceCandidatePriority::NakedTypeParameter
-                }
-                (InferenceCandidatePriority::ReturnType, _)
-                | (_, InferenceCandidatePriority::ReturnType) => {
-                    InferenceCandidatePriority::ReturnType
-                }
-                _ => InferenceCandidatePriority::Argument,
-            },
-        );
-        debug_assert_eq!(
-            self.candidate_priority, highest_info_rung,
-            "the session ladder rung must equal the pattern's highest per-info rung"
-        );
-        InferenceContextKey {
-            inferable_params: InferableParamSetId::new(Arc::from(
-                self.inferable_params.clone().into_boxed_slice(),
-            )),
-            variance_phase: self.variance_phase,
-            candidate_priority: self.candidate_priority,
-            no_infer_mask: self.no_infer_mask,
-            const_param_policy: self
-                .infos
-                .iter()
-                .find(|info| info.const_param_policy == ConstParamPolicy::Const)
-                .map_or(ConstParamPolicy::NonConst, |info| info.const_param_policy),
-            contextual_inference_mode: self.contextual_inference_mode,
+    pub(crate) fn new(
+        id: SessionId,
+        setup: InferenceSessionSetup,
+        reverse_projection: Option<ReverseProjectionState>,
+    ) -> Self {
+        let infos = setup
+            .infos
+            .iter()
+            .map(|info| InferenceInfo {
+                param_node: info.param_node,
+                param_name: Arc::clone(&info.param_name),
+                candidates: Vec::new(),
+            })
+            .collect();
+        Self {
+            id,
+            setup,
+            infos,
+            reverse_projection,
+            state: InferenceSessionState::InProgress,
         }
+    }
+
+    /// The exact frozen setup key used by both the enclosing relation key and
+    /// this session. Candidate collection cannot mutate it.
+    pub(crate) fn context_key(&self) -> &InferenceContextKey {
+        self.setup.context_key()
+    }
+
+    pub(crate) fn reverse_spec(&self) -> Option<&super::relation::ReverseHomomorphicSpec> {
+        self.reverse_projection
+            .as_ref()
+            .map(|reverse| &reverse.spec)
     }
 
     /// A rollback point over the session's per-parameter candidate lists.
@@ -450,12 +591,26 @@ impl InferenceSession {
     /// alternative-scoping primitive: a LOSING overload / signature-group
     /// alternative's deposits must not survive into fixation.
     pub(crate) fn checkpoint(&self) -> SessionCheckpoint {
+        let reverse = self.reverse_projection.as_ref();
         SessionCheckpoint {
             candidate_lens: self
                 .infos
                 .iter()
                 .map(|info| info.candidates.len())
                 .collect(),
+            projection_info_len: reverse.map_or(0, |state| state.projection_infos.len()),
+            projection_candidate_lens: reverse
+                .map(|state| {
+                    state
+                        .projection_infos
+                        .iter()
+                        .map(|info| info.candidates.len())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            recovered_len: reverse.map_or(0, |state| state.recovered.len()),
+            reverse_partial: reverse.is_some_and(|state| state.partial),
+            aggregate_candidate_len: reverse.map_or(0, |state| state.aggregate_candidates.len()),
         }
     }
 
@@ -477,24 +632,186 @@ impl InferenceSession {
         for (info, len) in self.infos.iter_mut().zip(checkpoint.candidate_lens.iter()) {
             info.candidates.truncate(*len);
         }
+        let Some(reverse) = self.reverse_projection.as_mut() else {
+            return;
+        };
+        if checkpoint.projection_candidate_lens.len() != checkpoint.projection_info_len
+            || checkpoint.projection_info_len > reverse.projection_infos.len()
+        {
+            debug_assert!(
+                false,
+                "reverse projection checkpoint does not match the active session"
+            );
+            return;
+        }
+        for (info, len) in reverse
+            .projection_infos
+            .iter_mut()
+            .take(checkpoint.projection_info_len)
+            .zip(checkpoint.projection_candidate_lens.iter())
+        {
+            info.candidates.truncate(*len);
+        }
+        reverse
+            .projection_infos
+            .truncate(checkpoint.projection_info_len);
+        reverse.recovered.truncate(checkpoint.recovered_len);
+        reverse.partial = checkpoint.reverse_partial;
+        reverse
+            .aggregate_candidates
+            .truncate(checkpoint.aggregate_candidate_len);
+    }
+
+    /// Register canonical indexed-access nodes for the current reverse
+    /// projection. A fresh journal entry is appended even when an older
+    /// projection used the same canonical node; deposits select the newest
+    /// registration, so nested checkpoints can remove it without mutating an
+    /// earlier alternative's state.
+    pub(crate) fn register_projection_targets(&mut self, targets: &[SemanticNodeId]) -> bool {
+        let Some(reverse) = self.reverse_projection.as_mut() else {
+            return false;
+        };
+        for (position, target) in targets.iter().enumerate() {
+            if targets[..position].contains(target) {
+                continue;
+            }
+            reverse.projection_infos.push(ProjectionInferenceInfo {
+                target_node: *target,
+                candidates: Vec::new(),
+            });
+        }
+        true
+    }
+
+    /// Whether `node` is registered as a projection target in this session.
+    pub(crate) fn is_projection_target(&self, node: SemanticNodeId) -> bool {
+        self.reverse_projection.as_ref().is_some_and(|reverse| {
+            reverse
+                .projection_infos
+                .iter()
+                .any(|info| info.target_node == node)
+        })
+    }
+
+    /// Deposit into the newest registration for `target`.
+    pub(crate) fn deposit_projection(
+        &mut self,
+        target: SemanticNodeId,
+        candidate: SemanticNodeId,
+        priority: InferenceCandidatePriority,
+        variance: VariancePhase,
+    ) -> bool {
+        let Some(info) = self.reverse_projection.as_mut().and_then(|reverse| {
+            reverse
+                .projection_infos
+                .iter_mut()
+                .rev()
+                .find(|info| info.target_node == target)
+        }) else {
+            return false;
+        };
+        info.candidates.push(InferenceCandidate {
+            node: candidate,
+            priority,
+            variance,
+        });
+        true
+    }
+
+    /// Projection candidates deposited since `checkpoint`.
+    pub(crate) fn projection_candidates_since(
+        &self,
+        checkpoint: &SessionCheckpoint,
+    ) -> Vec<InferenceCandidate> {
+        self.reverse_projection
+            .as_ref()
+            .map(|reverse| {
+                reverse.projection_infos[checkpoint.projection_info_len..]
+                    .iter()
+                    .flat_map(|info| info.candidates.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn push_recovered(&mut self, recovered: ReverseRecoveredEntry) {
+        if let Some(reverse) = self.reverse_projection.as_mut() {
+            reverse.recovered.push(recovered);
+        }
+    }
+
+    pub(crate) fn mark_reverse_partial(&mut self) {
+        if let Some(reverse) = self.reverse_projection.as_mut() {
+            reverse.partial = true;
+        }
+    }
+
+    pub(crate) fn reverse_is_partial(&self) -> bool {
+        self.reverse_projection
+            .as_ref()
+            .is_some_and(|reverse| reverse.partial)
+    }
+
+    pub(crate) fn recovered_since(
+        &self,
+        checkpoint: &SessionCheckpoint,
+    ) -> Vec<ReverseRecoveredEntry> {
+        self.reverse_projection
+            .as_ref()
+            .map(|reverse| reverse.recovered[checkpoint.recovered_len..].to_vec())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn deposit_reverse_aggregate(
+        &mut self,
+        param_node: SemanticNodeId,
+        candidate: SemanticNodeId,
+        priority: InferenceCandidatePriority,
+    ) -> bool {
+        let Some(info_index) = self
+            .infos
+            .iter()
+            .position(|info| info.param_node == param_node)
+        else {
+            return false;
+        };
+        let Some(reverse) = self.reverse_projection.as_mut() else {
+            return false;
+        };
+        let aggregate = InferenceCandidate {
+            node: candidate,
+            priority,
+            variance: VariancePhase::Covariant,
+        };
+        reverse.aggregate_candidates.push(aggregate.clone());
+        self.infos[info_index].candidates.push(aggregate);
+        true
     }
 
     /// Deposit a candidate for `param` under `priority`, tagged with the
-    /// variance of the position it came from.
+    /// variance of the position it came from. Returns `false` when `param`
+    /// is absent from the frozen setup; callers must propagate `Unknown`
+    /// rather than treating an inactive declaration as a successful bind.
     pub(crate) fn deposit(
         &mut self,
         param_node: SemanticNodeId,
         candidate: SemanticNodeId,
         priority: InferenceCandidatePriority,
         variance: VariancePhase,
-    ) {
-        if let Some(info) = self.infos.iter_mut().find(|i| i.param_node == param_node) {
-            info.candidates.push(InferenceCandidate {
-                node: candidate,
-                priority,
-                variance,
-            });
-        }
+    ) -> bool {
+        let Some(info) = self
+            .infos
+            .iter_mut()
+            .find(|info| info.param_node == param_node)
+        else {
+            return false;
+        };
+        info.candidates.push(InferenceCandidate {
+            node: candidate,
+            priority,
+            variance,
+        });
+        true
     }
 
     /// Fixation (design §4.2): combine each parameter's candidates into its
@@ -513,37 +830,10 @@ impl InferenceSession {
         let mut bindings = Vec::with_capacity(self.infos.len());
         let infos = std::mem::take(&mut self.infos);
         for info in &infos {
-            let mut rungs = [
-                info.candidates
-                    .iter()
-                    .filter(|c| c.priority == InferenceCandidatePriority::NakedTypeParameter)
-                    .collect::<Vec<_>>(),
-                info.candidates
-                    .iter()
-                    .filter(|c| c.priority == InferenceCandidatePriority::ReturnType)
-                    .collect::<Vec<_>>(),
-                info.candidates
-                    .iter()
-                    .filter(|c| c.priority == InferenceCandidatePriority::Argument)
-                    .collect::<Vec<_>>(),
-            ];
-            let chosen = rungs
-                .iter_mut()
-                .find(|rung| !rung.is_empty())
-                .map(std::mem::take)
-                .unwrap_or_default();
-            let contravariant: Vec<SemanticNodeId> = chosen
-                .iter()
-                .filter(|c| c.variance == VariancePhase::Contravariant)
-                .map(|c| c.node)
-                .collect();
-            let bound = if contravariant.is_empty() {
-                let covariant: Vec<SemanticNodeId> = chosen.iter().map(|c| c.node).collect();
-                combine(&covariant, VariancePhase::Covariant)
-            } else {
-                combine(&contravariant, VariancePhase::Contravariant)
-            };
+            let (candidates, variance) = select_inference_candidates(&info.candidates);
+            let bound = combine(&candidates, variance);
             bindings.push(InferBinding {
+                param: info.param_node,
                 name: Arc::clone(&info.param_name),
                 bound,
             });
@@ -551,6 +841,37 @@ impl InferenceSession {
         self.infos = infos;
         self.state = InferenceSessionState::CompletedDeterministic;
         bindings
+    }
+}
+
+/// Select the winning priority rung and combination variance for a candidate
+/// list. This is shared by top-level fixation and reverse-projection recovery.
+pub(crate) fn select_inference_candidates(
+    candidates: &[InferenceCandidate],
+) -> (Vec<SemanticNodeId>, VariancePhase) {
+    let Some(priority) = candidates
+        .iter()
+        .map(|candidate| candidate.priority)
+        .max_by_key(|priority| crate::semantic_query::inference_candidate_precedence(*priority))
+    else {
+        return (Vec::new(), VariancePhase::Covariant);
+    };
+    let chosen: Vec<&InferenceCandidate> = candidates
+        .iter()
+        .filter(|candidate| candidate.priority == priority)
+        .collect();
+    let contravariant: Vec<SemanticNodeId> = chosen
+        .iter()
+        .filter(|candidate| candidate.variance == VariancePhase::Contravariant)
+        .map(|candidate| candidate.node)
+        .collect();
+    if contravariant.is_empty() {
+        (
+            chosen.iter().map(|candidate| candidate.node).collect(),
+            VariancePhase::Covariant,
+        )
+    } else {
+        (contravariant, VariancePhase::Contravariant)
     }
 }
 
@@ -563,12 +884,16 @@ impl InferenceSession {
 pub(crate) struct PendingSccMember {
     /// The member's full §2.7 identity.
     pub(crate) key: RelateMemoKey,
+    /// Transient inference occurrence used if the member re-discharges.
+    pub(crate) occurrence: InferenceOccurrence,
     /// The member's provisional discharged verdict at pop.
     pub(crate) verdict: PendingVerdict,
     /// Session-local delta (row 7) — never publishes.
     pub(crate) session_delta: bool,
     /// The member opened session `Some(..)` (a binding member).
     pub(crate) opened_session: Option<SessionId>,
+    /// Store-owned admission for this inline non-binding member.
+    pub(crate) inline_flight: Option<InlineRelationFlight>,
 }
 
 /// The decided provisional verdict of a popped member.
@@ -578,6 +903,29 @@ pub(crate) enum PendingVerdict {
     NotAssignable,
     Unknown,
     BudgetExceeded(RecursionOrBudgetCap),
+}
+
+/// Session-close publication stability gate. The SCC-close snapshot is
+/// provisional: redischarge may publish only when its polarity and complete
+/// fixed-binding snapshot are unchanged. Proof shape is then deterministic
+/// from that verdict plus the unchanged SCC key set; `Unknown`/budget states
+/// are never stable publication candidates.
+pub(crate) fn redischarge_is_stable(
+    provisional: &PendingVerdict,
+    redischarge: &PendingVerdict,
+) -> bool {
+    match (provisional, redischarge) {
+        (
+            PendingVerdict::Assignable {
+                bindings: provisional,
+            },
+            PendingVerdict::Assignable {
+                bindings: redischarge,
+            },
+        ) => provisional == redischarge,
+        (PendingVerdict::NotAssignable, PendingVerdict::NotAssignable) => true,
+        _ => false,
+    }
 }
 
 /// The per-`CheckerTransaction` SCC ledger (design §2.3 step 4 R-a):
@@ -641,6 +989,7 @@ impl SessionAdmissionLedger {
 pub(crate) struct CompletedSccMember {
     pub(crate) key: RelateMemoKey,
     pub(crate) payload: RelationPayload,
+    pub(crate) inline_flight: Option<InlineRelationFlight>,
 }
 
 /// The per-relation-root cold-compute frame (design §2.1 /
@@ -663,11 +1012,25 @@ pub(crate) struct CheckerTransaction {
     /// The discharge substitution table of an in-flight re-discharge
     /// (design §2.3 step 4 — the converged verdicts a re-running member
     /// consults instead of re-entering the SCC).
-    pub(crate) discharge_substitution: FxHashMap<RelateMemoKey, RelationStep>,
+    pub(crate) discharge_substitution:
+        FxHashMap<(RelateMemoKey, InferenceOccurrence), RelationStep>,
+    /// Virtual root occurrence used while an SCC member re-discharges after
+    /// its real frame has been popped. The recorded stack depth lets nested
+    /// frames take over normally while preserving the popped member's
+    /// orientation at the virtual root.
+    pub(crate) redischarge_occurrence: Option<(usize, InferenceOccurrence)>,
     /// Per-target-node memo of the `infer`-pattern detection (a pure
     /// function of the pattern; avoids rescanning per ask).
     pub(crate) pattern_cache: FxHashMap<SemanticNodeId, Option<super::relation::InferPatternInfo>>,
     next_session_id: u64,
+}
+
+/// Saved transient state for a nested SCC re-discharge. Persistent relation
+/// identity is unaffected; this restores only the virtual occurrence and
+/// substitution rails used by the enclosing re-discharge.
+pub(crate) struct SavedRedischargeContext {
+    substitution: FxHashMap<(RelateMemoKey, InferenceOccurrence), RelationStep>,
+    occurrence: Option<(usize, InferenceOccurrence)>,
 }
 
 impl CheckerTransaction {
@@ -697,5 +1060,384 @@ impl CheckerTransaction {
             .iter()
             .rev()
             .find(|s| s.state == InferenceSessionState::InProgress)
+    }
+
+    /// Mark every active non-owner frame when an accepted candidate write
+    /// mutates an outer session.
+    pub(crate) fn note_candidate_write(&mut self, active_id: Option<SessionId>) {
+        let depth = self.reentry().depth();
+        if depth == 0 {
+            return;
+        }
+        let owner = (0..depth).rev().find(|index| {
+            self.reentry()
+                .frame_opened_session(*index)
+                .is_some_and(|opened| Some(opened) == active_id)
+        });
+        let first_non_owner = owner.map_or(0, |index| index + 1);
+        self.reentry_mut()
+            .note_session_delta_range(first_non_owner, depth);
+    }
+
+    /// Install one SCC re-discharge context and return the complete previous
+    /// context so a nested re-discharge can restore its caller exactly.
+    pub(crate) fn replace_redischarge_context(
+        &mut self,
+        substitution: FxHashMap<(RelateMemoKey, InferenceOccurrence), RelationStep>,
+        occurrence: InferenceOccurrence,
+    ) -> SavedRedischargeContext {
+        let previous_substitution =
+            std::mem::replace(&mut self.discharge_substitution, substitution);
+        let depth = self.reentry().depth();
+        let previous_occurrence = self.redischarge_occurrence.replace((depth, occurrence));
+        SavedRedischargeContext {
+            substitution: previous_substitution,
+            occurrence: previous_occurrence,
+        }
+    }
+
+    pub(crate) fn restore_redischarge_context(&mut self, saved: SavedRedischargeContext) {
+        self.discharge_substitution = saved.substitution;
+        self.redischarge_occurrence = saved.occurrence;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup(
+        param_node: SemanticNodeId,
+        variance_phase: VariancePhase,
+        pass_kind: InferencePassKind,
+        candidate_priority: InferenceCandidatePriority,
+        no_infer_mask: NoInferMask,
+        const_param_policy: ConstParamPolicy,
+        contextual_inference_mode: ContextualInferenceMode,
+    ) -> InferenceSessionSetup {
+        InferenceSessionSetup::new(
+            Arc::from(vec![InferenceInfoSetup::new(param_node, Arc::from("T"))].into_boxed_slice()),
+            variance_phase,
+            pass_kind,
+            candidate_priority,
+            no_infer_mask,
+            const_param_policy,
+            contextual_inference_mode,
+        )
+    }
+
+    #[test]
+    fn inference_context_key_projects_every_session_setup_axis() {
+        let active_param = SemanticNodeId(101);
+        let baseline = setup(
+            active_param,
+            VariancePhase::Covariant,
+            InferencePassKind::Ordinary,
+            InferenceCandidatePriority::Argument,
+            NoInferMask::empty(),
+            ConstParamPolicy::NonConst,
+            ContextualInferenceMode::None,
+        );
+        let baseline_key = baseline.context_key().clone();
+
+        // Exhaustive patterns make a new field on either authoritative setup
+        // record a compile error until this behavioral guard classifies it.
+        let InferenceSessionSetup {
+            context_key: _,
+            infos,
+        } = baseline.clone();
+        let [info] = infos.as_ref() else {
+            panic!("the fixture has exactly one inferable parameter");
+        };
+        let InferenceInfoSetup {
+            param_node: _,
+            param_name: _,
+        } = info;
+        let InferenceContextKey {
+            inferable_params: _,
+            variance_phase: _,
+            pass_kind: _,
+            candidate_priority: _,
+            no_infer_mask: _,
+            const_param_policy: _,
+            contextual_inference_mode: _,
+        } = baseline_key.clone();
+
+        let variants = [
+            setup(
+                SemanticNodeId(102),
+                VariancePhase::Covariant,
+                InferencePassKind::Ordinary,
+                InferenceCandidatePriority::Argument,
+                NoInferMask::empty(),
+                ConstParamPolicy::NonConst,
+                ContextualInferenceMode::None,
+            ),
+            setup(
+                active_param,
+                VariancePhase::Contravariant,
+                InferencePassKind::Ordinary,
+                InferenceCandidatePriority::Argument,
+                NoInferMask::empty(),
+                ConstParamPolicy::NonConst,
+                ContextualInferenceMode::None,
+            ),
+            setup(
+                active_param,
+                VariancePhase::Covariant,
+                InferencePassKind::ReverseHomomorphicMapped,
+                InferenceCandidatePriority::Argument,
+                NoInferMask::empty(),
+                ConstParamPolicy::NonConst,
+                ContextualInferenceMode::None,
+            ),
+            setup(
+                active_param,
+                VariancePhase::Covariant,
+                InferencePassKind::Ordinary,
+                InferenceCandidatePriority::ReturnType,
+                NoInferMask::empty(),
+                ConstParamPolicy::NonConst,
+                ContextualInferenceMode::None,
+            ),
+            setup(
+                active_param,
+                VariancePhase::Covariant,
+                InferencePassKind::Ordinary,
+                InferenceCandidatePriority::Argument,
+                NoInferMask(1),
+                ConstParamPolicy::NonConst,
+                ContextualInferenceMode::None,
+            ),
+            setup(
+                active_param,
+                VariancePhase::Covariant,
+                InferencePassKind::Ordinary,
+                InferenceCandidatePriority::Argument,
+                NoInferMask::empty(),
+                ConstParamPolicy::Const,
+                ContextualInferenceMode::None,
+            ),
+            setup(
+                active_param,
+                VariancePhase::Covariant,
+                InferencePassKind::Ordinary,
+                InferenceCandidatePriority::Argument,
+                NoInferMask::empty(),
+                ConstParamPolicy::NonConst,
+                ContextualInferenceMode::Contextual,
+            ),
+        ];
+        for variant in &variants {
+            assert_ne!(
+                variant.context_key(),
+                &baseline_key,
+                "changing any setup axis must select a distinct relation key"
+            );
+        }
+        let distinct: std::collections::HashSet<_> = std::iter::once(baseline_key.clone())
+            .chain(variants.iter().map(|variant| variant.context_key().clone()))
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            variants.len() + 1,
+            "each setup-axis mutation must have a distinct fingerprint"
+        );
+
+        let mut session = InferenceSession::new(SessionId(1), baseline, None);
+        assert_eq!(session.context_key(), &baseline_key);
+        assert!(session.deposit(
+            active_param,
+            SemanticNodeId(201),
+            InferenceCandidatePriority::Argument,
+            VariancePhase::Covariant,
+        ));
+        assert!(
+            !session.deposit(
+                SemanticNodeId(999),
+                SemanticNodeId(202),
+                InferenceCandidatePriority::Argument,
+                VariancePhase::Covariant,
+            ),
+            "an infer absent from the frozen setup must not accept a candidate"
+        );
+        assert_eq!(
+            session.context_key(),
+            &baseline_key,
+            "candidate collection cannot mutate the frozen setup key"
+        );
+        let _bindings =
+            session.fixate(|nodes, _| nodes.first().copied().unwrap_or(SemanticNodeId(0)));
+        assert_eq!(
+            session.context_key(),
+            &baseline_key,
+            "fixation cannot mutate the frozen setup key"
+        );
+    }
+
+    fn relation_key(seed: u64) -> RelateMemoKey {
+        RelateMemoKey::assignable(
+            SemanticNodeId(seed),
+            SemanticNodeId(seed + 1),
+            crate::semantic_query::RelationContext::default(),
+        )
+    }
+
+    #[test]
+    fn repeated_infer_sites_share_one_setup_record_and_one_fixed_binding() {
+        let param = SemanticNodeId(501);
+        let setup = InferenceSessionSetup::new(
+            Arc::from(
+                vec![
+                    InferenceInfoSetup::new(param, Arc::from("T")),
+                    InferenceInfoSetup::new(param, Arc::from("T")),
+                ]
+                .into_boxed_slice(),
+            ),
+            VariancePhase::Covariant,
+            InferencePassKind::Ordinary,
+            InferenceCandidatePriority::Argument,
+            NoInferMask::empty(),
+            ConstParamPolicy::NonConst,
+            ContextualInferenceMode::None,
+        );
+        assert_eq!(
+            setup.infos.len(),
+            1,
+            "the immutable setup authority must deduplicate repeated sites by exact param"
+        );
+        let mut session = InferenceSession::new(SessionId(17), setup, None);
+        assert!(session.deposit(
+            param,
+            SemanticNodeId(601),
+            InferenceCandidatePriority::Argument,
+            VariancePhase::Covariant,
+        ));
+        assert!(session.deposit(
+            param,
+            SemanticNodeId(602),
+            InferenceCandidatePriority::ReturnType,
+            VariancePhase::Contravariant,
+        ));
+        let fixed = session.fixate(|nodes, _| nodes[0]);
+        assert_eq!(
+            fixed.len(),
+            1,
+            "fixation must emit one binding for one exact infer parameter"
+        );
+        assert_eq!(fixed[0].param, param);
+    }
+
+    #[test]
+    fn redischarge_stability_requires_same_polarity_and_binding_snapshot() {
+        let binding = |bound| InferBinding {
+            param: SemanticNodeId(710),
+            name: Arc::from("T"),
+            bound: SemanticNodeId(bound),
+        };
+        let original = PendingVerdict::Assignable {
+            bindings: Arc::from(vec![binding(810)].into_boxed_slice()),
+        };
+        let same = PendingVerdict::Assignable {
+            bindings: Arc::from(vec![binding(810)].into_boxed_slice()),
+        };
+        let changed_binding = PendingVerdict::Assignable {
+            bindings: Arc::from(vec![binding(811)].into_boxed_slice()),
+        };
+        assert!(redischarge_is_stable(&original, &same));
+        assert!(
+            !redischarge_is_stable(&original, &PendingVerdict::NotAssignable),
+            "a polarity flip must refuse publication"
+        );
+        assert!(
+            !redischarge_is_stable(&original, &changed_binding),
+            "a changed fixed-binding snapshot must refuse publication"
+        );
+        assert!(redischarge_is_stable(
+            &PendingVerdict::NotAssignable,
+            &PendingVerdict::NotAssignable,
+        ));
+    }
+
+    #[test]
+    fn candidate_writes_mark_every_non_owner_ancestor_mutating_an_outer_session() {
+        let mut txn = CheckerTransaction::default();
+        let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
+        let session = SessionId(7);
+        let owner = txn.reentry_mut().push(relation_key(301), occurrence, 0);
+        txn.reentry_mut().note_opened_session(owner, session);
+        txn.note_candidate_write(Some(session));
+
+        txn.reentry_mut().push(relation_key(303), occurrence, 0);
+        txn.reentry_mut().push(relation_key(305), occurrence, 0);
+        txn.note_candidate_write(Some(session));
+
+        let leaf = txn.reentry_mut().pop();
+        let middle = txn.reentry_mut().pop();
+        let owner = txn.reentry_mut().pop();
+        assert!(
+            leaf.session_delta,
+            "the leaf frame writing the outer session must be ReturnOnly"
+        );
+        assert!(
+            middle.session_delta,
+            "every non-owner ancestor between the writer and session owner must be ReturnOnly"
+        );
+        assert!(
+            !owner.session_delta,
+            "the frame that owns the session may publish its fixed bindings"
+        );
+    }
+
+    #[test]
+    fn nested_redischarge_restores_the_enclosing_substitution_and_occurrence() {
+        let mut txn = CheckerTransaction::default();
+        let outer_occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
+        let inner_occurrence = InferenceOccurrence {
+            priority: InferenceCandidatePriority::ReturnType,
+            variance: VariancePhase::Contravariant,
+        };
+        let deepest_occurrence = InferenceOccurrence {
+            priority: InferenceCandidatePriority::NakedTypeParameter,
+            variance: VariancePhase::Covariant,
+        };
+        let outer_key = relation_key(401);
+        let inner_key = relation_key(403);
+        let deepest_key = relation_key(405);
+
+        txn.discharge_substitution.insert(
+            (outer_key.clone(), outer_occurrence),
+            RelationStep::NotAssignable,
+        );
+        txn.redischarge_occurrence = Some((1, outer_occurrence));
+
+        let mut inner_substitution = FxHashMap::default();
+        inner_substitution.insert((inner_key.clone(), inner_occurrence), RelationStep::Unknown);
+        let saved_outer = txn.replace_redischarge_context(inner_substitution, inner_occurrence);
+
+        let mut deepest_substitution = FxHashMap::default();
+        deepest_substitution.insert(
+            (deepest_key.clone(), deepest_occurrence),
+            RelationStep::Assumed,
+        );
+        let saved_inner = txn.replace_redischarge_context(deepest_substitution, deepest_occurrence);
+        txn.restore_redischarge_context(saved_inner);
+
+        assert_eq!(txn.redischarge_occurrence, Some((0, inner_occurrence)));
+        assert!(matches!(
+            txn.discharge_substitution
+                .get(&(inner_key, inner_occurrence)),
+            Some(RelationStep::Unknown)
+        ));
+        assert_eq!(txn.discharge_substitution.len(), 1);
+
+        txn.restore_redischarge_context(saved_outer);
+        assert_eq!(txn.redischarge_occurrence, Some((1, outer_occurrence)));
+        assert!(matches!(
+            txn.discharge_substitution
+                .get(&(outer_key, outer_occurrence)),
+            Some(RelationStep::NotAssignable)
+        ));
+        assert_eq!(txn.discharge_substitution.len(), 1);
     }
 }

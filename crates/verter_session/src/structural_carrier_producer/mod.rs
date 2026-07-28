@@ -27,10 +27,10 @@
 //! out-of-tree proc-macros.
 //!
 //! The owner module's boundary stays NARROW: beside [`macro_arg_producer`],
-//! this `mod.rs`, and test modules, it contains only [`infer_binder_names`], a
-//! typed-IR-only recursive walker with no graph, host, query, or lowering
-//! inputs. As a sibling it cannot name the child-private producer builders, so
-//! it is not producer-capable and does not create a second producer surface.
+//! this `mod.rs`, and test modules, it contains only the private lexical-binder
+//! context and typed import boundary for canonical infer-binder identities. As
+//! a sibling it cannot name the child-private producer builders, so it is not
+//! producer-capable and does not create a second producer surface.
 
 mod infer_binder_names;
 mod macro_arg_producer;

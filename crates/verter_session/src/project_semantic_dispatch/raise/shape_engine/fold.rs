@@ -264,7 +264,7 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             let default_out = default_out?;
             alg.type_parameter(Arc::clone(display_name), constraint_out, default_out)
         }
-        SemanticNodeData::Infer { name } | SemanticNodeData::InferRef { name } => {
+        SemanticNodeData::Infer { name, .. } | SemanticNodeData::InferRef { name, .. } => {
             alg.infer(Arc::clone(name))
         }
         SemanticNodeData::Opaque(err) => match err {

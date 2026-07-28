@@ -332,6 +332,39 @@ fn structural_hash_is_stable_for_identical_carriers() {
 }
 
 #[test]
+fn structural_hash_discriminates_exact_infer_binder_identity() {
+    let graph = empty_graph();
+    let left_binder = graph.alloc_infer_binder_id();
+    let right_binder = graph.alloc_infer_binder_id();
+    let left = SemanticNodeData::InferRef {
+        name: Arc::from("T"),
+        binder: left_binder.clone(),
+    };
+    let right = SemanticNodeData::InferRef {
+        name: Arc::from("T"),
+        binder: right_binder,
+    };
+
+    assert_ne!(
+        structural_hash_of(&graph, &left),
+        structural_hash_of(&graph, &right),
+        "same-name infer references bound by distinct declarations must have \
+         distinct audit structural fingerprints"
+    );
+    assert_eq!(
+        structural_hash_of(&graph, &left),
+        structural_hash_of(
+            &graph,
+            &SemanticNodeData::InferRef {
+                name: Arc::from("T"),
+                binder: left_binder,
+            },
+        ),
+        "control: the same exact binder identity remains fingerprint-stable"
+    );
+}
+
+#[test]
 fn structural_hash_discriminates_open_operand_identity() {
     use crate::semantic_query::{
         MacroOwnBodyStamp, MemberSurfaceCompleteness, MergeRoleStamp, OpenSpreadOperands,

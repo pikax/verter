@@ -2525,7 +2525,7 @@ fn lower_and_classify_key_domain_at(
         return ClosednessVerdict::Unavailable;
     };
     let lowering = escape_lowering_env(dispatch, prepared, bindings);
-    let node = lower_body_under_env(dispatch, prepared, &body, &lowering.env);
+    let node = lower_body_under_env(dispatch, prepared, slot, &body, &lowering.env);
     classify_lowered_node_key_domain_at(dispatch, node, lowering.bound_params, budget, position)
 }
 
@@ -2639,6 +2639,7 @@ fn type_param_shell_node(
 fn lower_body_under_env(
     dispatch: &ProjectSemanticDispatch<'_>,
     prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    slot: &verter_type_expr::locators::TypeBodySlot,
     body: &TypeExpr,
     env: &FxHashMap<String, SemanticNodeId>,
 ) -> SemanticNodeId {
@@ -2650,8 +2651,9 @@ fn lower_body_under_env(
     };
     let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
     let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-    dispatch.shallow_lower_type_expr_with_context(
+    dispatch.shallow_lower_type_expr_with_context_at_locator(
         body,
+        &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
         env,
         &scope,
         &prepared.name_resolution,
@@ -2879,7 +2881,8 @@ fn prepared_instantiation_key_domain_is_closed_unguarded(
             continue;
         };
         let lowering = escape_lowering_env(dispatch, &prepared, &bindings);
-        let default_node = lower_body_under_env(dispatch, &prepared, &default_body, &lowering.env);
+        let default_node =
+            lower_body_under_env(dispatch, &prepared, slot, &default_body, &lowering.env);
         let verdict =
             classify_lowered_node_key_domain(dispatch, default_node, lowering.bound_params, budget);
         if verdict.is_closed() {
@@ -3357,11 +3360,11 @@ struct OpenWalk<'a> {
     /// diverge on recursive refs.
     dispatch: &'a ProjectSemanticDispatch<'a>,
     bound_params: FxHashSet<SemanticNodeId>,
-    /// Infer NAMES bound by an enclosing oracle-selected bare-infer
+    /// Exact infer declarations bound by an enclosing oracle-selected bare-infer
     /// conditional (`X := check` — see the tri-state `Conditional` arm):
     /// an `Infer` reference in the selected branch classifies as its
     /// bound node. Empty outside such a branch.
-    bound_infers: FxHashMap<Arc<str>, SemanticNodeId>,
+    bound_infers: FxHashMap<crate::semantic_query::InferBinderId, SemanticNodeId>,
     /// The SINGLE policy axis. The [`OpenQuestion`], value-surface descent,
     /// per-argument key-domain judgement, and the concrete-instantiation
     /// shortcut are all DERIVED from this role (see [`OpenRole`]) — there
@@ -3519,7 +3522,7 @@ impl<'a> OpenWalk<'a> {
         }
     }
 
-    /// A child walk with the SAME policy + remaining budget and `name`
+    /// A child walk with the SAME policy + remaining budget and exact `binder`
     /// bound to `node` in the infer-binding environment — used by the
     /// tri-state `Conditional` arm when the shared oracle selects TRUE
     /// via the bare-infer pattern (`X := check`): the selected branch's
@@ -3528,9 +3531,13 @@ impl<'a> OpenWalk<'a> {
     /// `memo`/`in_flight` state (same rule as
     /// [`Self::scoped_with_bound_binder`]); the caller copies the
     /// child's spent budget back.
-    fn scoped_with_bound_infer(&self, name: Arc<str>, node: SemanticNodeId) -> Self {
+    fn scoped_with_bound_infer(
+        &self,
+        binder: crate::semantic_query::InferBinderId,
+        node: SemanticNodeId,
+    ) -> Self {
         let mut bound_infers = self.bound_infers.clone();
-        bound_infers.insert(name, node);
+        bound_infers.insert(binder, node);
         Self {
             dispatch: self.dispatch,
             bound_params: self.bound_params.clone(),
@@ -3690,8 +3697,8 @@ impl<'a> OpenWalk<'a> {
             // conditional (`X := check`) classifies as its bound node —
             // the same binding the build-side substitution applies; an
             // unbound placeholder stays closed.
-            SemanticNodeData::Infer { name } | SemanticNodeData::InferRef { name } => {
-                match self.bound_infers.get(name.as_ref()).copied() {
+            SemanticNodeData::Infer { binder, .. } | SemanticNodeData::InferRef { binder, .. } => {
+                match self.bound_infers.get(binder).copied() {
                     Some(bound) => self.node_is_open(ctx, bound),
                     None => false,
                 }
@@ -3733,7 +3740,10 @@ impl<'a> OpenWalk<'a> {
                 // diverging.
                 let (mut selection, infer) =
                     self.dispatch.conditional_branch_selection(check, extends);
-                let mut bare_infer_binding: Option<(Arc<str>, SemanticNodeId)> = None;
+                let mut bare_infer_binding: Option<(
+                    crate::semantic_query::InferBinderId,
+                    SemanticNodeId,
+                )> = None;
                 match infer {
                     Some(super::relation::RelationInferBindings {
                         shape: super::relation::InferPatternShape::Bare,
@@ -3743,7 +3753,11 @@ impl<'a> OpenWalk<'a> {
                         // session close (`X := check`) — the SAME binding
                         // the build-side substitution applies.
                         if let Some(binding) = bindings.first() {
-                            bare_infer_binding = Some((Arc::clone(&binding.name), binding.bound));
+                            if let Some(SemanticNodeData::Infer { binder, .. }) =
+                                super::node_data_for(ctx, binding.param).as_deref()
+                            {
+                                bare_infer_binding = Some((binder.clone(), binding.bound));
+                            }
                         }
                     }
                     Some(super::relation::RelationInferBindings { .. }) => {
@@ -3759,8 +3773,8 @@ impl<'a> OpenWalk<'a> {
                 }
                 match selection {
                     super::ConditionalBranchSelection::True => match bare_infer_binding {
-                        Some((name, bound)) => {
-                            let mut scoped = self.scoped_with_bound_infer(name, bound);
+                        Some((binder, bound)) => {
+                            let mut scoped = self.scoped_with_bound_infer(binder, bound);
                             let open = scoped.node_is_open(ctx, true_branch);
                             self.budget = scoped.budget;
                             open

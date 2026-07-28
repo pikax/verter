@@ -1071,7 +1071,7 @@ pub fn audit_key_for_node(
             "TypeParam({}::{}#{})",
             decl.canonical_id, display_name, param_index
         ),
-        SemanticNodeData::Infer { name } | SemanticNodeData::InferRef { name } => {
+        SemanticNodeData::Infer { name, .. } | SemanticNodeData::InferRef { name, .. } => {
             format!("Infer({name})")
         }
         SemanticNodeData::Conditional { distributive, .. } => {

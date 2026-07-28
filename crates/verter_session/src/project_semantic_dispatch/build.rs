@@ -2020,8 +2020,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Some(
             authored
                 .iter()
-                .map(|arg| {
-                    self.shallow_lower_type_expr_with_context(
+                .zip(args.iter())
+                .map(|(arg, locator)| {
+                    let infer_binders =
+                        crate::semantic_query::InferBinderFactory::for_authored_type_arg_locator(
+                            &scope, arg, locator,
+                        );
+                    self.lower_type_expr_with_infer_factory(
+                        &infer_binders,
                         arg,
                         &env,
                         &scope,
@@ -2034,6 +2040,95 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 })
                 .collect(),
         )
+    }
+
+    #[cfg(test)]
+    pub(super) fn lower_class_heritage_args_for_tests(
+        &self,
+        canonical: &str,
+        symbol: &str,
+    ) -> Vec<SemanticNodeId> {
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let (_, _, _, locators) = self
+            .class_heritage_bases(canonical, owner, symbol)
+            .into_iter()
+            .next()
+            .expect("test class must have one prepared heritage base");
+        self.lower_class_heritage_args(
+            canonical,
+            owner,
+            symbol,
+            &locators,
+            crate::semantic_query::ProjectionMode::Shallow,
+        )
+        .expect("prepared heritage arguments must dereference")
+    }
+
+    #[cfg(test)]
+    pub(super) fn lower_class_heritage_args_via_body_locator_for_tests(
+        &self,
+        canonical: &str,
+        symbol: &str,
+    ) -> Vec<SemanticNodeId> {
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let (_, _, _, locators) = self
+            .class_heritage_bases(canonical, owner, symbol)
+            .into_iter()
+            .next()
+            .expect("test class must have one prepared heritage base");
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .expect("test class must be indexed")
+            .indexed;
+        let type_decl = self
+            .ctx
+            .prepared_type_decl_return_only(canonical, owner, symbol)
+            .expect("test class must be prepared");
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            owner,
+            whole_hash: indexed.whole_hash,
+            local_scope: None,
+        };
+        let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
+            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                &bundle, owner,
+            )
+        });
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
+        let env =
+            self.class_type_param_shell_env(canonical, owner, symbol, indexed.whole_hash, &scope);
+        let mut substitutions = Vec::new();
+        locators
+            .iter()
+            .map(|locator| {
+                let arg = indexed
+                    .shallow_state
+                    .decl_bodies()
+                    .deref_type_arg(locator)
+                    .expect("test heritage argument must dereference");
+                let body_locator =
+                    crate::semantic_query::InferBinderFactory::authored_body_locator_for_type_arg(
+                        locator,
+                    );
+                self.shallow_lower_type_expr_with_context_at_locator(
+                    &arg,
+                    &body_locator,
+                    &env,
+                    &scope,
+                    &type_decl.name_resolution,
+                    scope_payload.as_ref(),
+                    &shadowing,
+                    &mut substitutions,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Shallow,
+                    ),
+                )
+            })
+            .collect()
     }
 
     /// Substitute a class's OWN type parameters positionally with the
@@ -8008,15 +8103,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // true branch (the `:8253-8262` TODO is resolved — the
             // relation's returned bindings are consumed, never
             // discarded). (The `infer X` binding occupies a separate
-            // name-slot mechanism from regular type parameters; the
-            // substitute helper's Infer arm matches by display_name to
-            // bridge that boundary.)
+            // name-slot mechanism from regular type parameters. The
+            // binding carries its exact declaration node so nested
+            // same-name infer scopes cannot capture each other.)
             let mut result = true_branch;
             for binding in selected.bindings.iter() {
-                let infer_node = graph.intern_node(SemanticNodeData::Infer {
-                    name: Arc::clone(&binding.name),
-                });
-                result = self.substitute_semantic_type_param(result, infer_node, binding.bound);
+                result = self.substitute_semantic_type_param(result, binding.param, binding.bound);
                 graph.record_origin_edge(
                     result,
                     OriginEdgeKind::InferBind,
@@ -8255,6 +8347,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match &*data {
             SemanticNodeData::Infer { .. } => ConditionalInferRoute::Bare,
             SemanticNodeData::Object(view) => {
+                if view.index_signatures.iter().any(|signature| {
+                    self.subtree_contains_infer(signature.key_type)
+                        || self.subtree_contains_infer(signature.value_type)
+                }) || view
+                    .call_signatures
+                    .iter()
+                    .chain(view.construct_signatures.iter())
+                    .any(|signature| self.subtree_contains_infer(*signature))
+                    || view
+                        .keyspace
+                        .is_some_and(|keyspace| self.subtree_contains_infer(keyspace))
+                    || view.open_spread_operands().is_some_and(|operands| {
+                        operands
+                            .as_slice()
+                            .iter()
+                            .any(|operand| self.subtree_contains_infer(*operand))
+                    })
+                {
+                    return ConditionalInferRoute::OutOfScope;
+                }
                 let mut direct = false;
                 for member in view.positive_members().iter() {
                     if matches!(
@@ -8321,6 +8433,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Some(SemanticNodeData::Infer { .. })
                     ) {
                         direct = true;
+                    } else if self.relation_pattern_info(param.ty).is_some_and(|pattern| {
+                        matches!(
+                            pattern.shape,
+                            super::relation::InferPatternShape::TupleHeadTail
+                                | super::relation::InferPatternShape::ArrayElement
+                        )
+                    }) {
+                        // Rest-tuple/array inference nested in a function
+                        // parameter is an in-scope contravariant pattern,
+                        // not an unsupported deep occurrence.
+                        direct = true;
                     } else if self.subtree_contains_infer(param.ty) {
                         return ConditionalInferRoute::OutOfScope;
                     }
@@ -8346,6 +8469,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ConditionalInferRoute::InScopePattern(
                         super::relation::InferPatternShape::Function,
                     )
+                } else {
+                    ConditionalInferRoute::None
+                }
+            }
+            SemanticNodeData::Mapped { .. } => {
+                if self.relation_pattern_info(extends).is_some_and(|pattern| {
+                    pattern.shape == super::relation::InferPatternShape::ReverseHomomorphicMapped
+                }) {
+                    ConditionalInferRoute::InScopePattern(
+                        super::relation::InferPatternShape::ReverseHomomorphicMapped,
+                    )
+                } else if self.subtree_contains_infer(extends) {
+                    ConditionalInferRoute::OutOfScope
                 } else {
                     ConditionalInferRoute::None
                 }

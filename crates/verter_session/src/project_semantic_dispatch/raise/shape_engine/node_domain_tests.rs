@@ -387,6 +387,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     ));
     let infer = graph.intern_node(SemanticNodeData::Infer {
         name: StdArc::from("I"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: StdArc::from(vec![StdArc::from("q")].into_boxed_slice()),

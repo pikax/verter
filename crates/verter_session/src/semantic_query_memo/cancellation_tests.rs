@@ -26,6 +26,16 @@ fn key(name: &'static str) -> SemanticQueryKey {
     })
 }
 
+fn dep_signature(canonical: &'static str, hash: u8) -> DepSignature {
+    Arc::from(
+        vec![(
+            Arc::<str>::from(canonical),
+            crate::semantic_query::DepVersion::WholeHash([hash; 16]),
+        )]
+        .into_boxed_slice(),
+    )
+}
+
 fn join_within<T: Send + 'static>(handle: std::thread::JoinHandle<T>, label: &str) -> T {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
@@ -220,4 +230,462 @@ fn cancelled_leader_never_publishes_and_live_follower_retries_cold() {
         },
     );
     assert!(matches!(warm.value, QueryResult::Value(node) if node == follower_node));
+}
+
+#[test]
+fn post_admission_cancellation_preserves_aba_replacement_and_success_capture() {
+    let store = Arc::new(SemanticGraphStore::new());
+    let query = key("CancelledAdmissionWithReplacement");
+    let context = RequestContext::new(6, Arc::from("/w/cancel.ts"), false, None);
+    let host = host();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = store.test_cold_winner_post_admission_gate(Arc::clone(&barrier));
+
+    let (worker, original_seq, replacement_seq, carrier, generation) =
+        std::thread::scope(|scope| {
+            let store_for_worker = Arc::clone(&store);
+            let query_for_worker = query.clone();
+            let context_for_worker = Arc::clone(&context);
+            let worker = scope.spawn(move || {
+                let _guard = RequestContextGuard::install(context_for_worker);
+                let mut publication = None;
+                let read = store_for_worker.execute_cooperative_value_capturing_publication(
+                    &host,
+                    query_for_worker,
+                    || store_for_worker.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                    || {
+                        let node = store_for_worker
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                        (
+                            QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                            empty_signature(),
+                        )
+                    },
+                    &mut publication,
+                );
+                (read, publication)
+            });
+
+            barrier.wait();
+            let carrier = store
+                .entry_read_set_signature_for_tests(&query)
+                .expect("the original candidate must be admitted");
+            let generation = store
+                .slot_candidate_generations_for_tests(&query)
+                .into_iter()
+                .next()
+                .expect("the original candidate generation");
+            let original_seq = store
+                .slot_candidate_admission_seqs_for_tests(&query)
+                .into_iter()
+                .next()
+                .expect("the original candidate admission token");
+            let replacement = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+            assert_eq!(
+                store.publish_with_carrier_dispatch_and_generation_for_tests(
+                    query.clone(),
+                    QueryResult::Value(replacement),
+                    carrier.clone(),
+                    Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                    empty_signature(),
+                    generation,
+                ),
+                1,
+                "the same-discriminant publish must replace the original admission"
+            );
+            let replacement_seq = store
+                .slot_candidate_admission_seqs_for_tests(&query)
+                .into_iter()
+                .next()
+                .expect("the replacement admission token");
+            assert_ne!(replacement_seq, original_seq);
+            context.cancel();
+            barrier.wait();
+            (
+                worker.join().expect("original publisher"),
+                original_seq,
+                replacement_seq,
+                carrier,
+                generation,
+            )
+        });
+
+    assert!(matches!(
+        worker.0.value,
+        QueryResult::Value(SemanticQueryValue::TypeNode(node))
+            if matches!(
+                store.node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            )
+    ));
+    let publication = worker
+        .1
+        .expect("successful admission retains its exact publication capture");
+    assert_eq!(publication.admission_seq, original_seq);
+    assert_eq!(publication.read_set_signature.facts, carrier.facts);
+    assert_eq!(publication.validated_at_generation, generation);
+    assert_eq!(
+        store.slot_candidate_count_for_tests(&query),
+        1,
+        "post-admission cancellation must not remove the later replacement candidate"
+    );
+    let survivor = store
+        .get_unvalidated(&query)
+        .expect("the replacement candidate must survive");
+    assert!(matches!(
+        survivor.value,
+        QueryResult::Value(node)
+            if matches!(
+                store.node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+            )
+    ));
+    assert_eq!(
+        store.slot_candidate_admission_seqs_for_tests(&query),
+        vec![replacement_seq]
+    );
+    assert_eq!(store.memo_budget_tracked_len_for_test(), 1);
+}
+
+#[test]
+fn post_admission_cancellation_keeps_same_discriminant_replacement_successful() {
+    use crate::semantic_query::demand::MaterializedSet;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let query = key("SameDiscriminantAdmissionWins");
+    let host = host();
+    let generation = host.project_type_store().current_project_generation();
+    let old = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    assert_eq!(
+        store.publish_with_materialized_set_for_tests(
+            query.clone(),
+            QueryResult::Value(old),
+            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+            empty_signature(),
+            generation,
+            MaterializedSet::empty(),
+        ),
+        1
+    );
+    let old_seq = store.slot_candidate_admission_seqs_for_tests(&query)[0];
+    let context = RequestContext::new(7, Arc::from("/w/cancel.ts"), false, None);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = store.test_cold_winner_post_admission_gate(Arc::clone(&barrier));
+
+    let (read, publication, admitted_seq) = std::thread::scope(|scope| {
+        let store_for_worker = Arc::clone(&store);
+        let query_for_worker = query.clone();
+        let context_for_worker = Arc::clone(&context);
+        let worker = scope.spawn(move || {
+            let _guard = RequestContextGuard::install(context_for_worker);
+            let mut publication = None;
+            let read = store_for_worker.execute_cooperative_value_capturing_publication(
+                &host,
+                query_for_worker,
+                || store_for_worker.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    let node = store_for_worker
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                    (
+                        QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                        empty_signature(),
+                    )
+                },
+                &mut publication,
+            );
+            (read, publication)
+        });
+        barrier.wait();
+        let admitted_seq = store.slot_candidate_admission_seqs_for_tests(&query)[0];
+        assert_ne!(admitted_seq, old_seq);
+        assert_eq!(store.slot_candidate_count_for_tests(&query), 1);
+        context.cancel();
+        barrier.wait();
+        let (read, publication) = worker.join().expect("same-discriminant publisher");
+        (read, publication, admitted_seq)
+    });
+
+    assert!(matches!(
+        read.value,
+        QueryResult::Value(SemanticQueryValue::TypeNode(node))
+            if matches!(
+                store.node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            )
+    ));
+    assert_eq!(
+        publication.expect("admission-wins capture").admission_seq,
+        admitted_seq
+    );
+    assert_eq!(
+        store.slot_candidate_admission_seqs_for_tests(&query),
+        vec![admitted_seq]
+    );
+    assert_eq!(store.memo_budget_tracked_len_for_test(), 1);
+}
+
+#[test]
+fn post_admission_cancellation_keeps_cap_lru_eviction_committed() {
+    use crate::semantic_query::demand::MaterializedSet;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let query = key("CapLruAdmissionWins");
+    for generation in 100..104 {
+        let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        assert_eq!(
+            store.publish_with_materialized_set_for_tests(
+                query.clone(),
+                QueryResult::Value(node),
+                crate::fact_signature_helpers::ReadSetSignature::empty(),
+                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                empty_signature(),
+                generation,
+                MaterializedSet::empty(),
+            ),
+            1
+        );
+    }
+    assert_eq!(
+        store.slot_candidate_generations_for_tests(&query),
+        vec![100, 101, 102, 103]
+    );
+    let host = host();
+    let admitted_generation = host.project_type_store().current_project_generation();
+    let context = RequestContext::new(8, Arc::from("/w/cancel.ts"), false, None);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = store.test_cold_winner_post_admission_gate(Arc::clone(&barrier));
+
+    let (read, publication) = std::thread::scope(|scope| {
+        let store_for_worker = Arc::clone(&store);
+        let query_for_worker = query.clone();
+        let context_for_worker = Arc::clone(&context);
+        let worker = scope.spawn(move || {
+            let _guard = RequestContextGuard::install(context_for_worker);
+            let mut publication = None;
+            let read = store_for_worker.execute_cooperative_value_capturing_publication(
+                &host,
+                query_for_worker,
+                || store_for_worker.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    let node = store_for_worker
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                    (
+                        QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                        empty_signature(),
+                    )
+                },
+                &mut publication,
+            );
+            (read, publication)
+        });
+        barrier.wait();
+        assert_eq!(
+            store.slot_candidate_generations_for_tests(&query),
+            vec![101, 102, 103, admitted_generation],
+            "successful admission evicts the LRU-front candidate"
+        );
+        context.cancel();
+        barrier.wait();
+        worker.join().expect("cap/LRU publisher")
+    });
+
+    assert!(matches!(read.value, QueryResult::Value(_)));
+    assert_eq!(
+        publication
+            .expect("cap/LRU admission capture")
+            .validated_at_generation,
+        admitted_generation
+    );
+    assert_eq!(
+        store.slot_candidate_generations_for_tests(&query),
+        vec![101, 102, 103, admitted_generation]
+    );
+    assert_eq!(store.memo_budget_tracked_len_for_test(), 1);
+}
+
+#[test]
+fn post_admission_cancellation_keeps_global_fifo_eviction_committed() {
+    let store = Arc::new(SemanticGraphStore::new_with_memo_budget_for_test(2));
+    let first = key("GlobalFifoFirst");
+    let second = key("GlobalFifoSecond");
+    let admitted = key("GlobalFifoAdmissionWins");
+    let seed = |key: SemanticQueryKey, canonical, hash| {
+        let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        assert_eq!(
+            store.publish_with_carrier_and_dispatch_for_tests(
+                key,
+                QueryResult::Value(node),
+                crate::fact_signature_helpers::ReadSetSignature::empty(),
+                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                dep_signature(canonical, hash),
+            ),
+            1
+        );
+    };
+    seed(first.clone(), "/w/fifo-first.ts", 1);
+    seed(second.clone(), "/w/fifo-second.ts", 2);
+    let host = host();
+    let context = RequestContext::new(9, Arc::from("/w/cancel.ts"), false, None);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = store.test_cold_winner_post_admission_gate(Arc::clone(&barrier));
+
+    let read = std::thread::scope(|scope| {
+        let store_for_worker = Arc::clone(&store);
+        let admitted_for_worker = admitted.clone();
+        let context_for_worker = Arc::clone(&context);
+        let worker = scope.spawn(move || {
+            let _guard = RequestContextGuard::install(context_for_worker);
+            store_for_worker.execute_cooperative(
+                &host,
+                admitted_for_worker,
+                || store_for_worker.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    let node = store_for_worker
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                    (QueryResult::Value(node), dep_signature("/w/fifo-new.ts", 3))
+                },
+            )
+        });
+        barrier.wait();
+        assert!(store.get_unvalidated(&first).is_none());
+        assert!(store.get_unvalidated(&second).is_some());
+        assert!(store.get_unvalidated(&admitted).is_some());
+        assert_eq!(store.memo_budget_tracked_len_for_test(), 2);
+        assert_eq!(store.canonical_to_entries_count("/w/fifo-first.ts"), 0);
+        assert_eq!(store.canonical_to_entries_count("/w/fifo-second.ts"), 1);
+        assert_eq!(store.canonical_to_entries_count("/w/fifo-new.ts"), 1);
+        context.cancel();
+        barrier.wait();
+        worker.join().expect("global FIFO publisher")
+    });
+
+    assert!(matches!(read.value, QueryResult::Value(_)));
+    assert!(store.get_unvalidated(&first).is_none());
+    assert!(store.get_unvalidated(&second).is_some());
+    assert!(store.get_unvalidated(&admitted).is_some());
+    assert_eq!(store.memo_budget_tracked_len_for_test(), 2);
+    assert_eq!(store.canonical_to_entries_count("/w/fifo-first.ts"), 0);
+    assert_eq!(store.canonical_to_entries_count("/w/fifo-second.ts"), 1);
+    assert_eq!(store.canonical_to_entries_count("/w/fifo-new.ts"), 1);
+}
+
+#[test]
+fn post_admission_cancellation_keeps_parent_and_prefix_backfill() {
+    use crate::project_semantic_dispatch::walk::{PrefixBackfill, QueryBuildOutput};
+    use crate::semantic_query::demand::MaterializedSet;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let parent = key("PrefixParentAdmissionWins");
+    let child = key("PrefixChildAdmissionWins");
+    let host = host();
+    let context = RequestContext::new(10, Arc::from("/w/cancel.ts"), false, None);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = store.test_cold_winner_post_admission_gate(Arc::clone(&barrier));
+
+    let read = std::thread::scope(|scope| {
+        let store_for_worker = Arc::clone(&store);
+        let parent_for_worker = parent.clone();
+        let child_for_worker = child.clone();
+        let context_for_worker = Arc::clone(&context);
+        let worker = scope.spawn(move || {
+            let _guard = RequestContextGuard::install(context_for_worker);
+            store_for_worker.execute_cooperative(
+                &host,
+                parent_for_worker.clone(),
+                || store_for_worker.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    let parent_node = store_for_worker
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                    let child_node = store_for_worker
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                    QueryBuildOutput {
+                        result: QueryResult::Value(parent_node),
+                        dep_signature: dep_signature("/w/prefix.ts", 4),
+                        walker_diagnostics: Vec::new(),
+                        cache_suppress: false,
+                        result_is_partial: false,
+                        taint: crate::semantic_query::ResultTaint::Clean,
+                        observed_self_roots: Vec::new(),
+                        graph_carrier: None,
+                        self_root_canonicals: Arc::from([]),
+                        pending_prefix_backfills: vec![PrefixBackfill {
+                            satisfied_projection: MaterializedSet::single(
+                                super::family::requested_point_for_key(&child_for_worker),
+                            ),
+                            key: child_for_worker,
+                            node: child_node,
+                        }],
+                        satisfied_projection: MaterializedSet::single(
+                            super::family::requested_point_for_key(&parent_for_worker),
+                        ),
+                    }
+                },
+            )
+        });
+        barrier.wait();
+        assert!(store.get_unvalidated(&parent).is_some());
+        assert!(store.get_unvalidated(&child).is_none());
+        context.cancel();
+        barrier.wait();
+        worker.join().expect("prefix publisher")
+    });
+
+    assert!(matches!(read.value, QueryResult::Value(_)));
+    assert!(store.get_unvalidated(&parent).is_some());
+    assert!(store.get_unvalidated(&child).is_some());
+    assert_eq!(store.memo_budget_tracked_len_for_test(), 2);
+    assert_eq!(store.canonical_to_entries_count("/w/prefix.ts"), 2);
+}
+
+#[test]
+fn cancellation_before_admission_remains_cancelled_and_unpublished() {
+    let store = Arc::new(SemanticGraphStore::new());
+    let query = key("PreAdmissionCancellation");
+    let host = host();
+    let context = RequestContext::new(11, Arc::from("/w/cancel.ts"), false, None);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    let (read, publication) = std::thread::scope(|scope| {
+        let store_for_worker = Arc::clone(&store);
+        let query_for_worker = query.clone();
+        let context_for_worker = Arc::clone(&context);
+        let worker = scope.spawn(move || {
+            let _guard = RequestContextGuard::install(context_for_worker);
+            let mut publication = None;
+            let read = store_for_worker.execute_cooperative_value_capturing_publication(
+                &host,
+                query_for_worker,
+                || store_for_worker.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    let node = store_for_worker
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                    (
+                        QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                        dep_signature("/w/pre-admission.ts", 5),
+                    )
+                },
+                &mut publication,
+            );
+            (read, publication)
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("cold build must reach the pre-admission window");
+        context.cancel();
+        release_tx.send(()).unwrap();
+        worker.join().expect("pre-admission publisher")
+    });
+
+    assert!(matches!(
+        read.value,
+        QueryResult::Error(QueryError::Cancelled)
+    ));
+    assert!(publication.is_none());
+    assert_eq!(store.slot_candidate_count_for_tests(&query), 0);
+    assert_eq!(store.memo_budget_tracked_len_for_test(), 0);
+    assert_eq!(store.canonical_to_entries_count("/w/pre-admission.ts"), 0);
 }

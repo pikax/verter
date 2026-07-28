@@ -34,7 +34,7 @@
 > - **Batched admission.** Admission is batched at SCC-close for a pure non-binding SCC, and for a
 >   NEGATIVE non-binding member of a mixed SCC whose transitive consumed-verdict closure contains no
 >   binding member. A binding member — and any POSITIVE non-binding member of a MIXED SCC — defers its
->   admission, proof-key remap, and `CoinductiveCycle` slot-fill to the LATER of {SCC-close, the
+>   admission and converged `CoinductiveCycle` proof construction to the LATER of {SCC-close, the
 >   relevant session-close}, via a per-session `SessionAdmissionLedger`. SCC-close is the admission
 >   instant only for a pure non-binding SCC and is necessary-not-sufficient when any binding member
 >   participates.
@@ -47,9 +47,10 @@
 >   session-completion, AND a stable converged re-discharge. An `Abandon`ed session releases the held
 >   singleflight registration without publishing (no entry, no fact signature, no backfill, no
 >   reverse-index metadata); blocked joiners then recompute.
-> - **Content-free proofs.** A durably-published proof never carries a transient `SessionId`. The
->   positive `CoinductiveCycle { keys }` set is remapped from transient `SessionId` identities to
->   completed full §2.7 `Relate` keys before any durable proof construction. `SubRelationRef` /
+> - **Content-free proofs.** A durably-published proof never carries a transient `SessionId` or
+>   `InferenceOccurrence`. The positive `CoinductiveCycle { keys }` set uses the frozen full §2.7
+>   `Relate` keys throughout; session-close re-discharge constructs the durable proof from converged
+>   verdicts and bindings rather than remapping identities. `SubRelationRef` /
 >   `failing_sub` is a content-free `(source-node, target-node, sub-position)` descriptor that
 >   excludes any session-bearing full `Relate` key, so a published `NotAssignable` leaks no
 >   `SessionId`.
@@ -184,7 +185,7 @@ through `ReturnOnly`.
 | # | Obligation | Captured | Mechanism |
 |---|---|---|---|
 | 1 | live relation/comparison stack (in-flight reentry chain) | **NOT in key — `ReturnOnly` gate** | transient `RelationAssumptionStack` per-`CheckerTransaction`; a result decided under an open assumption admits only at SCC-close — for a non-binding member of a **pure non-binding SCC**, or a NEGATIVE non-binding member whose transitive consumed-verdict closure contains no binding member — or, for a binding member (`inference_context = Some`), **a POSITIVE non-binding member of a MIXED SCC** (it carries the shared binding-referencing proof), or **a NEGATIVE non-binding member whose consumed-verdict closure reaches a binding sibling**, only at the relevant enclosing session's close (the LATER event, R-c / §2.3 step 4). Keying it would collapse all cyclic-result reuse (perf collapse) and is a category error. |
-| 2 | in-flight inference context | **IN KEY** | `inference_context: Option<InferenceContextKey>` — the content-free projection of the COMPLETED session (R-b generated, R-c admit-at-complete). |
+| 2 | in-flight inference context | **IN KEY** | `inference_context: Option<InferenceContextKey>` — the content-free fingerprint stored on the immutable session setup (R-b single authority, R-c admit-at-complete). |
 | 3 | strict-policy family in force | **IN KEY** (`context.type_env_hash`) **+ value BRANCHES** | the strict family ⊂ `type_env_hash` (R21 split); per #20/RI-10 the reducer *branches* on strict, so the value differs AND `type_env_hash` isolates strict-on from strict-off. A strict-on relation cannot warm-hit a strict-off request. |
 | 4a | freshness MODE (fresh-object-literal excess-check vs non-fresh) | **IN KEY** | `source_freshness: FreshnessKey`. |
 | 4b | freshness STRUCTURE (reachability of BOTH related types) | **ON VALUE** (R6) | `ReadSetSignature.facts` records path-precise `Member`/`MemberPresence` of both source and target; warm-hit revalidates. A structural edit to either type misses the warm read. |
@@ -277,30 +278,30 @@ This is the coinductive "assume the relation holds and verify the rest" step. Th
 same `(source, target)` pair (different `relation` / `policy` / `freshness` / `inference_context` /
 `context` ⇒ different assumption).
 
-**The cycle-detection identity is NOT the admission identity for an in-flight binding-`Relate`.** A
-binding-producing `Relate` (`inference_context = Some`) re-enters while its enclosing `InferenceSession` is
-still mutating, so its completed `InferenceContextKey` is **not yet well-defined** (§3.1/§3.3 R-c) — there is
-no concrete fingerprint to key its reentry-stack node by *now*, when cycle detection needs it. The two
-identities are therefore distinct objects:
+For the relation-owned inference subset, pattern detection constructs the immutable
+`InferenceSessionSetup` before execution. Its `InferenceContextKey` is therefore already part of the full
+`RelateMemoKey` used by both reentry and eventual admission. A caller-supplied inference context that differs
+from the detected pattern setup is canonicalized before memo selection; a raw family-dispatch key that
+bypasses that canonicalization is rejected rather than executing one setup under another key.
 
-| Identity | When | Composition | Cache key? |
-|---|---|---|---|
-| **Reentry-stack / assumption identity** (in-flight cycle detection, NOW) | while the session is in-flight | `(source, target, relation, policy, source_freshness, context)` **+ the transient `SessionId`** of the enclosing in-flight session (a content-free per-session token on the `CheckerTransaction`, in place of the not-yet-knowable `InferenceContextKey`) | **NEVER** |
-| **Admission identity** (at `CompletedDeterministic`, R-c) | at session close | the full §2.7 identity with the now-knowable completed `InferenceContextKey` substituted for the transient `SessionId` | **YES** (the persistent slot key) |
+Inference adds one **transient occurrence** to the in-flight identity:
 
-For a pure non-binding assignability (`inference_context = None`) the two coincide — there is no session and
-no transient handle. The transient `SessionId` is a per-`CheckerTransaction` in-flight token (content-free,
-allocated per session on `sessions`); it **NEVER** enters a published key, a `ReadSetSignature.facts`
-observation, or any fact signature. Soundness: two distinct in-flight sessions over the same `(source,
-target)` cannot collide on the reentry stack (distinct `SessionId`), and the result they each decide is
-re-keyed to its completed `InferenceContextKey` before admission (§3.3 R-c). When such a binding-`Relate`
-participates in a positive SCC, its slot in the `CoinductiveCycle { keys }` proof is left **UNFILLED at
-SCC-close** and is filled — together with the remap from the transient `SessionId`-based reentry identity to
-its completed full §2.7 key — only when its enclosing session reaches `CompletedDeterministic`, through the
-deferred `SessionAdmissionLedger` (§2.3 step 4). SCC-close and session-completion are independent convergence
-axes, so for a binding member this remap+slot-fill is a **session-close** event, not an SCC-close event; the
-durable proof is published only once every member's slot carries a completed full §2.7 key and never carries a
-transient `SessionId`.
+| Identity | Composition | Cache key? |
+|---|---|---|
+| **Reentry-stack / assumption identity** | `(RelateMemoKey, InferenceOccurrence { priority, variance })` | **NEVER** |
+| **Admission identity** | the persistent full §2.7 `RelateMemoKey` | **YES** |
+
+`InferenceOccurrence` preserves parameter/return priority and variance orientation through nested structural
+descent, so opposite-orientation visits cannot intercept one another and deposit the wrong candidate. It is
+excluded from persistent identity because it affects only session-local deposits; any frame that mutates an
+outer session is a `session_delta` and cannot publish. While a session is active, relation warm reads are
+bypassed so a cached binary verdict cannot stand in for required candidate deposits.
+
+`SessionId` remains a content-free per-transaction ownership token for the session stack and
+`SessionAdmissionLedger`; it is not a reentry key and never enters a published key, fact observation, or
+proof. SCC-close and session-completion remain independent convergence axes: binding members publish only
+after deterministic fixation and stable re-discharge, but no identity remap is needed because the frozen
+`InferenceContextKey` was present from the start.
 
 ### 2.3 The EXACT "provisional becomes STABLE / ADMISSIBLE" rule (SCC closure)
 
@@ -326,15 +327,16 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
    - **ALL non-assumptive obligations of EVERY member POSITIVE ⇒ SCC closes POSITIVE.** Every `Kᵢ` is decided
      `Assignable { bindings }` with a `CoinductiveCycle { keys: S }` proof. **Admission timing splits by SCC
      COMPOSITION, not member class alone (§2.3 step 4):** every positive member carries the SAME shared
-     `keys: S` proof, and `S` references the binding members whose completed keys are not knowable until
-     session-close, so that proof is not constructible until every binding slot is filled. Therefore in a
+     `keys: S` proof. The full keys are frozen before execution, but a binding member's verdict and bindings
+     are provisional until session-close, so the durable proof is not constructible until every binding
+     member has converged. Therefore in a
      **pure non-binding SCC** every member publishes at SCC-close (the proof is complete then); in a **mixed
      SCC** (≥1 binding member) the `SccLedger` keeps the WHOLE positive batch pending and publishes NONE at
      SCC-close — each binding member's verdict + fact-set is recorded into the enclosing session's
      `SessionAdmissionLedger`, and each POSITIVE non-binding member's verdict + fact-set is held on the
      `SccLedger` against the same later event (its `inference_context = None` does NOT exempt it — it carries
      the binding-referencing proof). The whole batch publishes together at the **LATER of {SCC-close, the last
-     binding member's session-close}**, when the proof is remapped and complete. A member whose *only*
+     binding member's session-close}**, when converged re-discharge produces the complete proof. A member whose *only*
      unresolved edges are back-edges (a genuinely recursive type with no non-recursive base case) **discharges**
      — it is NOT rejected for lacking a base case. The published `ReadSetSignature.facts` is the **UNION of all
      SCC members' non-assumptive observed facts** (so a content edit to any file any member visited misses every
@@ -369,7 +371,7 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
      `Abandon`s — exactly as the positive batch already does. A binding `NotAssignable` member always records its
      negative verdict + fact-set into the enclosing session's `SessionAdmissionLedger` at SCC-close and publishes
      only at session-close (§2.3 step 4). **Do NOT instead defend this by asserting a binding member's verdict is
-     final-and-monotone at SCC-close** — the parent §4.2 re-measurement rule + §3.3 "setup still mutating"
+     final-and-monotone at SCC-close** — the parent §4.2 re-measurement rule + §3.3 candidate-state mutation
      contradict that; the deferral GATE is the sound fix, not a monotonicity invariant.
      **Each negative member publishes with the SAME
      fact-set rule as positive members — NOT a per-member fact set:** a member that is `NotAssignable` SOLELY
@@ -423,20 +425,19 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
      sibling verdict FLIPPED to `Assignable` (so this member should now be `Assignable`), its own verdict flipped,
      or its bindings changed — OR when that session `Abandon`s (§2.3 step-4 outcomes 2 and 3).
    - **Positive close — non-binding members.** In a **pure non-binding SCC** every key in `S` is a non-binding
-     key whose in-flight and completed identities coincide (§2.2), so the shared `CoinductiveCycle { keys:
-     S }` proof is fully constructible at SCC-close and the `SccLedger` performs one batched
+     key, so the shared `CoinductiveCycle { keys: S }` proof is fully constructible at SCC-close and the `SccLedger` performs one batched
      `FamilySlots::publish` pass per member key **at SCC-close** — no remap. In a **mixed SCC** (≥1 binding
-     member) the same proof references binding members whose completed keys are not knowable until session-close,
-     so the `SccLedger` does **NOT** publish the positive non-binding members at SCC-close either — it holds them
+     member) the same proof depends on binding members whose verdicts and bindings do not converge until
+     session-close, so the `SccLedger` does **NOT** publish the positive non-binding members at SCC-close either — it holds them
      on the same deferred batch as the binding members (below); they publish at the LATER event the
-     **session-converged re-discharge** result, whose `CoinductiveCycle` proof references only completed keys
-     (§2.3 step 4).
+     **session-converged re-discharge** result, whose `CoinductiveCycle` proof references frozen keys for
+     judgments whose verdicts and bindings have fully converged (§2.3 step 4).
    - **Deferred members — every binding member (either sign), the held POSITIVE non-binding members of a
      mixed SCC, AND any NEGATIVE non-binding member whose transitive consumed-verdict closure reaches a binding
      sibling.** At SCC-close the `SccLedger` does **NOT** publish them and does **NOT** remap any binding key.
      Each binding member is handed to the enclosing session's **`SessionAdmissionLedger`** (the per-session
      ledger on the `CheckerTransaction`, keyed by the transient `SessionId`, §3.3), recording **PROVISIONAL
-     deferral metadata** `(Kᵢ in-flight identity, provisional relation verdict, provisional SIGN, the set of
+     deferral metadata** `(Kᵢ full persistent identity, transient InferenceOccurrence, provisional relation verdict, provisional SIGN, the set of
      consumed binding-sibling verdicts WITH the sign each held when consumed at SCC-close, accumulated SCC
      observed-fact-set)` — the same fact-set the rules above compute (SCC-union for positive, transitive
      consumed-verdict closure for negative). **This recorded snapshot is NEVER the published payload — it is a
@@ -444,10 +445,11 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
      signs are load-bearing only as inputs to that re-discharge; the published verdict comes from the
      re-discharge against the *converged* state, NOT from the provisional sign held at SCC-close. The held
      positive non-binding members AND the held binding-consuming negative non-binding members ride the same
-     deferred batch (their own keys are already complete, but a positive member's shared proof references binding
-     keys not yet knowable, and a binding-consuming negative member's consumed verdict is not yet converged, until
-     session-close). Each binding member's slot in the provisional `CoinductiveCycle { keys: S }` snapshot is left
-     **UNFILLED at SCC-close**.
+     deferred batch (all keys are already frozen, but a positive member's shared proof references binding
+     judgments not yet converged, and a binding-consuming negative member's consumed verdict is not yet converged, until
+     session-close). There is no key-slot completion step at SCC-close: each binding member already has its
+     frozen identity, but its provisional verdict and bindings have not converged, so no final
+     `CoinductiveCycle { keys: S }` proof can publish yet.
 
      **The session-close drain is a THREE-outcome gate whose published payload IS the session-converged
      RE-DISCHARGE.** At the batched-publish instant (when ALL relevant sessions of the deferred batch have reached
@@ -455,26 +457,24 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
      **COMPLETES**: the SCC is **RE-DISCHARGED against the fully-converged state** (final inference bindings, final
      own verdict, final consumed-sibling verdicts) through the **same `execute(Relate{Kᵢ})` dispatch** — the one
      engine's cold compute finishing once its session inputs are final, NOT a second engine. The published
-     `RelationPayload` (outcome + bindings + proof) **IS that re-discharge result**, keyed by the now-complete
-     full §2.7 identity, so a stale SCC-close snapshot is **impossible by construction**. The gate routes on the
+     `RelationPayload` (outcome + bindings + proof) **IS that re-discharge result**, keyed by the unchanged
+     frozen full §2.7 identity, so a stale SCC-close snapshot is **impossible by construction**. The gate routes on the
      re-discharge outcome:
        1. **Every relevant session `CompletedDeterministic` AND the re-discharge yields a STABLE determined
           publishable outcome ⇒ PUBLISH the re-discharge result.** The ledger runs the batched
           `FamilySlots::publish` pass for the deferred batch, splitting by re-discharged member sign:
             - **POSITIVE members** (every binding-positive member + every held POSITIVE non-binding member): the
-              re-discharge runs against the now-knowable completed identities, so the `CoinductiveCycle { keys: S }`
-              proof it produces already references **completed full §2.7 keys** (the re-keying is intrinsic to the
-              re-discharge — there is no separate remap of a stale recorded proof; the snapshot's unfilled slots
-              are discarded). Publish each positive member as `Assignable` with the re-discharged final
+              re-discharge runs against the converged session state, so the `CoinductiveCycle { keys: S }`
+              proof it produces references the frozen full §2.7 keys (there is no identity remap of a stale
+              recorded proof; the snapshot's provisional proof is discarded). Publish each positive member as `Assignable` with the re-discharged final
               `bindings` + the **complete `CoinductiveCycle` proof** and the re-discharged fact-set.
             - **NEGATIVE members** (every binding-negative member + every held binding-consuming NEGATIVE
               non-binding member): the re-discharge yields a publishable slotless `NotAssignable { reason,
               failing_sub }` proof (Decision 4 / the §2.3 step-3 negative-close above) keyed by the binding
-              member's completed §2.7 key (the re-discharge supplies the completed `InferenceContextKey`). It
-              carries NO `keys: S` set and receives **NO `CoinductiveCycle` slot-fill** — there is no positive
-              proof to complete. This reconciles with the §2.3 step-3 negative-close, which already omits
-              proof-fill for negatives: the `CoinductiveCycle` slot-fill applies ONLY to re-discharged POSITIVE
-              members.
+              member's frozen §2.7 key. It
+              carries NO `keys: S` set and requires no `CoinductiveCycle` construction — there is no positive
+              proof. This reconciles with the §2.3 step-3 negative-close: `CoinductiveCycle` applies only to
+              re-discharged POSITIVE members.
             - **Named special case (the consumed-sibling "same-sign" check).** When every consumed binding-sibling
               verdict converged to the SAME sign it held at SCC-close — and the member's own verdict + bindings are
               unchanged — the re-discharge reproduces the provisional outcome; this is the COMMON publishable path,
@@ -504,9 +504,9 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
           will never exist).
 
      Because the published value is always the converged re-discharge, a positive non-binding member of a mixed
-     SCC never publishes a proof whose binding slot never filled or whose binding sibling converged to the
+     SCC never publishes a proof whose referenced binding judgment failed to converge or converged to the
      opposite sign, and a binding-consuming negative member never publishes a verdict whose consumed sibling
-     never converged or converged to the opposite sign — both surface as a non-stable re-discharge (outcome 2).
+     failed to converge or converged to the opposite sign — both surface as a non-stable re-discharge (outcome 2).
 
    **Singleflight lifetime.** Within a single `CheckerTransaction` the SCC/session machinery already prevents
    duplicate work (the reentry stack and the `SccLedger` dedup every in-flight relation). Across transactions
@@ -539,32 +539,24 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
      registration CANNOT validate an entry that will never exist, so on either release-without-publish exit
      ((2) or (3)) it **recomputes** in its own transaction (deterministically — the same bounded perf cost as the
      binding-member recompute below, never a hang or a stale hit).
-   - **Binding members — NO mid-flight cross-transaction join.** A binding member's in-flight identity is keyed
-     by its enclosing `CheckerTransaction`'s transient `SessionId`, which is **private to that transaction and
-     not shareable across transactions**, and its final §2.7 key does not exist until session-close — so there
-     is **no joinable singleflight key for a binding member's in-flight work across transactions**.
-     Cross-transaction sharing of a binding `Relate` happens ONLY on the FINAL published query-identity slot,
-     available AFTER session-close (keyed by the completed full §2.7 identity, with the now-knowable
-     `InferenceContextKey`). A separate top-level transaction that needs the same binding `Relate` mid-flight
-     opens its **OWN** inference session and recomputes; this is deterministic (both sessions converge to the
-     same completed `InferenceContextKey`, so the first publish wins the slot and the other validates/joins on
-     it) and is a **bounded PERF cost, NOT an unsoundness or a hang** (recorded as a perf residual, §7 risk 6).
+   - **Binding members — NO mid-flight cross-transaction reuse.** A binding member has its full frozen §2.7
+     key before the session opens, but an active inference session bypasses warm reads because the relation must
+     reproduce its session-local candidate deposits. A separate top-level transaction that needs the same
+     binding `Relate` mid-flight therefore opens its **OWN** inference session and recomputes. This is
+     deterministic (both sessions share the same frozen `InferenceContextKey`; only a completed deterministic
+     payload may publish) and is a **bounded PERF cost, NOT an unsoundness or a hang** (recorded as a perf
+     residual, §7 risk 6). The dispatch implementation performs the explicit validated warm probe before the
+     cold boundary; only a cold binding miss bypasses the family coordinator, while remaining inside the shared
+     fact-traced build/finalisation funnel. A completed deterministic result still publishes through the normal
+     relation-family carrier for later warm reuse. Non-binding roots continue through family singleflight.
 
-   **Completed keys come from the re-discharge, not a remap of a stale proof (never carries a transient
-   `SessionId`).** The in-flight reentry/SCC identities of binding-`Relate` members carry the transient
-   `SessionId` stand-in (§2.2/§3.3 R-c), and the provisional SCC-close snapshot's `CoinductiveCycle { keys: S }`
-   has unfilled binding slots. Those provisional artifacts are NEVER published. At **session-close** the deferred
-   member's cold compute re-discharges against the converged state (§2.3 step 4); because every relevant session
-   is `CompletedDeterministic` by then, every binding member's `InferenceContextKey` is knowable, so the proof
-   the re-discharge produces already references **completed full §2.7 `Relate` keys** — the re-keying is
-   intrinsic to the re-discharge, not a separate remap step over a recorded proof. Non-binding members of a pure
-   non-binding SCC have no session handle, so their in-flight and completed keys already coincide and they
-   publish at SCC-close (no re-discharge needed, no remap). A durable `CoinductiveCycle { keys: S }` proof is
-   published only as the result of a re-discharge in which **every** member slot carries a completed full §2.7
-   `Relate` key: for a **pure non-binding SCC** that instant is SCC-close (published directly, unchanged); for an
-   SCC containing any binding member it is the **LATER of {SCC-close, the last binding member's session-close}**,
-   so no member ever durably publishes a proof with an unfilled slot or a transient `SessionId` (a durably-
-   published proof referencing a transient session identity would be dangling/unsound).
+   **Durable proofs come from converged re-discharge and never carry transient state.** The in-flight
+   reentry/SCC identity adds `InferenceOccurrence` to the already-frozen full key. The provisional SCC-close
+   `CoinductiveCycle` proof is NEVER published for a mixed SCC. At **session-close** the deferred member
+   re-discharges against the converged state (§2.3 step 4), producing a proof over the same frozen full §2.7
+   keys. A pure non-binding SCC publishes at SCC-close; an SCC containing a binding member publishes only at
+   the **LATER of {SCC-close, the last binding member's session-close}**. No durable proof carries
+   `InferenceOccurrence` or `SessionId`.
 
 **Coupling to #1 — when a coinductively-derived result admits vs `ReturnOnly`:** a result becomes admissible
 *exactly* when the SCC closes POSITIVE (`Assignable + CoinductiveCycle`) or NEGATIVE on a non-assumptive
@@ -589,15 +581,14 @@ sign, the member's own verdict flips, or its bindings change — is dropped to `
 publish, joiners recompute) because the snapshot it would have published is stale (§2.3 step-4 outcome 2). The
 transient `RelationAssumption::Holds` sentinel is **NEVER** warm-admitted, **NEVER** the published proof,
 **NEVER** a fact signature or backfill. A positive SCC's `CoinductiveCycle { keys }` proof is produced fresh by
-the session-converged re-discharge — referencing only completed keys — distinct from the sentinel.
+the session-converged re-discharge — referencing only frozen persistent keys — distinct from the sentinel.
 
 ### 2.4 Cross-engine unification (replaces per-family stand-ins)
 
 `Relate` keeps the §4.1 **assumption / discharge protocol** unchanged (the scoped-assumption + coinductive-SCC
-algorithm of §2.3) and participates in the **one shared** `CheckerReentryStack`. ("Unchanged" scopes to that
-assumption/discharge *protocol*; the in-flight *keying* of §4.1's `inference_context` component is specialized
-per **R-c (§3.3)** — the completed `InferenceContextKey` is provably not knowable in-flight, so the reentry
-node uses the transient `SessionId` stand-in, §2.2.) The substrate is DESIGNED for the full cross-engine cycle
+algorithm of §2.3) and participates in the **one shared** `CheckerReentryStack`. Binding relation reentry uses
+the frozen full key plus transient `InferenceOccurrence`; `SessionId` remains session ownership only (§2.2 /
+§3.3). The substrate is DESIGNED for the full cross-engine cycle
 `ResolveCall → FlowReturn → narrowing → Relate → ResolveCall` — a transient re-entry assumption on the one
 stack, never a self-await / budget-spin — so that each value domain can discharge its own SCC fixed-point to a
 converged deterministic result before anything warm-admits (`FlowReturn` → stable projected return type;
@@ -654,8 +645,10 @@ candidate sets, fixation flags) is TRANSIENT, never a key, never admitted. Admis
 
 ### 3.1 `InferenceContextKey` content-free (R6-clean)
 
-`InferenceContextKey` is the **fingerprint of the COMPLETED session's SETUP**, frozen at the instant the
-session reaches `CompletedDeterministic`:
+`InferenceContextKey` is the fingerprint of the session's immutable SETUP. For the relation-owned
+conditional-inference subset, the pattern determines the complete setup before the session opens, so the
+fingerprint is constructed once with `InferenceSessionSetup` and remains frozen through
+`CompletedDeterministic`:
 
 ```rust
 struct InferenceContextKey {
@@ -665,6 +658,7 @@ struct InferenceContextKey {
     no_infer_mask: NoInferMask,                     // occurrence-local NoInfer suppression mask (§1.2)
     const_param_policy: ConstParamPolicy,           // <const T> propagation
     contextual_inference_mode: ContextualInferenceMode, // whether / how the contextual target drives inference
+    pass_kind: InferencePassKind,                   // ordinary or exact reverse-homomorphic mapped recovery
     // NO env / content / parse_stable_hash / fact_dep_signature / AST handle / borrowed session pointer / candidate vector (R6/R21)
 }
 ```
@@ -677,27 +671,33 @@ version-rooted by `ReadSetSignature.facts`. Soundness: two sessions with the **s
 fingerprint + the content fact rail is a complete identity. Different setups ⇒ different `InferenceContextKey`
 ⇒ distinct slots.
 
-### 3.2 (R-b) `InferenceContextKey` is GENERATED from the `InferenceSession` setup-field set — MANDATORY
+### 3.2 (R-b) `InferenceSessionSetup` is the single fingerprint authority — MANDATORY
 
-Hand-maintaining the `InferenceSession`→`InferenceContextKey` projection re-mints the false-completeness
-defect: a future inference axis (a new priority rung, a new strict-affecting mask) added to the session but
-forgotten in the fingerprint yields a **silent unsound warm-hit** (two semantically distinct sessions
-sharing one slot) — the worst failure class. The fingerprint is **generated** by a `cargo run` target from
-the canonical setup-field list and the Rust test only diffs (same discipline as the `SemanticQueryKeySpec`
-table, the proof registry, the oracle rows). The generator projects every `#[setup_axis]`-tagged field
-across **BOTH** `InferenceSession` (`no_infer_mask`, `contextual_inference_mode`, the inferable-param set)
-**and** `InferenceInfo` (`priority`, `const_param_policy`, the variance side that becomes `variance_phase`),
-since the fingerprint axes are sourced from both structs. Guard
-`inference_context_key_projects_every_session_setup_axis` diffs generated-vs-tagged and fails on any
-untagged-or-unprojected setup axis (owner RI-6).
+Hand-maintaining separate pattern→key and live-session→key projections re-mints the false-completeness
+defect: a future inference axis added to one projection but forgotten in the other yields a **silent unsound
+warm-hit** (two semantically distinct sessions sharing one slot) — the worst failure class.
+
+`InferenceSessionSetup` is therefore one immutable value containing the frozen `InferenceContextKey` plus
+the immutable per-parameter identities/names. Pattern detection constructs it once. Relation-key construction
+clones its key, and session opening consumes the same setup value; mutable `InferenceSession` state contains
+only candidate and reverse-projection journals and cannot re-project or alter setup. Candidate priority and
+const policy are explicit setup-wide axes, not lossy reductions of per-parameter records.
+
+Guard `inference_context_key_projects_every_session_setup_axis` is behavioral and source-independent: it
+constructs setup through the production constructor, mutates each of the seven setup axes individually, and
+proves distinct keys. It exhaustively destructures `InferenceSessionSetup`, its parameter setup record, and
+`InferenceContextKey` without `..`, so a new field fails compilation until the guard classifies it. It also
+proves candidate collection and fixation cannot change the frozen key (owner RI-6). No source/name scanning
+or parallel generated projection participates in this invariant.
 
 ### 3.3 (R-c) Binding-producing `Relate` is `ReturnOnly` until its session completes — MANDATORY
 
 A binding-producing `Relate` (`inference_context = Some`) is a **session-internal delta and is `ReturnOnly`
 for its entire in-flight session lifetime**; its `RelationPayload` admits **only at the instant its
-enclosing session reaches `CompletedDeterministic`**, keyed by the now-knowable completed fingerprint.
-Before completion the fingerprint is not even well-defined (the setup is still mutating), so a mid-session
-admission would be unsound by construction.
+enclosing session reaches `CompletedDeterministic`**, keyed by the same fingerprint frozen at session setup.
+Although this subset's setup fingerprint is already frozen at session open, the inferred candidate bodies
+and final bindings are still mutating before completion, so a mid-session admission would be unsound by
+construction.
 
 **The SCC-close snapshot is PROVISIONAL; the published payload is the session-converged RE-DISCHARGE.** The
 verdict / `bindings: Arc<[InferBinding]>` / `relation_proof` recorded for any deferred member at SCC-close is a
@@ -706,9 +706,10 @@ LATER of all relevant sessions' closes), the member's cold compute **COMPLETES**
 against the fully-converged state** — final inference bindings, final own verdict, final consumed-sibling
 verdicts — through the **same `execute(Relate{Kᵢ})` dispatch** (this is the one engine's cold compute finishing
 once its session inputs are final, NOT a second engine, NOT a second resolver). The published `RelationPayload`
-(outcome + bindings + proof) **IS that re-discharge result**, keyed by the now-complete full §2.7 identity.
-Therefore a stale SCC-close snapshot is **impossible by construction** — the published value is always the
-converged re-evaluation.
+(outcome + bindings + proof) **IS that re-discharge result**, keyed by the unchanged full §2.7 identity,
+which was complete and frozen before execution. The delay is for verdict and binding convergence, not
+identity completion. Therefore a stale SCC-close snapshot is **impossible by construction** — the published
+value is always the converged re-evaluation.
 
 **The admission predicate is a conjunction gated on the LATER event AND on a stable converged re-discharge.**
 SCC-close (relation recursion converges) and session-completion (the fixation fixed-point converges) are two
@@ -721,7 +722,8 @@ re-discharge, and fire at whichever happens last:
 > verdict, and final consumed-sibling verdicts — yields a STABLE determined publishable outcome)`; the
 > published `RelationPayload` **IS that re-discharge result** (positive ⇒ `Assignable` with final bindings + a
 > complete `CoinductiveCycle { keys: S }` proof; publishable-negative ⇒ slotless `NotAssignable { reason,
-> failing_sub }`, no slot-fill). Any **non-stable / undetermined / `Unknown` / `BudgetExceeded`** re-discharge —
+> failing_sub }`, with no `CoinductiveCycle` proof). Any **non-stable / undetermined / `Unknown` /
+> `BudgetExceeded`** re-discharge —
 > including the member's OWN verdict flipping, a consumed binding-sibling verdict flipping sign, OR a bindings
 > change that alters the result — ⇒ `ReturnOnly` (release-without-publish, joiners recompute). If any relevant
 > session ends `Abandoned(reason)` the conjunction never holds and the member is `ReturnOnly`. The consumed-
@@ -752,7 +754,8 @@ re-discharge `RelationPayload`* are THREE DISTINCT objects.** The delta is the c
 `ReturnOnly`**, never publishable. The SCC-close snapshot (verdict + bindings + provisional proof) is **deferral
 metadata + the caller-return value**, never the published payload. The published `RelationPayload` is the
 **session-converged re-discharge result** — the cold compute of the member completing once its session inputs
-are final, through the same `execute(Relate{Kᵢ})` dispatch, keyed by the completed §2.7 identity. The three are
+are final, through the same `execute(Relate{Kᵢ})` dispatch, keyed by the unchanged §2.7 identity that was
+complete and frozen before execution. The three are
 never conflated: the §2.3-step-4 SCC-close batched pass publishes only members whose verdict is complete and
 stable at SCC-close (a pure non-binding SCC's members, and any NEGATIVE non-binding member whose consumed-verdict
 closure contains no binding member); binding members, POSITIVE non-binding members of a mixed SCC, AND NEGATIVE
@@ -761,15 +764,12 @@ relevant session-close, through the `SessionAdmissionLedger` / the `SccLedger`'s
 §2.3 step-4 **converged re-discharge** yields a stable publishable outcome (any non-stable / flipped / abandoned
 re-discharge releases the batch without publish so joiners recompute).
 
-Because the completed `InferenceContextKey` does not exist while the session is in-flight, **cycle detection
-and admission use two distinct identities for the same in-flight binding-`Relate`** (§2.2): while in-flight,
-its reentry-stack node / recorded assumption is keyed by `(source, target, relation, policy,
-source_freshness, context)` **+ the transient per-session `SessionId`** (content-free, never a cache key);
-at the instant the session reaches `CompletedDeterministic`, the decided result is **re-keyed** to the full
-§2.7 identity with the now-knowable completed `InferenceContextKey` substituted for the transient handle, and
-only then admitted. The admitted entry is then reusable by a future request opening a session with the same
-setup. Pure non-binding assignability (`inference_context = None`) never touches a session, has no transient
-handle, and caches normally.
+The immutable `InferenceContextKey` exists before the session opens and participates in the full relation key
+throughout execution. Reentry additionally carries only the transient `InferenceOccurrence` needed to
+preserve candidate orientation; admission drops that occurrence and uses the unchanged full relation key.
+The `CompletedDeterministic` gate is still mandatory because candidate bodies and fixed bindings mutate even
+though setup identity does not. Pure non-binding assignability (`inference_context = None`) never touches a
+session and caches normally.
 
 ### 3.4 One inference engine, not per-surface matchers
 
@@ -890,22 +890,19 @@ while the gate keeps it ReturnOnly.
   by the admission gate (row 4) — never warm-admitted, never backfilled, never a fact signature. Expressible
   and non-admitted are two layers; the locked value domain (the parent §3 value-domain prose, qvd
   §display_relation) requires both.
-- **`CoinductiveCycle { keys }` carries only COMPLETED keys (produced by the session-converged re-discharge).**
+- **`CoinductiveCycle { keys }` carries only full persistent keys (produced by the session-converged re-discharge).**
   The durable proof is NOT a remap of the provisional SCC-close snapshot's `keys: S` — it is the proof the
   **session-converged re-discharge** produces (§2.3 step 4 / §3.3). For a **pure non-binding SCC** every key in
-  `S` is a non-binding key whose in-flight and completed identities coincide, so the proof is fully constructible
-  and published **at SCC-close** (no re-discharge needed). For an SCC with any **binding** member, the binding
-  member used the transient `SessionId` stand-in on the reentry stack (§2.2/§3.3 R-c) and its
-  `InferenceContextKey` is not knowable until its session reaches `CompletedDeterministic`, so its slot is left
-  **UNFILLED in the provisional snapshot at SCC-close**; the durable proof is produced at the **LATER of
-  {SCC-close, the last binding member's session-close}** by re-discharging against the converged state — because
-  every relevant session is `CompletedDeterministic` by then, the re-discharge's proof already references
-  **completed full §2.7 keys** (the re-keying is intrinsic to the re-discharge, not a separate remap of a stale
-  proof). The durable proof is published only when that re-discharge yields a STABLE positive — a non-stable
+  `S` is a non-binding key, so the proof is fully constructible and published **at SCC-close** (no
+  re-discharge needed). For an SCC with any **binding** member, publication waits for the **LATER of
+  {SCC-close, the last binding member's session-close}** and re-discharges against the converged state. The
+  frozen `InferenceContextKey` already appears in each binding member's full §2.7 key; only the transient
+  `InferenceOccurrence` is absent from the durable proof. The proof is published only when that re-discharge
+  yields a STABLE positive — a non-stable
   re-discharge (a binding member converging to `NotAssignable`, the member's own verdict flipping, or its
   bindings changing) releases the positive batch WITHOUT publish (joiners recompute) rather than completing the
-  proof. It therefore references ONLY completed full `Relate` keys, NEVER a transient `SessionId` — a proof
-  referencing a transient session identity would be dangling/unsound.
+  proof. It therefore references only persistent full `Relate` keys, never `InferenceOccurrence` or
+  `SessionId`.
 - Proofs ride the **payload-side `relation_proofs` table by opaque proof id**, keeping the proof **OFF the
   type-values surface**: there is NO `GraphTypeNode` relation-proof arm on the wire — the former
   `GraphRelationProof relation_proof = 28` oneof arm is retired (tag 28 and the name `relation_proof` are
@@ -954,7 +951,7 @@ forbiddance:
 | Risk site | Forbiddance / guard |
 |---|---|
 | Fast-reject discriminator prefilter (§4.1 perf) | O(tag) prefilter inside the relate cold path reading `SemanticNodeData` tags ONLY (primitive / literal / shape-tag / brand / arity mismatch); MUST NOT re-resolve / re-lower / walk types — it short-circuits to `NotAssignable` or falls through. Guard `relation_negative_and_unknown_paths_are_fast` (bench). |
-| Reverse-mapped inference | a **relation-owned session pass**, NOT a private reverse-mapping matcher; each per-key recovery routes through binding-`Relate` into `InferenceInfo`; the session's final substitution reassembles `T`. Guard `reverse_mapped_inference_is_relation_owned_in_session`. |
+| Reverse-mapped inference | a **relation-owned session pass**, NOT a private reverse-mapping matcher. Eligibility is exact and structural: an unremapped `Mapped` target whose key space is `keyof T`, where `T` is an active infer declaration and the mapper binder is matched by `MapperKey::parameter_node`. The frozen `InferencePassKind::ReverseHomomorphicMapped` setup axis separates its session identity. Each per-key recovery registers canonical `T[key]` projection nodes, routes the member relation through binding-`Relate`, and deposits only into session-owned projection inference state; fixation combines one full or partial aggregate candidate for `T`. Failed or `Unknown` member relations roll back and cannot become partial recovery. Guard `reverse_mapped_inference_is_relation_owned_in_session`. |
 | Per-property freshness spread-taint | lives IN the session/relation substrate (the excess-check consults the per-property bit), NOT a second checker. Guard `freshness_tracks_per_property_spread_taint`. |
 | Identity-carrier unwrap (`unwrap_identity_carrier_for_relation`) | MUST route through `execute(Instantiate{…})` — the shared dispatch — never a private instantiation path. |
 | `InferenceSession` | cold-compute STATE of `execute`, not a standalone engine. Guard `inference_runs_in_checker_transaction_not_per_surface_matcher`. |
@@ -986,8 +983,8 @@ First matching row wins; `ReturnOnly` rows are checked **before** publish rows.
 | 10 | **incomplete self-rooting** (torn / conflicting self-root observation; `None` carrier) | **ReturnOnly** |
 | 11 | **unresolved provenance** (an SCC member's visited decl has no version root) | **ReturnOnly** |
 | 12 | **overlay/session-only** identity attempting to publish to a base/persistent cache | **ReturnOnly** (session-cache identity only) |
-| 13 | SCC closed **NEGATIVE** on a non-assumptive obligation ⇒ `NotAssignable` — for a **non-binding** member (`inference_context = None`) **whose transitive consumed-verdict closure contains no binding member** (publishes at SCC-close even in a mixed SCC); a non-binding member whose closure DOES reach a binding sibling, OR a **binding** member (`inference_context = Some`), reaches a publish only when every relevant enclosing session is ALSO `CompletedDeterministic`, else row 9 (`InProgress`) / row 8 (`Abandoned`) matches FIRST | **Cacheable** (publishable negative, final; published fact set = transitive consumed-verdict closure, NOT the bare per-member set — §2.3 step 3; a binding member — or a negative non-binding member whose closure reaches a binding sibling — publishes at session-close via the deferred batch / `SessionAdmissionLedger`, and the **published payload IS the session-converged re-discharge** — a slotless `NotAssignable` keyed by the completed §2.7 identity — NOT the recorded SCC-close snapshot; it publishes ONLY when that re-discharge yields a stable publishable negative (commonly: the consumed binding-sibling verdict converged to the SAME negative sign held at SCC-close); on session `Abandon`, OR if the re-discharge is non-stable (the sibling verdict FLIPPED, the member's own verdict flipped, or its bindings changed — so the snapshot is stale), the held registration is released WITHOUT publish and joiners recompute — §2.3 step 4) |
-| 14 | SCC closed **POSITIVE**, all non-assumptive obligations positive ⇒ `Assignable` (+ `CoinductiveCycle` if cyclic) — admits at SCC-close ONLY for a member of a **pure non-binding SCC**. A **binding** member reaches here only when every relevant enclosing session is ALSO `CompletedDeterministic`, else row 9 (`InProgress`) / row 8 (`Abandoned`) matches FIRST. A **POSITIVE non-binding member of a MIXED SCC** carries the shared binding-referencing `CoinductiveCycle { keys: S }` proof whose binding slots are UNFILLED at SCC-close, so it does NOT admit at SCC-close either — it is held on the `SccLedger`'s deferred batch and admits at the LATER of {SCC-close, last binding member's session-close} | **Cacheable** at the publish instant (pure non-binding SCC → SCC-close, published directly; binding member, and positive non-binding member of a mixed SCC → session-close, via the `SessionAdmissionLedger` / the `SccLedger`'s deferred batch). The **published payload IS the session-converged re-discharge** — `Assignable` with the re-discharged final `bindings` + a `CoinductiveCycle` proof referencing only completed keys — NOT the recorded SCC-close snapshot; it admits ONLY when that re-discharge yields a stable publishable positive. **On session `Abandon`, OR if the re-discharge is non-stable (a consumed binding-sibling verdict FLIPPED to `NotAssignable`, the member's own verdict flipped, or its bindings changed — so the snapshot is a stale false-positive), the deferred batch does NOT reach this row:** it is released WITHOUT publish (no entry / fact signature / backfill) and drops to `ReturnOnly` (row 8), and any concurrent joiner held on the singleflight registration recomputes — §2.3 step 4 |
+| 13 | SCC closed **NEGATIVE** on a non-assumptive obligation ⇒ `NotAssignable` — for a **non-binding** member (`inference_context = None`) **whose transitive consumed-verdict closure contains no binding member** (publishes at SCC-close even in a mixed SCC); a non-binding member whose closure DOES reach a binding sibling, OR a **binding** member (`inference_context = Some`), reaches a publish only when every relevant enclosing session is ALSO `CompletedDeterministic`, else row 9 (`InProgress`) / row 8 (`Abandoned`) matches FIRST | **Cacheable** (publishable negative, final; published fact set = transitive consumed-verdict closure, NOT the bare per-member set — §2.3 step 3; a binding member — or a negative non-binding member whose closure reaches a binding sibling — publishes at session-close via the deferred batch / `SessionAdmissionLedger`, and the **published payload IS the session-converged re-discharge** — a slotless `NotAssignable` keyed by the unchanged §2.7 identity that was complete and frozen before execution — NOT the recorded SCC-close snapshot; it publishes ONLY when that re-discharge yields a stable publishable negative (commonly: the consumed binding-sibling verdict converged to the SAME negative sign held at SCC-close); on session `Abandon`, OR if the re-discharge is non-stable (the sibling verdict FLIPPED, the member's own verdict flipped, or its bindings changed — so the snapshot is stale), the held registration is released WITHOUT publish and joiners recompute — §2.3 step 4) |
+| 14 | SCC closed **POSITIVE**, all non-assumptive obligations positive ⇒ `Assignable` (+ `CoinductiveCycle` if cyclic) — admits at SCC-close ONLY for a member of a **pure non-binding SCC**. A **binding** member reaches here only when every relevant enclosing session is ALSO `CompletedDeterministic`, else row 9 (`InProgress`) / row 8 (`Abandoned`) matches FIRST. A **POSITIVE non-binding member of a MIXED SCC** carries the shared binding-referencing `CoinductiveCycle { keys: S }` proof, but the referenced binding-member verdicts and bindings have not converged at SCC-close; every key is already complete and frozen. It therefore does NOT admit at SCC-close — it is held on the `SccLedger`'s deferred batch and admits at the LATER of {SCC-close, last binding member's session-close} | **Cacheable** at the publish instant (pure non-binding SCC → SCC-close, published directly; binding member, and positive non-binding member of a mixed SCC → session-close, via the `SessionAdmissionLedger` / the `SccLedger`'s deferred batch). The **published payload IS the session-converged re-discharge** — `Assignable` with the re-discharged final `bindings` + a `CoinductiveCycle` proof referencing frozen keys for fully converged judgments — NOT the recorded SCC-close snapshot; it admits ONLY when that re-discharge yields a stable publishable positive. **On session `Abandon`, OR if the re-discharge is non-stable (a consumed binding-sibling verdict FLIPPED to `NotAssignable`, the member's own verdict flipped, or its bindings changed — so the snapshot is a stale false-positive), the deferred batch does NOT reach this row:** it is released WITHOUT publish (no entry / fact signature / backfill) and drops to `ReturnOnly` (row 8), and any concurrent joiner held on the singleflight registration recomputes — §2.3 step 4 |
 | 15 | **non-cyclic** `Relate` with a `Decided` **binary** `Assignable`/`NotAssignable` outcome (NOT `BudgetExceeded` — that matches row 4 first), `CompletedDeterministic` (or no) session, fully self-rooted, in-generation, non-overflowed, within budget | **Cacheable** (publish) |
 
 Only rows 13–15 publish. Every cycle/SCC/budget/speculative/session/overlay/rooting state returns the
@@ -996,12 +993,13 @@ member (`inference_context = Some`) whose SCC has closed POSITIVE/NEGATIVE but w
 yet reached `CompletedDeterministic` matches row 9 (`InProgress`) — or row 8 if the session is `Abandoned` —
 BEFORE rows 13/14, so it is `ReturnOnly`/deferred at SCC-close and reaches a publish row only at session-close
 through the `SessionAdmissionLedger` (§2.3 step 4); the session-local delta it deposited en route is row 7,
-always `ReturnOnly` and a distinct object from the final re-keyed payload (§3.3). There is no contradiction —
+always `ReturnOnly` and a distinct object from the final converged payload (§3.3). There is no contradiction —
 the `ReturnOnly` rows being checked first is exactly what defers a binding member past SCC-close. **A POSITIVE
 non-binding member of a MIXED SCC** has no session of its own, so no session row (7/8/9) defers it; it is
-deferred instead by row 14's own gate — the shared `CoinductiveCycle { keys: S }` proof has UNFILLED binding
-slots at SCC-close, so its publish instant is the LATER of {SCC-close, the last binding member's
-session-close}, where the **published payload is the session-converged re-discharge** (NOT the SCC-close
+deferred instead by row 14's own gate — every key is already frozen, but the binding-member verdicts and
+bindings needed by the shared `CoinductiveCycle { keys: S }` proof have not converged at SCC-close, so its
+publish instant is the LATER of {SCC-close, the last binding member's session-close}, where the
+**published payload is the session-converged re-discharge** (NOT the SCC-close
 snapshot); a non-stable re-discharge — a binding sibling converging to `NotAssignable` (a stale false-positive),
 its own verdict flipping, or its bindings changing — releases the batch without publish so joiners recompute,
 and at SCC-close it is held on the `SccLedger`'s deferred batch (NOT admitted). A NEGATIVE
@@ -1046,9 +1044,10 @@ Goal: `execute(Relate { source: A, target: B, relation: Assignable, … })`.
    `A` declaration misses the warm read and recomputes.
 
 > Both members here are **non-binding** (`inference_context = None` — pure structural assignability, no
-> inference session), so this is a pure non-binding SCC: publish happens at SCC-close (§2.3 step 4). Had a
-> member been binding (`inference_context = Some`), its slot would stay unfilled at SCC-close and publish only
-> at its session's `CompletedDeterministic` close through the `SessionAdmissionLedger`.
+> inference session), so this is a pure non-binding SCC: publish happens at SCC-close (§2.3 step 4). For a
+> binding member (`inference_context = Some`), the key is already complete and frozen at SCC-close, but the
+> provisional verdict and bindings have not converged; the member remains unpublished until its
+> `CompletedDeterministic` session-close re-discharge through the `SessionAdmissionLedger`.
 
 **Contrast with the HISTORICAL baseline:** the pre-design code's step 2 returned
 `RelationResult::Unknown` via the thread-local in-flight cycle guard, and its step 5 **cached that
@@ -1142,9 +1141,9 @@ RI-1 ──┬── RI-2 ──────────────────
 | **RI-1** Full-identity `Relate` key | U2.QUERY_VALUE_DOMAIN | §2.7 key struct; `RelationKind`/`RelationPolicy`/`FreshnessKey`/`RelationContext`/`InferenceContextKey` types; `SemanticQueryKeySpec` row; re-key `BudgetedRelationMemo` bare→interned full identity; wire into per-family adaptive cap | `relate_key_covers_relation_kind_policy_freshness_and_context`; `relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit` | bare-pair `Relate` key; bare-pair `BudgetedRelationMemo` key |
 | **RI-2** `RelationPayload` value-domain + proof table + wire migration | RI-1 | The rich `RelationPayload` struct ({`outcome` ∈ `Assignable`/`NotAssignable`/`BudgetExceeded` — NO public `Unknown`, `bindings`, `relation_proof: RelationProofId`}), the four `RelationProof` shapes, and the payload-side `RelationProofTable` are ALREADY landed (value-domain block); RI-2's remaining payload work is the transient `RelationComputeResult`/`UndecidedReason` compute-result split (Decision 4) feeding that landed struct. **Wire migration (Typeinfo Wire Contract):** relocate the proof OFF `GraphTypeNode` to the payload-side `relation_proofs` table; add `reserved 28;` + `reserved "relation_proof";` at `GraphTypeNode` message scope (proto3 forbids `reserved` inside the `oneof` — neighbour of the existing `reserved 33 to 100;`); bump `SemanticTypeGraph.schema_version` | `relation_proofs_not_graph_type_nodes` (wire/proto-surface form — landed green with the tag-28 retirement); `typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node`; keep `typeinfo_graph_taxonomy` + `typeinfo_proto_ts_freshness` green; exercises/satisfies the parent value-domain guard `relate_query_value_carries_relation_proof_and_budget_state` (OWNED by U2.QUERY_VALUE_DOMAIN — the upgraded payload carries the `relation_proof` + the budget state typed into `RelationOutcome::BudgetExceeded`) | the PUBLIC tri-state `enum RelationPayload { Holds, DoesNotHold, Unknown }` at the value boundary is ALREADY deleted (value-domain block — replaced by the `{Assignable, NotAssignable, BudgetExceeded}` outcome, NO public `Unknown`) — NOT a remaining RI-2 deletion. The INTERNAL transient `RelationResult` legitimately keeps its `Unknown` arm as REDUCER STATE, but it is never memo-admitted — admission is decided-only. The RI-2 deletion — **`GraphTypeNode.relation_proof = 28` / `GraphRelationProof` as a `kind` arm** — is DONE (tag 28 reserved, name reserved, schema_version bumped) |
 | **RI-3** `CheckerReentryStack` + `RelationAssumptionStack` + `CheckerTransaction` | RI-1 | transient cold-compute frame; scoped assumption recording keyed by full identity | `relation_cycle_assumptions_are_scoped_to_full_relate_identity`; `checker_reentry_stack_substrate_built_and_relate_wired` (the shared `CheckerReentryStack` substrate is built and **only `Relate`** — plus the `Instantiate{args:[], context.projection_reduction.mode=Skeleton}` BFS it subsumes — is wired onto it as a typed view; testable at U2 with only the live variants. The full cross-engine span assertion is DEFERRED to the U6-owned `checker_reentry_graph_spans_flow_call_contextual_narrowing` — see Rescope/U6); retired-symbol: `relate_nodes(source,target)` / `RELATION_IN_FLIGHT` / `enter_/exit_relation_guard` cannot be re-introduced | `RELATION_IN_FLIGHT` thread-local; `enter_/exit_relation_guard`; bare-pair `relate_nodes` |
-| **RI-4** Coinductive SCC discharge + SCC-composition-split admission + `ReturnOnly` gate | RI-2, RI-3, RI-6 | `SccLedger`; Tarjan over assumption edges; §2.3 discharge verdict; at SCC-close publish ONLY the members whose verdict is complete then — a **pure non-binding SCC**'s members, and any **NEGATIVE** non-binding member (no `keys: S`) **whose transitive consumed-verdict closure contains no binding member** — via the batched `FamilySlots::publish` pass, and DEFER the rest (every binding member, the **POSITIVE non-binding members of a MIXED SCC** which share the binding-referencing proof, AND any **NEGATIVE** non-binding member whose consumed-verdict closure reaches a binding sibling) by handing binding members (verdict + SCC fact-set) to RI-6's per-session `SessionAdmissionLedger` and holding the deferred non-binding members on the `SccLedger`'s batch (NO binding-member, NO mixed-SCC positive, and NO binding-consuming negative publish or proof-key remap at SCC-close); the SCC-close verdict/bindings/proof recorded for a deferred member is PROVISIONAL (caller-return + deferral metadata, NEVER the published payload); the deferred batch's session-close drain is a THREE-outcome gate (§2.3 step 4) whose **published payload IS the session-converged re-discharge** — when every relevant session is `CompletedDeterministic` it re-discharges each member through the same `execute(Relate{K})` dispatch against the converged state and publishes that result ONLY when it yields a STABLE determined publishable outcome (positive ⇒ `Assignable` + complete `CoinductiveCycle` proof; negative ⇒ slotless `NotAssignable`, NO slot-fill); on a non-stable re-discharge (own-verdict flip, consumed-sibling sign-flip, or bindings change) or on `Abandon`, releases WITHOUT publish (no entry / fact signature / backfill; joiners recompute) | `relation_coinductive_scc_discharges_on_outgoing_obligations`; `relation_cycle_sentinel_is_never_warm_admitted`; admission rows 1–5,13,14; exercises `binding_relate_scc_member_admits_only_at_session_close` (owned by RI-6) for the SCC-close→ledger hand-off | the memoized `RelationResult::Unknown` admission arm (deleted — admission is decided-only; the `ReturnOnly` gate is the structural guarantee it cannot re-enter) |
+| **RI-4** Coinductive SCC discharge + SCC-composition-split admission + `ReturnOnly` gate | RI-2, RI-3, RI-6 | `SccLedger`; Tarjan over assumption edges; §2.3 discharge verdict; at SCC-close publish ONLY the members whose verdict is complete then — a **pure non-binding SCC**'s members, and any **NEGATIVE** non-binding member (no `keys: S`) **whose transitive consumed-verdict closure contains no binding member** — via the batched `FamilySlots::publish` pass, and DEFER the rest (every binding member, the **POSITIVE non-binding members of a MIXED SCC** which share the binding-referencing proof, AND any **NEGATIVE** non-binding member whose consumed-verdict closure reaches a binding sibling) by handing binding members (verdict + SCC fact-set) to RI-6's per-session `SessionAdmissionLedger` and holding the deferred non-binding members on the `SccLedger`'s batch (NO binding-member, NO mixed-SCC positive, and NO binding-consuming negative publish at SCC-close); the SCC-close verdict/bindings/proof recorded for a deferred member is PROVISIONAL (caller-return + deferral metadata, NEVER the published payload); the deferred batch's session-close drain is a THREE-outcome gate (§2.3 step 4) whose **published payload IS the session-converged re-discharge** — when every relevant session is `CompletedDeterministic` it re-discharges each member through the same `execute(Relate{K})` dispatch against the converged state and publishes that result ONLY when it yields a STABLE determined publishable outcome (positive ⇒ `Assignable` + complete `CoinductiveCycle` proof; negative ⇒ slotless `NotAssignable` with no `CoinductiveCycle` proof); on a non-stable re-discharge (own-verdict flip, consumed-sibling sign-flip, or bindings change) or on `Abandon`, releases WITHOUT publish (no entry / fact signature / backfill; joiners recompute) | `relation_coinductive_scc_discharges_on_outgoing_obligations`; `relation_cycle_sentinel_is_never_warm_admitted`; admission rows 1–5,13,14; exercises `binding_relate_scc_member_admits_only_at_session_close` (owned by RI-6) for the SCC-close→ledger hand-off | the memoized `RelationResult::Unknown` admission arm (deleted — admission is decided-only; the `ReturnOnly` gate is the structural guarantee it cannot re-enter) |
 | **RI-5** Fast-reject prefilter + memo locality | RI-1 | O(tag) structural discriminators before structural relate; interned-id locality layout | `relation_negative_and_unknown_paths_are_fast` (bench) | — |
-| **RI-6** `InferenceSession`/`SessionStack` + candidate combination + generated `InferenceContextKey` + completed-deterministic admission + `SessionAdmissionLedger` | RI-3 | §4.2 session substrate; closed `InferencePriority` ladder + combination rules; generated fingerprint (R-b); binding-`Relate` `ReturnOnly`-until-complete (R-c); the per-session `SessionAdmissionLedger` (on `CheckerTransaction`, keyed by transient `SessionId`) — populated by RI-4's `SccLedger` with the PROVISIONAL SCC-close snapshot (caller-return + deferral metadata, NEVER published verbatim) and DRAINED at session-close through a THREE-outcome gate whose **published payload IS the session-converged re-discharge**: when every relevant session is `CompletedDeterministic` it re-discharges each deferred member through the same `execute(Relate{K})` dispatch against the converged state (final bindings, final own verdict, final consumed-sibling verdicts), publishing that result ONLY when it is a STABLE determined publishable outcome — each deferred **POSITIVE** member as `Assignable` + a `CoinductiveCycle` proof referencing only completed keys (the re-keying intrinsic to the re-discharge, no separate remap), each deferred **NEGATIVE** member as a slotless `NotAssignable` with NO slot-fill; on a non-stable re-discharge (own-verdict flip, consumed-sibling sign-flip, or bindings change), OR on `Abandoned`, it drops the whole deferred batch to `ReturnOnly` and **releases the held singleflight registration WITHOUT publish** (no entry / fact signature / backfill), so any concurrent joiner recomputes | `inference_runs_in_checker_transaction_not_per_surface_matcher`; `only_completed_deterministic_sessions_are_admitted`; `inference_candidate_combination_matches_priority_and_variance`; `relate_same_nodes_different_inference_context_do_not_warm_hit`; `inference_context_key_projects_every_session_setup_axis` (R-b); `binding_relate_scc_member_admits_only_at_session_close` (deferred binding-member admission — lands TDD-first with this sub-block) | any standalone / per-surface inference matcher |
+| **RI-6** `InferenceSession`/`SessionStack` + candidate combination + immutable `InferenceSessionSetup`/`InferenceContextKey` + completed-deterministic admission + `SessionAdmissionLedger` | RI-3 | §4.2 session substrate; closed `InferencePriority` ladder + combination rules; one immutable setup/key authority (R-b); binding-`Relate` `ReturnOnly`-until-complete (R-c); the per-session `SessionAdmissionLedger` (on `CheckerTransaction`, keyed by transient `SessionId`) — populated by RI-4's `SccLedger` with the PROVISIONAL SCC-close snapshot (caller-return + deferral metadata, NEVER published verbatim) and DRAINED at session-close through a THREE-outcome gate whose **published payload IS the session-converged re-discharge**: when every relevant session is `CompletedDeterministic` it re-discharges each deferred member through the same `execute(Relate{K})` dispatch against the converged state (final bindings, final own verdict, final consumed-sibling verdicts), publishing that result ONLY when it is a STABLE determined publishable outcome — each deferred **POSITIVE** member as `Assignable` + a `CoinductiveCycle` proof referencing only frozen persistent keys, each deferred **NEGATIVE** member as a slotless `NotAssignable` with no `CoinductiveCycle` proof; on a non-stable re-discharge (own-verdict flip, consumed-sibling sign-flip, or bindings change), OR on `Abandoned`, it drops the whole deferred batch to `ReturnOnly` and **releases the held singleflight registration WITHOUT publish** (no entry / fact signature / backfill), so any concurrent joiner recomputes | `inference_runs_in_checker_transaction_not_per_surface_matcher`; `only_completed_deterministic_sessions_are_admitted`; `inference_candidate_combination_matches_priority_and_variance`; `relate_same_nodes_different_inference_context_do_not_warm_hit`; `inference_context_key_projects_every_session_setup_axis` (R-b); `binding_relate_scc_member_admits_only_at_session_close` (deferred binding-member admission — lands TDD-first with this sub-block) | any standalone / per-surface inference matcher |
 | **RI-7** Reverse-mapped inference pass + per-property freshness spread-taint | RI-6 | relation-owned session pass for homomorphic-mapped recovery; per-property freshness/taint algorithm | `reverse_mapped_inference_is_relation_owned_in_session`; `freshness_tracks_per_property_spread_taint` | any private reverse-mapping matcher |
 | **RI-8** `CheckerReentryStack` substrate REUSE + `RefCycleResultDb` retirement (U2 scope) | RI-4 | CONSUME the RI-3 `CheckerReentryStack` substrate (RI-3 is the SOLE builder + `Relate`-wirer — RI-8 builds NO substrate and wires NO `Relate`): collapse the `Instantiate{args:[], context.projection_reduction.mode=Skeleton}` ref-cycle BFS into the shared `Skeleton`-mode SCC over that substrate (the BFS becomes a `reentry_stack` walk) and demote the persistent boolean `ref_root_reaches_transitive_cycle_node` to a derived query-identity entry off the closed SCC; retire `RefCycleResultDb`. **Routing `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` onto the substrate is DEFERRED to U6** (those variants land at U6). | `cross_engine_cycle_discharge_admits_only_stable_deterministic_results` (at U2 exercises a U2-available `Relate` ↔ `Instantiate`/`Skeleton` cross-engine cycle ONLY; the `FlowReturn`/`ResolveCall` cross-engine-discharge guard lands at U6); retired-symbol: `RefCycleResultDb` / `ref_root_reaches_transitive_cycle_node` / its `ComputeAdmission` BFS cannot be re-introduced | `RefCycleResultDb`; `ref_root_reaches_transitive_cycle_node` bespoke path (NOT the flow depth-sentinel — that retires at U6 with `FlowReturn`) |
 | **RI-9** `RelationBudget` on full identity + three-layer non-admission | RI-4 | budget exhaustion → `BudgetExceeded` → `ReturnOnly` (no result / artifact / fact signature) | `relation_budget_exceeded_admits_nothing` | — |
@@ -1206,9 +1205,10 @@ The deferred-guard→owner registry (the mini-DAG table) is the gate's landable 
 3. **Reverse-mapped inference + per-property freshness (RI-7)** are the highest-divergence-risk corner —
    complex semantics under perf pressure is exactly where a private matcher tends to sprout. The two guards
    forbid it structurally; this is the review corner to watch.
-4. **`InferenceContextKey` completeness over future TS versions.** Even generated (R-b), a new TS inference
-   axis not yet modeled as a `#[setup_axis]` field is invisible to the generator. Backstop: the differential
-   `tsgo`-parity oracle (§6.3) surfaces a divergence as an oracle failure, not a silent unsound hit.
+4. **`InferenceContextKey` completeness over future TS versions.** A new TS inference axis not modeled on
+   the immutable setup/key remains outside the fingerprint. The exhaustive behavioral guard forces every new
+   setup struct field to be classified; the differential `tsgo`-parity oracle (§6.3) remains the backstop for
+   an inference axis that has not yet been modeled at all.
 5. **RI-8 migration risk (U2 scope).** RI-8 reuses the shared `CheckerReentryStack` substrate (RI-3 is the
    SOLE builder + `Relate`-wirer; RI-8 builds no substrate and wires no `Relate`) and retires
    `RefCycleResultDb`; the retirement must preserve the existing strict self-root warm-read semantics (the BFS
@@ -1222,13 +1222,13 @@ The deferred-guard→owner registry (the mini-DAG table) is the gate's landable 
    enclosing session never reaches `CompletedDeterministic` — it ends `Abandoned` (cancel / budget / superseded
    / non-deterministic) — has its decided relation verdict **dropped to `ReturnOnly`** and never published, even
    though the relation recursion itself converged. This is the *correct* soundness behavior — admitting a
-   binding member before its session converges would warm a result keyed on a not-yet-final
-   `InferenceContextKey` — and it mirrors the batched-poison residual (risk 1): work that did not converge on
+   binding member before its session converges would warm a result whose candidate bodies and bindings are
+   not yet final — and it mirrors the batched-poison residual (risk 1): work that did not converge on
    every axis is recomputed, never warm-admitted. **The deferral is per-SCC-composition AND
    per-verdict-dependency, NOT purely per-member:** in a **mixed SCC** (≥1 binding member) the POSITIVE
-   non-binding members defer too — they carry the shared binding-referencing `CoinductiveCycle { keys: S }` proof,
-   which is not constructible (and so not publishable) until every binding slot is filled at the last binding
-   member's session-close — AND a **NEGATIVE** non-binding member defers when its transitive consumed-verdict
+   non-binding members defer too — they carry the shared binding-referencing `CoinductiveCycle { keys: S }`
+   proof, whose keys are already frozen but whose referenced binding-member verdicts and bindings are not final
+   until the last binding member's session-close — AND a **NEGATIVE** non-binding member defers when its transitive consumed-verdict
    closure reaches a binding sibling: that sibling's SCC-close verdict is provisional until session-close (it may
    FLIP to `Assignable` or `Abandon`, and inference convergence is not a content edit the fact rail catches), so
    warm-publishing the negative at SCC-close would warm a verdict that did not converge on every axis (the
@@ -1255,11 +1255,11 @@ The deferred-guard→owner registry (the mini-DAG table) is the gate's landable 
    publishes entirely at SCC-close, and a
    **NEGATIVE** non-binding member whose consumed-verdict closure contains no binding member (proof
    `NotAssignable`, no `keys: S`) publishes at SCC-close even in a mixed SCC.
-   **Duplicate in-flight binding recompute (PERF, not unsoundness).** A binding member offers no mid-flight
-   cross-transaction singleflight join — its transient `SessionId` is private to its transaction and its final
-   §2.7 key does not exist until session-close (§2.3 step 4) — so a second top-level transaction needing the
-   same binding `Relate` mid-flight opens its OWN inference session and recomputes; both converge to the same
-   completed `InferenceContextKey` and the first publish wins the slot (the other validates/joins on it). This
+   **Duplicate in-flight binding recompute (PERF, not unsoundness).** The full key is frozen up front, but an
+   active inference session bypasses warm reuse because it must reproduce session-local deposits. A second
+   top-level transaction needing the same binding `Relate` mid-flight opens its OWN inference session and
+   recomputes; both use the same `InferenceContextKey`, and only a completed deterministic payload may
+   publish. This
    is a bounded, deterministic perf cost — not a hang or unsoundness. The §6.2 fallback-entry-rate bench tracks
    binding-`Relate` deferral/drop rate, mixed-SCC positive-non-binding deferral rate, AND duplicate in-flight
    binding-recompute rate alongside the recursive-relate fallback rate.

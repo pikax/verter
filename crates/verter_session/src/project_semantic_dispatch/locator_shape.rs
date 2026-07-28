@@ -91,6 +91,87 @@ enum AnchorPreparedDecl {
     Augmentation(Box<verter_semantic::analysis::type_solver::PreparedTypeDecl>),
 }
 
+fn register_locator_function_alias(
+    infer_binders: &crate::semantic_query::InferBinderFactory,
+    alias: &TypeExpr,
+    original: &FunctionExpr,
+) {
+    let alias_function = match alias {
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => function,
+        _ => return,
+    };
+    register_locator_function_children_alias(infer_binders, alias_function, original);
+}
+
+fn register_locator_function_children_alias(
+    infer_binders: &crate::semantic_query::InferBinderFactory,
+    alias_function: &FunctionExpr,
+    original: &FunctionExpr,
+) {
+    for (alias_parameter, original_parameter) in alias_function
+        .type_parameters
+        .iter()
+        .zip(&original.type_parameters)
+    {
+        if let (Some(alias), Some(original)) = (
+            alias_parameter.constraint.as_deref(),
+            original_parameter.constraint.as_deref(),
+        ) {
+            infer_binders.register_equivalent_subtree(alias, original);
+        }
+        if let (Some(alias), Some(original)) = (
+            alias_parameter.default.as_deref(),
+            original_parameter.default.as_deref(),
+        ) {
+            infer_binders.register_equivalent_subtree(alias, original);
+        }
+    }
+    for (alias_parameter, original_parameter) in
+        alias_function.parameters.iter().zip(&original.parameters)
+    {
+        infer_binders.register_equivalent_subtree(&alias_parameter.ty, &original_parameter.ty);
+    }
+    if let (Some(alias), Some(original)) = (
+        alias_function.return_type.as_deref(),
+        original.return_type.as_deref(),
+    ) {
+        infer_binders.register_equivalent_subtree(alias, original);
+    }
+}
+
+fn register_locator_object_member_alias(
+    infer_binders: &crate::semantic_query::InferBinderFactory,
+    alias: &ObjectMember,
+    original: &ObjectMember,
+) {
+    match (alias, original) {
+        (ObjectMember::Property(alias), ObjectMember::Property(original)) => {
+            infer_binders.register_equivalent_subtree(&alias.ty, &original.ty);
+        }
+        (ObjectMember::Spread(alias), ObjectMember::Spread(original)) => {
+            infer_binders.register_equivalent_subtree(&alias.ty, &original.ty);
+        }
+        (ObjectMember::IndexSignature(alias), ObjectMember::IndexSignature(original)) => {
+            infer_binders.register_equivalent_subtree(&alias.key_type, &original.key_type);
+            infer_binders.register_equivalent_subtree(&alias.value_type, &original.value_type);
+        }
+        (ObjectMember::Method(alias), ObjectMember::Method(original)) => {
+            register_locator_function_children_alias(
+                infer_binders,
+                &alias.function,
+                &original.function,
+            );
+        }
+        (ObjectMember::CallSignature(alias), ObjectMember::CallSignature(original)) => {
+            register_locator_function_children_alias(infer_binders, alias, original);
+        }
+        (ObjectMember::ConstructSignature(alias), ObjectMember::ConstructSignature(original)) => {
+            register_locator_function_children_alias(infer_binders, alias, original);
+        }
+        _ => {}
+    }
+}
+
 impl AnchorPreparedDecl {
     fn name_resolution(&self) -> &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> {
         match self {
@@ -125,12 +206,17 @@ pub(crate) enum BinderSlot {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct LocatorBinderFrame {
     names: FxHashMap<Arc<str>, BinderSlot>,
+    infer_declarations: FxHashMap<Arc<str>, SemanticNodeId>,
 }
 
 impl LocatorBinderFrame {
     /// Bind a syntactic binder name to its interned binder node.
     pub(crate) fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
         self.names.insert(name, BinderSlot::Usable(node));
+    }
+
+    fn bind_infer_declaration(&mut self, name: Arc<str>, node: SemanticNodeId) {
+        self.infer_declarations.insert(name, node);
     }
 
     /// Declare a syntactic binder name as present-but-forbidden: it shadows
@@ -141,6 +227,10 @@ impl LocatorBinderFrame {
 
     fn lookup(&self, name: &str) -> Option<BinderSlot> {
         self.names.get(name).copied()
+    }
+
+    fn lookup_infer_declaration(&self, name: &str) -> Option<SemanticNodeId> {
+        self.infer_declarations.get(name).copied()
     }
 }
 
@@ -216,6 +306,9 @@ pub struct LocatorShapeCtx<'a> {
     /// The anchor scope's declaration-scope payload (scope-local names +
     /// import bindings), threaded to the shared in-scope resolver.
     scope_payload: Option<&'a DeclarationScopePayload>,
+    /// Exact content-free authored source anchoring conditional-`infer`
+    /// declarations lowered through this locator family.
+    infer_source: Option<&'a AuthoredBodyLocator>,
 }
 
 impl<'a> LocatorShapeCtx<'a> {
@@ -233,7 +326,18 @@ impl<'a> LocatorShapeCtx<'a> {
             binders,
             name_resolution,
             scope_payload,
+            infer_source: None,
         }
+    }
+
+    pub(crate) fn with_infer_source(mut self, source: &'a AuthoredBodyLocator) -> Self {
+        self.infer_source = Some(source);
+        self
+    }
+
+    fn with_optional_infer_source(mut self, source: Option<&'a AuthoredBodyLocator>) -> Self {
+        self.infer_source = source;
+        self
     }
 }
 
@@ -244,6 +348,8 @@ struct ShapeLowerCtx<'a> {
     binders: &'a [LocatorBinderFrame],
     name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
     scope_payload: Option<&'a DeclarationScopePayload>,
+    infer_binders: &'a crate::semantic_query::InferBinderFactory,
+    infer_source: Option<&'a AuthoredBodyLocator>,
 }
 
 impl<'a> ShapeLowerCtx<'a> {
@@ -259,6 +365,8 @@ impl<'a> ShapeLowerCtx<'a> {
             binders,
             name_resolution: self.name_resolution,
             scope_payload: self.scope_payload,
+            infer_binders: self.infer_binders,
+            infer_source: self.infer_source,
         }
     }
 
@@ -270,6 +378,13 @@ impl<'a> ShapeLowerCtx<'a> {
             .iter()
             .rev()
             .find_map(|frame| frame.lookup(name))
+    }
+
+    fn lookup_infer_declaration(&self, name: &str) -> Option<SemanticNodeId> {
+        self.binders
+            .iter()
+            .rev()
+            .find_map(|frame| frame.lookup_infer_declaration(name))
     }
 }
 
@@ -289,11 +404,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &TypeExpr,
         ctx: &LocatorShapeCtx<'_>,
     ) -> SemanticNodeId {
+        let infer_binders = match ctx.infer_source {
+            Some(source) => crate::semantic_query::InferBinderFactory::for_authored_locator(
+                ctx.scope, expr, source,
+            ),
+            None => crate::semantic_query::InferBinderFactory::new(ctx.scope, expr),
+        };
         let work = ShapeLowerCtx {
             scope: ctx.scope,
             binders: ctx.binders,
             name_resolution: ctx.name_resolution,
             scope_payload: ctx.scope_payload,
+            infer_binders: &infer_binders,
+            infer_source: ctx.infer_source,
         };
         self.lower_locator_shape_node(expr, &work)
     }
@@ -417,21 +540,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 false_type,
             } => {
                 let check_id = self.lower_locator_shape_node(check, ctx);
-                let extends_id = self.lower_locator_shape_node(extends, ctx);
-                // `infer P` names introduced by the `extends` clause bind for
-                // the TRUE branch only (TS scoping). Collect them from the
-                // LOWERED extends node via the shared graph-side collector so
-                // a true-branch `Ref { name: "P" }` resolves to the SAME
-                // `Infer` binder node instead of leaking as a `BareRef`.
-                let mut infer_env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-                let mut visited = rustc_hash::FxHashSet::default();
-                self.collect_infer_bindings_into_env(extends_id, &mut infer_env, &mut visited);
-                let true_id = if infer_env.is_empty() {
+                let extends_path = ctx.infer_binders.path_for_expr(expr).child(
+                    crate::semantic_query::infer_binder_names::
+                        InferSyntaxPathStep::ConditionalExtends,
+                );
+                let infer_sites =
+                    crate::semantic_query::infer_binder_names::collect_extends_infer_declarations(
+                        extends,
+                        &extends_path,
+                    );
+                let mut declaration_frame = LocatorBinderFrame::default();
+                let mut declarations = Vec::with_capacity(infer_sites.len());
+                for site in infer_sites {
+                    let binder = ctx.infer_binders.binder_at(&site.path);
+                    let declaration = graph.intern_node_with_scope(
+                        SemanticNodeData::Infer {
+                            name: Arc::clone(&site.name),
+                            binder: binder.clone(),
+                        },
+                        scope.clone(),
+                    );
+                    declaration_frame.bind_infer_declaration(Arc::clone(&site.name), declaration);
+                    declarations.push((site.name, binder));
+                }
+                let mut extends_frames: Vec<LocatorBinderFrame> = ctx.binders.to_vec();
+                extends_frames.push(declaration_frame);
+                let extends_ctx = ctx.with_binders(&extends_frames);
+                let extends_id = self.lower_locator_shape_node(extends, &extends_ctx);
+                let true_id = if declarations.is_empty() {
                     self.lower_locator_shape_node(true_type, ctx)
                 } else {
                     let mut infer_frame = LocatorBinderFrame::default();
-                    for (name, node) in infer_env {
-                        infer_frame.bind(Arc::from(name.as_str()), node);
+                    for (name, binder) in declarations {
+                        let reference = graph.intern_node_with_scope(
+                            SemanticNodeData::InferRef {
+                                name: Arc::clone(&name),
+                                binder,
+                            },
+                            scope.clone(),
+                        );
+                        infer_frame.bind(name, reference);
                     }
                     let mut frames: Vec<LocatorBinderFrame> = ctx.binders.to_vec();
                     frames.push(infer_frame);
@@ -494,26 +642,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     scope.clone(),
                 );
-                let mut mapper_frame = LocatorBinderFrame::default();
-                mapper_frame.bind(Arc::clone(&mapper_display_name), parameter_node);
-                let mut frames: Vec<LocatorBinderFrame> = ctx.binders.to_vec();
-                frames.push(mapper_frame);
-                let body_ctx = ctx.with_binders(&frames);
-
-                let (source_node, key_space) = match source.as_ref() {
+                let (source_node, key_space, base_infer_name) = match source.as_ref() {
                     TypeExpr::KeyOf(inner) => {
                         let inner_id = self.lower_locator_shape_node(inner, ctx);
                         let key_space = graph.intern_node_with_scope(
                             SemanticNodeData::KeyOf { base: inner_id },
                             scope.clone(),
                         );
-                        (inner_id, key_space)
+                        let base_infer = match graph.node_data(inner_id).as_deref() {
+                            Some(SemanticNodeData::Infer { name, binder }) => {
+                                Some((Arc::clone(name), binder.clone()))
+                            }
+                            _ => None,
+                        };
+                        (inner_id, key_space, base_infer)
                     }
                     _ => {
                         let lowered = self.lower_locator_shape_node(source, ctx);
-                        (lowered, lowered)
+                        (lowered, lowered, None)
                     }
                 };
+
+                // Bind only the exact `Infer` declaration selected by the
+                // lowered `keyof` operand. Its scoped `InferRef` is visible to
+                // the mapped body, while the mapper frame is pushed last so an
+                // equal mapper name shadows it.
+                let mut frames: Vec<LocatorBinderFrame> = ctx.binders.to_vec();
+                if let Some((base_infer_name, binder)) = base_infer_name {
+                    let reference = graph.intern_node_with_scope(
+                        SemanticNodeData::InferRef {
+                            name: Arc::clone(&base_infer_name),
+                            binder,
+                        },
+                        scope.clone(),
+                    );
+                    let mut base_infer_frame = LocatorBinderFrame::default();
+                    base_infer_frame.bind(base_infer_name, reference);
+                    frames.push(base_infer_frame);
+                }
+                let mut mapper_frame = LocatorBinderFrame::default();
+                mapper_frame.bind(Arc::clone(&mapper_display_name), parameter_node);
+                frames.push(mapper_frame);
+                let body_ctx = ctx.with_binders(&frames);
+
                 let value_expr = self.lower_locator_shape_node(value, &body_ctx);
                 let name_remap = name_type
                     .as_deref()
@@ -585,7 +756,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ctx.binders,
                     ctx.name_resolution,
                     ctx.scope_payload,
-                );
+                )
+                .with_optional_infer_source(ctx.infer_source);
                 let (_frame, built) = self.build_type_param_binder_frame(
                     &base,
                     BinderIdentityMode::Signature,
@@ -596,7 +768,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             TypeParamBoundPosition::Constraint => param.constraint.as_deref(),
                             TypeParamBoundPosition::Default => param.default.as_deref(),
                         }?;
-                        Some(self.lower_type_expr_for_locator_shape(bound, bound_ctx))
+                        let bound_work = ShapeLowerCtx {
+                            scope: bound_ctx.scope,
+                            binders: bound_ctx.binders,
+                            name_resolution: bound_ctx.name_resolution,
+                            scope_payload: bound_ctx.scope_payload,
+                            infer_binders: ctx.infer_binders,
+                            infer_source: ctx.infer_source,
+                        };
+                        Some(self.lower_locator_shape_node(bound, &bound_work))
                     },
                 );
                 built[0].binder
@@ -608,12 +788,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 type_arguments,
             } => self.resolve_locator_ref_head(name, type_arguments, ctx),
 
-            TypeExpr::Infer { name } => graph.intern_node_with_scope(
-                SemanticNodeData::Infer {
-                    name: Arc::from(name.as_str()),
-                },
-                scope.clone(),
-            ),
+            TypeExpr::Infer { name } => match ctx.lookup_infer_declaration(name) {
+                Some(declaration) => declaration,
+                _ => graph.intern_node_with_scope(
+                    SemanticNodeData::Infer {
+                        name: Arc::from(name.as_str()),
+                        binder: ctx.infer_binders.binder_for_expr(expr),
+                    },
+                    scope.clone(),
+                ),
+            },
             // Raw fallback — display/compat carrier, never a control signal.
             TypeExpr::Unknown(value) => graph.intern_node_with_scope(
                 SemanticNodeData::RawFallback {
@@ -695,8 +879,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind,
                         SemanticNodeId,
                     )> = Vec::new();
-                    let mut run: Vec<ObjectMember> = Vec::new();
-                    let flush = |run: &mut Vec<ObjectMember>,
+                    let mut run: Vec<&ObjectMember> = Vec::new();
+                    let flush = |run: &mut Vec<&ObjectMember>,
                                  parts: &mut Vec<(
                         crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind,
                         SemanticNodeId,
@@ -705,12 +889,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             return;
                         }
                         let run_obj = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                            properties: std::mem::take(run),
+                            properties: run.iter().map(|member| (*member).clone()).collect(),
                         }));
+                        if let TypeExpr::Object(alias_object) = &run_obj {
+                            for (alias, original) in alias_object.properties.iter().zip(run.iter())
+                            {
+                                register_locator_object_member_alias(
+                                    ctx.infer_binders,
+                                    alias,
+                                    original,
+                                );
+                            }
+                        }
                         parts.push((
                             crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind::DirectRun,
                             self.lower_locator_shape_node(&run_obj, ctx),
                         ));
+                        run.clear();
                     };
                     for member in &obj.properties {
                         match member {
@@ -722,7 +917,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     self.taint_spread_node(operand),
                                 ));
                             }
-                            other => run.push(other.clone()),
+                            other => run.push(other),
                         }
                     }
                     flush(&mut run, &mut parts);
@@ -766,6 +961,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ObjectMember::Method(method) => {
                             let function_expr =
                                 TypeExpr::Function(Arc::new(method.function.clone()));
+                            register_locator_function_alias(
+                                ctx.infer_binders,
+                                &function_expr,
+                                &method.function,
+                            );
                             members.push(SurfaceMember {
                                 name: Arc::from(method.name.as_str()),
                                 value: self.lower_locator_shape_node(&function_expr, ctx),
@@ -784,11 +984,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                         ObjectMember::CallSignature(func) => {
                             let function_expr = TypeExpr::Function(Arc::new(func.clone()));
+                            register_locator_function_alias(
+                                ctx.infer_binders,
+                                &function_expr,
+                                func,
+                            );
                             call_signatures
                                 .push(self.lower_locator_shape_node(&function_expr, ctx));
                         }
                         ObjectMember::ConstructSignature(func) => {
                             let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
+                            register_locator_function_alias(
+                                ctx.infer_binders,
+                                &function_expr,
+                                func,
+                            );
                             construct_signatures
                                 .push(self.lower_locator_shape_node(&function_expr, ctx));
                         }
@@ -860,7 +1070,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 has_default: tp.default.is_some(),
             })
             .collect();
-        let base = LocatorShapeCtx::new(scope, ctx.binders, ctx.name_resolution, ctx.scope_payload);
+        let base = LocatorShapeCtx::new(scope, ctx.binders, ctx.name_resolution, ctx.scope_payload)
+            .with_optional_infer_source(ctx.infer_source);
         let (own_frame, built) = self.build_type_param_binder_frame(
             &base,
             BinderIdentityMode::Signature,
@@ -872,7 +1083,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     TypeParamBoundPosition::Constraint => tp.constraint.as_deref(),
                     TypeParamBoundPosition::Default => tp.default.as_deref(),
                 }?;
-                Some(self.lower_type_expr_for_locator_shape(bound, bound_ctx))
+                let bound_work = ShapeLowerCtx {
+                    scope: bound_ctx.scope,
+                    binders: bound_ctx.binders,
+                    name_resolution: bound_ctx.name_resolution,
+                    scope_payload: bound_ctx.scope_payload,
+                    infer_binders: ctx.infer_binders,
+                    infer_source: ctx.infer_source,
+                };
+                Some(self.lower_locator_shape_node(bound, &bound_work))
             },
         );
         let type_parameters: Vec<TypeParamDecl> = built

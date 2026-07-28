@@ -370,14 +370,10 @@ pub(super) enum FamilyKey {
     /// target / relation kind / policy / source freshness / inference context /
     /// env+substitution+projection-reduction context).
     ///
-    /// This is the LIVE relation-memo family: the production relation
-    /// authority `relate_nodes` reads and writes it through
-    /// [`super::SemanticGraphStore::get_relation`] /
-    /// [`super::SemanticGraphStore::compute_relation_and_admit`] (the
-    /// storage rehome — the retired dedicated `BudgetedRelationMemo` folded
-    /// into this family). The `execute` path for a `Relate` key stays an
-    /// explicit `Miss` and never publishes here; the family is served by
-    /// the relation engine's own read/write path only.
+    /// This is the LIVE relation-memo family. The production relation
+    /// authority is `SemanticQueryApi::execute(SemanticQueryKey::Relate)`;
+    /// root execution uses the shared cooperative value path to read and
+    /// publish this family, and every sub-relation re-enters that authority.
     ///
     /// It carries the FULL relation identity (NOT just source/target): a
     /// `Relate` key can NEVER collide with a live [`Self::IndexedAccess`]
@@ -1502,13 +1498,9 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             context_to_slot(*context),
         ),
         // `Relate` maps to a DEDICATED, non-aliasing `FamilyKey::Relate`
-        // carrying the FULL relation identity. No production code constructs a
-        // `SemanticQueryKey::Relate`, so this arm is exercised only by identity
-        // guards; the production relation authority is `relate_nodes`, which
-        // reads / writes the SAME `FamilyKey::Relate` family through
-        // `get_relation` / `compute_relation_and_admit` (the rehomed relation
-        // memo — the retired dedicated memo folded into the family substrate)
-        // and never enters `execute_cooperative`.
+        // carrying the FULL relation identity. Production relation roots enter
+        // this arm through `SemanticQueryApi::execute(Relate)` and the shared
+        // cooperative value path; sub-relations re-enter the same authority.
         //
         // `family_and_slot` is consulted UNCONDITIONALLY by
         // `try_warm_hit_fast_path` BEFORE any admission short-circuit, so this

@@ -1850,6 +1850,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        self.execute_via_cold_build_helper_with_publication_capture(key, None)
+    }
+
+    fn execute_via_cold_build_helper_capturing_publication(
+        &self,
+        key: SemanticQueryKey,
+        publication: &mut Option<crate::semantic_query_memo::PublishedMemoCandidate>,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        self.execute_via_cold_build_helper_with_publication_capture(key, Some(publication))
+    }
+
+    fn execute_via_cold_build_helper_with_publication_capture(
+        &self,
+        key: SemanticQueryKey,
+        publication: Option<&mut Option<crate::semantic_query_memo::PublishedMemoCandidate>>,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        if let SemanticQueryKey::Relate { .. } = &key {
+            let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
+            if !self.relation_raw_key_has_exact_inference_context(&relate) {
+                return CacheRead {
+                    value: QueryResult::Error(QueryError::Miss),
+                    dep_signature: empty_signature(),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: true,
+                    result_is_partial: false,
+                };
+            }
+        }
         // Install or join the connected state before carrier normalisation,
         // whose resolver can itself dispatch. Query-depth/work charging waits
         // until the canonical memo identity is known so an exact same-path key
@@ -2371,8 +2399,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             finalise_traced_build_output(output, finalise, &provenance, &carrier_prelude_for_build)
         };
-        let cache_read =
-            graph.execute_cooperative_value(self.ctx, key.clone(), sentinel, traced_build);
+        let cache_read = match publication {
+            Some(publication) => graph.execute_cooperative_value_capturing_publication(
+                self.ctx,
+                key.clone(),
+                sentinel,
+                traced_build,
+                publication,
+            ),
+            None => graph.execute_cooperative_value(self.ctx, key.clone(), sentinel, traced_build),
+        };
         // Attribute the dispatch by `SemanticQueryKey` kind +
         // cold/warm. Cold = the `traced_build` closure ran. Warm = the
         // memo short-circuited before the closure fired.
@@ -2788,6 +2824,19 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // also calls this so its callers keep counting after switching to
         // `execute_read`).
         self.record_dispatch_intent_counters(&key);
+        if matches!(key, SemanticQueryKey::Relate { .. }) && self.relation_redischarge_active() {
+            #[cfg(test)]
+            relation::record_redischarge_execute_visit_for_tests();
+            let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
+            return match self.execute_relate_redischarge_from_api(relate) {
+                QueryResult::Value(value) => QueryResult::Value(SemanticQueryOutput {
+                    value,
+                    provenance: ResultProvenance::clean(),
+                }),
+                QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                QueryResult::Error(error) => QueryResult::Error(error),
+            };
+        }
         // Delegate to the shared cold-build helper. Both `execute`
         // (this method) and `execute_read` route through the helper
         // so the fact-tracer wrapper, sentinel construction, and

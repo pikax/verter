@@ -27,13 +27,13 @@ use verter_session::for_tests::{
 use verter_session::semantic_query::query_key_spec::semantic_query_key_specs;
 use verter_session::semantic_query::{
     BudgetExceededKind, ConstParamPolicy, ContextualInferenceMode, DerivationTree, FreshnessKey,
-    IndexKey, InferableParamSetId, InferenceCandidatePriority, InferenceContextKey, NoInferMask,
-    OverloadSelectionPolicy, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
-    RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext, RelationFailureCode,
-    RelationKind, RelationOutcome, RelationPayload, RelationPolicy, RelationProof, RelationProofId,
-    RelationProofTable, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryKeyTag,
-    SemanticQueryValue, SemanticQueryValueTag, SubRelationPosition, SubRelationRef,
-    SubstitutionCanonicalHash, VariancePhase, VariancePolicy,
+    IndexKey, InferableParamSetId, InferenceCandidatePriority, InferenceContextKey,
+    InferencePassKind, NoInferMask, OverloadSelectionPolicy, PrimitiveKind, ProjectionMode,
+    ProjectionReductionContext, RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext,
+    RelationFailureCode, RelationKind, RelationOutcome, RelationPayload, RelationPolicy,
+    RelationProof, RelationProofId, RelationProofTable, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey, SemanticQueryKeyTag, SemanticQueryValue, SemanticQueryValueTag,
+    SubRelationPosition, SubRelationRef, SubstitutionCanonicalHash, VariancePhase, VariancePolicy,
 };
 use verter_session::{HostConfig, VerterHost};
 
@@ -483,9 +483,9 @@ fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
 // ---------------------------------------------------------------------------
 // (3) RELATION MEMO RE-KEY: same nodes, different inference context occupy
 //     DISTINCT memo slots — the inference session a relation runs within is
-//     part of identity. Each of the six content-free session axes
-//     (inferable_params / variance_phase / candidate_priority / no_infer_mask /
-//     const_param_policy / contextual_inference_mode) is a distinct
+//     part of identity. Each of the seven content-free session axes
+//     (inferable_params / variance_phase / pass_kind / candidate_priority /
+//     no_infer_mask / const_param_policy / contextual_inference_mode) is a distinct
 //     discriminator.
 // ---------------------------------------------------------------------------
 
@@ -554,13 +554,20 @@ fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
 
     // Each remaining session axis, mutated one at a time off `session`, is a
     // distinct discriminator — same nodes, distinct memo slot.
-    let axis_mutations: [(InferenceContextKey, &str); 5] = [
+    let axis_mutations: [(InferenceContextKey, &str); 6] = [
         (
             InferenceContextKey {
                 variance_phase: VariancePhase::Contravariant,
                 ..session.clone()
             },
             "variance_phase",
+        ),
+        (
+            InferenceContextKey {
+                pass_kind: InferencePassKind::ReverseHomomorphicMapped,
+                ..session.clone()
+            },
+            "pass_kind",
         ),
         (
             InferenceContextKey {
@@ -676,6 +683,7 @@ fn inferable_param_set_id_is_order_insensitive_set() {
 fn relate_query_value_carries_relation_proof_and_budget_state() {
     let binding = verter_session::semantic_query::InferBinding {
         name: Arc::from("T"),
+        param: SemanticNodeId(2),
         bound: SemanticNodeId(3),
     };
     let payload = RelationPayload {

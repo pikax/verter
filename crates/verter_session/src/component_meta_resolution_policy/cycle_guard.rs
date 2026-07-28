@@ -454,13 +454,15 @@ fn hash_node_rec<H: std::hash::Hasher>(
             decl.hash(hasher);
             hasher.write_u16(*param_index);
         }
-        SemanticNodeData::Infer { name } => {
+        SemanticNodeData::Infer { name, binder } => {
             hasher.write_u8(18);
             hasher.write(name.as_bytes());
+            binder.write_stable_fingerprint(hasher);
         }
-        SemanticNodeData::InferRef { name } => {
+        SemanticNodeData::InferRef { name, binder } => {
             hasher.write_u8(27);
             hasher.write(name.as_bytes());
+            binder.write_stable_fingerprint(hasher);
         }
         SemanticNodeData::Conditional {
             check,
@@ -633,6 +635,42 @@ mod tests {
             digest(&host, third),
             "'a' and 'b' literal argument nodes must fingerprint differently \
              (Pick<X, 'a'> vs Pick<X, 'b'> discrimination)",
+        );
+    }
+
+    #[test]
+    fn node_structural_hash_discriminates_exact_infer_binder_identity() {
+        use crate::semantic_query::SemanticNodeData;
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let graph = host.project_type_store().semantic_graph();
+        let left_binder = graph.alloc_infer_binder_id();
+        let right_binder = graph.alloc_infer_binder_id();
+        let left = graph.intern_node_with_scope(
+            SemanticNodeData::InferRef {
+                name: Arc::from("T"),
+                binder: left_binder,
+            },
+            scope(),
+        );
+        let right = graph.intern_node_with_scope(
+            SemanticNodeData::InferRef {
+                name: Arc::from("T"),
+                binder: right_binder,
+            },
+            scope(),
+        );
+
+        assert_ne!(
+            digest(&host, left),
+            digest(&host, right),
+            "same-name infer references bound by distinct declarations must \
+             have distinct cycle-guard fingerprints"
+        );
+        assert_eq!(
+            digest(&host, left),
+            digest(&host, left),
+            "control: the same exact binder identity remains fingerprint-stable"
         );
     }
 

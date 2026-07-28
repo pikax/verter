@@ -839,6 +839,19 @@ fn navigate_expr(
                     _ => return Err(LocatorBodyDerefError::PathUnresolved),
                 }
             }
+            (NavigatePosition::Expr(expr), TypeBodyPathStep::TypeArgument { ordinal }) => {
+                match unwrap_parenthesized(expr) {
+                    TypeExpr::Ref {
+                        ref type_arguments, ..
+                    } => NavigatePosition::Expr(
+                        type_arguments
+                            .get(*ordinal as usize)
+                            .cloned()
+                            .ok_or(LocatorBodyDerefError::PathUnresolved)?,
+                    ),
+                    _ => return Err(LocatorBodyDerefError::PathUnresolved),
+                }
+            }
             (NavigatePosition::Expr(expr), TypeBodyPathStep::UnionArm { ordinal }) => {
                 match unwrap_parenthesized(expr) {
                     TypeExpr::Union(ref arms) => NavigatePosition::Expr(

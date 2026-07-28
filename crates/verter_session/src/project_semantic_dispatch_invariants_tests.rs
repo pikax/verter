@@ -3882,6 +3882,7 @@ fn binding_session_close_publishes_root_only_with_fixed_bindings() {
     ])));
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("V"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         required_member("value", infer_v),
@@ -3947,6 +3948,7 @@ fn binding_session_abandoned_by_budget_publishes_nothing() {
     ])));
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("V"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         required_member("value", infer_v),
@@ -4406,8 +4408,10 @@ fn contravariant_infer_candidates_intersect_not_union() {
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let void_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+    let infer_u_binder = graph.alloc_infer_binder_id();
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: infer_u_binder.clone(),
     });
 
     let function = |a: crate::semantic_query::SemanticNodeId,
@@ -4534,6 +4538,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: graph.alloc_infer_binder_id(),
     });
     // Inner occurrence of the FUNCTION's own `U` (the shadowing binder's
     // reference — lowers as a TypeParam shell named "U").
@@ -4617,6 +4622,7 @@ fn mutable_array_infer_element_binds_covariantly() {
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let check = graph.intern_node(SemanticNodeData::Array {
         element: string_node,
@@ -4683,6 +4689,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: graph.alloc_infer_binder_id(),
     });
     // Inner: `number extends infer U ? U : never`.
     let inner = graph.intern_node(SemanticNodeData::Conditional {
@@ -4722,6 +4729,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
     // never) : never` → `string`.
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("V"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let inner_v = graph.intern_node(SemanticNodeData::Conditional {
         check: number_node,
@@ -4834,13 +4842,16 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
         default: None,
         display_name: Arc::from("T"),
     });
+    let infer_u_binder = graph.alloc_infer_binder_id();
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: infer_u_binder.clone(),
     });
     // The post-activation lowering shape: the inner check `U` is an
     // `InferRef` REFERENCE to the outer binder.
     let infer_ref_u = graph.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("U"),
+        binder: infer_u_binder,
     });
     // The branch arms are REAL declaration placeholders so the terminal
     // expansion genuinely rewrites them (the arm-identity short-circuit in
@@ -4952,6 +4963,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "a".to_string(),
@@ -5043,6 +5055,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_k = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("K"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "a".to_string(),
@@ -5139,13 +5152,16 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
 
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+    let infer_t_binder = graph.alloc_infer_binder_id();
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
+        binder: infer_t_binder.clone(),
     });
     // References inside the true branch bind as `InferRef` (the producer
     // contract).
     let t_ref = graph.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("T"),
+        binder: infer_t_binder,
     });
     let signature = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -5213,11 +5229,14 @@ fn constructor_type_relates_and_binds_infer_return() {
 
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let bool_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let infer_r_binder = graph.alloc_infer_binder_id();
     let infer_r = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("R"),
+        binder: infer_r_binder.clone(),
     });
     let r_ref = graph.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("R"),
+        binder: infer_r_binder,
     });
     let ctor_of = |ret: crate::semantic_query::SemanticNodeId| {
         let signature = graph.intern_node(SemanticNodeData::Signature {
@@ -5374,11 +5393,14 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
     let any_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let infer_p_binder = graph.alloc_infer_binder_id();
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
+        binder: infer_p_binder.clone(),
     });
     let p_ref = graph.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("P"),
+        binder: infer_p_binder,
     });
     // Inner extends: `new (x: infer P) => any`.
     let signature = graph.intern_node(SemanticNodeData::Signature {
@@ -5691,6 +5713,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
     // R := number (not merely the correct boolean).
     let infer_r = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("R"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let ctor_infer = {
         use crate::semantic_query::{FunctionParam, TypeParamDecl};
@@ -6799,6 +6822,7 @@ mod spread_materializer_behavior {
         let source = lower(&host, &literal_obj(vec![fresh_prop("value", number_ty())]));
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("V"),
+            binder: graph.alloc_infer_binder_id(),
         });
         let operand = graph.intern_node(SemanticNodeData::TypeParam {
             decl: DeclIdentity::synthetic("T"),
@@ -6841,6 +6865,7 @@ mod spread_materializer_behavior {
         let alias_to_open = graph.intern_node(SemanticNodeData::Alias(open));
         let infer = graph.intern_node(SemanticNodeData::Infer {
             name: Arc::from("V"),
+            binder: graph.alloc_infer_binder_id(),
         });
 
         for candidate in [open, alias_to_open] {

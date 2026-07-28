@@ -418,6 +418,7 @@ fn conditional_any_check_unions_both_branches() {
     // falls through so the infer-binding path in `build_conditional` binds U.
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     assert!(
@@ -446,6 +447,7 @@ fn conditional_any_check_detects_nested_infer_patterns() {
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let y_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
 

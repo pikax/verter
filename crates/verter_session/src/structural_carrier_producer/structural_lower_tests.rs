@@ -857,11 +857,11 @@ fn conditional_binds_bare_infer_in_true_branch() {
             ..
         } => {
             assert!(
-                matches!(&*node(&graph, *extends), SemanticNodeData::Infer { name } if name.as_ref() == "P"),
+                matches!(&*node(&graph, *extends), SemanticNodeData::Infer { name, .. } if name.as_ref() == "P"),
                 "extends lowers `infer P` to an Infer carrier"
             );
             assert!(
-                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name } if name.as_ref() == "P"),
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "P"),
                 "the true-branch `P` binds as an `InferRef` REFERENCE to the `infer P` \
                  declaration introduced by `extends` (reference-vs-declaration survives \
                  interning), got {:?}",
@@ -918,11 +918,11 @@ fn conditional_binds_nested_infer_in_true_branch() {
                 other => panic!("expected Array extends, got {other:?}"),
             };
             assert!(
-                matches!(&*node(&graph, nested_infer), SemanticNodeData::Infer { name } if name.as_ref() == "E"),
+                matches!(&*node(&graph, nested_infer), SemanticNodeData::Infer { name, .. } if name.as_ref() == "E"),
                 "the Array element is the `infer E` carrier"
             );
             assert!(
-                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name } if name.as_ref() == "E"),
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "E"),
                 "the true-branch `E` binds as an `InferRef` REFERENCE to the nested \
                  `infer E` declaration, got {:?}",
                 &*node(&graph, *true_branch_ref)
@@ -989,11 +989,11 @@ fn conditional_binds_object_member_infer_in_true_branch() {
                 other => panic!("expected Object extends, got {other:?}"),
             };
             assert!(
-                matches!(&*node(&graph, member_infer), SemanticNodeData::Infer { name } if name.as_ref() == "P"),
+                matches!(&*node(&graph, member_infer), SemanticNodeData::Infer { name, .. } if name.as_ref() == "P"),
                 "the object member `a` is the `infer P` carrier"
             );
             assert!(
-                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name } if name.as_ref() == "P"),
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "P"),
                 "the true-branch `P` binds as an `InferRef` REFERENCE to the \
                  object-member `infer P` declaration, got {:?}",
                 &*node(&graph, *true_branch_ref)
@@ -1064,11 +1064,11 @@ fn conditional_binds_function_param_infer_in_true_branch() {
                 other => panic!("expected Function extends, got {other:?}"),
             };
             assert!(
-                matches!(&*node(&graph, param_infer), SemanticNodeData::Infer { name } if name.as_ref() == "P"),
+                matches!(&*node(&graph, param_infer), SemanticNodeData::Infer { name, .. } if name.as_ref() == "P"),
                 "the function parameter `x` is the `infer P` carrier"
             );
             assert!(
-                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name } if name.as_ref() == "P"),
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "P"),
                 "the true-branch `P` binds as an `InferRef` REFERENCE to the \
                  function-param `infer P` declaration, got {:?}",
                 &*node(&graph, *true_branch_ref)
@@ -1132,7 +1132,7 @@ fn conditional_binds_mapped_as_remap_infer_in_true_branch() {
             true_branch_ref, ..
         } => {
             assert!(
-                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name } if name.as_ref() == "R"),
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "R"),
                 "the true-branch `R` binds as an `InferRef` REFERENCE to the mapped \
                  `as infer R` declaration, got {:?}",
                 &*node(&graph, *true_branch_ref)
@@ -1383,6 +1383,183 @@ fn assert_paths_agree(
          interned graph for a no-resolution shape (hash-consed by content)"
     );
     (graph, structural)
+}
+
+fn conditional_with_infer(name: &str, check: PrimitiveName) -> TypeExpr {
+    TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(check)),
+        extends: Arc::new(TypeExpr::Infer {
+            name: name.to_string(),
+        }),
+        true_type: Arc::new(TypeExpr::Ref {
+            name: Arc::from(name),
+            type_arguments: verter_type_expr::empty_type_args(),
+        }),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    }
+}
+
+fn conditional_infer_binder(
+    graph: &SemanticGraphStore,
+    conditional: SemanticNodeId,
+) -> crate::semantic_query::InferBinderId {
+    let extends = match graph.node_data(conditional).as_deref() {
+        Some(SemanticNodeData::Conditional { extends, .. }) => *extends,
+        other => panic!("expected conditional root, got {other:?}"),
+    };
+    match graph.node_data(extends).as_deref() {
+        Some(SemanticNodeData::Infer { binder, .. }) => binder.clone(),
+        other => panic!("expected infer declaration in extends, got {other:?}"),
+    }
+}
+
+#[test]
+fn authored_infer_identity_is_shared_by_structural_and_eager_routes() {
+    let host = VerterHost::new_standalone(Default::default());
+    let expr = conditional_with_infer("RouteT", PrimitiveName::String);
+    let (graph, structural_root) = lower_root(&host, &expr);
+    let structural_binder = conditional_infer_binder(&graph, structural_root);
+    let _eager_result = lower_eager(&host, &expr);
+    let route_binders: rustc_hash::FxHashSet<_> = (0..graph.node_count())
+        .filter_map(
+            |raw| match graph.node_data(SemanticNodeId(raw as u64)).as_deref() {
+                Some(SemanticNodeData::Infer { name, binder }) if name.as_ref() == "RouteT" => {
+                    Some(binder.clone())
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(
+        route_binders.len(),
+        1,
+        "eager and structural routes must mint one byte-identical authored binder identity"
+    );
+    assert!(route_binders.contains(&structural_binder));
+}
+
+#[test]
+fn authored_infer_identity_survives_relowering_and_unrelated_demand_order() {
+    let target = conditional_with_infer("StableT", PrimitiveName::String);
+    let noise = conditional_with_infer("NoiseT", PrimitiveName::Number);
+
+    let host_a = VerterHost::new_standalone(Default::default());
+    let (graph_a, first) = lower_root(&host_a, &target);
+    let (_, second) = lower_root(&host_a, &target);
+    assert_eq!(
+        conditional_infer_binder(&graph_a, first),
+        conditional_infer_binder(&graph_a, second),
+        "re-lowering the same authored conditional must reuse its binder identity"
+    );
+
+    let host_b = VerterHost::new_standalone(Default::default());
+    let _ = lower_root(&host_b, &noise);
+    let (graph_b, reordered) = lower_root(&host_b, &target);
+    assert_eq!(
+        conditional_infer_binder(&graph_a, first),
+        conditional_infer_binder(&graph_b, reordered),
+        "an unrelated earlier demand must not change authored binder identity"
+    );
+}
+
+#[test]
+fn authored_infer_identity_is_independent_of_concurrent_demand_order() {
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let run = |target_first: bool, barrier: Arc<std::sync::Barrier>| {
+        std::thread::spawn(move || {
+            let host = VerterHost::new_standalone(Default::default());
+            let target = conditional_with_infer("ConcurrentT", PrimitiveName::String);
+            let noise = conditional_with_infer("ConcurrentNoise", PrimitiveName::Number);
+            barrier.wait();
+            let (graph, root) = if target_first {
+                let target = lower_root(&host, &target);
+                let _ = lower_root(&host, &noise);
+                target
+            } else {
+                let _ = lower_root(&host, &noise);
+                lower_root(&host, &target)
+            };
+            conditional_infer_binder(&graph, root)
+        })
+    };
+
+    let first = run(true, Arc::clone(&barrier));
+    let second = run(false, barrier);
+    assert_eq!(
+        first.join().expect("first concurrent lowering succeeds"),
+        second.join().expect("second concurrent lowering succeeds"),
+        "concurrent stores with opposite demand order must mint the same authored identity"
+    );
+}
+
+#[test]
+fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let outer_u = graph.intern_node_with_scope(
+        SemanticNodeData::TypeParam {
+            decl: DeclIdentity::from_scope(&fixture_scope(), Arc::from("OuterU")),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("U"),
+        },
+        fixture_scope(),
+    );
+    let mut outer = BinderScope::default();
+    outer.bind(Arc::from("U"), outer_u);
+    let frames = [outer];
+    let ctx = StructuralLowerContext::new(&frames);
+    let pattern = TypeExpr::Tuple {
+        elements: Arc::from(
+            vec![
+                verter_type_expr::TupleElement {
+                    label: None,
+                    ty: TypeExpr::Infer {
+                        name: "U".to_string(),
+                    },
+                    optional: false,
+                    rest: false,
+                },
+                verter_type_expr::TupleElement {
+                    label: None,
+                    ty: TypeExpr::Ref {
+                        name: Arc::from("U"),
+                        type_arguments: verter_type_expr::empty_type_args(),
+                    },
+                    optional: false,
+                    rest: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    };
+    let expr = TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(pattern),
+        true_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    };
+    let root = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+        .expect("structural lowering succeeds")
+        .node();
+    let extends = match graph.node_data(root).as_deref() {
+        Some(SemanticNodeData::Conditional { extends, .. }) => *extends,
+        other => panic!("expected conditional, got {other:?}"),
+    };
+    let elements = match graph.node_data(extends).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+        other => panic!("expected tuple pattern, got {other:?}"),
+    };
+    assert!(matches!(
+        graph.node_data(elements[0].value).as_deref(),
+        Some(SemanticNodeData::Infer { .. })
+    ));
+    assert_eq!(
+        elements[1].value, outer_u,
+        "ordinary sibling `U` must resolve through the ordinary outer frame, not the hidden infer declaration"
+    );
 }
 
 #[test]
@@ -1724,12 +1901,12 @@ fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
         other => panic!("outer conditional expected, got {other:?}"),
     };
     assert!(
-        matches!(&*node(&graph, inner_extends), SemanticNodeData::InferRef { name } if name.as_ref() == "U"),
+        matches!(&*node(&graph, inner_extends), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "U"),
         "the inner `extends U` is a REFERENCE to the outer binder, got {:?}",
         &*node(&graph, inner_extends)
     );
     assert!(
-        matches!(&*node(&graph, inner_true), SemanticNodeData::InferRef { name } if name.as_ref() == "U"),
+        matches!(&*node(&graph, inner_true), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "U"),
         "the inner true-branch `U` is a REFERENCE to the outer binder, got {:?}",
         &*node(&graph, inner_true)
     );

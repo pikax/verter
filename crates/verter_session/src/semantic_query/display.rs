@@ -400,8 +400,8 @@ pub(crate) fn display_type_node(
             s
         }
         SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),
-        SemanticNodeData::Infer { name } => format!("infer {name}"),
-        SemanticNodeData::InferRef { name } => name.to_string(),
+        SemanticNodeData::Infer { name, .. } => format!("infer {name}"),
+        SemanticNodeData::InferRef { name, .. } => name.to_string(),
         SemanticNodeData::Conditional {
             check,
             extends,

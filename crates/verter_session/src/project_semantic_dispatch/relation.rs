@@ -23,6 +23,10 @@
 //! admission suppressed (three-layer non-admission). The
 //! `shallow_relation_check` prefilter survives ONLY as the O(tag) fast
 //! reject INSIDE this authority (RI-5), never a parallel truth source.
+//!
+//! Reverse-mapped recovery's input preflight, precision boundary, opaque-state
+//! polarity, and fixture ledger live in `/type-resolution` under
+//! "Reverse-homomorphic mapped recovery".
 
 use std::sync::Arc;
 
@@ -30,19 +34,38 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::relation_predicates::*;
 use super::relation_txn::{
-    CompletedSccMember, InferenceInfo, InferenceSession, InferenceSessionState, PendingSccMember,
-    PendingVerdict, RelationStep, SessionCheckpoint, StrictFamilyConfig,
+    redischarge_is_stable, select_inference_candidates, CompletedSccMember, InferenceInfoSetup,
+    InferenceOccurrence, InferenceSession, InferenceSessionSetup, InferenceSessionState,
+    PendingSccMember, PendingVerdict, RelationStep, ReverseProjectionState, ReverseRecoveredEntry,
+    SessionCheckpoint, StrictFamilyConfig,
 };
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    ConstParamPolicy, ContextualInferenceMode, DeclIdentity, InferBinding, InferableParamSetId,
-    InferenceCandidatePriority, InferenceContextKey, LiteralValue, NoInferMask, PrimitiveKind,
-    ProjectionReductionContext, QueryError, QueryResult, RecursionOrBudgetCap, RelateKeyId,
-    RelateMemoKey, RelationContext, RelationFailureCode, RelationKind, RelationOutcome,
-    RelationPayload, RelationPolicy, RelationProof, RelationResult, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-    SubRelationPosition, SubRelationRef, SurfaceView, VariancePhase,
+    ConstParamPolicy, ContextualInferenceMode, DeclIdentity, IndexKey, InferBinding,
+    InferenceCandidatePriority, InferencePassKind, LiteralValue, NoInferMask, OptionalityMod,
+    PrimitiveKind, ProjectionReductionContext, QueryError, QueryResult, ReadonlyMod,
+    RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext, RelationFailureCode,
+    RelationKind, RelationOutcome, RelationPayload, RelationPolicy, RelationProof, RelationResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    SemanticQueryValue, SubRelationPosition, SubRelationRef, SurfaceView, VariancePhase,
 };
+use crate::semantic_query_memo::InlineRelationFlight;
+
+#[cfg(test)]
+std::thread_local! {
+    static REDISCHARGE_EXECUTE_VISITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn redischarge_execute_visits_for_tests() -> usize {
+    REDISCHARGE_EXECUTE_VISITS.get()
+}
+
+#[cfg(test)]
+pub(super) fn record_redischarge_execute_visit_for_tests() {
+    REDISCHARGE_EXECUTE_VISITS.set(REDISCHARGE_EXECUTE_VISITS.get() + 1);
+}
 
 /// The O(tag) fast-reject prefilter verdict (RI-5) — the retired
 /// `shallow_relation_check`, surviving ONLY as a tag-only prefilter inside
@@ -70,8 +93,34 @@ pub(super) enum InferPosition {
     Return,
 }
 
-/// The shape of an in-scope conditional-`infer` pattern (RI-6 scope:
-/// object property, tuple head/tail, array element, function inference).
+fn inference_occurrence_for_position(
+    ambient: InferenceOccurrence,
+    position: InferPosition,
+) -> InferenceOccurrence {
+    match position {
+        // Structural object/array/tuple/index descent preserves the complete
+        // occurrence selected by its enclosing relation position.
+        InferPosition::Covariant => ambient,
+        // Entering a function parameter flips orientation and starts the
+        // ordinary argument-priority rung.
+        InferPosition::ContravariantParam => InferenceOccurrence {
+            priority: InferenceCandidatePriority::Argument,
+            variance: match ambient.variance {
+                VariancePhase::Covariant => VariancePhase::Contravariant,
+                VariancePhase::Contravariant => VariancePhase::Covariant,
+                VariancePhase::Invariant => VariancePhase::Invariant,
+            },
+        },
+        // A return changes the priority rung while preserving the enclosing
+        // orientation (including a return nested inside a parameter).
+        InferPosition::Return => InferenceOccurrence {
+            priority: InferenceCandidatePriority::ReturnType,
+            variance: ambient.variance,
+        },
+    }
+}
+
+/// The shape of an in-scope conditional-`infer` pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InferPatternShape {
     /// `T extends infer X`.
@@ -86,6 +135,48 @@ pub(crate) enum InferPatternShape {
     /// `T extends (p: infer U, ..) => infer R` — direct `Infer`
     /// parameter / return positions.
     Function,
+    /// `{ [P in keyof infer T]: X }` with no key remap.
+    ReverseHomomorphicMapped,
+}
+
+/// Mapped modifiers whose inverse metadata effect is applied while the
+/// source shape is reconstructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReverseMappedModifiers {
+    pub(crate) optionality: OptionalityMod,
+    pub(crate) readonly: ReadonlyMod,
+}
+
+/// Exact descriptor for a reverse-homomorphic mapped target.
+#[derive(Debug, Clone)]
+pub(crate) struct ReverseHomomorphicSpec {
+    pub(crate) mapped_node: SemanticNodeId,
+    pub(crate) base_infer: SemanticNodeId,
+    pub(crate) mapper_parameter: SemanticNodeId,
+    pub(crate) template: SemanticNodeId,
+    pub(crate) modifiers: ReverseMappedModifiers,
+}
+
+enum ReverseSourceShape {
+    Object,
+    Array { readonly: bool },
+    Tuple { readonly: bool },
+}
+
+fn reverse_optional(observed: bool, modifier: OptionalityMod) -> Option<bool> {
+    match modifier {
+        OptionalityMod::Add => Some(false),
+        OptionalityMod::Keep => Some(observed),
+        OptionalityMod::Remove => (!observed).then_some(false),
+    }
+}
+
+fn reverse_readonly(observed: bool, modifier: ReadonlyMod) -> Option<bool> {
+    match modifier {
+        ReadonlyMod::Add => Some(false),
+        ReadonlyMod::Keep => Some(observed),
+        ReadonlyMod::Remove => Some(observed),
+    }
 }
 
 /// One inferable parameter discovered in a pattern.
@@ -99,31 +190,51 @@ pub(super) struct InferParamSite {
     priority: InferenceCandidatePriority,
 }
 
-/// The detected pattern payload: shape + every inferable parameter site.
+/// The detected pattern payload: shape plus the one frozen session setup
+/// shared by key construction and session opening.
 #[derive(Debug, Clone)]
 pub(crate) struct InferPatternInfo {
     pub(crate) shape: InferPatternShape,
-    sites: Vec<InferParamSite>,
+    setup: InferenceSessionSetup,
+    reverse_homomorphic: Option<ReverseHomomorphicSpec>,
 }
 
 impl InferPatternInfo {
-    /// The session-level candidate priority (the pattern's highest rung).
-    fn candidate_priority(&self) -> InferenceCandidatePriority {
-        let mut priority = InferenceCandidatePriority::Argument;
-        for site in &self.sites {
-            priority = match (priority, site.priority) {
-                (InferenceCandidatePriority::NakedTypeParameter, _)
-                | (_, InferenceCandidatePriority::NakedTypeParameter) => {
-                    InferenceCandidatePriority::NakedTypeParameter
-                }
-                (InferenceCandidatePriority::ReturnType, _)
-                | (_, InferenceCandidatePriority::ReturnType) => {
-                    InferenceCandidatePriority::ReturnType
-                }
-                _ => InferenceCandidatePriority::Argument,
-            };
+    fn new(
+        shape: InferPatternShape,
+        sites: Vec<InferParamSite>,
+        reverse_homomorphic: Option<ReverseHomomorphicSpec>,
+    ) -> Self {
+        let pass_kind = if reverse_homomorphic.is_some() {
+            InferencePassKind::ReverseHomomorphicMapped
+        } else {
+            InferencePassKind::Ordinary
+        };
+        let candidate_priority = sites
+            .iter()
+            .map(|site| site.priority)
+            .max_by_key(|priority| crate::semantic_query::inference_candidate_precedence(*priority))
+            .unwrap_or(InferenceCandidatePriority::Argument);
+        let infos = Arc::from(
+            sites
+                .into_iter()
+                .map(|site| InferenceInfoSetup::new(site.node, site.name))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        Self {
+            shape,
+            setup: InferenceSessionSetup::new(
+                infos,
+                VariancePhase::Covariant,
+                pass_kind,
+                candidate_priority,
+                NoInferMask::empty(),
+                ConstParamPolicy::NonConst,
+                ContextualInferenceMode::None,
+            ),
+            reverse_homomorphic,
         }
-        priority
     }
 }
 
@@ -146,6 +257,16 @@ enum RootClose {
     /// No public value-domain form (Unknown / poisoned SCC) — `Miss`.
     Undecided,
 }
+
+type DischargedMember = (
+    RelateMemoKey,
+    InferenceOccurrence,
+    PendingVerdict,
+    bool,
+    bool,
+    Option<super::relation_txn::SessionId>,
+    Option<InlineRelationFlight>,
+);
 
 impl<'a> ProjectSemanticDispatch<'a> {
     // ──────────────────────────────────────────────────────────────────
@@ -182,6 +303,244 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 RelationResult::Unknown
             }
         }
+    }
+
+    #[cfg(test)]
+    pub fn redischarge_execute_visits_for_tests(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> usize {
+        let before = redischarge_execute_visits_for_tests();
+        let _ = self.relation_redischarge(
+            &self.relate_key_for(source, target),
+            InferenceOccurrence::ARGUMENT_COVARIANT,
+            &FxHashMap::default(),
+        );
+        redischarge_execute_visits_for_tests() - before
+    }
+
+    /// Exercise a one-member cyclic binding judgement through the real
+    /// frame-close/fixation/re-discharge path. `negative` changes only a
+    /// fixed tuple obligation, so both polarities still collect and fix
+    /// the same direct-infer candidate before SCC close.
+    #[cfg(test)]
+    pub fn binding_scc_discharge_for_tests(
+        &self,
+        negative: bool,
+    ) -> (RelationOutcome, Arc<[InferBinding]>, usize) {
+        let graph = self.graph();
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let infer = graph.intern_node(SemanticNodeData::Infer {
+            name: Arc::from("CyclicBinding"),
+            binder: graph.alloc_infer_binder_id(),
+        });
+        let tuple = |first, second| {
+            graph.intern_node(SemanticNodeData::Tuple {
+                elements: Arc::from(
+                    vec![
+                        crate::semantic_query::TupleElement {
+                            label: None,
+                            value: first,
+                            optional: false,
+                            rest: false,
+                        },
+                        crate::semantic_query::TupleElement {
+                            label: None,
+                            value: second,
+                            optional: false,
+                            rest: false,
+                        },
+                    ]
+                    .into_boxed_slice(),
+                ),
+                readonly: true,
+            })
+        };
+        let source = tuple(string, if negative { string } else { number });
+        let target = tuple(infer, number);
+        let key = self.relation_key_with_inference(self.relate_key_for(source, target));
+        let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
+        let idx = self.relation_frame_open(&key, occurrence);
+        {
+            // A self edge is enough to select the cyclic discharge branch;
+            // the reducer below remains the real positive/negative binding
+            // judgement.
+            let mut txn = self.relation_txn.borrow_mut();
+            txn.assumptions.record_assumption(idx);
+        }
+        let mut bindings = Vec::new();
+        let verdict = self.reduce_relation(&key, &mut bindings);
+        let before = redischarge_execute_visits_for_tests();
+        let payload = match self.relation_frame_close_root(idx, verdict, bindings) {
+            RootClose::Decided(payload) => payload,
+            other => panic!(
+                "cyclic binding fixture must decide, got {}",
+                match other {
+                    RootClose::BudgetExceeded(_) => "BudgetExceeded",
+                    RootClose::Undecided => "Undecided",
+                    RootClose::Decided(_) => unreachable!(),
+                }
+            ),
+        };
+        (
+            payload.outcome,
+            Arc::clone(&payload.bindings),
+            redischarge_execute_visits_for_tests() - before,
+        )
+    }
+
+    /// Exercise a mixed SCC whose root fixes one binding while a nested
+    /// non-binding member closes negative against an assumption edge.
+    #[cfg(test)]
+    pub fn mixed_binding_scc_discharge_for_tests(
+        &self,
+    ) -> (RelationOutcome, Arc<[InferBinding]>, usize) {
+        let graph = self.graph();
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let infer = graph.intern_node(SemanticNodeData::Infer {
+            name: Arc::from("MixedCyclicBinding"),
+            binder: graph.alloc_infer_binder_id(),
+        });
+        let root_key = self.relation_key_with_inference(self.relate_key_for(string, infer));
+        let member_key = self.relate_key_for(string, number);
+        let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
+        let root_idx = self.relation_frame_open(&root_key, occurrence);
+        let member_idx = self.relation_frame_open(&member_key, occurrence);
+        {
+            let mut txn = self.relation_txn.borrow_mut();
+            txn.assumptions.record_assumption(root_idx);
+        }
+        let mut member_bindings = Vec::new();
+        let member_verdict = self.reduce_relation(&member_key, &mut member_bindings);
+        let member_step = self.relation_frame_close(member_idx, member_verdict, member_bindings);
+        assert!(matches!(member_step, RelationStep::NotAssignable));
+
+        let mut root_bindings = Vec::new();
+        let root_verdict = self.reduce_relation(&root_key, &mut root_bindings);
+        let before = redischarge_execute_visits_for_tests();
+        let payload = match self.relation_frame_close_root(root_idx, root_verdict, root_bindings) {
+            RootClose::Decided(payload) => payload,
+            other => panic!(
+                "mixed cyclic binding fixture must decide, got {}",
+                match other {
+                    RootClose::BudgetExceeded(_) => "BudgetExceeded",
+                    RootClose::Undecided => "Undecided",
+                    RootClose::Decided(_) => unreachable!(),
+                }
+            ),
+        };
+        let result = (
+            payload.outcome,
+            Arc::clone(&payload.bindings),
+            redischarge_execute_visits_for_tests() - before,
+        );
+        self.relation_abort_completed_members();
+        result
+    }
+
+    /// Re-discharge a binding SCC consumer whose structural child edge is
+    /// already fixed in the SCC substitution table. The returned tuple
+    /// exposes the consumed binding snapshot and the real stability gate.
+    #[cfg(test)]
+    pub fn binding_scc_substitution_edge_for_tests(&self) -> (Arc<[InferBinding]>, bool) {
+        let graph = self.graph();
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+        let infer = graph.intern_node(SemanticNodeData::Infer {
+            name: Arc::from("SubstitutionEdgeBinding"),
+            binder: graph.alloc_infer_binder_id(),
+        });
+        let member = |value, readonly| crate::semantic_query::SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            name: Arc::from("value"),
+            value,
+            optional: false,
+            readonly,
+            is_method: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: Default::default(),
+            declaration_origin: None,
+        };
+        let source = graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(vec![member(string, false)].into_boxed_slice()),
+                call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+            },
+        ));
+        let target = graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(vec![member(unknown, true)].into_boxed_slice()),
+                call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+            },
+        ));
+        let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
+        let binding = InferBinding {
+            param: infer,
+            name: Arc::from("SubstitutionEdgeBinding"),
+            bound: string,
+        };
+        let fixed = Arc::from(vec![binding].into_boxed_slice());
+        let substitution = FxHashMap::from_iter([(
+            (self.relate_key_for(string, unknown), occurrence),
+            RelationStep::Assignable {
+                bindings: Arc::clone(&fixed),
+            },
+        )]);
+        let rerun = self.relation_redischarge(
+            &self.relate_key_for(source, target),
+            occurrence,
+            &substitution,
+        );
+        let bindings = match &rerun {
+            PendingVerdict::Assignable { bindings } => Arc::clone(bindings),
+            other => panic!("substitution-edge redischarge must stay assignable, got {other:?}"),
+        };
+        let provisional = PendingVerdict::Assignable { bindings: fixed };
+        let stable = redischarge_is_stable(&provisional, &rerun);
+        (bindings, stable)
+    }
+
+    /// Exercise the production nested-frame registration path for a
+    /// non-binding relation member.
+    #[cfg(test)]
+    pub fn nested_nonbinding_frame_registers_inline_flight_for_tests(&self) -> bool {
+        let graph = self.graph();
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
+        let root_key = self.relate_key_for(string, string);
+        let member_key = self.relate_key_for(string, number);
+        let root_idx = self.relation_frame_open(&root_key, occurrence);
+        let member_idx = self.relation_frame_open(&member_key, occurrence);
+        let member_step =
+            self.relation_frame_close(member_idx, RelationResult::NotAssignable, Vec::new());
+        assert!(matches!(member_step, RelationStep::NotAssignable));
+        let registered = self
+            .relation_txn
+            .borrow()
+            .completed_members
+            .last()
+            .is_some_and(|member| member.inline_flight.is_some());
+        let root_close =
+            self.relation_frame_close_root(root_idx, assignable(&mut Vec::new()), Vec::new());
+        assert!(matches!(root_close, RootClose::Decided(_)));
+        self.relation_abort_completed_members();
+        registered
     }
 
     /// The full default relation identity for `(source, target)` under the
@@ -244,6 +603,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    sub-relation computes INLINE on the transaction (its publish is
     ///    batched at its SCC's close and drained by the root).
     pub(crate) fn execute_relate(&self, key: RelateMemoKey) -> RelationStep {
+        self.execute_relate_with_occurrence(key, InferenceOccurrence::ARGUMENT_COVARIANT)
+    }
+
+    /// Execute one relation under a transient inference occurrence. The
+    /// occurrence is deliberately excluded from the persistent memo key:
+    /// it changes only session-local candidate deposits. It is included in
+    /// reentry identity so opposite-orientation visits cannot intercept one
+    /// another while a reverse-inference session is active.
+    fn execute_relate_with_occurrence(
+        &self,
+        key: RelateMemoKey,
+        occurrence: InferenceOccurrence,
+    ) -> RelationStep {
         let graph = self.graph();
         graph.record_relation_check();
         // Open object roots are deliberately undecidable. This guard runs
@@ -253,30 +625,89 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return RelationStep::Unknown;
         }
         // Binding-producing upgrade: an in-scope `infer` pattern on the
-        // target (with no explicit inference context) opens this judgement
-        // under the pattern's GENERATED session-setup fingerprint (RI-6).
-        // The fingerprint is a pure function of the pattern — the setup is
-        // frozen at session open, so the admission identity is well
-        // defined up front (design §3.3 for this subset).
+        // target opens this judgement under the pattern's immutable
+        // session-setup fingerprint. Reverse-projection sub-relations retain
+        // their outer session context even though their immediate target is
+        // no longer the mapped root.
         let key = self.relation_key_with_inference(key);
         // (1) Reentry intercept.
         {
             let mut txn = self.relation_txn.borrow_mut();
-            if let Some(idx) = txn.reentry().find(&key) {
+            if let Some(idx) = txn.reentry().find(&key, occurrence) {
                 txn.assumptions.record_assumption(idx);
                 return RelationStep::Assumed;
             }
         }
-        // (2) Warm read (generation-gated, carrier-validated).
-        if let Some(payload) = graph.get_relation_payload(self.ctx, &key) {
-            return relation_step_from_payload(&payload);
+        // (2) Warm read (generation-gated, carrier-validated). An active
+        // inference session must execute the relation so its transient
+        // projection/direct-infer deposits occur; a persistent binary warm
+        // verdict cannot stand in for those session-local effects.
+        if self.relation_txn.borrow().active_session().is_none() {
+            if let Some(payload) = graph.get_relation_payload(self.ctx, &key) {
+                return relation_step_from_payload(&payload);
+            }
         }
         // (3) Cold compute.
         if self.relation_txn.borrow().reentry().is_empty() {
             self.execute_relate_root(key)
         } else {
-            self.execute_relate_inline(key)
+            self.execute_relate_inline(key, occurrence)
         }
+    }
+
+    pub(super) fn relation_redischarge_active(&self) -> bool {
+        self.relation_txn.borrow().redischarge_occurrence.is_some()
+    }
+
+    /// Producer body used only by the `SemanticQueryApi::execute(Relate)`
+    /// redischarge branch. It deliberately runs inline and every frame opened
+    /// under the transient redischarge context is ReturnOnly.
+    pub(super) fn execute_relate_redischarge_from_api(
+        &self,
+        key: RelateMemoKey,
+    ) -> QueryResult<SemanticQueryValue> {
+        if self.relation_key_with_inference(key.clone()) != key {
+            return QueryResult::Error(QueryError::Miss);
+        }
+        let occurrence = self
+            .relation_txn
+            .borrow()
+            .redischarge_occurrence
+            .map(|(_, occurrence)| occurrence)
+            .unwrap_or(InferenceOccurrence::ARGUMENT_COVARIANT);
+        let step = self.execute_relate_inline(key.clone(), occurrence);
+        let payload = match step {
+            RelationStep::Assignable { bindings } => self.relation_payload(
+                RelationOutcome::Assignable,
+                bindings,
+                RelationProof::Assignable {
+                    witness: crate::semantic_query::DerivationTree {
+                        sub_derivations: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                },
+            ),
+            RelationStep::NotAssignable => self.relation_payload(
+                RelationOutcome::NotAssignable,
+                Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+                RelationProof::NotAssignable {
+                    reason: RelationFailureCode::Structural,
+                    failing_sub: SubRelationRef {
+                        source: key.source,
+                        target: key.target,
+                        position: SubRelationPosition::Root,
+                    },
+                },
+            ),
+            RelationStep::BudgetExceeded(cap) => self.relation_payload(
+                RelationOutcome::BudgetExceeded(cap.kind),
+                Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+                RelationProof::BudgetExceeded { cap },
+            ),
+            RelationStep::Unknown | RelationStep::Assumed => {
+                return QueryResult::Error(QueryError::Miss);
+            }
+        };
+        QueryResult::Value(SemanticQueryValue::Relation(payload))
     }
 
     /// The machinery ROOT path: the full family singleflight
@@ -285,33 +716,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// SCC-closed member batch onto the root's SCC-union carrier (design
     /// §2.3 step 4 R-a batched admission).
     fn execute_relate_root(&self, key: RelateMemoKey) -> RelationStep {
-        let read = self.execute_via_cold_build_helper(key.to_query_key());
-        let (step, published) = match read.value {
+        let mut publication = None;
+        let read = self.execute_via_cold_build_helper_capturing_publication(
+            key.to_query_key(),
+            &mut publication,
+        );
+        let step = match read.value {
             QueryResult::Value(SemanticQueryValue::Relation(payload)) => {
-                let published = !read.cache_suppress;
-                (relation_step_from_payload(&payload), published)
+                relation_step_from_payload(&payload)
             }
             // An undecided judgement surfaces `Error(Miss)` — loud, never a
             // fallback, never admitted.
-            _ => (RelationStep::Unknown, false),
+            _ => RelationStep::Unknown,
         };
-        if published {
-            self.relation_drain_completed_members(&key);
+        if let Some(publication) = publication {
+            #[cfg(any(test, feature = "test-support"))]
+            self.graph().wait_relation_root_pre_member_drain_gate();
+            self.relation_drain_completed_members(&key, &publication);
         } else {
             // ReturnOnly exit (poisoned SCC / budget / undecided): the
             // deferred batch releases WITHOUT publish — no entry, no fact
             // signature, no backfill, no reverse-index metadata.
-            self.relation_txn.borrow_mut().completed_members.clear();
+            self.relation_abort_completed_members();
         }
         step
+    }
+
+    /// Binding roots carry transient candidate deposits and therefore cannot
+    /// join another transaction's in-flight inference session. Completed
+    /// payloads are still eligible for the explicit warm read in
+    /// `execute_relate_with_occurrence`; this policy controls only the cold
+    /// build after that read misses.
+    #[cfg(test)]
+    pub(super) fn relate_root_uses_family_singleflight(key: &RelateMemoKey) -> bool {
+        key.inference_context.is_none()
     }
 
     /// A nested sub-relation's INLINE cold compute: push a frame, run the
     /// reducer, close the frame through the SCC discharge. The publish is
     /// NEVER direct — it is batched at this frame's SCC close and drained
     /// by the machinery root onto the SCC-union carrier.
-    fn execute_relate_inline(&self, key: RelateMemoKey) -> RelationStep {
-        let idx = self.relation_frame_open(&key);
+    fn execute_relate_inline(
+        &self,
+        key: RelateMemoKey,
+        occurrence: InferenceOccurrence,
+    ) -> RelationStep {
+        let idx = self.relation_frame_open(&key, occurrence);
         let mut bindings: Vec<InferBinding> = Vec::new();
         let verdict = self.reduce_relation(&key, &mut bindings);
         self.relation_frame_close(idx, verdict, bindings)
@@ -326,7 +776,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: &RelateMemoKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
         let fence = self.project_generation_signature();
-        let observed_self_roots = self.observed_self_roots_from_nodes([key.source, key.target]);
+        // A raw `SemanticQueryKey::Relate` can enter the family dispatcher
+        // without passing through `execute_relate`. Refuse any such key whose
+        // supplied inference context does not equal the target pattern's
+        // immutable setup projection. Otherwise release builds could execute
+        // one session setup while admitting under another fingerprint.
+        if self.relation_key_with_inference(key.clone()) != *key {
+            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<
+                SemanticQueryValue,
+            > = (QueryResult::Error(QueryError::Miss), fence).into();
+            output.cache_suppress = true;
+            return output;
+        }
         // Test-only fact-injection hook (ported from the retired
         // `relate_nodes` cold path): when the host's per-host
         // `relation_knobs.force_overflow_observations` knob is non-zero, emit
@@ -349,11 +810,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 );
             }
         }
-        let idx = self.relation_frame_open(key);
+        let idx = self.relation_frame_open(key, InferenceOccurrence::ARGUMENT_COVARIANT);
         let mut bindings: Vec<InferBinding> = Vec::new();
         let verdict = self.reduce_relation(key, &mut bindings);
         match self.relation_frame_close_root(idx, verdict, bindings) {
             RootClose::Decided(payload) => {
+                let observed_self_roots = self.relation_completed_publication_roots(key);
                 crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                     QueryResult::Value(SemanticQueryValue::Relation(payload)),
                     fence,
@@ -361,6 +823,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .with_observed_self_roots(observed_self_roots)
             }
             RootClose::BudgetExceeded(payload) => {
+                let observed_self_roots =
+                    self.observed_self_roots_from_nodes([key.source, key.target]);
                 let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<
                     SemanticQueryValue,
                 > = (
@@ -386,11 +850,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Push a reentry frame for `key`, opening an inference session when
     /// the key carries a fingerprint and no session is active (a binding
     /// root). Also snapshots the strict configuration at the root push.
-    fn relation_frame_open(&self, key: &RelateMemoKey) -> usize {
+    fn relation_frame_open(&self, key: &RelateMemoKey, occurrence: InferenceOccurrence) -> usize {
         // Snapshot the strict config + pattern BEFORE taking the borrow —
         // `relation_pattern_info` re-borrows the transaction (its
         // per-target cache lives there).
         let strict = self.relation_strict_config();
+        let redischarge = self.relation_redischarge_active();
+        let wants_inline_flight = !redischarge
+            && key.inference_context.is_none()
+            && !self.relation_txn.borrow().reentry().is_empty();
+        let inline_flight = wants_inline_flight
+            .then(|| self.graph().begin_inline_relation_flight(key))
+            .flatten();
         let wants_session = key.inference_context.is_some()
             && self.relation_txn.borrow().active_session().is_none();
         let pattern = if wants_session {
@@ -406,40 +877,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             txn.strict = Some(strict);
         }
         let watermark = txn.scc_ledger.pending_len();
-        let idx = txn.reentry_mut().push(key.clone(), watermark);
+        let idx = txn.reentry_mut().push(key.clone(), occurrence, watermark);
+        txn.reentry_mut().note_inline_flight(idx, inline_flight);
+        if redischarge {
+            txn.reentry_mut().note_session_delta_range(idx, idx + 1);
+        }
         if wants_session {
             if let Some(pattern) = pattern {
                 let session_id = txn.alloc_session_id();
-                let session = InferenceSession {
-                    id: session_id,
-                    inferable_params: pattern.sites.iter().map(|s| s.node).collect(),
-                    variance_phase: VariancePhase::Covariant,
-                    candidate_priority: pattern.candidate_priority(),
-                    no_infer_mask: NoInferMask::empty(),
-                    contextual_inference_mode: ContextualInferenceMode::None,
-                    infos: pattern
-                        .sites
-                        .iter()
-                        .map(|site| InferenceInfo {
-                            param_node: site.node,
-                            param_name: Arc::clone(&site.name),
-                            priority: site.priority,
-                            const_param_policy: ConstParamPolicy::NonConst,
-                            candidates: Vec::new(),
-                        })
-                        .collect(),
-                    state: InferenceSessionState::InProgress,
-                };
-                // The R-b invariant, asserted at open: the session's
-                // GENERATED setup projection reproduces the key's
-                // fingerprint exactly (a hand-maintained projection would
-                // silently drift — the same diff the
-                // `inference_context_key_projects_every_session_setup_axis`
-                // guard enforces structurally).
+                let session = InferenceSession::new(
+                    session_id,
+                    pattern.setup,
+                    pattern.reverse_homomorphic.map(ReverseProjectionState::new),
+                );
+                // Both identities come from the same immutable setup value;
+                // candidate collection cannot make them diverge.
                 debug_assert_eq!(
                     Some(session.context_key()),
-                    key.inference_context,
-                    "the opened session's generated InferenceContextKey must reproduce the relation key's fingerprint"
+                    key.inference_context.as_ref(),
+                    "the opened session must retain the relation key's frozen inference setup"
                 );
                 txn.sessions.push(session);
                 txn.reentry_mut().note_opened_session(idx, session_id);
@@ -563,9 +1019,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             txn.scc_ledger.deposit(PendingSccMember {
                 key: frame.key,
+                occurrence: frame.occurrence,
                 verdict: pending,
                 session_delta: frame.session_delta,
                 opened_session: frame.opened_session,
+                inline_flight: frame.inline_flight,
             });
             return FramePop::Provisional(step);
         }
@@ -603,6 +1061,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             });
         if poisoned {
+            self.relation_abort_inline_flight(frame.inline_flight.as_ref());
+            for member in &members {
+                self.relation_abort_inline_flight(member.inline_flight.as_ref());
+            }
             // Release WITHOUT publish (no entry / fact signature /
             // backfill / reverse-index metadata). The machinery root
             // surfaces the public `BudgetExceeded` payload when a budget
@@ -632,13 +1094,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             || members
                 .iter()
                 .any(|m| matches!(m.verdict, PendingVerdict::NotAssignable));
-        let mut discharged: Vec<(
-            RelateMemoKey,
-            PendingVerdict,
-            bool,
-            bool,
-            Option<super::relation_txn::SessionId>,
-        )> = Vec::new();
+        let mut discharged: Vec<DischargedMember> = Vec::new();
         let self_assumptive = !frame.assumption_targets.is_empty();
         if let Some(sid) = frame.opened_session {
             self.relation_txn
@@ -648,18 +1104,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         discharged.push((
             frame.key.clone(),
+            frame.occurrence,
             pending,
             self_assumptive,
             frame.session_delta,
             frame.opened_session,
+            frame.inline_flight,
         ));
         for member in members {
             discharged.push((
                 member.key,
+                member.occurrence,
                 member.verdict,
                 true,
                 member.session_delta,
                 member.opened_session,
+                member.inline_flight,
             ));
         }
         // The session-close drain gate (design §2.3 step 4): a binding
@@ -670,7 +1130,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             let mut txn = self.relation_txn.borrow_mut();
             let mut ledger_ok = true;
-            for (key, _, _, _, opened_session) in &discharged {
+            for (key, _, _, _, _, opened_session, _) in &discharged {
                 let Some(sid) = opened_session else {
                     continue;
                 };
@@ -687,14 +1147,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             if !ledger_ok {
                 drop(txn);
+                self.relation_abort_discharged_flights(&discharged);
                 return FramePop::RootClose(RootClose::Undecided);
             }
         }
-        if any_negative {
-            let mut substitution: FxHashMap<RelateMemoKey, RelationStep> = discharged
-                .iter()
-                .map(|(key, verdict, _, _, _)| (key.clone(), relation_step_from_pending(verdict)))
-                .collect();
+        let has_binding_member = discharged
+            .iter()
+            .any(|(key, _, _, _, _, opened_session, _)| {
+                opened_session.is_some() || key.inference_context.is_some()
+            });
+        // Re-discharge is an SCC-close operation. A redischarge itself
+        // opens an ordinary acyclic frame; allowing a merely-negative
+        // binding result to enter this branch again would recursively
+        // redischarge forever.
+        if cyclic && (any_negative || has_binding_member) {
+            let mut substitution: FxHashMap<(RelateMemoKey, InferenceOccurrence), RelationStep> =
+                discharged
+                    .iter()
+                    .map(|(key, occurrence, verdict, _, _, _, _)| {
+                        (
+                            (key.clone(), *occurrence),
+                            relation_step_from_pending(verdict),
+                        )
+                    })
+                    .collect();
             // Bottom-up over the condensation: re-discharge the POSITIVE
             // assumption-consuming members DEEPEST-FIRST so a shallower
             // member re-runs against the FINAL deeper verdicts. Layout:
@@ -706,21 +1182,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // flipped on its collapsed back-edge.)
             let order: Vec<usize> = (1..discharged.len()).chain(std::iter::once(0)).collect();
             for position in order {
-                let (key, verdict, assumptive, _, _) = &discharged[position];
-                if !*assumptive || !matches!(verdict, PendingVerdict::Assignable { .. }) {
+                let (key, occurrence, verdict, assumptive, _, opened_session, _) =
+                    &discharged[position];
+                let binding_member = opened_session.is_some() || key.inference_context.is_some();
+                let must_redischarge = if has_binding_member {
+                    true
+                } else {
+                    *assumptive && matches!(verdict, PendingVerdict::Assignable { .. })
+                };
+                if !binding_member && !must_redischarge {
                     continue;
                 }
                 let key = key.clone();
-                let rerun = self.relation_redischarge(&key, &substitution);
+                let occurrence = *occurrence;
+                let rerun = self.relation_redischarge(&key, occurrence, &substitution);
                 match rerun {
                     PendingVerdict::Unknown | PendingVerdict::BudgetExceeded(_) => {
                         // Non-stable re-discharge ⇒ release the whole batch
                         // WITHOUT publish (joiners recompute).
+                        self.relation_abort_discharged_flights(&discharged);
                         return FramePop::RootClose(RootClose::Undecided);
                     }
                     stable => {
-                        substitution.insert(key.clone(), relation_step_from_pending(&stable));
-                        discharged[position].1 = stable;
+                        if has_binding_member && !redischarge_is_stable(verdict, &stable) {
+                            // A binding SCC may publish only when every
+                            // member retains its provisional polarity and the
+                            // binding members retain their complete fixed
+                            // binding snapshot. Pure non-binding SCCs instead
+                            // converge bottom-up: a provisional positive may
+                            // legitimately collapse to the final negative
+                            // verdict carried by its dependency.
+                            self.relation_abort_discharged_flights(&discharged);
+                            return FramePop::RootClose(RootClose::Undecided);
+                        }
+                        substitution.insert(
+                            (key.clone(), occurrence),
+                            relation_step_from_pending(&stable),
+                        );
+                        discharged[position].2 = stable;
                     }
                 }
             }
@@ -732,7 +1231,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let scc_keys: Arc<[RelateKeyId]> = if cyclic {
             let keys: Vec<RelateKeyId> = discharged
                 .iter()
-                .map(|(key, _, _, _, _)| self.graph().intern_relate_key(key.clone()))
+                .map(|(key, _, _, _, _, _, _)| self.graph().intern_relate_key(key.clone()))
                 .collect();
             Arc::from(keys.into_boxed_slice())
         } else {
@@ -741,7 +1240,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut self_publish: Option<RelationPayload> = None;
         let mut self_step: Option<RelationStep> = None;
         let mut completed: Vec<CompletedSccMember> = Vec::new();
-        for (position, (key, verdict, _, session_delta, _)) in discharged.into_iter().enumerate() {
+        for (position, (key, _, verdict, _, session_delta, _, inline_flight)) in
+            discharged.into_iter().enumerate()
+        {
             let is_self = position == 0;
             let payload = match &verdict {
                 PendingVerdict::Assignable { bindings } => {
@@ -785,6 +1286,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if session_delta {
                     // Admission row 7: a session-local delta never
                     // publishes — the caller gets the computed step.
+                    self.relation_abort_inline_flight(inline_flight.as_ref());
                     self_step = Some(relation_step_from_payload(&payload));
                 } else if machinery_root {
                     // The machinery root publishes through the family
@@ -795,10 +1297,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // the SCC (drained by the machinery root); the caller
                     // consumes the computed step.
                     self_step = Some(relation_step_from_payload(&payload));
-                    completed.push(CompletedSccMember { key, payload });
+                    completed.push(CompletedSccMember {
+                        key,
+                        payload,
+                        inline_flight,
+                    });
                 }
             } else if !session_delta {
-                completed.push(CompletedSccMember { key, payload });
+                completed.push(CompletedSccMember {
+                    key,
+                    payload,
+                    inline_flight,
+                });
+            } else {
+                self.relation_abort_inline_flight(inline_flight.as_ref());
             }
         }
         self.relation_txn
@@ -821,24 +1333,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn relation_redischarge(
         &self,
         key: &RelateMemoKey,
-        substitution: &FxHashMap<RelateMemoKey, RelationStep>,
+        occurrence: InferenceOccurrence,
+        substitution: &FxHashMap<(RelateMemoKey, InferenceOccurrence), RelationStep>,
     ) -> PendingVerdict {
-        self.relation_txn.borrow_mut().discharge_substitution = substitution
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let mut bindings: Vec<InferBinding> = Vec::new();
-        let verdict = self.reduce_relation(key, &mut bindings);
+        let saved_context = {
+            let mut txn = self.relation_txn.borrow_mut();
+            let next_substitution = substitution
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            txn.replace_redischarge_context(next_substitution, occurrence)
+        };
+        let verdict = self.execute(key.to_query_key());
         self.relation_txn
             .borrow_mut()
-            .discharge_substitution
-            .clear();
+            .restore_redischarge_context(saved_context);
         match verdict {
-            RelationResult::Assignable { .. } => PendingVerdict::Assignable {
-                bindings: Arc::from(bindings.into_boxed_slice()),
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::Relation(payload),
+                ..
+            }) => match payload.outcome {
+                RelationOutcome::Assignable => PendingVerdict::Assignable {
+                    bindings: Arc::clone(&payload.bindings),
+                },
+                RelationOutcome::NotAssignable => PendingVerdict::NotAssignable,
+                RelationOutcome::BudgetExceeded(_) => PendingVerdict::Unknown,
             },
-            RelationResult::NotAssignable => PendingVerdict::NotAssignable,
-            RelationResult::Unknown => PendingVerdict::Unknown,
+            _ => PendingVerdict::Unknown,
         }
     }
 
@@ -885,10 +1406,102 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    fn relation_abort_inline_flight(&self, flight: Option<&InlineRelationFlight>) {
+        if let Some(flight) = flight {
+            self.graph().abort_inline_relation_flight(flight);
+        }
+    }
+
+    fn relation_abort_discharged_flights(&self, discharged: &[DischargedMember]) {
+        for (_, _, _, _, _, _, flight) in discharged {
+            self.relation_abort_inline_flight(flight.as_ref());
+        }
+    }
+
+    fn relation_abort_completed_members(&self) {
+        let members = {
+            let mut txn = self.relation_txn.borrow_mut();
+            std::mem::take(&mut txn.completed_members)
+        };
+        for member in &members {
+            self.relation_abort_inline_flight(member.inline_flight.as_ref());
+        }
+    }
+
+    fn relation_publication_roots(
+        &self,
+        root_key: &RelateMemoKey,
+        member_keys: impl IntoIterator<Item = RelateMemoKey>,
+    ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
+        let mut nodes = vec![root_key.source, root_key.target];
+        for member in member_keys {
+            nodes.push(member.source);
+            nodes.push(member.target);
+        }
+        self.observed_self_roots_from_nodes(nodes)
+    }
+
+    fn relation_completed_publication_roots(
+        &self,
+        root_key: &RelateMemoKey,
+    ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
+        let member_keys = self
+            .relation_txn
+            .borrow()
+            .completed_members
+            .iter()
+            .map(|member| member.key.clone())
+            .collect::<Vec<_>>();
+        self.relation_publication_roots(root_key, member_keys)
+    }
+
+    #[cfg(test)]
+    pub(super) fn scc_publication_roots_for_tests(
+        &self,
+        root_key: &RelateMemoKey,
+        member_keys: &[RelateMemoKey],
+    ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
+        self.relation_publication_roots(root_key, member_keys.iter().cloned())
+    }
+
+    #[cfg(test)]
+    pub(super) fn publish_staged_scc_member_for_tests(
+        &self,
+        root_key: RelateMemoKey,
+        member_key: RelateMemoKey,
+    ) -> RelationStep {
+        let inline_flight = self
+            .graph()
+            .begin_inline_relation_flight(&member_key)
+            .expect("the staged member must claim its relation flight");
+        let payload = self.relation_payload(
+            RelationOutcome::Assignable,
+            Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+            RelationProof::Assignable {
+                witness: crate::semantic_query::DerivationTree {
+                    sub_derivations: Arc::from(Vec::new().into_boxed_slice()),
+                },
+            },
+        );
+        self.relation_txn
+            .borrow_mut()
+            .completed_members
+            .push(CompletedSccMember {
+                key: member_key,
+                payload,
+                inline_flight: Some(inline_flight),
+            });
+        self.execute_relate_root(root_key)
+    }
+
     /// Drain the SCC-closed member batch onto the root's published
     /// SCC-union carrier (design §2.3: the published fact set is the UNION
     /// of all SCC members' observed facts, never the bare per-member set).
-    fn relation_drain_completed_members(&self, root_key: &RelateMemoKey) {
+    fn relation_drain_completed_members(
+        &self,
+        root_key: &RelateMemoKey,
+        carrier: &crate::semantic_query_memo::PublishedMemoCandidate,
+    ) {
         let members: Vec<CompletedSccMember> = {
             let mut txn = self.relation_txn.borrow_mut();
             std::mem::take(&mut txn.completed_members)
@@ -897,28 +1510,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
         let graph = self.graph();
-        let Some(carrier) = graph.relation_published_carrier(root_key) else {
-            return;
-        };
         for member in members {
-            // Self-roots: the root pair's origins UNION the member pair's
-            // origins (design §1.4: source, target, and every declaration
-            // visited during structural descent).
-            let member_roots =
-                self.observed_self_roots_from_nodes([member.key.source, member.key.target]);
-            let mut canonicals: Vec<Arc<str>> = carrier.self_root_canonicals.to_vec();
-            for (canonical, _) in &member_roots {
-                if !canonicals.iter().any(|root| root == canonical) {
-                    canonicals.push(Arc::clone(canonical));
-                }
-            }
-            graph.publish_relation_member(
+            let Some(flight) = member.inline_flight else {
+                continue;
+            };
+            graph.publish_relation_member_fenced(
                 Some(self.ctx),
                 member.key,
                 member.payload,
                 carrier.read_set_signature.clone(),
-                Arc::from(canonicals.into_boxed_slice()),
+                Arc::clone(&carrier.self_root_canonicals),
                 carrier.validated_at_generation,
+                Some((root_key.clone(), carrier.admission_seq)),
+                Some(flight),
             );
         }
     }
@@ -927,13 +1531,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     // Inference pattern detection + session plumbing
     // ──────────────────────────────────────────────────────────────────
 
-    /// Upgrade a plain relation key with the GENERATED session-setup
-    /// fingerprint when the target carries an in-scope `infer` pattern
-    /// (RI-6 / R-b). The fingerprint projects the pattern-determined
-    /// session setup; it is frozen at session open, so this upgrade is a
-    /// pure function of the pattern.
-    fn relation_key_with_inference(&self, mut key: RelateMemoKey) -> RelateMemoKey {
-        if key.inference_context.is_some() || key.relation != RelationKind::Assignable {
+    /// Upgrade a plain relation key with the target pattern's immutable
+    /// session-setup fingerprint. Session opening consumes the same setup
+    /// value, so there is no second projection to drift.
+    pub(super) fn relation_key_with_inference(&self, mut key: RelateMemoKey) -> RelateMemoKey {
+        if key.relation != RelationKind::Assignable {
             return key;
         }
         // Only upgrade when a binding could actually occur: the pattern
@@ -941,36 +1543,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(pattern) = self.relation_pattern_info(key.target) else {
             return key;
         };
-        key.inference_context = Some(self.inference_context_key_for_pattern(&pattern));
+        // Canonicalize even a caller-supplied context: behavior and memo
+        // identity are one projection of the same frozen setup.
+        key.inference_context = Some(pattern.setup.context_key().clone());
         key
     }
 
-    /// The GENERATED [`InferenceContextKey`] projection of a pattern's
-    /// session setup (R-b): one line per setup axis.
-    fn inference_context_key_for_pattern(&self, pattern: &InferPatternInfo) -> InferenceContextKey {
-        InferenceContextKey {
-            inferable_params: InferableParamSetId::new(Arc::from(
-                pattern
-                    .sites
-                    .iter()
-                    .map(|s| s.node)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            )),
-            variance_phase: VariancePhase::Covariant,
-            candidate_priority: pattern.candidate_priority(),
-            no_infer_mask: NoInferMask::empty(),
-            const_param_policy: ConstParamPolicy::NonConst,
-            contextual_inference_mode: ContextualInferenceMode::None,
+    /// Raw family dispatch accepts only the target pattern's exact frozen
+    /// inference context. A target without an inferable pattern accepts no
+    /// caller-supplied context. Reverse-projection sub-relations do not enter
+    /// through raw dispatch; they retain the active session context through
+    /// [`Self::relation_sub_key`].
+    pub(super) fn relation_raw_key_has_exact_inference_context(&self, key: &RelateMemoKey) -> bool {
+        if key.relation != RelationKind::Assignable {
+            return key.inference_context.is_none();
         }
+        let expected = self
+            .relation_pattern_info(key.target)
+            .map(|pattern| pattern.setup.context_key().clone());
+        key.inference_context == expected
     }
 
-    /// Detect an in-scope conditional-`infer` pattern on `target` (RI-6
-    /// scope: bare / object property / tuple head-tail / function
-    /// positions — DIRECT `Infer` occupants only; deeper nesting is out
-    /// of scope and stays deferred). Cached per target node on the
-    /// transaction.
-    fn relation_pattern_info(&self, target: SemanticNodeId) -> Option<InferPatternInfo> {
+    /// Detect an in-scope conditional-`infer` pattern on `target`. Direct
+    /// infer occupants are supported in bare, object, tuple, array, and
+    /// function positions. An exact unremapped homomorphic mapped target
+    /// enables reverse projection; all other deeper nesting stays deferred.
+    /// Results are cached per target node on the transaction.
+    pub(super) fn relation_pattern_info(&self, target: SemanticNodeId) -> Option<InferPatternInfo> {
         if let Some(cached) = self.relation_txn.borrow().pattern_cache.get(&target) {
             return cached.clone();
         }
@@ -984,19 +1583,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     fn relation_pattern_info_uncached(&self, target: SemanticNodeId) -> Option<InferPatternInfo> {
         let graph = self.graph();
+        if let Some(spec) = self.reverse_homomorphic_spec(target) {
+            let name = match graph.node_data(spec.base_infer).as_deref() {
+                Some(SemanticNodeData::Infer { name, .. }) => Arc::clone(name),
+                _ => return None,
+            };
+            return Some(InferPatternInfo::new(
+                InferPatternShape::ReverseHomomorphicMapped,
+                vec![InferParamSite {
+                    node: spec.base_infer,
+                    name,
+                    priority: InferenceCandidatePriority::HomomorphicMapped,
+                }],
+                Some(spec),
+            ));
+        }
         match graph.node_data(target).as_deref() {
-            Some(SemanticNodeData::Infer { name }) => Some(InferPatternInfo {
-                shape: InferPatternShape::Bare,
-                sites: vec![InferParamSite {
+            Some(SemanticNodeData::Infer { name, .. }) => Some(InferPatternInfo::new(
+                InferPatternShape::Bare,
+                vec![InferParamSite {
                     node: target,
                     name: Arc::clone(name),
                     priority: InferenceCandidatePriority::NakedTypeParameter,
                 }],
-            }),
+                None,
+            )),
             Some(SemanticNodeData::Object(view)) => {
                 let mut sites = Vec::new();
                 for member in view.positive_members().iter() {
-                    if let Some(SemanticNodeData::Infer { name }) =
+                    if let Some(SemanticNodeData::Infer { name, .. }) =
                         graph.node_data(member.value).as_deref()
                     {
                         sites.push(InferParamSite {
@@ -1006,15 +1621,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         });
                     }
                 }
-                (!sites.is_empty()).then_some(InferPatternInfo {
-                    shape: InferPatternShape::ObjectProps,
-                    sites,
-                })
+                (!sites.is_empty())
+                    .then(|| InferPatternInfo::new(InferPatternShape::ObjectProps, sites, None))
             }
             Some(SemanticNodeData::Tuple { elements, .. }) => {
                 let mut sites = Vec::new();
                 for element in elements.iter() {
-                    if let Some(SemanticNodeData::Infer { name }) =
+                    if let Some(SemanticNodeData::Infer { name, .. }) =
                         graph.node_data(element.value).as_deref()
                     {
                         sites.push(InferParamSite {
@@ -1024,22 +1637,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         });
                     }
                 }
-                (!sites.is_empty()).then_some(InferPatternInfo {
-                    shape: InferPatternShape::TupleHeadTail,
-                    sites,
-                })
+                (!sites.is_empty())
+                    .then(|| InferPatternInfo::new(InferPatternShape::TupleHeadTail, sites, None))
             }
             Some(SemanticNodeData::Array { element, .. }) => {
-                if let Some(SemanticNodeData::Infer { name }) = graph.node_data(*element).as_deref()
+                if let Some(SemanticNodeData::Infer { name, .. }) =
+                    graph.node_data(*element).as_deref()
                 {
-                    Some(InferPatternInfo {
-                        shape: InferPatternShape::ArrayElement,
-                        sites: vec![InferParamSite {
+                    Some(InferPatternInfo::new(
+                        InferPatternShape::ArrayElement,
+                        vec![InferParamSite {
                             node: *element,
                             name: Arc::clone(name),
                             priority: InferenceCandidatePriority::Argument,
                         }],
-                    })
+                        None,
+                    ))
                 } else {
                     None
                 }
@@ -1051,7 +1664,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }) => {
                 let mut sites = Vec::new();
                 for param in params.iter() {
-                    if let Some(SemanticNodeData::Infer { name }) =
+                    if let Some(SemanticNodeData::Infer { name, .. }) =
                         graph.node_data(param.ty).as_deref()
                     {
                         sites.push(InferParamSite {
@@ -1059,9 +1672,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name: Arc::clone(name),
                             priority: InferenceCandidatePriority::Argument,
                         });
+                    } else {
+                        // A function parameter may itself be a variadic
+                        // tuple/array inference pattern (`...args:
+                        // [...infer R]`). The function relation flips the
+                        // occurrence to contravariant; the nested
+                        // container reducer deposits into these exact
+                        // sites.
+                        match graph.node_data(param.ty).as_deref() {
+                            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                                for element in elements.iter() {
+                                    if let Some(SemanticNodeData::Infer { name, .. }) =
+                                        graph.node_data(element.value).as_deref()
+                                    {
+                                        sites.push(InferParamSite {
+                                            node: element.value,
+                                            name: Arc::clone(name),
+                                            priority: InferenceCandidatePriority::Argument,
+                                        });
+                                    }
+                                }
+                            }
+                            Some(SemanticNodeData::Array { element, .. }) => {
+                                if let Some(SemanticNodeData::Infer { name, .. }) =
+                                    graph.node_data(*element).as_deref()
+                                {
+                                    sites.push(InferParamSite {
+                                        node: *element,
+                                        name: Arc::clone(name),
+                                        priority: InferenceCandidatePriority::Argument,
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                if let Some(SemanticNodeData::Infer { name }) =
+                if let Some(SemanticNodeData::Infer { name, .. }) =
                     graph.node_data(*return_type).as_deref()
                 {
                     sites.push(InferParamSite {
@@ -1070,13 +1717,89 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         priority: InferenceCandidatePriority::ReturnType,
                     });
                 }
-                (!sites.is_empty()).then_some(InferPatternInfo {
-                    shape: InferPatternShape::Function,
-                    sites,
-                })
+                (!sites.is_empty())
+                    .then(|| InferPatternInfo::new(InferPatternShape::Function, sites, None))
             }
             _ => None,
         }
+    }
+
+    /// Recognize only the exact `{ [P in keyof infer T]: X }` descriptor.
+    fn reverse_homomorphic_spec(
+        &self,
+        mapped_node: SemanticNodeId,
+    ) -> Option<ReverseHomomorphicSpec> {
+        let graph = self.graph();
+        let mapped = graph.node_data(mapped_node)?;
+        let (source, mapper) = match mapped.as_ref() {
+            SemanticNodeData::Mapped { source, mapper } if mapper.name_remap.is_none() => {
+                (*source, mapper.clone())
+            }
+            _ => return None,
+        };
+        drop(mapped);
+
+        let source = self.peel_relation_alias(source)?;
+        let key_space = self.peel_relation_alias(mapper.key_space)?;
+        let key_base = match graph.node_data(key_space).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => self.peel_relation_alias(*base)?,
+            _ => return None,
+        };
+        if source != key_base
+            || !matches!(
+                graph.node_data(key_base).as_deref(),
+                Some(SemanticNodeData::Infer { .. })
+            )
+            || !matches!(
+                graph.node_data(mapper.parameter_node).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. })
+            )
+        {
+            return None;
+        }
+        Some(ReverseHomomorphicSpec {
+            mapped_node,
+            base_infer: key_base,
+            mapper_parameter: mapper.parameter_node,
+            template: mapper.value_expr,
+            modifiers: ReverseMappedModifiers {
+                optionality: mapper.optionality,
+                readonly: mapper.readonly,
+            },
+        })
+    }
+
+    fn peel_relation_alias(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        let mut current = node;
+        let mut seen = FxHashSet::default();
+        while seen.insert(current) {
+            match self.graph().node_data(current).as_deref() {
+                Some(SemanticNodeData::Alias(inner)) => current = *inner,
+                Some(_) => return Some(current),
+                None => return None,
+            }
+        }
+        None
+    }
+
+    /// The transient inference occurrence of the current reducer. A popped
+    /// SCC member re-discharges through a virtual root occurrence until it
+    /// opens a nested real frame; ordinary structural frames read their
+    /// occurrence directly from the shared reentry stack.
+    fn relation_current_occurrence(&self) -> InferenceOccurrence {
+        let txn = self.relation_txn.borrow();
+        if let Some((virtual_depth, occurrence)) = txn.redischarge_occurrence {
+            if txn.reentry().depth() <= virtual_depth {
+                return occurrence;
+            }
+        }
+        txn.reentry()
+            .frames_top_occurrence()
+            .unwrap_or(InferenceOccurrence::ARGUMENT_COVARIANT)
+    }
+
+    fn relation_occurrence(&self, position: InferPosition) -> InferenceOccurrence {
+        inference_occurrence_for_position(self.relation_current_occurrence(), position)
     }
 
     /// Deposit an inference candidate into the active session (a
@@ -1089,40 +1812,287 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         param_node: SemanticNodeId,
         bound: SemanticNodeId,
-        position: InferPosition,
+        occurrence: InferenceOccurrence,
     ) -> bool {
         if self.relation_root_is_open(param_node) || self.relation_root_is_open(bound) {
             return false;
         }
-        let (priority, variance) = match position {
-            InferPosition::Covariant => (
-                InferenceCandidatePriority::Argument,
-                VariancePhase::Covariant,
-            ),
-            InferPosition::ContravariantParam => (
-                InferenceCandidatePriority::Argument,
-                VariancePhase::Contravariant,
-            ),
-            InferPosition::Return => (
-                InferenceCandidatePriority::ReturnType,
-                VariancePhase::Covariant,
-            ),
-        };
         let mut txn = self.relation_txn.borrow_mut();
         let active_id = txn.active_session().map(|session| session.id);
-        if let Some(session) = txn.active_session_mut() {
-            session.deposit(param_node, bound, priority, variance);
+        let accepted = txn.active_session_mut().is_some_and(|session| {
+            session.deposit(param_node, bound, occurrence.priority, occurrence.variance)
+        });
+        if !accepted {
+            return false;
         }
-        if let Some(depth) = txn.reentry().depth().checked_sub(1) {
-            let top_opened_session = txn
-                .reentry()
-                .frame_opened_session(depth)
-                .is_some_and(|opened| Some(opened) == active_id);
-            if !top_opened_session {
-                txn.reentry_mut().note_session_delta(depth);
+        txn.note_candidate_write(active_id);
+        true
+    }
+
+    fn relation_projection_target(&self, node: SemanticNodeId) -> bool {
+        self.relation_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| session.is_projection_target(node))
+    }
+
+    /// Deposit the assembled reverse candidate through the same frame/session
+    /// ownership gate as ordinary and projection candidates. A nested frame
+    /// mutating an outer session is a session-local delta and therefore cannot
+    /// publish an otherwise context-free relation payload.
+    fn relation_reverse_aggregate_deposit(
+        &self,
+        param_node: SemanticNodeId,
+        candidate: SemanticNodeId,
+        priority: InferenceCandidatePriority,
+    ) -> bool {
+        let mut txn = self.relation_txn.borrow_mut();
+        let active_id = txn.active_session().map(|session| session.id);
+        let accepted = txn.active_session_mut().is_some_and(|session| {
+            session.deposit_reverse_aggregate(param_node, candidate, priority)
+        });
+        if !accepted {
+            return false;
+        }
+        txn.note_candidate_write(active_id);
+        true
+    }
+
+    /// Deposit into a registered reverse projection. The indexed access is
+    /// only a projection target; it never becomes an `Infer` declaration.
+    fn relation_projection_deposit(
+        &self,
+        projection: SemanticNodeId,
+        bound: SemanticNodeId,
+        occurrence: InferenceOccurrence,
+    ) -> bool {
+        let bound = match self.unwrap_identity_carrier_for_relation(bound) {
+            IdentityCarrierUnwrap::Concrete(bound) => bound,
+            IdentityCarrierUnwrap::Unresolvable => return false,
+        };
+        if self.relation_root_is_open(projection) || self.relation_root_is_open(bound) {
+            return false;
+        }
+        if self.relation_subtree_contains_semantically_unresolved(bound)
+            || super::raise::node_is_unknown_materializing_failure(self, bound)
+            || super::raise::node_contains_semantic_miss_with_dispatch(self, bound) != Some(false)
+        {
+            return false;
+        }
+        let Some(bound_data) = self.graph().node_data(bound) else {
+            return false;
+        };
+        if is_deferred(&bound_data)
+            || matches!(
+                bound_data.as_ref(),
+                SemanticNodeData::TypeParam { .. }
+                    | SemanticNodeData::Infer { .. }
+                    | SemanticNodeData::InferRef { .. }
+            )
+        {
+            return false;
+        }
+        drop(bound_data);
+        let mut txn = self.relation_txn.borrow_mut();
+        let active_id = txn.active_session().map(|session| session.id);
+        let deposited = txn.active_session_mut().is_some_and(|session| {
+            session.deposit_projection(projection, bound, occurrence.priority, occurrence.variance)
+        });
+        if !deposited {
+            return false;
+        }
+        txn.note_candidate_write(active_id);
+        true
+    }
+
+    fn relation_subtree_contains_semantically_unresolved(&self, root: SemanticNodeId) -> bool {
+        self.relation_subtree_matches(root, |_, data| data.means_type_is_not_yet_known())
+    }
+
+    fn relation_reverse_input_is_semantically_resolved(&self, root: SemanticNodeId) -> bool {
+        !self.relation_subtree_contains_semantically_unresolved(root)
+            && !super::raise::node_is_unknown_materializing_failure(self, root)
+            && super::raise::node_contains_semantic_miss_with_dispatch(self, root) == Some(false)
+    }
+
+    /// Enforces the assembled-input preflight documented in `/type-resolution`
+    /// under "Reverse-homomorphic mapped recovery".
+    fn relation_reverse_source_inputs_are_semantically_resolved(
+        &self,
+        source: SemanticNodeId,
+    ) -> bool {
+        let Some(data) = self.graph().node_data(source) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Object(surface) => {
+                surface.positive_members().iter().all(|member| {
+                    self.relation_reverse_input_is_semantically_resolved(member.value)
+                }) && surface.index_signatures.iter().all(|signature| {
+                    self.relation_reverse_input_is_semantically_resolved(signature.key_type)
+                        && self
+                            .relation_reverse_input_is_semantically_resolved(signature.value_type)
+                })
+            }
+            SemanticNodeData::Array { element, .. } => {
+                self.relation_reverse_input_is_semantically_resolved(*element)
+            }
+            SemanticNodeData::Tuple { elements, .. } => elements
+                .iter()
+                .all(|element| self.relation_reverse_input_is_semantically_resolved(element.value)),
+            _ => false,
+        }
+    }
+
+    fn relation_subtree_contains_projection(&self, root: SemanticNodeId) -> bool {
+        self.relation_subtree_matches(root, |node, _| self.relation_projection_target(node))
+    }
+
+    fn relation_subtree_matches(
+        &self,
+        root: SemanticNodeId,
+        mut matches: impl FnMut(SemanticNodeId, &SemanticNodeData) -> bool,
+    ) -> bool {
+        let graph = self.graph();
+        let mut visited = FxHashSet::default();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            if matches(node, data.as_ref()) {
+                return true;
+            }
+            match data.as_ref() {
+                SemanticNodeData::Alias(inner) => stack.push(*inner),
+                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                    stack.extend(members.iter().copied());
+                }
+                SemanticNodeData::Array { element, .. } => stack.push(*element),
+                SemanticNodeData::Tuple { elements, .. } => {
+                    stack.extend(elements.iter().map(|element| element.value));
+                }
+                SemanticNodeData::Object(surface) => {
+                    stack.extend(surface.positive_members().iter().map(|member| member.value));
+                    stack.extend(surface.call_signatures.iter().copied());
+                    stack.extend(surface.construct_signatures.iter().copied());
+                    for signature in surface.index_signatures.iter() {
+                        stack.push(signature.key_type);
+                        stack.push(signature.value_type);
+                    }
+                    if let Some(keyspace) = surface.keyspace {
+                        stack.push(keyspace);
+                    }
+                    if let Some(operands) = surface.open_spread_operands() {
+                        stack.extend(operands.as_slice().iter().copied());
+                    }
+                }
+                SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    type_parameters,
+                    ..
+                } => {
+                    stack.extend(params.iter().map(|parameter| parameter.ty));
+                    stack.push(*return_type);
+                    for parameter in type_parameters.iter() {
+                        stack.extend(parameter.constraint);
+                        stack.extend(parameter.default);
+                    }
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    stack.extend(expressions.iter().copied());
+                }
+                SemanticNodeData::KeyOf { base } => stack.push(*base),
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    stack.push(*object);
+                    if let IndexKey::TypeNode(index) = index {
+                        stack.push(*index);
+                    }
+                }
+                SemanticNodeData::Mapped { source, mapper } => {
+                    stack.push(*source);
+                    stack.push(mapper.key_space);
+                    stack.push(mapper.value_expr);
+                    stack.extend(mapper.name_remap);
+                }
+                SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref,
+                    false_branch_ref,
+                    ..
+                } => {
+                    stack.extend([*check, *extends, *true_branch_ref, *false_branch_ref]);
+                }
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
+                SemanticNodeData::MergedDecl { contributors } => {
+                    stack.extend(contributors.iter().copied());
+                }
+                SemanticNodeData::SyntheticBinding { value_node, .. } => {
+                    stack.push(SemanticNodeId(*value_node));
+                }
+                SemanticNodeData::TypeParam {
+                    constraint,
+                    default,
+                    ..
+                } => {
+                    stack.extend(constraint.iter().copied());
+                    stack.extend(default.iter().copied());
+                }
+                SemanticNodeData::TypeOf(_)
+                | SemanticNodeData::BareRef(_)
+                | SemanticNodeData::ImportType(_) => {
+                    stack.extend(data.carrier_type_args().iter().copied());
+                }
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::Opaque(_)
+                | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
+                | SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::RawFallback { .. } => {}
             }
         }
-        true
+        false
+    }
+
+    fn try_relation_projection(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut [InferBinding],
+        occurrence: InferenceOccurrence,
+    ) -> Option<RelationResult> {
+        let projection = match occurrence.variance {
+            VariancePhase::Covariant => self
+                .relation_projection_target(target)
+                .then_some((target, source)),
+            VariancePhase::Contravariant => self
+                .relation_projection_target(source)
+                .then_some((source, target)),
+            VariancePhase::Invariant => {
+                if self.relation_projection_target(target) {
+                    Some((target, source))
+                } else {
+                    self.relation_projection_target(source)
+                        .then_some((source, target))
+                }
+            }
+        };
+        let projection = projection?;
+        Some(
+            if self.relation_projection_deposit(projection.0, projection.1, occurrence) {
+                assignable(bindings)
+            } else {
+                RelationResult::Unknown
+            },
+        )
     }
 
     /// Whether an inference session is currently active.
@@ -1155,22 +2125,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    fn relate_signature_alternatives(
+    fn relate_pair_alternatives(
         &self,
-        source_signatures: &[SemanticNodeId],
-        target_signature: SemanticNodeId,
+        alternatives: &[(SemanticNodeId, SemanticNodeId)],
         bindings: &mut Vec<InferBinding>,
+        position: InferPosition,
+    ) -> RelationResult {
+        self.relate_pair_alternatives_with_freshness(alternatives, bindings, position, false)
+    }
+
+    fn relate_union_target_alternatives(
+        &self,
+        alternatives: &[(SemanticNodeId, SemanticNodeId)],
+        bindings: &mut Vec<InferBinding>,
+        position: InferPosition,
+    ) -> RelationResult {
+        self.relate_pair_alternatives_with_freshness(alternatives, bindings, position, true)
+    }
+
+    fn relate_pair_alternatives_with_freshness(
+        &self,
+        alternatives: &[(SemanticNodeId, SemanticNodeId)],
+        bindings: &mut Vec<InferBinding>,
+        position: InferPosition,
+        excess_prepass_completed: bool,
     ) -> RelationResult {
         let mut any_unknown = false;
-        for source_signature in source_signatures {
+        for (source, target) in alternatives {
             let checkpoint = self.relation_session_checkpoint();
             let bindings_len = bindings.len();
-            match self.relate_member(
-                *source_signature,
-                target_signature,
-                bindings,
-                InferPosition::Covariant,
-            ) {
+            let result = if excess_prepass_completed {
+                self.relate_union_arm_after_excess_prepass(*source, *target, bindings, position)
+            } else {
+                self.relate_member(*source, *target, bindings, position)
+            };
+            match result {
                 result @ RelationResult::Assignable { .. } => return result,
                 RelationResult::Unknown => {
                     self.relation_session_rollback(&checkpoint);
@@ -1190,27 +2179,606 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    fn relate_signature_alternatives(
+        &self,
+        source_signatures: &[SemanticNodeId],
+        target_signature: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        let alternatives: Vec<_> = source_signatures
+            .iter()
+            .map(|source| (*source, target_signature))
+            .collect();
+        self.relate_pair_alternatives(&alternatives, bindings, InferPosition::Covariant)
+    }
+
+    /// Recover the input of an exact homomorphic mapped target. The only
+    /// externally visible output is the normal relation verdict; recovered
+    /// values and the aggregate candidate stay in the active session.
+    fn relate_reverse_homomorphic(
+        &self,
+        source: SemanticNodeId,
+        spec: &ReverseHomomorphicSpec,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        let source = match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(source) => source,
+            IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
+        };
+        if self.relation_root_is_open(source) {
+            return RelationResult::Unknown;
+        }
+        if !self.relation_reverse_source_inputs_are_semantically_resolved(source) {
+            return RelationResult::Unknown;
+        }
+        let overall_checkpoint = self.relation_session_checkpoint();
+        let Some(checkpoint) = overall_checkpoint.as_ref() else {
+            return RelationResult::Unknown;
+        };
+        let bindings_len = bindings.len();
+        let graph = self.graph();
+        let source_shape = match graph.node_data(source).as_deref() {
+            Some(SemanticNodeData::Object(view)) if !view.is_open_spread() => {
+                if view.has_known_index_signature() && view.index_signatures.is_empty() {
+                    self.relation_session_rollback(&overall_checkpoint);
+                    return RelationResult::Unknown;
+                }
+                ReverseSourceShape::Object
+            }
+            Some(SemanticNodeData::Array { readonly, .. }) => ReverseSourceShape::Array {
+                readonly: *readonly,
+            },
+            Some(SemanticNodeData::Tuple { readonly, .. }) => ReverseSourceShape::Tuple {
+                readonly: *readonly,
+            },
+            _ => {
+                self.relation_session_rollback(&overall_checkpoint);
+                return RelationResult::Unknown;
+            }
+        };
+
+        let relation = match graph.node_data(source).as_deref() {
+            Some(SemanticNodeData::Object(view)) => {
+                let members = view.positive_members().to_vec();
+                let index_signatures = view.index_signatures.to_vec();
+                let mut verdict = assignable(bindings);
+                for member in members {
+                    let Some(optional) =
+                        reverse_optional(member.optional, spec.modifiers.optionality)
+                    else {
+                        verdict = RelationResult::NotAssignable;
+                        break;
+                    };
+                    let Some(readonly) = reverse_readonly(member.readonly, spec.modifiers.readonly)
+                    else {
+                        verdict = RelationResult::NotAssignable;
+                        break;
+                    };
+                    let key = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                        member.name.to_string(),
+                    )));
+                    verdict = self.recover_reverse_projection(
+                        member.value,
+                        key,
+                        spec,
+                        bindings,
+                        move |value| {
+                            let mut recovered = member;
+                            recovered.value = value;
+                            recovered.optional = optional;
+                            recovered.readonly = readonly;
+                            ReverseRecoveredEntry::ObjectMember { member: recovered }
+                        },
+                    );
+                    if !matches!(verdict, RelationResult::Assignable { .. }) {
+                        break;
+                    }
+                }
+                if matches!(verdict, RelationResult::Assignable { .. }) {
+                    for signature in index_signatures {
+                        let Some(readonly) =
+                            reverse_readonly(signature.readonly, spec.modifiers.readonly)
+                        else {
+                            verdict = RelationResult::NotAssignable;
+                            break;
+                        };
+                        let key = signature.key_type;
+                        verdict = self.recover_reverse_projection(
+                            signature.value_type,
+                            key,
+                            spec,
+                            bindings,
+                            move |value| {
+                                let mut recovered = signature;
+                                recovered.value_type = value;
+                                recovered.readonly = readonly;
+                                ReverseRecoveredEntry::IndexSignature {
+                                    signature: recovered,
+                                }
+                            },
+                        );
+                        if !matches!(verdict, RelationResult::Assignable { .. }) {
+                            break;
+                        }
+                    }
+                }
+                verdict
+            }
+            Some(SemanticNodeData::Array { element, .. }) => {
+                let number_key =
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                self.recover_reverse_projection(*element, number_key, spec, bindings, |value| {
+                    ReverseRecoveredEntry::ArrayElement { value }
+                })
+            }
+            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                let elements = elements.to_vec();
+                let mut verdict = assignable(bindings);
+                let mut variadic_key_domain = false;
+                for (index, element) in elements.into_iter().enumerate() {
+                    let Some(optional) =
+                        reverse_optional(element.optional, spec.modifiers.optionality)
+                    else {
+                        verdict = RelationResult::NotAssignable;
+                        break;
+                    };
+                    if element.rest {
+                        variadic_key_domain = true;
+                        let rest = match self.unwrap_identity_carrier_for_relation(element.value) {
+                            IdentityCarrierUnwrap::Concrete(rest) => rest,
+                            IdentityCarrierUnwrap::Unresolvable => {
+                                verdict = RelationResult::Unknown;
+                                break;
+                            }
+                        };
+                        let Some(rest_data) = graph.node_data(rest) else {
+                            verdict = RelationResult::Unknown;
+                            break;
+                        };
+                        let (rest_element, rest_readonly) = match rest_data.as_ref() {
+                            SemanticNodeData::Array { element, readonly } => (*element, *readonly),
+                            _ => {
+                                verdict = RelationResult::Unknown;
+                                break;
+                            }
+                        };
+                        drop(rest_data);
+                        let key =
+                            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                        verdict = self.recover_reverse_projection(
+                            rest_element,
+                            key,
+                            spec,
+                            bindings,
+                            move |value| {
+                                let mut recovered = element;
+                                recovered.value = graph.intern_node(SemanticNodeData::Array {
+                                    element: value,
+                                    readonly: rest_readonly,
+                                });
+                                recovered.optional = optional;
+                                ReverseRecoveredEntry::TupleElement { element: recovered }
+                            },
+                        );
+                    } else {
+                        let key = if variadic_key_domain {
+                            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number))
+                        } else {
+                            graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                                index.to_string(),
+                            )))
+                        };
+                        verdict = self.recover_reverse_projection(
+                            element.value,
+                            key,
+                            spec,
+                            bindings,
+                            move |value| {
+                                let mut recovered = element;
+                                recovered.value = value;
+                                recovered.optional = optional;
+                                ReverseRecoveredEntry::TupleElement { element: recovered }
+                            },
+                        );
+                    }
+                    if !matches!(verdict, RelationResult::Assignable { .. }) {
+                        break;
+                    }
+                }
+                verdict
+            }
+            _ => RelationResult::Unknown,
+        };
+        if !matches!(relation, RelationResult::Assignable { .. }) {
+            self.relation_session_rollback(&overall_checkpoint);
+            bindings.truncate(bindings_len);
+            return relation;
+        }
+
+        let (recovered, partial) = self
+            .relation_txn
+            .borrow()
+            .active_session()
+            .map(|session| {
+                (
+                    session.recovered_since(checkpoint),
+                    session.reverse_is_partial(),
+                )
+            })
+            .unwrap_or_default();
+        let Some(aggregate) = self.assemble_reverse_candidate(source_shape, recovered) else {
+            self.relation_session_rollback(&overall_checkpoint);
+            bindings.truncate(bindings_len);
+            return RelationResult::Unknown;
+        };
+        let priority = if partial {
+            InferenceCandidatePriority::PartialHomomorphicMapped
+        } else {
+            InferenceCandidatePriority::HomomorphicMapped
+        };
+        if partial {
+            if let Some(session) = self.relation_txn.borrow_mut().active_session_mut() {
+                session.mark_reverse_partial();
+            }
+        }
+        let deposited =
+            self.relation_reverse_aggregate_deposit(spec.base_infer, aggregate, priority);
+        if !deposited {
+            self.relation_session_rollback(&overall_checkpoint);
+            bindings.truncate(bindings_len);
+            return RelationResult::Unknown;
+        }
+        assignable(bindings)
+    }
+
+    fn recover_reverse_projection<F>(
+        &self,
+        source: SemanticNodeId,
+        key: SemanticNodeId,
+        spec: &ReverseHomomorphicSpec,
+        bindings: &mut Vec<InferBinding>,
+        recover: F,
+    ) -> RelationResult
+    where
+        F: FnOnce(SemanticNodeId) -> ReverseRecoveredEntry,
+    {
+        let property_checkpoint = self.relation_session_checkpoint();
+        let Some(checkpoint) = property_checkpoint.as_ref() else {
+            return RelationResult::Unknown;
+        };
+        let bindings_len = bindings.len();
+        let template =
+            self.substitute_semantic_type_param(spec.template, spec.mapper_parameter, key);
+        let projection_probe = self.graph().intern_node(SemanticNodeData::IndexedAccess {
+            object: spec.base_infer,
+            index: IndexKey::TypeNode(spec.mapper_parameter),
+        });
+        let projection_probe =
+            self.substitute_semantic_type_param(projection_probe, spec.mapper_parameter, key);
+        let expected_index = match self.graph().node_data(projection_probe).as_deref() {
+            Some(SemanticNodeData::IndexedAccess { index, .. }) => index.clone(),
+            _ => {
+                self.relation_session_rollback(&property_checkpoint);
+                return RelationResult::Unknown;
+            }
+        };
+        let projection_targets =
+            self.discover_reverse_projection_targets(template, spec.base_infer, &expected_index);
+        let registered = self
+            .relation_txn
+            .borrow_mut()
+            .active_session_mut()
+            .is_some_and(|session| session.register_projection_targets(&projection_targets));
+        if !registered {
+            self.relation_session_rollback(&property_checkpoint);
+            return RelationResult::Unknown;
+        }
+
+        let relation = self.relate_member(source, template, bindings, InferPosition::Covariant);
+        if !matches!(relation, RelationResult::Assignable { .. }) {
+            self.relation_session_rollback(&property_checkpoint);
+            bindings.truncate(bindings_len);
+            return relation;
+        }
+        let candidates = self
+            .relation_txn
+            .borrow()
+            .active_session()
+            .map(|session| session.projection_candidates_since(checkpoint))
+            .unwrap_or_default();
+        let (candidate_nodes, variance) = select_inference_candidates(&candidates);
+        let projection_recovered = !candidate_nodes.is_empty();
+        let recovered = if projection_recovered {
+            self.relation_combine_candidates(&candidate_nodes, variance)
+        } else {
+            self.graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+        };
+        let mut txn = self.relation_txn.borrow_mut();
+        let Some(session) = txn.active_session_mut() else {
+            drop(txn);
+            self.relation_session_rollback(&property_checkpoint);
+            bindings.truncate(bindings_len);
+            return RelationResult::Unknown;
+        };
+        if !projection_recovered {
+            session.mark_reverse_partial();
+        }
+        session.push_recovered(recover(recovered));
+        assignable(bindings)
+    }
+
+    fn assemble_reverse_candidate(
+        &self,
+        source: ReverseSourceShape,
+        recovered: Vec<ReverseRecoveredEntry>,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        match source {
+            ReverseSourceShape::Object => {
+                let mut members = Vec::new();
+                let mut index_signatures = Vec::new();
+                for entry in recovered {
+                    match entry {
+                        ReverseRecoveredEntry::ObjectMember { member, .. } => {
+                            members.push(member);
+                        }
+                        ReverseRecoveredEntry::IndexSignature { signature, .. } => {
+                            index_signatures.push(signature);
+                        }
+                        _ => return None,
+                    }
+                }
+                let has_index_signature = !index_signatures.is_empty();
+                Some(graph.intern_node(SemanticNodeData::Object(
+                    crate::semantic_query::surface_view! {
+                        members: Arc::from(members.into_boxed_slice()),
+                        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        index_signatures: Arc::from(index_signatures.into_boxed_slice()),
+                        keyspace: None,
+                        has_index_signature,
+                        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+                    },
+                )))
+            }
+            ReverseSourceShape::Array { readonly } => match recovered.as_slice() {
+                [ReverseRecoveredEntry::ArrayElement { value, .. }] => {
+                    Some(graph.intern_node(SemanticNodeData::Array {
+                        element: *value,
+                        readonly,
+                    }))
+                }
+                _ => None,
+            },
+            ReverseSourceShape::Tuple { readonly } => {
+                let mut elements = Vec::with_capacity(recovered.len());
+                for entry in recovered {
+                    match entry {
+                        ReverseRecoveredEntry::TupleElement { element, .. } => {
+                            elements.push(element);
+                        }
+                        _ => return None,
+                    }
+                }
+                match self.normalize_tuple_spread(&elements, readonly) {
+                    super::build::NormalizedTupleShape::Tuple(elements) => {
+                        Some(graph.intern_node(SemanticNodeData::Tuple {
+                            elements: Arc::from(elements.into_boxed_slice()),
+                            readonly,
+                        }))
+                    }
+                    super::build::NormalizedTupleShape::Array(array) => Some(array),
+                }
+            }
+        }
+    }
+
+    fn discover_reverse_projection_targets(
+        &self,
+        root: SemanticNodeId,
+        base_infer: SemanticNodeId,
+        expected_index: &IndexKey,
+    ) -> Vec<SemanticNodeId> {
+        let graph = self.graph();
+        let Some(SemanticNodeData::Infer {
+            name: base_name,
+            binder: base_binder,
+        }) = graph.node_data(base_infer).as_deref().cloned()
+        else {
+            return Vec::new();
+        };
+        let mut targets = Vec::new();
+        let mut visited: FxHashSet<(SemanticNodeId, bool)> = FxHashSet::default();
+        let mut stack = vec![(root, false)];
+        while let Some((node, shadowed)) = stack.pop() {
+            if !visited.insert((node, shadowed)) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    if !shadowed
+                        && index == expected_index
+                        && self.reverse_projection_object_matches(
+                            *object,
+                            base_infer,
+                            base_binder.clone(),
+                        )
+                    {
+                        targets.push(node);
+                    }
+                    stack.push((*object, shadowed));
+                    if let IndexKey::TypeNode(index) = index {
+                        stack.push((*index, shadowed));
+                    }
+                }
+                SemanticNodeData::Mapped { source, mapper } => {
+                    stack.push((*source, shadowed));
+                    stack.push((mapper.key_space, shadowed));
+                    let mapper_shadows = matches!(
+                        graph.node_data(mapper.parameter_node).as_deref(),
+                        Some(SemanticNodeData::TypeParam { display_name, .. })
+                            if display_name.as_ref() == base_name.as_ref()
+                    );
+                    stack.push((mapper.value_expr, shadowed || mapper_shadows));
+                    if let Some(remap) = mapper.name_remap {
+                        stack.push((remap, shadowed || mapper_shadows));
+                    }
+                }
+                SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref,
+                    false_branch_ref,
+                    ..
+                } => {
+                    let conditional_shadows =
+                        self.extends_pattern_declares_infer(*extends, base_infer);
+                    stack.push((*check, shadowed));
+                    stack.push((*false_branch_ref, shadowed));
+                    stack.push((*extends, shadowed || conditional_shadows));
+                    stack.push((*true_branch_ref, shadowed || conditional_shadows));
+                }
+                SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    type_parameters,
+                    ..
+                } => {
+                    if shadowed
+                        || type_parameters
+                            .iter()
+                            .any(|parameter| parameter.name.as_ref() == base_name.as_ref())
+                    {
+                        continue;
+                    }
+                    for parameter in params.iter() {
+                        stack.push((parameter.ty, false));
+                    }
+                    stack.push((*return_type, false));
+                    for parameter in type_parameters.iter() {
+                        if let Some(constraint) = parameter.constraint {
+                            stack.push((constraint, false));
+                        }
+                        if let Some(default) = parameter.default {
+                            stack.push((default, false));
+                        }
+                    }
+                }
+                SemanticNodeData::Alias(inner) => stack.push((*inner, shadowed)),
+                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                    stack.extend(members.iter().map(|member| (*member, shadowed)));
+                }
+                SemanticNodeData::Array { element, .. } => stack.push((*element, shadowed)),
+                SemanticNodeData::Tuple { elements, .. } => {
+                    stack.extend(elements.iter().map(|element| (element.value, shadowed)));
+                }
+                SemanticNodeData::Object(surface) => {
+                    stack.extend(
+                        surface
+                            .positive_members()
+                            .iter()
+                            .map(|member| (member.value, shadowed)),
+                    );
+                    stack.extend(
+                        surface
+                            .call_signatures
+                            .iter()
+                            .chain(surface.construct_signatures.iter())
+                            .map(|signature| (*signature, shadowed)),
+                    );
+                    for signature in surface.index_signatures.iter() {
+                        stack.push((signature.key_type, shadowed));
+                        stack.push((signature.value_type, shadowed));
+                    }
+                    if let Some(keyspace) = surface.keyspace {
+                        stack.push((keyspace, shadowed));
+                    }
+                    if let Some(operands) = surface.open_spread_operands() {
+                        stack.extend(operands.as_slice().iter().map(|node| (*node, shadowed)));
+                    }
+                }
+                SemanticNodeData::MergedDecl { contributors } => {
+                    stack.extend(
+                        contributors
+                            .iter()
+                            .map(|contributor| (*contributor, shadowed)),
+                    );
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    stack.extend(expressions.iter().map(|expression| (*expression, shadowed)));
+                }
+                SemanticNodeData::KeyOf { base } => stack.push((*base, shadowed)),
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    stack.extend(args.iter().map(|argument| (*argument, shadowed)));
+                }
+                other => {
+                    stack.extend(
+                        other
+                            .carrier_type_args()
+                            .iter()
+                            .map(|argument| (*argument, shadowed)),
+                    );
+                }
+            }
+        }
+        targets.sort_by_key(|node| node.0);
+        targets.dedup();
+        targets
+    }
+
+    fn reverse_projection_object_matches(
+        &self,
+        object: SemanticNodeId,
+        base_infer: SemanticNodeId,
+        base_binder: crate::semantic_query::InferBinderId,
+    ) -> bool {
+        let Some(object) = self.peel_relation_alias(object) else {
+            return false;
+        };
+        if object == base_infer {
+            return true;
+        }
+        let Some(data) = self.graph().node_data(object) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::InferRef { binder, .. } => *binder == base_binder,
+            _ => false,
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────────
     // The lattice adapter: full-key sub-relations from the reducer
     // ──────────────────────────────────────────────────────────────────
 
     /// The full identity of a sub-relation inside the current frame:
     /// inherits the top frame's relation kind / policy / freshness / env
-    /// context, with NO inference context (a pure member judgement is
-    /// session-independent; binding deposits route through the session,
-    /// never the key).
+    /// context. Ordinary direct-infer member judgements remain
+    /// session-independent. Reverse-projection judgements retain the frozen
+    /// inference context because registered indexed-access targets alter
+    /// their reduction and therefore their memo identity.
     fn relation_sub_key(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelateMemoKey {
         let txn = self.relation_txn.borrow();
         match txn.reentry().frames_top_key() {
-            Some(top) => RelateMemoKey {
-                source,
-                target,
-                relation: top.relation,
-                policy: top.policy,
-                source_freshness: top.source_freshness,
-                inference_context: None,
-                context: top.context,
-            },
+            Some(top) => {
+                let inference_context = top.inference_context.as_ref().and_then(|context| {
+                    (context.pass_kind == InferencePassKind::ReverseHomomorphicMapped)
+                        .then(|| context.clone())
+                });
+                RelateMemoKey {
+                    source,
+                    target,
+                    relation: top.relation,
+                    policy: top.policy,
+                    source_freshness: top.source_freshness,
+                    inference_context,
+                    context: top.context,
+                }
+            }
             None => self.relate_key_for(source, target),
         }
     }
@@ -1227,22 +2795,57 @@ impl<'a> ProjectSemanticDispatch<'a> {
         bindings: &mut Vec<InferBinding>,
         position: InferPosition,
     ) -> RelationResult {
+        self.relate_member_with_freshness(source, target, bindings, position, None)
+    }
+
+    /// Relate an ordinary union arm after the enclosing fresh-source frame
+    /// has completed its one excess-property prepass. Freshness is consumed
+    /// by that enclosing check; carrying it into each arm would rerun a
+    /// branch-local excess check and reject names known by sibling arms.
+    fn relate_union_arm_after_excess_prepass(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        position: InferPosition,
+    ) -> RelationResult {
+        self.relate_member_with_freshness(
+            source,
+            target,
+            bindings,
+            position,
+            Some(crate::semantic_query::FreshnessKey::Regular),
+        )
+    }
+
+    fn relate_member_with_freshness(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        position: InferPosition,
+        source_freshness: Option<crate::semantic_query::FreshnessKey>,
+    ) -> RelationResult {
+        let occurrence = self.relation_occurrence(position);
+        if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
+            return result;
+        }
         let graph = self.graph();
         if self.relation_session_active() {
-            match position {
-                InferPosition::Covariant | InferPosition::Return => {
+            match occurrence.variance {
+                VariancePhase::Covariant | VariancePhase::Invariant => {
                     if let Some(SemanticNodeData::Infer { .. }) = graph.node_data(target).as_deref()
                     {
-                        if !self.relation_deposit(target, source, position) {
+                        if !self.relation_deposit(target, source, occurrence) {
                             return RelationResult::Unknown;
                         }
                         return assignable(bindings);
                     }
                 }
-                InferPosition::ContravariantParam => {
+                VariancePhase::Contravariant => {
                     if let Some(SemanticNodeData::Infer { .. }) = graph.node_data(source).as_deref()
                     {
-                        if !self.relation_deposit(source, target, position) {
+                        if !self.relation_deposit(source, target, occurrence) {
                             return RelationResult::Unknown;
                         }
                         return assignable(bindings);
@@ -1253,21 +2856,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The discharge substitution rail (re-discharge, design §2.3 step
         // 4): a member of a negatively-closed SCC re-runs against the
         // converged verdicts.
+        let mut key = self.relation_sub_key(source, target);
+        if let Some(source_freshness) = source_freshness {
+            key.source_freshness = source_freshness;
+        }
         {
             let txn = self.relation_txn.borrow();
             if !txn.discharge_substitution.is_empty() {
-                let key = self.relation_sub_key(source, target);
-                if let Some(step) = txn.discharge_substitution.get(&key) {
+                if let Some(step) = txn.discharge_substitution.get(&(key.clone(), occurrence)) {
                     return match step {
-                        RelationStep::Assignable { .. } => assignable(bindings),
+                        RelationStep::Assignable { bindings: sub } => {
+                            for binding in sub.iter() {
+                                if !bindings
+                                    .iter()
+                                    .any(|existing| existing.param == binding.param)
+                                {
+                                    bindings.push(binding.clone());
+                                }
+                            }
+                            assignable(bindings)
+                        }
                         RelationStep::NotAssignable => RelationResult::NotAssignable,
                         _ => RelationResult::Unknown,
                     };
                 }
             }
         }
-        let key = self.relation_sub_key(source, target);
-        match self.execute_relate(key) {
+        match self.execute_relate_with_occurrence(key, occurrence) {
             RelationStep::Assumed => {
                 // The coinductive hypothesis: assumed to hold; the edge is
                 // recorded on the frame.
@@ -1275,7 +2890,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             RelationStep::Assignable { bindings: sub } => {
                 for binding in sub.iter() {
-                    if !bindings.iter().any(|b| b.name == binding.name) {
+                    if !bindings.iter().any(|b| b.param == binding.param) {
                         bindings.push(binding.clone());
                     }
                 }
@@ -1342,17 +2957,60 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             return RelationResult::Unknown;
         }
+        let occurrence = self.relation_current_occurrence();
+        if let Some(result) =
+            self.try_relation_projection(key.source, key.target, bindings, occurrence)
+        {
+            return result;
+        }
+        let reverse_spec = self
+            .relation_txn
+            .borrow()
+            .active_session()
+            .and_then(InferenceSession::reverse_spec)
+            .cloned()
+            .filter(|spec| spec.mapped_node == key.target);
+        if let Some(spec) = reverse_spec {
+            return self.relate_reverse_homomorphic(key.source, &spec, bindings);
+        }
+        match self.reduce_relation_conditional(key.source) {
+            Some(Some(reduced)) => {
+                return self.relate_member(reduced, key.target, bindings, InferPosition::Covariant);
+            }
+            Some(None) => return RelationResult::Unknown,
+            None => {}
+        }
+        match self.reduce_relation_conditional(key.target) {
+            Some(Some(reduced)) => {
+                return self.relate_member(key.source, reduced, bindings, InferPosition::Covariant);
+            }
+            Some(None) => return RelationResult::Unknown,
+            None => {}
+        }
         // The binding root's bare-`Infer` arm: `check extends infer X`
-        // binds `X := check` for ANY check (the pre-relation semantics,
-        // now through the session).
+        // binds `X := check` for any check through the active session.
         if self.relation_session_active() {
-            if let Some(SemanticNodeData::Infer { .. }) =
-                self.graph().node_data(key.target).as_deref()
-            {
-                if !self.relation_deposit(key.target, key.source, InferPosition::Covariant) {
-                    return RelationResult::Unknown;
+            match occurrence.variance {
+                VariancePhase::Covariant | VariancePhase::Invariant => {
+                    if let Some(SemanticNodeData::Infer { .. }) =
+                        self.graph().node_data(key.target).as_deref()
+                    {
+                        if !self.relation_deposit(key.target, key.source, occurrence) {
+                            return RelationResult::Unknown;
+                        }
+                        return assignable(bindings);
+                    }
                 }
-                return assignable(bindings);
+                VariancePhase::Contravariant => {
+                    if let Some(SemanticNodeData::Infer { .. }) =
+                        self.graph().node_data(key.source).as_deref()
+                    {
+                        if !self.relation_deposit(key.source, key.target, occurrence) {
+                            return RelationResult::Unknown;
+                        }
+                        return assignable(bindings);
+                    }
+                }
             }
         }
         // The fresh excess-property prepass (once per frame, BEFORE ordinary
@@ -1378,6 +3036,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ShallowRelation::Unknown => {}
         }
         self.decide_relation_with_dispatch(key.source, key.target, bindings)
+    }
+
+    /// Reduce one conditional shell through the canonical conditional query.
+    /// The outer option distinguishes a non-conditional node; the inner
+    /// option distinguishes a decided reduction from an undecided shell.
+    fn reduce_relation_conditional(&self, node: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
+        let data = self.graph().node_data(node)?;
+        let SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            distributive,
+        } = data.as_ref()
+        else {
+            return None;
+        };
+        let key = SemanticQueryKey::Conditional {
+            check: *check,
+            extends: *extends,
+            true_branch: *true_branch_ref,
+            false_branch: *false_branch_ref,
+            distributive: *distributive,
+        };
+        drop(data);
+        Some(match self.execute_type_node(key) {
+            QueryResult::Value(SemanticQueryOutput { value, .. }) if value != node => Some(value),
+            _ => None,
+        })
     }
 
     /// The O(tag) fast-reject prefilter (RI-5): decides the trivial
@@ -1564,6 +3251,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.relation_root_is_open(source) || self.relation_root_is_open(target) {
             return RelationResult::Unknown;
         }
+        let occurrence = self.relation_current_occurrence();
+        if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
+            return result;
+        }
         if source == target {
             return assignable(bindings);
         }
@@ -1572,7 +3263,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut budget_used: u64 = 0;
         let mut work: Vec<RelateWork> = Vec::new();
         let mut results: Vec<RelationResult> = Vec::new();
-        work.push(RelateWork::Eval(source, target));
+        work.push(RelateWork::Expand(source, target));
         while let Some(item) = work.pop() {
             budget_used = budget_used.saturating_add(1);
             if budget_used > budget_limit {
@@ -1587,20 +3278,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return RelationResult::Unknown;
             }
             match item {
-                RelateWork::Eval(s, t) => {
+                RelateWork::Expand(s, t) => {
                     self.expand_pair(s, t, bindings, &mut work, &mut results);
+                }
+                RelateWork::Eval(s, t) => {
+                    if self.relation_eval_requires_canonical_frame(s, t) {
+                        results.push(self.relate_member(s, t, bindings, InferPosition::Covariant));
+                    } else {
+                        self.expand_pair(s, t, bindings, &mut work, &mut results);
+                    }
                 }
                 RelateWork::ReduceAnd(n) => {
                     let combined = reduce_and_from_results(&mut results, n);
                     results.push(combined);
                 }
-                RelateWork::ReduceOr(n) => {
-                    let combined = reduce_or_from_results(&mut results, n);
-                    results.push(combined);
-                }
             }
         }
         results.pop().unwrap_or(RelationResult::Unknown)
+    }
+
+    fn relation_eval_requires_canonical_frame(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> bool {
+        let graph = self.graph();
+        [source, target].into_iter().any(|node| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Conditional { .. })
+            )
+        })
     }
 
     /// Expand a single relate pair into direct result(s) or sub-work
@@ -1616,6 +3324,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) {
         if self.relation_root_is_open(source) || self.relation_root_is_open(target) {
             results.push(RelationResult::Unknown);
+            return;
+        }
+        let occurrence = self.relation_current_occurrence();
+        if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
+            results.push(result);
             return;
         }
         if source == target {
@@ -1749,21 +3462,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // ── Infer: bind through the active session (RI-6); without one,
         //    defensive Unknown. ──────────────────────────────────────────
-        if let SemanticNodeData::Infer { .. } = &*target_data {
-            if self.relation_session_active() {
-                if self.relation_deposit(target, source, InferPosition::Covariant) {
-                    results.push(assignable(bindings));
-                } else {
-                    results.push(RelationResult::Unknown);
+        match occurrence.variance {
+            VariancePhase::Covariant | VariancePhase::Invariant => {
+                if let SemanticNodeData::Infer { .. } = &*target_data {
+                    if self.relation_session_active()
+                        && self.relation_deposit(target, source, occurrence)
+                    {
+                        results.push(assignable(bindings));
+                    } else {
+                        results.push(RelationResult::Unknown);
+                    }
+                    return;
                 }
-            } else {
-                results.push(RelationResult::Unknown);
+                if matches!(&*source_data, SemanticNodeData::Infer { .. }) {
+                    results.push(RelationResult::Unknown);
+                    return;
+                }
             }
-            return;
-        }
-        if matches!(&*source_data, SemanticNodeData::Infer { .. }) {
-            results.push(RelationResult::Unknown);
-            return;
+            VariancePhase::Contravariant => {
+                if let SemanticNodeData::Infer { .. } = &*source_data {
+                    if self.relation_session_active()
+                        && self.relation_deposit(source, target, occurrence)
+                    {
+                        results.push(assignable(bindings));
+                    } else {
+                        results.push(RelationResult::Unknown);
+                    }
+                    return;
+                }
+                if matches!(&*target_data, SemanticNodeData::Infer { .. }) {
+                    results.push(RelationResult::Unknown);
+                    return;
+                }
+            }
         }
 
         // ── InferRef: an in-scope infer REFERENCE that reached the relate
@@ -1788,14 +3519,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let members = Arc::clone(members);
             drop(source_data);
             drop(target_data);
-            distribute_or(work, results, &members, |m| (source, *m));
+            let alternatives: Vec<_> = members.iter().map(|member| (source, *member)).collect();
+            results.push(self.relate_union_target_alternatives(
+                &alternatives,
+                bindings,
+                InferPosition::Covariant,
+            ));
             return;
         }
         if let SemanticNodeData::Intersection(members) = &*source_data {
             let members = Arc::clone(members);
             drop(source_data);
             drop(target_data);
-            distribute_or(work, results, &members, |m| (*m, target));
+            let alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
+            results.push(self.relate_pair_alternatives(
+                &alternatives,
+                bindings,
+                InferPosition::Covariant,
+            ));
             return;
         }
         if let SemanticNodeData::Intersection(members) = &*target_data {
@@ -1879,11 +3620,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // (`Infer ≤ element`) is undecidable and would defer the
                 // whole pattern. Non-`Infer` mutable arrays KEEP the
                 // invariant bidirectional check.
+                let inference_element = match occurrence.variance {
+                    VariancePhase::Covariant | VariancePhase::Invariant => t_el,
+                    VariancePhase::Contravariant => s_el,
+                };
                 let infer_element = self.relation_session_active()
-                    && matches!(
-                        graph.node_data(t_el).as_deref(),
+                    && (matches!(
+                        graph.node_data(inference_element).as_deref(),
                         Some(SemanticNodeData::Infer { .. })
-                    );
+                    ) || self.relation_subtree_contains_projection(inference_element));
                 if t_ro || s_ro || infer_element {
                     work.push(RelateWork::Eval(s_el, t_el));
                 } else {
@@ -1916,16 +3661,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(RelationResult::NotAssignable);
                     return;
                 }
-                let required_target_len = t_els.iter().filter(|e| !e.optional && !e.rest).count();
-                if s_els.len() < required_target_len {
-                    results.push(RelationResult::NotAssignable);
-                    return;
-                }
                 // Tuple-inference rest tail (RI-6 in-scope): a trailing
                 // `...infer Rest` element binds the remaining source
                 // elements as a tuple through the active session.
+                let rest_on_source = matches!(occurrence.variance, VariancePhase::Contravariant);
                 let session_rest = if self.relation_session_active() {
-                    t_els.iter().position(|e| {
+                    let inference_elements = if rest_on_source { &s_els } else { &t_els };
+                    inference_elements.iter().position(|e| {
                         e.rest
                             && matches!(
                                 graph.node_data(e.value).as_deref(),
@@ -1935,66 +3677,127 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else {
                     None
                 };
-                let pair_count = s_els.len().min(t_els.len());
+                let required_source_len = s_els.iter().filter(|e| !e.optional && !e.rest).count();
+                let required_target_len = t_els.iter().filter(|e| !e.optional && !e.rest).count();
+                let required_lengths_compatible = if session_rest.is_some() {
+                    let (required_inference_len, required_remainder_len) = if rest_on_source {
+                        (required_source_len, required_target_len)
+                    } else {
+                        (required_target_len, required_source_len)
+                    };
+                    required_remainder_len >= required_inference_len
+                } else {
+                    required_source_len >= required_target_len
+                };
+                if !required_lengths_compatible {
+                    results.push(RelationResult::NotAssignable);
+                    return;
+                }
+                let mut pairs: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
                 if let Some(rest_index) = session_rest {
-                    let remainder: Vec<crate::semantic_query::TupleElement> = s_els
+                    let (inference_elements, remainder_elements) = if rest_on_source {
+                        (&s_els, &t_els)
+                    } else {
+                        (&t_els, &s_els)
+                    };
+                    let infer_element = inference_elements[rest_index].value;
+                    let prefix = &inference_elements[..rest_index];
+                    let suffix = &inference_elements[rest_index + 1..];
+                    let required_prefix_len =
+                        prefix.iter().filter(|element| !element.optional).count();
+                    let required_suffix_len =
+                        suffix.iter().filter(|element| !element.optional).count();
+                    if remainder_elements.len() < required_prefix_len + required_suffix_len {
+                        results.push(RelationResult::NotAssignable);
+                        return;
+                    }
+                    // Reserve the full fixed suffix when present; when the
+                    // concrete tuple is shorter, only optional trailing suffix
+                    // slots may disappear. The same rule applies to the fixed
+                    // prefix before the variadic capture.
+                    let suffix_len = suffix
+                        .len()
+                        .min(remainder_elements.len().saturating_sub(required_prefix_len));
+                    let prefix_len = prefix
+                        .len()
+                        .min(remainder_elements.len().saturating_sub(suffix_len));
+                    if prefix[prefix_len..].iter().any(|element| !element.optional)
+                        || suffix[suffix_len..].iter().any(|element| !element.optional)
+                    {
+                        results.push(RelationResult::NotAssignable);
+                        return;
+                    }
+                    let remainder_end = remainder_elements.len() - suffix_len;
+                    let remainder: Vec<crate::semantic_query::TupleElement> = remainder_elements
                         .iter()
-                        .skip(rest_index)
-                        .map(|e| crate::semantic_query::TupleElement {
-                            label: None,
-                            value: e.value,
-                            optional: false,
-                            rest: false,
-                        })
+                        .skip(prefix_len)
+                        .take(remainder_end - prefix_len)
+                        .cloned()
                         .collect();
                     let remainder_tuple = graph.intern_node(SemanticNodeData::Tuple {
                         elements: Arc::from(remainder.into_boxed_slice()),
-                        readonly: false,
+                        readonly: if rest_on_source { t_ro } else { s_ro },
                     });
-                    if !self.relation_deposit(
-                        t_els[rest_index].value,
-                        remainder_tuple,
-                        InferPosition::Covariant,
-                    ) {
+                    if !self.relation_deposit(infer_element, remainder_tuple, occurrence) {
                         results.push(RelationResult::Unknown);
                         return;
                     }
+                    for position in 0..prefix_len {
+                        pairs.push((s_els[position].value, t_els[position].value));
+                    }
+                    for offset in 0..suffix_len {
+                        let inference_position = rest_index + 1 + offset;
+                        let remainder_position = remainder_elements.len() - suffix_len + offset;
+                        if rest_on_source {
+                            pairs.push((
+                                inference_elements[inference_position].value,
+                                remainder_elements[remainder_position].value,
+                            ));
+                        } else {
+                            pairs.push((
+                                remainder_elements[remainder_position].value,
+                                inference_elements[inference_position].value,
+                            ));
+                        }
+                    }
+                } else {
+                    pairs.extend(
+                        s_els
+                            .iter()
+                            .zip(t_els.iter())
+                            .map(|(source, target)| (source.value, target.value)),
+                    );
                 }
-                if pair_count == 0 {
+                if pairs.is_empty() {
                     results.push(assignable(bindings));
                     return;
                 }
                 let mut forward: Vec<RelateWork> = Vec::new();
-                let mut pairs_evaluated: u32 = 0;
-                for (position, (s_el, t_el)) in
-                    s_els.iter().zip(t_els.iter()).take(pair_count).enumerate()
-                {
-                    // A rest-tail `Infer` element binds through the
-                    // remainder deposit above — skip its pairwise eval.
-                    if session_rest == Some(position) {
-                        continue;
-                    }
-                    pairs_evaluated += 1;
+                for (source_element, target_element) in pairs.iter().copied() {
                     // Same covariant-only rule as the Array arm: a direct
                     // `Infer` element position under an active session
                     // binds through the forward deposit; the invariant
                     // reverse against the `Infer` node would defer it.
+                    let inference_element = match occurrence.variance {
+                        VariancePhase::Covariant | VariancePhase::Invariant => target_element,
+                        VariancePhase::Contravariant => source_element,
+                    };
                     let infer_element = self.relation_session_active()
-                        && matches!(
-                            graph.node_data(t_el.value).as_deref(),
+                        && (matches!(
+                            graph.node_data(inference_element).as_deref(),
                             Some(SemanticNodeData::Infer { .. })
-                        );
+                        ) || self.relation_subtree_contains_projection(inference_element));
                     if s_ro || t_ro || infer_element {
-                        forward.push(RelateWork::Eval(s_el.value, t_el.value));
+                        forward.push(RelateWork::Eval(source_element, target_element));
                     } else {
                         // Per-element bidirectional: Eval + Eval + ReduceAnd(2).
-                        forward.push(RelateWork::Eval(s_el.value, t_el.value));
-                        forward.push(RelateWork::Eval(t_el.value, s_el.value));
+                        forward.push(RelateWork::Eval(source_element, target_element));
+                        forward.push(RelateWork::Eval(target_element, source_element));
                         forward.push(RelateWork::ReduceAnd(2));
                     }
                 }
-                if pairs_evaluated > 1 {
-                    forward.push(RelateWork::ReduceAnd(pairs_evaluated));
+                if pairs.len() > 1 {
+                    forward.push(RelateWork::ReduceAnd(pairs.len() as u32));
                 }
                 push_forward_work(work, forward);
                 return;
@@ -2155,7 +3958,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Instantiate a decl identity carrier into its concrete shape for
     /// relation dispatch through `execute(Instantiate{…})` — the shared
     /// dispatch, never a private instantiation path.
-    pub(super) fn unwrap_identity_carrier_for_relation(
+    pub(super) fn unwrap_identity_carrier_one_step(
         &self,
         id: SemanticNodeId,
     ) -> IdentityCarrierUnwrap {
@@ -2164,6 +3967,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return IdentityCarrierUnwrap::Unresolvable;
         };
         let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
+            SemanticNodeData::Alias(inner) => return IdentityCarrierUnwrap::Concrete(*inner),
+            SemanticNodeData::MergedDecl { contributors } => {
+                return IdentityCarrierUnwrap::Concrete(
+                    super::walk::reduce_merged_decl_with_graph(graph, contributors),
+                );
+            }
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id,
                 owner,
@@ -2200,23 +4009,88 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )) {
             QueryResult::Value(SemanticQueryOutput {
                 value: unwrapped, ..
-            }) => self
-                .evaluate_deferred_semantic_node_with_context(unwrapped, transit)
-                .into_active_query_build_node(self),
+            }) => unwrapped,
             _ => return IdentityCarrierUnwrap::Unresolvable,
         };
-        let Some(unwrapped_data) = graph.node_data(unwrapped) else {
-            return IdentityCarrierUnwrap::Unresolvable;
-        };
-        if matches!(
-            &*unwrapped_data,
-            SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
-        ) {
+        if unwrapped == id {
             IdentityCarrierUnwrap::Unresolvable
         } else {
-            drop(unwrapped_data);
             IdentityCarrierUnwrap::Concrete(unwrapped)
         }
+    }
+
+    /// Fully unwrap an identity carrier for ordinary structural relation.
+    pub(super) fn unwrap_identity_carrier_for_relation(
+        &self,
+        id: SemanticNodeId,
+    ) -> IdentityCarrierUnwrap {
+        let graph = self.graph();
+        let transit = ProjectionReductionContext::structural_transit();
+        let mut current = id;
+        let mut seen = FxHashSet::default();
+        while seen.insert(current) {
+            let Some(data) = graph.node_data(current) else {
+                return IdentityCarrierUnwrap::Unresolvable;
+            };
+            let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
+                SemanticNodeData::Alias(inner) => {
+                    current = *inner;
+                    continue;
+                }
+                SemanticNodeData::MergedDecl { contributors } => {
+                    let contributors = Arc::clone(contributors);
+                    drop(data);
+                    current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
+                    continue;
+                }
+                SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                    canonical_id,
+                    owner,
+                    name,
+                    whole_hash,
+                }) => (
+                    DeclIdentity {
+                        canonical_id: Arc::clone(canonical_id),
+                        owner: *owner,
+                        whole_hash: *whole_hash,
+                        decl_name: Arc::clone(name),
+                    },
+                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                ),
+                SemanticNodeData::DeclRef { identity } => (
+                    identity.clone(),
+                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                ),
+                SemanticNodeData::InstantiationRef { base, args } => {
+                    (base.clone(), Arc::clone(args))
+                }
+                _ => return IdentityCarrierUnwrap::Concrete(current),
+            };
+            drop(data);
+            let unwrapped = match self.execute_type_node(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        Arc::clone(&identity.canonical_id),
+                        identity.owner,
+                        Arc::clone(&identity.decl_name),
+                    ),
+                    args,
+                    self.instantiate_context_for(&identity.canonical_id, transit),
+                ),
+            )) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: unwrapped, ..
+                }) => self
+                    .evaluate_deferred_semantic_node_with_context(unwrapped, transit)
+                    .into_active_query_build_node(self),
+                _ => return IdentityCarrierUnwrap::Unresolvable,
+            };
+            if unwrapped == current {
+                return IdentityCarrierUnwrap::Unresolvable;
+            }
+            current = unwrapped;
+        }
+        IdentityCarrierUnwrap::Unresolvable
     }
 
     /// Source-side declaration identity carrier with Object body against
@@ -2743,6 +4617,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         for (s_param, t_param) in source_params.iter().zip(target_params.iter()) {
             // Contravariant: target param ≤ source param. Under the
             // bivariant regime either direction discharges the pair.
+            let checkpoint = self.relation_session_checkpoint();
+            let bindings_len = bindings.len();
             let contravariant = self.relate_member(
                 t_param.ty,
                 s_param.ty,
@@ -2750,10 +4626,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 InferPosition::ContravariantParam,
             );
             let pair = if bivariant && !matches!(contravariant, RelationResult::Assignable { .. }) {
-                result_or(
-                    contravariant,
-                    self.relate_member(s_param.ty, t_param.ty, bindings, InferPosition::Covariant),
-                )
+                self.relation_session_rollback(&checkpoint);
+                bindings.truncate(bindings_len);
+                let fallback_checkpoint = self.relation_session_checkpoint();
+                let fallback_bindings_len = bindings.len();
+                let fallback =
+                    self.relate_member(s_param.ty, t_param.ty, bindings, InferPosition::Covariant);
+                if !matches!(fallback, RelationResult::Assignable { .. }) {
+                    self.relation_session_rollback(&fallback_checkpoint);
+                    bindings.truncate(fallback_bindings_len);
+                }
+                result_or(contravariant, fallback)
             } else {
                 contravariant
             };
@@ -2835,28 +4718,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::SignatureKind::Call => &source.call_signatures,
             crate::semantic_query::SignatureKind::Construct => &source.construct_signatures,
         };
-        let mut any_unknown = false;
-        for s_sig in group.iter() {
-            // First-match alternatives: a LOSING alternative's inference
-            // deposits roll back — only the succeeding alternative may
-            // contribute candidates to fixation.
-            let checkpoint = self.relation_session_checkpoint();
-            match self.relate_member(*s_sig, target_sig, bindings, InferPosition::Covariant) {
-                r @ RelationResult::Assignable { .. } => return r,
-                RelationResult::Unknown => {
-                    self.relation_session_rollback(&checkpoint);
-                    any_unknown = true;
-                }
-                RelationResult::NotAssignable => {
-                    self.relation_session_rollback(&checkpoint);
-                }
-            }
-        }
-        if any_unknown {
-            RelationResult::Unknown
-        } else {
-            RelationResult::NotAssignable
-        }
+        let alternatives: Vec<_> = group
+            .iter()
+            .map(|source_signature| (*source_signature, target_sig))
+            .collect();
+        self.relate_pair_alternatives(&alternatives, bindings, InferPosition::Covariant)
     }
 }
 
@@ -2938,12 +4804,12 @@ fn relation_step_from_payload(payload: &RelationPayload) -> RelationStep {
 /// Iterative worklist item for [`ProjectSemanticDispatch::decide_relation`].
 #[derive(Debug, Clone)]
 enum RelateWork {
+    /// Expand the current frame's root pair locally.
+    Expand(SemanticNodeId, SemanticNodeId),
     /// Evaluate `(source, target)`.
     Eval(SemanticNodeId, SemanticNodeId),
     /// Pop `n` prior results, AND them, push one combined result.
     ReduceAnd(u32),
-    /// Pop `n` prior results, OR them, push one combined result.
-    ReduceOr(u32),
 }
 
 fn reduce_and_from_results(results: &mut Vec<RelationResult>, n: u32) -> RelationResult {
@@ -2956,18 +4822,6 @@ fn reduce_and_from_results(results: &mut Vec<RelationResult>, n: u32) -> Relatio
             .pop()
             .expect("RelateWork::ReduceAnd: result-stack underflow");
         combined = result_and(combined, r);
-    }
-    combined
-}
-
-fn reduce_or_from_results(results: &mut Vec<RelationResult>, n: u32) -> RelationResult {
-    let mut combined = RelationResult::NotAssignable;
-    // bounded-loop: drains `n` per-pair results owned by this reducer — fan-out of the originating distribution; total work bounded by `decide_relation` budget (graph-size × 10).
-    for _ in 0..n {
-        let r = results
-            .pop()
-            .expect("RelateWork::ReduceOr: result-stack underflow");
-        combined = result_or(combined, r);
     }
     combined
 }
@@ -3004,32 +4858,6 @@ fn distribute_and<F>(
     }
     if n > 1 {
         forward.push(RelateWork::ReduceAnd(n as u32));
-    }
-    push_forward_work(work, forward);
-}
-
-/// Build and push the worklist fan-out for a distribution whose reducer
-/// is OR-any.
-fn distribute_or<F>(
-    work: &mut Vec<RelateWork>,
-    results: &mut Vec<RelationResult>,
-    members: &[SemanticNodeId],
-    mut pairer: F,
-) where
-    F: FnMut(&SemanticNodeId) -> (SemanticNodeId, SemanticNodeId),
-{
-    let n = members.len();
-    if n == 0 {
-        results.push(RelationResult::NotAssignable);
-        return;
-    }
-    let mut forward: Vec<RelateWork> = Vec::with_capacity(n + 1);
-    for m in members.iter() {
-        let (s, t) = pairer(m);
-        forward.push(RelateWork::Eval(s, t));
-    }
-    if n > 1 {
-        forward.push(RelateWork::ReduceOr(n as u32));
     }
     push_forward_work(work, forward);
 }
@@ -3077,5 +4905,103 @@ fn tag_level_disjoint(
             concrete(*prim) && literal_base(lit) != *prim
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod reverse_ownership_tests {
+    use super::super::relation_txn::SessionId;
+    use super::*;
+
+    fn reverse_setup(param: SemanticNodeId) -> InferenceSessionSetup {
+        InferenceSessionSetup::new(
+            Arc::from(vec![InferenceInfoSetup::new(param, Arc::from("T"))].into_boxed_slice()),
+            VariancePhase::Covariant,
+            InferencePassKind::ReverseHomomorphicMapped,
+            InferenceCandidatePriority::HomomorphicMapped,
+            NoInferMask::empty(),
+            ConstParamPolicy::NonConst,
+            ContextualInferenceMode::None,
+        )
+    }
+
+    fn reverse_state(param: SemanticNodeId) -> ReverseProjectionState {
+        ReverseProjectionState::new(ReverseHomomorphicSpec {
+            mapped_node: SemanticNodeId(301),
+            base_infer: param,
+            mapper_parameter: SemanticNodeId(302),
+            template: SemanticNodeId(303),
+            modifiers: ReverseMappedModifiers {
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+            },
+        })
+    }
+
+    fn require_relation_result_signature<'dispatch>(
+        _pass: fn(
+            &ProjectSemanticDispatch<'dispatch>,
+            SemanticNodeId,
+            &ReverseHomomorphicSpec,
+            &mut Vec<InferBinding>,
+        ) -> RelationResult,
+    ) {
+    }
+
+    fn classify_relation_result_exhaustively(result: RelationResult) {
+        match result {
+            RelationResult::Assignable { .. }
+            | RelationResult::NotAssignable
+            | RelationResult::Unknown => {}
+        }
+    }
+
+    #[test]
+    fn reverse_mapped_inference_is_relation_owned_in_session() {
+        // This private function item is nameable only from the relation
+        // authority's own module tree, and its sole output is the closed
+        // reducer lattice rather than a standalone binding map.
+        require_relation_result_signature(ProjectSemanticDispatch::relate_reverse_homomorphic);
+        classify_relation_result_exhaustively(RelationResult::Unknown);
+
+        let active_param = SemanticNodeId(304);
+        let aggregate = SemanticNodeId(305);
+        let fallback = SemanticNodeId(306);
+
+        let mut inactive = InferenceSession::new(
+            SessionId(1),
+            reverse_setup(active_param),
+            Some(reverse_state(active_param)),
+        );
+        assert!(
+            !inactive.deposit_reverse_aggregate(
+                SemanticNodeId(999),
+                aggregate,
+                InferenceCandidatePriority::HomomorphicMapped,
+            ),
+            "a reverse aggregate cannot bind outside the frozen session setup"
+        );
+        let inactive_bindings =
+            inactive.fixate(|nodes, _| nodes.first().copied().unwrap_or(fallback));
+        assert_eq!(
+            inactive_bindings[0].bound, fallback,
+            "a refused deposit must leave no independently publishable reverse result"
+        );
+
+        let mut active = InferenceSession::new(
+            SessionId(2),
+            reverse_setup(active_param),
+            Some(reverse_state(active_param)),
+        );
+        assert!(active.deposit_reverse_aggregate(
+            active_param,
+            aggregate,
+            InferenceCandidatePriority::HomomorphicMapped,
+        ));
+        let active_bindings = active.fixate(|nodes, _| nodes.first().copied().unwrap_or(fallback));
+        assert_eq!(
+            active_bindings[0].bound, aggregate,
+            "the accepted aggregate reaches bindings only through session fixation"
+        );
     }
 }

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_type_expr::{ExcessPropertyOrigin, ObjectExpr, ObjectMember, TypeExpr};
+use verter_type_expr::{ExcessPropertyOrigin, FunctionExpr, ObjectExpr, ObjectMember, TypeExpr};
 
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
@@ -59,11 +59,71 @@ impl SpreadFoldState {
     }
 }
 
+fn register_spread_member_alias(
+    infer_binders: &crate::semantic_query::InferBinderFactory,
+    alias: &ObjectMember,
+    original: &ObjectMember,
+) {
+    match (alias, original) {
+        (ObjectMember::Property(alias), ObjectMember::Property(original)) => {
+            infer_binders.register_equivalent_subtree(&alias.ty, &original.ty);
+        }
+        (ObjectMember::IndexSignature(alias), ObjectMember::IndexSignature(original)) => {
+            infer_binders.register_equivalent_subtree(&alias.key_type, &original.key_type);
+            infer_binders.register_equivalent_subtree(&alias.value_type, &original.value_type);
+        }
+        (ObjectMember::Method(alias), ObjectMember::Method(original)) => {
+            register_spread_function_alias(infer_binders, &alias.function, &original.function);
+        }
+        (ObjectMember::CallSignature(alias), ObjectMember::CallSignature(original))
+        | (ObjectMember::ConstructSignature(alias), ObjectMember::ConstructSignature(original)) => {
+            register_spread_function_alias(infer_binders, alias, original)
+        }
+        (ObjectMember::Spread(alias), ObjectMember::Spread(original)) => {
+            infer_binders.register_equivalent_subtree(&alias.ty, &original.ty);
+        }
+        _ => {}
+    }
+}
+
+fn register_spread_function_alias(
+    infer_binders: &crate::semantic_query::InferBinderFactory,
+    alias: &FunctionExpr,
+    original: &FunctionExpr,
+) {
+    for (alias_parameter, original_parameter) in
+        alias.type_parameters.iter().zip(&original.type_parameters)
+    {
+        if let (Some(alias), Some(original)) = (
+            alias_parameter.constraint.as_deref(),
+            original_parameter.constraint.as_deref(),
+        ) {
+            infer_binders.register_equivalent_subtree(alias, original);
+        }
+        if let (Some(alias), Some(original)) = (
+            alias_parameter.default.as_deref(),
+            original_parameter.default.as_deref(),
+        ) {
+            infer_binders.register_equivalent_subtree(alias, original);
+        }
+    }
+    for (alias_parameter, original_parameter) in alias.parameters.iter().zip(&original.parameters) {
+        infer_binders.register_equivalent_subtree(&alias_parameter.ty, &original_parameter.ty);
+    }
+    if let (Some(alias), Some(original)) = (
+        alias.return_type.as_deref(),
+        original.return_type.as_deref(),
+    ) {
+        infer_binders.register_equivalent_subtree(alias, original);
+    }
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn lower_spread_object_literal(
         &self,
         obj: &ObjectExpr,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
         name_resolution: &FxHashMap<Arc<str>, ResolvedRootIdentity>,
@@ -73,18 +133,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
         let mut segments: Vec<(FoldSegmentKind, SemanticNodeId)> = Vec::new();
-        let mut run: Vec<ObjectMember> = Vec::new();
+        let mut run: Vec<&ObjectMember> = Vec::new();
         let lower_run =
-            |run: &mut Vec<ObjectMember>,
+            |run: &mut Vec<&ObjectMember>,
              substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
              segments: &mut Vec<(FoldSegmentKind, SemanticNodeId)>| {
                 if run.is_empty() {
                     return;
                 }
                 let run_obj = TypeExpr::Object(Arc::new(ObjectExpr {
-                    properties: std::mem::take(run),
+                    properties: run.iter().map(|member| (*member).clone()).collect(),
                 }));
-                let node = self.shallow_lower_type_expr_with_context(
+                if let TypeExpr::Object(alias_object) = &run_obj {
+                    for (alias, original) in alias_object.properties.iter().zip(run.iter()) {
+                        register_spread_member_alias(infer_binders, alias, original);
+                    }
+                }
+                let node = self.lower_type_expr_with_infer_factory(
+                    infer_binders,
                     &run_obj,
                     env,
                     scope,
@@ -95,13 +161,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     reduction_context,
                 );
                 segments.push((FoldSegmentKind::DirectRun, node));
+                run.clear();
             };
 
         for member in &obj.properties {
             match member {
                 ObjectMember::Spread(spread) => {
                     lower_run(&mut run, substitutions, &mut segments);
-                    let operand = self.shallow_lower_type_expr_with_context(
+                    let operand = self.lower_type_expr_with_infer_factory(
+                        infer_binders,
                         &spread.ty,
                         env,
                         scope,
@@ -116,7 +184,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.taint_spread_node(operand),
                     ));
                 }
-                other => run.push(other.clone()),
+                other => run.push(other),
             }
         }
         lower_run(&mut run, substitutions, &mut segments);

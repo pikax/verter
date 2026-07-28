@@ -91,16 +91,9 @@
 //! `IndexedReady` carrying a fresh empty mirror, so a superseded mirror can
 //! never answer a new-content demand. Publishing an artifact lowers ZERO
 //! macro mirrors (the cell table is unallocated until first demand). The
-//! mirror is a lazy DENSE table: an outer [`OnceLock`] lazily allocates a
-//! per-macro-count cell table ONCE on first demand (race-safe via
-//! `get_or_init`); each per-slot `MacroSlot` (indexed by `macro_index`) is
-//! the singleflight unit — its per-slot build lock collapses concurrent
-//! first-touch of one macro onto one lowering, waiters block cooperatively on
-//! that lock and then read the lock-free committed `OnceLock`. The build lock
-//! (NOT the cell's `get_or_init`) is the serializer because a transient
-//! `LeaseMiss` must leave the slot VACANT for a later retry, never commit a
-//! permanent negative. Two threads racing the TABLE allocation also
-//! singleflight on the outer cell.
+//! passive mirror storage lazily allocates one slot per macro on first demand.
+//! Each slot singleflights cold population and provides a lock-free committed
+//! read. A transient `LeaseMiss` leaves its slot vacant for a later retry.
 //!
 //! ## Script-setup generic seeding
 //!
@@ -125,170 +118,21 @@ use std::sync::{Arc, OnceLock};
 use rustc_hash::FxHashMap;
 use verter_type_expr::{FunctionExpr, LiteralValue, MappedModifier, ObjectMember, TypeExpr};
 
-use super::infer_binder_names::collect_extends_infer_binder_names;
+use super::infer_binder_names::{
+    collect_extends_infer_declarations, BinderScope, InferSyntaxPathStep, StructuralLowerContext,
+};
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
-    DeclIdentity, FunctionParam, HashValue, HotTypeRef, IndexKey, IndexSignature,
-    MacroOwnBodyStamp, MapperKey, MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod,
-    PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId,
-    SignatureKind, SurfaceMember, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    DeclIdentity, FunctionParam, HotTypeRef, IndexKey, IndexSignature, MacroOwnBodyStamp,
+    MapperKey, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError, ReadonlyMod,
+    ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind, SurfaceMember, SyntheticBindingId,
+    TupleElement, TypeParamDecl, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
 // =============================================================================
 // Query-free structural lowering internals (PRIVATE to this module).
 // =============================================================================
-
-/// A lexical binder frame: the syntactic type-parameter / `infer` /
-/// mapped-type-parameter names in scope at one nesting level, each mapped
-/// to the already-interned binder node (a `TypeParam` or `Infer`
-/// [`SemanticNodeId`]) it stands for.
-///
-/// A `Ref` whose name hits a binder returns that binder node directly
-/// instead of emitting a `BareRef` — the only "resolution" the structural
-/// lowerer performs is this purely syntactic, in-scope binder lookup, which
-/// needs no host query.
-#[derive(Debug, Default, Clone)]
-struct BinderScope {
-    names: FxHashMap<Arc<str>, SemanticNodeId>,
-}
-
-impl BinderScope {
-    /// Bind a syntactic type-parameter name to its interned binder node.
-    /// Module-internal binder-frame builder used by the script-setup seed
-    /// construction, never an outward producer entry.
-    fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
-        self.names.insert(name, node);
-    }
-
-    /// The binder node a `name` stands for in this frame, if any.
-    fn lookup(&self, name: &str) -> Option<SemanticNodeId> {
-        self.names.get(name).copied()
-    }
-}
-
-/// Structural / provenance inputs to the query-free lowerer.
-///
-/// This context carries ONLY syntactic and surface-provenance information:
-/// the innermost-last stack of lexical [`BinderScope`] frames plus the
-/// surface-merge role / macro-own-body provenance stamped onto object
-/// members. It deliberately does NOT hold `ProjectSemanticDispatch`, a host
-/// object, type-provider state, a `SemanticQueryKey`, or a
-/// `ProjectionReductionContext` — the structural lowerer is not a resolver,
-/// so it has no use for any demand-time resolution surface.
-#[derive(Debug, Clone, Copy)]
-struct StructuralLowerContext<'a> {
-    /// Innermost-last stack of lexical binder frames; binder lookup scans
-    /// from the top (last) frame outward so an inner type-parameter shadows
-    /// an outer one of the same name.
-    binders: &'a [BinderScope],
-    /// Surface-merge role stamp applied to the DIRECT members of an object
-    /// lowered under this context — `OwnBody` for an interface/class own
-    /// body arm, `Heritage` for a heritage arm, NEUTRAL (`Authored`, the
-    /// default) otherwise. Carried as the witness-gated stamp VALUE: this
-    /// context never mints a role, it transports one minted upstream.
-    /// Orthogonal to the macro-own-body axis.
-    merge_role: MergeRoleStamp,
-    /// Macro own-body stamp for the object lowered under this context (sets
-    /// `declared_in_macro_type_arg` on its direct members). Witness-gated:
-    /// minted from the analyzed macro kind at the payload entry, NEUTRAL
-    /// everywhere else.
-    macro_own_body: MacroOwnBodyStamp,
-    /// Per-lowering allocator for mapped-type binder ordinals. The eager
-    /// path keys these through the host-owned `MapperBinderRegistry` for
-    /// cross-lowering cache stability; the query-free lowerer cannot reach
-    /// host state, so it allocates emission-only ordinals from this counter
-    /// — distinct `[K in …]` binders in one lowering get distinct ordinals.
-    /// `None` outside a lowering (a freshly constructed root context);
-    /// [`lower_type_expr_structural`] injects it.
-    mapper_ordinals: Option<&'a Cell<u16>>,
-}
-
-impl<'a> StructuralLowerContext<'a> {
-    /// A root context over `binders` (innermost last) with default
-    /// provenance: an `Authored` merge role and not-a-macro-own-body. The
-    /// empty slice is the no-binders-in-scope root.
-    fn new(binders: &'a [BinderScope]) -> Self {
-        Self {
-            binders,
-            merge_role: MergeRoleStamp::NEUTRAL,
-            macro_own_body: MacroOwnBodyStamp::NEUTRAL,
-            mapper_ordinals: None,
-        }
-    }
-
-    /// Inject the per-lowering mapped-binder ordinal counter (called once at
-    /// the lowering entry point so a caller never has to supply one).
-    fn with_mapper_ordinals(mut self, ordinals: &'a Cell<u16>) -> Self {
-        self.mapper_ordinals = Some(ordinals);
-        self
-    }
-
-    /// The next mapped-binder ordinal for this lowering, or `0` when no
-    /// counter is in scope (a root context constructed directly in a test).
-    fn next_mapper_ordinal(&self) -> u16 {
-        match self.mapper_ordinals {
-            Some(cell) => {
-                let next = cell.get();
-                cell.set(next.saturating_add(1));
-                next
-            }
-            None => 0,
-        }
-    }
-
-    /// Replace the surface-merge role (the owner stamps `OwnBody` on an
-    /// interface/class own-body arm and `Heritage` on a heritage arm).
-    #[cfg(test)]
-    fn with_merge_role(mut self, merge_role: MergeRoleStamp) -> Self {
-        self.merge_role = merge_role;
-        self
-    }
-
-    /// Mark whether this context lowers the macro type-argument's own body.
-    fn with_macro_own_body(mut self, macro_own_body: MacroOwnBodyStamp) -> Self {
-        self.macro_own_body = macro_own_body;
-        self
-    }
-
-    /// Swap the binder stack, preserving the surface provenance and the
-    /// mapper-ordinal counter (used when a function's own generics extend the
-    /// stack for its body).
-    fn with_binders<'b>(&self, binders: &'b [BinderScope]) -> StructuralLowerContext<'b>
-    where
-        'a: 'b,
-    {
-        StructuralLowerContext {
-            binders,
-            merge_role: self.merge_role,
-            macro_own_body: self.macro_own_body,
-            mapper_ordinals: self.mapper_ordinals,
-        }
-    }
-
-    /// Downgrade for a nested member VALUE: a nested object inside a member
-    /// type is not THIS object's macro own-body, but the merge-role axis is
-    /// orthogonal and preserved (mirrors `into_structural_provenance`).
-    fn structural_provenance(&self) -> Self {
-        Self {
-            binders: self.binders,
-            merge_role: self.merge_role,
-            macro_own_body: MacroOwnBodyStamp::NEUTRAL,
-            mapper_ordinals: self.mapper_ordinals,
-        }
-    }
-
-    /// The binder node a `name` stands for, scanning from the innermost
-    /// (last) frame outward so an inner type-parameter shadows an outer one.
-    /// `None` when `name` is not a bound syntactic type-parameter — the
-    /// caller then emits a `BareRef` carrier.
-    fn lookup_binder(&self, name: &str) -> Option<SemanticNodeId> {
-        self.binders
-            .iter()
-            .rev()
-            .find_map(|frame| frame.lookup(name))
-    }
-}
 
 /// A `TypeExpr` shape the structural lowerer genuinely cannot construct
 /// without resolution.
@@ -328,7 +172,15 @@ fn lower_type_expr_structural(
     // The mapped-binder ordinal counter is per-lowering, owned here so a
     // caller never has to supply one.
     let mapper_ordinals = Cell::new(0u16);
-    let ctx = ctx.with_mapper_ordinals(&mapper_ordinals);
+    let infer_binders = match ctx.infer_source {
+        Some(source) => {
+            crate::semantic_query::InferBinderFactory::for_authored_locator(&scope, expr, source)
+        }
+        None => crate::semantic_query::InferBinderFactory::new(&scope, expr),
+    };
+    let ctx = ctx
+        .with_mapper_ordinals(&mapper_ordinals)
+        .with_infer_binders(&infer_binders);
     let node = lower_node(graph, expr, &scope, &ctx)?;
     Ok(HotTypeRef::new(node))
 }
@@ -449,6 +301,9 @@ fn lower_node(
             true_type,
             false_type,
         } => {
+            let infer_binders = ctx
+                .infer_binders
+                .expect("structural lowering injects an infer identity authority");
             let check = lower_node(graph, check, scope, ctx)?;
             // `infer P` names introduced by the `extends` clause bind for the
             // TRUE branch only (TS scoping). Collect them syntactically BEFORE
@@ -459,23 +314,47 @@ fn lower_node(
             // binder instead of leaking out as an unbound `BareRef`. The false
             // branch and the check / extends are unaffected. Purely syntactic
             // binder collection — no resolution.
-            let mut infer_names: Vec<Arc<str>> = Vec::new();
-            collect_extends_infer_binder_names(extends, &mut infer_names);
-            let extends = lower_node(graph, extends, scope, ctx)?;
-            let true_branch_ref = if infer_names.is_empty() {
+            let extends_path = infer_binders
+                .path_for_expr(expr)
+                .child(InferSyntaxPathStep::ConditionalExtends);
+            let infer_sites = collect_extends_infer_declarations(extends, &extends_path);
+            let mut declaration_frame = BinderScope::default();
+            let mut declarations = FxHashMap::default();
+            for site in &infer_sites {
+                let binder = infer_binders.binder_at(&site.path);
+                let declaration = graph.intern_node_with_scope(
+                    SemanticNodeData::Infer {
+                        name: Arc::clone(&site.name),
+                        binder: binder.clone(),
+                    },
+                    scope.clone(),
+                );
+                declaration_frame.bind_infer_declaration(Arc::clone(&site.name), declaration);
+                declarations.insert(Arc::clone(&site.name), (declaration, binder));
+            }
+            let mut extends_frames: Vec<BinderScope> = ctx.binders.to_vec();
+            extends_frames.push(declaration_frame);
+            let extends_ctx = ctx.with_binders(&extends_frames);
+            let extends = lower_node(graph, extends, scope, &extends_ctx)?;
+            let true_branch_ref = if infer_sites.is_empty() {
                 lower_node(graph, true_type, scope, ctx)?
             } else {
                 let mut infer_frame = BinderScope::default();
-                for name in &infer_names {
+                for site in &infer_sites {
                     // References bind to `InferRef`, never the `Infer`
                     // declaration node (the shadow stop keys on declarations).
                     let infer_node = graph.intern_node_with_scope(
                         SemanticNodeData::InferRef {
-                            name: Arc::clone(name),
+                            name: Arc::clone(&site.name),
+                            binder: declarations
+                                .get(&site.name)
+                                .expect("conditional infer declaration was preseeded")
+                                .1
+                                .clone(),
                         },
                         scope.clone(),
                     );
-                    infer_frame.bind(Arc::clone(name), infer_node);
+                    infer_frame.bind(Arc::clone(&site.name), infer_node);
                 }
                 let mut frames: Vec<BinderScope> = ctx.binders.to_vec();
                 frames.push(infer_frame);
@@ -517,12 +396,24 @@ fn lower_node(
         TypeExpr::RecursiveRef { .. } => Err(StructuralLowerError::UnsupportedWithoutResolution {
             shape: "RecursiveRef",
         }),
-        TypeExpr::Infer { name } => Ok(graph.intern_node_with_scope(
-            SemanticNodeData::Infer {
-                name: Arc::from(name.as_str()),
-            },
-            scope.clone(),
-        )),
+        TypeExpr::Infer { name } => {
+            if let Some(declaration) = ctx.lookup_infer_declaration(name) {
+                let declaration_data = graph.node_data(declaration);
+                if let Some(SemanticNodeData::Infer { .. }) = declaration_data.as_deref() {
+                    return Ok(declaration);
+                }
+            }
+            Ok(graph.intern_node_with_scope(
+                SemanticNodeData::Infer {
+                    name: Arc::from(name.as_str()),
+                    binder: ctx
+                        .infer_binders
+                        .expect("structural lowering injects an infer identity authority")
+                        .binder_for_expr(expr),
+                },
+                scope.clone(),
+            ))
+        }
 
         // -- Call / construct signatures — ONE `Signature` carrier whose
         //    `kind` preserves the spelling (`new () => R` stays distinct
@@ -699,6 +590,12 @@ fn lower_node(
                     }),
                     ObjectMember::Method(method) => {
                         let function_expr = TypeExpr::Function(Arc::new(method.function.clone()));
+                        register_structural_function_alias(
+                            ctx.infer_binders
+                                .expect("structural lowering injects infer identity"),
+                            &function_expr,
+                            &method.function,
+                        );
                         members.push(SurfaceMember {
                             name: Arc::from(method.name.as_str()),
                             value: lower_node(graph, &function_expr, scope, &value_ctx)?,
@@ -715,10 +612,22 @@ fn lower_node(
                     }
                     ObjectMember::CallSignature(func) => {
                         let function_expr = TypeExpr::Function(Arc::new(func.clone()));
+                        register_structural_function_alias(
+                            ctx.infer_binders
+                                .expect("structural lowering injects infer identity"),
+                            &function_expr,
+                            func,
+                        );
                         call_signatures.push(lower_node(graph, &function_expr, scope, ctx)?);
                     }
                     ObjectMember::ConstructSignature(func) => {
                         let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
+                        register_structural_function_alias(
+                            ctx.infer_binders
+                                .expect("structural lowering injects infer identity"),
+                            &function_expr,
+                            func,
+                        );
                         construct_signatures.push(lower_node(graph, &function_expr, scope, ctx)?);
                     }
                     ObjectMember::IndexSignature(sig) => index_signatures.push(IndexSignature {
@@ -780,26 +689,48 @@ fn lower_node(
                 },
                 scope.clone(),
             );
-            let mut mapper_frame = BinderScope::default();
-            mapper_frame.bind(Arc::clone(&mapper_display_name), parameter_node);
-            let mut frames: Vec<BinderScope> = ctx.binders.to_vec();
-            frames.push(mapper_frame);
-            let body_ctx = ctx.with_binders(&frames);
-
-            let (source_node, key_space) = match source.as_ref() {
+            let (source_node, key_space, base_infer_name) = match source.as_ref() {
                 TypeExpr::KeyOf(inner) => {
                     let inner_id = lower_node(graph, inner, scope, ctx)?;
                     let key_space = graph.intern_node_with_scope(
                         SemanticNodeData::KeyOf { base: inner_id },
                         scope.clone(),
                     );
-                    (inner_id, key_space)
+                    let base_infer = match graph.node_data(inner_id).as_deref() {
+                        Some(SemanticNodeData::Infer { name, binder }) => {
+                            Some((Arc::clone(name), binder.clone()))
+                        }
+                        _ => None,
+                    };
+                    (inner_id, key_space, base_infer)
                 }
                 _ => {
                     let lowered = lower_node(graph, source, scope, ctx)?;
-                    (lowered, lowered)
+                    (lowered, lowered, None)
                 }
             };
+
+            // Seed a scoped reference only for the exact `Infer` declaration
+            // selected by `keyof infer T`. The mapper frame is innermost so a
+            // same-name `[T in ...]` binder capture-avoidingly shadows it.
+            let mut frames: Vec<BinderScope> = ctx.binders.to_vec();
+            if let Some((base_infer_name, binder)) = base_infer_name {
+                let reference = graph.intern_node_with_scope(
+                    SemanticNodeData::InferRef {
+                        name: Arc::clone(&base_infer_name),
+                        binder,
+                    },
+                    scope.clone(),
+                );
+                let mut base_infer_frame = BinderScope::default();
+                base_infer_frame.bind(base_infer_name, reference);
+                frames.push(base_infer_frame);
+            }
+            let mut mapper_frame = BinderScope::default();
+            mapper_frame.bind(Arc::clone(&mapper_display_name), parameter_node);
+            frames.push(mapper_frame);
+            let body_ctx = ctx.with_binders(&frames);
+
             let value_expr = lower_node(graph, value, scope, &body_ctx)?;
             let name_remap = name_type
                 .as_deref()
@@ -1004,6 +935,46 @@ fn lower_args(
     Ok(Arc::from(lowered.into_boxed_slice()))
 }
 
+fn register_structural_function_alias(
+    infer_binders: &crate::semantic_query::InferBinderFactory,
+    alias: &TypeExpr,
+    original: &FunctionExpr,
+) {
+    let alias_function = match alias {
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => function,
+        _ => return,
+    };
+    for (alias_parameter, original_parameter) in alias_function
+        .type_parameters
+        .iter()
+        .zip(&original.type_parameters)
+    {
+        if let (Some(alias), Some(original)) = (
+            alias_parameter.constraint.as_deref(),
+            original_parameter.constraint.as_deref(),
+        ) {
+            infer_binders.register_equivalent_subtree(alias, original);
+        }
+        if let (Some(alias), Some(original)) = (
+            alias_parameter.default.as_deref(),
+            original_parameter.default.as_deref(),
+        ) {
+            infer_binders.register_equivalent_subtree(alias, original);
+        }
+    }
+    for (alias_parameter, original_parameter) in
+        alias_function.parameters.iter().zip(&original.parameters)
+    {
+        infer_binders.register_equivalent_subtree(&alias_parameter.ty, &original_parameter.ty);
+    }
+    if let (Some(alias), Some(original)) = (
+        alias_function.return_type.as_deref(),
+        original.return_type.as_deref(),
+    ) {
+        infer_binders.register_equivalent_subtree(alias, original);
+    }
+}
+
 // =============================================================================
 // The `<script setup generic="…">` binder-seed builder (PRIVATE).
 // =============================================================================
@@ -1046,24 +1017,20 @@ fn build_script_setup_seed_frames(
         return Vec::new();
     }
 
-    let decl = match scope {
-        NodeScopeId::Global => DeclIdentity {
-            canonical_id: Arc::from(""),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            whole_hash: HashValue::default(),
-            decl_name: Arc::from("<script-setup>"),
-        },
+    let (canonical_id, owner, whole_hash) = match scope {
+        NodeScopeId::Global => return Vec::new(),
         NodeScopeId::File {
             canonical_id,
             owner,
             whole_hash,
             ..
-        } => DeclIdentity {
-            canonical_id: Arc::clone(canonical_id),
-            owner: *owner,
-            whole_hash: *whole_hash,
-            decl_name: Arc::from("<script-setup>"),
-        },
+        } => (canonical_id, *owner, *whole_hash),
+    };
+    let decl = DeclIdentity {
+        canonical_id: Arc::clone(canonical_id),
+        owner,
+        whole_hash,
+        decl_name: Arc::from("<script-setup>"),
     };
 
     let mut frame = BinderScope::default();
@@ -1075,13 +1042,38 @@ fn build_script_setup_seed_frames(
         // (`std::slice::from_ref`) feeds the head context without cloning the
         // accumulated binder map per parameter.
         let head_frames = std::slice::from_ref(&frame);
-        let head_ctx = StructuralLowerContext::new(head_frames);
+        let bound_locator = |position| {
+            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                verter_type_expr::locators::TypeBodySlot {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::clone(canonical_id),
+                        owner,
+                        symbol: Arc::from("<script-setup>"),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                    },
+                    path: Arc::from(
+                        Vec::from([
+                            verter_type_expr::locators::TypeBodyPathStep::TypeParamBound {
+                                ordinal: u32::try_from(idx).unwrap_or(u32::MAX),
+                                position,
+                            },
+                        ])
+                        .into_boxed_slice(),
+                    ),
+                },
+            )
+        };
         let constraint = param.constraint.as_ref().and_then(|c| {
+            let source =
+                bound_locator(verter_type_expr::locators::TypeParamBoundPosition::Constraint);
+            let head_ctx = StructuralLowerContext::new(head_frames).with_infer_source(&source);
             lower_type_expr_structural(graph, c, scope.clone(), &head_ctx)
                 .ok()
                 .map(HotTypeRef::node)
         });
         let default = param.default.as_ref().and_then(|d| {
+            let source = bound_locator(verter_type_expr::locators::TypeParamBoundPosition::Default);
+            let head_ctx = StructuralLowerContext::new(head_frames).with_infer_source(&source);
             lower_type_expr_structural(graph, d, scope.clone(), &head_ctx)
                 .ok()
                 .map(HotTypeRef::node)
@@ -1111,49 +1103,75 @@ fn build_script_setup_seed_frames(
     Vec::from([frame])
 }
 
-// =============================================================================
-// The macro hot mirror (the ONLY crate-visible producer surface).
-// =============================================================================
-
-/// Lazy, singleflight, content-addressed mirror of one file's Vue SFC MACRO
-/// type-argument graph handles.
-///
-/// See the module documentation. Stored on
-/// [`IndexedReady`](crate::project_type_store::IndexedReady); content-
-/// addressed by construction (a fresh artifact carries a fresh empty
-/// mirror).
+/// Lazy, singleflight storage for one file's macro type-argument handles.
 #[derive(Default)]
-pub struct MacroHotMirror {
-    /// Lazily allocated once on first demand, sized to the owner's macro
-    /// count. `cells[macro_index]` is a per-slot [`MacroSlot`]:
-    /// `committed = Some(HotTypeRef)` = lowered, `committed = None` = stable
-    /// negative (no `parsed_type_argument` / not structurally lowerable). The
-    /// outer [`OnceLock`] stays EMPTY until the first `macro_type_arg_hot_ref`
-    /// demand, so publishing an artifact allocates ZERO.
+pub(crate) struct MacroHotMirror {
     cells: OnceLock<Box<[MacroSlot]>>,
 }
 
-/// One per-macro mirror slot.
-///
-/// `committed` is the lock-free [`OnceLock`] warm read: `Some(HotTypeRef)` =
-/// lowered, `None` = stable negative. `build_lock` is the SINGLEFLIGHT unit for
-/// the COLD lowering — it collapses concurrent first-touch of one macro onto a
-/// single [`build_macro_hot_ref`]. The `OnceLock` alone cannot serialize the
-/// build: a transient broken decl-body lease (`LeaseMiss`) must leave the slot
-/// VACANT so a later live-lease demand retries, which rules out
-/// `OnceLock::get_or_init` (it would commit the transient negative
-/// permanently). The build lock therefore does the serialization and is held
-/// ONLY across the cold build, NEVER on the warm read path.
 #[derive(Default)]
 struct MacroSlot {
     committed: OnceLock<Option<HotTypeRef>>,
     build_lock: parking_lot::Mutex<()>,
 }
 
+impl MacroHotMirror {
+    fn slot(&self, macro_count: usize, macro_index: usize) -> Option<MacroMirrorSlot<'_>> {
+        let cells = self.cells.get_or_init(|| {
+            (0..macro_count)
+                .map(|_| MacroSlot::default())
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        });
+        cells.get(macro_index).map(MacroMirrorSlot)
+    }
+
+    #[cfg(test)]
+    fn demanded_count(&self) -> usize {
+        self.cells.get().map_or(0, |cells| {
+            cells
+                .iter()
+                .filter(|cell| cell.committed.get().is_some())
+                .count()
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MacroMirrorSlot<'a>(&'a MacroSlot);
+
+impl<'a> MacroMirrorSlot<'a> {
+    fn committed(self) -> Option<Option<HotTypeRef>> {
+        self.0.committed.get().copied()
+    }
+
+    fn lock_build(self) -> MacroMirrorBuildGuard<'a> {
+        MacroMirrorBuildGuard {
+            slot: self.0,
+            _lock: self.0.build_lock.lock(),
+        }
+    }
+}
+
+/// Opaque proof that the producer owns the cold-build lock for one exact slot.
+struct MacroMirrorBuildGuard<'a> {
+    slot: &'a MacroSlot,
+    _lock: parking_lot::MutexGuard<'a, ()>,
+}
+
+impl MacroMirrorBuildGuard<'_> {
+    fn commit(self, result: Option<HotTypeRef>) {
+        let _ = self.slot.committed.set(result);
+    }
+}
+
 impl std::fmt::Debug for MacroHotMirror {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let demanded = self.cells.get().map_or(0, |cells| {
-            cells.iter().filter(|c| c.committed.get().is_some()).count()
+            cells
+                .iter()
+                .filter(|cell| cell.committed.get().is_some())
+                .count()
         });
         f.debug_struct("MacroHotMirror")
             .field("demanded", &demanded)
@@ -1161,9 +1179,6 @@ impl std::fmt::Debug for MacroHotMirror {
     }
 }
 
-/// A clone is a distinct artifact instance, so it starts with an EMPTY
-/// per-artifact demand mirror; re-demand repopulates it (interned nodes are
-/// content-addressed, so a re-lower hits the same node ids).
 impl Clone for MacroHotMirror {
     fn clone(&self) -> Self {
         Self {
@@ -1192,18 +1207,13 @@ pub(crate) fn macro_type_arg_hot_ref(
     // count (race-safe via the outer `OnceLock::get_or_init`). An
     // out-of-range `macro_index` returns `None` (same negative as a missing
     // macro), never grows the table.
-    let table = indexed.macro_hot_mirror.cells.get_or_init(|| {
-        let n = indexed
-            .script_analysis
-            .as_ref()
-            .map(|s| s.macros.len())
-            .unwrap_or(0);
-        (0..n)
-            .map(|_| MacroSlot::default())
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    });
-    let cell = table.get(macro_index)?;
+    let macro_count = indexed
+        .script_analysis
+        .as_ref()
+        .map(|script| script.macros.len())
+        .unwrap_or(0);
+    let mirror = &indexed.macro_hot_mirror;
+    let cell = mirror.slot(macro_count, macro_index)?;
 
     // The mirror is a PURE producer of the UNRESOLVED structural carrier graph
     // (inert carrier nodes, resolved on demand at the consuming dispatch):
@@ -1220,8 +1230,8 @@ pub(crate) fn macro_type_arg_hot_ref(
     // built ref OR a genuine (cacheable) absence commits.
     //
     // Lock-free warm read first.
-    if let Some(committed) = cell.committed.get() {
-        return *committed;
+    if let Some(committed) = cell.committed() {
+        return committed;
     }
     // Test-only rendezvous between the lock-free warm MISS and the build lock: when
     // armed it holds every thread that has just missed until ALL of them have, which
@@ -1239,16 +1249,16 @@ pub(crate) fn macro_type_arg_hot_ref(
     // `LeaseMiss` leaves the slot vacant for retry, which forbids
     // `get_or_init`). Re-check under the lock: a racing builder may have
     // committed while this thread waited on the lock.
-    let _build_guard = cell.build_lock.lock();
-    if let Some(committed) = cell.committed.get() {
-        return *committed;
+    let build_guard = cell.lock_build();
+    if let Some(committed) = cell.committed() {
+        return committed;
     }
     match build_macro_hot_ref(ctx, owner_canonical, &indexed, macro_index) {
         MacroHotRefOutcome::Ready(result) => {
             // First-writer commit under the build lock: `set` cannot race a
             // second committer (all commits take this lock), so it succeeds and
             // `result` IS the committed value.
-            let _ = cell.committed.set(result);
+            build_guard.commit(result);
             result
         }
         MacroHotRefOutcome::LeaseMiss => {
@@ -1306,9 +1316,9 @@ fn build_macro_hot_ref(
     // locator); the typed IR hydrates transiently from the memo's retained
     // snapshot at the macro call's span — the mirror is the position's sole
     // producer, and the lease-only re-borrow never re-parses.
-    if mac.parsed_type_argument.as_ref().is_none() {
+    let Some(payload_locator) = mac.parsed_type_argument.as_ref() else {
         return MacroHotRefOutcome::Ready(None);
-    }
+    };
     let parsed_arg = match indexed
         .shallow_state
         .decl_bodies()
@@ -1350,7 +1360,11 @@ fn build_macro_hot_ref(
     // data (`raw_source` + `framework_parse`) — NO host route lookup, so the
     // mirror stays a pure producer.
     let seed_frames = build_script_setup_seed_frames(indexed, graph, &scope);
-    let lower_ctx = StructuralLowerContext::new(&seed_frames).with_macro_own_body(macro_own_body);
+    let infer_source =
+        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload_locator.clone());
+    let lower_ctx = StructuralLowerContext::new(&seed_frames)
+        .with_macro_own_body(macro_own_body)
+        .with_infer_source(&infer_source);
 
     // A lowering failure is a genuine (cacheable) absence — commit `Ready(None)`.
     MacroHotRefOutcome::Ready(lower_type_expr_structural(graph, parsed_arg, scope, &lower_ctx).ok())

@@ -1,8 +1,9 @@
+use super::relation_txn::RelationStep;
 use super::*;
 use crate::semantic_query::{
     IndexSignature, NodeScopeId, OriginEdgeKind, PathSegment, ProjectionMode,
-    ProjectionReductionContext, ScopeId, SemanticNodeData, SemanticQueryOutput, SurfaceMember,
-    SurfaceView, ValueRootKey,
+    ProjectionReductionContext, RelationOutcome, ScopeId, SemanticNodeData, SemanticQueryOutput,
+    SurfaceMember, SurfaceView, ValueRootKey,
 };
 use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
@@ -13,6 +14,1455 @@ fn num_key(value: i64) -> crate::semantic_query::IndexKey {
     crate::semantic_query::IndexKey::Number(
         crate::semantic_query::CanonicalIndexInt::from_canonical_i64(value).expect("canonical"),
     )
+}
+
+#[test]
+fn reverse_homomorphic_reduces_more_than_eight_root_conditionals() {
+    use crate::semantic_query::{IndexKey, LiteralValue, OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let (infer, parameter) = reverse_test_binders(&graph, "DeepConditionalT", 410);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let mut template = projection;
+    for index in (0..12).rev() {
+        let fixed_key = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            index.to_string(),
+        )));
+        template = graph.intern_node(SemanticNodeData::Conditional {
+            check: parameter,
+            extends: fixed_key,
+            true_branch_ref: never,
+            false_branch_ref: template,
+            distributive: false,
+        });
+    }
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        template,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let source = graph.intern_node(SemanticNodeData::Array {
+        element: string,
+        readonly: true,
+    });
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Array { element, readonly }) => {
+            assert_eq!(*element, string);
+            assert!(*readonly);
+        }
+        other => panic!(
+            "the number key must pass through all twelve false arms and reach the projection; got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn scc_redischarge_reenters_the_semantic_query_relate_authority() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    assert_eq!(
+        dispatch.redischarge_execute_visits_for_tests(string, string),
+        1,
+        "redischarge must re-enter SemanticQueryApi::execute(Relate) exactly once"
+    );
+}
+
+#[test]
+fn positive_binding_scc_redischarge_runs_after_fixation() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let (outcome, bindings, execute_visits) = dispatch.binding_scc_discharge_for_tests(false);
+    assert_eq!(outcome, crate::semantic_query::RelationOutcome::Assignable);
+    assert_eq!(
+        execute_visits, 1,
+        "the cyclic binding member must redischarge through execute after fixation"
+    );
+    assert_eq!(bindings.len(), 1);
+    assert!(matches!(
+        graph.node_data(bindings[0].bound).as_deref(),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+    ));
+}
+
+#[test]
+fn negative_binding_scc_redischarge_runs_after_fixation() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let (outcome, _bindings, execute_visits) = dispatch.binding_scc_discharge_for_tests(true);
+    assert_eq!(
+        outcome,
+        crate::semantic_query::RelationOutcome::NotAssignable
+    );
+    assert_eq!(
+        execute_visits, 1,
+        "a negative cyclic binding member must also redischarge through execute after fixation"
+    );
+}
+
+#[test]
+fn mixed_binding_scc_redischarge_rechecks_negative_nonbinding_consumers() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let (outcome, bindings, execute_visits) = dispatch.mixed_binding_scc_discharge_for_tests();
+    assert_eq!(outcome, crate::semantic_query::RelationOutcome::Assignable);
+    assert_eq!(
+        bindings.len(),
+        1,
+        "the binding root must retain its converged fixed binding"
+    );
+    assert_eq!(
+        execute_visits, 2,
+        "a binding SCC must redischarge both its binding root and its \
+         negative nonbinding consumer after fixation"
+    );
+}
+
+#[test]
+fn binding_scc_substitution_edge_preserves_the_fixed_binding_snapshot() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let (bindings, stable) = dispatch.binding_scc_substitution_edge_for_tests();
+    assert_eq!(
+        bindings.len(),
+        1,
+        "a redischarge substitution-table hit must merge the consumed binding member"
+    );
+    assert!(
+        stable,
+        "the consumed binding snapshot must survive the SCC stability gate"
+    );
+}
+
+#[test]
+fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_positions() {
+    use crate::semantic_query::{FunctionParam, IndexSignature, SignatureKind, TypeParamDecl};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let infer = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("UnsupportedObjectPosition"),
+        binder: graph.alloc_infer_binder_id(),
+    });
+    let signature = |kind, value| {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind,
+            params: Arc::from(
+                vec![FunctionParam::synthetic(
+                    Some(Arc::from("value")),
+                    string,
+                    false,
+                    false,
+                )]
+                .into_boxed_slice(),
+            ),
+            return_type: value,
+            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            signature_span: None,
+            return_type_span: None,
+        })
+    };
+    let object = |members: Vec<SurfaceMember>,
+                  call_signatures: Vec<SemanticNodeId>,
+                  construct_signatures: Vec<SemanticNodeId>,
+                  index_signatures: Vec<IndexSignature>| {
+        let has_index_signature = !index_signatures.is_empty();
+        graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(members.into_boxed_slice()),
+                call_signatures: Arc::from(call_signatures.into_boxed_slice()),
+                construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
+                index_signatures: Arc::from(index_signatures.into_boxed_slice()),
+                keyspace: None,
+                has_index_signature,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+            },
+        ))
+    };
+
+    let supported_source = object(
+        vec![surface_member("value", string, false, false)],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let supported_target = object(
+        vec![surface_member("value", infer, false, false)],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let supported =
+        reverse_test_conditional(&dispatch, supported_source, supported_target, infer, never);
+    assert_eq!(
+        supported, string,
+        "control: direct object-property inference stays supported"
+    );
+
+    let string_index = |value| IndexSignature {
+        key_type: string,
+        value_type: value,
+        readonly: false,
+        spans: Default::default(),
+        declaration_origin: None,
+    };
+    let unsupported = [
+        (
+            "index",
+            object(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vec![string_index(string)],
+            ),
+            object(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vec![string_index(infer)],
+            ),
+        ),
+        (
+            "call",
+            object(
+                Vec::new(),
+                vec![signature(SignatureKind::Call, string)],
+                Vec::new(),
+                Vec::new(),
+            ),
+            object(
+                Vec::new(),
+                vec![signature(SignatureKind::Call, infer)],
+                Vec::new(),
+                Vec::new(),
+            ),
+        ),
+        (
+            "construct",
+            object(
+                Vec::new(),
+                Vec::new(),
+                vec![signature(SignatureKind::Construct, string)],
+                Vec::new(),
+            ),
+            object(
+                Vec::new(),
+                Vec::new(),
+                vec![signature(SignatureKind::Construct, infer)],
+                Vec::new(),
+            ),
+        ),
+    ];
+    for (label, source, target) in unsupported {
+        let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+        assert!(
+            matches!(
+                graph.node_data(result).as_deref(),
+                Some(SemanticNodeData::Conditional { .. })
+            ),
+            "an object {label}-signature infer position is deliberately unsupported and must stay deferred, never select true with an unresolved Infer"
+        );
+    }
+}
+
+#[test]
+fn heritage_type_argument_infer_binders_use_exact_authored_argument_positions() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/heritage-infer-locators.ts",
+        "class Base<A, B> {}\n\
+         export class Derived extends Base<\n\
+           Missing extends [infer X] ? X : never,\n\
+           Missing extends [infer X] ? X : never\n\
+         > {}\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let first =
+        dispatch.lower_class_heritage_args_for_tests("/w/heritage-infer-locators.ts", "Derived");
+    let second =
+        dispatch.lower_class_heritage_args_for_tests("/w/heritage-infer-locators.ts", "Derived");
+    let via_body_locator = dispatch.lower_class_heritage_args_via_body_locator_for_tests(
+        "/w/heritage-infer-locators.ts",
+        "Derived",
+    );
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        first, second,
+        "repeat lowering of the same authored heritage positions must be deterministic"
+    );
+    assert_eq!(
+        first, via_body_locator,
+        "the type-argument factory and normalized authored-body locator route must agree per position"
+    );
+    assert_ne!(
+        first[0], first[1],
+        "identical infer-bearing arguments at distinct heritage ordinals need distinct binder identities"
+    );
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    ProjectSemanticDispatch::new(&host).lower_class_heritage_args_for_tests(
+                        "/w/heritage-infer-locators.ts",
+                        "Derived",
+                    )
+                })
+            })
+            .collect();
+        for handle in handles {
+            assert_eq!(
+                handle.join().expect("concurrent heritage lowering"),
+                first,
+                "concurrent lowering must preserve the exact authored binder identities"
+            );
+        }
+    });
+}
+
+#[test]
+fn script_setup_constraint_and_default_infer_binders_use_authored_bound_positions() {
+    let host = host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/w/script-setup-infer-bounds.vue".to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\" generic=\"\
+         T extends (Missing extends [infer X] ? X : never), \
+         U = (Missing extends [infer X] ? X : never)\">\n\
+         defineProps<{ value: T | U }>()\n\
+         </script>\n\
+         <template><div /></template>\n",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("script-setup fixture");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let first =
+        dispatch.lower_script_setup_type_params_for_tests("/w/script-setup-infer-bounds.vue");
+    let second =
+        dispatch.lower_script_setup_type_params_for_tests("/w/script-setup-infer-bounds.vue");
+    assert_eq!(first, second, "script-setup bound lowering must repeat");
+    let constraint = match host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(first[0])
+        .as_deref()
+    {
+        Some(SemanticNodeData::TypeParam {
+            constraint: Some(constraint),
+            ..
+        }) => *constraint,
+        other => panic!("expected constrained script-setup TypeParam, got {other:?}"),
+    };
+    let default = match host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(first[1])
+        .as_deref()
+    {
+        Some(SemanticNodeData::TypeParam {
+            default: Some(default),
+            ..
+        }) => *default,
+        other => panic!("expected defaulted script-setup TypeParam, got {other:?}"),
+    };
+    assert_ne!(
+        constraint, default,
+        "identical infer-bearing constraint/default text occupies distinct authored bound slots"
+    );
+}
+
+#[test]
+fn macro_hot_script_setup_infer_bounds_share_eager_authored_identities() {
+    let host = host();
+    let canonical = "/w/macro-hot-script-setup-infer-bounds.vue";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\" generic=\"\
+         T extends (Missing extends [infer X] ? X : never), \
+         U = (Missing extends [infer X] ? X : never)\">\n\
+         defineProps<{ constraint: T; fallback: U }>()\n\
+         </script>\n\
+         <template><div /></template>\n",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("script-setup macro fixture");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let eager = dispatch.lower_script_setup_type_params_for_tests(canonical);
+    assert_eq!(
+        eager,
+        dispatch.lower_script_setup_type_params_for_tests(canonical),
+        "eager script-setup bound lowering must repeat"
+    );
+
+    let indexed = host
+        .ensure_indexed_ready(canonical)
+        .expect("script-setup macro fixture must be indexed");
+    let macro_index = indexed
+        .script_analysis
+        .as_ref()
+        .expect("script-setup analysis")
+        .macros
+        .iter()
+        .position(|candidate| candidate.is_type_based)
+        .expect("defineProps must be type-based");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let macro_members = || {
+        let root = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+            &host,
+            canonical,
+            macro_index,
+        )
+        .expect("macro type argument must lower")
+        .node();
+        let surface = match graph.node_data(root).as_deref() {
+            Some(SemanticNodeData::Object(surface)) => surface.clone(),
+            other => panic!("defineProps object must lower structurally, got {other:?}"),
+        };
+        ["constraint", "fallback"].map(|name| {
+            surface
+                .positive_members()
+                .iter()
+                .find(|member| member.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("missing macro member {name}"))
+                .value
+        })
+    };
+
+    let concurrent = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4).map(|_| scope.spawn(&macro_members)).collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("concurrent macro-hot lowering"))
+            .collect::<Vec<_>>()
+    });
+    let macro_params = concurrent[0];
+    assert!(
+        concurrent.iter().all(|observed| *observed == macro_params),
+        "concurrent first demands must share the same macro-hot TypeParam nodes"
+    );
+    assert_eq!(
+        macro_members(),
+        macro_params,
+        "repeat macro-hot demand must preserve its TypeParam identities"
+    );
+
+    let type_param_shape = |node, constraint_position| match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::TypeParam {
+            decl,
+            param_index,
+            constraint,
+            default,
+            display_name,
+        }) => (
+            decl.clone(),
+            *param_index,
+            Arc::clone(display_name),
+            if constraint_position {
+                constraint.expect("constraint node")
+            } else {
+                default.expect("default node")
+            },
+        ),
+        other => panic!("expected script-setup TypeParam, got {other:?}"),
+    };
+    let eager_constraint = type_param_shape(eager[0], true);
+    let eager_default = type_param_shape(eager[1], false);
+    let macro_constraint = type_param_shape(macro_params[0], true);
+    let macro_default = type_param_shape(macro_params[1], false);
+    assert_eq!(
+        (&macro_constraint.0, macro_constraint.1, &macro_constraint.2),
+        (&eager_constraint.0, eager_constraint.1, &eager_constraint.2),
+        "constraint TypeParam declaration identity, ordinal, and display name must match"
+    );
+    assert_eq!(
+        (&macro_default.0, macro_default.1, &macro_default.2),
+        (&eager_default.0, eager_default.1, &eager_default.2),
+        "default TypeParam declaration identity, ordinal, and display name must match"
+    );
+
+    let infer_children = |bound| {
+        let (extends, true_branch_ref) = match graph.node_data(bound).as_deref() {
+            Some(SemanticNodeData::Conditional {
+                extends,
+                true_branch_ref,
+                ..
+            }) => (*extends, *true_branch_ref),
+            other => panic!("expected conditional infer bound, got {other:?}"),
+        };
+        let declaration = match graph.node_data(extends).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. }) => elements[0].value,
+            other => panic!("expected infer-bearing tuple extends arm, got {other:?}"),
+        };
+        assert!(matches!(
+            graph.node_data(declaration).as_deref(),
+            Some(SemanticNodeData::Infer { .. })
+        ));
+        assert!(matches!(
+            graph.node_data(true_branch_ref).as_deref(),
+            Some(SemanticNodeData::InferRef { .. })
+        ));
+        (declaration, true_branch_ref)
+    };
+    for (eager_bound, macro_bound) in [
+        (eager_constraint.3, macro_constraint.3),
+        (eager_default.3, macro_default.3),
+    ] {
+        assert_eq!(
+            graph.node_data(macro_bound),
+            graph.node_data(eager_bound),
+            "eager and macro-hot Conditional payloads must share every authored child identity"
+        );
+        assert_eq!(
+            infer_children(macro_bound),
+            infer_children(eager_bound),
+            "the exact Infer declaration and InferRef capture IDs must match"
+        );
+        assert_eq!(graph.node_scope(eager_bound), Some(NodeScopeId::Global));
+        assert_eq!(
+            graph.node_scope(macro_bound),
+            graph.node_scope(macro_params[0]),
+            "the query-free mirror keeps its deferred outer Conditional in file scope"
+        );
+    }
+    assert_ne!(
+        infer_children(eager_constraint.3),
+        infer_children(eager_default.3),
+        "constraint and default occupy distinct authored TypeParamBound slots"
+    );
+}
+
+#[test]
+fn nested_nonbinding_relation_frame_registers_the_store_owned_family_flight() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    assert!(
+        dispatch.nested_nonbinding_frame_registers_inline_flight_for_tests(),
+        "a production nested nonbinding frame must register its member in the \
+         relation-family flight table"
+    );
+}
+
+#[test]
+fn scc_root_and_members_share_complete_self_root_union_and_invalidation() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let root_canonical = Arc::<str>::from("/w/scc-root.ts");
+    let member_canonical = Arc::<str>::from("/w/scc-member.ts");
+    let root_hash = [0x11; 16];
+    let member_hash = [0x22; 16];
+    let root_source = graph.intern_node_with_scope(
+        SemanticNodeData::Primitive(PrimitiveKind::String),
+        NodeScopeId::File {
+            canonical_id: Arc::clone(&root_canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: root_hash,
+            local_scope: None,
+        },
+    );
+    let member_source = graph.intern_node_with_scope(
+        SemanticNodeData::Primitive(PrimitiveKind::Number),
+        NodeScopeId::File {
+            canonical_id: Arc::clone(&member_canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: member_hash,
+            local_scope: None,
+        },
+    );
+    let target = primitive(&graph, PrimitiveKind::Unknown);
+    let root_key = dispatch.relate_key_for(root_source, target);
+    let member_key = dispatch.relate_key_for(member_source, target);
+    let roots =
+        dispatch.scc_publication_roots_for_tests(&root_key, std::slice::from_ref(&member_key));
+    assert_eq!(
+        roots.len(),
+        2,
+        "the SCC publication root set must include every member's file origin"
+    );
+    let facts: Vec<_> = roots
+        .iter()
+        .map(
+            |(canonical_id, hash)| crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: canonical_id.to_string(),
+                hash: *hash,
+            },
+        )
+        .collect();
+    let canonicals: Arc<[Arc<str>]> = Arc::from(
+        roots
+            .iter()
+            .map(|(canonical_id, _)| Arc::clone(canonical_id))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    let carrier =
+        crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(facts.into_boxed_slice()));
+    let generation = host.project_type_store().current_project_generation();
+    for key in [&root_key, &member_key] {
+        graph.insert_relation_payload_for_tests(
+            key.clone(),
+            carrier.clone(),
+            Arc::clone(&canonicals),
+            graph.relation_payload_for_tests(RelationOutcome::Assignable),
+            generation,
+        );
+    }
+    for key in [&root_key, &member_key] {
+        let published = graph
+            .relation_published_carrier(key)
+            .expect("both SCC entries must publish");
+        assert_eq!(
+            published.read_set_signature.facts, carrier.facts,
+            "root and member must carry the identical SCC-union fact set"
+        );
+        assert_eq!(
+            published.self_root_canonicals, canonicals,
+            "root and member must carry the identical SCC-union strict roots"
+        );
+    }
+    assert_eq!(
+        graph.canonical_to_entries_count(&member_canonical),
+        2,
+        "the member canonical must reverse-index both SCC entries"
+    );
+    assert_eq!(graph.invalidate_canonical(&member_canonical), 2);
+    assert_eq!(
+        graph.relation_memo_count(),
+        0,
+        "editing one SCC member dependency must invalidate the root and every member"
+    );
+}
+
+#[test]
+fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_publication() {
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let unknown = primitive(&graph, PrimitiveKind::Unknown);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let root_key = dispatch.relate_key_for(string, unknown);
+    let member_key = dispatch.relate_key_for(number, unknown);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = graph.test_relation_root_pre_member_drain_gate(Arc::clone(&barrier));
+
+    let root_for_worker = root_key.clone();
+    let member_for_worker = member_key.clone();
+    let step = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            ProjectSemanticDispatch::new(&host)
+                .publish_staged_scc_member_for_tests(root_for_worker, member_for_worker)
+        });
+        barrier.wait();
+        let exact_root = graph
+            .relation_published_carrier(&root_key)
+            .expect("the transaction root must publish before the drain gate");
+        let sibling_generation = exact_root.validated_at_generation.saturating_add(1);
+        graph.insert_relation_payload_for_tests(
+            root_key.clone(),
+            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+            graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
+            sibling_generation,
+        );
+        barrier.wait();
+        (
+            worker.join().expect("relation root worker"),
+            exact_root.validated_at_generation,
+        )
+    });
+    assert!(matches!(step.0, RelationStep::Assignable { .. }));
+    let member = graph
+        .relation_published_carrier(&member_key)
+        .expect("the completed SCC member must publish");
+    assert_eq!(
+        member.validated_at_generation, step.1,
+        "a later sibling publication must not replace the transaction root's carrier"
+    );
+}
+
+#[test]
+fn scc_member_drain_inherits_the_root_candidate_without_a_race() {
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let unknown = primitive(&graph, PrimitiveKind::Unknown);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let root_key = dispatch.relate_key_for(string, unknown);
+    let member_key = dispatch.relate_key_for(number, unknown);
+    let step = dispatch.publish_staged_scc_member_for_tests(root_key.clone(), member_key.clone());
+    assert!(matches!(step, RelationStep::Assignable { .. }));
+    let root = graph
+        .relation_published_carrier(&root_key)
+        .expect("root publication");
+    let member = graph
+        .relation_published_carrier(&member_key)
+        .expect("member publication");
+    assert_eq!(
+        (
+            member.read_set_signature.facts,
+            member.self_root_canonicals,
+            member.validated_at_generation,
+        ),
+        (
+            root.read_set_signature.facts,
+            root.self_root_canonicals,
+            root.validated_at_generation,
+        ),
+        "a normal drain must inherit the exact root carrier"
+    );
+}
+
+#[test]
+fn cancellation_after_root_admission_loses_to_relation_publication() {
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let unknown = primitive(&graph, PrimitiveKind::Unknown);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let root_key = dispatch.relate_key_for(string, unknown);
+    let member_key = dispatch.relate_key_for(number, unknown);
+    let context = crate::request_context::RequestContext::new(
+        0x7b_7001,
+        Arc::from("/w/relation-cancel.ts"),
+        false,
+        None,
+    );
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = graph.test_cold_winner_post_admission_gate(Arc::clone(&barrier));
+
+    let root_for_worker = root_key.clone();
+    let member_for_worker = member_key.clone();
+    let (step, admitted_root_seq) = std::thread::scope(|scope| {
+        let context_for_worker = Arc::clone(&context);
+        let worker = scope.spawn(|| {
+            let _request = crate::request_context::RequestContextGuard::install(context_for_worker);
+            ProjectSemanticDispatch::new(&host)
+                .publish_staged_scc_member_for_tests(root_for_worker, member_for_worker)
+        });
+        barrier.wait();
+        let admitted_root = graph
+            .relation_published_carrier(&root_key)
+            .expect("the root must be admitted before cancellation");
+        assert_eq!(graph.memo_budget_tracked_len_for_test(), 1);
+        assert_eq!(graph.canonical_to_entries_count("<project>"), 1);
+        context.cancel();
+        barrier.wait();
+        (
+            worker.join().expect("relation root worker"),
+            admitted_root.admission_seq,
+        )
+    });
+
+    assert!(matches!(step, RelationStep::Assignable { .. }));
+    let root = graph
+        .relation_published_carrier(&root_key)
+        .expect("successful admission remains the published root");
+    assert_eq!(root.admission_seq, admitted_root_seq);
+    assert!(
+        graph.relation_published_carrier(&member_key).is_none(),
+        "the existing member-level cancellation fence still rejects the staged member"
+    );
+    assert_eq!(graph.memo_budget_tracked_len_for_test(), 1);
+    assert_eq!(graph.canonical_to_entries_count("<project>"), 1);
+}
+
+#[test]
+fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_warm_promotion() {
+    let primary_host = host();
+    let warm_host = host();
+    let _ = warm_host.project_type_store().bump_project_generation();
+    let root_generation = primary_host
+        .project_type_store()
+        .current_project_generation();
+    let sibling_generation = warm_host.project_type_store().current_project_generation();
+    assert_ne!(
+        root_generation, sibling_generation,
+        "the sibling candidate must miss the root transaction's generation gate"
+    );
+
+    let graph = Arc::clone(primary_host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let unknown = primitive(&graph, PrimitiveKind::Unknown);
+    let dispatch = ProjectSemanticDispatch::new(&primary_host);
+    let root_key = dispatch.relate_key_for(string, unknown);
+    let member_key = dispatch.relate_key_for(number, unknown);
+    graph.insert_relation_payload_for_tests(
+        root_key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+        graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
+        sibling_generation,
+    );
+
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = graph.test_relation_root_pre_member_drain_gate(Arc::clone(&barrier));
+    let root_for_worker = root_key.clone();
+    let member_for_worker = member_key.clone();
+    let exact_generation = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            ProjectSemanticDispatch::new(&primary_host)
+                .publish_staged_scc_member_for_tests(root_for_worker, member_for_worker)
+        });
+        barrier.wait();
+        let exact_root = graph
+            .relation_published_carrier(&root_key)
+            .expect("the transaction root must be freshest before promotion");
+        assert_eq!(exact_root.validated_at_generation, root_generation);
+        let warmed = graph
+            .get_relation_payload(&warm_host, &root_key)
+            .expect("the sibling must validate in the warm reader's generation");
+        assert_eq!(warmed.outcome, RelationOutcome::NotAssignable);
+        barrier.wait();
+        let step = worker.join().expect("relation root worker");
+        assert!(matches!(step, RelationStep::Assignable { .. }));
+        exact_root.validated_at_generation
+    });
+    let member = graph
+        .relation_published_carrier(&member_key)
+        .expect("the completed SCC member must publish");
+    assert_eq!(
+        member.validated_at_generation, exact_generation,
+        "warming an older sibling must not replace the transaction root's carrier"
+    );
+}
+
+#[test]
+fn production_nested_same_name_conditional_infers_have_distinct_identity() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/nested-infer-shadow.ts",
+        "export type Result = string extends infer T\n\
+           ? [T, number extends infer T ? T : never]\n\
+           : never;\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/nested-infer-shadow.ts",
+            "Result",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let result = outcome
+        .ok()
+        .flatten()
+        .expect("the nested conditional infer fixture must resolve");
+    let infer_declarations: Vec<_> = (0..graph.node_count())
+        .map(|raw| SemanticNodeId(raw as u64))
+        .filter(|node| {
+            matches!(
+                graph.node_data(*node).as_deref(),
+                Some(SemanticNodeData::Infer { name, .. }) if name.as_ref() == "T"
+            )
+        })
+        .collect();
+    assert_eq!(
+        infer_declarations.len(),
+        2,
+        "the outer and nested `infer T` declarations need distinct canonical identities"
+    );
+    let binder_identities: rustc_hash::FxHashSet<_> = infer_declarations
+        .iter()
+        .map(|node| match graph.node_data(*node).as_deref() {
+            Some(SemanticNodeData::Infer { binder, .. }) => binder.clone(),
+            _ => unreachable!("the list contains only infer declarations"),
+        })
+        .collect();
+    assert_eq!(
+        binder_identities.len(),
+        2,
+        "same-name nested declarations must carry distinct collision-free binder tokens"
+    );
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, .. }) => {
+            assert_eq!(elements.len(), 2);
+            assert!(matches!(
+                graph.node_data(elements[0].value).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ));
+            assert!(matches!(
+                graph.node_data(elements[1].value).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+            ));
+        }
+        other => panic!("expected [string, number], got {other:?}"),
+    }
+}
+
+#[test]
+fn production_nested_same_name_conditional_does_not_bind_outer_reverse_session() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/nested-reverse-infer-shadow.ts",
+        "export type Result = { a: string } extends\n\
+           { [P in keyof infer T]: P extends infer T ? T[P] : never }\n\
+           ? T\n\
+           : never;\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/nested-reverse-infer-shadow.ts",
+            "Result",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let result = outcome
+        .ok()
+        .flatten()
+        .expect("the nested reverse-infer shadow fixture must resolve");
+    let (outer_infer, nested_template) = match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Conditional { extends, .. }) => {
+            match graph.node_data(*extends).as_deref() {
+                Some(SemanticNodeData::Mapped { source, mapper }) => (*source, mapper.value_expr),
+                other => panic!("expected deferred mapped target, got {other:?}"),
+            }
+        }
+        other => panic!("expected deferred conditional, got {other:?}"),
+    };
+    let inner_infer = match graph.node_data(nested_template).as_deref() {
+        Some(SemanticNodeData::Conditional { extends, .. }) => *extends,
+        Some(SemanticNodeData::IndexedAccess { object, .. }) => *object,
+        other => panic!("expected nested conditional result template, got {other:?}"),
+    };
+    assert_ne!(
+        outer_infer, inner_infer,
+        "same-spelled nested declarations require distinct canonical binder identities"
+    );
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "the inner `infer T` shadows the reverse mapper's outer `infer T`; it cannot become T[P]"
+    );
+}
+
+#[test]
+fn reverse_projection_rejects_nested_materialized_opaque_candidates() {
+    use crate::semantic_query::{
+        IndexKey, OptionalityMod, ReadonlyMod, SemanticQueryValueTag, TupleElement,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let (infer, parameter) = reverse_test_binders(&graph, "NestedOpaqueT", 411);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let controls = [
+        QueryError::Other(Arc::from("materialized error")),
+        QueryError::TypeParamCycle,
+        QueryError::RaiseMiss,
+        QueryError::ValueDomainMismatch {
+            expected: SemanticQueryValueTag::TypeNode,
+            actual: SemanticQueryValueTag::Relation,
+        },
+    ];
+    for control in controls {
+        let opaque = graph.intern_node(SemanticNodeData::Opaque(control.clone()));
+        let wrappers = [
+            intern_object_with_members(
+                &graph,
+                vec![surface_member("nested", opaque, false, false)],
+            ),
+            graph.intern_node(SemanticNodeData::Array {
+                element: opaque,
+                readonly: true,
+            }),
+            graph.intern_node(SemanticNodeData::Tuple {
+                elements: Arc::from(
+                    vec![TupleElement {
+                        label: None,
+                        value: opaque,
+                        optional: false,
+                        rest: false,
+                    }]
+                    .into_boxed_slice(),
+                ),
+                readonly: true,
+            }),
+        ];
+        for wrapped in wrappers {
+            let source = intern_object_with_members(
+                &graph,
+                vec![surface_member("a", wrapped, false, false)],
+            );
+            let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+            assert!(
+                matches!(
+                    graph.node_data(result).as_deref(),
+                    Some(SemanticNodeData::Conditional { .. })
+                ),
+                "nested {control:?} in wrapper {:?} must fail closed",
+                graph.node_data(wrapped)
+            );
+        }
+    }
+}
+
+#[test]
+fn mutable_container_nested_projection_subtrees_use_only_the_binding_direction() {
+    use crate::semantic_query::{
+        IndexKey, OptionalityMod, ReadonlyMod, RelationResult, TupleElement,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let (infer, parameter) = reverse_test_binders(&graph, "NestedProjectionT", 412);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let nested_projection = intern_object_with_members(
+        &graph,
+        vec![surface_member("value", projection, false, false)],
+    );
+    let nested_string =
+        intern_object_with_members(&graph, vec![surface_member("value", string, false, false)]);
+
+    let array_template = graph.intern_node(SemanticNodeData::Array {
+        element: nested_projection,
+        readonly: false,
+    });
+    let array_source_value = graph.intern_node(SemanticNodeData::Array {
+        element: nested_string,
+        readonly: false,
+    });
+    let array_target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        array_template,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let array_source = intern_object_with_members(
+        &graph,
+        vec![surface_member("a", array_source_value, false, false)],
+    );
+    let array_result =
+        reverse_test_conditional(&dispatch, array_source, array_target, infer, never);
+    assert_eq!(
+        surface_get_member(
+            &require_object_surface(&graph, array_result, "nested mutable array projection"),
+            "a",
+        )
+        .value,
+        string
+    );
+
+    let tuple = |value| {
+        graph.intern_node(SemanticNodeData::Tuple {
+            elements: Arc::from(
+                vec![TupleElement {
+                    label: None,
+                    value,
+                    optional: false,
+                    rest: false,
+                }]
+                .into_boxed_slice(),
+            ),
+            readonly: false,
+        })
+    };
+    let tuple_target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        tuple(nested_projection),
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let tuple_source = intern_object_with_members(
+        &graph,
+        vec![surface_member("a", tuple(nested_string), false, false)],
+    );
+    let tuple_result =
+        reverse_test_conditional(&dispatch, tuple_source, tuple_target, infer, never);
+    assert_eq!(
+        surface_get_member(
+            &require_object_surface(&graph, tuple_result, "nested mutable tuple projection"),
+            "a",
+        )
+        .value,
+        string
+    );
+
+    let mutable_numbers = graph.intern_node(SemanticNodeData::Array {
+        element: number,
+        readonly: false,
+    });
+    let mutable_strings = graph.intern_node(SemanticNodeData::Array {
+        element: string,
+        readonly: false,
+    });
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_as_result_for_tests(mutable_numbers, mutable_strings),
+            RelationResult::NotAssignable
+        ),
+        "ordinary mutable arrays remain invariant outside an inference-bearing subtree"
+    );
+}
+
+#[test]
+fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns() {
+    use crate::semantic_query::{FunctionParam, SignatureKind, TupleElement, TypeParamDecl};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let void = primitive(&graph, PrimitiveKind::Void);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let concrete = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![
+                TupleElement {
+                    label: None,
+                    value: string,
+                    optional: false,
+                    rest: false,
+                },
+                TupleElement {
+                    label: None,
+                    value: number,
+                    optional: false,
+                    rest: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let infer = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("Rest"),
+        binder: graph.alloc_infer_binder_id(),
+    });
+    let rest_pattern = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![TupleElement {
+                label: None,
+                value: infer,
+                optional: false,
+                rest: true,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let covariant = reverse_test_conditional(&dispatch, concrete, rest_pattern, infer, never);
+    assert_eq!(
+        covariant, concrete,
+        "a sole covariant `...infer R` deposit must still decide Assignable"
+    );
+
+    let signature = |param_ty| {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: SignatureKind::Call,
+            params: Arc::from(
+                vec![FunctionParam::synthetic(
+                    Some(Arc::from("value")),
+                    param_ty,
+                    false,
+                    false,
+                )]
+                .into_boxed_slice(),
+            ),
+            return_type: void,
+            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            signature_span: None,
+            return_type_span: None,
+        })
+    };
+    let contravariant = reverse_test_conditional(
+        &dispatch,
+        signature(concrete),
+        signature(rest_pattern),
+        infer,
+        never,
+    );
+    assert_eq!(
+        contravariant,
+        concrete,
+        "a sole contravariant `...infer R` deposit must still decide Assignable; got {:?}",
+        graph.node_data(contravariant)
+    );
+}
+
+#[test]
+fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
+    use crate::semantic_query::{FunctionParam, SignatureKind, TupleElement, TypeParamDecl};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let void = primitive(&graph, PrimitiveKind::Void);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let nested_tail = graph.intern_node(SemanticNodeData::Array {
+        element: number,
+        readonly: true,
+    });
+    let concrete = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![
+                TupleElement {
+                    label: Some(Arc::from("head")),
+                    value: string,
+                    optional: true,
+                    rest: false,
+                },
+                TupleElement {
+                    label: Some(Arc::from("tail")),
+                    value: nested_tail,
+                    optional: false,
+                    rest: true,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: true,
+    });
+    let infer = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("ExactRest"),
+        binder: graph.alloc_infer_binder_id(),
+    });
+    let pattern = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![TupleElement {
+                label: Some(Arc::from("captured")),
+                value: infer,
+                optional: false,
+                rest: true,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: true,
+    });
+    assert_eq!(
+        reverse_test_conditional(&dispatch, concrete, pattern, infer, never),
+        concrete,
+        "covariant tuple-rest capture must preserve labels/optional/rest/readonly exactly"
+    );
+
+    let signature = |param_ty| {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: SignatureKind::Call,
+            params: Arc::from(
+                vec![FunctionParam::synthetic(
+                    Some(Arc::from("value")),
+                    param_ty,
+                    false,
+                    false,
+                )]
+                .into_boxed_slice(),
+            ),
+            return_type: void,
+            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            signature_span: None,
+            return_type_span: None,
+        })
+    };
+    assert_eq!(
+        reverse_test_conditional(
+            &dispatch,
+            signature(concrete),
+            signature(pattern),
+            infer,
+            never,
+        ),
+        concrete,
+        "contravariant tuple-rest capture must preserve labels/optional/rest/readonly exactly"
+    );
+}
+
+#[test]
+fn tuple_rest_does_not_bypass_required_prefix_validation() {
+    use crate::semantic_query::TupleElement;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let source = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![TupleElement {
+                label: Some(Arc::from("maybe")),
+                value: string,
+                optional: true,
+                rest: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let infer = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("Tail"),
+        binder: graph.alloc_infer_binder_id(),
+    });
+    let target = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![
+                TupleElement {
+                    label: Some(Arc::from("required")),
+                    value: string,
+                    optional: false,
+                    rest: false,
+                },
+                TupleElement {
+                    label: Some(Arc::from("tail")),
+                    value: infer,
+                    optional: false,
+                    rest: true,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    assert_eq!(
+        reverse_test_conditional(&dispatch, source, target, infer, never),
+        never,
+        "an optional source prefix cannot satisfy a required target prefix merely because the target has an infer rest"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_nonterminal_tuple_rest_uses_the_broad_number_key() {
+    use crate::semantic_query::{
+        IndexKey, LiteralValue, OptionalityMod, ReadonlyMod, TupleElement,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let boolean = primitive(&graph, PrimitiveKind::Boolean);
+    let (infer, parameter) = reverse_test_binders(&graph, "NonterminalRestT", 413);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let fixed_zero = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "0".to_string(),
+    )));
+    let number_branch = graph.intern_node(SemanticNodeData::Conditional {
+        check: parameter,
+        extends: number,
+        true_branch_ref: projection,
+        false_branch_ref: never,
+        distributive: false,
+    });
+    let template = graph.intern_node(SemanticNodeData::Conditional {
+        check: parameter,
+        extends: fixed_zero,
+        true_branch_ref: projection,
+        false_branch_ref: number_branch,
+        distributive: false,
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        template,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let rest_array = graph.intern_node(SemanticNodeData::Array {
+        element: number,
+        readonly: false,
+    });
+    let source = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![
+                TupleElement {
+                    label: None,
+                    value: string,
+                    optional: false,
+                    rest: false,
+                },
+                TupleElement {
+                    label: None,
+                    value: rest_array,
+                    optional: false,
+                    rest: true,
+                },
+                TupleElement {
+                    label: None,
+                    value: boolean,
+                    optional: false,
+                    rest: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, .. }) => {
+            assert_eq!(elements.len(), 3);
+            assert_eq!(elements[0].value, string);
+            assert!(elements[1].rest);
+            assert_eq!(elements[2].value, boolean);
+        }
+        other => panic!(
+            "fixed entries following a variadic rest are in the broad number domain; got {other:?}"
+        ),
+    }
 }
 
 fn host() -> VerterHost {
@@ -3141,11 +4591,14 @@ fn infer_in_closed_conditional_binds_via_relation() {
     // The bare-infer path in build_conditional recognises `extends == Infer`
     // and always selects True, substituting X → check (number).
     let check = primitive(&graph, PrimitiveKind::Number);
+    let binder = graph.alloc_infer_binder_id();
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
+        binder: binder.clone(),
     });
-    let true_branch = graph.intern_node(SemanticNodeData::Infer {
+    let true_branch = graph.intern_node(SemanticNodeData::InferRef {
         name: Arc::from("X"),
+        binder,
     });
     let false_branch = primitive(&graph, PrimitiveKind::Never);
 
@@ -3213,10 +4666,12 @@ fn infer_in_open_conditional_stays_symbolic_without_private_bind() {
     });
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let extends = simple_object(&graph, &[("a", infer_x)]);
     let true_branch = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let false_branch = primitive(&graph, PrimitiveKind::Never);
 
@@ -8903,6 +10358,43 @@ fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
     );
 }
 
+#[test]
+fn iterative_deep_array_relation_reaches_the_nested_conditional_oracle() {
+    use crate::semantic_query::{LiteralValue, RelationResult};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let key = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "deep".to_string(),
+    )));
+    let conditional = graph.intern_node(SemanticNodeData::Conditional {
+        check: key,
+        extends: key,
+        true_branch_ref: string,
+        false_branch_ref: never,
+        distributive: false,
+    });
+    let nest = |mut node| {
+        for _ in 0..500 {
+            node = graph.intern_node(SemanticNodeData::Array {
+                element: node,
+                readonly: true,
+            });
+        }
+        node
+    };
+
+    let result = dispatch.execute_relate_pair_as_result_for_tests(nest(string), nest(conditional));
+    assert!(
+        matches!(result, RelationResult::Assignable { .. }),
+        "the iterative array descent must reach the leaf through the heap worklist, then reduce \
+         that leaf through the canonical conditional oracle; got {result:?}"
+    );
+}
+
 /// Nested-infer in Function types invariant:
 /// `T extends (props: infer P) => any ? P : never` with
 /// `T = (x: string) => any` must bind `P = string` and return
@@ -8927,6 +10419,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     // extends = `(x: infer P) => any` — Function with Infer in param[0].
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let extends = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -9043,6 +10536,7 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
     // extends = `(a: infer U, b: string) => void`.
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("U"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let extends = call_sig(infer_u, string_node);
 
@@ -9063,6 +10557,2437 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
         "only the SUCCEEDING overload's deposit fixes: `U` must be `string`, \
          never the losing alternative's intersection; got {:?}",
         graph.node_data(result)
+    );
+}
+
+fn reverse_test_binders(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    infer_name: &str,
+    ordinal: u16,
+) -> (SemanticNodeId, SemanticNodeId) {
+    let infer = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from(infer_name),
+        binder: graph.alloc_infer_binder_id(),
+    });
+    let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("<reverse-mapper>"),
+        param_index: ordinal,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("P"),
+    });
+    (infer, parameter)
+}
+
+fn reverse_test_binder_id(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    infer: SemanticNodeId,
+) -> crate::semantic_query::InferBinderId {
+    match graph.node_data(infer).as_deref() {
+        Some(SemanticNodeData::Infer { binder, .. }) => binder.clone(),
+        other => panic!("expected an infer declaration, got {other:?}"),
+    }
+}
+
+fn reverse_test_target(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    infer: SemanticNodeId,
+    parameter: SemanticNodeId,
+    template: SemanticNodeId,
+    optionality: crate::semantic_query::OptionalityMod,
+    readonly: crate::semantic_query::ReadonlyMod,
+) -> SemanticNodeId {
+    let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: infer });
+    graph.intern_node(SemanticNodeData::Mapped {
+        source: infer,
+        mapper: crate::semantic_query::MapperKey {
+            parameter_node: parameter,
+            key_space,
+            value_expr: template,
+            optionality,
+            readonly,
+            name_remap: None,
+            kind: crate::semantic_query::MapperKind::Computed,
+        },
+    })
+}
+
+fn reverse_test_conditional(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    check: SemanticNodeId,
+    extends: SemanticNodeId,
+    infer: SemanticNodeId,
+    false_branch: SemanticNodeId,
+) -> SemanticNodeId {
+    match dispatch.execute_type_node(SemanticQueryKey::Conditional {
+        check,
+        extends,
+        true_branch: infer,
+        false_branch,
+        distributive: false,
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("expected a conditional value, got {other:?}"),
+    }
+}
+
+#[test]
+fn production_lowering_seeds_the_selected_infer_before_the_mapped_template() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/reverse-production.ts",
+        "type T = { ambient: boolean };\n\
+         type Box<X> = { value: X };\n\
+         export type Result =\n\
+           { a: Box<string> } extends\n\
+             { [P in keyof infer T]: Box<T[P]> }\n\
+             ? T\n\
+             : never;\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/reverse-production.ts",
+            "Result",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let result = outcome
+        .ok()
+        .flatten()
+        .expect("the production-lowered Result declaration must resolve");
+
+    let recovered = require_object_surface(
+        &graph,
+        result,
+        "production-lowered reverse homomorphic conditional",
+    );
+    assert_eq!(recovered.positive_members().len(), 1);
+    let recovered_a = surface_get_member(&recovered, "a").value;
+    assert_node_primitive(
+        &graph,
+        recovered_a,
+        PrimitiveKind::String,
+        "the mapped template's `T[P]` must bind the exact `infer T`, not the ambient type alias",
+    );
+    assert!(
+        recovered
+            .positive_members()
+            .iter()
+            .all(|member| member.name.as_ref() != "ambient"),
+        "the ambient same-name declaration must not be captured"
+    );
+}
+
+#[test]
+fn production_lowering_keeps_an_inner_same_name_binder_innermost() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/reverse-shadow.ts",
+        "export type Result =\n\
+           { a: <X>() => string } extends\n\
+             { [P in keyof infer T]: <T>() => T[P] }\n\
+             ? T\n\
+             : never;\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(
+            "/w/reverse-shadow.ts",
+            "Result",
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let result = outcome
+        .ok()
+        .flatten()
+        .expect("the production-lowered shadow fixture must resolve");
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "the signature's own `<T>` must shadow the outer selected `infer T`; the reverse relation stays deferred"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_raw_fallback_projection_candidate_stays_deferred() {
+    use crate::semantic_query::{
+        FunctionParam, IndexKey, OptionalityMod, ReadonlyMod, SignatureKind, TypeParamDecl,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let raw_fallback = graph.intern_node(SemanticNodeData::RawFallback {
+        value: verter_type_expr::UnknownValue::unsupported_syntax("x is string"),
+    });
+    let signature = graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        return_type: raw_fallback,
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let source =
+        intern_object_with_members(&graph, vec![surface_member("a", signature, false, false)]);
+    let (infer, parameter) = reverse_test_binders(&graph, "RawFallbackT", 531);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "a RawFallback nested in the source signature must propagate Unknown and keep \
+         the conditional deferred; got {:?}",
+        graph.node_data(result)
+    );
+}
+
+#[test]
+fn reverse_homomorphic_nested_bare_ref_projection_candidate_stays_deferred() {
+    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let missing = graph.intern_node(SemanticNodeData::new_bare_ref(
+        Arc::from("Missing"),
+        crate::semantic_query::NodeScopeId::Global,
+        Arc::from(Vec::new().into_boxed_slice()),
+    ));
+    let nested =
+        intern_object_with_members(&graph, vec![surface_member("x", missing, false, false)]);
+    let source =
+        intern_object_with_members(&graph, vec![surface_member("a", nested, false, false)]);
+    let (infer, parameter) = reverse_test_binders(&graph, "NestedBareRefT", 532);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "a BareRef nested in the projected source object must refuse the deposit and keep \
+         the conditional deferred; got {:?} (selected_true_whole_source={})",
+        graph.node_data(result),
+        result == source
+    );
+}
+
+#[test]
+fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
+    use crate::semantic_query::{
+        FunctionParam, IndexKey, OptionalityMod, ReadonlyMod, SignatureKind, TypeParamDecl,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let void = primitive(&graph, PrimitiveKind::Void);
+    let missing = graph.intern_node(SemanticNodeData::new_bare_ref(
+        Arc::from("NoSuch"),
+        crate::semantic_query::NodeScopeId::Global,
+        Arc::from(Vec::new().into_boxed_slice()),
+    ));
+    let signature = graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from(
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("x")),
+                missing,
+                false,
+                false,
+            )]
+            .into_boxed_slice(),
+        ),
+        return_type: void,
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let source =
+        intern_object_with_members(&graph, vec![surface_member("a", signature, false, false)]);
+    let (infer, parameter) = reverse_test_binders(&graph, "NestedSignatureBareRefT", 533);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "a BareRef nested in a projected signature parameter must refuse the deposit and keep \
+         the conditional deferred; got {:?} (selected_true_whole_source={})",
+        graph.node_data(result),
+        result == source
+    );
+}
+
+#[test]
+fn reverse_homomorphic_nested_type_param_bound_poison_stays_deferred() {
+    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let missing = graph.intern_node(SemanticNodeData::new_bare_ref(
+        Arc::from("MissingBound"),
+        crate::semantic_query::NodeScopeId::Global,
+        Arc::from(Vec::new().into_boxed_slice()),
+    ));
+    let bounded_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("<nested-bound>"),
+        param_index: 0,
+        constraint: Some(missing),
+        default: None,
+        display_name: Arc::from("U"),
+    });
+    let nested = intern_object_with_members(
+        &graph,
+        vec![surface_member("x", bounded_param, false, false)],
+    );
+    let source =
+        intern_object_with_members(&graph, vec![surface_member("a", nested, false, false)]);
+    let (infer, parameter) = reverse_test_binders(&graph, "NestedTypeParamBoundT", 534);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "an unresolved carrier nested in a projected TypeParam bound must refuse the deposit and \
+         keep the conditional deferred; got {:?} (selected_true_whole_source={})",
+        graph.node_data(result),
+        result == source
+    );
+}
+
+#[test]
+fn reverse_homomorphic_synthetic_binding_descends_value_node_without_over_refusal() {
+    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod, SyntheticBindingId};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let synthetic = |binding_name: &'static str, value_node: SemanticNodeId| {
+        graph.intern_node(SemanticNodeData::SyntheticBinding {
+            id: SyntheticBindingId {
+                scope_canonical_id: Arc::from("/w/reverse-synthetic.ts"),
+                surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
+                slot_name: Some(Arc::from("default")),
+                binding_name: Arc::from(binding_name),
+            },
+            value_node: value_node.0,
+        })
+    };
+
+    let known_binding = synthetic("known", string);
+    let known_source = intern_object_with_members(
+        &graph,
+        vec![surface_member("a", known_binding, false, false)],
+    );
+    let (known_infer, known_parameter) = reverse_test_binders(&graph, "SyntheticKnownT", 535);
+    let known_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: known_infer,
+        index: IndexKey::TypeNode(known_parameter),
+    });
+    let known_target = reverse_test_target(
+        &graph,
+        known_infer,
+        known_parameter,
+        known_projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let known_result =
+        reverse_test_conditional(&dispatch, known_source, known_target, known_infer, never);
+    assert_eq!(
+        known_result, known_source,
+        "a SyntheticBinding whose value_node is known must still recover through the \
+         reverse-homomorphic relation"
+    );
+
+    let missing = graph.intern_node(SemanticNodeData::new_bare_ref(
+        Arc::from("Missing"),
+        crate::semantic_query::NodeScopeId::Global,
+        Arc::from(Vec::new().into_boxed_slice()),
+    ));
+    let unresolved_binding = synthetic("unresolved", missing);
+    let unresolved_source = intern_object_with_members(
+        &graph,
+        vec![surface_member("a", unresolved_binding, false, false)],
+    );
+    let (unresolved_infer, unresolved_parameter) =
+        reverse_test_binders(&graph, "SyntheticUnresolvedT", 536);
+    let unresolved_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: unresolved_infer,
+        index: IndexKey::TypeNode(unresolved_parameter),
+    });
+    let unresolved_target = reverse_test_target(
+        &graph,
+        unresolved_infer,
+        unresolved_parameter,
+        unresolved_projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let unresolved_result = reverse_test_conditional(
+        &dispatch,
+        unresolved_source,
+        unresolved_target,
+        unresolved_infer,
+        never,
+    );
+    assert!(
+        matches!(
+            graph.node_data(unresolved_result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "an unresolved SyntheticBinding value_node must refuse the deposit and keep the \
+         conditional deferred; got {:?} (selected_true_whole_source={})",
+        graph.node_data(unresolved_result),
+        unresolved_result == unresolved_source
+    );
+}
+
+#[test]
+fn watched_red_reverse_homomorphic_recursive_ref_is_publishable() {
+    use crate::semantic_query::{IndexKey, OptionalityMod, QueryError, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+        name: Arc::from("Tree"),
+    }));
+    let source =
+        intern_object_with_members(&graph, vec![surface_member("a", recursive, false, false)]);
+    let (infer, parameter) = reverse_test_binders(&graph, "RecursiveRefT", 537);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+
+    assert_eq!(
+        result,
+        source,
+        "a RecursiveRef is a publishable recursive carrier and must recover intact; got {:?}",
+        graph.node_data(result)
+    );
+}
+
+#[test]
+fn watched_red_reverse_homomorphic_discards_noncontributing_call_signature_poison() {
+    use crate::semantic_query::{
+        FunctionParam, IndexKey, OptionalityMod, ReadonlyMod, SignatureKind, TypeParamDecl,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let unknown = primitive(&graph, PrimitiveKind::Unknown);
+    let source_value =
+        intern_object_with_members(&graph, vec![surface_member("value", string, false, false)]);
+    let raw_fallback = graph.intern_node(SemanticNodeData::RawFallback {
+        value: verter_type_expr::UnknownValue::unsupported_syntax("x is string"),
+    });
+    let call_signature = graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from(
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("x")),
+                unknown,
+                false,
+                false,
+            )]
+            .into_boxed_slice(),
+        ),
+        return_type: raw_fallback,
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let source = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(
+                vec![surface_member("a", source_value, false, false)].into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(vec![call_signature].into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+        },
+    ));
+    let (infer, parameter) = reverse_test_binders(&graph, "DiscardedSignatureT", 538);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let template = intern_object_with_members(
+        &graph,
+        vec![surface_member("value", projection, false, false)],
+    );
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        template,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    let recovered = require_object_surface(
+        &graph,
+        result,
+        "reverse recovery with a discarded poisoned call signature",
+    );
+    let recovered_a = surface_get_member(&recovered, "a").value;
+
+    assert_eq!(
+        recovered_a,
+        string,
+        "only the contributing property is assembled; got result {:?} and member {:?}",
+        graph.node_data(result),
+        graph.node_data(recovered_a)
+    );
+}
+
+#[test]
+fn production_reverse_homomorphic_recovers_named_and_instantiated_sources() {
+    let host = host();
+    let mapped_visits_before = super::locator_view_worklist::mapped_after_source_visits_for_tests();
+    upsert_ts(
+        &host,
+        "/w/reverse-named.ts",
+        "type Box<X> = { value: X };\n\
+         type Named = { a: Box<string> };\n\
+         type Generic<X> = { a: Box<X> };\n\
+         export type NamedResult = Named extends\n\
+           { [P in keyof infer T]: Box<T[P]> }\n\
+           ? T\n\
+           : never;\n\
+         export type InstantiatedResult = Generic<number> extends\n\
+           { [P in keyof infer T]: Box<T[P]> }\n\
+           ? T\n\
+           : never;\n\
+         type Reverse<S> = S extends\n\
+           { [P in keyof infer T]: Box<T[P]> }\n\
+           ? T\n\
+           : never;\n\
+         export type DeferredGenericResult = Reverse<Generic<boolean>>;\n",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    for (name, expected) in [
+        ("NamedResult", PrimitiveKind::String),
+        ("InstantiatedResult", PrimitiveKind::Number),
+        ("DeferredGenericResult", PrimitiveKind::Boolean),
+    ] {
+        let (outcome, _) = host
+            .resolve_named_symbol_with_audit(
+                "/w/reverse-named.ts",
+                name,
+                Some(ProjectionMode::Expanded),
+            )
+            .into_parts();
+        let result = outcome
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| panic!("{name} must resolve"));
+        let recovered = require_object_surface(&graph, result, name);
+        assert!(
+            matches!(
+                graph
+                    .node_data(surface_get_member(&recovered, "a").value)
+                    .as_deref(),
+                Some(SemanticNodeData::Primitive(kind)) if *kind == expected
+            ),
+            "{name} must recover the normalized source's member as {expected:?}"
+        );
+    }
+    assert!(
+        super::locator_view_worklist::mapped_after_source_visits_for_tests() > mapped_visits_before,
+        "the public named/generic fixture must traverse MappedAfterSource; \
+         otherwise it cannot guard preservation of the authored `keyof infer T` shell"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
+    use crate::semantic_query::{
+        DeclIdentity, IndexKey, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let never_node = primitive(&graph, PrimitiveKind::Never);
+    let source_value = intern_object_with_members(
+        &graph,
+        vec![surface_member("value", string_node, false, false)],
+    );
+    let source = intern_object_with_members(
+        &graph,
+        vec![surface_member("a", source_value, false, false)],
+    );
+
+    let infer_t = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("T"),
+        binder: graph.alloc_infer_binder_id(),
+    });
+    let mapper_parameter = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("<reverse-mapper>"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("P"),
+    });
+    let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: infer_t });
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer_t,
+        index: IndexKey::TypeNode(mapper_parameter),
+    });
+    let template = intern_object_with_members(
+        &graph,
+        vec![surface_member("value", projection, false, false)],
+    );
+    let mapped_target = graph.intern_node(SemanticNodeData::Mapped {
+        source: infer_t,
+        mapper: MapperKey {
+            parameter_node: mapper_parameter,
+            key_space,
+            value_expr: template,
+            optionality: OptionalityMod::Keep,
+            readonly: ReadonlyMod::Keep,
+            name_remap: None,
+            kind: MapperKind::Computed,
+        },
+    });
+
+    let mismatched_raw_key = crate::semantic_query::RelateMemoKey {
+        inference_context: Some(crate::semantic_query::InferenceContextKey::default()),
+        ..crate::semantic_query::RelateMemoKey::assignable(
+            source,
+            mapped_target,
+            crate::semantic_query::RelationContext::default(),
+        )
+    };
+    assert!(
+        matches!(
+            dispatch.execute(mismatched_raw_key.to_query_key()),
+            QueryResult::Error(QueryError::Miss)
+        ),
+        "raw family dispatch must reject a caller inference key that differs \
+         from the detected reverse-homomorphic setup"
+    );
+
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
+        check: source,
+        extends: mapped_target,
+        true_branch: infer_t,
+        false_branch: never_node,
+        distributive: false,
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("expected a conditional value, got {other:?}"),
+    };
+
+    let recovered = require_object_surface(
+        &graph,
+        result,
+        "reverse homomorphic mapped conditional binding",
+    );
+    assert_eq!(
+        surface_get_member(&recovered, "a").value,
+        string_node,
+        "the projection inside Box<T[P]> must recover T.a as string"
+    );
+}
+
+#[test]
+fn raw_relate_rejects_forged_inference_context_when_target_has_no_pattern() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let forged = crate::semantic_query::RelateMemoKey {
+        inference_context: Some(crate::semantic_query::InferenceContextKey::default()),
+        ..crate::semantic_query::RelateMemoKey::assignable(
+            string,
+            string,
+            crate::semantic_query::RelationContext::default(),
+        )
+    };
+
+    assert!(
+        matches!(
+            dispatch.execute(forged.to_query_key()),
+            QueryResult::Error(QueryError::Miss)
+        ),
+        "a raw relation key must reject a supplied inference fingerprint when \
+         the target admits no inference session"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_as_result_for_tests(string, string),
+            crate::semantic_query::RelationResult::Assignable { .. }
+        ),
+        "control: the same ordinary relation remains assignable through the \
+         canonical no-session key"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_reduces_key_sensitive_conditionals_nested_in_template_members() {
+    use crate::semantic_query::{IndexKey, LiteralValue, OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let (infer, parameter) = reverse_test_binders(&graph, "NestedConditionalT", 9);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let key_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "a".to_string(),
+    )));
+    let key_sensitive = graph.intern_node(SemanticNodeData::Conditional {
+        check: parameter,
+        extends: key_a,
+        true_branch_ref: projection,
+        false_branch_ref: never,
+        distributive: false,
+    });
+    let template = intern_object_with_members(
+        &graph,
+        vec![surface_member("payload", key_sensitive, false, false)],
+    );
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        template,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+
+    let source = intern_object_with_members(
+        &graph,
+        vec![surface_member(
+            "a",
+            intern_object_with_members(
+                &graph,
+                vec![surface_member("payload", string, false, false)],
+            ),
+            false,
+            false,
+        )],
+    );
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    let recovered =
+        require_object_surface(&graph, result, "nested key-sensitive reverse conditional");
+    assert_eq!(surface_get_member(&recovered, "a").value, string);
+}
+
+#[test]
+fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function_children() {
+    use crate::semantic_query::{
+        FunctionParam, IndexKey, OptionalityMod, PrimitiveKind, ReadonlyMod, SignatureKind,
+        TupleElement, TypeParamDecl,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let key_a = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("a".to_string()),
+    ));
+    let signature = |parameter: SemanticNodeId, return_type: SemanticNodeId| {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: SignatureKind::Call,
+            params: Arc::from(
+                vec![FunctionParam::synthetic(
+                    Some(Arc::from("value")),
+                    parameter,
+                    false,
+                    false,
+                )]
+                .into_boxed_slice(),
+            ),
+            return_type,
+            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            signature_span: None,
+            return_type_span: None,
+        })
+    };
+
+    for (case, label) in ["array", "tuple", "function"].into_iter().enumerate() {
+        let (infer, parameter) =
+            reverse_test_binders(&graph, &format!("Nested{label}T"), 520 + case as u16);
+        let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: infer,
+            index: IndexKey::TypeNode(parameter),
+        });
+        let conditional = graph.intern_node(SemanticNodeData::Conditional {
+            check: parameter,
+            extends: key_a,
+            true_branch_ref: projection,
+            false_branch_ref: never,
+            distributive: false,
+        });
+        let (template, source_value) = match label {
+            "array" => (
+                graph.intern_node(SemanticNodeData::Array {
+                    element: conditional,
+                    readonly: true,
+                }),
+                graph.intern_node(SemanticNodeData::Array {
+                    element: string,
+                    readonly: true,
+                }),
+            ),
+            "tuple" => (
+                graph.intern_node(SemanticNodeData::Tuple {
+                    elements: Arc::from(
+                        vec![TupleElement {
+                            label: Some(Arc::from("value")),
+                            value: conditional,
+                            optional: false,
+                            rest: false,
+                        }]
+                        .into_boxed_slice(),
+                    ),
+                    readonly: true,
+                }),
+                graph.intern_node(SemanticNodeData::Tuple {
+                    elements: Arc::from(
+                        vec![TupleElement {
+                            label: Some(Arc::from("value")),
+                            value: string,
+                            optional: false,
+                            rest: false,
+                        }]
+                        .into_boxed_slice(),
+                    ),
+                    readonly: true,
+                }),
+            ),
+            "function" => (
+                signature(conditional, conditional),
+                signature(string, string),
+            ),
+            _ => unreachable!(),
+        };
+        let target = reverse_test_target(
+            &graph,
+            infer,
+            parameter,
+            template,
+            OptionalityMod::Keep,
+            ReadonlyMod::Keep,
+        );
+        let source = intern_object_with_members(
+            &graph,
+            vec![surface_member("a", source_value, false, false)],
+        );
+        let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+        let recovered =
+            require_object_surface(&graph, result, &format!("nested {label} conditional"));
+        assert_eq!(
+            surface_get_member(&recovered, "a").value,
+            string,
+            "the substituted conditional nested through {label} must deposit its projection"
+        );
+    }
+}
+
+#[test]
+fn reverse_homomorphic_array_and_tuple_containers_preserve_source_readonly_across_modifiers() {
+    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod, TupleElement};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let modifiers = [ReadonlyMod::Add, ReadonlyMod::Keep, ReadonlyMod::Remove];
+
+    for (case, modifier) in modifiers.into_iter().enumerate() {
+        for source_readonly in [false, true] {
+            let (array_infer, array_parameter) =
+                reverse_test_binders(&graph, "ReadonlyArrayT", 500 + case as u16);
+            let array_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+                object: array_infer,
+                index: IndexKey::TypeNode(array_parameter),
+            });
+            let array_target = reverse_test_target(
+                &graph,
+                array_infer,
+                array_parameter,
+                array_projection,
+                OptionalityMod::Keep,
+                modifier,
+            );
+            let array_source = graph.intern_node(SemanticNodeData::Array {
+                element: string,
+                readonly: source_readonly,
+            });
+            let array_result =
+                reverse_test_conditional(&dispatch, array_source, array_target, array_infer, never);
+            match graph.node_data(array_result).as_deref() {
+                Some(SemanticNodeData::Array { element, readonly }) => {
+                    assert_eq!(*element, string);
+                    assert_eq!(
+                        *readonly, source_readonly,
+                        "array source readonly must survive {modifier:?}"
+                    );
+                }
+                other => panic!(
+                    "expected recovered array for {modifier:?}/{source_readonly}, got {other:?}"
+                ),
+            }
+
+            let (tuple_infer, tuple_parameter) =
+                reverse_test_binders(&graph, "ReadonlyTupleT", 510 + case as u16);
+            let tuple_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+                object: tuple_infer,
+                index: IndexKey::TypeNode(tuple_parameter),
+            });
+            let tuple_target = reverse_test_target(
+                &graph,
+                tuple_infer,
+                tuple_parameter,
+                tuple_projection,
+                OptionalityMod::Keep,
+                modifier,
+            );
+            let tuple_source = graph.intern_node(SemanticNodeData::Tuple {
+                elements: Arc::from(
+                    vec![TupleElement {
+                        label: Some(Arc::from("item")),
+                        value: string,
+                        optional: false,
+                        rest: false,
+                    }]
+                    .into_boxed_slice(),
+                ),
+                readonly: source_readonly,
+            });
+            let tuple_result =
+                reverse_test_conditional(&dispatch, tuple_source, tuple_target, tuple_infer, never);
+            match graph.node_data(tuple_result).as_deref() {
+                Some(SemanticNodeData::Tuple { elements, readonly }) => {
+                    assert_eq!(elements[0].value, string);
+                    assert_eq!(
+                        *readonly, source_readonly,
+                        "tuple source readonly must survive {modifier:?}"
+                    );
+                }
+                other => panic!(
+                    "expected recovered tuple for {modifier:?}/{source_readonly}, got {other:?}"
+                ),
+            }
+        }
+    }
+}
+
+#[test]
+fn binding_relation_roots_bypass_cross_transaction_singleflight() {
+    let non_binding = crate::semantic_query::RelateMemoKey::assignable(
+        SemanticNodeId(1),
+        SemanticNodeId(2),
+        crate::semantic_query::RelationContext::default(),
+    );
+    assert!(
+        ProjectSemanticDispatch::relate_root_uses_family_singleflight(&non_binding),
+        "non-binding roots retain cooperative singleflight"
+    );
+
+    let binding = crate::semantic_query::RelateMemoKey {
+        inference_context: Some(crate::semantic_query::InferenceContextKey::default()),
+        ..non_binding
+    };
+    assert!(
+        !ProjectSemanticDispatch::relate_root_uses_family_singleflight(&binding),
+        "a cold binding root must open its own transaction-local inference \
+         session instead of joining another transaction's in-flight session"
+    );
+}
+
+#[test]
+fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let infer = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("AbortFencedT"),
+        binder: graph.alloc_infer_binder_id(),
+    });
+    let key = dispatch.relation_key_with_inference(dispatch.relate_key_for(string, infer));
+    assert!(
+        key.inference_context.is_some(),
+        "fixture must select the nonjoining binding-root policy"
+    );
+
+    let abort = graph.test_force_cold_abort_sweep();
+    let result = dispatch.execute_relate(key.clone());
+    drop(abort);
+    assert!(
+        matches!(result, super::relation_txn::RelationStep::Assignable { .. }),
+        "the raced cold result still returns to its owning request"
+    );
+    assert!(
+        graph.get_relation_payload(&host, &key).is_none(),
+        "an aborted cold binding owner must not resurrect a warm relation entry"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_modifiers() {
+    use crate::semantic_query::{
+        IndexKey, IndexSignature, OptionalityMod, ReadonlyMod, TupleElement,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let boolean = primitive(&graph, PrimitiveKind::Boolean);
+    let boxed = |value| {
+        intern_object_with_members(&graph, vec![surface_member("value", value, false, false)])
+    };
+
+    let (array_infer, array_parameter) = reverse_test_binders(&graph, "ArrayT", 10);
+    let array_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: array_infer,
+        index: IndexKey::TypeNode(array_parameter),
+    });
+    let array_target = reverse_test_target(
+        &graph,
+        array_infer,
+        array_parameter,
+        boxed(array_projection),
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let array_source = graph.intern_node(SemanticNodeData::Array {
+        element: boxed(string),
+        readonly: true,
+    });
+    let array_result =
+        reverse_test_conditional(&dispatch, array_source, array_target, array_infer, never);
+    match graph.node_data(array_result).as_deref() {
+        Some(SemanticNodeData::Array { element, readonly }) => {
+            assert_eq!(*element, string, "array element projection recovered");
+            assert!(*readonly, "the source array's readonly shape is preserved");
+        }
+        other => panic!("expected recovered readonly array, got {other:?}"),
+    }
+
+    let (tuple_infer, tuple_parameter) = reverse_test_binders(&graph, "TupleT", 11);
+    let tuple_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: tuple_infer,
+        index: IndexKey::TypeNode(tuple_parameter),
+    });
+    let tuple_target = reverse_test_target(
+        &graph,
+        tuple_infer,
+        tuple_parameter,
+        boxed(tuple_projection),
+        OptionalityMod::Add,
+        ReadonlyMod::Keep,
+    );
+    let tuple_source = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![
+                TupleElement {
+                    label: Some(Arc::from("first")),
+                    value: boxed(number),
+                    optional: true,
+                    rest: false,
+                },
+                TupleElement {
+                    label: Some(Arc::from("second")),
+                    value: boxed(boolean),
+                    optional: false,
+                    rest: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: true,
+    });
+    let tuple_result =
+        reverse_test_conditional(&dispatch, tuple_source, tuple_target, tuple_infer, never);
+    match graph.node_data(tuple_result).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, readonly }) => {
+            assert_eq!(elements[0].value, number);
+            assert_eq!(elements[1].value, boolean);
+            assert!(
+                !elements[0].optional,
+                "a mapped `+?` is synthetic and is removed from the recovered tuple"
+            );
+            assert!(*readonly, "tuple container readonly shape is preserved");
+        }
+        other => panic!("expected recovered readonly tuple, got {other:?}"),
+    }
+
+    let (object_infer, object_parameter) = reverse_test_binders(&graph, "ObjectT", 12);
+    let object_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: object_infer,
+        index: IndexKey::TypeNode(object_parameter),
+    });
+    let object_target = reverse_test_target(
+        &graph,
+        object_infer,
+        object_parameter,
+        boxed(object_projection),
+        OptionalityMod::Add,
+        ReadonlyMod::Add,
+    );
+    let string_key = primitive(&graph, PrimitiveKind::String);
+    let object_source = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(
+                vec![surface_member("named", boxed(string), true, true)].into_boxed_slice()
+            ),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(
+                vec![IndexSignature {
+                    key_type: string_key,
+                    value_type: boxed(boolean),
+                    readonly: true,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                }]
+                .into_boxed_slice()
+            ),
+            keyspace: None,
+            has_index_signature: true,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+        },
+    ));
+    let object_result =
+        reverse_test_conditional(&dispatch, object_source, object_target, object_infer, never);
+    let object_view = require_object_surface(&graph, object_result, "reverse object modifiers");
+    let named = surface_get_member(&object_view, "named");
+    assert_eq!(named.value, string);
+    assert!(!named.optional && !named.readonly);
+    assert_eq!(object_view.index_signatures.len(), 1);
+    assert_eq!(object_view.index_signatures[0].value_type, boolean);
+    assert!(
+        !object_view.index_signatures[0].readonly,
+        "a mapped `+readonly` is synthetic on the recovered index signature"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_partial_requires_a_decided_positive_property_relation() {
+    use crate::semantic_query::{OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let boolean = primitive(&graph, PrimitiveKind::Boolean);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let source =
+        intern_object_with_members(&graph, vec![surface_member("a", string, false, false)]);
+
+    let (partial_infer, partial_parameter) = reverse_test_binders(&graph, "PartialT", 20);
+    let partial_target = reverse_test_target(
+        &graph,
+        partial_infer,
+        partial_parameter,
+        string,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let partial_result =
+        reverse_test_conditional(&dispatch, source, partial_target, partial_infer, never);
+    let partial_view =
+        require_object_surface(&graph, partial_result, "decided-positive partial reverse");
+    assert!(
+        matches!(
+            graph
+                .node_data(surface_get_member(&partial_view, "a").value)
+                .as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+        ),
+        "a successful property relation with no projection deposits recovers unknown"
+    );
+
+    let (failed_infer, failed_parameter) = reverse_test_binders(&graph, "FailedT", 21);
+    let failed_target = reverse_test_target(
+        &graph,
+        failed_infer,
+        failed_parameter,
+        number,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let failed_result =
+        reverse_test_conditional(&dispatch, source, failed_target, failed_infer, boolean);
+    assert_eq!(
+        failed_result, boolean,
+        "a failed property relation selects the false branch; it is never a partial recovery"
+    );
+
+    let (unknown_infer, unknown_parameter) = reverse_test_binders(&graph, "UnknownT", 22);
+    let unresolved = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let unknown_target = reverse_test_target(
+        &graph,
+        unknown_infer,
+        unknown_parameter,
+        unresolved,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let unknown_result =
+        reverse_test_conditional(&dispatch, source, unknown_target, unknown_infer, boolean);
+    assert!(
+        matches!(
+            graph.node_data(unknown_result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "an Unknown property relation keeps the conditional deferred; it is never laundered into Partial"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_projectionless_templates_reject_control_and_degraded_sources() {
+    use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
+    use crate::semantic_query::{OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let templates = [
+        primitive(&graph, PrimitiveKind::Any),
+        primitive(&graph, PrimitiveKind::Unknown),
+    ];
+    let controls = [
+        QueryError::Miss,
+        QueryError::BudgetExceeded(BudgetExceededFailure {
+            domain: BudgetDomain::ProjectionOperation,
+            limit: 1,
+            actual: 2,
+            context: "projectionless reverse source".to_string(),
+        }),
+        QueryError::Cancelled,
+        QueryError::UnstableState { attempts: 2 },
+        QueryError::OpenSurface,
+    ];
+
+    for (template_index, template) in templates.into_iter().enumerate() {
+        for (control_index, control) in controls.iter().cloned().enumerate() {
+            let (infer, parameter) = reverse_test_binders(
+                &graph,
+                "ProjectionlessPoisonT",
+                530 + (template_index * controls.len() + control_index) as u16,
+            );
+            let target = reverse_test_target(
+                &graph,
+                infer,
+                parameter,
+                template,
+                OptionalityMod::Keep,
+                ReadonlyMod::Keep,
+            );
+            let poison = graph.intern_node(SemanticNodeData::Opaque(control.clone()));
+            let nested = intern_object_with_members(
+                &graph,
+                vec![surface_member("nested", poison, false, false)],
+            );
+            let source =
+                intern_object_with_members(&graph, vec![surface_member("a", nested, false, false)]);
+            let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+            assert!(
+                matches!(
+                    graph.node_data(result).as_deref(),
+                    Some(SemanticNodeData::Conditional { .. })
+                ),
+                "projectionless {template_index} template must not launder {control:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reverse_projection_control_and_degraded_candidates_fail_closed() {
+    use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
+    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let (infer, parameter) = reverse_test_binders(&graph, "ControlT", 23);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let controls = vec![
+        QueryError::Miss,
+        QueryError::BudgetExceeded(BudgetExceededFailure {
+            domain: BudgetDomain::ProjectionOperation,
+            limit: 1,
+            actual: 2,
+            context: "reverse projection candidate".to_string(),
+        }),
+        QueryError::Cancelled,
+        QueryError::UnstableState { attempts: 3 },
+        QueryError::Other(Arc::from("genuine error type")),
+        QueryError::OpenSurface,
+    ];
+    for control in controls {
+        let candidate = graph.intern_node(SemanticNodeData::Opaque(control.clone()));
+        let source =
+            intern_object_with_members(&graph, vec![surface_member("a", candidate, false, false)]);
+        let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+        assert!(
+            matches!(
+                graph.node_data(result).as_deref(),
+                Some(SemanticNodeData::Conditional { .. })
+            ),
+            "a projection candidate carrying {control:?} must propagate Unknown and keep the conditional deferred"
+        );
+    }
+
+    let nested_miss = intern_object_with_members(
+        &graph,
+        vec![surface_member(
+            "nested",
+            graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            false,
+            false,
+        )],
+    );
+    let nested_source =
+        intern_object_with_members(&graph, vec![surface_member("a", nested_miss, false, false)]);
+    let nested_result = reverse_test_conditional(&dispatch, nested_source, target, infer, never);
+    assert!(
+        matches!(
+            graph.node_data(nested_result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "a nested unmaterialized control must not be laundered through a projection aggregate"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_normalizes_a_transparent_closed_source_alias() {
+    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let (infer, parameter) = reverse_test_binders(&graph, "AliasT", 24);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let source_object =
+        intern_object_with_members(&graph, vec![surface_member("a", string, false, false)]);
+    let source = graph.intern_node(SemanticNodeData::Alias(source_object));
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    let recovered = require_object_surface(&graph, result, "transparent reverse source alias");
+    assert_eq!(surface_get_member(&recovered, "a").value, string);
+}
+
+#[test]
+fn reverse_homomorphic_normalizes_declref_and_instantiationref_sources() {
+    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/reverse-carriers.ts",
+        "export type Named = { a: string };\n\
+         export type Generic<X> = { a: X };\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let number = primitive(&graph, PrimitiveKind::Number);
+
+    for (ordinal, source, expected) in [
+        (
+            241,
+            graph.intern_node(SemanticNodeData::DeclRef {
+                identity: decl_identity_value(&host, "/w/reverse-carriers.ts", "Named"),
+            }),
+            PrimitiveKind::String,
+        ),
+        (
+            242,
+            graph.intern_node(SemanticNodeData::InstantiationRef {
+                base: decl_identity_value(&host, "/w/reverse-carriers.ts", "Generic"),
+                args: Arc::from(vec![number].into_boxed_slice()),
+            }),
+            PrimitiveKind::Number,
+        ),
+    ] {
+        let (infer, parameter) =
+            reverse_test_binders(&graph, &format!("CarrierT{ordinal}"), ordinal);
+        let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: infer,
+            index: IndexKey::TypeNode(parameter),
+        });
+        let target = reverse_test_target(
+            &graph,
+            infer,
+            parameter,
+            projection,
+            OptionalityMod::Keep,
+            ReadonlyMod::Keep,
+        );
+        let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+        let recovered =
+            require_object_surface(&graph, result, "transparent declaration identity source");
+        assert!(
+            matches!(
+                graph
+                    .node_data(surface_get_member(&recovered, "a").value)
+                    .as_deref(),
+                Some(SemanticNodeData::Primitive(kind)) if *kind == expected
+            ),
+            "the normalized carrier must recover the expected primitive kind {expected:?}"
+        );
+    }
+
+    let unresolved = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: decl_identity_value(&host, "/w/reverse-carriers.ts", "Missing"),
+    });
+    let (infer, parameter) = reverse_test_binders(&graph, "UnresolvedCarrierT", 243);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        projection,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let result = reverse_test_conditional(&dispatch, unresolved, target, infer, never);
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "an unresolved identity source must remain Unknown/deferred"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_rejects_an_inactive_additional_infer() {
+    use crate::semantic_query::{OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let (infer_t, parameter) = reverse_test_binders(&graph, "ActiveT", 25);
+    let infer_u = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("InactiveU"),
+        binder: graph.alloc_infer_binder_id(),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer_t,
+        parameter,
+        infer_u,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let source =
+        intern_object_with_members(&graph, vec![surface_member("a", string, false, false)]);
+    let result = reverse_test_conditional(&dispatch, source, target, infer_t, never);
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "an infer declaration absent from the frozen session setup must fail closed"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
+    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod, TupleElement};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let fallback = primitive(&graph, PrimitiveKind::Boolean);
+    let string = primitive(&graph, PrimitiveKind::String);
+
+    let run = |name: &str,
+               ordinal: u16,
+               source: SemanticNodeId,
+               optionality: OptionalityMod,
+               readonly: ReadonlyMod| {
+        let (infer, parameter) = reverse_test_binders(&graph, name, ordinal);
+        let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: infer,
+            index: IndexKey::TypeNode(parameter),
+        });
+        let target =
+            reverse_test_target(&graph, infer, parameter, projection, optionality, readonly);
+        reverse_test_conditional(&dispatch, source, target, infer, fallback)
+    };
+
+    let optional_object =
+        intern_object_with_members(&graph, vec![surface_member("a", string, true, false)]);
+    assert_eq!(
+        run(
+            "OptionalRemoveT",
+            26,
+            optional_object,
+            OptionalityMod::Remove,
+            ReadonlyMod::Keep,
+        ),
+        fallback,
+        "an optional source property cannot satisfy mapped `-?`"
+    );
+    let readonly_object =
+        intern_object_with_members(&graph, vec![surface_member("a", string, false, true)]);
+    let readonly_object_result = run(
+        "ReadonlyRemoveT",
+        27,
+        readonly_object,
+        OptionalityMod::Keep,
+        ReadonlyMod::Remove,
+    );
+    let readonly_object_view = require_object_surface(
+        &graph,
+        readonly_object_result,
+        "readonly object modifier removal",
+    );
+    assert!(
+        surface_get_member(&readonly_object_view, "a").readonly,
+        "TypeScript reverse construction preserves a readonly source property through `-readonly`"
+    );
+    let readonly_index_source = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(
+                vec![crate::semantic_query::IndexSignature {
+                    key_type: primitive(&graph, PrimitiveKind::String),
+                    value_type: string,
+                    readonly: true,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                }]
+                .into_boxed_slice()
+            ),
+            keyspace: None,
+            has_index_signature: true,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+        },
+    ));
+    let readonly_index_result = run(
+        "ReadonlyIndexRemoveT",
+        271,
+        readonly_index_source,
+        OptionalityMod::Keep,
+        ReadonlyMod::Remove,
+    );
+    let readonly_index_view = require_object_surface(
+        &graph,
+        readonly_index_result,
+        "readonly index modifier removal",
+    );
+    assert!(
+        readonly_index_view.index_signatures[0].readonly,
+        "TypeScript reverse construction preserves a readonly source index signature through `-readonly`"
+    );
+    let readonly_array = graph.intern_node(SemanticNodeData::Array {
+        element: string,
+        readonly: true,
+    });
+    let readonly_array_result = run(
+        "ReadonlyArrayRemoveT",
+        28,
+        readonly_array,
+        OptionalityMod::Keep,
+        ReadonlyMod::Remove,
+    );
+    assert!(
+        matches!(
+            graph.node_data(readonly_array_result).as_deref(),
+            Some(SemanticNodeData::Array {
+                element,
+                readonly: true,
+            }) if *element == string
+        ),
+        "homomorphic reverse construction preserves the source array's \
+         readonly container bit independently of member modifier inversion"
+    );
+    let optional_tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![TupleElement {
+                label: Some(Arc::from("head")),
+                value: string,
+                optional: true,
+                rest: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    assert_eq!(
+        run(
+            "OptionalTupleRemoveT",
+            29,
+            optional_tuple,
+            OptionalityMod::Remove,
+            ReadonlyMod::Keep,
+        ),
+        fallback,
+        "an optional tuple slot cannot satisfy mapped `-?`"
+    );
+    let readonly_tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![TupleElement {
+                label: None,
+                value: string,
+                optional: false,
+                rest: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: true,
+    });
+    let readonly_tuple_result = run(
+        "ReadonlyTupleRemoveT",
+        30,
+        readonly_tuple,
+        OptionalityMod::Keep,
+        ReadonlyMod::Remove,
+    );
+    assert!(
+        matches!(
+            graph.node_data(readonly_tuple_result).as_deref(),
+            Some(SemanticNodeData::Tuple {
+                elements,
+                readonly: true,
+            }) if elements.len() == 1 && elements[0].value == string
+        ),
+        "homomorphic reverse construction preserves the source tuple's \
+         readonly container bit independently of member modifier inversion"
+    );
+
+    let mutable_required_object =
+        intern_object_with_members(&graph, vec![surface_member("a", string, false, false)]);
+    let object_result = run(
+        "ValidObjectRemoveT",
+        301,
+        mutable_required_object,
+        OptionalityMod::Remove,
+        ReadonlyMod::Remove,
+    );
+    let object_view =
+        require_object_surface(&graph, object_result, "valid object modifier removal");
+    let object_member = surface_get_member(&object_view, "a");
+    assert!(!object_member.optional && !object_member.readonly);
+
+    let mutable_array = graph.intern_node(SemanticNodeData::Array {
+        element: string,
+        readonly: false,
+    });
+    let array_result = run(
+        "ValidArrayRemoveT",
+        302,
+        mutable_array,
+        OptionalityMod::Remove,
+        ReadonlyMod::Remove,
+    );
+    assert!(
+        matches!(
+            graph.node_data(array_result).as_deref(),
+            Some(SemanticNodeData::Array {
+                element,
+                readonly: false,
+            }) if *element == string
+        ),
+        "a mutable array validly satisfies `-readonly` and reconstructs mutable metadata"
+    );
+
+    let mutable_required_tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![TupleElement {
+                label: Some(Arc::from("head")),
+                value: string,
+                optional: false,
+                rest: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let tuple_result = run(
+        "ValidTupleRemoveT",
+        303,
+        mutable_required_tuple,
+        OptionalityMod::Remove,
+        ReadonlyMod::Remove,
+    );
+    match graph.node_data(tuple_result).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, readonly }) => {
+            assert!(!readonly);
+            assert!(!elements[0].optional);
+        }
+        other => panic!("expected valid mutable required tuple recovery, got {other:?}"),
+    }
+    assert_ne!(
+        never, fallback,
+        "control: the false-branch sentinel is discriminating"
+    );
+}
+
+#[test]
+fn reverse_homomorphic_tuple_uses_string_fixed_keys_and_number_rest_keys() {
+    use crate::semantic_query::{
+        IndexKey, LiteralValue, OptionalityMod, ReadonlyMod, TupleElement,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let (infer, parameter) = reverse_test_binders(&graph, "TupleKeyT", 31);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let fixed_key = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "0".to_string(),
+    )));
+    let rest_branch = graph.intern_node(SemanticNodeData::Conditional {
+        check: parameter,
+        extends: number,
+        true_branch_ref: projection,
+        false_branch_ref: never,
+        distributive: false,
+    });
+    let template = graph.intern_node(SemanticNodeData::Conditional {
+        check: parameter,
+        extends: fixed_key,
+        true_branch_ref: projection,
+        false_branch_ref: rest_branch,
+        distributive: false,
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        template,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let rest_array = graph.intern_node(SemanticNodeData::Array {
+        element: number,
+        readonly: true,
+    });
+    let source = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![
+                TupleElement {
+                    label: Some(Arc::from("fixed")),
+                    value: string,
+                    optional: true,
+                    rest: false,
+                },
+                TupleElement {
+                    label: Some(Arc::from("tail")),
+                    value: rest_array,
+                    optional: false,
+                    rest: true,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        readonly: true,
+    });
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, readonly }) => {
+            assert!(*readonly);
+            assert_eq!(elements.len(), 2);
+            assert_eq!(elements[0].label.as_deref(), Some("fixed"));
+            assert_eq!(elements[0].value, string);
+            assert!(
+                elements[0].optional,
+                "Keep preserves fixed-slot optionality"
+            );
+            assert!(!elements[0].rest);
+            assert_eq!(elements[1].label.as_deref(), Some("tail"));
+            assert!(elements[1].rest);
+            match graph.node_data(elements[1].value).as_deref() {
+                Some(SemanticNodeData::Array { element, readonly }) => {
+                    assert_eq!(*element, number);
+                    assert!(*readonly, "the rest array's readonly metadata is preserved");
+                }
+                other => panic!("expected the recovered variadic rest array, got {other:?}"),
+            }
+        }
+        other => panic!("expected a recovered tuple with a variadic rest slot, got {other:?}"),
+    }
+}
+
+#[test]
+fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back() {
+    use crate::semantic_query::{
+        FunctionParam, IndexKey, OptionalityMod, ReadonlyMod, SignatureKind, TypeParamDecl,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let void = primitive(&graph, PrimitiveKind::Void);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let signature = |first: SemanticNodeId, second: SemanticNodeId| {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: SignatureKind::Call,
+            params: Arc::from(
+                vec![
+                    FunctionParam::synthetic(Some(Arc::from("first")), first, false, false),
+                    FunctionParam::synthetic(Some(Arc::from("second")), second, false, false),
+                ]
+                .into_boxed_slice(),
+            ),
+            return_type: void,
+            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            signature_span: None,
+            return_type_span: None,
+        })
+    };
+    let overloaded = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+            call_signatures: Arc::from(
+                vec![signature(number, number), signature(string, string)].into_boxed_slice()
+            ),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+        },
+    ));
+    let source =
+        intern_object_with_members(&graph, vec![surface_member("a", overloaded, false, false)]);
+
+    let (infer, parameter) = reverse_test_binders(&graph, "RollbackT", 30);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        signature(projection, string),
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    let recovered = require_object_surface(&graph, result, "reverse overload rollback");
+    assert_eq!(
+        surface_get_member(&recovered, "a").value,
+        string,
+        "the losing number overload's projection deposit must not survive fixation"
+    );
+}
+
+#[test]
+fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_back() {
+    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let boolean = primitive(&graph, PrimitiveKind::Boolean);
+    let never = primitive(&graph, PrimitiveKind::Never);
+
+    let (union_infer, union_parameter) = reverse_test_binders(&graph, "UnionRollbackT", 32);
+    let union_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: union_infer,
+        index: IndexKey::TypeNode(union_parameter),
+    });
+    let losing_target = intern_object_with_members(
+        &graph,
+        vec![
+            surface_member("leak", union_projection, false, false),
+            surface_member("tag", boolean, false, false),
+        ],
+    );
+    let winning_target = intern_object_with_members(
+        &graph,
+        vec![surface_member("keep", union_projection, false, false)],
+    );
+    let union_template = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![losing_target, winning_target].into_boxed_slice(),
+    )));
+    let union_source_value = intern_object_with_members(
+        &graph,
+        vec![
+            surface_member("leak", string, false, false),
+            surface_member("tag", string, false, false),
+            surface_member("keep", number, false, false),
+        ],
+    );
+    let union_target = reverse_test_target(
+        &graph,
+        union_infer,
+        union_parameter,
+        union_template,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let union_source = intern_object_with_members(
+        &graph,
+        vec![surface_member("a", union_source_value, false, false)],
+    );
+    let union_result =
+        reverse_test_conditional(&dispatch, union_source, union_target, union_infer, never);
+    let union_recovered =
+        require_object_surface(&graph, union_result, "reverse target-union rollback");
+    assert_eq!(
+        surface_get_member(&union_recovered, "a").value,
+        number,
+        "the losing target-union arm's string projection must not contaminate the winning number arm"
+    );
+
+    let (intersection_infer, intersection_parameter) =
+        reverse_test_binders(&graph, "IntersectionRollbackT", 33);
+    let intersection_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: intersection_infer,
+        index: IndexKey::TypeNode(intersection_parameter),
+    });
+    let intersection_template = intern_object_with_members(
+        &graph,
+        vec![
+            surface_member("capture", intersection_projection, false, false),
+            surface_member("tag", string, false, false),
+        ],
+    );
+    let losing_source_arm = intern_object_with_members(
+        &graph,
+        vec![
+            surface_member("capture", number, false, false),
+            surface_member("tag", boolean, false, false),
+        ],
+    );
+    let winning_source_arm = intern_object_with_members(
+        &graph,
+        vec![
+            surface_member("capture", string, false, false),
+            surface_member("tag", string, false, false),
+        ],
+    );
+    let intersection_source_value = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![losing_source_arm, winning_source_arm].into_boxed_slice(),
+    )));
+    let intersection_target = reverse_test_target(
+        &graph,
+        intersection_infer,
+        intersection_parameter,
+        intersection_template,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let intersection_source = intern_object_with_members(
+        &graph,
+        vec![surface_member("a", intersection_source_value, false, false)],
+    );
+    let intersection_result = reverse_test_conditional(
+        &dispatch,
+        intersection_source,
+        intersection_target,
+        intersection_infer,
+        never,
+    );
+    let intersection_recovered = require_object_surface(
+        &graph,
+        intersection_result,
+        "reverse source-intersection rollback",
+    );
+    assert_eq!(
+        surface_get_member(&intersection_recovered, "a").value,
+        string,
+        "the losing source-intersection arm's number projection must not contaminate the winning string arm"
+    );
+}
+
+#[test]
+fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_nesting() {
+    use crate::semantic_query::{
+        FunctionParam, IndexKey, OptionalityMod, ReadonlyMod, SignatureKind, TupleElement,
+        TypeParamDecl,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let void = primitive(&graph, PrimitiveKind::Void);
+    let signature = |params: Vec<SemanticNodeId>| {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: SignatureKind::Call,
+            params: Arc::from(
+                params
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, ty)| {
+                        FunctionParam::synthetic(
+                            Some(Arc::from(format!("p{index}"))),
+                            ty,
+                            false,
+                            false,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            return_type: void,
+            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            signature_span: None,
+            return_type_span: None,
+        })
+    };
+
+    for (ordinal, label) in [(34, "object"), (35, "array"), (36, "tuple")] {
+        let (infer, parameter) =
+            reverse_test_binders(&graph, &format!("{label}VarianceT"), ordinal);
+        let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: infer,
+            index: IndexKey::TypeNode(parameter),
+        });
+        let wrap = |value| match label {
+            "object" => intern_object_with_members(
+                &graph,
+                vec![surface_member("value", value, false, false)],
+            ),
+            "array" => graph.intern_node(SemanticNodeData::Array {
+                element: value,
+                readonly: false,
+            }),
+            "tuple" => graph.intern_node(SemanticNodeData::Tuple {
+                elements: Arc::from(
+                    vec![TupleElement {
+                        label: Some(Arc::from("value")),
+                        value,
+                        optional: false,
+                        rest: false,
+                    }]
+                    .into_boxed_slice(),
+                ),
+                readonly: false,
+            }),
+            _ => unreachable!(),
+        };
+        let template = signature(vec![wrap(projection), wrap(projection)]);
+        let source_value = signature(vec![wrap(string), wrap(number)]);
+        let target = reverse_test_target(
+            &graph,
+            infer,
+            parameter,
+            template,
+            OptionalityMod::Keep,
+            ReadonlyMod::Keep,
+        );
+        let source = intern_object_with_members(
+            &graph,
+            vec![surface_member("a", source_value, false, false)],
+        );
+        let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+        let recovered =
+            require_object_surface(&graph, result, &format!("nested {label} contravariance"));
+        assert_eq!(
+            surface_get_member(&recovered, "a").value,
+            never,
+            "contravariant string and number candidates nested through {label} must combine by intersection"
+        );
+    }
+}
+
+#[test]
+fn direct_inference_candidate_outranks_a_reverse_homomorphic_candidate() {
+    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let (infer, parameter) = reverse_test_binders(&graph, "PriorityT", 31);
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: infer,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let template = intern_object_with_members(
+        &graph,
+        vec![
+            surface_member("projection", projection, false, false),
+            surface_member("direct", infer, false, false),
+        ],
+    );
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        template,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let source_value = intern_object_with_members(
+        &graph,
+        vec![
+            surface_member("projection", string, false, false),
+            surface_member("direct", number, false, false),
+        ],
+    );
+    let source = intern_object_with_members(
+        &graph,
+        vec![surface_member("a", source_value, false, false)],
+    );
+
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    assert_eq!(
+        result, number,
+        "the direct Argument candidate must outrank the aggregate HomomorphicMapped candidate"
+    );
+    assert!(
+        crate::semantic_query::inference_candidate_precedence(
+            crate::semantic_query::InferenceCandidatePriority::HomomorphicMapped
+        ) > crate::semantic_query::inference_candidate_precedence(
+            crate::semantic_query::InferenceCandidatePriority::PartialHomomorphicMapped
+        ),
+        "full homomorphic recovery must outrank partial recovery"
+    );
+}
+
+#[test]
+fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_refs() {
+    use crate::semantic_query::{
+        DeclIdentity, FunctionParam, IndexKey, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
+        SignatureKind, TypeParamDecl,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string = primitive(&graph, PrimitiveKind::String);
+    let void = primitive(&graph, PrimitiveKind::Void);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let boxed = |value| {
+        intern_object_with_members(&graph, vec![surface_member("value", value, false, false)])
+    };
+    let source = intern_object_with_members(
+        &graph,
+        vec![surface_member("a", boxed(string), false, false)],
+    );
+
+    let (infer, parameter) = reverse_test_binders(&graph, "RefT", 40);
+    let scoped_reference = graph.intern_node(SemanticNodeData::InferRef {
+        name: Arc::from("RefT"),
+        binder: reverse_test_binder_id(&graph, infer),
+    });
+    let projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: scoped_reference,
+        index: IndexKey::TypeNode(parameter),
+    });
+    let target = reverse_test_target(
+        &graph,
+        infer,
+        parameter,
+        boxed(projection),
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let result = reverse_test_conditional(&dispatch, source, target, infer, never);
+    let recovered = require_object_surface(&graph, result, "reverse scoped reference association");
+    assert_eq!(
+        surface_get_member(&recovered, "a").value,
+        string,
+        "the scoped InferRef bridge must associate with the selected infer declaration"
+    );
+
+    let (bare_infer, bare_parameter) = reverse_test_binders(&graph, "BareT", 41);
+    let unrelated_bare = graph.intern_node(SemanticNodeData::new_bare_ref(
+        Arc::from("BareT"),
+        NodeScopeId::Global,
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+    ));
+    let bare_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: unrelated_bare,
+        index: IndexKey::TypeNode(bare_parameter),
+    });
+    let bare_target = reverse_test_target(
+        &graph,
+        bare_infer,
+        bare_parameter,
+        boxed(bare_projection),
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let bare_result = reverse_test_conditional(&dispatch, source, bare_target, bare_infer, never);
+    assert!(
+        matches!(
+            graph.node_data(bare_result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "an unrelated global/imported bare `T` must never associate with the selected infer declaration"
+    );
+
+    let (shadow_infer, shadow_parameter) = reverse_test_binders(&graph, "ShadowT", 42);
+    let shadow_reference = graph.intern_node(SemanticNodeData::InferRef {
+        name: Arc::from("ShadowT"),
+        binder: reverse_test_binder_id(&graph, shadow_infer),
+    });
+    let shadow_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: shadow_reference,
+        index: IndexKey::TypeNode(shadow_parameter),
+    });
+    let shadow_template = graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from(
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("value")),
+                shadow_projection,
+                false,
+                false,
+            )]
+            .into_boxed_slice(),
+        ),
+        return_type: void,
+        type_parameters: Arc::from(
+            vec![TypeParamDecl {
+                name: Arc::from("ShadowT"),
+                constraint: None,
+                default: None,
+            }]
+            .into_boxed_slice(),
+        ),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let shadow_source_value = graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from(
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("value")),
+                string,
+                false,
+                false,
+            )]
+            .into_boxed_slice(),
+        ),
+        return_type: void,
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let shadow_source = intern_object_with_members(
+        &graph,
+        vec![surface_member("a", shadow_source_value, false, false)],
+    );
+    let shadow_target = reverse_test_target(
+        &graph,
+        shadow_infer,
+        shadow_parameter,
+        shadow_template,
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let shadow_result =
+        reverse_test_conditional(&dispatch, shadow_source, shadow_target, shadow_infer, never);
+    assert!(
+        matches!(
+            graph.node_data(shadow_result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "a function type parameter with the same name shadows the outer infer reference"
+    );
+
+    let (identity_infer, identity_parameter) = reverse_test_binders(&graph, "IdentityT", 43);
+    let same_name_other_parameter = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("<different-reverse-mapper>"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("P"),
+    });
+    let wrong_parameter_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: identity_infer,
+        index: IndexKey::TypeNode(same_name_other_parameter),
+    });
+    let identity_target = reverse_test_target(
+        &graph,
+        identity_infer,
+        identity_parameter,
+        boxed(wrong_parameter_projection),
+        OptionalityMod::Keep,
+        ReadonlyMod::Keep,
+    );
+    let identity_result =
+        reverse_test_conditional(&dispatch, source, identity_target, identity_infer, never);
+    assert!(
+        matches!(
+            graph.node_data(identity_result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "a different mapper parameter with the same display name is not the mapped binder"
+    );
+
+    let (remap_infer, remap_parameter) = reverse_test_binders(&graph, "RemapT", 44);
+    let remap_key_space = graph.intern_node(SemanticNodeData::KeyOf { base: remap_infer });
+    let remap_projection = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: remap_infer,
+        index: IndexKey::TypeNode(remap_parameter),
+    });
+    let remapped_target = graph.intern_node(SemanticNodeData::Mapped {
+        source: remap_infer,
+        mapper: MapperKey {
+            parameter_node: remap_parameter,
+            key_space: remap_key_space,
+            value_expr: boxed(remap_projection),
+            optionality: OptionalityMod::Keep,
+            readonly: ReadonlyMod::Keep,
+            name_remap: Some(string),
+            kind: MapperKind::Computed,
+        },
+    });
+    let remap_result =
+        reverse_test_conditional(&dispatch, source, remapped_target, remap_infer, never);
+    assert!(
+        matches!(
+            graph.node_data(remap_result).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "name-remapped mapped targets are ineligible for reverse inference"
     );
 }
 
@@ -11976,6 +15901,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
     let string_ty = primitive(&graph, PrimitiveKind::String);
     let infer_x = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("X"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let label_obj = simple_object(&graph, &[("label", string_ty)]);
     let node_cond = graph.intern_node(SemanticNodeData::Conditional {
@@ -19711,6 +23637,7 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
     ));
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let string_ty = graph.intern_node(SemanticNodeData::Primitive(
         crate::semantic_query::PrimitiveKind::String,
@@ -19857,6 +23784,7 @@ fn typeparam_binder_substitution_preserves_same_name_infer_declaration() {
     });
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let extends = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/infer_collision.ts", "Boxed"),
@@ -19934,6 +23862,7 @@ fn subtree_references_node_ignores_same_name_infer_under_typeparam_probe() {
     });
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("T"),
+        binder: graph.alloc_infer_binder_id(),
     });
     let root = graph.intern_node(SemanticNodeData::Array {
         element: infer_t,
@@ -19953,22 +23882,57 @@ fn subtree_references_node_ignores_same_name_infer_under_typeparam_probe() {
         "substitute must leave the same-name infer declaration untouched; a \
          referencing walker verdict would contradict it"
     );
-    // The dedicated Infer-binder direction is unchanged: an Infer target
-    // still bridges to same-name TypeParam occurrences (the Conditional
-    // reducer's infer-bind consumer relies on it).
+    // Exact infer identity has no name bridge: a same-spelled TypeParam is a
+    // distinct declaration and must remain untouched. Legitimate conditional
+    // references are `InferRef` nodes carrying the exact binder.
     let typeparam_root = graph.intern_node(SemanticNodeData::Array {
         element: t_param,
         readonly: false,
     });
     assert!(
-        dispatch.subtree_references_node(typeparam_root, infer_t),
-        "an Infer probe still bridges to same-name TypeParam occurrences"
+        !dispatch.subtree_references_node(typeparam_root, infer_t),
+        "an Infer probe must not treat an unrelated same-name TypeParam as its reference"
     );
-    assert_ne!(
+    assert_eq!(
         dispatch.substitute_semantic_type_param(typeparam_root, infer_t, number),
         typeparam_root,
-        "an Infer binder still rewrites same-name TypeParam occurrences"
+        "an Infer binder must not rewrite an unrelated same-name TypeParam"
     );
+}
+
+#[test]
+fn relation_conjunction_keeps_distinct_same_name_infer_params() {
+    use crate::semantic_query::{InferBinding, RelationResult};
+
+    let first = InferBinding {
+        param: SemanticNodeId(701),
+        name: Arc::from("T"),
+        bound: SemanticNodeId(801),
+    };
+    let second = InferBinding {
+        param: SemanticNodeId(702),
+        name: Arc::from("T"),
+        bound: SemanticNodeId(802),
+    };
+    let merged = super::relation_predicates::result_and(
+        RelationResult::Assignable {
+            bindings: Arc::from(vec![first].into_boxed_slice()),
+        },
+        RelationResult::Assignable {
+            bindings: Arc::from(vec![second].into_boxed_slice()),
+        },
+    );
+    match merged {
+        RelationResult::Assignable { bindings } => {
+            assert_eq!(
+                bindings.len(),
+                2,
+                "same display spelling must not deduplicate distinct exact params"
+            );
+            assert_ne!(bindings[0].param, bindings[1].param);
+        }
+        other => panic!("expected assignable conjunction, got {other:?}"),
+    }
 }
 
 /// The memo entry self-roots on the callee AND the explicit type-argument

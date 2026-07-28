@@ -181,7 +181,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // "no excess".
             ResolvedExcessNode::Exhausted => return ExcessPrepassOutcome::Undecided,
         };
-
         // Typed target-classification gate + broad-target skips. Both
         // predicates are tri-state: an exhausted classification is
         // undecided, never a silent skip.
@@ -347,7 +346,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if carrier_hops > 8 {
                         return ResolvedExcessNode::Exhausted;
                     }
-                    match self.unwrap_identity_carrier_for_relation(current) {
+                    match self.unwrap_identity_carrier_one_step(current) {
                         super::relation::IdentityCarrierUnwrap::Concrete(resolved) => {
                             if resolved == current {
                                 return ResolvedExcessNode::Node(current);

@@ -9,6 +9,26 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
+mod work_credit;
+
+use work_credit::ConnectedWorkCredit;
+
+#[cfg(test)]
+std::thread_local! {
+    static MAPPED_AFTER_SOURCE_VISITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn mapped_after_source_visits_for_tests() -> usize {
+    MAPPED_AFTER_SOURCE_VISITS.get()
+}
+
+#[cfg(test)]
+fn record_mapped_after_source_visit_for_tests() {
+    MAPPED_AFTER_SOURCE_VISITS.set(MAPPED_AFTER_SOURCE_VISITS.get() + 1);
+}
+
 use super::carrier::{CarrierArgsContinuation, CarrierResolutionPlan, CarrierResolverContext};
 use super::locator_view::{LocatorViewInputs, ViewMemo};
 use super::ProjectSemanticDispatch;
@@ -144,62 +164,6 @@ enum ProjectionChildPlan<'a> {
         data: &'a SemanticNodeData,
         context: ProjectionReductionContext,
     },
-}
-
-/// Panic-safe local accounting for one explicit projection worklist. Structural
-/// traversal consumes this local credit and synchronizes it before any nested
-/// semantic query can observe or join the connected demand. Drop commits on
-/// unwind as well.
-struct ConnectedWorkCredit<'dispatch, 'ctx> {
-    dispatch: &'dispatch ProjectSemanticDispatch<'ctx>,
-    window_start: usize,
-    remaining: usize,
-}
-
-impl<'dispatch, 'ctx> ConnectedWorkCredit<'dispatch, 'ctx> {
-    fn new(
-        dispatch: &'dispatch ProjectSemanticDispatch<'ctx>,
-    ) -> Result<Self, crate::semantic_query::PartialReasonSet> {
-        let available = dispatch.connected_work_available()?;
-        Ok(Self {
-            dispatch,
-            window_start: available,
-            remaining: available,
-        })
-    }
-
-    #[inline(always)]
-    fn consume(&mut self) -> Result<(), crate::semantic_query::PartialReasonSet> {
-        if self.remaining == 0 {
-            self.settle();
-            return self.dispatch.charge_connected_work();
-        }
-        self.remaining -= 1;
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn settle(&mut self) {
-        self.dispatch
-            .commit_connected_work(self.window_start - self.remaining);
-        self.window_start = 0;
-        self.remaining = 0;
-    }
-
-    fn refresh(&mut self) -> Result<(), crate::semantic_query::PartialReasonSet> {
-        debug_assert_eq!(self.window_start, 0);
-        debug_assert_eq!(self.remaining, 0);
-        let available = self.dispatch.connected_work_available()?;
-        self.window_start = available;
-        self.remaining = available;
-        Ok(())
-    }
-}
-
-impl Drop for ConnectedWorkCredit<'_, '_> {
-    fn drop(&mut self) {
-        self.settle();
-    }
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -704,6 +668,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     data,
                     source,
                 } => {
+                    #[cfg(test)]
+                    record_mapped_after_source_visit_for_tests();
                     let SemanticNodeData::Mapped { mapper, .. } = data.as_ref() else {
                         unreachable!("mapped staging frame must carry a mapped node")
                     };
@@ -713,7 +679,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Some(SemanticNodeData::KeyOf { base }) if *base == source
                     );
                     let key_space = if keyof_sourced {
-                        if may_reduce_operator(context) {
+                        // The exact `keyof infer T` descriptor is open only
+                        // until the enclosing conditional relation fixes T.
+                        // Reducing it during locator-view projection can only
+                        // turn the authored `KeyOf` carrier into `Miss`,
+                        // making the reverse-homomorphic pattern
+                        // unrecognizable. Preserve that exact selected Infer
+                        // operand in every projection mode; concrete sources
+                        // keep the established eager `KeyOf` path.
+                        let selected_base_is_infer = matches!(
+                            self.graph().node_data(source_id).as_deref(),
+                            Some(SemanticNodeData::Infer { .. })
+                        );
+                        if may_reduce_operator(context) && !selected_base_is_infer {
                             work_credit.settle();
                             let result = match self.execute_type_node(SemanticQueryKey::KeyOf {
                                 base: source_id,
@@ -1475,4 +1453,30 @@ fn projected(
     *memo
         .get(&(node, context))
         .unwrap_or_else(|| panic!("projection child {node:?} was not completed before its parent"))
+}
+
+#[cfg(test)]
+mod witness_tests {
+    use super::{mapped_after_source_visits_for_tests, record_mapped_after_source_visit_for_tests};
+
+    #[test]
+    fn mapped_after_source_witness_is_test_thread_local() {
+        let main_before = mapped_after_source_visits_for_tests();
+        std::thread::spawn(|| {
+            let child_before = mapped_after_source_visits_for_tests();
+            record_mapped_after_source_visit_for_tests();
+            assert_eq!(
+                mapped_after_source_visits_for_tests(),
+                child_before + 1,
+                "the executing test thread observes its own production-path witness"
+            );
+        })
+        .join()
+        .expect("witness worker must finish");
+        assert_eq!(
+            mapped_after_source_visits_for_tests(),
+            main_before,
+            "a parallel test thread must not mutate this test's witness"
+        );
+    }
 }
