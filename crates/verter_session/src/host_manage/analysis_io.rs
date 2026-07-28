@@ -138,6 +138,27 @@ impl VerterHost {
     /// context into base content); a caller without coherent inputs
     /// (torn generation join, non-SFC) simply skips the computation
     /// and the template stays absent — fail closed, never mixed.
+    /// Whether the template analysis must be materialised for a file served on
+    /// THIS call.
+    ///
+    /// Two independent sources, either of which suffices:
+    ///
+    /// * the configured [`verter_semantic::analysis::AnalysisScope`] carries a
+    ///   template flag — the standing, host-wide answer;
+    /// * a [`crate::request_context::RootTemplateDemandScope`] is active on this
+    ///   thread — the REQUEST-SCOPED answer used by the public-API carrier
+    ///   render, whose parent-facing props type is projected from the
+    ///   inheritance resolver's root reachability.
+    ///
+    /// The demand exists so `AnalysisScope::BUILD` can stay template-free: a
+    /// template bit there would materialise the whole template snapshot for
+    /// every carrier file every BUILD-scope consumer analyses, to obtain the one
+    /// fact the carrier actually reads.
+    pub(crate) fn template_analysis_required(&self) -> bool {
+        self.config.effective_scope().needs_template_analysis()
+            || crate::request_context::root_template_analysis_demanded()
+    }
+
     pub(crate) fn compute_template_analysis_if_missing(
         &self,
         canonical: &str,
@@ -360,7 +381,7 @@ impl VerterHost {
                 return Some(self.finalize_analysis_snapshot(
                     canonical,
                     snapshot,
-                    self.config.effective_scope().needs_template_analysis(),
+                    self.template_analysis_required(),
                     template_inputs,
                     analysis_started,
                 ));
@@ -472,7 +493,7 @@ impl VerterHost {
                 return Some(self.finalize_analysis_snapshot(
                     canonical,
                     snapshot,
-                    scope.needs_template_analysis(),
+                    self.template_analysis_required(),
                     template_inputs,
                     analysis_started,
                 ));
@@ -489,7 +510,7 @@ impl VerterHost {
             Some(self.finalize_analysis_snapshot(
                 canonical,
                 snapshot,
-                self.config.effective_scope().needs_template_analysis(),
+                self.template_analysis_required(),
                 joined_inputs,
                 analysis_started,
             ))
@@ -587,7 +608,7 @@ impl VerterHost {
             return Some(self.finalize_analysis_snapshot(
                 canonical.as_str(),
                 snapshot,
-                self.config.effective_scope().needs_template_analysis(),
+                self.template_analysis_required(),
                 template_inputs,
                 analysis_started,
             ));

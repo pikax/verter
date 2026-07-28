@@ -1,4 +1,7 @@
-use super::script::{generate_tsc_output_with_options, MacroTscInput, TscGenOptions, TscMode};
+use super::script::{
+    generate_tsc_output_with_options, FallthroughPropsProjection, MacroTscInput, TscGenOptions,
+    TscMode,
+};
 use oxc_sourcemap::SourceMap;
 use verter_macro_dto::{
     AuthoredMemberOrdinal, MacroAnchor, MacroFailure, MacroInvalidReason, MacroPartialReason,
@@ -388,6 +391,7 @@ fn gen_tsc_mode_with(
             ..Default::default()
         },
         MacroTscInput::Authoritative(&bundle),
+        &FallthroughPropsProjection::none(),
     )
     .expect("explicit TSC fixture must match typed macro syntax")
 }
@@ -403,6 +407,7 @@ fn direct_tsc_rejects_typed_macro_without_authoritative_semantics() {
         "TestComp",
         &TscGenOptions::default(),
         MacroTscInput::NotRequired,
+        &FallthroughPropsProjection::none(),
     )
     .expect_err("typed macro must reject NotRequired");
 
@@ -428,6 +433,7 @@ fn generate_with_bundle(
             ..Default::default()
         },
         MacroTscInput::Authoritative(bundle),
+        &FallthroughPropsProjection::none(),
     )
 }
 
@@ -1495,6 +1501,7 @@ fn explicit_emit_fixture_drives_emit_and_handler_parameter_contracts() {
         "TestComp",
         &TscGenOptions::default(),
         MacroTscInput::Authoritative(&bundle),
+        &FallthroughPropsProjection::none(),
     )
     .expect("explicit emit DTO");
 
@@ -1530,6 +1537,7 @@ fn gen_tsc_output(sfc: &str) -> super::script::TscOutput {
             ..Default::default()
         },
         MacroTscInput::NotRequired,
+        &FallthroughPropsProjection::none(),
     )
     .expect("fixture has no typed codegen macro")
 }
@@ -1544,6 +1552,7 @@ fn gen_tsc_narrowing_with(sfc: &str, fixtures: &[TscFixture<'_>]) -> String {
             ..Default::default()
         },
         MacroTscInput::Authoritative(&bundle),
+        &FallthroughPropsProjection::none(),
     )
     .expect("explicit TSC fixture must match typed macro syntax")
     .code
@@ -1563,6 +1572,7 @@ fn gen_tsc_output_testing(sfc: &str) -> super::script::TscOutput {
             ..Default::default()
         },
         MacroTscInput::NotRequired,
+        &FallthroughPropsProjection::none(),
     )
     .expect("fixture has no typed codegen macro")
 }
@@ -3452,6 +3462,7 @@ import type { Attrs } from './types'
         "TestComp",
         &TscGenOptions::default(),
         MacroTscInput::NotRequired,
+        &FallthroughPropsProjection::none(),
     );
 
     let expected = super::script::TscGenerationError::UnavailableOutcome {
@@ -3474,6 +3485,7 @@ import type { Attrs } from './types'
             "TestComp",
             TscMode::Public,
             MacroTscInput::NotRequired,
+            &FallthroughPropsProjection::none(),
         )
         .unwrap_err(),
         expected,
@@ -3515,6 +3527,7 @@ defineProps<Payload>()
         "TestComp",
         TscMode::Public,
         MacroTscInput::Authoritative(&bundle),
+        &FallthroughPropsProjection::none(),
     )
     .expect_err("malformed source-owned attrs must win cached generation precedence");
     assert_eq!(cached, direct);
@@ -4557,6 +4570,7 @@ defineEmits<{ (e: 'change', val: number): void }>()
         "TestComp",
         TscMode::Public,
         MacroTscInput::Authoritative(&bundle),
+        &FallthroughPropsProjection::none(),
     )
     .expect("explicit semantic DTO");
     let direct = generate_tsc_output_with_options(
@@ -4567,6 +4581,7 @@ defineEmits<{ (e: 'change', val: number): void }>()
             ..Default::default()
         },
         MacroTscInput::Authoritative(&bundle),
+        &FallthroughPropsProjection::none(),
     )
     .expect("explicit semantic DTO");
 
@@ -4596,6 +4611,7 @@ defineEmits(['click', 'update'])
         "TestComp",
         TscMode::Public,
         MacroTscInput::NotRequired,
+        &FallthroughPropsProjection::none(),
     )
     .expect("runtime macros require no semantic DTO");
     let direct = gen_tsc(sfc);
@@ -4626,6 +4642,7 @@ fn assert_valid_tsc_output(source: &str, name: &str, props: &[FixturePropRow<'_>
         name,
         &TscGenOptions::default(),
         MacroTscInput::Authoritative(&bundle),
+        &FallthroughPropsProjection::none(),
     )
     .expect("explicit fixture matches typed macro");
     let code = &tsc_out.code;
@@ -4687,6 +4704,7 @@ defineProps<{ value: string }>()
         "My.Component.Name",
         &TscGenOptions::default(),
         MacroTscInput::Authoritative(&bundle),
+        &FallthroughPropsProjection::none(),
     )
     .expect("explicit fixture matches typed macro");
     let code = &tsc_out.code;
@@ -5098,6 +5116,7 @@ fn reserved_word_component_name_is_prefixed() {
         "default",
         &TscGenOptions::default(),
         MacroTscInput::NotRequired,
+        &FallthroughPropsProjection::none(),
     )
     .expect("no typed macros")
     .code;
@@ -5120,6 +5139,7 @@ fn digit_prefix_component_name_is_prefixed() {
         "404",
         &TscGenOptions::default(),
         MacroTscInput::NotRequired,
+        &FallthroughPropsProjection::none(),
     )
     .expect("no typed macros")
     .code;
@@ -5153,6 +5173,7 @@ fn gen_tsc_declaration(sfc: &str) -> String {
             ..Default::default()
         },
         MacroTscInput::NotRequired,
+        &FallthroughPropsProjection::none(),
     )
     .expect("fixture has no typed codegen macro")
     .code
@@ -5641,6 +5662,7 @@ defineExpose({ internal })
             ..Default::default()
         },
         MacroTscInput::NotRequired,
+        &FallthroughPropsProjection::none(),
     )
     .expect("fixture has no typed codegen macro")
     .code;
@@ -6647,6 +6669,97 @@ fn public_api_surface_reports_the_dialect_of_the_code_it_carries() {
         SfcScriptDialect::TypeScript,
         "a template-only SFC keeps the TypeScript default: {}",
         template_only.code
+    );
+}
+
+/// The parent-facing fallthrough surface is spelled entirely in TypeScript-only
+/// syntax, and the Options-API stub copies the AUTHORED body through — so a
+/// JavaScript `<script>` produces a JavaScript stub with nowhere to put it.
+///
+/// This is the same principle the sibling test above states for `<script
+/// setup>` ("labelling it JavaScript would put `declare`/type-annotation syntax
+/// into a `.js` file — a syntax error, not a relaxed check"), applied to the
+/// one generator that cannot escape it by synthesising its surface instead: a
+/// widened JavaScript Options-API stub reports TS8006/TS8008/TS8009/TS8010 on
+/// Verter's OWN generated lines, and those are syntax diagnostics reported
+/// whether or not `checkJs` is on.
+///
+/// Discriminates in BOTH directions: the TypeScript arm proves the widening is
+/// still emitted where it can be expressed, so a regression that simply stopped
+/// widening everything fails this test rather than passing it.
+#[test]
+fn a_javascript_options_api_stub_is_never_widened_but_a_typescript_one_is() {
+    use super::script::{FallthroughArm, InheritedComponentProps};
+
+    // A resolvable branch with BOTH channels populated — the element arm and
+    // the root-component arm — so every construct the widening can emit is in
+    // play, not just the cheapest one.
+    let projection = FallthroughPropsProjection {
+        arms: vec![FallthroughArm {
+            root_tag: Some("a".to_string()),
+            root_component_props: Some(InheritedComponentProps {
+                module_specifier: "./Child.vue".to_string(),
+                export_name: "default".to_string(),
+                prop_names: vec!["tone".to_string()],
+            }),
+        }],
+    };
+
+    let gen_options_api = |script_open: &str| {
+        generate_tsc_output_with_options(
+            &format!(
+                "{script_open}\nexport default {{ props: {{ label: {{ type: String }} }} }}\n\
+                 </script>\n<template><a>x</a></template>"
+            ),
+            "TestComp",
+            &TscGenOptions {
+                filename: Some("/test/TestComp.vue".to_string()),
+                ..Default::default()
+            },
+            MacroTscInput::NotRequired,
+            &projection,
+        )
+        .expect("options-api fixture has no typed codegen macro")
+    };
+
+    // NEGATIVE: the JavaScript stub carries no TypeScript-only construct.
+    let js = gen_options_api("<script>");
+    for forbidden in [
+        "type __Verter_RootElementAttrs",
+        "type __Verter_DataAttrs",
+        "type __OmitNew",
+        "declare module",
+        "declare const",
+    ] {
+        assert!(
+            !js.code.contains(forbidden),
+            "a JavaScript Options-API stub must not carry `{forbidden}` — it is a \
+             `.js` carrier and that is a syntax error, not a relaxed check: {}",
+            js.code
+        );
+    }
+    // …and it is still a usable stub: the authored body survives, so the
+    // assertion above cannot be satisfied by emitting nothing at all.
+    assert!(
+        js.code.contains("props:") && js.code.contains("label"),
+        "the JavaScript stub still carries its authored options body: {}",
+        js.code
+    );
+
+    // POSITIVE: the identical component with `lang="ts"` IS widened — the
+    // suppression is keyed on the dialect, not on the projection.
+    let ts = gen_options_api("<script lang=\"ts\">");
+    assert!(
+        ts.code.contains("type __Verter_RootElementAttrs")
+            && ts.code.contains("declare const")
+            && ts.code.contains("__Verter_RootElementAttrs<\"a\">"),
+        "a TypeScript Options-API stub still projects the widened element arm: {}",
+        ts.code
+    );
+    assert!(
+        ts.code.contains("./Child.vue"),
+        "a TypeScript Options-API stub still projects the root-component arm: {}",
+        ts.code
     );
 }
 

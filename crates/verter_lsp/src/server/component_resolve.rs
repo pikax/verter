@@ -1070,11 +1070,17 @@ impl VerterLanguageServer {
         let blocks = scan_sfc_blocks(&child_source);
         let line_index = LineIndex::new(&child_source, self.documents.encoding());
 
+        let inherited_attrs = super::server_utils::resolved_fallthrough_attr_names(
+            self.documents.host(),
+            &child_canonical_id,
+        );
+
         Some(crate::features::cross_file::ChildComponentContext {
             canonical_id: child_canonical_id,
             uri: child_uri,
             source: child_source,
             analysis,
+            inherited_attrs,
             blocks,
             line_index,
         })

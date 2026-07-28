@@ -2210,6 +2210,7 @@ impl VerterHost {
                     render_seed: Some(crate::framework::api_projector::PublicApiRenderSeed {
                         cold_seed: fixed.cold_seed(),
                         view,
+                        fixed,
                     }),
                 })
             })
@@ -2473,6 +2474,48 @@ impl VerterHost {
         // CLEARS the semantic axis when the set is empty (closes F15).
         self.sync_transitive_macro_type_dependencies(&canonical, &transitive_macro_type_deps);
         let macro_tsc = macro_output.tsc;
+        // The PARENT-FACING half of attribute fallthrough. `$attrs` already
+        // answers what this component may READ; this is what a parent may
+        // PASS, and it is the surface a consumer's `<Child title="…" />` is
+        // checked against. Resolved by the single inheritance resolver
+        // (`verter_session` owns it per the Fallthrough / Root Inheritance
+        // CRITICAL rule) and handed to the compiler as data — the compiler
+        // cannot see the resolver. Every uncertainty projects to "widen
+        // nothing"; see `fallthrough_props`.
+        //
+        // The resolve is PINNED to the batch's captured fixed view when that
+        // capture is still promotion-admissible, so this render takes ZERO
+        // additional store-view reads — the O(1)-batch contract this path
+        // documents. A capture that is no longer admissible falls back to the
+        // resolver's own snapshot rather than validating a warm entry against
+        // a stale view.
+        //
+        // The captured fingerprint travels WITH the view. The executor stamps
+        // that captured value (never a fresh live read) and compares it against
+        // the live fingerprint before promoting, so an import/root edit landing
+        // after the one-shot admissibility precheck makes the result
+        // return-only rather than warming a shared entry computed from an old
+        // route view under new fact hashes.
+        let pinned_view = render_seed
+            .as_ref()
+            .map(|seed| seed.fixed)
+            .filter(|fixed| fixed.payload_promotion_admissible(self))
+            .map(|fixed| {
+                let (view, captured_fingerprint) = fixed.executor_fixed_view();
+                (view, captured_fingerprint, fixed.is_current())
+            });
+        //
+        // Root reachability is a TEMPLATE fact and `AnalysisScope::BUILD` — the
+        // preset both shipping carrier producers run under — carries no
+        // template flag. The resolve opens its own request-scoped demand for
+        // exactly the files it walks; see
+        // `resolve_fallthrough_surface_internal_with_overrides`.
+        let fallthrough_resolution =
+            self.resolve_fallthrough_surface_pinned(&canonical, pinned_view);
+        let fallthrough_props = crate::host_resolve::fallthrough_props::project_fallthrough_props(
+            fallthrough_resolution.as_ref(),
+            &|child_canonical_id| self.owner_import_reference_for(&canonical, child_canonical_id),
+        );
         let tsc_mode = match mode {
             PublicApiMode::Public => verter_compiler::tsc::TscMode::Public,
             PublicApiMode::Testing => verter_compiler::tsc::TscMode::Testing,
@@ -2514,6 +2557,7 @@ impl VerterHost {
                     verter_compiler::tsc::MacroTscInput::NotRequired,
                     verter_compiler::tsc::MacroTscInput::Authoritative,
                 ),
+                &fallthrough_props,
             )?;
             return Ok(Some(TscResponse {
                 code: Arc::from(tsc_out.code),
@@ -2534,6 +2578,7 @@ impl VerterHost {
                 verter_compiler::tsc::MacroTscInput::NotRequired,
                 verter_compiler::tsc::MacroTscInput::Authoritative,
             ),
+            &fallthrough_props,
         )?;
         Ok(Some(TscResponse {
             code: Arc::from(tsc_out.code),

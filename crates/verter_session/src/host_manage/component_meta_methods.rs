@@ -755,7 +755,7 @@ impl VerterHost {
             let mut snapshot = (*facts.snapshot).clone();
             self.resolve_snapshot_imports(canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
-            if self.config.effective_scope().needs_template_analysis() {
+            if self.template_analysis_required() {
                 // Template inputs from the overlay artifact's OWN
                 // source + SFC parse — the same content the snapshot
                 // above was built from, so the template derives from
@@ -2364,7 +2364,7 @@ impl VerterHost {
                 let mut snapshot = snapshot;
                 self.resolve_snapshot_imports(canonical, &mut snapshot);
                 self.enrich_destructured_bindings(&mut snapshot);
-                if self.config.effective_scope().needs_template_analysis() {
+                if self.template_analysis_required() {
                     // Thread the inputs joined at the snapshot's own
                     // generation — never a second independent scheduler
                     // consult. A torn join (the source moved between
@@ -2398,7 +2398,7 @@ impl VerterHost {
         let mut snapshot = (*facts.snapshot).clone();
         self.resolve_snapshot_imports(canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
-        if self.config.effective_scope().needs_template_analysis() {
+        if self.template_analysis_required() {
             // Thread the artifact's own base-authoritative source +
             // SFC parse: the snapshot above came from this artifact,
             // so the template derives from the SAME content — and an

@@ -37,10 +37,7 @@ pub fn build_workspace_snapshot(
     generation: SnapshotGeneration,
     vite_opts: &crate::vite_config::ViteConfigOptions,
 ) -> SnapshotBuildResult {
-    use crate::config::{
-        discover_tsconfigs, is_project_config, load_compiler_options, load_project_membership,
-        load_project_references,
-    };
+    use crate::config::{discover_tsconfigs, is_project_config, load_project_references};
     use crate::vite_config::{analyze_vite_config, ViteConfigAnalysis, ViteConfigTrustInfo};
     use std::path::PathBuf;
 
@@ -77,39 +74,15 @@ pub fn build_workspace_snapshot(
                 continue;
             }
 
-            let tsconfig_path = CanonicalPath::new(&entry.path);
-            let project_root = CanonicalPath::new(&entry.root);
-            let raw_membership = load_project_membership(ws, &entry.path);
-            let compiler_options = load_compiler_options(ws, &entry.path);
-            let raw_references = load_project_references(ws, &entry.path);
-
-            let supported = supported_extensions_for(&compiler_options);
-            let spec = membership_to_spec(&project_root, &raw_membership, &supported);
-            let materialized_files = materialize_from_spec(&spec, &project_root, Some(ws));
-
-            let references = raw_references
-                .into_iter()
-                .map(|r| CanonicalPath::new(&r))
-                .collect();
-
             let id = ProjectId(next_id);
             next_id += 1;
-
-            projects.push(OwnershipProject {
+            projects.push(configured_project(
+                ws,
+                &entry.path,
+                &entry.root,
+                &canonical_root,
                 id,
-                root: project_root,
-                workspace_root: canonical_root.clone(),
-                payload: ProjectPayload::Configured {
-                    tsconfig_path,
-                    membership: ConfiguredMembership {
-                        spec,
-                        materialized_files,
-                    },
-                    compiler_options,
-                    references,
-                    workspace_aliases: Vec::new(),
-                },
-            });
+            ));
         }
 
         // ── Fallback project ──
@@ -172,6 +145,117 @@ pub fn build_workspace_snapshot(
             generation,
         },
         trust_required,
+    }
+}
+
+/// Build the [`OwnershipProject`] for ONE configured tsconfig.
+///
+/// The single per-config body: membership, compiler options (`baseUrl` /
+/// `paths` included), references, and exact file materialization.
+/// [`build_workspace_snapshot`] calls it once per discovered config and
+/// [`build_selected_project_snapshot`] calls it once for the config a caller
+/// named, so the two cannot drift into different project shapes.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn configured_project(
+    ws: &dyn crate::traits::WorkspaceAccess,
+    tsconfig_path: &str,
+    project_root: &str,
+    workspace_root: &CanonicalPath,
+    id: ProjectId,
+) -> OwnershipProject {
+    use crate::config::{load_compiler_options, load_project_membership, load_project_references};
+
+    let project_root = CanonicalPath::new(project_root);
+    let raw_membership = load_project_membership(ws, tsconfig_path);
+    let compiler_options = load_compiler_options(ws, tsconfig_path);
+    let raw_references = load_project_references(ws, tsconfig_path);
+
+    let supported = supported_extensions_for(&compiler_options);
+    let spec = membership_to_spec(&project_root, &raw_membership, &supported);
+    let materialized_files = materialize_from_spec(&spec, &project_root, Some(ws));
+
+    OwnershipProject {
+        id,
+        root: project_root,
+        workspace_root: workspace_root.clone(),
+        payload: ProjectPayload::Configured {
+            tsconfig_path: CanonicalPath::new(tsconfig_path),
+            membership: ConfiguredMembership {
+                spec,
+                materialized_files,
+            },
+            compiler_options,
+            references: raw_references
+                .into_iter()
+                .map(|r| CanonicalPath::new(&r))
+                .collect(),
+            workspace_aliases: Vec::new(),
+        },
+    }
+}
+
+/// Build a [`WorkspaceSnapshot`] for the ONE tsconfig a caller SELECTED, plus
+/// the workspace-root fallback.
+///
+/// [`build_workspace_snapshot`] answers "what projects exist under these
+/// roots?", which is the right question for an editor serving a whole
+/// workspace and the WRONG one for a tool invoked as `--project X`: discovery
+/// finds every sibling config, and precedence — longest root, then configured,
+/// then alphabetical `tsconfig_path` — decides the owner without reference to
+/// what the caller asked for. In the default Vue + Vite scaffold
+/// (`tsconfig.json` alongside `tsconfig.app.json`, different `paths`) that
+/// resolves aliases from a config the user did not select.
+///
+/// This entry takes the selection as the input it is. No discovery walk, so no
+/// sibling config can win, and — because the vite-config branch in
+/// [`build_workspace_snapshot`] is reached only when discovery found NO
+/// tsconfig — no `vite.config.*` is read or analysed on this path at all.
+/// There is no `ViteConfigOptions` to get wrong.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn build_selected_project_snapshot(
+    ws: &dyn crate::traits::WorkspaceAccess,
+    tsconfig_path: &str,
+    workspace_root: &str,
+    generation: SnapshotGeneration,
+) -> WorkspaceSnapshot {
+    let canonical_root = CanonicalPath::new(workspace_root);
+    let project_root = tsconfig_path
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_else(|| canonical_root.as_str().to_string());
+
+    let mut projects = vec![
+        configured_project(
+            ws,
+            tsconfig_path,
+            &project_root,
+            &canonical_root,
+            ProjectId(0),
+        ),
+        OwnershipProject {
+            id: ProjectId(1),
+            root: canonical_root.clone(),
+            workspace_root: canonical_root.clone(),
+            payload: ProjectPayload::Fallback {
+                membership: FallbackMembership {
+                    root: canonical_root.clone(),
+                    exclude: typescript_default_excludes(&canonical_root),
+                },
+            },
+        },
+    ];
+
+    projects.sort_by(compare_project_precedence);
+    for (i, project) in projects.iter_mut().enumerate() {
+        project.id = ProjectId(i as u32);
+    }
+    let resolver = build_resolver_from_projects(&projects);
+
+    WorkspaceSnapshot {
+        owners_memo: Default::default(),
+        projects,
+        resolver,
+        generation,
     }
 }
 

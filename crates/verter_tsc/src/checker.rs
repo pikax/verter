@@ -215,6 +215,10 @@ fn generate_public_api_stubs(
         // (the stub will live in temp_dir, not the vue file's directory).
         let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
         let code = rewrite_relative_imports(&tsc_response.code, vue_dir);
+        // …and canonicalize the NON-relative carrier specifiers the first pass
+        // cannot reach, so an aliased root-component reference resolves to its
+        // generated stub instead of the empty `*.vue` wildcard shim.
+        let code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
 
         let raw_name = vue_path
             .file_stem()
@@ -342,9 +346,20 @@ fn generate_all_tsx(
                 ))
             })?;
 
-            // Rewrite relative imports (both `import('...')` and `from '...'` patterns)
+            // Rewrite relative imports to absolute paths (the carriers live in a
+            // virtual directory, not beside the source)…
             let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
             let mut code = rewrite_relative_imports(&tsx_block.code, vue_dir);
+            // …and canonicalize the NON-relative carrier specifiers the first
+            // pass cannot reach. This is not stub-only work: the IDE codegen
+            // deliberately preserves an aliased child import (`@/Child.vue`)
+            // bare, and the lowering that follows needs an exact canonical-map
+            // key or it leaves the carrier on the `*.vue` wildcard shim — an
+            // EMPTY `DefineComponent<{}, {}, any>`. Without this the widening
+            // is simply absent for every alias-importing consumer, which is the
+            // headline case of issue #97 for a project using `paths`.
+            let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+            code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
 
             // Append inline source map so `map_tsc_position()` can remap errors.
             if !tsx_block.source_map.is_empty() {
@@ -476,6 +491,55 @@ fn generate_all_tsc(
     })
 }
 
+/// Give the shared host the project's REAL workspace, so module resolution is
+/// the one shared owner rather than bare path arithmetic.
+///
+/// Without this the host is workspace-less and
+/// [`VerterHost::resolve_import`] answers `None` for every NON-RELATIVE
+/// specifier — including a `paths` alias. The consequences reach well past
+/// module bookkeeping: the inheritance resolver cannot follow
+/// `import Child from "@/Child.vue"` to its target, so an alias-importing
+/// component's root chain is unresolved, its attribute-fallthrough surface is
+/// empty, and the generated carrier silently rejects every attribute Vue
+/// forwards (issue #97). The same blindness costs alias-imported types,
+/// cross-component prop checking, and every other cross-file answer.
+///
+/// The snapshot is built for the tsconfig the user SELECTED, through the
+/// shared `verter_workspace::build_selected_project_snapshot` — the same
+/// per-config body (`configured_project`) the LSP's discovery path runs, given
+/// one config instead of a walk.
+///
+/// Discovery would be wrong here. `build_workspace_snapshot` answers "what
+/// projects exist under this root?" and then lets precedence — longest root,
+/// configured over fallback, then alphabetical `tsconfig_path` — pick the
+/// owner. `verter-tsc -p tsconfig.app.json` in the default Vue + Vite scaffold
+/// has a sibling `tsconfig.json`, and precedence, not the `-p` argument,
+/// would decide which one's `paths` resolved an alias.
+///
+/// Vite config discovery is not merely disabled on this path, it is absent:
+/// the vite branch lives inside the discovery loop and fires only when NO
+/// tsconfig was found, and this entry performs no discovery and takes no
+/// `ViteConfigOptions`.
+fn install_project_workspace(host: &VerterHost, root_dir: &Path, tsconfig_path: &Path) {
+    let workspace = std::sync::Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let root = root_dir.to_string_lossy().replace('\\', "/");
+    let selected = tsconfig_path.to_string_lossy().replace('\\', "/");
+    let snapshot = verter_workspace::build_selected_project_snapshot(
+        workspace.as_ref(),
+        &selected,
+        &root,
+        verter_workspace::workspace_snapshot::SnapshotGeneration(1),
+    );
+    workspace.publish_snapshot(
+        verter_workspace::published_state::PublishedRoot::new_vfs_only(std::sync::Arc::new(
+            snapshot,
+        )),
+    );
+    host.set_workspace(workspace as std::sync::Arc<dyn verter_workspace::WorkspaceAccess>);
+}
+
 /// Single source of truth for the [`HostConfig`] the production `verter-tsc`
 /// checker constructs its shared [`VerterHost`] from.
 ///
@@ -588,6 +652,7 @@ pub fn run(
     // ONE shared VerterHost (Batch preset): upsert every `.vue` once. Both stages
     // build from it — the typecheck overlay carriers and the declaration `.tsc.tsx`.
     let host = VerterHost::new_standalone(build_host_config());
+    install_project_workspace(&host, &config.root_dir, tsconfig_path);
     let mut admission = CarrierAdmission::default();
     for vue_path in &config.vue_files {
         let source = fs::read_to_string(vue_path).map_err(|error| {
@@ -941,7 +1006,23 @@ fn run_inmemory_typecheck(
     // Generate the validation carriers IN-MEMORY, rooted at deterministic
     // in-project virtual paths (so node_modules resolution walks from the root).
     let stubs = generate_public_api_stubs(host, admitted, &root);
-    let (stub_files, vue_ts_map) = stubs.value;
+    let (mut stub_files, vue_ts_map) = stubs.value;
+    // The stubs reference each OTHER: a component whose root is another
+    // component names that child's carrier to carry its declared props onto the
+    // parent-facing surface. Those specifiers are Verter's own generated
+    // carrier references, and the stub lives in `base_dir` under a hashed name
+    // rather than beside the source, so the same lowering the validation TSX
+    // gets must run here too — otherwise the reference resolves to nothing and
+    // the inherited surface silently degrades to `{}`.
+    //
+    // Runs after the whole batch is generated, so `vue_ts_map` is complete: a
+    // stub may name a child that appears later in `admitted`.
+    for (_, code) in &mut stub_files {
+        let rewritten = lower_tsc_validation_carrier_specifiers(code, &vue_ts_map);
+        if rewritten != *code {
+            *code = rewritten;
+        }
+    }
     let mut tsx_files = generate_all_tsx(host, admitted, &root)?;
     // Lower the generated TSX's OWN carrier specifiers to the public-API stubs (or
     // strip back to the bare carrier for the `*.vue` wildcard shim).
@@ -1667,121 +1748,132 @@ fn collect_dts_files(dir: &Path) -> Vec<PathBuf> {
 /// - `import('./types')` — dynamic import syntax
 /// - `from './types'` — ES module import/export syntax
 fn rewrite_relative_imports(code: &str, vue_dir: &Path) -> String {
-    let mut result = String::with_capacity(code.len());
-    let mut rest = code;
+    rewrite_import_specifiers(code, |specifier| {
+        absolutize_relative_specifier(specifier, vue_dir)
+    })
+}
 
-    loop {
-        // Find the earliest occurrence of either pattern.
-        let import_paren = rest.find("import(");
-        let from_kw = rest.find("from ");
-
-        let (pos, kind) = match (import_paren, from_kw) {
-            (Some(a), Some(b)) if a <= b => (a, ImportKind::DynamicImport),
-            (Some(_), Some(b)) => (b, ImportKind::FromKeyword),
-            (Some(a), None) => (a, ImportKind::DynamicImport),
-            (None, Some(b)) => (b, ImportKind::FromKeyword),
-            (None, None) => break,
-        };
-
-        result.push_str(&rest[..pos]);
-
-        match kind {
-            ImportKind::DynamicImport => {
-                let after = &rest[pos + 7..]; // skip "import("
-                match rewrite_quoted_path(after, vue_dir) {
-                    Some((rewritten, consumed)) => {
-                        result.push_str("import(");
-                        result.push_str(&rewritten);
-                        rest = &after[consumed..];
-                    }
-                    None => {
-                        result.push_str("import(");
-                        rest = after;
-                    }
-                }
-            }
-            ImportKind::FromKeyword => {
-                let after = &rest[pos + 5..]; // skip "from "
-                match rewrite_quoted_path(after, vue_dir) {
-                    Some((rewritten, consumed)) => {
-                        result.push_str("from ");
-                        result.push_str(&rewritten);
-                        rest = &after[consumed..];
-                    }
-                    None => {
-                        result.push_str("from ");
-                        rest = after;
-                    }
-                }
-            }
+/// Canonicalize NON-relative CARRIER specifiers through the host's own module
+/// resolver, so the stub map lookup that follows can exact-hit them.
+///
+/// `rewrite_relative_imports` absolutizes only the relative class, so an owner
+/// that reaches its root child through a tsconfig alias emits
+/// `import("@/B.vue")`, which misses the canonical `vue_ts_map` and resolves
+/// through the ambient `*.vue` wildcard shim instead: an EMPTY
+/// `DefineComponent<{}, {}, any>` whose `$props` carries none of B's members, so
+/// the inherited surface silently degrades to `{}`. Asking
+/// [`VerterHost::resolve_import`] — the same resolver that produced the
+/// canonical id in the first place — turns the alias into the canonical carrier
+/// path the map is keyed by. A specifier the host cannot resolve is left exactly
+/// as it is.
+fn canonicalize_nonrelative_carrier_specifiers(
+    code: &str,
+    owner_canonical_id: &str,
+    host: &VerterHost,
+) -> String {
+    rewrite_import_specifiers(code, |specifier| {
+        if verter_workspace::resolver::is_relative_specifier(specifier) {
+            return None;
         }
-    }
+        // Only CARRIER specifiers: everything else (`vue`, a package type
+        // import) must keep the spelling node resolution expects.
+        let carrier = CARRIER_VIRTUAL_IMPORT_SUFFIXES
+            .iter()
+            .find_map(|suffix| specifier.strip_suffix(suffix))
+            .filter(|carrier| verter_workspace::path_is_carrier(carrier))
+            .or_else(|| verter_workspace::path_is_carrier(specifier).then_some(specifier))?;
+        let resolved = host.resolve_import(owner_canonical_id, carrier)?;
+        let suffix = &specifier[carrier.len()..];
+        Some(format!("{resolved}{suffix}"))
+    })
+}
 
-    result.push_str(rest);
+/// Rewrite every MODULE SPECIFIER in `code` that `rewrite` answers `Some` for.
+///
+/// The specifier inventory is STRUCTURAL: it comes from
+/// [`verter_compiler::tsc::collect_module_specifier_spans`], which walks the
+/// parsed program and reports the source range of each real specifier node.
+/// That is not an optimisation over a substring scan for `import(` / `from ` —
+/// it is a correctness requirement. The Options-API stub passes the user's
+/// authored script body through VERBATIM, so a scan rewrites the interior of
+///
+/// ```ts
+/// const marker = 'import("@/Child.vue")' as const
+/// ```
+///
+/// silently changing the user's literal type and the diagnostics they see. A
+/// span-driven splice cannot reach anything that is not a specifier.
+///
+/// FAIL-CLOSED: a source the parser cannot handle yields NO inventory, and the
+/// code comes back unchanged rather than rewritten on a guess. That is the safe
+/// direction — an un-rewritten specifier surfaces as a module-resolution
+/// diagnostic the user can see, where a wrongly-rewritten one silently
+/// retargets their import.
+fn rewrite_import_specifiers(code: &str, rewrite: impl Fn(&str) -> Option<String>) -> String {
+    let Some(spans) = verter_compiler::tsc::collect_module_specifier_spans(code) else {
+        return code.to_string();
+    };
+    let mut result = String::with_capacity(code.len());
+    let mut cursor = 0usize;
+    for span in spans {
+        let Some(replacement) = rewrite(&span.text) else {
+            continue;
+        };
+        result.push_str(&code[cursor..span.start]);
+        // Re-emit the WHOLE literal rather than splicing into it: the recorded
+        // text is the specifier's decoded value, so an escaped one (a Windows
+        // `'..\\x'`) round-trips instead of being corrupted or skipped.
+        result.push_str(&verter_compiler::tsc::quote_module_specifier(
+            &replacement,
+            span.quote,
+        ));
+        cursor = span.end;
+    }
+    result.push_str(&code[cursor..]);
     result
 }
 
-enum ImportKind {
-    DynamicImport,
-    FromKeyword,
-}
-
-/// Try to extract a quoted path, resolve it if relative, and return the rewritten
-/// quoted string plus the number of bytes consumed from `after` (including closing quote).
-fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
-    let quote = match after.chars().next() {
-        Some(q @ '\'') | Some(q @ '"') => q,
-        _ => return None,
-    };
-    let path_start = 1; // skip opening quote
-    let path_end = after[path_start..].find(quote)? + path_start;
-    let import_path = &after[path_start..path_end];
-
+/// The absolute form of a RELATIVE specifier, or `None` for every other class.
+fn absolutize_relative_specifier(import_path: &str, vue_dir: &Path) -> Option<String> {
     // Relative classification is the full TS `pathIsRelative` class (bare
     // `.`/`..` plus the `./`/`../`/`.\`/`..\` prefixes) — the SAME shared
     // predicate the workspace resolver uses. A narrower `./`/`../` prefix
     // check leaves the bare and backslash spellings un-absolutized in the
     // generated temp TSX, and TypeScript then resolves them against the
     // TEMP directory: spurious missing-module diagnostics on this lane.
-    let result = if verter_workspace::resolver::is_relative_specifier(import_path) {
-        // Check if the path after "./" is already an absolute path (e.g., "./D:/...")
-        // This happens when the IDE codegen embeds a full filename in import('./filename.vue.verter.ts').
-        let after_dot = import_path.strip_prefix("./").unwrap_or(import_path);
-        if after_dot.contains(':') || after_dot.starts_with('/') {
-            // Already absolute — just strip the "./" prefix
-            format!("{quote}{after_dot}{quote}")
-        } else if import_path == "." {
-            // Bare `.` — the importer directory's own index module.
-            // Joining "." would leave a trailing `/.` segment
-            // (Path::join does not normalize "." segments on all
-            // platforms), so emit the directory itself.
-            let abs_path = vue_dir.to_string_lossy().replace('\\', "/");
-            format!("{quote}{abs_path}{quote}")
-        } else {
-            // `\` is a module-specifier separator in the same
-            // `pathIsRelative` class (TS `normalizeSlashes`) — normalize
-            // before joining so `..\x` joins identically to `../x`.
-            // Then strip a leading "./" before joining to avoid
-            // "dir/./rest" in the result (Path::join does not normalize
-            // "." segments on all platforms). Bare `..` joins as-is —
-            // TypeScript normalizes the `..` segment during resolution,
-            // exactly as it does for the `../x` forms.
-            let normalized: std::borrow::Cow<'_, str> = if import_path.contains('\\') {
-                std::borrow::Cow::Owned(import_path.replace('\\', "/"))
-            } else {
-                std::borrow::Cow::Borrowed(import_path)
-            };
-            let clean_rel = normalized.strip_prefix("./").unwrap_or(&normalized);
-            let resolved = vue_dir.join(clean_rel);
-            let abs_path = resolved.to_string_lossy().replace('\\', "/");
-            format!("{quote}{abs_path}{quote}")
-        }
+    if !verter_workspace::resolver::is_relative_specifier(import_path) {
+        return None;
+    }
+    // Check if the path after "./" is already an absolute path (e.g., "./D:/...")
+    // This happens when the IDE codegen embeds a full filename in import('./filename.vue.verter.ts').
+    let after_dot = import_path.strip_prefix("./").unwrap_or(import_path);
+    if after_dot.contains(':') || after_dot.starts_with('/') {
+        // Already absolute — just strip the "./" prefix
+        return Some(after_dot.to_string());
+    }
+    if import_path == "." {
+        // Bare `.` — the importer directory's own index module.
+        // Joining "." would leave a trailing `/.` segment
+        // (Path::join does not normalize "." segments on all
+        // platforms), so emit the directory itself.
+        return Some(vue_dir.to_string_lossy().replace('\\', "/"));
+    }
+    // `\` is a module-specifier separator in the same
+    // `pathIsRelative` class (TS `normalizeSlashes`) — normalize
+    // before joining so `..\x` joins identically to `../x`.
+    // Then strip a leading "./" before joining to avoid
+    // "dir/./rest" in the result (Path::join does not normalize
+    // "." segments on all platforms). Bare `..` joins as-is —
+    // TypeScript normalizes the `..` segment during resolution,
+    // exactly as it does for the `../x` forms.
+    let normalized: std::borrow::Cow<'_, str> = if import_path.contains('\\') {
+        std::borrow::Cow::Owned(import_path.replace('\\', "/"))
     } else {
-        format!("{quote}{import_path}{quote}")
+        std::borrow::Cow::Borrowed(import_path)
     };
-
-    // consumed = opening quote + path + closing quote
-    Some((result, path_end + 1))
+    let clean_rel = normalized.strip_prefix("./").unwrap_or(&normalized);
+    let resolved = vue_dir.join(clean_rel);
+    Some(resolved.to_string_lossy().replace('\\', "/"))
 }
 
 /// The virtual-file suffixes the IDE codegen appends onto a carrier path, in
@@ -3955,13 +4047,19 @@ defineProps<{ value: Unsafe }>()
     fn rewrite_relative_imports_absolutizes_backslash_relative() {
         // `..\x` / `.\x` are the same TS `pathIsRelative` class ([\\/]);
         // the rewritten output is separator-normalized.
-        let code = r#"import type { Foo } from '..\x'"#;
+        //
+        // The backslash is ESCAPED in the source, because that is the only way
+        // a TypeScript string literal can denote it: a bare `'..\x'` is an
+        // invalid escape sequence, not a Windows path. The rewriter reads the
+        // literal's decoded VALUE and re-emits a whole literal, so the escape
+        // round-trips instead of being spliced through.
+        let code = r#"import type { Foo } from '..\\x'"#;
         let result = rewrite_relative_imports(code, Path::new("/project/src"));
         assert!(
             result.contains("'/project/src/../x'"),
             "'..\\x' must absolutize with normalized separators: {result}"
         );
-        let code = r#"import type { Foo } from '.\x'"#;
+        let code = r#"import type { Foo } from '.\\x'"#;
         let result = rewrite_relative_imports(code, Path::new("/project/src"));
         assert!(
             result.contains("'/project/src/x'"),
@@ -6666,5 +6764,232 @@ const props = defineProps<{ msg: string }>()
             ts_code: 2322,
             message: "Type error".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod authored_literal_survival_tests {
+    use super::*;
+
+    /// A rewriter that locates specifiers by scanning for `import(` / `from `
+    /// cannot tell a specifier from text that merely looks like one — and the
+    /// Options-API stub passes the user's authored script body through
+    /// VERBATIM, so authored text reaches it.
+    ///
+    /// Both halves are load-bearing: the real import MUST be canonicalized (or
+    /// the alias case regresses) and the authored literal MUST survive byte
+    /// for byte (or the user's own `as const` type silently changes).
+    ///
+    /// Mutation recipe: replace the structural inventory in
+    /// `rewrite_import_specifiers` with a `find("import(")` / `find("from ")`
+    /// scan — the literal assertion turns RED while the specifier assertion
+    /// stays green, so only this test discriminates the defect.
+    #[test]
+    fn an_authored_specifier_lookalike_survives_canonicalization() {
+        let code = "import Child from '@/Child.vue'\n\
+             const marker = 'import(\"@/Child.vue\")' as const\n\
+             const alsoMarker = \"from '@/Child.vue'\"\n\
+             export default { components: { Child }, marker, alsoMarker }\n";
+
+        let rewritten = rewrite_import_specifiers(code, |specifier| {
+            assert_eq!(
+                specifier, "@/Child.vue",
+                "only the real import declaration's source may be offered for \
+                 rewriting; an authored literal is not a specifier"
+            );
+            Some("/abs/src/Child.vue".to_string())
+        });
+
+        assert!(
+            rewritten.contains("import Child from '/abs/src/Child.vue'"),
+            "the REAL specifier must be rewritten: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("const marker = 'import(\"@/Child.vue\")' as const"),
+            "the authored literal must survive byte-identical — rewriting it \
+             silently changes the user's `as const` type and the diagnostics \
+             they see: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("const alsoMarker = \"from '@/Child.vue'\""),
+            "and so must one containing the `from` spelling: {rewritten}"
+        );
+    }
+
+    /// The same property through the REAL producer: `generate_options_api_stub`
+    /// preserves the authored body, and the canonicalization pass runs over
+    /// whatever it produced.
+    #[test]
+    fn the_options_api_stub_keeps_its_authored_literal_through_the_rewriter() {
+        // The lookalike is RELATIVE, so it is the `rewrite_relative_imports`
+        // pass — the one every carrier goes through, alias project or not —
+        // that a substring scanner would corrupt here.
+        let sfc = "<script lang=\"ts\">\n\
+             import { defineComponent } from 'vue'\n\
+             const marker = 'import(\"./Child.vue\")' as const\n\
+             const alsoMarker = \"from './Child.vue'\"\n\
+             export default defineComponent({\n\
+               props: { label: { type: String } },\n\
+               marker,\n\
+               alsoMarker,\n\
+             })\n\
+             </script>\n\
+             <template><div>options</div></template>\n";
+        let stub = verter_compiler::tsc::generate_tsc_output(sfc, "Opt")
+            .expect("options-api stub")
+            .code;
+        assert!(
+            stub.contains("const marker = 'import(\"./Child.vue\")' as const"),
+            "precondition: the stub preserves the authored body verbatim, which \
+             is exactly why a text scan over it reaches user code: {stub}"
+        );
+
+        let rewritten = rewrite_relative_imports(&stub, Path::new("/project/src"));
+        assert!(
+            rewritten.contains("const marker = 'import(\"./Child.vue\")' as const"),
+            "the authored literal must survive the relative-import pass — a scan \
+             absolutizes its interior and silently changes the user's `as const` \
+             type: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("const alsoMarker = \"from './Child.vue'\""),
+            "and so must one containing the `from` spelling: {rewritten}"
+        );
+        // POSITIVE control: the pass is not a no-op on this input — the stub's
+        // REAL `vue` import is still visited (and correctly left alone, being
+        // non-relative), and a genuine relative import IS absolutized.
+        let with_real_import = format!("import Sibling from './Sibling.vue'\n{stub}");
+        let rewritten_real = rewrite_relative_imports(&with_real_import, Path::new("/project/src"));
+        assert!(
+            rewritten_real.contains("import Sibling from '/project/src/Sibling.vue'"),
+            "control: a REAL relative specifier in the same source must still be \
+             absolutized, or the assertions above pass because nothing ran: \
+             {rewritten_real}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod selected_project_workspace_tests {
+    use super::*;
+
+    /// Lay out the default Vue + Vite scaffold shape: a root `tsconfig.json`
+    /// and a sibling `tsconfig.app.json`, each mapping the SAME alias to a
+    /// DIFFERENT directory, plus a `vite.config.ts` mapping it to a third.
+    fn scaffold() -> tempfile::TempDir {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        for dir in ["src/fromroot", "src/fromapp", "src/fromvite"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(
+                root.join(dir).join("Child.vue"),
+                "<script setup lang=\"ts\">\ndefineProps<{ label?: string }>()\n</script>\n<template><div>{{ label }}</div></template>\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("tsconfig.json"),
+            "{\"compilerOptions\":{\"baseUrl\":\".\",\"paths\":{\"@/*\":[\"src/fromroot/*\"]}},\"include\":[\"src\"]}",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tsconfig.app.json"),
+            "{\"compilerOptions\":{\"baseUrl\":\".\",\"paths\":{\"@/*\":[\"src/fromapp/*\"]}},\"include\":[\"src\"]}",
+        )
+        .unwrap();
+        // Present and deliberately never consulted on this path.
+        std::fs::write(
+            root.join("vite.config.ts"),
+            "import { defineConfig } from 'vite'\n\
+             export default defineConfig({\n  \
+               resolve: { alias: { '@': new URL('./src/fromvite', import.meta.url).pathname } },\n\
+             })\n",
+        )
+        .unwrap();
+        temp
+    }
+
+    fn resolve_alias_under(root: &Path, selected: &Path) -> Option<String> {
+        let host = VerterHost::new_standalone(build_host_config());
+        install_project_workspace(&host, root, selected);
+        let importer = root.join("src").join("App.vue");
+        let importer_id = importer.to_string_lossy().replace('\\', "/");
+        let source = "<script setup lang=\"ts\">\nimport Child from '@/Child.vue'\n</script>\n<template><Child /></template>\n";
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(importer_id.clone()),
+            input_id: importer_id.clone(),
+            source: std::sync::Arc::<str>::from(source),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        });
+        host.resolve_import(&importer_id, "@/Child.vue")
+    }
+
+    /// `verter-tsc -p tsconfig.app.json` must resolve `@/*` through
+    /// `tsconfig.app.json`.
+    ///
+    /// Discovery cannot answer this: it finds every config under the root and
+    /// then lets precedence — longest root, configured over fallback, then
+    /// alphabetical `tsconfig_path` — pick the owner, with no reference to
+    /// what `-p` named. This is the default Vue 3 + Vite scaffold, so the
+    /// wrong answer is the common case rather than a corner.
+    ///
+    /// Mutation recipe: point `install_project_workspace` back at
+    /// `build_workspace_snapshot(root)` — BOTH legs below resolve into
+    /// `src/fromroot`, so the selected config is ignored in one direction and
+    /// coincidentally right in the other, which is exactly why the test
+    /// asserts both.
+    #[test]
+    fn the_selected_tsconfig_decides_alias_resolution() {
+        let temp = scaffold();
+        let root = temp.path();
+
+        let via_app = resolve_alias_under(root, &root.join("tsconfig.app.json"))
+            .expect("the selected app config resolves the alias");
+        assert!(
+            via_app
+                .replace('\\', "/")
+                .contains("/src/fromapp/Child.vue"),
+            "`-p tsconfig.app.json` must resolve `@/*` through THAT config's \
+             paths, not a sibling's: {via_app}"
+        );
+
+        // The other direction, so the assertion above cannot pass by accident:
+        // selecting the root config resolves into the root config's directory.
+        let via_root = resolve_alias_under(root, &root.join("tsconfig.json"))
+            .expect("the selected root config resolves the alias");
+        assert!(
+            via_root
+                .replace('\\', "/")
+                .contains("/src/fromroot/Child.vue"),
+            "and `-p tsconfig.json` must resolve through ITS paths: {via_root}"
+        );
+        assert_ne!(
+            via_app, via_root,
+            "the two configs map the same alias to different directories, so a \
+             selection-independent answer is the defect"
+        );
+    }
+
+    /// A `vite.config.*` in the project contributes NO alias on this path.
+    ///
+    /// Not a policy switch that could be set wrong: the vite branch lives
+    /// inside `build_workspace_snapshot`'s discovery loop and fires only when
+    /// discovery found no tsconfig at all. `build_selected_project_snapshot`
+    /// performs no discovery and takes no `ViteConfigOptions`, so there is no
+    /// enabled flag to get backwards — which is what the previous revision's
+    /// "vite discovery is left OFF" comment did while passing
+    /// `ViteConfigOptions::default()` (`enabled: true`).
+    #[test]
+    fn a_vite_config_alias_is_never_consulted_for_the_selected_project() {
+        let temp = scaffold();
+        let root = temp.path();
+        let resolved =
+            resolve_alias_under(root, &root.join("tsconfig.app.json")).expect("the alias resolves");
+        assert!(
+            !resolved.replace('\\', "/").contains("/src/fromvite/"),
+            "the vite config maps `@` to a third directory; the selected \
+             project's own `paths` is the only alias authority here: {resolved}"
+        );
     }
 }

@@ -66,6 +66,7 @@ fn make_child_context(source: &str, analysis: FileAnalysisSnapshot) -> ChildComp
         uri: "file:///project/src/Child.vue".parse().unwrap(),
         source: source.to_string(),
         analysis,
+        inherited_attrs: std::collections::HashSet::new(),
         blocks,
         line_index,
     }

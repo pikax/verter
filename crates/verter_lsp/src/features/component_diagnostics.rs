@@ -7,13 +7,47 @@ use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::*;
 use verter_semantic::analysis::template::{TemplateComponentUsage, TemplatePropUsage};
-use verter_semantic::analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
+use verter_semantic::analysis::types::{AnalyzedMacroKind, VueApiClassification};
 use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 
-/// Attributes that are always valid on any component (Vue fallthrough attrs).
+/// `class` and `style` reach EVERY component through
+/// `AllowedComponentProps` — they are merged onto the root rather than
+/// consumed by fallthrough, so they stay valid on a fragment child and under
+/// `inheritAttrs: false` alike. They are deliberately NOT part of the
+/// inherited surface below: routing them through fallthrough would make their
+/// acceptance depend on inheritance, which is not what Vue does.
 const BUILTIN_ATTRS: &[&str] = &["class", "style"];
+
+/// A child component as this lint needs it: its analysis snapshot plus the
+/// attribute-fallthrough surface resolved for it.
+///
+/// The fallthrough half is produced ONLY by `verter_session`'s single
+/// inheritance resolver (the Fallthrough / Root Inheritance CRITICAL rule).
+/// This module owns no inheritance semantics of its own — the string allowlist
+/// it used to decide with (`class`/`style`/`data-*`/`aria-*` by prefix, plus a
+/// root-element count) was a second implementation of that rule, and it was
+/// the one producing the false positives in
+/// <https://github.com/pikax/verter/issues/97>.
+pub struct ResolvedChildComponent {
+    pub analysis: FileAnalysisSnapshot,
+    /// Attribute names a parent may pass that the child does not declare,
+    /// as resolved. EMPTY means nothing is inherited — `inheritAttrs: false`,
+    /// a fragment, an unresolved root, or no resolver answer at all. Empty is
+    /// the fail-closed value: an unresolved surface must never widen.
+    pub inherited_attrs: HashSet<String>,
+}
+
+impl ResolvedChildComponent {
+    /// Whether ANY attribute falls through to this child's root. Distinguishes
+    /// "inherits nothing" (fragment / `inheritAttrs: false` / unresolved) from
+    /// "inherits a surface", which is what decides the hyphenated-attribute
+    /// case below.
+    fn inherits_anything(&self) -> bool {
+        !self.inherited_attrs.is_empty()
+    }
+}
 
 /// Information about an unknown prop found on a component usage.
 pub struct UnknownPropInfo {
@@ -46,26 +80,22 @@ fn kebab_to_camel(name: &str) -> String {
 
 /// Check if a child component suppresses unknown prop diagnostics.
 ///
-/// Returns true if:
-/// - The child calls `useAttrs()` (accessing fallthrough attrs)
-/// - The child has `defineOptions({ inheritAttrs: false })`
+/// The ONE suppressor is `useAttrs()`: a child that reads `$attrs`
+/// programmatically may give meaning to any attribute the parent passes, so
+/// this lint cannot prove one wrong. That is a fail-OPEN choice about a
+/// component's own code, not a statement about inheritance.
+///
+/// `defineOptions({ inheritAttrs: false })` is deliberately NOT a suppressor.
+/// It used to be, which was the exact INVERSE of the Fallthrough / Root
+/// Inheritance rule: `inheritAttrs: false` means NO inherited surface, so an
+/// undeclared attribute reaches nothing and is MORE wrong there, not less.
+/// The resolved surface below is empty for such a child, which produces the
+/// correct answer without a special case here.
 fn child_suppresses_prop_checks(child: &FileAnalysisSnapshot) -> bool {
-    // Check useAttrs()
-    let has_use_attrs = child
+    child
         .vue_api_calls
         .iter()
-        .any(|c| c.api == VueApiClassification::UseAttrs);
-    if has_use_attrs {
-        return true;
-    }
-
-    // Check inheritAttrs: false
-    let flags = AnalysisFlags::from_bits_truncate(child.script_flags);
-    if flags.contains(AnalysisFlags::HAS_INHERIT_ATTRS_FALSE) {
-        return true;
-    }
-
-    false
+        .any(|c| c.api == VueApiClassification::UseAttrs)
 }
 
 /// Get the set of defined prop names from a child's analysis (camelCase).
@@ -93,7 +123,7 @@ fn child_prop_names(child: &FileAnalysisSnapshot) -> HashSet<String> {
 /// Find unknown props across all component usages.
 pub fn find_unknown_props(
     analysis: &FileAnalysisSnapshot,
-    resolve_child: &dyn Fn(&str) -> Option<FileAnalysisSnapshot>,
+    resolve_child: &dyn Fn(&str) -> Option<ResolvedChildComponent>,
 ) -> Vec<UnknownPropInfo> {
     let template = match &analysis.template {
         Some(t) => t,
@@ -114,7 +144,7 @@ pub fn find_unknown_props(
 /// Check a single component usage for unknown props.
 fn check_component_props(
     comp: &TemplateComponentUsage,
-    resolve_child: &dyn Fn(&str) -> Option<FileAnalysisSnapshot>,
+    resolve_child: &dyn Fn(&str) -> Option<ResolvedChildComponent>,
 ) -> Option<Vec<UnknownPropInfo>> {
     // Skip dynamic components (<component :is="...">)
     if comp.is_dynamic {
@@ -133,11 +163,11 @@ fn check_component_props(
     let child = resolve_child(import_source)?;
 
     // Check if child suppresses prop checks
-    if child_suppresses_prop_checks(&child) {
+    if child_suppresses_prop_checks(&child.analysis) {
         return None;
     }
 
-    let defined_props = child_prop_names(&child);
+    let defined_props = child_prop_names(&child.analysis);
 
     // If no prop definitions could be resolved (e.g., external type refs like
     // `defineProps<Props>()` where Props is imported), skip checking entirely
@@ -146,11 +176,10 @@ fn check_component_props(
         return None;
     }
 
-    let is_fragment = child_is_fragment(&child);
     let mut unknowns = Vec::new();
 
     for prop in &comp.props {
-        if is_unknown_prop(prop, &defined_props, is_fragment) {
+        if is_unknown_prop(prop, &defined_props, &child) {
             unknowns.push(UnknownPropInfo {
                 component_name: comp.name.clone(),
                 prop_name: prop.name.clone(),
@@ -163,48 +192,65 @@ fn check_component_props(
     Some(unknowns)
 }
 
-/// Check if an attribute can fall through to a child's root element.
-fn is_fallthrough_attr(name: &str) -> bool {
-    BUILTIN_ATTRS.contains(&name) || name.starts_with("data-") || name.starts_with("aria-")
+/// Whether an attribute name is a valid JS/TS identifier.
+///
+/// The distinction is load-bearing rather than cosmetic: TypeScript skips
+/// excess-property checking on JSX attributes whose names are not valid
+/// identifiers, so the generated-TSX producer cannot check `data-foo` on a
+/// component either. Reporting it here would make the Verter-owned lint and
+/// the type-checked carrier disagree about the same markup.
+fn is_identifier_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' || first == '$' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
-/// Check if a child component is a fragment (multiple root elements).
-fn child_is_fragment(child: &FileAnalysisSnapshot) -> bool {
-    child.template.as_ref().is_some_and(|t| {
-        t.elements
-            .iter()
-            .filter(|e| e.parent_index.is_none())
-            .count()
-            > 1
-    })
-}
-
-/// Check if a single prop is unknown (not defined by the child).
+/// Check if a single prop is unknown (neither declared by the child nor
+/// reaching its root element through attribute fallthrough).
 fn is_unknown_prop(
     prop: &TemplatePropUsage,
     defined_props: &HashSet<String>,
-    is_fragment: bool,
+    child: &ResolvedChildComponent,
 ) -> bool {
     // Skip spread entries
     if prop.from_spread {
         return false;
     }
 
-    // Builtin attrs (class, style) always accepted
+    // class/style reach every component through AllowedComponentProps.
     if BUILTIN_ATTRS.contains(&prop.name.as_str()) {
         return false;
     }
 
-    // On non-fragment components, data-*/aria-* fall through to the root element
-    if !is_fragment && is_fallthrough_attr(&prop.name) {
+    // Normalize to camelCase for comparison (`my-prop` binds `myProp`).
+    let camel_name = kebab_to_camel(&prop.name);
+
+    // Declared by the child.
+    if defined_props.contains(&camel_name) {
         return false;
     }
 
-    // Normalize to camelCase for comparison
-    let camel_name = kebab_to_camel(&prop.name);
+    // On the resolved fallthrough surface — the attribute genuinely reaches
+    // the child's root element. Both spellings are checked because the
+    // resolver names members as the element types them (`aria-label` stays
+    // hyphenated, `tabindex` does not).
+    if child.inherited_attrs.contains(&prop.name) || child.inherited_attrs.contains(&camel_name) {
+        return false;
+    }
 
-    // Check against defined props
-    !defined_props.contains(&camel_name)
+    // A non-identifier attribute name (`data-foo`) on a child that inherits
+    // SOMETHING: the carrier cannot check it either (see `is_identifier_name`),
+    // so neither does this lint. A child that inherits nothing — a fragment, or
+    // `inheritAttrs: false` — still reports it, because there it reaches
+    // nothing at all.
+    if !is_identifier_name(&prop.name) && child.inherits_anything() {
+        return false;
+    }
+
+    true
 }
 
 /// Information about an unknown v-model found on a component usage.
@@ -279,7 +325,7 @@ fn child_declares_model(
 /// Find unknown v-models across all component usages.
 pub fn find_unknown_models(
     analysis: &FileAnalysisSnapshot,
-    resolve_child: &dyn Fn(&str) -> Option<FileAnalysisSnapshot>,
+    resolve_child: &dyn Fn(&str) -> Option<ResolvedChildComponent>,
 ) -> Vec<UnknownModelInfo> {
     let template = match &analysis.template {
         Some(t) => t,
@@ -303,9 +349,9 @@ pub fn find_unknown_models(
             None => continue,
         };
 
-        let defined_models = child_model_names(&child);
-        let defined_props = child_prop_names(&child);
-        let defined_emits = child_emit_names(&child);
+        let defined_models = child_model_names(&child.analysis);
+        let defined_props = child_prop_names(&child.analysis);
+        let defined_emits = child_emit_names(&child.analysis);
 
         for vmodel in &comp.v_models {
             if !child_declares_model(
@@ -353,7 +399,7 @@ fn child_required_slot_names(child: &FileAnalysisSnapshot) -> HashSet<String> {
 /// Find missing required slots across all component usages.
 pub fn find_missing_required_slots(
     analysis: &FileAnalysisSnapshot,
-    resolve_child: &dyn Fn(&str) -> Option<FileAnalysisSnapshot>,
+    resolve_child: &dyn Fn(&str) -> Option<ResolvedChildComponent>,
 ) -> Vec<MissingRequiredSlotInfo> {
     let template = match &analysis.template {
         Some(t) => t,
@@ -377,7 +423,7 @@ pub fn find_missing_required_slots(
             None => continue,
         };
 
-        let required = child_required_slot_names(&child);
+        let required = child_required_slot_names(&child.analysis);
         if required.is_empty() {
             continue;
         }
@@ -403,7 +449,7 @@ pub fn find_missing_required_slots(
 pub fn component_usage_diagnostics(
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
-    resolve_child: &dyn Fn(&str) -> Option<FileAnalysisSnapshot>,
+    resolve_child: &dyn Fn(&str) -> Option<ResolvedChildComponent>,
 ) -> Vec<Diagnostic> {
     let unknowns = find_unknown_props(analysis, resolve_child);
     let mut diagnostics = Vec::new();

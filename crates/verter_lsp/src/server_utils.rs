@@ -994,7 +994,33 @@ pub(super) fn import_resolved_matches_target(resolved: &str, target: &str) -> bo
     false
 }
 
-/// Resolve a component's analysis snapshot from an import source.
+/// The attribute names a parent may pass to `canonical_id` that the component
+/// does not declare — its resolved attribute-fallthrough surface.
+///
+/// This is the ONE place the LSP asks that question, and it asks
+/// `verter_session`'s single inheritance resolver (the Fallthrough / Root
+/// Inheritance CRITICAL rule). An owner the resolver cannot answer for yields
+/// an EMPTY set: nothing inherits, which is the fail-closed direction — a
+/// surface that silently widened on an unresolved answer would be an unbounded
+/// false negative in prop checking.
+pub(crate) fn resolved_fallthrough_attr_names(
+    host: &verter_session::VerterHost,
+    canonical_id: &str,
+) -> std::collections::HashSet<String> {
+    use verter_semantic::analysis::component_meta::MemberProvenance;
+
+    let Some(resolution) = host.resolve_fallthrough_surface(canonical_id) else {
+        return std::collections::HashSet::new();
+    };
+    resolution
+        .accepted_props
+        .iter()
+        .filter(|prop| matches!(prop.provenance, MemberProvenance::Inherited { .. }))
+        .map(|prop| prop.name.clone())
+        .collect()
+}
+
+/// Resolve a component's canonical id + analysis snapshot from an import source.
 ///
 /// Extracted as a free function so both `VerterLanguageServer` and `SyncCoordinator`
 /// can resolve component types for diagnostic computation.
@@ -1002,7 +1028,7 @@ pub(crate) fn resolve_component_for(
     host: &verter_session::VerterHost,
     parent_canonical_id: &str,
     import_source: &str,
-) -> Option<verter_session::FileAnalysisSnapshot> {
+) -> Option<(String, verter_session::FileAnalysisSnapshot)> {
     let read_component_analysis = |canonical_id: &str| {
         let mut analysis = host.get_analysis(canonical_id);
 
@@ -1039,7 +1065,7 @@ pub(crate) fn resolve_component_for(
         let dir = parts[..parts.len().saturating_sub(1)].join("/");
         let resolved = resolve_import_path(&dir, import_source);
         if let Some(a) = read_component_analysis(&resolved) {
-            return Some(a);
+            return Some((resolved, a));
         }
     }
 
@@ -1048,12 +1074,29 @@ pub(crate) fn resolve_component_for(
         host.resolve_import_via_workspace(parent_canonical_id, import_source)
     {
         if let Some(a) = read_component_analysis(&resolved_path) {
-            return Some(a);
+            return Some((resolved_path, a));
         }
     }
 
     // Try 3: Direct lookup
-    read_component_analysis(import_source)
+    read_component_analysis(import_source).map(|a| (import_source.to_string(), a))
+}
+
+/// The child a component-usage lint needs: its analysis PLUS its resolved
+/// fallthrough surface, both keyed to the same resolved canonical id.
+pub(crate) fn resolve_child_component_for(
+    host: &verter_session::VerterHost,
+    parent_canonical_id: &str,
+    import_source: &str,
+) -> Option<crate::features::component_diagnostics::ResolvedChildComponent> {
+    let (child_canonical_id, analysis) =
+        resolve_component_for(host, parent_canonical_id, import_source)?;
+    Some(
+        crate::features::component_diagnostics::ResolvedChildComponent {
+            inherited_attrs: resolved_fallthrough_attr_names(host, &child_canonical_id),
+            analysis,
+        },
+    )
 }
 
 pub(super) fn location_from_span(
@@ -1543,7 +1586,9 @@ fn compute_verter_diagnostics_for_with_views(
                 crate::features::component_diagnostics::component_usage_diagnostics(
                     &analysis,
                     &doc.line_index,
-                    &|import_source| resolve_component_for(host, &canonical_id, import_source),
+                    &|import_source| {
+                        resolve_child_component_for(host, &canonical_id, import_source)
+                    },
                 ),
             );
 

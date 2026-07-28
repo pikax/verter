@@ -135,13 +135,17 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     ("src/ImportErrors.vue", 11, 1, 2322, 1, "'boolean' is not assignable to type 'string'"),
     ("src/ImportErrors.vue", 12, 1, 2322, 1, "'string' is not assignable to type 'number'"),
     // Generated public-API stub diagnostics (hash + per-run temp dir stripped).
-    ("OptionsApiAdvanced.vue.ts", 25, 13, 2322, 1, "'number' is not assignable to type 'string'"),
+    // The line numbers include the attribute-fallthrough widening the
+    // Options-API stub generator now emits (the three helper declarations plus
+    // the widened `declare const` replacing the bare pass-through export), which
+    // is why they sit five lines below the authored error.
+    ("OptionsApiAdvanced.vue.ts", 30, 13, 2322, 1, "'number' is not assignable to type 'string'"),
     ("src/OptionsApiAdvanced.vue", 1, 1, 6196, 1, "'___VERTER___attributes' is declared but never used"),
     ("src/OptionsApiAdvanced.vue", 26, 1, 2322, 1, "'number' is not assignable to type 'string'"),
     // The numeric prop on line 5 is valid. Vue slot-body isolation removes the
     // former foreign-React `children` diagnostic, leaving only the real bad value.
     ("src/OptionsApiConsumer.vue", 6, 24, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("OptionsApiErrors.vue.ts", 21, 13, 2322, 1, "'string' is not assignable to type 'number'"),
+    ("OptionsApiErrors.vue.ts", 26, 13, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/OptionsApiErrors.vue", 1, 1, 6196, 1, "'___VERTER___attributes' is declared but never used"),
     ("src/OptionsApiErrors.vue", 22, 1, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/PropErrors.vue", 6, 1, 2322, 1, "'string' is not assignable to type 'number'"),

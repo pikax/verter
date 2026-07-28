@@ -957,6 +957,11 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
                     .resolve_fallthrough_surface_internal_with_overrides(
                         canonical_id,
                         prop_type_overrides,
+                        // A CHILD resolve takes its own snapshot: the parent's
+                        // pinned view is not this canonical's request-bound
+                        // capture, and the executor treats a supplied view as
+                        // proven-current for the warm peek.
+                        None,
                         visiting,
                     );
 

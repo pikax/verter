@@ -1,4 +1,9 @@
 import { defineComponent } from "vue"
+type __Verter_RootElementAttrs<Tag extends string> = Tag extends keyof import("vue").IntrinsicElementAttributes ? import("vue").IntrinsicElementAttributes[Tag] : {}
+declare module "vue" {
+  interface IntrinsicElementAttributes {}
+}
+type __Verter_DataAttrs = { [Key in `data-${string}`]?: unknown }
 type __OmitNew<T> = { [K in keyof T]: T[K] }
 import type { ChildProps } from './types'
 import type { ChildEmits } from './types'
@@ -7,8 +12,8 @@ const __comp = defineComponent({
 })
 
 declare const Child: __OmitNew<typeof __comp> & {
-  new(props?: import("vue").PublicProps & ChildProps & { "onChange"?: (value: number) => void }): {
-    $props: import("vue").PublicProps & ChildProps & { "onChange"?: (value: number) => void },
+  new(props?: import("vue").PublicProps & ChildProps & { "onChange"?: (value: number) => void } & Omit<__Verter_RootElementAttrs<"div">, "class" | "style" | keyof import("vue").PublicProps | keyof (ChildProps & { "onChange"?: (value: number) => void })> & __Verter_DataAttrs): {
+    $props: import("vue").PublicProps & ChildProps & { "onChange"?: (value: number) => void } & Omit<__Verter_RootElementAttrs<"div">, "class" | "style" | keyof import("vue").PublicProps | keyof (ChildProps & { "onChange"?: (value: number) => void })> & __Verter_DataAttrs,
     $emit: ((event: "change", value: number) => void),
     $data: {},
     $attrs: import("vue").HTMLAttributes,
@@ -16,4 +21,4 @@ declare const Child: __OmitNew<typeof __comp> & {
   }
 }
 export default Child
-//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovQ2hpbGQudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENoaWxkUHJvcHMsIENoaWxkRW1pdHMgfSBmcm9tICcuL3R5cGVzJ1xuZGVmaW5lUHJvcHM8Q2hpbGRQcm9wcz4oKVxuZGVmaW5lRW1pdHM8Q2hpbGRFbWl0cz4oKVxuPC9zY3JpcHQ+XG48dGVtcGxhdGU+PGRpdiAvPjwvdGVtcGxhdGU+XG4iXSwibWFwcGluZ3MiOiJBO0E7QSx5QztBLHlDO0E7QTtBOztBO0EsMENBRVksVSxHLEVBQ0EsVSxHLHVCLEU7QSx3Q0FEQSxVLEcsRUFDQSxVLEcsdUIsRTtBLFcsU0FBQSxRLEUsYSxVO0E7QTtBO0E7QTtBIn0=
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovQ2hpbGQudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENoaWxkUHJvcHMsIENoaWxkRW1pdHMgfSBmcm9tICcuL3R5cGVzJ1xuZGVmaW5lUHJvcHM8Q2hpbGRQcm9wcz4oKVxuZGVmaW5lRW1pdHM8Q2hpbGRFbWl0cz4oKVxuPC9zY3JpcHQ+XG48dGVtcGxhdGU+PGRpdiAvPjwvdGVtcGxhdGU+XG4iXSwibWFwcGluZ3MiOiJBO0E7QTs7O0E7QTtBLHlDO0EseUM7QTtBO0E7O0E7QSwwQ0FFWSxVLEcsRUFDQSxVLEcsdUIsRSxHLGdMO0Esd0NBREEsVSxHLEVBQ0EsVSxHLHVCLEUsRyxnTDtBLFcsU0FBQSxRLEUsYSxVO0E7QTtBO0E7QTtBIn0=

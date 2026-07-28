@@ -657,3 +657,59 @@ function handleEvent(event) {}
         "every union arm must be a parameter tuple"
     );
 }
+
+/// The `asInput` discriminating-prop conditional root, on the IDE TSX path —
+/// the path that OWNS conditional-root generic narrowing.
+///
+/// This is a REGRESSION FENCE for the attribute-fallthrough widening work: that
+/// widening lives entirely on the `.tsc.tsx` carrier path, and per the Two
+/// Template Codegen Paths rule the two paths do not affect one another. If a
+/// future change routed the parent-facing widening through here and flattened
+/// the branch structure, the generic parameter and the conditional below would
+/// disappear.
+///
+/// It also PINS what the mechanism actually produces, which is narrower than
+/// "the parent gets `<input>` attrs when `asInput` is true":
+///
+/// * `___VERTER___getRootComponent<T_asInput extends …['asInput'] = …['asInput']>()`
+///   returns `T_asInput extends true ? ReturnType<Comp_input> : ReturnType<Comp_div>`
+///   — a real generic, really discriminated on the prop; but
+/// * the only consumer, `type ___VERTER___RootElement = ReturnType<typeof
+///   ___VERTER___getRootComponent>`, instantiates it at the DEFAULT argument
+///   (`boolean`), which distributes to the union of BOTH branches; and
+/// * `___VERTER___RootElement` feeds `___VERTER___Attrs` — the component's own
+///   `$attrs` READ surface — not the parent-facing props type.
+#[test]
+fn conditional_root_narrowing_emits_the_discriminating_generic_on_the_ide_path() {
+    let runtime = props_runtime(vec![crate::test_helpers::runtime_prop(
+        "asInput",
+        true,
+        [verter_macro_dto::RuntimeConstructor::Boolean],
+    )]);
+    let code = gen_tsx_script_narrowing_with_runtime(
+        r#"<script setup lang="ts">
+defineProps<{ asInput: boolean }>()
+</script>
+<template><input v-if="asInput"><div v-else>fallback</div></template>"#,
+        &runtime,
+    );
+
+    assert!(
+        code.contains("function ___VERTER___getRootComponent<T_asInput extends ___VERTER___defineProps_Type['asInput'] = ___VERTER___defineProps_Type['asInput']>()"),
+        "the root selector must stay GENERIC in the discriminating prop:\n{code}"
+    );
+    assert!(
+        code.contains("as T_asInput extends true ? ReturnType<typeof ___VERTER___Comp"),
+        "the two branches must stay a conditional discriminated on that generic, \
+         never a flattened union of both arms:\n{code}"
+    );
+    // The generic feeds the component's OWN attrs READ surface.
+    assert!(
+        code.contains(
+            "type ___VERTER___RootElement = ReturnType<typeof ___VERTER___getRootComponent>;"
+        ) && code.contains(
+            "type ___VERTER___Attrs = ___VERTER___attributes & ___VERTER___RootElementProps;"
+        ),
+        "the narrowed root must still feed the component's own `$attrs` surface:\n{code}"
+    );
+}

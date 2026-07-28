@@ -1390,6 +1390,13 @@ fn compile_inner(
                 tsc::MacroTscInput::NotRequired,
                 tsc::MacroTscInput::Authoritative,
             ),
+            // The in-crate compile pipeline has no inheritance resolver — that
+            // lives in `verter_session`, above this crate. The type-checked
+            // `.tsc.tsx` a consumer actually sees is rendered by the session's
+            // public-API projector (`get_public_api` / `get_public_api_batch`),
+            // which supplies the resolved surface; this block is the
+            // bundler-facing artifact and widens nothing.
+            &tsc::FallthroughPropsProjection::none(),
         );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;
         if let Some(observer) = verter_audit::current_observer() {

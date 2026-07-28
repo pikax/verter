@@ -16504,7 +16504,8 @@ fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
     let diags =
         crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     let fragment_path = format!("{workspace_id}/src/FragmentComp.vue");
-    let fragment_analysis = resolve_component_for(host.as_ref(), &app_path, "./FragmentComp.vue");
+    let fragment_analysis = resolve_component_for(host.as_ref(), &app_path, "./FragmentComp.vue")
+        .map(|(_, analysis)| analysis);
 
     assert!(
             diags.iter().any(|diag| {
