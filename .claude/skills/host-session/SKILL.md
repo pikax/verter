@@ -209,6 +209,90 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 
 During `initialized()`, the LSP spawns a priority-aware `WorkspaceScanner`. Filesystem-backed tsserver continues to resolve real `.ts`/`.tsx`/`.js`/`.jsx` and `node_modules` from disk. Framework carriers are compiled on the background lane and published by authored source identity into the durable plugin store; after the carrier pass, one coalesced refresh advances metadata without making every workspace carrier a Program root. No generated file is opened over the tsserver protocol. Before every carrier unit the scanner yields to active LSP handlers, with a bounded background-deferral interval so continuous editor traffic cannot starve project-wide warmup. TSGO retains its explicit eager project-input path for carrier and plain-source materialization. Verter semantic/type-info caches remain a separate host concern; they are not serialized into either TypeScript engine or used as a substitute for its project graph.
 
+### Ordinary Carrier Import → Public-API Surface
+
+An ordinary module import of a carrier (`import C from "./Comp.vue"` from a plain
+`.ts`/`.tsx`, or from a generated carrier buffer) resolves to the
+descriptor-generated IMPORT surface (`{carrier}.verter.ts`) or to NOTHING. The IDE
+`CarrierIde` companion (`{carrier}.vue.tsx` / `.jsx`) is the editor's own
+diagnostic root and is never a redirect target: handing it to a consuming module
+makes that module's project require `jsx` (TypeScript reports TS6142 `--jsx is not
+set` for a `.tsx` resolution when `options.jsx` is unset) and exposes template
+lowering rather than the component's public contract.
+
+Two owners, deliberately split:
+
+- **WHICH surface** — `@verter/language-shared` carrier policy
+  (`carrier/policy.ts::resolveCarrierImportTarget`). It derives the candidate
+  path from the descriptor columns in the byte-pinned
+  `virtual-file-naming.generated.ts` mirror, requires the owning project to own a
+  `CarrierApi` row whose `provider_uri` IS that path (the reader matches a query
+  against either `source_uri` or `provider_uri`, so identity is checked, not
+  assumed), and otherwise abstains. Vue and Svelte take the same path — there is
+  no per-framework branch — and a JavaScript-authored carrier (published as
+  `.jsx` for the editor) still presents a TypeScript surface.
+- **WHEN it is servable** — the host. For `@verter/typescript-plugin`
+  (`index.ts::importedCarrierForSource`): published ⇒ resolve; owned but not yet
+  published ⇒ the bounded cold read (`helpers/coldRead.ts` — last-good, else a
+  short bounded block on the manifest), the same wait `readFile`/`fileExists`
+  perform for a known companion, so resolution and serving cannot disagree; not
+  owned, or the cold read times out ⇒ ABSTAIN.
+
+**ONE target for every host that can choose, and there is no per-host mode.**
+Both hosts that serve carriers through a `resolveModuleNameLiterals` override —
+the tsserver plugin and the browser/WASM in-context service
+(`packages/playground/src/editor/inContextLs.ts`) — call the same function and
+get `Comp.vue.verter.ts`. A host that rewrites the specifier itself can name any
+published surface, so "which one" is a POLICY question with one answer, not a
+capability question with several.
+
+This matters semantically, not just cosmetically: the two published surfaces are
+NOT interchangeable. A runtime-object `defineExpose({ count })` renders
+`count: typeof count` on the API surface (the setup body is emitted, so the
+inferred type survives) and `count: unknown` on the declaration surface (the body
+is omitted, so the binding is out of scope — see the TODO in
+`crates/verter_compiler/src/tsc/script.rs`). Letting a host pick the declaration
+carrier would make the same source type differently depending on where the user
+reads it. Pinned at the type level by
+`cross_host_import_surface_semantic_parity (#11)` in
+`packages/playground/src/editor/wasmInContextLs.spec.ts`.
+
+The engine that gets no say is **native tsgo**: it has no host plugin, so
+TypeScript's own basename-append probe finds the `importDriven` declaration
+carrier (`Comp.d.vue.ts`) and nothing else
+(`crates/verter_type_runtime/tests/cases/owned_provider_carrier_resolution.rs`).
+That path never reaches this policy, so it must not shape it — and it is a
+strictly weaker surface, which is why closing the `script.rs` gap is a
+precondition for relying on it. `carrierRootMembership` names the same three-way
+split from the program-membership side.
+
+Abstaining is the fail-closed state, not a dead end. Resolving to an unowned path
+would produce a sticky `TS2307` no publication could clear; abstaining lets
+TypeScript's own answer stand and the next publication heal it. The carrier source
+is recorded in the plugin's `observedCarrierImportKeys` BEFORE the resolution
+attempt, so a publication that makes it ready counts as a relevant ready-version
+change and triggers that configured project's resolution-cache clear
+(`clearSemanticCache`); a store-dir handoff (the cold-start window before the LSP
+reports the store) clears it too. On the LSP side, `did_open` of a plain script
+prewarms each imported carrier's API through
+`sync_imported_carrier_api_lightweight` → `publish_carrier_to_external_ts`, and
+every publish advertises the COMPLETE companion set.
+
+Alias/`baseUrl` specifiers take the same target through the failed-lookup route;
+`baseUrl` containment is boundary-anchored over the host's canonical path identity
+(`canonicalPath`), never a raw substring test — a `D:\ws\src` baseUrl must accept
+the `d:/ws/src/...` candidates TypeScript reports.
+
+**KNOWN GAP — auto-import does not offer unopened carriers.** `getExternalFiles`
+advertises only the companions of editor-ACTIVE carrier sources (the authored
+working set, matching Volar/Svelte ownership), so an unopened carrier's API
+surface is in neither the Program nor a package export map and TypeScript cannot
+suggest it. The eager `CarrierApi` index that would close this
+(`external_ts_sync.rs::EagerApiIndexPlan`) is landed but has NO production caller —
+it is referenced only by its own tests. This is a separate missing contributor
+from the redirect-target rule above; an explicitly written import resolves
+correctly either way.
+
 ### Barrel-Import Eager Sync (TSGO)
 
 When a carrier script imports through a non-carrier barrel (for example `components/index.ts`), publication follows exact configured ownership and each effective owner's `allowImportingTsExtensions` option. For tsserver, every effective owner must explicitly opt in before authored `.vue`/`.svelte` specifiers stay under the plugin + TypeScript resolver with no rewritten barrel buffer; one missing/`false` co-owner keeps the single shared buffer on the `.verter.ts` compatibility projection. Deterministic nearest-config convenience lookup is never ownership authority. TSGO retains explicit publication because it has no equivalent host plugin. Both explicit-publication paths seed from shallow import facts, walk only `ExportFrom` references, sync terminal carrier dependencies first, and publish only barrel projections whose bytes differ from disk; unchanged closure files are never pushed. The walk is cycle-terminated and complete (no depth/node cap may mint a false `DependencyReady` receipt) and yields periodically instead of truncating. Ordinary imports, dynamic imports, `require` edges, and unchanged compiled output remain provider-resolved from disk.

@@ -335,6 +335,27 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
     return parsed;
   }
 
+  /**
+   * Drop the cached manifest snapshot so the next read re-parses from disk.
+   *
+   * The `(mtimeMs, size)` change key above is an OPTIMISATION, not a
+   * publication oracle. The Rust publisher swaps `manifest.json` ATOMICALLY, so
+   * a publication that REPLACES a `ready_files` entry rather than adding one can
+   * land at the same serialized length; if that write also falls inside a single
+   * filesystem timestamp tick, the replacement is stat-IDENTICAL and the cached
+   * snapshot silently survives it. A caller that has independent evidence a
+   * publication occurred (the plugin's `carrierStoreRefreshToken` advance) must
+   * therefore invalidate explicitly — otherwise the stale snapshot reports "no
+   * relevant change", the resolution-cache clear never runs, and a cached
+   * `TS2307` for an imported carrier survives until some unrelated publication.
+   *
+   * Safe to call with no store dir and before any read.
+   */
+  invalidateManifest(): void {
+    this.cachedManifest = undefined;
+    this.cachedStat = undefined;
+  }
+
   /** The current published epoch, or `undefined` when the store is unavailable. */
   currentEpoch(): number | undefined {
     return this.readManifest()?.epoch;
@@ -506,34 +527,6 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
     }
     const companion = carrierSourceToCompanion(source);
     return companion === null ? undefined : companion;
-  }
-
-  /**
-   * The ready public API companion for a carrier source. Imports prefer this
-   * role over the IDE TSX/JSX implementation carrier: source dialect is an
-   * editing concern while every consumer observes one TypeScript declaration
-   * surface (`$props`/`$events`/`$slots`) through direct and barrel imports. An
-   * owned but unpublished API companion is ignored so callers can retain their
-   * existing IDE fallback until the atomic publication becomes readable.
-   */
-  apiCompanionForSource(sourcePath: string): string | undefined {
-    const source = normalizePath(sourcePath);
-    const sourceKey = this.canonicalPath(source);
-    const manifest = this.readManifest();
-    if (!manifest) return undefined;
-    for (const project of this.scopedProjectEntries(manifest)) {
-      const ownedApi = this.canonicalOwnedSources(project)
-        .get(sourceKey)
-        ?.find(
-          (owned) =>
-            owned.role === "CarrierApi" && this.canonicalPath(owned.source_uri) === sourceKey,
-        );
-      if (ownedApi) {
-        const provider = normalizePath(ownedApi.provider_uri);
-        if (this.readyFile(provider)?.role === "CarrierApi") return provider;
-      }
-    }
-    return undefined;
   }
 
   /**

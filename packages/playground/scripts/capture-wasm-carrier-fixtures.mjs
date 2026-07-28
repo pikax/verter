@@ -58,6 +58,23 @@ const msg = "ok"
 <template><div>🎉🎉{{ msg }}</div></template>`,
   },
   {
+    // The cross-host semantic-parity probe: a runtime-object `defineExpose`
+    // whose exposed member's type is INFERRED from the setup binding. The API
+    // surface renders `count: typeof count` (the setup body is emitted, so the
+    // inferred `number` survives); the declaration surface can only render
+    // `count: unknown` (the body is omitted, so the binding is not in scope).
+    // Every host that can choose its import target must therefore choose the
+    // API surface, or the same code types differently per host.
+    key: "exposeVue",
+    filename: "Expose.vue",
+    fileKind: "vue",
+    source: `<script setup lang="ts">
+const count = 41 + 1
+defineExpose({ count })
+</script>
+<template><div>{{ count }}</div></template>`,
+  },
+  {
     key: "compSvelte",
     filename: "Comp.svelte",
     fileKind: "svelte",

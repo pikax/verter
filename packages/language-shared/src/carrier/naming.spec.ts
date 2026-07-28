@@ -5,6 +5,7 @@ import {
   isVue,
   toDeclarationCarrierFileName,
   toIdeCarrierFileName,
+  toImportSurfaceFileName,
 } from "./naming";
 
 describe("toDeclarationCarrierFileName (extension-MIDDLE declaration carrier)", () => {
@@ -114,5 +115,37 @@ describe("relocated carrier naming CORE (browser-safe surface smoke)", () => {
     );
     // Safety negative: a real rune module with no backing carrier is untouched.
     expect(cleanupCarrierVirtualImportPath("./store.svelte.ts", exists)).toBe("./store.svelte.ts");
+  });
+});
+
+describe("toImportSurfaceFileName (the descriptor `importSurface` column)", () => {
+  it("maps every component carrier to its descriptor-generated import surface", () => {
+    // Vue and Svelte read the SAME column — no per-framework branch.
+    expect(toImportSurfaceFileName("/x/B.vue")).toBe("/x/B.vue.verter.ts");
+    expect(toImportSurfaceFileName("/x/B.svelte")).toBe("/x/B.svelte.verter.ts");
+  });
+
+  it("is NEVER the JSX IDE companion", () => {
+    for (const source of ["/x/B.vue", "/x/B.svelte"]) {
+      const surface = toImportSurfaceFileName(source);
+      expect(surface).not.toMatch(/\.[jt]sx$/);
+    }
+  });
+
+  it("normalizes backslashes", () => {
+    expect(toImportSurfaceFileName("d:\\src\\Comp.vue")).toBe("d:/src/Comp.vue.verter.ts");
+  });
+
+  it("returns null for non-carrier paths, generated virtuals and self-file rune modules", () => {
+    expect(toImportSurfaceFileName("/x/util.ts")).toBeNull();
+    expect(toImportSurfaceFileName("/x/B.vue.tsx")).toBeNull();
+    expect(toImportSurfaceFileName("/x/B.vue.verter.ts")).toBeNull();
+    // A REAL standalone rune module serves its own path (a `selfFile` row).
+    expect(toImportSurfaceFileName("/x/store.svelte.ts")).toBeNull();
+  });
+
+  it("requires a non-empty basename stem", () => {
+    expect(toImportSurfaceFileName("/x/.vue")).toBeNull();
+    expect(toImportSurfaceFileName(".svelte")).toBeNull();
   });
 });

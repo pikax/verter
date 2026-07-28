@@ -1,5 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+  rmSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import ts from "typescript";
@@ -666,7 +675,7 @@ describe("host-proxy matrix: readFile / fileExists", () => {
   });
 });
 
-describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carrier)", () => {
+describe("host-proxy matrix: resolveModuleNameLiterals (in-project → public-API carrier)", () => {
   function resolveOne(info: any, specifier: string, containing: string): string | undefined {
     const result = info.languageServiceHost.resolveModuleNameLiterals(
       [{ text: specifier }],
@@ -678,24 +687,61 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     return result[0]?.resolvedModule?.resolvedFileName;
   }
 
-  it("redirects a relative .vue import to the .vue.tsx IDE carrier (NOT .verter.ts)", () => {
+  it("ABSTAINS for a relative .vue import when the project owns no public-API carrier", () => {
+    // The fixture owns only the `CarrierIde` role. An ordinary import must never
+    // be handed the JSX/TSX editor surface (that is the `--jsx is not set`
+    // defect); with no import surface owned the plugin fails CLOSED and lets
+    // TypeScript's own resolution answer, so the later publication can heal it.
     const dir = track(writeStore(vueAndSvelteManifest(), {}));
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
     const resolved = resolveOne(info, "./A.vue", "/ws/src/consumer.ts");
-    expect(resolved).toBe("/ws/src/A.vue.tsx");
-    expect(resolved).not.toContain(".verter.ts");
+    expect(resolved).toBeUndefined();
   });
 
-  it("redirects a relative .svelte import to the .svelte.tsx IDE carrier", () => {
+  it("ABSTAINS for a relative .svelte import when the project owns no public-API carrier", () => {
     const dir = track(writeStore(vueAndSvelteManifest(), {}));
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
     const resolved = resolveOne(info, "./W.svelte", "/ws/src/consumer.ts");
-    expect(resolved).toBe("/ws/src/W.svelte.tsx");
-    expect(resolved).not.toContain(".verter.ts");
+    expect(resolved).toBeUndefined();
+  });
+
+  it("redirects a relative .vue import to its public API carrier when both roles exist", () => {
+    const manifest = vueAndSvelteManifest();
+    const project = manifest.projects["/ws/tsconfig.json"];
+    project.owned_sources.push({
+      source_uri: "/ws/src/A.vue",
+      provider_uri: "/ws/src/A.vue.verter.ts",
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    project.ready_files["/ws/src/A.vue.verter.ts"] = {
+      content_hash: "aa1",
+      version: 6,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    const dir = track(
+      writeStore(manifest, { "blobs/A.vue.verter.ts": "export default class A {}" }),
+    );
+    const info = createInfo(dir, { diskFiles: {} });
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./A.vue" }],
+      "/ws/src/consumer.ts",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+
+    expect(result?.resolvedFileName).toBe("/ws/src/A.vue.verter.ts");
+    expect(result?.extension).toBe(ts.Extension.Ts);
   });
 
   it("redirects a Svelte import to its public API carrier when both roles exist", () => {
@@ -813,7 +859,7 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     );
   });
 
-  it("redirects a JavaScript .svelte import to the .svelte.jsx IDE carrier as JSX", () => {
+  it("never hands a JavaScript .svelte carrier's JSX surface to an ordinary importer", () => {
     const dir = track(writeStore(javascriptSvelteManifest(), {}));
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
@@ -825,11 +871,46 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
       {},
       undefined,
     )[0]?.resolvedModule;
-    expect(result?.resolvedFileName).toBe("/ws/src/W.svelte.jsx");
-    expect(result?.extension).toBe(ts.Extension.Jsx);
+    expect(result).toBeUndefined();
   });
 
-  it("redirects a JavaScript .vue import to its manifest-owned JSX carrier", () => {
+  it("resolves a JavaScript .svelte carrier to its TS import surface, not its .jsx carrier", () => {
+    const manifest = javascriptSvelteManifest();
+    const project = manifest.projects["/ws/tsconfig.json"];
+    project.owned_sources.push({
+      source_uri: "/ws/src/W.svelte",
+      provider_uri: "/ws/src/W.svelte.verter.ts",
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    project.ready_files["/ws/src/W.svelte.verter.ts"] = {
+      content_hash: "wj2",
+      version: 4,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/W.svelte.verter.ts",
+    };
+    const dir = track(
+      writeStore(manifest, { "blobs/W.svelte.verter.ts": "export default class W {}" }),
+    );
+    const info = createInfo(dir, { diskFiles: {} });
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./W.svelte" }],
+      "/ws/src/consumer.ts",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+    // The carrier's SOURCE dialect is an editing concern; every consumer sees
+    // one TypeScript import surface.
+    expect(result?.resolvedFileName).toBe("/ws/src/W.svelte.verter.ts");
+    expect(result?.extension).toBe(ts.Extension.Ts);
+  });
+
+  it("never hands a JavaScript .vue carrier's manifest-owned JSX carrier to an importer", () => {
     const manifest = vueAndSvelteManifest();
     const project = manifest.projects["/ws/tsconfig.json"];
     const owned = project.owned_sources.find((entry) => entry.source_uri.endsWith("/A.vue"))!;
@@ -854,10 +935,7 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
       undefined,
     );
 
-    expect(result[0]?.resolvedModule).toMatchObject({
-      resolvedFileName: "/ws/src/A.vue.jsx",
-      extension: ts.Extension.Jsx,
-    });
+    expect(result[0]?.resolvedModule).toBeUndefined();
   });
 
   it("leaves a plain relative .ts import to TS's own resolution", () => {
@@ -1659,6 +1737,614 @@ function twoProjectManifest(): Manifest {
     },
   };
 }
+
+/**
+ * The DX gate for the reported defect: a plain `.ts` file importing a framework
+ * carrier from a configured project that sets NO `jsx`.
+ *
+ * Everything here is deliberate:
+ *  - the `ts.LanguageService` is created BEFORE the plugin installs its hooks
+ *    (tsserver's real lifecycle: the ConfiguredProject builds its service, then
+ *    plugins are enabled on the same host object);
+ *  - the project's compiler options carry NO `jsx`, matching the reporting user.
+ *    Note the plugin force-sets `jsx: Preserve` on those options once loaded, so
+ *    TS6142 itself is SUPPRESSED here and is only a regression guard; the
+ *    load-bearing assertions are the exact resolved filename, the resolved
+ *    extension being `Ts` (never `Tsx`/`Jsx` — which is what makes TS6142
+ *    unreachable by construction rather than by that mutation), TS2307
+ *    presence/absence, and the TS2322-mentions-`number` API witness;
+ *  - the API role is never hand-injected — only the IDE role is pre-published
+ *    (that is precisely the state the old fallback mis-served), and the
+ *    unpublished → ready transition is driven through the real publish +
+ *    `carrierStoreRefreshToken` invalidation path;
+ *  - the assertions are on the EXACT resolved filename AND the resulting
+ *    semantic diagnostics, so a suffix-only fix proves nothing.
+ */
+describe("plain .ts importing a carrier (real Program, project sets NO jsx)", () => {
+  const projectKey = "/ws/tsconfig.json";
+  const consumer = "/ws/src/consumer.ts";
+
+  /** Compiler options a real user project has: `jsx` is ABSENT. */
+  const noJsxOptions = (): ts.CompilerOptions => ({
+    strict: true,
+    noLib: true,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+  });
+
+  /** A manifest owning ONLY the IDE role for `source` (API not published yet). */
+  function ideOnlyManifest(source: string, ideProvider: string, blobRel: string): Manifest {
+    return {
+      epoch: 1,
+      host_version: "test",
+      projects: {
+        [projectKey]: {
+          owned_sources: [
+            {
+              source_uri: source,
+              provider_uri: ideProvider,
+              role: "CarrierIde",
+              script_kind: "TSX",
+            },
+          ],
+          ready_files: {
+            [ideProvider]: {
+              content_hash: "ide-1",
+              version: 1,
+              script_kind: "TSX",
+              role: "CarrierIde",
+              map_hash: "0",
+              blob_rel: blobRel,
+            },
+          },
+        },
+      },
+    };
+  }
+
+  interface Harness {
+    info: any;
+    plugin: ReturnType<typeof init>;
+    /** How many times production invoked the project's cache-clear hook. */
+    clearCalls(): number;
+    resolve(specifier: string, containing?: string): ts.ResolvedModuleFull | undefined;
+    diagnostics(fileName?: string): ts.Diagnostic[];
+    codes(fileName?: string): number[];
+    publish(manifest: Manifest, token: number): Promise<void>;
+    dir: string;
+  }
+
+  function harness(options: {
+    manifest: Manifest;
+    blobs: Record<string, string>;
+    diskFiles: Record<string, string>;
+    compilerOptions?: ts.CompilerOptions;
+  }): Harness {
+    const dir = track(writeStore(options.manifest, options.blobs));
+    const compilerOptions = options.compilerOptions ?? noJsxOptions();
+    const info = createInfo(dir, { diskFiles: options.diskFiles }, projectKey);
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 1,
+    };
+    info.project.getConfigFilePath = () => projectKey;
+    info.project.getCompilerOptions = () => compilerOptions;
+    let projectVersion = 0;
+    info.languageServiceHost.getCompilationSettings = () => compilerOptions;
+    info.languageServiceHost.getCurrentDirectory = info.project.getCurrentDirectory;
+    info.languageServiceHost.getDefaultLibFileName = () => "/ws/no-lib.d.ts";
+    info.languageServiceHost.getProjectVersion = () => String(projectVersion);
+    info.languageServiceHost.getScriptFileNames = () => Object.keys(options.diskFiles);
+    info.languageServiceHost.fileExists = info.serverHost.fileExists;
+    info.languageServiceHost.readFile = info.serverHost.readFile;
+    info.languageServiceHost.resolveModuleNameLiterals = (literals: readonly { text: string }[]) =>
+      literals.map(() => ({ resolvedModule: undefined }));
+
+    // tsserver's lifecycle: the project's LanguageService exists BEFORE the
+    // plugin is enabled on the same host object.
+    const realLanguageService = ts.createLanguageService(info.languageServiceHost);
+    info.languageService.__lsImpl = realLanguageService;
+
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    // The harness stands in for tsserver's `ProjectService.clearSemanticCache`,
+    // which does `project.resolutionCache.clear()` + `cleanupSemanticCache()` +
+    // `markAsDirty()`. There is no `ConfiguredProject` here, so there is no
+    // `ResolutionCache` to clear; what the stand-in reproduces is the OBSERVABLE
+    // consequence this gate depends on — the Program is dropped and the project
+    // version advances, so every module specifier is resolved again on the next
+    // query. It does NOT prove tsserver's own resolution-cache clear; that leg
+    // is covered by asserting production INVOKES this hook (`clearCalls` below,
+    // and the cold-start / equal-stat cases), plus TypeScript's own
+    // implementation of it.
+    let clearCalls = 0;
+    info.project.projectService.clearSemanticCache = () => {
+      clearCalls += 1;
+      projectVersion++;
+      realLanguageService.cleanupSemanticCache();
+    };
+    info.project.projectService.reloadFileNamesOfConfiguredProject = () => {
+      projectVersion++;
+      return true;
+    };
+
+    return {
+      info,
+      plugin,
+      clearCalls: () => clearCalls,
+      dir,
+      resolve(specifier: string, containing: string = consumer) {
+        return info.languageServiceHost.resolveModuleNameLiterals(
+          [{ text: specifier }],
+          containing,
+          undefined,
+          compilerOptions,
+          undefined,
+        )[0]?.resolvedModule;
+      },
+      diagnostics(fileName: string = consumer) {
+        return info.languageService.getSemanticDiagnostics(fileName) as ts.Diagnostic[];
+      },
+      codes(fileName: string = consumer) {
+        return (info.languageService.getSemanticDiagnostics(fileName) as ts.Diagnostic[]).map(
+          (d) => d.code,
+        );
+      },
+      async publish(manifest: Manifest, token: number) {
+        writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest), "utf8");
+        plugin.onConfigurationChanged!({
+          carrierStoreDir: dir,
+          [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+          carrierStoreRefreshToken: token,
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      },
+    };
+  }
+
+  /**
+   * Both component carriers, one body. Vue and Svelte take the SAME path —
+   * the import surface comes from the adapter's descriptor column, never a
+   * per-framework branch in the plugin.
+   */
+  for (const ext of [".vue", ".svelte"] as const) {
+    const source = `/ws/src/A${ext}`;
+    const ideProvider = `${source}.tsx`;
+    const apiProvider = `${source}.verter.ts`;
+
+    it(`resolves a ${ext} import to the public-API carrier across the unpublished → ready transition`, async () => {
+      const h = harness({
+        manifest: ideOnlyManifest(source, ideProvider, `blobs/A${ext}.tsx`),
+        blobs: {
+          // The IDE surface types `contract` as a STRING — if an ordinary import
+          // ever lands here the consumer type-checks CLEAN, which is exactly the
+          // silent-wrong-surface failure this gate must catch.
+          [`blobs/A${ext}.tsx`]: "declare const A: { contract: string };\nexport default A;\n",
+          [`blobs/A${ext}.verter.ts`]:
+            "declare const A: { contract: number };\nexport default A;\n",
+        },
+        diskFiles: {
+          [consumer]: `import A from "./A${ext}";\nexport const label: string = A.contract;\n`,
+        },
+      });
+
+      // ── phase 1: the project owns no import surface yet ──────────────────
+      // FAIL CLOSED. Never the JSX/TSX editor carrier (the `--jsx is not set`
+      // defect), never a fabricated `.verter.ts` the store cannot serve.
+      expect(h.resolve(`./A${ext}`)).toBeUndefined();
+      const cold = h.codes();
+      // Regression guard only — the plugin's own `jsx: Preserve` mutation keeps
+      // TS6142 unreachable while it is loaded, so nothing here rests on it.
+      expect(cold).not.toContain(6142);
+      // The IDE surface must not have silently type-checked the consumer.
+      expect(cold).not.toContain(2322);
+      // TS's own answer stands: an unresolvable module.
+      expect(cold).toContain(2307);
+
+      // ── phase 2: the owning project publishes the API companion ──────────
+      const published = ideOnlyManifest(source, ideProvider, `blobs/A${ext}.tsx`);
+      const project = published.projects[projectKey];
+      published.epoch = 2;
+      project.owned_sources.push({
+        source_uri: source,
+        provider_uri: apiProvider,
+        role: "CarrierApi",
+        script_kind: "TS",
+      });
+      project.ready_files[apiProvider] = {
+        content_hash: "api-1",
+        version: 1,
+        script_kind: "TS",
+        role: "CarrierApi",
+        map_hash: "0",
+        blob_rel: `blobs/A${ext}.verter.ts`,
+      };
+      await h.publish(published, 2);
+
+      const resolved = h.resolve(`./A${ext}`);
+      expect(resolved?.resolvedFileName).toBe(apiProvider);
+      // A non-JSX extension is what makes TS6142 unreachable by construction —
+      // the plugin must not be relying on force-enabling `jsx` for the user's
+      // whole project to keep an ordinary import type-checkable.
+      expect(resolved?.extension).toBe(ts.Extension.Ts);
+      expect(resolved?.extension).not.toBe(ts.Extension.Tsx);
+      expect(resolved?.extension).not.toBe(ts.Extension.Jsx);
+
+      const warm = h.diagnostics();
+      const warmCodes = warm.map((d) => d.code);
+      const detail = warm
+        .map((d) => `TS${d.code}: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`)
+        .join("\n");
+      // Production reached the real invalidation hook — the resolution did not
+      // simply re-run against an unchanged Program.
+      expect(h.clearCalls()).toBeGreaterThan(0);
+      // The module resolves, and it resolves to a NON-JSX surface.
+      expect(warmCodes, detail).not.toContain(2307);
+      // Regression guard only (see the `jsx: Preserve` note above).
+      expect(warmCodes, detail).not.toContain(6142);
+      // …and the API surface is genuinely in the Program: its `number` contract
+      // is what the consumer is checked against, not the IDE surface's `string`.
+      expect(
+        warm.some(
+          (d) =>
+            d.code === 2322 &&
+            ts.flattenDiagnosticMessageText(d.messageText, "\n").includes("number"),
+        ),
+        detail,
+      ).toBe(true);
+    });
+  }
+
+  it("heals a cold start: the store dir arrives after the first resolution", async () => {
+    // On a cold editor start the plugin is created before the LSP has reported
+    // the resolved carrier-store dir, so the first resolution has no store to
+    // consult at all. It must fail closed — and the store handoff must clear
+    // this project's resolution cache so the retry sees the published surface.
+    const source = "/ws/src/A.vue";
+    const apiProvider = `${source}.verter.ts`;
+    const manifest = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
+    const project = manifest.projects[projectKey];
+    project.owned_sources.push({
+      source_uri: source,
+      provider_uri: apiProvider,
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    project.ready_files[apiProvider] = {
+      content_hash: "api-1",
+      version: 1,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    const dir = track(
+      writeStore(manifest, {
+        "blobs/A.vue.tsx": "export default {};",
+        "blobs/A.vue.verter.ts": "export default class A {}",
+      }),
+    );
+
+    // Constructed with NO store dir — the pre-notification cold window.
+    const info = createInfo(undefined, { diskFiles: {} }, projectKey);
+    let resolutionCacheCleared = 0;
+    info.project.projectService.clearSemanticCache = () => {
+      resolutionCacheCleared += 1;
+    };
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    const resolveA = () =>
+      info.languageServiceHost.resolveModuleNameLiterals(
+        [{ text: "./A.vue" }],
+        "/ws/src/consumer.ts",
+        undefined,
+        {},
+        undefined,
+      )[0]?.resolvedModule;
+
+    expect(resolveA()).toBeUndefined();
+
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 1,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // The store handoff invalidated module resolution…
+    expect(resolutionCacheCleared).toBeGreaterThan(0);
+    // …and the retry now sees the published import surface.
+    const resolved = resolveA();
+    expect(resolved?.resolvedFileName).toBe(apiProvider);
+    expect(resolved?.extension).toBe(ts.Extension.Ts);
+  });
+
+  it("heals a publication whose manifest replacement has an IDENTICAL stat tuple", async () => {
+    // The reader's change key is `(mtimeMs, size)`. The Rust publisher swaps the
+    // manifest ATOMICALLY, so a publication that replaces a ready-file entry
+    // rather than adding one can land at the same byte length within a single
+    // filesystem timestamp tick — a stat-identical replacement. If the token
+    // advance reads ready versions from the stale snapshot, nothing looks
+    // changed, `clearSemanticCache` never fires, and the cached TS2307 for this
+    // exact import survives until some unrelated publication. That is the
+    // sticky-negative mode this whole change exists to prevent.
+    const source = "/ws/src/A.vue";
+    const apiProvider = `${source}.verter.ts`;
+
+    // BEFORE: the API companion is owned but NOT ready.
+    const before = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
+    before.projects[projectKey].owned_sources.push({
+      source_uri: source,
+      provider_uri: apiProvider,
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    // AFTER: the same manifest with the API companion READY.
+    const after = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
+    after.projects[projectKey].owned_sources.push({
+      source_uri: source,
+      provider_uri: apiProvider,
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    after.projects[projectKey].ready_files[apiProvider] = {
+      content_hash: "api-1",
+      version: 1,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    // Both serializations padded to ONE width, and both writes pinned to ONE
+    // whole-second timestamp, so the replacement is byte-for-byte stat-identical.
+    const width = Math.max(JSON.stringify(before).length, JSON.stringify(after).length);
+    const pad = (m: Manifest) => {
+      const json = JSON.stringify(m);
+      return json + " ".repeat(width - json.length);
+    };
+    const pinnedSeconds = Math.floor(Date.now() / 1000) - 60;
+
+    const dir = track(
+      writeStore(before, {
+        "blobs/A.vue.tsx": "export default {};",
+        "blobs/A.vue.verter.ts": "export default class A {}",
+      }),
+    );
+    const manifestPath = join(dir, "manifest.json");
+    writeFileSync(manifestPath, pad(before), "utf8");
+    utimesSync(manifestPath, pinnedSeconds, pinnedSeconds);
+
+    const info = createInfo(dir, { diskFiles: {} }, projectKey);
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 1,
+    };
+    let cacheClears = 0;
+    info.project.projectService.clearSemanticCache = () => {
+      cacheClears += 1;
+    };
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    const resolveA = () =>
+      info.languageServiceHost.resolveModuleNameLiterals(
+        [{ text: "./A.vue" }],
+        "/ws/src/consumer.ts",
+        undefined,
+        {},
+        undefined,
+      )[0]?.resolvedModule;
+
+    // Owned-but-unready: the bounded cold read times out and the plugin
+    // abstains. This ALSO seeds the reader's manifest snapshot.
+    expect(resolveA()).toBeUndefined();
+    const statBefore = statSync(manifestPath);
+
+    writeFileSync(manifestPath, pad(after), "utf8");
+    utimesSync(manifestPath, pinnedSeconds, pinnedSeconds);
+
+    // The replacement really is stat-identical — otherwise this test would be
+    // exercising the ordinary mtime-changed path and prove nothing.
+    const statAfter = statSync(manifestPath);
+    expect(statAfter.size).toBe(statBefore.size);
+    expect(statAfter.mtimeMs).toBe(statBefore.mtimeMs);
+
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 2,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // The token advance observed the publication despite the identical stat…
+    expect(cacheClears).toBeGreaterThan(0);
+    // …and the import now resolves to the public-API surface.
+    const resolved = resolveA();
+    expect(resolved?.resolvedFileName).toBe(apiProvider);
+    expect(resolved?.extension).toBe(ts.Extension.Ts);
+  });
+
+  it("abstains for an OWNED but never-published import surface (bounded, never fabricated)", () => {
+    // Ownership without content is the transient mid-publish window. The bounded
+    // cold read is allowed to wait it out, but on timeout the answer is still
+    // ABSTAIN: pointing TypeScript at a path the store cannot serve produces a
+    // sticky TS2307 that no later publication can clear.
+    const source = "/ws/src/A.vue";
+    const manifest = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
+    manifest.projects[projectKey].owned_sources.push({
+      source_uri: source,
+      provider_uri: `${source}.verter.ts`,
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    // NOTE: no `ready_files` entry for the API companion — owned, unpublished.
+    const dir = track(writeStore(manifest, { "blobs/A.vue.tsx": "export default {};" }));
+    const info = createInfo(dir, { diskFiles: {} }, projectKey);
+    init({ typescript: ts } as any).create(info);
+
+    const resolved = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./A.vue" }],
+      "/ws/src/consumer.ts",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+    expect(resolved).toBeUndefined();
+  });
+
+  it("matches the owned import surface through the host's canonical path identity", () => {
+    // A case-insensitive host (Windows / APFS): the importer spells the
+    // directory differently from the manifest the LSP wrote. The redirect must
+    // still find the owned import surface — a raw string comparison would not.
+    const source = "/ws/src/A.vue";
+    const manifest = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
+    manifest.projects[projectKey].owned_sources.push({
+      source_uri: source,
+      provider_uri: `${source}.verter.ts`,
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    manifest.projects[projectKey].ready_files[`${source}.verter.ts`] = {
+      content_hash: "api-1",
+      version: 1,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    const dir = track(
+      writeStore(manifest, {
+        "blobs/A.vue.tsx": "export default {};",
+        "blobs/A.vue.verter.ts": "export default class A {}",
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: {} }, projectKey);
+    expect(info.serverHost.useCaseSensitiveFileNames).toBe(false);
+    init({ typescript: ts } as any).create(info);
+
+    const resolved = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./A.vue" }],
+      "/WS/src/consumer.ts",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+    // The MANIFEST-owned identity is returned, not the importer's spelling: the
+    // store, the ScriptInfo content reloads and the ready-version bookkeeping
+    // all key on the path the LSP published.
+    expect(resolved?.resolvedFileName).toBe("/ws/src/A.vue.verter.ts");
+    expect(resolved?.extension).toBe(ts.Extension.Ts);
+  });
+
+  /**
+   * The alias / `baseUrl` route (a NON-relative carrier specifier). The
+   * candidate carrier source is picked out of TypeScript's own failed-lookup
+   * locations, gated on `baseUrl` containment. That gate used a raw
+   * `candidate.includes(baseUrl)` substring test — separator- and drive-case
+   * sensitive, so a `baseUrl` spelled `D:\ws\src` rejected a `d:/ws/src/...`
+   * candidate on Windows and the carrier silently failed to resolve.
+   */
+  describe("alias / baseUrl carrier specifier", () => {
+    const source = "/ws/src/A.vue";
+    const apiProvider = `${source}.verter.ts`;
+
+    /**
+     * `candidate` is the carrier source TypeScript reports in its
+     * `failedLookupLocations`; the manifest owns that source's API companion, so
+     * the ONLY thing under test is the `baseUrl` containment gate.
+     */
+    function aliasHarness(baseUrl: string | undefined, candidate: string = source) {
+      const ide = `${candidate}.tsx`;
+      const api = `${candidate}.verter.ts`;
+      const manifest = ideOnlyManifest(candidate, ide, "blobs/A.vue.tsx");
+      const project = manifest.projects[projectKey];
+      project.owned_sources.push({
+        source_uri: candidate,
+        provider_uri: api,
+        role: "CarrierApi",
+        script_kind: "TS",
+      });
+      project.ready_files[api] = {
+        content_hash: "api-1",
+        version: 1,
+        script_kind: "TS",
+        role: "CarrierApi",
+        map_hash: "0",
+        blob_rel: "blobs/A.vue.verter.ts",
+      };
+      const dir = track(
+        writeStore(manifest, {
+          "blobs/A.vue.tsx": "export default {};",
+          "blobs/A.vue.verter.ts": "export default class A {}",
+        }),
+      );
+      const info = createInfo(dir, { diskFiles: { [candidate]: "<template />" } }, projectKey);
+      const compilerOptions: ts.CompilerOptions = baseUrl === undefined ? {} : { baseUrl };
+      info.project.getCompilerOptions = () => compilerOptions;
+      // TypeScript's own resolver misses the aliased carrier and reports where
+      // it looked — the exact shape the redirect consumes.
+      info.languageServiceHost.resolveModuleNameLiterals = (
+        literals: readonly { text: string }[],
+      ) =>
+        literals.map(() => ({
+          resolvedModule: undefined,
+          failedLookupLocations: [candidate],
+        }));
+      init({ typescript: ts } as any).create(info);
+      return info;
+    }
+
+    function resolveAlias(info: any): ts.ResolvedModuleFull | undefined {
+      return info.languageServiceHost.resolveModuleNameLiterals(
+        [{ text: "@app/A.vue" }],
+        "/ws/src/consumer.ts",
+        undefined,
+        info.project.getCompilerOptions(),
+        undefined,
+      )[0]?.resolvedModule;
+    }
+
+    it("resolves an aliased carrier to the public-API carrier with no baseUrl", () => {
+      const resolved = resolveAlias(aliasHarness(undefined));
+      expect(resolved?.resolvedFileName).toBe(apiProvider);
+      expect(resolved?.extension).toBe(ts.Extension.Ts);
+    });
+
+    it("accepts a candidate under a baseUrl spelled with foreign separators", () => {
+      const resolved = resolveAlias(aliasHarness("\\ws\\src"));
+      expect(resolved?.resolvedFileName).toBe(apiProvider);
+    });
+
+    it("accepts a candidate under a baseUrl whose case differs on a case-insensitive host", () => {
+      const resolved = resolveAlias(aliasHarness("/WS/SRC"));
+      expect(resolved?.resolvedFileName).toBe(apiProvider);
+    });
+
+    it("rejects a sibling directory that merely SHARES the baseUrl prefix", () => {
+      // The kill shot for the old `candidate.includes(baseUrl)` gate:
+      // `"/ws/srcOther/A.vue".includes("/ws/src")` is TRUE, so the substring
+      // test accepted a carrier that is NOT inside `baseUrl`. Boundary-anchored
+      // containment rejects it — `/ws/srcOther` is a sibling of `/ws/src`, not a
+      // child. (Reversing the roles would not discriminate: the old test's
+      // base `/ws/srcOther` is already absent from `/ws/src/A.vue`.)
+      const info = aliasHarness("/ws/src", "/ws/srcOther/A.vue");
+      expect(resolveAlias(info)).toBeUndefined();
+    });
+
+    it("accepts a candidate nested under an ANCESTOR baseUrl directory", () => {
+      // `baseUrl` is a DIRECTORY (that is the shape TypeScript parses from a
+      // tsconfig), and a real project's carriers sit below it rather than at
+      // it. This exercises the boundary-anchored prefix branch at a real depth.
+      const resolved = resolveAlias(aliasHarness("/ws", "/ws/src/nested/A.vue"));
+      expect(resolved?.resolvedFileName).toBe("/ws/src/nested/A.vue.verter.ts");
+      expect(resolved?.extension).toBe(ts.Extension.Ts);
+    });
+  });
+});
 
 describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
   it("getExternalFiles(projectA) returns ONLY projectA's carrier, never projectB's (vue + svelte)", () => {
@@ -4190,8 +4876,9 @@ describe("module-level companion definition remap (import-specifier go-to-def)",
       "/ws/src/A.vue": '<template/>\n<script setup lang="ts">\nconst x = 1;\n</script>\n',
       "/ws/src/W.svelte": '<script lang="ts">\nconst y = 1;\n</script>\n',
       // The carriers must exist on disk so `resolveModuleFileName` (which checks
-      // `path.resolve(dir, './A.vue')`) resolves them; the plugin redirects to
-      // the IDE companion via `toIdeCarrierFileName`.
+      // `path.resolve(dir, './A.vue')`) resolves them. Module-specifier
+      // NAVIGATION targets the carrier SOURCE directly — no companion is
+      // involved, and no publication state is consulted.
       "/ws/src/Consumer.ts": CONSUMER,
     };
   }

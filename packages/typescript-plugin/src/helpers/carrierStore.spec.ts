@@ -1,13 +1,27 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { resolveCarrierImportTarget } from "@verter/language-shared";
 import type { CarrierStoreReader, Manifest } from "@verter/language-shared";
 import {
   DiskCarrierStoreReader,
   resolveCarrierStoreDir,
   resolveResponseRemap,
 } from "./carrierStore";
+
+/**
+ * Pad `json` with insignificant whitespace until it serializes to EXACTLY
+ * `length` bytes, so a manifest replacement can be made stat-identical to the
+ * file it replaces. Throws when the payload is already longer — a silently
+ * shorter/longer replacement would make the equal-stat test prove nothing.
+ */
+function padToLength(json: string, length: number): string {
+  if (json.length > length) {
+    throw new Error(`cannot pad ${json.length} bytes down to ${length}`);
+  }
+  return json + " ".repeat(length - json.length);
+}
 
 /** Write a manifest + the named blob/map files into a fresh store dir. */
 function makeStore(manifest: Manifest, blobs: Record<string, string> = {}): string {
@@ -234,6 +248,53 @@ describe("DiskCarrierStoreReader.readManifest", () => {
 
     expect(reader.readManifest()?.epoch).toBe(9);
   });
+
+  it("invalidateManifest forces a re-read of a replacement with an IDENTICAL stat tuple", () => {
+    // The `(mtimeMs, size)` change key cannot see an atomic replacement that
+    // preserves both — a same-length manifest written within one filesystem
+    // timestamp tick. The Rust publisher swaps the manifest atomically, so a
+    // publication whose serialized length is unchanged (the common case: a
+    // ready-file entry replaced, not added) is exactly that shape. Nothing
+    // downstream may rely on the stat key alone to observe a publication.
+    const first = baseManifest();
+    const second = baseManifest();
+    second.epoch = 9;
+    const width = Math.max(JSON.stringify(first).length, JSON.stringify(second).length);
+
+    const dir = track(makeStore(first));
+    const manifestPath = join(dir, "manifest.json");
+    // Pin both writes to the SAME whole-second timestamp so the stat tuple is
+    // exactly reproducible (sub-millisecond mtime precision is not).
+    const pinnedSeconds = Math.floor(Date.now() / 1000) - 60;
+    writeFileSync(manifestPath, padToLength(JSON.stringify(first), width), "utf8");
+    utimesSync(manifestPath, pinnedSeconds, pinnedSeconds);
+
+    const reader = new DiskCarrierStoreReader(dir);
+    expect(reader.readManifest()?.epoch).toBe(7);
+    const before = statSync(manifestPath);
+
+    writeFileSync(manifestPath, padToLength(JSON.stringify(second), width), "utf8");
+    utimesSync(manifestPath, pinnedSeconds, pinnedSeconds);
+
+    // The replacement really is stat-identical — otherwise this test would be
+    // exercising the ordinary mtime-changed path and prove nothing.
+    const after = statSync(manifestPath);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+
+    // The cached snapshot is genuinely stale…
+    expect(reader.readManifest()?.epoch).toBe(7);
+    // …and only an explicit invalidation can observe the publication.
+    reader.invalidateManifest();
+    expect(reader.readManifest()?.epoch).toBe(9);
+  });
+
+  it("invalidateManifest is safe with no store dir and with no prior read", () => {
+    expect(() => new DiskCarrierStoreReader(undefined).invalidateManifest()).not.toThrow();
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
+    reader.invalidateManifest();
+    expect(reader.readManifest()?.epoch).toBe(7);
+  });
 });
 
 describe("DiskCarrierStoreReader.ownedSources", () => {
@@ -363,13 +424,35 @@ describe("DiskCarrierStoreReader.readyFileForSource", () => {
     expect(reader.companionForSource("d:/ws/src/JsWidget.svelte")).toBe(
       "d:/ws/src/JsWidget.svelte.jsx",
     );
-    expect(reader.apiCompanionForSource("d:/ws/src/JsWidget.svelte")).toBe(
-      "d:/ws/src/JsWidget.svelte.verter.ts",
-    );
+    // The shared import policy over this disk reader: a JavaScript-authored
+    // Svelte carrier (published as `.jsx` for the editor) still presents ONE
+    // TypeScript import surface to consuming modules.
+    expect(resolveCarrierImportTarget(reader, "d:/ws/src/JsWidget.svelte")).toEqual({
+      kind: "resolve",
+      provider: "d:/ws/src/JsWidget.svelte.verter.ts",
+    });
 
+    // Ownership — not readiness — is what the policy answers: an owned surface
+    // whose content has not landed yet still selects the same target (the
+    // caller's bounded cold read decides whether it is servable), and the
+    // carrier's `.jsx` editor companion is never the answer.
     delete project.ready_files["d:/ws/src/JsWidget.svelte.verter.ts"];
     const unreadyReader = new DiskCarrierStoreReader(track(makeStore(manifest)));
-    expect(unreadyReader.apiCompanionForSource("d:/ws/src/JsWidget.svelte")).toBeUndefined();
+    expect(resolveCarrierImportTarget(unreadyReader, "d:/ws/src/JsWidget.svelte")).toEqual({
+      kind: "resolve",
+      provider: "d:/ws/src/JsWidget.svelte.verter.ts",
+    });
+  });
+
+  it("abstains from the import surface when the project owns only the IDE carrier", () => {
+    const manifest = baseManifest();
+    const reader = new DiskCarrierStoreReader(track(makeStore(manifest)));
+    // `baseManifest` owns only `CarrierIde` rows — an ordinary import must get
+    // nothing rather than the JSX/TSX editor companion.
+    expect(resolveCarrierImportTarget(reader, "d:/ws/src/A.vue")).toEqual({
+      kind: "abstain",
+      reason: "unowned",
+    });
   });
 
   it("uses the manifest IDE identity for a JavaScript carrier", () => {

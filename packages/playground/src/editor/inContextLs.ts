@@ -11,19 +11,20 @@
  * - roots       — user files + ready IDE companions (`selfDiagnosticRoot`);
  *                 declaration carriers are import-driven, API carriers
  *                 redirect-reached (CORE root-membership policy);
- * - resolution  — a bare `./X.vue` / `./X.svelte` import routes to the CORE
- *                 extension-MIDDLE declaration carrier (`X.d.vue.ts`) and
- *                 FAILS CLOSED when it is not published (no fallthrough to
- *                 `.tsx` / `.verter.ts`); everything else uses TypeScript's
- *                 own resolution;
+ * - resolution  — a bare `./X.vue` / `./X.svelte` import goes through the CORE
+ *                 import policy, which gives this host the SAME target the Node
+ *                 tsserver plugin gets: the API carrier (`X.vue.verter.ts`),
+ *                 FAILING CLOSED when it is not published (no fallthrough to
+ *                 `.tsx` / `.d.vue.ts`); everything else uses TypeScript's own
+ *                 resolution;
  * - script kind — the CORE carrier script-kind policy with the injected `ts`;
  * - options     — parity with the Rust host's synthesized compiler options.
  */
 import type * as tsNs from "typescript";
 import {
   normalizePath,
+  resolveCarrierImportTarget,
   scriptKindForCarrier,
-  toDeclarationCarrierFileName,
   type CarrierStoreReader,
 } from "@verter/language-shared";
 
@@ -182,9 +183,23 @@ export function createInContextLanguageService(options: InContextLsOptions): InC
   };
 
   /**
-   * The fail-closed bare-carrier redirect: a RELATIVE `./X.vue` / `./X.svelte`
-   * import resolves to the published extension-MIDDLE declaration carrier or
-   * NOT AT ALL. `null` = not a bare-carrier import (use default resolution).
+   * The fail-closed bare-carrier import: a RELATIVE `./X.vue` / `./X.svelte`
+   * import resolves to the published API carrier (`X.vue.verter.ts`) or NOT AT
+   * ALL. `null` = not a bare-carrier import (use default resolution).
+   *
+   * WHICH surface is the shared CORE policy's answer — the SAME answer the Node
+   * tsserver plugin gets. This host rewrites the specifier itself (it returns
+   * `resolvedFileName` from its own `resolveModuleNameLiterals` below), so it
+   * can name any published surface, and every host that can choose must choose
+   * the same one: a user must not observe a different component type in the
+   * browser than in their editor. The extension-MIDDLE declaration carrier
+   * (`X.d.vue.ts`) is what native tsgo finds through its OWN basename-append
+   * probe, having no host plugin — that is tsgo's constraint, not this host's,
+   * and it is a strictly weaker surface (a runtime-object `defineExpose({ x })`
+   * renders `x: unknown` there because the setup body is omitted, versus
+   * `x: typeof x` on the API surface). Never the IDE `.tsx`/`.jsx` companion.
+   *
+   * WHEN it is servable stays here: the store must actually hold the blob.
    */
   const resolveBareCarrierImport = (
     specifier: string,
@@ -193,22 +208,23 @@ export function createInContextLanguageService(options: InContextLsOptions): InC
     if (!specifier.startsWith("./") && !specifier.startsWith("../")) {
       return null;
     }
-    if (toDeclarationCarrierFileName(specifier) === null) {
-      return null;
-    }
     const baseDir = posixDirname(normalizePath(containingFile));
     const absolute = posixResolveFrom(baseDir, specifier);
-    const declPath = toDeclarationCarrierFileName(absolute);
-    if (declPath !== null && store.readyFile(declPath) !== undefined) {
-      return {
-        resolvedFileName: declPath,
-        extension: ts.Extension.Dts,
-        isExternalLibraryImport: false,
-      };
+    const target = resolveCarrierImportTarget(store, absolute);
+    if (target.kind === "abstain") {
+      // `notCarrier` — a plain relative module: TypeScript's own resolution.
+      // `unowned`   — a carrier whose API surface is not published: fail closed
+      //               rather than fall through to `.tsx` / `.d.vue.ts`.
+      return target.reason === "notCarrier" ? null : undefined;
     }
-    // Fail closed: the declaration carrier is not published — the import
-    // stays unresolved rather than falling through to `.tsx`/`.verter.ts`.
-    return undefined;
+    if (store.readyFile(target.provider) === undefined) {
+      return undefined;
+    }
+    return {
+      resolvedFileName: target.provider,
+      extension: ts.Extension.Ts,
+      isExternalLibraryImport: false,
+    };
   };
 
   const host: tsNs.LanguageServiceHost & {

@@ -126,7 +126,10 @@ export function normalizePath(fileName: string): string {
  * The IDE-carrier companion suffix a `VirtualPathPolicy` produces — the
  * `ide` column, NOT the import surface. This is the path the Rust LSP
  * publishes a carrier's interactive content at (`Comp.vue.tsx` /
- * `Comp.svelte.jsx`) and the in-project module-resolution redirect target:
+ * `Comp.svelte.jsx`) — the editor's own self-diagnostic root. It is NEVER an
+ * ordinary import's target: that is the `importSurface` column
+ * ([`toImportSurfaceFileName`]) or the declaration carrier
+ * ([`toDeclarationCarrierFileName`]), per the host's resolution mechanism.
  *   - `suffix`        → its single suffix.
  *   - `jsxConditional`→ the `nonJsx` suffix used as the shape-only fallback.
  *     The manifest-aware host path selects the actual `nonJsx`/`jsx` identity
@@ -197,6 +200,56 @@ export function toIdeCarrierFileName(fileName: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * The IMPORT-SURFACE (public-API) path for a component-carrier source — the
+ * `importSurface` column (`Comp.vue` → `Comp.vue.verter.ts`, `Comp.svelte` →
+ * `Comp.svelte.verter.ts`), or `null` when `source` projects no distinct import
+ * surface.
+ *
+ * This is the target an ORDINARY module import of a carrier resolves to: one
+ * TypeScript declaration surface (`$props`/`$events`/`$slots`) every consumer
+ * observes, whatever dialect the carrier's script block is authored in. It is
+ * deliberately NOT [`toIdeCarrierFileName`] — the IDE companion is the editor's
+ * own JSX/TSX diagnostic root, and handing it to a consuming module makes an
+ * ordinary `.ts` importer depend on the project having `jsx` configured.
+ *
+ * Descriptor-derived (longest carrier extension wins), never a framework
+ * literal, so both component adapters — and any future one — participate with
+ * no edit here:
+ *   - a row whose `importSurface` is `selfFile`/`none` (the Svelte rune module,
+ *     which serves its OWN path) returns `null`;
+ *   - a generated virtual (`Comp.vue.tsx`, `Comp.vue.verter.ts`) is not a bare
+ *     carrier source and returns `null` (no double-suffixing);
+ *   - the carrier extension must sit on a non-empty BASENAME stem (a bare
+ *     `.vue` / `/x/.vue` is not a carrier path).
+ */
+export function toImportSurfaceFileName(source: string): string | null {
+  const normalized = normalizePath(source);
+  // LONGEST carrier extension first, THEN interpret that row's import surface.
+  // Filtering non-`suffix` rows out before the longest-match would let a SHORTER
+  // component row claim a path a longer `selfFile` row owns and fabricate a
+  // surface for it (`store.component.vue` → `store.component.vue.verter.ts`
+  // under a hypothetical `.component.vue` self-file row). The owning row decides,
+  // and a `selfFile`/`none` owner contributes no distinct import surface.
+  let match: { extension: string; suffix: string | null } | null = null;
+  for (const row of Object.values(VIRTUAL_FILE_NAMING)) {
+    const ext = row.carrierExtension;
+    if (ext === null || !normalized.endsWith(ext)) continue;
+    if (match === null || ext.length > match.extension.length) {
+      match = { extension: ext, suffix: policySuffix(row.importSurface) };
+    }
+  }
+  if (match === null || match.suffix === null) {
+    return null;
+  }
+  const stem = normalized.slice(0, normalized.length - match.extension.length);
+  const last = stem.length > 0 ? stem[stem.length - 1] : undefined;
+  if (last === undefined || last === "/") {
+    return null;
+  }
+  return `${normalized}${match.suffix as string}`;
 }
 
 /**

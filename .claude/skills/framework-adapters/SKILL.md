@@ -56,6 +56,20 @@ derivations are CONSUMERS of the column; consumer rewiring is a later
 vertical, but the column + mirror + freshness pin land here so the two
 cannot drift.
 
+An ORDINARY module import of a carrier resolves through ONE shared function with
+ONE answer, `@verter/language-shared`'s
+`carrier/policy.ts::resolveCarrierImportTarget`: the `importSurface` column via
+`carrier/naming.ts::toImportSurfaceFileName`, never the `ide` column. Every host
+that rewrites the specifier itself (the tsserver plugin, the browser/WASM
+in-context service) gets that same target, because the surfaces are semantically
+distinct and a user must not observe a different component type per host. Native
+tsgo is the one engine with no choice — no host plugin, so its own
+basename-append probe finds the `declarationSurface` column — and it does not go
+through this function. The path transforms are framework-neutral by
+construction, so a new adapter participates with no host edit. See
+`/host-session` → "Ordinary Carrier Import → Public-API Surface" for the
+semantic-parity rationale and the readiness/invalidation half.
+
 ### Client framework manifest (de-Vue-forked client wiring)
 
 A SECOND descriptor-generated, byte-pinned TS artifact —
