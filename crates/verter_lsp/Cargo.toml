@@ -11,6 +11,18 @@ publish = false
 
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_session/hotpath", "verter_diagnostics/hotpath"]
+# Opt-in test-support seam for items the SEPARATE integration-test binary needs
+# (`#[cfg(any(test, feature = "test-support"))]`) — e.g. the delivered-ledger
+# read `ProjectSync::delivered_provider_content`. Activated by the self-edge in
+# dev-dependencies below (the same pattern as `verter_session`'s self-edge), so
+# the seam exists for this crate's own test targets. The invariant this
+# delivers is DEFAULT-OFF, not unconditional unreachability: no default build
+# compiles the seam (it is not in the `default` feature closure — guard-enforced
+# by `test_support_feature_is_not_in_default_build` in
+# tests/cases/test_support_feature_off_in_default_build.rs) and no current
+# dependent enables it, but an explicit opt-in (`--all-features`, or a future
+# dependent declaring `features = ["test-support"]`) does compile it.
+test-support = []
 
 [dependencies]
 verter_session = { path = "../verter_session", features = ["session_metrics"] }
@@ -86,6 +98,15 @@ tempfile = "3.27"
 # The ordinary dependency already enables `session_metrics`; keeping the full
 # union here makes feature intent explicit without creating a duplicate key.
 verter_session = { path = "../verter_session", features = ["session_metrics", "test-support", "test-util"] }
+# Structural `[features]`-table parse for the `test-support` default-off
+# architecture guard (tests/cases/test_support_feature_off_in_default_build.rs),
+# mirroring verter_session's dev-dependency of the same purpose.
+toml = "1.1"
+# Self-edge that activates `verter_lsp`'s OWN `test-support` feature for its
+# test targets (unit + integration): feature unification gives the lib those
+# seams exactly when it is built for this crate's tests, never for a production
+# dependent. Mirrors `verter_session`'s self-edge.
+verter_lsp = { path = ".", features = ["test-support"] }
 # Used by `tests/editor_liveness_guards.rs` to AST-parse the LSP provider-sync
 # source so the delegated-stale-close detector is robust against multiline call
 # spans, bare-local stale sets, and aliased delegation (a line-based scan is

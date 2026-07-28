@@ -248,6 +248,7 @@ export async function waitForFileReady(
   }
 
   const start = Date.now();
+  let lastProbeSummary = "no completion poll completed";
   while (Date.now() - start < timeoutMs) {
     const completions = await vscode.commands.executeCommand<vscode.CompletionList>(
       "vscode.executeCompletionItemProvider",
@@ -265,13 +266,23 @@ export async function waitForFileReady(
       ) {
         return;
       }
+      // What the LAST poll actually saw, so a timeout names the answer shape
+      // instead of reading as a bare deadline. Zero items with the lane engaged
+      // (the shared-tsgo sidecar-drop failure mode) and "present but untyped
+      // (kind=Text word suggestion)" are different defects; the summary makes
+      // them distinguishable from the failure alone.
+      lastProbeSummary = match
+        ? `"${expectedLabel}" present but not typed (kind=${match.kind === undefined ? "undefined" : vscode.CompletionItemKind[match.kind]}) among ${completions.items.length} item(s)`
+        : `${completions.items.length} item(s), none labeled "${expectedLabel}"`;
+    } else {
+      lastProbeSummary = "no completion list (provider returned null)";
     }
     await sleep(intervalMs);
   }
 
   throw new Error(
     `waitForFileReady: timed out waiting for "${expectedLabel}" in ${doc.uri.toString()} ` +
-      `to get a typed completion (${timeoutMs}ms)`,
+      `to get a typed completion (${timeoutMs}ms); last poll saw: ${lastProbeSummary}`,
   );
 }
 

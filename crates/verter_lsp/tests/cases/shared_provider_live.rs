@@ -244,13 +244,24 @@ fn write_fixture_common(dir: &Path) -> PathBuf {
     .unwrap();
     // A minimal `vue` package so the carrier's `import(\"vue\")` resolves.
     let vue_dir = dir.join("node_modules").join("vue");
-    std::fs::create_dir_all(&vue_dir).unwrap();
+    std::fs::create_dir_all(vue_dir.join("jsx-runtime")).unwrap();
+    // The package carries a typed `./jsx-runtime` export because the PRODUCTION
+    // tsgo carrier preparer (`prepare_managed_tsgo_vue_carrier`) resolves it to
+    // build the classic-JSX adapter — a real installed Vue always has it, and
+    // the ProjectSync-driven template-answer tests publish through that real
+    // preparer. The `.` export keeps the plain `import { ref } from "vue"`
+    // resolution identical to the pre-exports stub.
     std::fs::write(
         vue_dir.join("package.json"),
-        "{\n  \"name\": \"vue\",\n  \"version\": \"3.5.0\",\n  \"types\": \"index.d.ts\"\n}\n",
+        "{\n  \"name\": \"vue\",\n  \"version\": \"3.5.0\",\n  \"types\": \"index.d.ts\",\n  \"exports\": {\n    \".\": { \"types\": \"./index.d.ts\" },\n    \"./jsx-runtime\": { \"types\": \"./jsx-runtime/index.d.ts\" }\n  }\n}\n",
     )
     .unwrap();
     std::fs::write(vue_dir.join("index.d.ts"), VUE_STUB).unwrap();
+    std::fs::write(
+        vue_dir.join("jsx-runtime").join("index.d.ts"),
+        "export namespace JSX {\n  interface Element {}\n  interface ElementClass { $props: {} }\n  interface ElementAttributesProperty { $props: {} }\n  interface IntrinsicElements { [name: string]: any }\n  interface IntrinsicAttributes {}\n}\n",
+    )
+    .unwrap();
     // A minimal `@verter/types` package so the carrier's `import from
     // "@verter/types"` RESOLVES (an inline `declare module` inside the module
     // carrier would be a no-op augmentation; a real installed project ships the
@@ -1418,7 +1429,9 @@ struct CompositeHarness {
     /// duration — dropping it EOFs the shim's stdin.
     #[allow(dead_code)]
     editor: FakeEditor,
-    composite: TsgoCompositeProvider,
+    /// `Arc` so the template-answer suite can hand the SAME composite to the
+    /// production `ProjectSync` publication funnel (`Arc<dyn TypeProvider>`).
+    composite: Arc<TsgoCompositeProvider>,
     dir: PathBuf,
     src: PathBuf,
 }
@@ -1483,7 +1496,7 @@ async fn setup_composite(tsgo: &Path, tag: &str, owned: Arc<dyn TypeProvider>) -
     );
     // The always-present host-aware admission layer wraps OWNED + the host, with the
     // SHARED overlay OPTIONAL (present here under the live rendezvous).
-    let composite = TsgoCompositeProvider::new(owned, host, Some(overlay));
+    let composite = Arc::new(TsgoCompositeProvider::new(owned, host, Some(overlay)));
 
     CompositeHarness {
         shim,
@@ -1728,7 +1741,7 @@ async fn composite_attach_failure_activates_managed_fallback_exactly_once() {
             }
         }
     })) as Arc<dyn TypeProvider>;
-    let composite = TsgoCompositeProvider::new(fallback, host, Some(overlay));
+    let composite = Arc::new(TsgoCompositeProvider::new(fallback, host, Some(overlay)));
 
     let (ide_code, _source_map, companion) = compile_vue_ide(WIDGET_VUE);
     let carrier_tsx = norm(&src.join("Widget.vue.tsx"));
@@ -1759,4 +1772,358 @@ async fn composite_attach_failure_activates_managed_fallback_exactly_once() {
 
     composite.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(dir);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEMPLATE-REGION TYPED ANSWERS THROUGH THE SHARED FEATURE LANE
+//
+// The `monorepo@shared-tsgo` E2E leg dies in its root readiness probe: the SHARED
+// lane ENGAGES (148 served completion queries in one run) yet never returns a
+// typed completion for a template interpolation binding. These two tests pin the
+// invariant at the composite boundary — the same entry the LSP handler drives —
+// for (a) the single-project control and (b) the nested-leaf monorepo topology
+// (a root SOLUTION tsconfig referencing two disjoint packages, the carrier
+// uniquely owned by ONE leaf). The probes mirror the E2E readiness gate: a
+// completion item for the template member with a REAL kind (never `Text`), and a
+// hover that names the prop's declared type (never a degraded `any`).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The E2E monorepo topology, miniaturized on disk: a root SOLUTION
+/// `tsconfig.json` (`files: [], references`) plus two DISJOINT nested configured
+/// projects. The carrier lives under `packages/app/src` and is claimed by EXACTLY
+/// ONE leaf — the uniquely-owned nested-project case, distinct from the
+/// dual-claimant overlap fixture. Returns `(app_tsconfig_path, app_src_dir)`.
+fn write_monorepo_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+    let app_dir = dir.join("packages").join("app");
+    let src = write_fixture_common(&app_dir);
+    std::fs::write(
+        app_dir.join("tsconfig.json"),
+        format!("{{\n{FIXTURE_COMPILER_OPTIONS},\n  \"include\": [\"src/**/*\"]\n}}\n"),
+    )
+    .unwrap();
+    let shared_dir = dir.join("packages").join("shared");
+    let shared_src = shared_dir.join("src");
+    std::fs::create_dir_all(&shared_src).unwrap();
+    std::fs::write(shared_src.join("util.ts"), "export const shared = 1;\n").unwrap();
+    std::fs::write(
+        shared_dir.join("tsconfig.json"),
+        format!("{{\n{FIXTURE_COMPILER_OPTIONS},\n  \"include\": [\"src/**/*\"]\n}}\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("tsconfig.json"),
+        "{\n  \"files\": [],\n  \"references\": [\n    { \"path\": \"./packages/app\" },\n    { \"path\": \"./packages/shared\" }\n  ]\n}\n",
+    )
+    .unwrap();
+    (app_dir.join("tsconfig.json"), src)
+}
+
+/// The published snapshot for the monorepo fixture: the solution + the two nested
+/// leaves, built through the SAME production membership/reference loaders every
+/// other fixture snapshot in this file uses. Each nested project's ROOT is its own
+/// package directory (the include-pattern base), not the workspace root.
+fn monorepo_fixture_snapshot(ws_root: &str) -> WorkspaceSnapshot {
+    let solution = format!("{ws_root}/tsconfig.json");
+    let app = format!("{ws_root}/packages/app/tsconfig.json");
+    let shared = format!("{ws_root}/packages/shared/tsconfig.json");
+    let ws = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![ws_root.to_string()],
+        default_resolve_extensions: None,
+    });
+    ws.inject_file(
+        solution.clone(),
+        Arc::<str>::from(
+            r#"{ "files": [], "references": [{ "path": "./packages/app" }, { "path": "./packages/shared" }] }"#,
+        ),
+    );
+    ws.inject_file(
+        app.clone(),
+        Arc::<str>::from(r#"{ "include": ["src/**/*"] }"#),
+    );
+    ws.inject_file(
+        shared.clone(),
+        Arc::<str>::from(r#"{ "include": ["src/**/*"] }"#),
+    );
+    ws.inject_file(
+        format!("{ws_root}/packages/app/src/Widget.vue"),
+        Arc::<str>::from("<template></template>"),
+    );
+
+    let make_project = |id: u32, project_root: &str, tsconfig: &str| {
+        let root = CanonicalPath::new(project_root);
+        let raw_membership = load_project_membership(&ws, tsconfig);
+        let compiler_options = load_compiler_options(&ws, tsconfig);
+        let supported = supported_extensions_for(&compiler_options);
+        let spec = membership_to_spec(&root, &raw_membership, &supported);
+        let references = load_project_references(&ws, tsconfig)
+            .into_iter()
+            .map(|r| CanonicalPath::new(&r))
+            .collect();
+        OwnershipProject {
+            id: ProjectId(id),
+            root,
+            workspace_root: CanonicalPath::new(ws_root),
+            payload: ProjectPayload::Configured {
+                tsconfig_path: CanonicalPath::new(tsconfig),
+                membership: ConfiguredMembership {
+                    spec,
+                    materialized_files: Default::default(),
+                },
+                compiler_options,
+                references,
+                workspace_aliases: Vec::new(),
+            },
+        }
+    };
+    build_workspace_snapshot_simple(
+        vec![
+            make_project(0, ws_root, &solution),
+            make_project(1, &format!("{ws_root}/packages/app"), &app),
+            make_project(2, &format!("{ws_root}/packages/shared"), &shared),
+        ],
+        SnapshotGeneration(1),
+    )
+}
+
+/// Wire the composite over the MONOREPO fixture: real shim + fake editor + the
+/// host publishing the solution+leaves snapshot. Mirrors `setup_composite`.
+async fn setup_composite_monorepo(
+    tsgo: &Path,
+    tag: &str,
+    owned: Arc<dyn TypeProvider>,
+) -> CompositeHarness {
+    let dir = tempdir(tag);
+    let (_app_tsconfig, src) = write_monorepo_fixture(&dir);
+    let workspace_norm = norm(&dir);
+    let root_uri = format!("file:///{}", workspace_norm.trim_start_matches('/'));
+    let control_dir = dir.join("ctl");
+    let session_key = tag.to_string();
+
+    let mut shim = spawn_shim(tsgo, &control_dir, &session_key);
+    let editor_stdin = shim.stdin.take().expect("shim stdin piped");
+    let editor_stdout = shim.stdout.take().expect("shim stdout piped");
+    let editor = FakeEditor::new(editor_stdin, editor_stdout);
+
+    editor
+        .send(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init_params(&root_uri),
+        }))
+        .await;
+    let init_resp = editor
+        .wait_for(|m| m["id"] == 1, Duration::from_secs(40))
+        .await
+        .expect("the relayed initialize response");
+    assert_eq!(
+        init_resp["result"]["serverInfo"]["version"].as_str(),
+        Some("7.0.2"),
+        "the fake editor observes the REAL relayed tsgo version"
+    );
+    editor
+        .send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))
+        .await;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: verter_session::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+    let ws = Arc::new(FilesystemWorkspace::new(FilesystemOptions::default()));
+    ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        monorepo_fixture_snapshot(&workspace_norm),
+    )));
+    host.set_workspace(Arc::clone(&ws) as Arc<dyn WorkspaceAccess>);
+
+    let overlay = SharedTsgoOverlay::new(
+        Arc::clone(&host),
+        SharedRendezvous {
+            control_dir,
+            session_key,
+            workspace_root: workspace_norm,
+        },
+    );
+    let composite = Arc::new(TsgoCompositeProvider::new(owned, host, Some(overlay)));
+
+    CompositeHarness {
+        shim,
+        editor,
+        composite,
+        dir,
+        src,
+    }
+}
+
+/// The E2E readiness probe, at the composite boundary, over the PRODUCTION
+/// virtualized-`@verter/types` carrier shape — published through the REAL
+/// production funnel, never a hand-built sidecar.
+///
+/// The E2E fixtures (like most real projects) do NOT install `@verter/types`,
+/// so `ProjectSync::publish_tsx` (driven here via `open_tsx` over the SAME
+/// composite the LSP uses) rewrites the carrier's `@verter/types` imports to
+/// the descriptor-derived relative sidecar specifier and publishes the sidecar
+/// `.d.ts` overlay BEFORE the carrier. Because the sidecar path and specifier
+/// come from the producer itself, a producer/classifier naming divergence is
+/// visible to this test by construction — a hand-built sidecar could never see
+/// it. The probes then require (a) a completion item for the template's
+/// `props.count` member with a REAL provider kind, and (b) a hover on that
+/// member naming the declared `number` type — never a degraded `any`.
+///
+/// Discriminator: a shared overlay that DROPS the sidecar (because the
+/// descriptor naming column does not classify what the producer published)
+/// leaves the editor-owned Program with an unresolvable `__verter_types`
+/// import — the JSX helper surface collapses, template hover degrades to
+/// `any`, and template completions come back null. That is exactly the E2E
+/// `monorepo@shared-tsgo` / `single-project@shared-tsgo` readiness-probe death.
+async fn assert_template_member_served_typed(h: &CompositeHarness, topology: &str) {
+    // The virtualization PRECONDITION: the owner has no `@verter/types` install.
+    // The stub lives beside the fixture's `src/` (the workspace root in the
+    // single-project layout, `packages/app` in the monorepo layout), so remove
+    // it from the src-adjacent node_modules — the ancestor the resolution walk
+    // reaches first — as well as the workspace root.
+    if let Some(package_dir) = h.src.parent() {
+        let _ = std::fs::remove_dir_all(package_dir.join("node_modules").join("@verter"));
+    }
+    let _ = std::fs::remove_dir_all(h.dir.join("node_modules").join("@verter"));
+
+    let (ide_code_raw, _source_map, companion) = compile_vue_ide(WIDGET_VUE);
+    let carrier_tsx = norm(&h.src.join("Widget.vue.tsx"));
+    let companion_ts = norm(&h.src.join("Widget.vue.verter.ts"));
+
+    // The `.verter.ts` API companion is an ordinary carrier companion (not part
+    // of the virtualized sidecar surface) — open it directly.
+    h.composite
+        .open_file(&companion_ts, &companion)
+        .await
+        .expect("composite open of the .verter.ts companion");
+
+    // THE REAL PUBLICATION PATH: the production `ProjectSync` funnel over the
+    // SAME composite — kind Tsgo, no workspace ⇒ the owner resolves no
+    // `@verter/types`, so virtualization is ACTIVE exactly as in the E2E
+    // fixtures. `open_tsx` prepares (import rewrite + sidecar derivation, both
+    // through the descriptor naming API) and publishes sidecar-then-carrier.
+    let sync = verter_lsp::type_provider::project_sync::ProjectSync::new_with_kind(
+        Arc::clone(&h.composite) as Arc<dyn TypeProvider>,
+        verter_lsp::ProjectSyncMode::FullProject,
+        verter_lsp::TypeProviderKind::Tsgo,
+    );
+    sync.open_tsx(&carrier_tsx, &ide_code_raw)
+        .await
+        .expect("the production publication path succeeds");
+
+    // The DELIVERED bytes — the provider's coordinate space (import rewrites +
+    // JSX adaptation applied). Probe offsets MUST come from these, and the
+    // virtualized shape must actually have been exercised.
+    let delivered = sync
+        .delivered_provider_content(&carrier_tsx, &ide_code_raw)
+        .expect("the delivered provider surface is recorded");
+    let sidecar_specifier =
+        verter_session::framework::descriptor::verter_types_import_specifier(&carrier_tsx)
+            .expect("the carrier companion path derives a sidecar specifier");
+    assert!(
+        delivered.contains(sidecar_specifier.as_str()),
+        "[{topology}] the delivered carrier must import the descriptor-derived sidecar \
+         specifier ({sidecar_specifier}) — the virtualized shape was not exercised"
+    );
+    assert!(
+        !delivered.contains("from \"@verter/types\""),
+        "[{topology}] no bare @verter/types import may survive the virtualized rewrite"
+    );
+
+    // Sanity: the shared Program serves this carrier at all (the diagnostics lane).
+    let diags = tokio::time::timeout(
+        Duration::from_secs(45),
+        h.composite.get_diagnostics(&carrier_tsx),
+    )
+    .await
+    .expect("composite get_diagnostics timed out")
+    .expect("composite diagnostics");
+    let codes: Vec<_> = diags.iter().filter_map(|d| d.code.clone()).collect();
+    assert!(
+        diags.iter().any(|d| d.code.as_deref() == Some("2322")),
+        "[{topology}] the shared Program must typecheck the carrier (TS2322 expected); got {codes:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.code.as_deref() == Some("2307")),
+        "[{topology}] every carrier import must resolve — no TS2307; got {codes:?}"
+    );
+
+    // The TEMPLATE projection's `props.count` — the LAST occurrence (the script's
+    // deliberate mis-assignment reads `props.label`; `props.count` appears only in
+    // the template projection). Offsets index the DELIVERED bytes — the exact
+    // content the provider serves and converts positions against.
+    let template_member = delivered
+        .rfind("props.count")
+        .expect("the delivered projection contains the template's props.count expression");
+    let member_offset = (template_member + "props.".len()) as u32;
+
+    let hover = tokio::time::timeout(
+        Duration::from_secs(45),
+        h.composite.get_hover(&carrier_tsx, member_offset),
+    )
+    .await
+    .expect("shared template hover timed out")
+    .expect("shared template hover request")
+    .unwrap_or_else(|| panic!("[{topology}] hover at the template's props.count returned None"));
+    assert!(
+        hover.contents.contains("number"),
+        "[{topology}] template-member hover must name the declared prop type (number), \
+         never a degraded answer: {hover:?}"
+    );
+
+    let completions = tokio::time::timeout(
+        Duration::from_secs(45),
+        h.composite
+            .get_completions(&carrier_tsx, member_offset, None),
+    )
+    .await
+    .expect("shared template completion timed out")
+    .expect("shared template completion request");
+    let labels: Vec<_> = completions
+        .items
+        .iter()
+        .map(|i| (i.label.clone(), i.kind))
+        .collect();
+    let count_item = completions
+        .items
+        .iter()
+        .find(|i| i.label == "count")
+        .unwrap_or_else(|| {
+            panic!(
+                "[{topology}] the template member position must complete the typed prop \
+                 `count`; got {} items: {labels:?}",
+                completions.items.len()
+            )
+        });
+    assert!(
+        matches!(
+            count_item.kind,
+            Some(k) if k != verter_lsp::type_provider::protocol::CompletionKind::Text
+        ),
+        "[{topology}] the `count` completion must carry a REAL provider kind (never Text/None): {count_item:?}"
+    );
+}
+
+/// CONTROL — the single-project topology serves typed TEMPLATE-region answers
+/// through the SHARED feature lane. If this fails, the defect is not
+/// topology-specific and the monorepo test below is a duplicate signal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn composite_shared_template_answers_are_typed_single_project() {
+    let Some(tsgo) = engine_or_skip().await else {
+        return;
+    };
+    let h = setup_composite(&tsgo, "tpl_single", Arc::new(OwnedBaselineDouble)).await;
+    assert_template_member_served_typed(&h, "single-project").await;
+    teardown_composite(h).await;
+}
+
+/// THE E2E `monorepo@shared-tsgo` READINESS INVARIANT — a carrier in a NESTED,
+/// uniquely-owned leaf of a solution-rooted monorepo serves typed template-region
+/// completions and hover through the SHARED editor-attach lane, exactly as the
+/// single-project control does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn composite_shared_template_answers_are_typed_monorepo_nested_leaf() {
+    let Some(tsgo) = engine_or_skip().await else {
+        return;
+    };
+    let h = setup_composite_monorepo(&tsgo, "tpl_mono", Arc::new(OwnedBaselineDouble)).await;
+    assert_template_member_served_typed(&h, "monorepo").await;
+    teardown_composite(h).await;
 }

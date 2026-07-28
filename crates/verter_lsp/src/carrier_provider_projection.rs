@@ -141,13 +141,15 @@ pub(crate) fn prepare_carrier_provider_surface(
     encoding: tower_lsp_server::ls_types::PositionEncodingKind,
     virtualize_verter_types: bool,
 ) -> PreparedCarrierProviderSurface {
+    // BOTH the import specifier and the overlay path derive from the ONE
+    // descriptor naming authority — never a locally-formatted string — so the
+    // published sidecar can never drift from what `classify_carrier_companion`
+    // recognizes (the drift that silently dropped the sidecar from the SHARED
+    // overlay). Round-trip-guarded by
+    // `published_provider_paths_classify_as_companions_of_their_carrier`.
     let verter_types_specifier = (virtualize_verter_types
         && !owner_resolves_verter_types(workspace, canonical_id))
-    .then(|| {
-        std::path::Path::new(provider_path)
-            .file_name()
-            .map(|file_name| format!("./{}.__verter_types", file_name.to_string_lossy()))
-    })
+    .then(|| verter_session::framework::descriptor::verter_types_import_specifier(provider_path))
     .flatten();
 
     let (prepared, rewrote_verter_types) = prepare_carrier_provider_imports_with_verter_types(
@@ -161,8 +163,15 @@ pub(crate) fn prepare_carrier_provider_surface(
         prepared,
         // The overlay is only a live dependency when an import actually points at
         // it; a carrier that never mentions `@verter/types` needs no overlay file.
+        // The path derivation shares the specifier derivation's fail-closed
+        // basename predicate, so `rewrote_verter_types` (a specifier existed and
+        // was written into the carrier) implies the overlay path derives too — a
+        // rewrite can never point at an overlay this refuses to name.
         virtual_verter_types_path: rewrote_verter_types
-            .then(|| format!("{provider_path}.__verter_types.d.ts")),
+            .then(|| {
+                verter_session::framework::descriptor::verter_types_sidecar_path(provider_path)
+            })
+            .flatten(),
     }
 }
 

@@ -337,6 +337,28 @@ impl ProjectSync {
         }
     }
 
+    /// The exact DELIVERED provider bytes for `path` as prepared from
+    /// `generated` — what the engine actually received (carrier-import rewrites,
+    /// the virtualized `@verter/types` specifier, and any JSX adaptation
+    /// applied), which is the coordinate space every provider byte-offset query
+    /// resolves against. Answered from the delivered ledger ONLY: `None` before
+    /// any successful publication of exactly `generated`, never a
+    /// freshly-prepared prospective surface presented as a receipt — an accessor
+    /// that synthesizes on a miss would attest bytes no engine holds.
+    ///
+    /// A test-support seam, not production API: the live shared-provider suite
+    /// computes its probe offsets from this so its probes can never drift from
+    /// the real published surface. Production readers hold the crate-private
+    /// [`Self::carrier_provider_surface`], which deliberately models
+    /// not-yet-published buffers, or mint witness-bearing evidence through
+    /// [`Self::synced_tsx_surface`].
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn delivered_provider_content(&self, path: &str, generated: &str) -> Option<Arc<str>> {
+        self.delivered_carrier_surface_for(path, generated)
+            .map(|delivered| Arc::clone(delivered.content()))
+    }
+
     /// Mint post-open evidence only for a path whose last provider operation
     /// completed successfully and remains live in the exact-byte ledger.
     pub(crate) fn synced_tsx_surface(&self, path: &str) -> Option<SyncedTsxSurface> {
@@ -1060,6 +1082,236 @@ mod tests {
         assert!(
             !std::path::Path::new(virtual_path).exists(),
             "the fallback must remain provider-virtual"
+        );
+    }
+
+    /// PRODUCER → CLASSIFIER ROUND-TRIP body — the naming-drift tripwire, run
+    /// once per built-in adapter. Drives the REAL publication funnel
+    /// (`open_tsx` → `publish_tsx`, virtualization active) and asserts every
+    /// path it hands the provider classifies through the ONE descriptor
+    /// authority (`classify_carrier_companion`) as a companion of the published
+    /// carrier's SOURCE — including the `@verter/types` sidecar itself
+    /// (`CarrierCompanionKind::Sidecar`), so an input that never triggers
+    /// sidecar creation cannot pass as coverage. A producer that publishes any
+    /// path the descriptor does not classify re-creates the shared-overlay
+    /// sidecar drop: `shared_record` gates on `carrier_source_of`, so the
+    /// unclassified path never reaches the editor-owned Program, its import
+    /// TS2307s, and every template-region answer degrades (hover `any`,
+    /// completions null). The suffix-only descriptor tests CANNOT see that
+    /// divergence — they assert the column, not what the producer publishes;
+    /// only this round-trip fails on a producer-side rename.
+    ///
+    /// Returns the delivered carrier bytes for adapter-specific assertions.
+    async fn assert_real_funnel_publishes_only_classifiable_companions(
+        provider_path: &str,
+        source: &str,
+    ) -> String {
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        sync.open_tsx(provider_path, source)
+            .await
+            .expect("the virtualized publication succeeds");
+
+        let expected_source =
+            verter_session::framework::descriptor::classify_carrier_companion(provider_path)
+                .expect("the carrier companion itself classifies")
+                .source;
+        let calls = mock.file_sync_calls();
+        let published: Vec<&String> = calls
+            .iter()
+            .filter_map(|call| match call {
+                MockCall::OpenFile { path, .. }
+                | MockCall::OpenFileBackground { path, .. }
+                | MockCall::LoadFile { path, .. }
+                | MockCall::UpdateFile { path, .. } => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            published.len() >= 2,
+            "the virtualized publication must deliver the sidecar AND the carrier: {calls:?}"
+        );
+        let mut saw_sidecar = false;
+        for path in published {
+            let companion = verter_session::framework::descriptor::classify_carrier_companion(path)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the producer published `{path}`, which the descriptor does NOT \
+                             classify as a carrier companion — the SHARED overlay's \
+                             `shared_record` gate would silently drop it (the sidecar-loss \
+                             defect); creation/specifier/cleanup must derive from the \
+                             descriptor naming API"
+                    )
+                });
+            assert_eq!(
+                companion.source, expected_source,
+                "published path `{path}` must belong to the published carrier's family"
+            );
+            saw_sidecar |= companion.kind
+                == verter_session::framework::descriptor::CarrierCompanionKind::Sidecar;
+        }
+        assert!(
+            saw_sidecar,
+            "the publication must actually create the @verter/types sidecar — an input \
+             that triggers no sidecar exercises nothing this round-trip guards: {calls:?}"
+        );
+        calls
+            .iter()
+            .find_map(|call| match call {
+                MockCall::OpenFile { path, content } if path == provider_path => {
+                    Some(content.clone())
+                }
+                _ => None,
+            })
+            .expect("the carrier open reached the provider")
+    }
+
+    #[tokio::test]
+    async fn published_provider_paths_classify_as_companions_of_their_carrier() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let source = "import type { GlobalComponentType } from \"@verter/types\";\n\
+                      type T = GlobalComponentType<\"X\">;\n";
+        assert_real_funnel_publishes_only_classifiable_companions(&provider_path, source).await;
+    }
+
+    /// The SVELTE arm of the producer → classifier round-trip, through the SAME
+    /// real funnel. Svelte carriers take their OWN preparation branch
+    /// (`prepare_managed_tsgo_svelte_carrier`) before the sidecar derivation, so
+    /// a Svelte-specific publication path that spelled the sidecar locally would
+    /// leave the Vue arm green while every Svelte sidecar silently dropped from
+    /// the shared overlay — exactly the divergence class Svelte-as-first-class
+    /// forbids. The usable-install fixture plus the `@verter/svelte-jsx` pragma
+    /// make the Svelte specialization branch actually RUN (asserted below), so
+    /// this arm cannot quietly degrade into the common branch.
+    #[tokio::test]
+    async fn published_svelte_provider_paths_classify_as_companions_of_their_carrier() {
+        let owner = tempfile::tempdir().expect("temporary Svelte owner");
+        let svelte_dir = owner.path().join("node_modules/svelte");
+        std::fs::create_dir_all(&svelte_dir).expect("Svelte package directory");
+        std::fs::write(
+            svelte_dir.join("package.json"),
+            r#"{"name":"svelte","version":"5.0.0","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#,
+        )
+        .expect("Svelte package marker");
+        std::fs::write(
+            svelte_dir.join("index.d.ts"),
+            "export type Snippet = () => unknown;\n",
+        )
+        .expect("Svelte public declarations");
+        std::fs::write(
+            svelte_dir.join("elements.d.ts"),
+            "export interface SvelteHTMLElements { div: {}; }\n",
+        )
+        .expect("Svelte elements declarations");
+        let provider_path = owner.path().join("src/Component.svelte.tsx");
+        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let source = "/** @jsxImportSource @verter/svelte-jsx */\n\
+                      import type { GlobalComponentType } from \"@verter/types\";\n\
+                      const view = <div />;\n";
+
+        let delivered =
+            assert_real_funnel_publishes_only_classifiable_companions(&provider_path, source).await;
+        // Pin the delivered bytes on output ONLY the Svelte specialization
+        // (`svelte_assets::prepare_managed_tsgo_svelte_carrier`) produces: it
+        // replaces the authored `@jsxImportSource` pragma at byte 0 with the
+        // classic-JSX wiring — the `@jsxRuntime classic` pragma trio plus the
+        // owner-bound factory-namespace import. A bare `delivered != source`
+        // does NOT prove the branch ran: the common projection
+        // (`carrier_provider_projection`) rewrites this fixture's
+        // `@verter/types` import in place, so inequality holds even with the
+        // specialization disabled — but the common projection only overwrites
+        // import specifiers and can never emit this intro or consume the
+        // authored pragma.
+        let head: String = delivered.chars().take(160).collect();
+        assert!(
+            delivered.starts_with("/** @jsxRuntime classic */"),
+            "the managed tsgo SVELTE preparation branch must replace the authored \
+             pragma with its classic-JSX intro — delivered head: {head:?}"
+        );
+        assert!(
+            delivered.contains(&format!(
+                "import * as {}svelte_jsx_",
+                verter_compiler::framework_common::GENERATED_IDENTIFIER_PREFIX
+            )),
+            "the specialization imports the owner-bound classic JSX factory \
+             namespace — delivered head: {head:?}"
+        );
+        assert!(
+            !delivered.contains("@jsxImportSource"),
+            "the specialization consumes the authored `@jsxImportSource` pragma; \
+             its survival means the Svelte arm degenerated into the common branch \
+             — delivered head: {head:?}"
+        );
+    }
+
+    /// The DELIVERED accessor answers only from the delivered ledger — never by
+    /// synthesizing a prospective surface. "Delivered" is a claim about bytes an
+    /// engine actually received: a caller invoking it before any successful
+    /// publication (or holding bytes no publication ever delivered) gets `None`,
+    /// not freshly-prepared bytes presented as a receipt.
+    #[tokio::test]
+    async fn delivered_provider_content_answers_only_after_a_successful_delivery() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let source = "import type { GlobalComponentType } from \"@verter/types\";\n\
+                      type T = GlobalComponentType<\"X\">;\n";
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        assert!(
+            sync.delivered_provider_content(&provider_path, source)
+                .is_none(),
+            "no engine has received anything — the accessor must not synthesize \
+             prospective bytes and present them as delivered"
+        );
+
+        sync.open_tsx(&provider_path, source)
+            .await
+            .expect("managed tsgo open succeeds");
+
+        let delivered = sync
+            .delivered_provider_content(&provider_path, source)
+            .expect("a successful publication is answerable from the ledger");
+        let calls = mock.file_sync_calls();
+        let engine_received = calls
+            .iter()
+            .find_map(|call| match call {
+                MockCall::OpenFile { path, content } if path == &provider_path => {
+                    Some(content.clone())
+                }
+                _ => None,
+            })
+            .expect("the carrier open reached the provider");
+        assert_eq!(
+            delivered.as_ref(),
+            engine_received,
+            "the answer is the exact bytes the engine received"
+        );
+
+        // Bytes no publication delivered are not answerable either: an edit
+        // under the same path must neither replay the old delivery nor be
+        // freshly prepared into a fake receipt.
+        let edited = "import type { GlobalComponentType } from \"@verter/types\";\n\
+                      type Edited = GlobalComponentType<\"Y\">;\n";
+        assert!(
+            sync.delivered_provider_content(&provider_path, edited)
+                .is_none(),
+            "bytes never delivered to an engine have no delivered content"
         );
     }
 

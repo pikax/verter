@@ -56,6 +56,45 @@ derivations are CONSUMERS of the column; consumer rewiring is a later
 vertical, but the column + mirror + freshness pin land here so the two
 cannot drift.
 
+`sidecar_suffixes` names the adjacent virtualized-`@verter/types` overlay
+(`VERTER_TYPES_SIDECAR_SUFFIXES` — `{source}{.tsx|.jsx}.__verter_types.d.ts`,
+identical for Vue and Svelte): the fallback `.d.ts` the LSP publishes beside a
+carrier's IDE companion when the owner project cannot resolve `@verter/types`
+(`ProjectSync::publish_tsx` → `prepare_carrier_provider_surface`). Naming it in
+the column is what makes `classify_carrier_companion` reverse-map it to its
+carrier source, so the SHARED tsgo overlay records + injects it with its
+carrier family; an unclassified sidecar was silently dropped by the shared
+lane's `shared_record` gate — the editor-owned Program then 2307'd the
+rewritten `__verter_types` import and every template-region answer degraded
+(hover `any`, completions null) while managed stayed green.
+
+The producer never spells the sidecar itself: creation, the import specifier,
+and cleanup all derive from the descriptor API
+(`verter_types_sidecar_path` / `verter_types_import_specifier`, consumed by
+`prepare_carrier_provider_surface` and `ProjectSync::close_virtual_verter_types`),
+so a producer-side rename cannot drift from what the classifier recognizes.
+Both derivations fail closed on the SAME shared basename predicate: a
+basename-less companion path (empty / separator-terminated, `/` and `\` alike)
+derives `None` for the sidecar path AND the specifier, never a fabricated
+`{directory}.__verter_types.d.ts`. (The descriptor authority constants —
+`VERTER_TYPES_SIDECAR_MODULE_STEM` / `VERTER_TYPES_SIDECAR_EXT` /
+`VERTER_TYPES_SIDECAR_SUFFIXES` — remain the one place the spelling lives in
+production; only independent re-derivations outside them are forbidden.)
+Guarded by the descriptor naming/derivation unit tests
+(`verter_types_sidecar_column_derives_from_the_module_stem`, including the
+no-basename refusal pins with Windows spellings), the producer→classifier
+round-trip — run per built-in adapter through the REAL `open_tsx` →
+`publish_tsx` funnel:
+(`published_provider_paths_classify_as_companions_of_their_carrier` (Vue) and
+`published_svelte_provider_paths_classify_as_companions_of_their_carrier`
+(Svelte, with the Svelte specialization branch asserted active) in
+`crates/verter_lsp/src/type_provider/project_sync.rs` — every path the real
+publication funnel hands the provider must classify as a companion of its
+carrier, and one must classify as the Sidecar) — and the live
+`composite_shared_template_answers_are_typed_{single_project,monorepo_nested_leaf}`
+suite (`crates/verter_lsp/tests/cases/shared_provider_live.rs`), which publishes
+through the real `ProjectSync` funnel rather than a hand-built sidecar.
+
 An ORDINARY module import of a carrier resolves through ONE shared function with
 ONE answer, `@verter/language-shared`'s
 `carrier/policy.ts::resolveCarrierImportTarget`: the `importSurface` column via

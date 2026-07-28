@@ -229,7 +229,18 @@ impl ProjectSync {
         tsx_path: &str,
         lane: ProviderLane,
     ) -> Result<(), TypeProviderError> {
-        let path = format!("{tsx_path}.__verter_types.d.ts");
+        // Cleanup derives the SAME descriptor-owned path creation derived
+        // (`prepare_carrier_provider_surface`), so a naming change can never
+        // strand a published overlay under a stale locally-formatted spelling.
+        // A refusal (no basename) proves no overlay EXISTS to clean up: every
+        // `virtual_verter_types_paths` entry was inserted from the SAME
+        // deterministic derivation over the same `tsx_path`, so a path this
+        // refuses to name was refused at publication too and never entered the
+        // set — returning `Ok` skips nothing that lives.
+        let Some(path) = verter_session::framework::descriptor::verter_types_sidecar_path(tsx_path)
+        else {
+            return Ok(());
+        };
         if self.virtual_verter_types_paths.remove(&path).is_none() {
             return Ok(());
         }

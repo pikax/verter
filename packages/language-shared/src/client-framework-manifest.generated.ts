@@ -56,7 +56,7 @@ export const CLIENT_FRAMEWORKS: readonly ClientFramework[] = [
       ide: [".jsx", ".tsx"],
       importSurface: [".verter.ts"],
       testingApi: ".__verter_test.ts",
-      sidecars: [],
+      sidecars: [".tsx.__verter_types.d.ts", ".jsx.__verter_types.d.ts"],
     },
   },
   {
@@ -69,7 +69,7 @@ export const CLIENT_FRAMEWORKS: readonly ClientFramework[] = [
       ide: [".jsx", ".tsx"],
       importSurface: [".verter.ts"],
       testingApi: null,
-      sidecars: [],
+      sidecars: [".tsx.__verter_types.d.ts", ".jsx.__verter_types.d.ts"],
     },
   },
 ];
