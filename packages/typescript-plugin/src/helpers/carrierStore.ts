@@ -9,6 +9,7 @@ import {
   type ProjectEntry,
   type ReadyFile,
 } from "@verter/language-shared";
+import type { CarrierImportCompletionSnapshot } from "./pathCompletion";
 
 /**
  * The NODE ADAPTER of the shared [`CarrierStoreReader`] interface: a
@@ -527,6 +528,32 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
     }
     const companion = carrierSourceToCompanion(source);
     return companion === null ? undefined : companion;
+  }
+
+  /**
+   * ONE-manifest-read snapshot for a single import-path completion request:
+   * the reader's SCOPED owned-source rows plus the canonical provider-path set
+   * of ready `CarrierApi` surfaces, both taken from the SAME manifest read.
+   * Completion runs per-candidate policy + readiness checks on the keystroke
+   * path; this snapshot bounds the whole request at exactly one manifest stat
+   * regardless of how many carriers the directory holds.
+   */
+  importCompletionSnapshot(): CarrierImportCompletionSnapshot {
+    const manifest = this.readManifest();
+    if (!manifest) {
+      return { ownedSources: [], readyApiProviders: new Set() };
+    }
+    const ownedSources: OwnedSource[] = [];
+    const readyApiProviders = new Set<string>();
+    for (const project of this.scopedProjectEntries(manifest)) {
+      ownedSources.push(...project.owned_sources);
+      for (const [providerUri, ready] of Object.entries(project.ready_files)) {
+        if (ready.role === "CarrierApi") {
+          readyApiProviders.add(this.canonicalPath(providerUri));
+        }
+      }
+    }
+    return { ownedSources, readyApiProviders };
   }
 
   /**

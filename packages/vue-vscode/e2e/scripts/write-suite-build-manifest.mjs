@@ -17,7 +17,9 @@ const { buildParityTestInventory } = require(
 // `verter-native-semantics` server profile. Adding a suite is a deliberate act,
 // which is exactly why this number is pinned rather than derived.
 const ACCEPTED_SUITE_COUNT = 77;
-const ACCEPTED_PARITY_LITERAL_COUNT = 258;
+// 259 = 258 + `ide.complete.import-path-carrier` (import-path completion in a
+// plain `.ts` offers the carrier file — the VS-Code-TS-service lane).
+const ACCEPTED_PARITY_LITERAL_COUNT = 259;
 const ACCEPTED_MATRIX_CASE_COUNT = 73;
 
 function discover(directory) {

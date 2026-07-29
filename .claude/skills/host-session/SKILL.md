@@ -283,6 +283,33 @@ Alias/`baseUrl` specifiers take the same target through the failed-lookup route;
 (`canonicalPath`), never a raw substring test — a `D:\ws\src` baseUrl must accept
 the `d:/ws/src/...` candidates TypeScript reports.
 
+**Import-path completion consumes the same policy.** TypeScript's own
+module-specifier path completion never consults `extraFileExtensions`
+(`getSupportedExtensionsForModuleResolution` lists TS/JS extensions plus ambient
+`*.x` wildcard modules only), so a plain `.ts` buffer typing `from './` was never
+offered `./Comp.vue` / `./Comp.svelte`. The plugin augments module-specifier
+string positions in `getCompletionsAtPosition` (`index.ts::withCarrierPathEntries`
++ `helpers/pathCompletion.ts`): candidates come from ONE manifest snapshot per
+request (`DiskCarrierStoreReader::importCompletionSnapshot` — no directory
+listing, no filesystem walk, exactly one manifest stat on the keystroke path
+regardless of candidate count) and each must pass `resolveCarrierImportTarget`
+PLUS the non-blocking readiness arms of actual resolution (a published
+`CarrierApi` import surface in the same snapshot, or retained last-good
+content). The guarantee is one-directional and snapshot-relative: every OFFERED
+entry's accepted bare specifier resolves against that snapshot; a conflicted
+(manifest-absent) carrier, an IDE-role-only carrier, a rune module, and an
+owned carrier still in its publication warm-up window (no ready entry, no
+last-good — the bounded cold read could still resolve it, but completion never
+blocks per candidate) are never offered, and the offered name is never a
+companion path. Replacement spans are computed from the literal's RAW source
+characters (`rawModuleSpecifierText`), never the cooked `literal.text` whose
+collapsed escapes (`.\\W.sv` → `.\W.sv`) desync spans from the file; an escape
+form outside the modeled separator escapes fails closed (no entries). Entries
+mirror TypeScript's path-entry shape (kind `script`, extension
+`kindModifiers`, `SortText.LocationPriority`). The e2e proof on the
+VS-Code-TS-service lane is `ide.complete.import-path-carrier` (shared parity
+suite, Vue AND Svelte).
+
 **KNOWN GAP — auto-import does not offer unopened carriers.** `getExternalFiles`
 advertises only the companions of editor-ACTIVE carrier sources (the authored
 working set, matching Volar/Svelte ownership), so an unopened carrier's API

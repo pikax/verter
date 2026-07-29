@@ -4988,3 +4988,284 @@ describe("carrier-path conflict honor (manifest is the authority)", () => {
     expect(info.serverHost.fileExists("/ws/src/Foo.vue.tsx")).toBe(true);
   });
 });
+
+describe("import-path completion in a plain .ts offers owned carriers", () => {
+  const projectKey = "/ws/tsconfig.json";
+  const consumer = "/ws/src/consumer.ts";
+  // Caret sits INSIDE the module-specifier literal, right after `./`.
+  const consumerText = 'import Comp from "./";\n';
+  const caret = consumerText.indexOf('"./') + '"./'.length;
+
+  const compilerOptions = (): ts.CompilerOptions => ({
+    strict: true,
+    noLib: true,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+  });
+
+  /**
+   * A manifest where `A.vue` and `W.svelte` own READY public-API surfaces
+   * (`CarrierApi` + ready blob — the resolvable state), while `B.vue` stays
+   * IDE-role-only (an ordinary import of it ABSTAINS today, so offering it
+   * would insert a specifier that does NOT resolve).
+   */
+  function resolvableCarrierManifest(): Manifest {
+    const manifest = vueAndSvelteManifest();
+    const project = manifest.projects[projectKey];
+    project.owned_sources.push(
+      {
+        source_uri: "/ws/src/A.vue",
+        provider_uri: "/ws/src/A.vue.verter.ts",
+        role: "CarrierApi",
+        script_kind: "TS",
+      },
+      {
+        source_uri: "/ws/src/W.svelte",
+        provider_uri: "/ws/src/W.svelte.verter.ts",
+        role: "CarrierApi",
+        script_kind: "TS",
+      },
+    );
+    project.ready_files["/ws/src/A.vue.verter.ts"] = {
+      content_hash: "aa1",
+      version: 6,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    project.ready_files["/ws/src/W.svelte.verter.ts"] = {
+      content_hash: "wa1",
+      version: 4,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/W.svelte.verter.ts",
+    };
+    return manifest;
+  }
+
+  function completionHarness(options: { manifest: Manifest; diskFiles: Record<string, string> }) {
+    const dir = track(
+      writeStore(options.manifest, {
+        "blobs/A.vue.verter.ts": "export default class A {}",
+        "blobs/W.svelte.verter.ts": "export default class W {}",
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: options.diskFiles }, projectKey);
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 1,
+    };
+    const opts = compilerOptions();
+    info.project.getConfigFilePath = () => projectKey;
+    info.project.getCompilerOptions = () => opts;
+    info.languageServiceHost.getCompilationSettings = () => opts;
+    info.languageServiceHost.getCurrentDirectory = info.project.getCurrentDirectory;
+    info.languageServiceHost.getDefaultLibFileName = () => "/ws/no-lib.d.ts";
+    info.languageServiceHost.getScriptFileNames = () => Object.keys(options.diskFiles);
+    info.languageServiceHost.fileExists = info.serverHost.fileExists;
+    info.languageServiceHost.readFile = info.serverHost.readFile;
+
+    // tsserver's lifecycle: the project's LanguageService exists BEFORE the
+    // plugin decorates the same host object. `getProgram` mirrors the real
+    // service (the fake `createInfo` default pins it to `undefined`).
+    const realLanguageService = ts.createLanguageService(info.languageServiceHost);
+    info.languageService.__lsImpl = realLanguageService;
+    info.languageService.getProgram = () => realLanguageService.getProgram();
+
+    init({ typescript: ts } as any).create(info);
+    return { info, opts };
+  }
+
+  it("offers each RESOLVABLE owned carrier by name (.vue AND .svelte) and the accepted specifier resolves", () => {
+    const { info, opts } = completionHarness({
+      manifest: resolvableCarrierManifest(),
+      diskFiles: {
+        [consumer]: consumerText,
+        "/ws/src/A.vue": "<template/>",
+        "/ws/src/W.svelte": "<script></script>",
+        "/ws/src/B.vue": "<template/>",
+        // On disk but ABSENT from the manifest: Rust marked it ambiguous
+        // (carrier-path conflict), so importing it cannot resolve.
+        "/ws/src/Conflicted.vue": "<template/>",
+      },
+    });
+
+    const result = info.languageService.getCompletionsAtPosition(
+      consumer,
+      caret,
+      undefined,
+      undefined,
+    ) as ts.CompletionInfo | undefined;
+    expect(result).toBeDefined();
+    const names = result!.entries.map((entry) => entry.name);
+
+    // The user-reported defect: typing `from './` in a plain .ts must offer
+    // the carrier BY NAME, for BOTH first-class frameworks.
+    expect(names).toContain("A.vue");
+    expect(names).toContain("W.svelte");
+
+    // Fail closed: a carrier the manifest does not own cannot resolve, so it
+    // is NOT offered — neither the conflicted one nor the IDE-role-only one.
+    expect(names).not.toContain("Conflicted.vue");
+    expect(names).not.toContain("B.vue");
+
+    // Never a companion/virtual path in the offer list.
+    expect(names).not.toContain("A.vue.verter.ts");
+    expect(names).not.toContain("A.vue.tsx");
+    expect(names).not.toContain("W.svelte.verter.ts");
+
+    // The entry is a path completion: TypeScript's path-entry kind, the
+    // carrier extension as kindModifiers, TS's location sort priority.
+    const vueEntry = result!.entries.find((entry) => entry.name === "A.vue")!;
+    expect(vueEntry.kind).toBe(ts.ScriptElementKind.scriptElement);
+    expect(vueEntry.kindModifiers).toBe(".vue");
+    expect(vueEntry.sortText).toBe("11");
+
+    // Accepting the entry inserts the authored bare specifier `./A.vue`, and
+    // that exact specifier RESOLVES through the same plugin host (to the
+    // public-API surface, never the IDE companion).
+    const resolved = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./A.vue" }],
+      consumer,
+      undefined,
+      opts,
+      undefined,
+    )[0]?.resolvedModule;
+    expect(resolved?.resolvedFileName).toBe("/ws/src/A.vue.verter.ts");
+  });
+
+  it("computes the replacement span from RAW source text (escaped windows separator)", () => {
+    // The user's file contains: import W from ".\\W.sv";
+    // Raw literal contents `.\\W.sv` (7 chars) cook to `.\W.sv` (6 chars) —
+    // TypeScript collapses the escaped separator in `literal.text`. A span
+    // computed from cooked offsets starts one raw character early, so
+    // accepting `W.svelte` would splice `".\W.sveltev"` into the file.
+    const text = 'import W from ".\\\\W.sv";\n';
+    const caret = text.indexOf('W.sv"') + "W.sv".length;
+    const { info } = completionHarness({
+      manifest: resolvableCarrierManifest(),
+      diskFiles: {
+        [consumer]: text,
+        "/ws/src/A.vue": "<template/>",
+        "/ws/src/W.svelte": "<script></script>",
+      },
+    });
+
+    const result = info.languageService.getCompletionsAtPosition(
+      consumer,
+      caret,
+      undefined,
+      undefined,
+    ) as ts.CompletionInfo | undefined;
+    const entry = result?.entries.find((candidate) => candidate.name === "W.svelte");
+    expect(entry).toBeDefined();
+
+    // The RAW basename `W.sv` — the actual source characters the accept must
+    // replace — starts AFTER both raw backslashes.
+    expect(entry!.replacementSpan).toEqual({ start: text.indexOf("W.sv"), length: 4 });
+
+    // Accepting the entry yields a clean, still-escaped specifier — never the
+    // corrupted `".\W.sveltev"`.
+    const span = entry!.replacementSpan!;
+    const accepted = text.slice(0, span.start) + entry!.name + text.slice(span.start + span.length);
+    expect(accepted).toBe('import W from ".\\\\W.svelte";\n');
+  });
+
+  it("does not offer an owned carrier whose import surface has not published yet (warm-up)", () => {
+    const manifest = resolvableCarrierManifest();
+    // Ownership lands BEFORE content publishes: an owned CarrierApi row with
+    // NO ready_files entry is the warm-up window. Offering it would insert a
+    // specifier the non-blocking resolution arms cannot serve yet.
+    manifest.projects[projectKey].owned_sources.push({
+      source_uri: "/ws/src/Warm.vue",
+      provider_uri: "/ws/src/Warm.vue.verter.ts",
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    const { info } = completionHarness({
+      manifest,
+      diskFiles: {
+        [consumer]: consumerText,
+        "/ws/src/A.vue": "<template/>",
+        "/ws/src/W.svelte": "<script></script>",
+        "/ws/src/Warm.vue": "<template/>",
+      },
+    });
+
+    const result = info.languageService.getCompletionsAtPosition(
+      consumer,
+      caret,
+      undefined,
+      undefined,
+    ) as ts.CompletionInfo | undefined;
+    const names = result?.entries.map((entry) => entry.name) ?? [];
+    expect(names).not.toContain("Warm.vue");
+    // The READY carriers in the same directory are still offered.
+    expect(names).toContain("A.vue");
+    expect(names).toContain("W.svelte");
+  });
+
+  it("does not offer carriers outside a module-specifier string (plain string literal)", () => {
+    const text = 'const s = "./";\n';
+    const pos = text.indexOf('"./') + '"./'.length;
+    const { info } = completionHarness({
+      manifest: resolvableCarrierManifest(),
+      diskFiles: {
+        "/ws/src/consumer.ts": text,
+        "/ws/src/A.vue": "<template/>",
+      },
+    });
+
+    const result = info.languageService.getCompletionsAtPosition(
+      "/ws/src/consumer.ts",
+      pos,
+      undefined,
+      undefined,
+    ) as ts.CompletionInfo | undefined;
+    const names = result?.entries.map((entry) => entry.name) ?? [];
+    expect(names).not.toContain("A.vue");
+  });
+
+  it("offers carriers from a SUBDIRECTORY fragment and none from the wrong directory", () => {
+    const text = 'import Comp from "./components/";\n';
+    const pos = text.indexOf('"./components/') + '"./components/'.length;
+    const manifest = resolvableCarrierManifest();
+    const project = manifest.projects[projectKey];
+    project.owned_sources.push({
+      source_uri: "/ws/src/components/Nested.vue",
+      provider_uri: "/ws/src/components/Nested.vue.verter.ts",
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    project.ready_files["/ws/src/components/Nested.vue.verter.ts"] = {
+      content_hash: "n1",
+      version: 1,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    const { info } = completionHarness({
+      manifest,
+      diskFiles: {
+        "/ws/src/consumer.ts": text,
+        "/ws/src/A.vue": "<template/>",
+        "/ws/src/components/Nested.vue": "<template/>",
+      },
+    });
+
+    const result = info.languageService.getCompletionsAtPosition(
+      "/ws/src/consumer.ts",
+      pos,
+      undefined,
+      undefined,
+    ) as ts.CompletionInfo | undefined;
+    const names = result?.entries.map((entry) => entry.name) ?? [];
+    expect(names).toContain("Nested.vue");
+    // Carriers owned in the PARENT directory must not leak into the subdir list.
+    expect(names).not.toContain("A.vue");
+  });
+});

@@ -34,6 +34,11 @@ import {
 } from "./helpers/carrierStore";
 import { coldResolveCompanion } from "./helpers/coldRead";
 import {
+  carrierPathCompletionEntries,
+  moduleSpecifierLiteralAt,
+  rawModuleSpecifierText,
+} from "./helpers/pathCompletion";
+import {
   getAliasedNavigationResult,
   getAliasedQuickInfo,
   getModuleSpecifierNavigationResult,
@@ -2752,6 +2757,61 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     const _getCompletionsAtPosition =
       languageService.getCompletionsAtPosition.bind(languageService);
+
+    // ── carrier import-path completion (module-specifier positions) ────────
+    //
+    // TypeScript's own path completion never consults `extraFileExtensions`
+    // (`getSupportedExtensionsForModuleResolution` lists TS/JS extensions plus
+    // ambient `*.x` wildcard modules only), so typing `import X from './` in a
+    // plain `.ts` buffer offers no `./Comp.vue` / `./Comp.svelte` even though
+    // the plugin resolves exactly that specifier. Augment the module-specifier
+    // string position with the carriers the store manifest OWNS in the typed
+    // fragment's directory. Every OFFERED entry's accepted bare specifier
+    // resolves against the same manifest snapshot the offer was computed from
+    // (`resolveCarrierImportTarget` — the policy the module resolver consults —
+    // plus the non-blocking readiness arms: published import surface or
+    // last-good content); a conflicted carrier (manifest-absent), an
+    // IDE-role-only carrier, a rune module, and an owned carrier still in its
+    // publication warm-up window are never offered, and the offered name is
+    // never a companion path. Replacement spans address the literal's RAW
+    // source characters, never the cooked `literal.text` (whose collapsed
+    // escapes desync it from the file). Cost: no filesystem walk and no
+    // directory listing — exactly ONE manifest read (a stat change check) per
+    // request, only at specifier positions.
+    const withCarrierPathEntries = (
+      fileName: string,
+      position: number,
+      result: tsModule.CompletionInfo | undefined,
+    ): tsModule.CompletionInfo | undefined => {
+      const sourceFile = languageService.getProgram?.()?.getSourceFile(fileName);
+      if (sourceFile === undefined) return result;
+      const literal = moduleSpecifierLiteralAt(ts, sourceFile, position);
+      if (literal === undefined) return result;
+      const entries = carrierPathCompletionEntries({
+        containingFile: fileName,
+        literalText: literal.text,
+        literalRawText: rawModuleSpecifierText(
+          sourceFile.text,
+          literal.getStart(sourceFile),
+          literal.getEnd(),
+        ),
+        literalStart: literal.getStart(sourceFile),
+        reader: store,
+        existingNames: new Set(result?.entries.map((entry) => entry.name)),
+      });
+      if (entries.length === 0) return result;
+      if (result === undefined) {
+        // Mirror TypeScript's `convertPathCompletions` result shape.
+        return {
+          isGlobalCompletion: false,
+          isMemberCompletion: false,
+          isNewIdentifierLocation: true,
+          entries,
+        };
+      }
+      return { ...result, entries: [...result.entries, ...entries] };
+    };
+
     const isMemberCompletionEntry = (entry: tsModule.CompletionEntry): boolean => {
       switch (entry.kind) {
         case ts.ScriptElementKind.memberVariableElement:
@@ -2932,7 +2992,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             : { optionalReplacementSpan: mappedOptionalReplacementSpan }),
         };
       } else {
-        result = _getCompletionsAtPosition(fileName, position, options, formattingSettings);
+        result = withCarrierPathEntries(
+          fileName,
+          position,
+          _getCompletionsAtPosition(fileName, position, options, formattingSettings),
+        );
       }
       if (result?.entries) {
         const existsRelToContaining = containingFileAwareExists(_fileExists, fileName);
