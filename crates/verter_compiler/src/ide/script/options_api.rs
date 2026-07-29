@@ -310,7 +310,7 @@ pub(super) fn process_tsx_script_only<'alloc>(
         source,
         options,
         false, // no getCurrentInstance detection for Options API
-        true,  // emit attributes type
+        false, // ambient Options instance does not reference the attributes alias
     );
 }
 

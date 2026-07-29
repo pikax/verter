@@ -15,18 +15,18 @@ void ___VERTER___directiveAccessor;
 <div />
 } // close block scope
 
-function ___VERTER___Comp100<T>() {
+function ___VERTER___Comp100() {
   return {} as HTMLElementTagNameMap["div"];
 }
-function ___VERTER___getRootComponent<T>() { return ___VERTER___Comp100<T>(); }
-function ___VERTER___getRootComponentPassedProps<T>() { return {}; }
-type ___VERTER___RootElement<T> = ReturnType<typeof ___VERTER___getRootComponent<T>>;
-type ___VERTER___RootElementProps<T> = ___VERTER___Prettify<Omit<
-  ___VERTER___ExtractComponentProps<___VERTER___RootElement<T>>,
-  keyof ReturnType<typeof ___VERTER___getRootComponentPassedProps<T>>
+function ___VERTER___getRootComponent() { return ___VERTER___Comp100(); }
+function ___VERTER___getRootComponentPassedProps() { return {}; }
+type ___VERTER___RootElement = ReturnType<typeof ___VERTER___getRootComponent>;
+type ___VERTER___RootElementProps = ___VERTER___Prettify<Omit<
+  ___VERTER___ExtractComponentProps<___VERTER___RootElement>,
+  keyof ReturnType<typeof ___VERTER___getRootComponentPassedProps>
 >>;
 
-type ___VERTER___Attrs<T> = ___VERTER___attributes<T> & ___VERTER___RootElementProps<T>;
+type ___VERTER___Attrs = ___VERTER___attributes & ___VERTER___RootElementProps;
 
 void ___VERTER___getRootComponent; void ___VERTER___getRootComponentPassedProps;
 void __props;

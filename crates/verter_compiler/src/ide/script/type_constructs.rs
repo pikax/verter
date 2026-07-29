@@ -470,45 +470,34 @@ pub(super) fn emit_type_constructs(
 /// Emit RootElement, RootElementProps, and Attrs type aliases inside the function scope.
 ///
 /// These must be inside `templateBindingFN` because they reference `getRootComponent`
-/// and `getRootComponentPassedProps` which are function-local.
+/// and `getRootComponentPassedProps` which are function-local. They capture the
+/// wrapper's component generic instead of redeclaring it. Only an explicit
+/// generic `___VERTER___attributes` alias, emitted at file scope, needs type args.
 pub(super) fn emit_attrs_type_aliases(
     buf: &mut String,
-    generic_info: &Option<IdeGenericInfo>,
+    attributes_generic_args: &str,
     inherit_attrs: bool,
 ) {
-    let gs = generic_info
-        .as_ref()
-        .map(|g| g.source_bracket())
-        .unwrap_or_default();
-    let gn = generic_info
-        .as_ref()
-        .map(|g| g.names_bracket())
-        .unwrap_or_default();
-
     buf.push_str(&format!(
-        "\ntype {P}RootElement{gs} = ReturnType<typeof {P}getRootComponent{gn}>;\
-         \ntype {P}RootElementProps{gs} = {P}Prettify<Omit<\
-         \n  {P}ExtractComponentProps<{P}RootElement{gn}>,\
-         \n  keyof ReturnType<typeof {P}getRootComponentPassedProps{gn}>\
+        "\ntype {P}RootElement = ReturnType<typeof {P}getRootComponent>;\
+         \ntype {P}RootElementProps = {P}Prettify<Omit<\
+         \n  {P}ExtractComponentProps<{P}RootElement>,\
+         \n  keyof ReturnType<typeof {P}getRootComponentPassedProps>\
          \n>>;\n",
         P = PREFIX,
-        gs = gs,
-        gn = gn,
     ));
 
     if inherit_attrs {
         buf.push_str(&format!(
-            "\ntype {P}Attrs{gs} = {P}attributes{gn} & {P}RootElementProps{gn};\n",
+            "\ntype {P}Attrs = {P}attributes{aga} & {P}RootElementProps;\n",
             P = PREFIX,
-            gs = gs,
-            gn = gn,
+            aga = attributes_generic_args,
         ));
     } else {
         buf.push_str(&format!(
-            "\ntype {P}Attrs{gs} = {P}attributes{gn};\n",
+            "\ntype {P}Attrs = {P}attributes{aga};\n",
             P = PREFIX,
-            gs = gs,
-            gn = gn,
+            aga = attributes_generic_args,
         ));
     }
 }

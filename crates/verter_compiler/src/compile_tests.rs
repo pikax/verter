@@ -14867,6 +14867,148 @@ defineProps<{ items: T[] }>()
 }
 
 #[test]
+fn tsx_default_empty_attrs_capture_outer_generic_without_redeclaration() {
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "name",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_tsx_with_runtime(
+        r#"<script setup lang="ts" generic="T extends string">
+defineProps<{ name: T }>()
+</script>
+<template><div>{{ name }}</div></template>"#,
+        runtime,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    assert!(
+        tsx.code
+            .contains("export function ___VERTER___TemplateBindingFN<T extends string>()"),
+        "the authored component generic should remain on the outer wrapper, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("type ___VERTER___attributes = {};"),
+        "default empty attributes should remain non-generic, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains(
+            "type ___VERTER___Attrs = ___VERTER___attributes & ___VERTER___RootElementProps;"
+        ),
+        "local attrs aliases should capture the outer generic scope without redeclaration, got:\n{}",
+        tsx.code
+    );
+    let instance_line = tsx
+        .code
+        .lines()
+        .find(|line| line.contains("$attrs:"))
+        .expect("generic instance attrs override");
+    assert!(
+        instance_line.contains("$attrs: ___VERTER___Attrs"),
+        "instance attrs override should reference the local non-generic alias, got:\n{instance_line}"
+    );
+
+    assert!(
+        !tsx.code.contains("___VERTER___attributes<T>"),
+        "default attributes alias must not be used with a type argument, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code
+            .contains("type ___VERTER___Attrs<T extends string>"),
+        "local Attrs alias must not redundantly redeclare the component generic, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !instance_line.contains("$attrs: ___VERTER___Attrs<T>"),
+        "instance override must not apply an argument to the local Attrs alias, got:\n{instance_line}"
+    );
+    assert!(
+        !tsx.code
+            .lines()
+            .any(|line| line.contains("function ___VERTER___Comp")
+                && line.contains("<T extends string>")),
+        "nested Comp helpers must capture rather than redeclare the outer generic, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code
+            .contains("function ___VERTER___getRootComponentPassedProps<T extends string>()"),
+        "root-props helper must not carry an unused copy of the outer generic, got:\n{}",
+        tsx.code
+    );
+
+    let alloc = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "generic default-attrs TSX must parse: {:?}\n---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>(),
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_options_api_skips_unreferenced_attributes_alias() {
+    let result = compile_tsx(
+        r#"<script lang="ts">
+import { defineComponent } from "vue"
+
+export default defineComponent({
+  props: {
+    msg: { type: String, required: true }
+  }
+})
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    assert!(
+        tsx.code
+            .contains("declare let ___VERTER___instance: InstanceType<"),
+        "Options API template should retain its ambient instance reference, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("___VERTER___attributes"),
+        "Options API must not emit the unreferenced attributes alias, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("type ___VERTER___attributes = {};"),
+        "Options API must not retain the old empty attributes declaration, got:\n{}",
+        tsx.code
+    );
+
+    let alloc = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Options API TSX must parse without the alias: {:?}\n---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>(),
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_attrs_alias_attributes() {
     // Also accept 'attributes' as alias for 'attrs'
     let result = compile_tsx(
