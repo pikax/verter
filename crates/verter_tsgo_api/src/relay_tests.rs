@@ -1910,6 +1910,69 @@ async fn relay_captures_in_band_initialize_witness_as_handshake_passes() {
         Some(serde_json::json!([{ "uri": "file:///w", "name": "w" }])),
         "the workspaceFolders witness is captured from the request"
     );
+    assert!(
+        witness.semantic_tokens_legend.is_none(),
+        "a response advertising no semanticTokensProvider yields no legend — the \
+         capture must not fabricate one"
+    );
+
+    drop(editor_write);
+    relay.shutdown().await;
+}
+
+/// The witness carries the SERVER-advertised semantic-token legend from the
+/// `initialize` response — the only place the shared (non-owning) lane can
+/// learn which legend the editor-owned engine's token indices refer to — and
+/// stays `None` when the server advertises none (the downstream remap then
+/// fails closed instead of guessing).
+#[tokio::test]
+async fn relay_witness_carries_the_servers_semantic_token_legend() {
+    let (editor_endpoint, relay_editor_side) = tokio::io::duplex(64 * 1024);
+    let (server_endpoint, relay_server_side) = tokio::io::duplex(64 * 1024);
+    let (er, ew) = tokio::io::split(relay_editor_side);
+    let (sr, sw) = tokio::io::split(relay_server_side);
+    let relay = LspRelay::start(er, ew, sr, sw);
+    let (mut editor_read, mut editor_write) = tokio::io::split(editor_endpoint);
+    let (mut server_read, mut server_write) = tokio::io::split(server_endpoint);
+
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "initialize",
+        "params": { "rootUri": "file:///w", "capabilities": {} },
+    });
+    write_frame(&mut editor_write, &init_req).await;
+    let forwarded_req = read_frame(&mut server_read).await;
+    assert_eq!(forwarded_req["method"], "initialize");
+
+    // The negotiated legend rides `capabilities.semanticTokensProvider.legend`
+    // — in the SERVER's own order, which is exactly what must be retained.
+    let legend = serde_json::json!({
+        "tokenTypes": ["namespace", "class", "enum", "interface"],
+        "tokenModifiers": ["declaration", "readonly"],
+    });
+    let init_resp = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {
+            "serverInfo": { "name": "tsgo", "version": "7.0.2" },
+            "capabilities": {
+                "semanticTokensProvider": { "legend": legend, "range": true, "full": true }
+            },
+        },
+    });
+    write_frame(&mut server_write, &init_resp).await;
+    let _forwarded_resp = read_frame(&mut editor_read).await;
+
+    let witness = tokio::time::timeout(Duration::from_secs(5), relay.wait_initialized())
+        .await
+        .expect("wait_initialized timed out")
+        .expect("the handshake completed, so a witness must be present");
+    assert_eq!(
+        witness.semantic_tokens_legend,
+        Some(legend),
+        "the witness must retain the server's advertised legend verbatim"
+    );
 
     drop(editor_write);
     relay.shutdown().await;

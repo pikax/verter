@@ -2414,28 +2414,248 @@ fn parse_lsp_parameter_label_rejects_out_of_bounds_inverted_and_overflowing_offs
     );
 }
 
-/// @ai-generated — decode_semantic_tokens decodes delta-encoded tokens
+/// decode_semantic_tokens decodes delta-encoded tokens AND remaps them from
+/// the server-advertised legend into Verter's published legend space.
 #[test]
 fn test_decode_semantic_tokens() {
     let content = "const msg = 'hello';\nconst count = 42;\n";
+    // A server legend whose order deliberately differs from Verter's published
+    // order (keyword: server 0 vs Verter 15; variable: server 1 vs Verter 8),
+    // with one modifier (readonly: server bit 1 vs Verter bit 2).
+    let legend = crate::semantic_tokens::SemanticTokenLegendMap::from_names(
+        &["keyword", "variable"],
+        &["declaration", "readonly"],
+    );
     let data: Vec<serde_json::Value> = vec![
+        // "const" @ line 0 col 0, len 5 — server keyword(0), no modifiers.
         0.into(),
         0.into(),
         5.into(),
-        15.into(),
         0.into(),
+        0.into(),
+        // "msg" @ +0 lines, +6 cols, len 3 — server variable(1),
+        // declaration|readonly (server bits 0|1).
         0.into(),
         6.into(),
         3.into(),
-        8.into(),
+        1.into(),
+        3.into(),
+        // "count" @ next line col 6, len 5 — server type index 2 is OUTSIDE the
+        // advertised legend: dropped (fail closed), delta still advances.
+        1.into(),
+        6.into(),
+        5.into(),
+        2.into(),
         0.into(),
     ];
-    let tokens = decode_semantic_tokens(&data, Some(content));
-    assert_eq!(tokens.len(), 2);
+    let tokens = decode_semantic_tokens(&data, Some(content), &legend);
+    assert_eq!(tokens.len(), 2, "{tokens:?}");
     assert_eq!(tokens[0].start, 0);
     assert_eq!(tokens[0].length, 5);
+    assert_eq!(
+        tokens[0].token_type, 15,
+        "server keyword(0) → Verter keyword(15)"
+    );
+    assert_eq!(tokens[0].token_modifiers, 0);
     assert_eq!(tokens[1].start, 6);
     assert_eq!(tokens[1].length, 3);
+    assert_eq!(
+        tokens[1].token_type, 8,
+        "server variable(1) → Verter variable(8)"
+    );
+    assert_eq!(
+        tokens[1].token_modifiers,
+        (1 << 0) | (1 << 2),
+        "server declaration(0)|readonly(1) → Verter declaration(0)|readonly(2)"
+    );
+}
+
+/// A dropped mid-stream token must not desync the running delta anchor for the
+/// tokens after it.
+#[test]
+fn test_decode_semantic_tokens_drop_preserves_delta_anchoring() {
+    let content = "const msg = 'hello';\nconst count = 42;\n";
+    let legend =
+        crate::semantic_tokens::SemanticTokenLegendMap::from_names(&["variable"], &["declaration"]);
+    let data: Vec<serde_json::Value> = vec![
+        // Unknown type index 5 @ line 0 col 6 — dropped.
+        0.into(),
+        6.into(),
+        3.into(),
+        5.into(),
+        0.into(),
+        // "count" @ line 1 col 6 (delta from the DROPPED token's position),
+        // len 5 — variable(0) + declaration.
+        1.into(),
+        6.into(),
+        5.into(),
+        0.into(),
+        1.into(),
+    ];
+    let tokens = decode_semantic_tokens(&data, Some(content), &legend);
+    assert_eq!(tokens.len(), 1, "{tokens:?}");
+    // Line 1 starts at byte 21; col 6 ⇒ byte 27 ("count").
+    assert_eq!(tokens[0].start, 27);
+    assert_eq!(tokens[0].token_type, 8);
+    assert_eq!(tokens[0].token_modifiers, 1);
+}
+
+#[test]
+fn test_decode_semantic_tokens_converts_utf16_lengths_to_bytes() {
+    let content = "const π𝛑val = 1;\n";
+    let legend =
+        crate::semantic_tokens::SemanticTokenLegendMap::from_names(&["variable"], &["declaration"]);
+    let data: Vec<serde_json::Value> = vec![
+        // "π𝛑val" starts at UTF-16 column 6 and spans six UTF-16 units:
+        // π(1) + 𝛑(2) + val(3). The provider contract uses bytes, where the
+        // same token is nine bytes: π(2) + 𝛑(4) + val(3).
+        0.into(),
+        6.into(),
+        6.into(),
+        0.into(),
+        1.into(),
+    ];
+
+    let tokens = decode_semantic_tokens(&data, Some(content), &legend);
+    assert_eq!(tokens.len(), 1, "{tokens:?}");
+    assert_eq!((tokens[0].start, tokens[0].length), (6, 9));
+    assert_eq!(
+        &content[tokens[0].start as usize..(tokens[0].start + tokens[0].length) as usize],
+        "π𝛑val"
+    );
+    assert!(
+        decode_semantic_tokens(&data, None, &legend).is_empty(),
+        "without source text UTF-16 positions cannot safely become byte offsets"
+    );
+}
+
+// @ai-generated - Guards checked conversion of tsgo semantic-token fields.
+#[test]
+fn test_decode_semantic_tokens_stops_on_numeric_field_overflow() {
+    let content = "const value = 1; const other = 2;";
+    let legend =
+        crate::semantic_tokens::SemanticTokenLegendMap::from_names(&["variable"], &["declaration"]);
+    let wrapped_value_start = u64::from(u32::MAX) + 7;
+    let data: Vec<serde_json::Value> = vec![
+        // Truncation turns this malformed deltaStart into column 6 and emits a
+        // wrong token on `value`.
+        0.into(),
+        wrapped_value_start.into(),
+        5.into(),
+        0.into(),
+        1.into(),
+        // A delta stream cannot be resynchronised after the malformed entry,
+        // so this otherwise-valid following token must be discarded too.
+        0.into(),
+        17.into(),
+        5.into(),
+        0.into(),
+        1.into(),
+    ];
+
+    let tokens = decode_semantic_tokens(&data, Some(content), &legend);
+    assert!(
+        tokens.is_empty(),
+        "an overflowing field must yield no token and terminate the delta stream: {tokens:?}"
+    );
+}
+
+// @ai-generated - Guards fail-closed parsing of non-numeric tsgo delta fields.
+#[test]
+fn test_decode_semantic_tokens_stops_on_non_numeric_field() {
+    let content = "const value = 1;";
+    let legend =
+        crate::semantic_tokens::SemanticTokenLegendMap::from_names(&["variable"], &["declaration"]);
+    let data: Vec<serde_json::Value> = vec![
+        // `unwrap_or(0)` fabricates a valid token on `const`.
+        0.into(),
+        serde_json::json!("not-a-number"),
+        5.into(),
+        0.into(),
+        0.into(),
+        // The remaining delta stream must not be decoded after the bad entry.
+        0.into(),
+        6.into(),
+        5.into(),
+        0.into(),
+        1.into(),
+    ];
+
+    let tokens = decode_semantic_tokens(&data, Some(content), &legend);
+    assert!(
+        tokens.is_empty(),
+        "a non-numeric field must yield no token and terminate the delta stream: {tokens:?}"
+    );
+}
+
+// @ai-generated - Guards checked accumulation of tsgo semantic-token deltas.
+#[test]
+fn test_decode_semantic_tokens_stops_on_delta_accumulation_overflow() {
+    let content = "const value = 1;";
+    let legend =
+        crate::semantic_tokens::SemanticTokenLegendMap::from_names(&["variable"], &["declaration"]);
+    let data: Vec<serde_json::Value> = vec![
+        // The first numeric entry is representable but outside the source.
+        u32::MAX.into(),
+        0.into(),
+        1.into(),
+        0.into(),
+        0.into(),
+        // Adding one more line overflows the running delta position.
+        1.into(),
+        0.into(),
+        5.into(),
+        0.into(),
+        1.into(),
+    ];
+
+    let tokens = decode_semantic_tokens(&data, Some(content), &legend);
+    assert!(
+        tokens.is_empty(),
+        "delta accumulation overflow must terminate the stream without a token: {tokens:?}"
+    );
+}
+
+// @ai-generated - Guards exact byte conversion and cache-miss refusal for tsgo inlay hints.
+#[test]
+fn test_parse_inlay_hint_requires_content_and_an_exact_position() {
+    let content = "é\nconst value = 1;\n";
+    let hint = serde_json::json!({
+        "position": { "line": 1, "character": 6 },
+        "label": ": number",
+        "kind": 1,
+    });
+
+    let parsed = parse_inlay_hint(&hint, Some(content)).expect("valid inlay hint");
+    assert_eq!(
+        parsed.position, 9,
+        "the UTF-16 line/column must resolve to a byte offset"
+    );
+    assert!(
+        parse_inlay_hint(&hint, None).is_none(),
+        "a content-cache miss must drop the hint, never pack line/column as bytes"
+    );
+
+    let out_of_range = serde_json::json!({
+        "position": { "line": 99, "character": 0 },
+        "label": ": number",
+        "kind": 1,
+    });
+    assert!(
+        parse_inlay_hint(&out_of_range, Some(content)).is_none(),
+        "an out-of-range inlay position must be dropped, never clamped to EOF"
+    );
+
+    let overflow = u64::from(u32::MAX) + 1;
+    let overflowing = serde_json::json!({
+        "position": { "line": overflow, "character": 0 },
+        "label": ": number",
+        "kind": 1,
+    });
+    assert!(
+        parse_inlay_hint(&overflowing, Some(content)).is_none(),
+        "an overflowing inlay position must be dropped, never truncated to line 0"
+    );
 }
 
 /// @ai-generated — parse_document_highlight parses highlight JSON
@@ -2838,6 +3058,7 @@ async fn test_provider_operations_fail_after_process_death() {
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache,
         teardown_intent: Arc::new(AtomicBool::new(false)),
+        semantic_token_legend: Arc::new(StdRwLock::new(None)),
     };
 
     // All operations should NOT hang, which is the critical invariant.
@@ -2927,6 +3148,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
         contents: Arc::clone(&contents_cache),
         diagnostics_cache,
         teardown_intent: Arc::new(AtomicBool::new(false)),
+        semantic_token_legend: Arc::new(StdRwLock::new(None)),
     };
 
     // Insert under a mixed-case, backslash-separated Windows-style path.
@@ -3026,6 +3248,7 @@ async fn test_drop_kills_child_process() {
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
+        semantic_token_legend: Arc::new(StdRwLock::new(None)),
     };
 
     // Drop the provider — Drop impl should call start_kill().
@@ -3065,6 +3288,7 @@ async fn test_child_pid_returns_id() {
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
+        semantic_token_legend: Arc::new(StdRwLock::new(None)),
     };
 
     // After the process has exited, id() returns None.
@@ -3804,6 +4028,7 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
+        semantic_token_legend: Arc::new(StdRwLock::new(None)),
     };
 
     let total = MAX_COMPLETION_DETAIL_ENRICH + 70;
@@ -3882,6 +4107,7 @@ async fn get_completion_details_enriches_full_small_list() {
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
+        semantic_token_legend: Arc::new(StdRwLock::new(None)),
     };
 
     let items: Vec<Completion> = (0..5)
@@ -3967,6 +4193,7 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
+        semantic_token_legend: Arc::new(StdRwLock::new(None)),
     };
 
     let handle = CompletionResolveData::Lsp {
@@ -4552,6 +4779,7 @@ fn ledger_provider(capacity: usize) -> (TsgoTypeProvider, mpsc::Receiver<StdinMe
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
+        semantic_token_legend: Arc::new(StdRwLock::new(None)),
     };
     (provider, stdin_rx)
 }
@@ -4753,4 +4981,330 @@ async fn tsgo_sends_no_workspace_configuration_notification() {
     let frames = drained_notifications(&mut stdin_rx);
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].0, "textDocument/didOpen");
+}
+
+// ── Semantic tokens + inlay hints: Verter-legend-space delivery (live) ───────
+//
+// Provider tokens cross the `TypeProvider` boundary in VERTER's published
+// legend space (the `SemanticTokensLegend` the LSP advertises in
+// `verter_lsp::capabilities`): type indices — namespace=0, type=1, class=2,
+// enum=3, interface=4, struct=5, typeParameter=6, parameter=7, variable=8,
+// property=9, enumMember=10, event=11, function=12, method=13, macro=14,
+// keyword=15, modifier=16, comment=17, string=18, number=19, regexp=20,
+// operator=21, decorator=22; modifier bits — declaration=0, definition=1,
+// readonly=2, static=3, deprecated=4, abstract=5, async=6, modification=7,
+// documentation=8, defaultLibrary=9, local=10.
+//
+// tsgo emits tokens in ITS OWN server-advertised legend (observed live on the
+// pinned 7.0.2: interface=3, variable=8, function=13 — a DIFFERENT order), so
+// the provider must retain the `initialize`-result legend and remap BOTH the
+// type index and the modifier bitset by NAME before returning. An unmapped
+// token type or modifier bit drops the token (fail closed — absent beats
+// wrong).
+
+/// Live discriminator for the tsgo semantic-token lane: the same identifiers a
+/// `.ts` file gets under VS Code's TypeScript semantic highlighting must come
+/// back with Verter-legend indices. Pre-fix this fails because
+/// `build_client_capabilities()` never advertises `textDocument.semanticTokens`
+/// — the pinned engine then advertises an EMPTY legend and returns zero data.
+#[tokio::test]
+async fn tsgo_semantic_tokens_arrive_in_verter_legend_space() {
+    let tsgo_bin = tsgo_bin_or_skip()
+        .await
+        .expect("the pinned tsgo engine is required for the live semantic-token discriminator");
+
+    let tmp = std::env::temp_dir().join("verter_tsgo_test_semtok_legend");
+    let _ = std::fs::remove_dir_all(&tmp);
+    create_test_project(&tmp).unwrap();
+
+    let content = "interface Shape { area: number }\n\
+                   const localCount = 42;\n\
+                   function computeArea(shape: Shape): number { return shape.area + localCount; }\n";
+    let ts_path = tmp.join("semtok.ts");
+    std::fs::write(&ts_path, content).unwrap();
+
+    let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
+    let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
+    let file_path = ts_path.to_str().unwrap().replace('\\', "/");
+    provider.open_file(&file_path, content).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let tokens = provider.get_semantic_tokens(&file_path).await.unwrap();
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    assert!(
+        !tokens.is_empty(),
+        "the tsgo lane must produce semantic tokens for a plain .ts file — an \
+         empty result means the client capability was never advertised (the \
+         engine gates the feature on it)"
+    );
+
+    let find = |start: u32, length: u32| {
+        tokens
+            .iter()
+            .find(|t| t.start == start && t.length == length)
+            .unwrap_or_else(|| panic!("no token at byte {start} (len {length}); got: {tokens:?}"))
+    };
+
+    // "Shape" declaration — line 0, bytes 10..15. VS Code TS baseline:
+    // interface + declaration.
+    let shape = find(10, 5);
+    assert_eq!(
+        shape.token_type, 4,
+        "`Shape` must map to Verter `interface` (index 4), got index {} — a raw \
+         tsgo index here means the server legend was forwarded unmapped",
+        shape.token_type
+    );
+    assert_eq!(
+        shape.token_modifiers, 1,
+        "`Shape` declaration must carry exactly the Verter `declaration` bit (0)"
+    );
+
+    // "localCount" declaration — line 1 starts at byte 33; token bytes 39..49.
+    // VS Code TS baseline: variable + declaration + readonly.
+    let local_count = find(39, 10);
+    assert_eq!(
+        local_count.token_type, 8,
+        "`localCount` must map to Verter `variable` (index 8)"
+    );
+    assert_eq!(
+        local_count.token_modifiers,
+        (1 << 0) | (1 << 2),
+        "`localCount` must carry Verter `declaration` (bit 0) + `readonly` (bit 2)"
+    );
+
+    // "computeArea" declaration — line 2 starts at byte 56; token bytes 65..76.
+    let compute_area = find(65, 11);
+    assert_eq!(
+        compute_area.token_type, 12,
+        "`computeArea` must map to Verter `function` (index 12)"
+    );
+    assert_eq!(
+        compute_area.token_modifiers, 1,
+        "`computeArea` declaration must carry exactly the Verter `declaration` bit"
+    );
+
+    // Negative: no token may carry a type index outside Verter's 23-type legend —
+    // an out-of-range index means provider-space indices leaked through.
+    for token in &tokens {
+        assert!(
+            token.token_type < 23,
+            "token {token:?} carries an index outside Verter's published legend"
+        );
+    }
+}
+
+/// Live discriminator for the tsgo inlay-hint lane. TS inlay hints are all
+/// preference-gated (off by default) and tsgo only ASKS for preferences
+/// (`workspace/configuration`) when the client advertises
+/// `workspace.configuration: true`. Pre-fix the capability is never advertised
+/// and the configuration responder answers the wrong section shape, so the
+/// engine returns zero hints for every file.
+#[tokio::test]
+async fn tsgo_inlay_hints_appear_for_inferred_types() {
+    let tsgo_bin = tsgo_bin_or_skip()
+        .await
+        .expect("the pinned tsgo engine is required for the live inlay-hint discriminator");
+
+    let tmp = std::env::temp_dir().join("verter_tsgo_test_inlay_hints");
+    let _ = std::fs::remove_dir_all(&tmp);
+    create_test_project(&tmp).unwrap();
+
+    let content = "function compute(width: number): number { return width * 2; }\n\
+                   const inferred = compute(21);\n";
+    let ts_path = tmp.join("inlay.ts");
+    std::fs::write(&ts_path, content).unwrap();
+
+    let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
+    let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
+    let file_path = ts_path.to_str().unwrap().replace('\\', "/");
+    provider.open_file(&file_path, content).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let hints = provider
+        .get_inlay_hints(&file_path, 0, content.len() as u32)
+        .await
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    assert!(
+        !hints.is_empty(),
+        "the tsgo lane must produce inlay hints — an empty result means the \
+         engine never received inlay-hint preferences (workspace/configuration \
+         is only requested when the client advertises workspace.configuration)"
+    );
+    assert!(
+        hints.iter().any(|h| {
+            matches!(h.kind, Some(crate::protocol::InlayHintKind::Type))
+                && h.label.contains("number")
+        }),
+        "expected a variable-type hint `: number` on `inferred`; got: {hints:?}"
+    );
+    assert!(
+        hints.iter().any(|h| {
+            matches!(h.kind, Some(crate::protocol::InlayHintKind::Parameter))
+                && h.label.contains("width")
+        }),
+        "expected a parameter-name hint `width:` at the call site; got: {hints:?}"
+    );
+}
+
+/// The shared-attach seam: a NON-OWNING provider (`from_initialized_transport`)
+/// never sees an `initialize` result itself — the relay's in-band witness
+/// supplies the legend via `set_semantic_token_legend`. Before injection the
+/// provider FAILS CLOSED (no tokens, and no request reaches the wire — raw
+/// indices must never be forwarded for lack of a legend); after injection the
+/// same engine data comes back remapped into Verter's published legend space.
+#[tokio::test]
+async fn non_owning_transport_semantic_tokens_fail_closed_until_witness_legend_arrives() {
+    let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
+    let (read, write) = tokio::io::split(provider_side);
+    let provider = TsgoTypeProvider::from_initialized_transport(read, write);
+
+    let path = if cfg!(windows) {
+        "D:/w/Comp.vue.tsx"
+    } else {
+        "/w/Comp.vue.tsx"
+    };
+    let source = "interface Shape { area: number }\n";
+    provider
+        .load_file(path, source)
+        .await
+        .expect("cache content");
+
+    // No legend yet: fail closed — empty result, nothing on the wire.
+    let tokens = provider
+        .get_semantic_tokens(path)
+        .await
+        .expect("fail-closed call succeeds");
+    assert!(
+        tokens.is_empty(),
+        "without a witness legend the provider must return NO tokens: {tokens:?}"
+    );
+
+    // Inject the witness legend (the relay's in-band initialize capture), in
+    // the server's own order — deliberately NOT Verter's.
+    let legend = serde_json::json!({
+        "tokenTypes": ["namespace", "class", "enum", "interface", "struct",
+                        "typeParameter", "type", "parameter", "variable"],
+        "tokenModifiers": ["declaration", "definition", "readonly"],
+    });
+    provider.set_semantic_token_legend(
+        crate::semantic_tokens::SemanticTokenLegendMap::from_legend_json(&legend)
+            .expect("legend-shaped"),
+    );
+
+    // Scripted engine: answer the (single) semanticTokens/full request with
+    // "Shape" @ line 0 col 10 len 5, server interface(3) + declaration(bit 0).
+    let server = tokio::spawn(async move {
+        let mut framer = MessageFramer::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = relay_side.read(&mut chunk).await.expect("read request");
+            assert_ne!(n, 0, "provider closed before issuing semanticTokens/full");
+            framer.push(&chunk[..n]);
+            if let Some(request) = framer.next_message().expect("decode request") {
+                assert_eq!(
+                    request["method"],
+                    serde_json::json!("textDocument/semanticTokens/full"),
+                    "the fail-closed phase must not have queued a request; the first \
+                     wire request is the post-injection one"
+                );
+                let response = encode_message(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": { "data": [0, 10, 5, 3, 1] }
+                }));
+                relay_side.write_all(&response).await.expect("write tokens");
+                break;
+            }
+        }
+        relay_side
+    });
+
+    let tokens = provider
+        .get_semantic_tokens(path)
+        .await
+        .expect("mapped tokens");
+    let _relay_side = server.await.expect("scripted engine");
+
+    assert_eq!(tokens.len(), 1, "{tokens:?}");
+    assert_eq!(tokens[0].start, 10);
+    assert_eq!(tokens[0].length, 5);
+    assert_eq!(
+        tokens[0].token_type, 4,
+        "server-legend interface(3) must remap to Verter interface(4) — equality \
+         here would mean the raw index was forwarded"
+    );
+    assert_eq!(tokens[0].token_modifiers, 1, "declaration bit maps 0 → 0");
+}
+
+/// The tsgo `initialize` client capabilities must advertise
+/// `textDocument.semanticTokens` — the engine gates the ENTIRE feature on it
+/// (verified live on the pinned 7.0.2: without the capability the initialize
+/// result advertises an EMPTY legend and `semanticTokens/full` returns zero
+/// data for every file). The advertised vocabulary is Verter's PUBLISHED
+/// legend, so the server's negotiated echo can only contain names the shared
+/// remap owner can express.
+///
+/// Discriminating: the pre-fix capabilities left `semanticTokens` to
+/// "static server-side registration" (no key at all) and fail every assert.
+#[test]
+fn client_capabilities_advertise_semantic_tokens_with_the_published_vocabulary() {
+    let caps = build_client_capabilities();
+    let semantic = &caps["textDocument"]["semanticTokens"];
+
+    assert_eq!(
+        semantic["requests"]["full"],
+        serde_json::json!(true),
+        "semanticTokens.requests.full must be advertised — get_semantic_tokens \
+         issues textDocument/semanticTokens/full"
+    );
+    assert_eq!(
+        semantic["formats"],
+        serde_json::json!(["relative"]),
+        "the delta decoder consumes the `relative` token format"
+    );
+    let advertised_types: Vec<&str> = semantic["tokenTypes"]
+        .as_array()
+        .expect("tokenTypes must be an array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        advertised_types,
+        crate::semantic_tokens::VERTER_TOKEN_TYPES.to_vec(),
+        "the advertised token types must be exactly Verter's published legend"
+    );
+    let advertised_modifiers: Vec<&str> = semantic["tokenModifiers"]
+        .as_array()
+        .expect("tokenModifiers must be an array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        advertised_modifiers,
+        crate::semantic_tokens::VERTER_TOKEN_MODIFIERS.to_vec(),
+        "the advertised token modifiers must be exactly Verter's published legend"
+    );
+}
+
+/// The tsgo `initialize` client capabilities must advertise
+/// `workspace.configuration: true`. TypeScript inlay hints are entirely
+/// preference-gated (all off by default) and the engine only PULLS preferences
+/// (`workspace/configuration` for the `typescript` / `javascript` sections)
+/// when the client claims the configuration channel — without it the
+/// preferences the read loop's responder serves can never be requested and
+/// `textDocument/inlayHint` returns null for every file (verified live).
+///
+/// Discriminating: the pre-fix capabilities had no `workspace` object at all.
+#[test]
+fn client_capabilities_advertise_the_workspace_configuration_channel() {
+    let caps = build_client_capabilities();
+    assert_eq!(
+        caps["workspace"]["configuration"],
+        serde_json::json!(true),
+        "workspace.configuration must be advertised — the engine only requests the \
+         inlay-hint preferences over this channel"
+    );
 }

@@ -140,6 +140,7 @@ pub(crate) struct TestSessionBuilder {
     suppress_imported_carrier_prewarm: bool,
     plugin_response_remap: bool,
     resilient: bool,
+    tsgo_lsp_feature_only: bool,
 }
 
 impl TestSessionBuilder {
@@ -157,6 +158,7 @@ impl TestSessionBuilder {
             // `plugin_response_remap(true)`.
             plugin_response_remap: false,
             resilient: false,
+            tsgo_lsp_feature_only: false,
         }
     }
 
@@ -179,6 +181,20 @@ impl TestSessionBuilder {
     /// Only meaningful for the tsserver provider (the plugin lives there).
     pub(crate) fn plugin_response_remap(mut self, enabled: bool) -> Self {
         self.plugin_response_remap = enabled;
+        self
+    }
+
+    /// Exercise tsgo's real LSP feature surface without attaching the separate
+    /// `--api` checker transport.
+    ///
+    /// Semantic tokens and inlay hints are implemented by
+    /// [`crate::tsgo::ipc::TsgoTypeProvider`] and the production owned
+    /// composite delegates those feature reads to that exact instance. Tests
+    /// limited to those reads can use this seam without opening the checker's
+    /// Unix-domain socket; the default remains the full one-process
+    /// dual-surface provider used by diagnostics/type-checker tests.
+    pub(crate) fn tsgo_lsp_feature_only(mut self, enabled: bool) -> Self {
+        self.tsgo_lsp_feature_only = enabled;
         self
     }
 
@@ -381,13 +397,17 @@ impl TestSessionBuilder {
                             )
                         }
                     };
-                match crate::tsgo::ipc::TsgoOwnedProvider::attach(inner, &tsgo_bin).await {
-                    Ok(owned) => Arc::new(owned),
-                    Err(e) => {
-                        return handle_absent_provider(
-                            self.kind,
-                            &format!("tsgo --api attach failed: {e}"),
-                        )
+                if self.tsgo_lsp_feature_only {
+                    inner
+                } else {
+                    match crate::tsgo::ipc::TsgoOwnedProvider::attach(inner, &tsgo_bin).await {
+                        Ok(owned) => Arc::new(owned),
+                        Err(e) => {
+                            return handle_absent_provider(
+                                self.kind,
+                                &format!("tsgo --api attach failed: {e}"),
+                            )
+                        }
                     }
                 }
             }

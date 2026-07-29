@@ -400,6 +400,7 @@ impl ControlServer {
                         observed_initialize_id: witness.observed_initialize_id,
                         root_uri: witness.root_uri,
                         workspace_folders: witness.workspace_folders,
+                        semantic_tokens_legend: witness.semantic_tokens_legend,
                     };
                     ok_frame(id, &result)
                 }

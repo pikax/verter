@@ -3003,6 +3003,49 @@ fn on_type_formatting_triggers_on_gt_only_not_slash() {
     );
 }
 
+/// The advertised semantic-token legend IS the shared mapping owner's
+/// published vocabulary, name-for-name and index-for-index. Every provider
+/// lane remaps its token space into `verter_type_runtime::semantic_tokens`'
+/// published indices, so a wire legend that drifts from those arrays re-opens
+/// the exact index-space mismatch this pin exists to prevent.
+#[test]
+fn advertised_semantic_token_legend_is_the_shared_owners_published_vocabulary() {
+    use tower_lsp_server::ls_types::SemanticTokensServerCapabilities;
+
+    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let Some(SemanticTokensServerCapabilities::SemanticTokensOptions(options)) =
+        caps.semantic_tokens_provider.as_ref()
+    else {
+        panic!("semantic tokens must be advertised as SemanticTokensOptions");
+    };
+
+    let advertised_types: Vec<&str> = options
+        .legend
+        .token_types
+        .iter()
+        .map(|t| t.as_str())
+        .collect();
+    assert_eq!(
+        advertised_types,
+        verter_type_runtime::semantic_tokens::VERTER_TOKEN_TYPES.to_vec(),
+        "legend token types must equal the shared owner's published array, in order"
+    );
+
+    let advertised_modifiers: Vec<&str> = options
+        .legend
+        .token_modifiers
+        .iter()
+        .map(|m| m.as_str())
+        .collect();
+    assert_eq!(
+        advertised_modifiers,
+        verter_type_runtime::semantic_tokens::VERTER_TOKEN_MODIFIERS.to_vec(),
+        "legend token modifiers must equal the shared owner's published array, in order \
+         (including the TypeScript-family `local` bit — without it every \
+         function-scoped binding's token fails closed and disappears)"
+    );
+}
+
 /// The advertised `resolve_provider` capability is HONEST: it mirrors the
 /// `resolve_provider` argument (which the initialize handler derives from the
 /// active provider's `supports_completion_resolve`), never a hard-coded `true`.

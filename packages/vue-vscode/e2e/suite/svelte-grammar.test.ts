@@ -10,7 +10,7 @@ import {
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
-import { pollUntil, semanticTokensExist } from "../lib/parityHarness";
+import { semanticTokenAt } from "../lib/parityHarness";
 
 // Svelte syntax-colorization packaging: a `.svelte` document opens under the
 // `svelte` language id, and the RUNNING Verter extension contributes both the
@@ -134,25 +134,30 @@ suite(`Svelte grammar packaging [${FIXTURE_NAME}]`, function () {
     await waitForFileReady(doc);
     // Semantic tokens are additive (VS Code layers them ABOVE TextMate scopes).
     // Where the product serves `.svelte` semantic-token DATA (the shared-tsgo
-    // lane), hard-assert a non-empty legend AND non-empty token data via the
-    // shared hard predicate (`semanticTokensExist`) — an absent/empty provider
-    // result FAILS this test instead of degrading to a log line.
+    // lane), hard-assert a NAMED identifier resolves to its expected token
+    // KIND (`semanticTokenAt`) — existence alone cannot see the wrong-kind
+    // defect class (provider-legend indices forwarded unmapped), and an
+    // absent/empty provider result still FAILS this test instead of degrading
+    // to a log line.
     //
     // tsserver / managed-tsgo do not produce `.svelte` token data yet — the
     // ledgered product gap ISSUE-lsp-semantic-tokens (e2e/ISSUES.md), owned and
-    // hard-failed by the parity suite (`lsp.semantic-tokens.present`). On those
+    // hard-failed by the parity suite (`lsp.semantic-tokens.kinds`). On those
     // routes this packaging suite still asserts the discriminating packaging
     // fact it owns: the provider REGISTRATION (legend) survives the grammar
     // contribution.
     if (TYPE_PROVIDER === "shared-tsgo") {
-      const present = await pollUntil(
-        "svelte semantic tokens (non-empty legend + data)",
-        () => semanticTokensExist(SVELTE_CHILD),
-        (ok) => ok,
-        20_000,
-      );
-      expect(present, "semantic tokens must be present (non-empty legend + non-empty data)").to.be
-        .true;
+      const resolved = await semanticTokenAt({
+        file: SVELTE_CHILD,
+        token: "bumpSvelteChild",
+        occurrence: 0,
+      });
+      expect(resolved, "a semantic token must cover the `bumpSvelteChild` declaration").to.not.be
+        .undefined;
+      expect(
+        resolved!.tokenType,
+        "`bumpSvelteChild` must highlight as a function — the same name a .ts file gets",
+      ).to.equal("function");
     } else {
       const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend | undefined>(
         "vscode.provideDocumentSemanticTokensLegend",

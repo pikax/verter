@@ -503,11 +503,32 @@ export async function typeDefinitionsAt(anchor: TokenAnchor): Promise<vscode.Loc
   return locations;
 }
 
-export async function semanticTokensExist(relative: string): Promise<boolean> {
-  const doc = await openRelative(relative);
-  // VS Code does not expose a stable execute* command for semantic tokens in all versions;
-  // probe via the built-in provider command when present.
-  try {
+/** A decoded semantic token resolved against the provider's own legend. */
+export interface ResolvedSemanticToken {
+  /** Legend NAME of the token type (e.g. `interface`, `variable`). */
+  readonly tokenType: string;
+  /** Legend NAMES of every set modifier bit (e.g. `declaration`, `readonly`). */
+  readonly modifiers: readonly string[];
+}
+
+/**
+ * Resolve the semantic token covering `anchor` to legend NAMES.
+ *
+ * `tokens.data.length > 0` is not evidence of correctness — the historical
+ * defect class here is tokens that EXIST with the wrong type/modifier indices
+ * (provider legend forwarded unmapped), which an existence probe can never
+ * see. Callers assert the decoded NAME, which is exactly what themes key on.
+ *
+ * Returns `undefined` when no token covers the anchor within the poll budget
+ * (feature absent, anchor unmapped, or the token was dropped).
+ */
+export async function semanticTokenAt(
+  anchor: TokenAnchor,
+): Promise<ResolvedSemanticToken | undefined> {
+  const doc = await openRelative(anchor.file);
+  const position = tokenPosition(doc, anchor);
+
+  const resolve = async (): Promise<ResolvedSemanticToken | undefined> => {
     const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend>(
       "vscode.provideDocumentSemanticTokensLegend",
       doc.uri,
@@ -516,9 +537,48 @@ export async function semanticTokensExist(relative: string): Promise<boolean> {
       "vscode.provideDocumentSemanticTokens",
       doc.uri,
     );
-    return Boolean(legend && tokens && tokens.data.length > 0);
+    if (!legend || !tokens) return undefined;
+    // Decode the LSP delta stream: [deltaLine, deltaStartChar, length, type, modifiers].
+    let line = 0;
+    let char = 0;
+    for (let i = 0; i + 4 < tokens.data.length; i += 5) {
+      const deltaLine = tokens.data[i];
+      const deltaChar = tokens.data[i + 1];
+      const length = tokens.data[i + 2];
+      const typeIndex = tokens.data[i + 3];
+      const modifierBits = tokens.data[i + 4];
+      if (deltaLine > 0) {
+        line += deltaLine;
+        char = deltaChar;
+      } else {
+        char += deltaChar;
+      }
+      if (
+        line === position.line &&
+        position.character >= char &&
+        position.character < char + length
+      ) {
+        const tokenType = legend.tokenTypes[typeIndex];
+        // An index outside the advertised legend is itself a defect worth
+        // surfacing loudly rather than reading as "no token here".
+        assert.ok(
+          tokenType !== undefined,
+          `token at ${anchor.file}#${anchor.token} carries type index ${typeIndex} ` +
+            `outside the advertised ${legend.tokenTypes.length}-entry legend`,
+        );
+        const modifiers = legend.tokenModifiers.filter(
+          (_, bit) => (modifierBits & (1 << bit)) !== 0,
+        );
+        return { tokenType, modifiers };
+      }
+    }
+    return undefined;
+  };
+
+  try {
+    return await pollUntil("semanticTokenAt", resolve, (value) => value !== undefined);
   } catch {
-    return false;
+    return undefined;
   }
 }
 

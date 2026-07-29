@@ -1335,3 +1335,167 @@ async fn completion_details_propagate_a_refusal_instead_of_returning_the_previou
          binding produced hides the refusal and serves another project's result"
     );
 }
+
+// ── Semantic tokens: TS "2020" classification decode + Verter legend remap ──
+//
+// `encodedSemanticClassifications-full` with `"format": "2020"` packs each
+// span's classification as `((tokenTypeIdx + 1) << 8) | modifierSet` in
+// TypeScript's classifier-2020 legend (types: class=0, enum=1, interface=2,
+// namespace=3, typeParameter=4, type=5, parameter=6, variable=7, enumMember=8,
+// property=9, function=10, method=11; modifier bits: declaration=0, static=1,
+// async=2, readonly=3, defaultLibrary=4, local=5). Tokens cross the
+// `TypeProvider` boundary in VERTER's published legend space, so the provider
+// must decode the 2020 packing (fields are NOT `type | mods << 8` — they are
+// the other way around, plus the `+1` offset) and remap BOTH halves by name.
+//
+// Discrimination: the classification constants below are asymmetric — a decoder
+// that swaps the fields, drops the `+1`, or forwards TS-legend indices produces
+// different numbers for every assertion.
+#[tokio::test]
+async fn semantic_tokens_decode_2020_and_remap_into_verter_legend_space() {
+    let file = "/workspace/src/entry.ts";
+    let content = "interface Shape { area: number }\nconst localCount = 42;\n";
+
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response(
+        "encodedSemanticClassifications-full",
+        json!({
+            "spans": [
+                // "Shape" @ 10, len 5 — TS interface(2) + declaration(bit 0):
+                // ((2 + 1) << 8) | 0b000001 = 769
+                10, 5, 769,
+                // "localCount" @ 39, len 10 — TS variable(7) + declaration(bit 0)
+                // + readonly(bit 3) + local(bit 5):
+                // ((7 + 1) << 8) | 0b101001 = 2089
+                39, 10, 2089,
+            ]
+        }),
+    );
+
+    let provider = ExtensionTypeProvider::with_transport(transport, "/workspace");
+    provider.open_file(file, content).await.expect("open");
+    let tokens = provider
+        .get_semantic_tokens(file)
+        .await
+        .expect("semantic tokens");
+
+    assert_eq!(tokens.len(), 2, "both spans decode: {tokens:?}");
+
+    // Verter legend: interface = type index 4; declaration = modifier bit 0.
+    assert_eq!(tokens[0].start, 10);
+    assert_eq!(tokens[0].length, 5);
+    assert_eq!(
+        tokens[0].token_type, 4,
+        "TS-2020 `interface` (2) must remap to Verter `interface` (4); the \
+         pre-fix inverted decode yields 1 here"
+    );
+    assert_eq!(
+        tokens[0].token_modifiers, 1,
+        "TS-2020 `declaration` (bit 0) must remap to Verter `declaration` (bit 0); \
+         the pre-fix inverted decode reads the type field as modifiers and yields 3"
+    );
+
+    // Verter legend: variable = 8; declaration|readonly|local = bits 0,2,10.
+    assert_eq!(tokens[1].start, 39);
+    assert_eq!(tokens[1].length, 10);
+    assert_eq!(
+        tokens[1].token_type, 8,
+        "TS-2020 `variable` (7) must remap to Verter `variable` (8)"
+    );
+    assert_eq!(
+        tokens[1].token_modifiers,
+        (1 << 0) | (1 << 2) | (1 << 10),
+        "modifier BITS remap individually by name: TS declaration(0)/readonly(3)/\
+         local(5) become Verter declaration(0)/readonly(2)/local(10) — forwarding \
+         the raw bitset (0b101001) is the colors-look-plausible-but-wrong failure"
+    );
+}
+
+/// Fail-closed half: a classification whose decoded type index is outside the
+/// TS-2020 legend must DROP the token, and a zero type field (impossible under
+/// the `+1` packing — only produced by mis-decoding) must not panic or emit.
+#[tokio::test]
+async fn semantic_tokens_drop_unmappable_classifications_instead_of_guessing() {
+    let file = "/workspace/src/entry.ts";
+    let content = "const ok = 1;\n";
+
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response(
+        "encodedSemanticClassifications-full",
+        json!({
+            "spans": [
+                // Type index 12 is outside the 12-entry TS-2020 legend:
+                // ((12 + 1) << 8) | 0 = 3328 → dropped.
+                0, 2, 3328,
+                // A raw zero "type" field (no +1 offset possible) → dropped.
+                3, 2, 0,
+                // "ok" @ 6, len 2 — variable(7) + declaration: survives.
+                6, 2, ((7 + 1) << 8) | 1,
+            ]
+        }),
+    );
+
+    let provider = ExtensionTypeProvider::with_transport(transport, "/workspace");
+    provider.open_file(file, content).await.expect("open");
+    let tokens = provider
+        .get_semantic_tokens(file)
+        .await
+        .expect("semantic tokens");
+
+    assert_eq!(
+        tokens.len(),
+        1,
+        "unmappable classifications are dropped, never emitted with a guessed \
+         kind: {tokens:?}"
+    );
+    assert_eq!(tokens[0].start, 6);
+    assert_eq!(tokens[0].token_type, 8, "Verter `variable`");
+    assert_eq!(tokens[0].token_modifiers, 1, "Verter `declaration`");
+}
+
+#[tokio::test]
+async fn inlay_hints_use_absolute_utf16_request_offsets_and_return_byte_positions() {
+    let file = "/workspace/src/entry.ts";
+    let content = "é\nconst answer = makeValue(42);\n";
+
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response(
+        "provideInlayHints",
+        json!([{
+            "text": "value:",
+            "position": { "line": 2, "offset": 26 },
+            "kind": "Parameter",
+            "whitespaceAfter": true,
+        }]),
+    );
+
+    let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/workspace");
+    provider.open_file(file, content).await.expect("open");
+    let hints = provider
+        .get_inlay_hints(file, 3, content.len() as u32)
+        .await
+        .expect("inlay hints");
+
+    let args = transport.first_args("provideInlayHints");
+    assert_eq!(
+        args["start"],
+        json!(2),
+        "the byte offset after `é\\n` is absolute UTF-16 offset 2, not line 2"
+    );
+    assert_eq!(
+        args["length"],
+        json!(content.encode_utf16().count() - 2),
+        "length is an absolute UTF-16 span, not an approximate line count"
+    );
+
+    assert_eq!(hints.len(), 1, "{hints:?}");
+    assert_eq!(
+        hints[0].position, 28,
+        "tsserver line/offset must convert through the cached text into bytes"
+    );
+    assert!(matches!(hints[0].kind, Some(InlayHintKind::Parameter)));
+    assert_eq!(hints[0].label, "value:");
+}

@@ -1644,6 +1644,18 @@ pub fn byte_offset_to_tsserver_pos(content: &str, offset: u32) -> (u32, u32) {
     (lc.line + 1, lc.character + 1) // tsserver is 1-based
 }
 
+/// Convert a byte offset to tsserver's zero-based absolute UTF-16 offset.
+///
+/// `encodedSemanticClassifications-full` and `provideInlayHints` take numeric
+/// absolute offsets rather than the line/offset objects used by most tsserver
+/// commands. Invalid byte offsets fail closed instead of being rounded onto a
+/// neighboring character.
+pub fn byte_offset_to_tsserver_absolute_offset(content: &str, offset: u32) -> Option<u32> {
+    let end = usize::try_from(offset).ok()?;
+    let prefix = content.get(..end)?;
+    u32::try_from(prefix.encode_utf16().count()).ok()
+}
+
 /// Convert tsserver's 1-based (line, offset) position to a byte offset.
 ///
 /// tsserver uses 1-based line and offset, where offset counts UTF-16 code units.
@@ -1693,6 +1705,42 @@ fn tsserver_pos_to_byte_offset_checked(content: &str, line: u32, offset: u32) ->
         return None;
     }
     Some(offset)
+}
+
+/// Parse one tsserver-family `provideInlayHints` entry into the provider
+/// contract's byte-offset representation.
+///
+/// Both the managed-tsserver and extension-hosted decoders consume this shared
+/// owner. A missing content snapshot or malformed/out-of-range UTF-16 position
+/// drops the hint; packed line/column sentinels are forbidden because carrier
+/// sourcemap merging interprets [`InlayHint::position`] as a byte offset.
+pub fn parse_tsserver_inlay_hint(
+    hint: &serde_json::Value,
+    content: Option<&str>,
+) -> Option<InlayHint> {
+    let text = hint.get("text")?.as_str()?.to_string();
+    let pos = hint.get("position")?;
+    let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
+    let offset = u32::try_from(pos.get("offset")?.as_u64()?).ok()?;
+    let position = tsserver_pos_to_byte_offset_checked(content?, line, offset)?;
+
+    let kind = match hint.get("kind").and_then(|value| value.as_str()) {
+        Some("Type") => Some(InlayHintKind::Type),
+        Some("Parameter") => Some(InlayHintKind::Parameter),
+        _ => None,
+    };
+
+    Some(InlayHint {
+        position,
+        label: text,
+        kind,
+        padding_left: hint
+            .get("whitespaceBefore")
+            .and_then(|value| value.as_bool()),
+        padding_right: hint
+            .get("whitespaceAfter")
+            .and_then(|value| value.as_bool()),
+    })
 }
 
 /// How a tracked open file was opened — the discriminant a resync replays on.
@@ -4457,7 +4505,14 @@ impl TypeProvider for TsserverTypeProvider {
                 // No cached content — nothing to get tokens for
                 return Ok(vec![]);
             };
-            let end_line = content.lines().count() as u32 + 1;
+            // `EncodedSemanticClassificationsRequestArgs` takes NUMERIC
+            // `start`/`length` — UTF-16 code-unit offsets — NOT the
+            // line/offset objects most tsserver commands use. tsserver
+            // answers a line/offset-shaped request with `success: true` and
+            // ZERO spans (live-verified on TS 5.4/5.8/6.0), so the wrong
+            // shape reads as an engine with no classifications rather than
+            // an error.
+            let utf16_length = content.encode_utf16().count() as u64;
 
             let result = transport
                 .request_background(
@@ -4465,8 +4520,8 @@ impl TypeProvider for TsserverTypeProvider {
                     inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
-                            "start": { "line": 1, "offset": 1 },
-                            "end": { "line": end_line, "offset": 1 },
+                            "start": 0,
+                            "length": utf16_length,
                             "format": "2020",
                         }),
                         &project_file_name,
@@ -4482,26 +4537,17 @@ impl TypeProvider for TsserverTypeProvider {
                         .cloned()
                         .unwrap_or_default();
 
-                    // Spans come as [start, length, classification, start, length, classification, ...]
-                    let mut tokens = Vec::new();
-                    let mut i = 0;
-                    while i + 2 < spans.len() {
-                        let start = spans[i].as_u64().unwrap_or(0) as u32;
-                        let length = spans[i + 1].as_u64().unwrap_or(0) as u32;
-                        let classification = spans[i + 2].as_u64().unwrap_or(0) as u32;
-                        // Map classification to semantic token type/modifiers
-                        let token_type = classification & 0xFF;
-                        let token_modifiers = (classification >> 8) & 0xFF;
-                        tokens.push(SemanticToken {
-                            start,
-                            length,
-                            token_type,
-                            token_modifiers,
-                        });
-                        i += 3;
-                    }
-
-                    Ok(tokens)
+                    // Spans come as [start, length, classification, ...]
+                    // triplets whose classification is `"format": "2020"`
+                    // packed. The shared owner decodes the packing, remaps
+                    // both halves into Verter's published legend space
+                    // (unmappable classifications drop their span), and
+                    // converts the engine's UTF-16 span offsets to the byte
+                    // offsets the SemanticToken contract requires.
+                    Ok(crate::semantic_tokens::map_classified_spans_2020(
+                        &spans,
+                        Some(&content),
+                    ))
                 }
                 Err(_) => Ok(vec![]),
             }
@@ -4606,15 +4652,24 @@ impl TypeProvider for TsserverTypeProvider {
         let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let (sl, sc, el, ec) = {
+            let (start, length, content_snapshot) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&file) {
                     Some(c) => {
-                        let (sl, sc) = byte_offset_to_tsserver_pos(c, start_offset);
-                        let (el, ec) = byte_offset_to_tsserver_pos(c, end_offset);
-                        (sl, sc, el, ec)
+                        let Some(start) = byte_offset_to_tsserver_absolute_offset(c, start_offset)
+                        else {
+                            return Ok(vec![]);
+                        };
+                        let Some(end) = byte_offset_to_tsserver_absolute_offset(c, end_offset)
+                        else {
+                            return Ok(vec![]);
+                        };
+                        let Some(length) = end.checked_sub(start) else {
+                            return Ok(vec![]);
+                        };
+                        (start, length, Some(Arc::clone(c)))
                     }
-                    None => (1, start_offset + 1, 1, end_offset + 1),
+                    None => return Ok(vec![]),
                 }
             };
 
@@ -4624,8 +4679,8 @@ impl TypeProvider for TsserverTypeProvider {
                     inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
-                            "start": sl,
-                            "length": (el.saturating_sub(sl) + 1) * 200, // Approximate byte range
+                            "start": start,
+                            "length": length,
                         }),
                         &project_file_name,
                     ),
@@ -4634,40 +4689,12 @@ impl TypeProvider for TsserverTypeProvider {
 
             match result {
                 Ok(body) => {
-                    let _ = (sc, ec); // Used above for position calculation
                     let hints = body
                         .as_array()
                         .map(|arr| {
                             arr.iter()
                                 .filter_map(|hint| {
-                                    let text = hint.get("text")?.as_str()?.to_string();
-                                    let pos = hint.get("position")?;
-                                    let hl = pos.get("line")?.as_u64()? as u32;
-                                    let ho = pos.get("offset")?.as_u64()? as u32;
-
-                                    let kind_str =
-                                        hint.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                                    let kind = match kind_str {
-                                        "Type" => Some(InlayHintKind::Type),
-                                        "Parameter" => Some(InlayHintKind::Parameter),
-                                        _ => None,
-                                    };
-
-                                    // Convert 1-based position to packed 0-based
-                                    let position = ((hl.saturating_sub(1)) << 16)
-                                        | ((ho.saturating_sub(1)) & 0xFFFF);
-
-                                    Some(InlayHint {
-                                        position,
-                                        label: text,
-                                        kind,
-                                        padding_left: hint
-                                            .get("whitespaceBefore")
-                                            .and_then(|v| v.as_bool()),
-                                        padding_right: hint
-                                            .get("whitespaceAfter")
-                                            .and_then(|v| v.as_bool()),
-                                    })
+                                    parse_tsserver_inlay_hint(hint, content_snapshot.as_deref())
                                 })
                                 .collect()
                         })

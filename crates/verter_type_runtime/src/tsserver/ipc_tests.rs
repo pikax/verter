@@ -5032,3 +5032,34 @@ fn spawn_command_simplifies_a_verbatim_unc_install() {
         Some(r"\\build01\ts\node_modules\typescript\lib\tsserver.js")
     );
 }
+
+#[test]
+fn inlay_hint_decoder_returns_byte_offsets_and_fails_closed_without_content() {
+    let content = "é\nconst answer = 42;\n";
+    let hint = serde_json::json!({
+        "text": ": number",
+        "position": { "line": 2, "offset": 13 },
+        "kind": "Type",
+        "whitespaceBefore": true,
+    });
+
+    let parsed = parse_tsserver_inlay_hint(&hint, Some(content)).expect("valid hint");
+    assert_eq!(
+        parsed.position, 15,
+        "line/offset is UTF-16 while the provider contract requires bytes"
+    );
+    assert_eq!(parsed.label, ": number");
+    assert!(matches!(parsed.kind, Some(InlayHintKind::Type)));
+    assert_eq!(parsed.padding_left, Some(true));
+
+    assert!(
+        parse_tsserver_inlay_hint(&hint, None).is_none(),
+        "without the target text a packed line/offset sentinel would be misread as bytes"
+    );
+    let out_of_range = serde_json::json!({
+        "text": ": number",
+        "position": { "line": 200, "offset": 1 },
+        "kind": "Type",
+    });
+    assert!(parse_tsserver_inlay_hint(&out_of_range, Some(content)).is_none());
+}

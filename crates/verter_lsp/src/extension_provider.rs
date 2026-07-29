@@ -16,12 +16,12 @@ use tokio::sync::{Mutex, OnceCell};
 use crate::server::TsQueryParams;
 use crate::tsserver::ipc::{
     assemble_signature_label, build_completion_entry_details_request, build_entry_names_entry,
-    byte_offset_to_tsserver_pos, combined_code_fix_args,
+    byte_offset_to_tsserver_absolute_offset, byte_offset_to_tsserver_pos, combined_code_fix_args,
     completion_entry_details_to_resolve_result, concat_display_parts, dedup_error_codes,
     enrich_completion_with_entry_details, format_quickinfo_hover, merge_diagnostic_sets,
     parse_tsserver_code_action, parse_tsserver_combined_code_fix, parse_tsserver_completion,
-    parse_tsserver_diagnostic, parse_tsserver_location, parse_tsserver_rename_span,
-    stamp_tsserver_completion_offset,
+    parse_tsserver_diagnostic, parse_tsserver_inlay_hint, parse_tsserver_location,
+    parse_tsserver_rename_span, stamp_tsserver_completion_offset,
 };
 use crate::type_provider::protocol::*;
 use crate::type_provider::traits::{ConfiguredOwnerAuthority, ProviderFuture, TypeProvider};
@@ -1037,24 +1037,22 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         .cloned()
                         .unwrap_or_default();
 
-                    let mut tokens = Vec::new();
-                    let mut i = 0;
-                    while i + 2 < spans.len() {
-                        let start = spans[i].as_u64().unwrap_or(0) as u32;
-                        let length = spans[i + 1].as_u64().unwrap_or(0) as u32;
-                        let classification = spans[i + 2].as_u64().unwrap_or(0) as u32;
-                        let token_type = classification & 0xFF;
-                        let token_modifiers = (classification >> 8) & 0xFF;
-                        tokens.push(SemanticToken {
-                            start,
-                            length,
-                            token_type,
-                            token_modifiers,
-                        });
-                        i += 3;
-                    }
-
-                    Ok(tokens)
+                    // Same span payload as the managed tsserver lane: `"2020"`
+                    // packed classification triplets (the extension host's
+                    // bridge accepts the line/offset REQUEST shape and calls
+                    // `getEncodedSemanticClassifications` itself, but the
+                    // RESPONSE spans are the language service's raw UTF-16
+                    // offsets either way). The shared owner
+                    // (`verter_type_runtime::semantic_tokens`) decodes, remaps
+                    // into Verter's published legend space (unmappable
+                    // classifications drop their span, fail closed), and
+                    // converts the offsets to bytes through the cached text.
+                    Ok(
+                        verter_type_runtime::semantic_tokens::map_classified_spans_2020(
+                            &spans,
+                            Some(&content),
+                        ),
+                    )
                 }
                 Err(e) => Err(e),
             }
@@ -1149,15 +1147,24 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         let file = Self::normalize_path(path);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (sl, _sc, el, _ec) = {
+            let (start, length, content_snapshot) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&file) {
                     Some(c) => {
-                        let (sl, sc) = byte_offset_to_tsserver_pos(c, start_offset);
-                        let (el, ec) = byte_offset_to_tsserver_pos(c, end_offset);
-                        (sl, sc, el, ec)
+                        let Some(start) = byte_offset_to_tsserver_absolute_offset(c, start_offset)
+                        else {
+                            return Ok(vec![]);
+                        };
+                        let Some(end) = byte_offset_to_tsserver_absolute_offset(c, end_offset)
+                        else {
+                            return Ok(vec![]);
+                        };
+                        let Some(length) = end.checked_sub(start) else {
+                            return Ok(vec![]);
+                        };
+                        (start, length, Some(Arc::clone(c)))
                     }
-                    None => (1, start_offset + 1, 1, end_offset + 1),
+                    None => return Ok(vec![]),
                 }
             };
 
@@ -1166,8 +1173,8 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     "provideInlayHints",
                     serde_json::json!({
                         "file": file,
-                        "start": sl,
-                        "length": (el.saturating_sub(sl) + 1) * 200,
+                        "start": start,
+                        "length": length,
                     }),
                 )
                 .await;
@@ -1179,33 +1186,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         .map(|arr| {
                             arr.iter()
                                 .filter_map(|hint| {
-                                    let text = hint.get("text")?.as_str()?.to_string();
-                                    let pos = hint.get("position")?;
-                                    let hl = pos.get("line")?.as_u64()? as u32;
-                                    let ho = pos.get("offset")?.as_u64()? as u32;
-
-                                    let kind_str =
-                                        hint.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                                    let kind = match kind_str {
-                                        "Type" => Some(InlayHintKind::Type),
-                                        "Parameter" => Some(InlayHintKind::Parameter),
-                                        _ => None,
-                                    };
-
-                                    let position = ((hl.saturating_sub(1)) << 16)
-                                        | ((ho.saturating_sub(1)) & 0xFFFF);
-
-                                    Some(InlayHint {
-                                        position,
-                                        label: text,
-                                        kind,
-                                        padding_left: hint
-                                            .get("whitespaceBefore")
-                                            .and_then(|v| v.as_bool()),
-                                        padding_right: hint
-                                            .get("whitespaceAfter")
-                                            .and_then(|v| v.as_bool()),
-                                    })
+                                    parse_tsserver_inlay_hint(hint, content_snapshot.as_deref())
                                 })
                                 .collect()
                         })

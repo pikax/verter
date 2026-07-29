@@ -511,6 +511,16 @@ pub struct ProviderDiagnosticContext {
 }
 
 /// A semantic token from the type provider.
+///
+/// `token_type` / `token_modifiers` are indices/bits into VERTER's published
+/// semantic-token legend (`crate::semantic_tokens::VERTER_TOKEN_TYPES` /
+/// `VERTER_TOKEN_MODIFIERS` — the exact legend the LSP advertises), NEVER a
+/// provider's own token space. Each provider decodes its backend's encoding
+/// (tsserver-family `"2020"` classifications; tsgo's server-advertised legend)
+/// and remaps by name through `crate::semantic_tokens::SemanticTokenLegendMap`
+/// before constructing one of these; a token the map cannot express is dropped
+/// at the provider (fail closed), so consumers may forward these indices to
+/// the wire unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticToken {
     pub start: u32,

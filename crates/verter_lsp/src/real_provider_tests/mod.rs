@@ -44,5 +44,6 @@ mod multi_fixture;
 mod references;
 mod rename;
 mod request_surface;
+mod semantic_tokens;
 mod signature_help;
 mod template_surface;

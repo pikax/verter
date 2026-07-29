@@ -13,7 +13,7 @@ import {
   signatureHelpAt,
   failParityGap,
   typeDefinitionsAt,
-  semanticTokensExist,
+  semanticTokenAt,
 } from "../../lib/parityHarness";
 
 function parityFramework(): "vue" | "svelte" | null {
@@ -99,19 +99,50 @@ suite(`LSP extras [${FIXTURE_NAME}]`, function () {
     }
   });
 
-  test("lsp.semantic-tokens.present", async function () {
+  test("lsp.semantic-tokens.kinds", async function () {
     const fw = parityFramework();
     if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
     const file = fw === "vue" ? "src/DailyBinding.vue" : "src/DailyBinding.svelte";
+    // The same identifier in an equivalent `.ts` file gets these token-type
+    // NAMES under VS Code's TypeScript semantic highlighting — the carrier
+    // must match name-for-name (Verter's legend may be a subset of TS's).
+    // `data.length > 0` is NOT asserted anywhere: existence cannot see the
+    // wrong-kind defect class (provider-legend indices forwarded unmapped).
+    const expectations: ReadonlyArray<{ token: string; occurrence: number; expected: string }> = [
+      // Script-side declarations.
+      { token: "DailyValue", occurrence: 0, expected: "interface" },
+      { token: "dailyValue", occurrence: 0, expected: "variable" },
+      { token: "renderDaily", occurrence: 0, expected: "function" },
+    ];
     try {
-      const ok = await semanticTokensExist(file);
-      if (!ok) throw new Error("no semantic tokens (or provider command unavailable)");
+      for (const { token, occurrence, expected } of expectations) {
+        const resolved = await semanticTokenAt({ file, token, occurrence });
+        if (!resolved) {
+          throw new Error(`no semantic token covers ${file}#${token}[${occurrence}]`);
+        }
+        if (resolved.tokenType !== expected) {
+          throw new Error(
+            `${file}#${token}[${occurrence}] highlighted as \`${resolved.tokenType}\` ` +
+              `(modifiers: ${resolved.modifiers.join(",") || "none"}), expected \`${expected}\``,
+          );
+        }
+      }
+      // Modifier half: the const/let binding's declaration must carry the
+      // `declaration` modifier — a type-only remap that forwards raw modifier
+      // bitsets ships wrong `static`/`readonly`/`async` styling.
+      const declaration = await semanticTokenAt({ file, token: "dailyValue", occurrence: 0 });
+      if (!declaration?.modifiers.includes("declaration")) {
+        throw new Error(
+          `dailyValue declaration lacks the \`declaration\` modifier ` +
+            `(got: ${declaration?.modifiers.join(",") || "none"})`,
+        );
+      }
     } catch (err) {
       failParityGap(
         this,
-        "lsp.semantic-tokens.present",
+        "lsp.semantic-tokens.kinds",
         "ISSUE-lsp-semantic-tokens",
-        `Semantic tokens not observable for ${fw}: ${String(err)}`,
+        `Semantic token kinds wrong or unobservable for ${fw}: ${String(err)}`,
         "product-gap",
       );
     }
