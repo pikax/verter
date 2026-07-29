@@ -464,11 +464,22 @@ async fn coordinator_loop(
                     .map(|(id, (_, signal))| (id.clone(), signal.clone()))
                     .collect();
 
+                // The canonicals whose settled signal carried a REAL edit
+                // (`requires_sync`) — the only signal class after which the
+                // results of files that IMPORT this one can have changed. Their
+                // open importers are re-armed after the loop, once this tick's
+                // own work (including the edited file's provider sync, which
+                // runs inline above the arming's debounce window) is done.
+                let mut settled_edits: Vec<String> = Vec::new();
+
                 for (canonical_id, signal) in ready {
                     pending_files.remove(&canonical_id);
                     let mut publish_diagnostics = signal.force_diagnostics;
                     let will_sync = signal.requires_sync
                         && deps.needs_provider_sync.remove(&canonical_id).is_some();
+                    if signal.requires_sync {
+                        settled_edits.push(canonical_id.clone());
+                    }
 
                     // The carrier's IDE surface is owed by THIS tick, for every
                     // settled revision it is about to sync or publish — not by
@@ -524,8 +535,119 @@ async fn coordinator_loop(
                         );
                     }
                 }
+                arm_open_importer_republish(&deps, &settled_edits, &mut pending_files);
                 diagnostic_tasks.retain(|_, task| !task.is_finished());
             }
+        }
+    }
+}
+
+/// Arm a debounced diagnostics-only republish for every OPEN importer of each
+/// canonical whose settled REAL edit this tick just processed.
+///
+/// A child edit changes what its parents' diagnostics say — a renamed prop
+/// turns a parent's usage into `verter/unknown-prop`; a changed prop type
+/// turns the parent's generated TSX into a provider type error — but the edit
+/// clears and re-arms only the CHILD: the host upsert clears the child's
+/// `latest_diagnostics`, the `did_change` handler signals the child's
+/// canonical, and this tick publishes only pending keys. Without this arming a
+/// parent keeps whatever the editor last showed, forever. The workspace's
+/// reverse import graph exists for exactly this consumer ("LSP affected-files
+/// reporting + diagnostics" — `WorkspaceRead::affected_canonicals`, R22); it
+/// is read-only bookkeeping here and is never wired to cache invalidation —
+/// the parent's recompute reads host state that revalidates on read.
+///
+/// Depth: the TRANSITIVE closure (`affected_canonicals`), not direct importers
+/// only — a parent that re-exports or wraps the child can change its own
+/// public surface, so a grandparent's diagnostics can move too. The walk is an
+/// in-memory reverse-axis BFS; the expensive work is bounded separately below.
+///
+/// What bounds the fan-out:
+/// - armed at most once per settled quiet window per edited file — the arming
+///   rides THIS tick, never the per-keystroke `did_change` path, so a burst of
+///   keystrokes coalesces into one child settle and one arming;
+/// - only OPEN importers arm (push diagnostics exist for open editors only, and
+///   the tick's own refresh gate drops closed documents anyway), so the armed
+///   work is bounded by the open-editor count, not by the import graph;
+/// - armed importers enter the SAME debounced pending map with a fresh receipt
+///   — they publish one debounce window later, coalescing with each other,
+///   with their own pending edits, and with any further child settles;
+/// - the republish is diagnostics-only (`requires_sync: false`): no provider
+///   sync, and the tick's IDE refresh is a warm cache hit for a parent whose
+///   own compile inputs did not change.
+///
+/// Fail-closed: the arming only schedules the parent through the existing
+/// publish path, which already refuses to publish torn results (surface
+/// re-validation, document-version fences). A CHILD edit moves neither the
+/// parent's document version nor, on its own, the parent's diagnostics
+/// generation — so without intervention the parent's version-keyed
+/// document-half cache would warm-hit and republish yesterday's set as fresh.
+///
+/// The stale-cache fence is the GENERATION BUMP, not the entry drop. Dropping
+/// the entry alone cannot fence a parent computation already in flight: that
+/// computation snapshotted the pre-arm generation at entry, captured pre-edit
+/// child state, and lands its cache write AFTER the drop — with the parent's
+/// version and generation both still matching, every later read warm-hits it.
+/// Bumping the parent's host diagnostics generation here advances the epoch
+/// that every computation stamps into its write and every read re-validates
+/// against the live counter (the same read-side-authoritative rail
+/// host-driven recompiles already use), so a computation that began before
+/// the arm can never satisfy a read that happens after it. The entry drop
+/// stays only to free the known-dead value eagerly.
+fn arm_open_importer_republish(
+    deps: &SyncCoordinatorDeps,
+    settled_edits: &[String],
+    pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
+) {
+    if settled_edits.is_empty() {
+        return;
+    }
+    // The OPEN documents are the bound: enumerate them once (their canonical
+    // ids and the client's own URI serialization, which keys the diagnostic
+    // caches), then test each against the reverse closure — never a
+    // document-map scan per closure member.
+    let open_documents: Vec<(String, String)> = deps
+        .documents
+        .open_uris()
+        .into_iter()
+        .filter_map(|uri_str| {
+            let uri: Uri = uri_str.parse().ok()?;
+            Some((deps.documents.get_canonical_id(&uri)?, uri_str))
+        })
+        .collect();
+    if open_documents.is_empty() {
+        return;
+    }
+    let workspace = deps.documents.host().workspace_read();
+    let received_at = Instant::now();
+    for edited in settled_edits {
+        let affected: std::collections::HashSet<String> =
+            workspace.affected_canonicals(edited).into_iter().collect();
+        for (importer, importer_uri) in &open_documents {
+            if importer == edited || !affected.contains(importer) {
+                continue;
+            }
+            tracing::debug!(
+                "sync_coordinator: arming open importer {importer} after settled edit of {edited}"
+            );
+            deps.documents.host().bump_diagnostics_generation(importer);
+            deps.cached_verter_diags.remove(importer_uri);
+            pending_files
+                .entry(importer.clone())
+                .and_modify(|(changed_at, pending)| {
+                    *changed_at = (*changed_at).max(received_at);
+                    pending.force_diagnostics = true;
+                    pending.received_at = pending.received_at.max(received_at);
+                })
+                .or_insert((
+                    received_at,
+                    PendingSignal {
+                        uri: importer_uri.clone(),
+                        requires_sync: false,
+                        force_diagnostics: true,
+                        received_at,
+                    },
+                ));
         }
     }
 }

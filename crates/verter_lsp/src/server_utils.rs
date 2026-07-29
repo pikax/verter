@@ -1524,10 +1524,11 @@ fn compute_verter_diagnostics_for_with_views(
     // Check cache: if version AND diagnostics generation both match, return cached.
     let uri_str = uri.as_str();
     let canonical_id = uri_to_canonical_id(uri);
-    let current_diag_gen = documents
-        .host()
-        .get_diagnostics_generation(&canonical_id)
-        .unwrap_or(0);
+    // The host's epoch VERBATIM. Not `unwrap_or(0)`: a canonical with no
+    // recorded epoch must read as its own value, distinct from every epoch an
+    // advance can produce, or an arm that lands while the file has no compile
+    // row is indistinguishable from no arm at all.
+    let current_diag_gen = documents.host().get_diagnostics_generation(&canonical_id);
     if let Some(doc) = documents.get(uri) {
         if let Some(cached) = cached_verter_diags.get(uri_str) {
             if cached.0 == doc.version && cached.1 == current_diag_gen {

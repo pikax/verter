@@ -3637,6 +3637,104 @@ fn bump_diagnostics_generation_increments_without_recompile() {
     );
 }
 
+/// `evict` clears a file's stored diagnostics without moving any document
+/// version, so it must ADVANCE the epoch consumers revalidate against —
+/// otherwise a result derived from the pre-evict diagnostics keeps validating
+/// against a post-evict read and is served as fresh.
+///
+/// The epoch itself stays readable across the eviction: reporting `None` there
+/// while the stored counter kept advancing made an advance invisible, so a
+/// sample taken before one and a sample taken after it were the same value.
+/// The eviction gate belongs on the diagnostics PAYLOAD, which keeps it.
+#[test]
+fn evict_advances_the_diagnostics_epoch_whose_diagnostics_it_clears() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst a = 1\n</script>\n<template><div>{{ a }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    let _ = host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some("/src/Comp.vue".to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile(),
+    });
+    let before = host.get_diagnostics_generation("/src/Comp.vue");
+    assert!(
+        before.is_some(),
+        "fixture: a compiled file must have a recorded epoch"
+    );
+    assert!(
+        host.get_diagnostics("/src/Comp.vue", &profile()).is_some(),
+        "fixture: the compile must have stored diagnostics for evict to clear"
+    );
+
+    host.evict("/src/Comp.vue");
+
+    let after = host.get_diagnostics_generation("/src/Comp.vue");
+    assert!(
+        after > before,
+        "evict clears `latest_diagnostics` with no document-version change — \
+         exactly what the epoch signals — so it must advance it: read \
+         {before:?} before the evict and {after:?} after"
+    );
+    assert!(
+        host.get_diagnostics("/src/Comp.vue", &profile()).is_none(),
+        "the eviction gate stays on the diagnostics PAYLOAD: an evicted file \
+         serves no stored diagnostics"
+    );
+}
+
+/// The diagnostics epoch is a FENCE — a consumer samples it, stamps the
+/// sample into a derived cache entry, and later re-validates that entry
+/// against a fresh sample — so an advance must be OBSERVABLE for every
+/// canonical the host knows, not only for one that happens to carry a
+/// `ProfileState` row.
+///
+/// The row is created lazily (compilation, dependency ingress) and dropped
+/// wholesale by the authority-reset cascade that `set_workspace` and `close`
+/// run, which explicitly RETAINS scheduler sources — "scheduler-tracked
+/// canonicals rebuild on demand from their retained scheduler sources".
+/// That leaves a host-known file with no row, and the LSP keeps its documents
+/// open across a workspace change. Advancing only an existing row made the
+/// call a silent no-op there: the epoch reads the same before the advance and
+/// after it, so nothing a consumer stamped beforehand can be told apart from
+/// something computed afterwards.
+#[test]
+fn bump_diagnostics_generation_is_observable_for_a_known_file_whose_row_a_reset_dropped() {
+    let host = strict_host();
+    upsert_non_sfc(&host, "/src/dep.ts", "export const a = 1\n");
+    assert!(
+        host.get_diagnostics_generation("/src/dep.ts").is_some(),
+        "fixture: an upserted file must have a recorded epoch to begin with"
+    );
+
+    // The AUTHORITY-RESET cascade `set_workspace` / `close` run: every
+    // per-canonical compile row drops, the scheduler source is retained.
+    host.project_type_store()
+        .bump_project_generation_and_evict();
+    let after_reset = host.get_diagnostics_generation("/src/dep.ts");
+    assert_eq!(
+        after_reset, None,
+        "fixture: the authority reset must drop the compile row — without \
+         that this test is not exercising the row-less state at all"
+    );
+
+    host.bump_diagnostics_generation("/src/dep.ts");
+
+    let after_bump = host.get_diagnostics_generation("/src/dep.ts");
+    assert!(
+        after_bump.is_some(),
+        "a diagnostics-epoch advance on a file the host still knows must be \
+         observable: it read {after_reset:?} before the advance and \
+         {after_bump:?} after, so a consumer that sampled the epoch before \
+         the advance cannot tell its stamp is stale"
+    );
+    assert_ne!(
+        after_bump, after_reset,
+        "the advance must move the epoch off the value a pre-advance sample \
+         recorded"
+    );
+}
+
 #[test]
 fn bump_diagnostics_generation_is_noop_for_missing_file() {
     let host = strict_host();

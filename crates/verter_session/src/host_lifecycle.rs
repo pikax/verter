@@ -754,6 +754,14 @@ impl VerterHost {
             let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
             session_node.clear_compile_outputs_for_file(&mut profile);
             profile.latest_diagnostics.clear();
+            // Clearing `latest_diagnostics` is a diagnostics change that moves
+            // no document version — precisely what the epoch signals. Advance
+            // it so a consumer holding a result derived from the pre-evict
+            // diagnostics cannot revalidate it. Reopening the file onto the
+            // byte-identical-content upsert fast path does not clear the
+            // evicted flag, so without this the epoch would sit unmoved across
+            // an evict/reopen pair.
+            profile.diagnostics_generation += 1;
         }
         // DerivedRawState (derived_raw_cache_db): set the evicted flag
         // and capture pre-evict whole_hash; clear all source-derived

@@ -3407,3 +3407,1046 @@ async fn a_closed_documents_pending_tick_never_reaches_into_the_host() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
+
+// ─── Cross-file republish: a child's settled edit re-arms its open parents ───
+
+/// A child whose single declared prop is `prop`.
+fn child_declaring_prop(prop: &str) -> String {
+    format!(
+        "<script setup lang=\"ts\">\ndefineProps<{{ {prop}: string }}>()\n</script>\n\
+         <template><div>{{{{ {prop} }}}}</div></template>\n"
+    )
+}
+
+/// A parent that passes `label` to the imported child. Valid while the child
+/// declares `label`; a `verter/unknown-prop` the moment the child renames it.
+const PARENT_PASSING_LABEL: &str = "<script setup lang=\"ts\">\n\
+     import Child from './Child.vue'\n\
+     </script>\n\
+     <template><Child label=\"x\" /></template>\n";
+
+/// The Verter-owned diagnostics `PARENT_PASSING_LABEL` produces when it is
+/// OPENED against `child_source` — the fixture control. A fresh registry per
+/// call, so nothing leaks between the control and the coordinator run.
+async fn parent_diagnostics_when_opened_against(child_source: &str) -> Vec<Diagnostic> {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let child_uri: Uri = "file:///workspace/src/Child.vue".parse().expect("uri");
+    let parent_uri: Uri = "file:///workspace/src/Parent.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri,
+        language_id: "vue".to_string(),
+        version: 1,
+        text: child_source.to_string(),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: PARENT_PASSING_LABEL.to_string(),
+    });
+    let deps = verter_only_deps(Arc::clone(&documents));
+    compute_verter_diagnostics(&deps, "/workspace/src/Parent.vue", &parent_uri)
+}
+
+/// Wait until the coordinator's publish path has recomputed the PARENT's
+/// diagnostics into a set satisfying `satisfied`, and return that set.
+///
+/// The cache entry is written only by the publish path itself (nothing else in
+/// these tests computes the parent), so observing it observes a real debounced
+/// republish of the parent — the same observation rail
+/// `await_publish_for_version` uses, keyed on content rather than version
+/// because a cross-file republish does not move the parent's version.
+async fn await_parent_republish_with(
+    cached_verter_diags: &DashMap<String, crate::server::CachedVerterDiagEntry>,
+    parent_uri: &str,
+    what: &str,
+    satisfied: impl Fn(&[Diagnostic]) -> bool,
+) -> Vec<Diagnostic> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(entry) = cached_verter_diags.get(parent_uri) {
+            if satisfied(&entry.2) {
+                return entry.2.clone();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the coordinator never republished the parent's diagnostics: {what}; \
+             the parent's cached entry is now {:?}",
+            cached_verter_diags
+                .get(parent_uri)
+                .map(|entry| (entry.0, entry.2.clone()))
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Editing a CHILD component must make its OPEN parents re-report diagnostics.
+///
+/// The regression (a live one, on `main`): a child edit clears only the
+/// child's own `latest_diagnostics` (host upsert), signals only the child's
+/// canonical (the `did_change` handler), and the debounced tick compiles,
+/// syncs, and publishes ONLY pending keys — so a parent whose usage of the
+/// child just became wrong keeps whatever the editor last showed, forever.
+/// The reverse import graph the workspace maintains for exactly this
+/// ("LSP affected-files reporting + diagnostics", R22) had zero production
+/// call sites in `verter_lsp`.
+///
+/// Drives the REAL spawned coordinator, fed exactly what `handle_did_change`
+/// feeds it — a `needs_provider_sync` insert plus a `signal` for the CHILD
+/// only; the parent is never signalled, never edited, never touched. Asserts
+/// the parent's published CONTENT (`verter/unknown-prop`, the prop and
+/// component names, the range over the parent's own template), not merely that
+/// a publish occurred.
+///
+/// Three legs make it discriminating in both directions:
+/// - controls: the parent OPENED against each child revision proves the
+///   fixture itself discriminates (no unknown-prop against v1, unknown-prop
+///   against the rename) — without this a green means nothing;
+/// - appear: after the child's prop rename settles, the parent republishes
+///   WITH the diagnostic;
+/// - clear: after the child restores the prop, the parent republishes WITHOUT
+///   it — a fix that arms once but never clears would pass the appear leg and
+///   fail here.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_childs_settled_edit_republishes_each_open_parents_diagnostics() {
+    fn unknown_label_prop(diags: &[Diagnostic]) -> Option<&Diagnostic> {
+        diags.iter().find(|d| {
+            matches!(&d.code, Some(NumberOrString::String(code)) if code == "verter/unknown-prop")
+                && d.message.contains("'label'")
+                && d.message.contains("<Child>")
+        })
+    }
+
+    // ── Controls: the fixture must discriminate on its own. ──
+    let against_original =
+        parent_diagnostics_when_opened_against(&child_declaring_prop("label")).await;
+    assert!(
+        unknown_label_prop(&against_original).is_none(),
+        "control: the parent opened against the ORIGINAL child must not report \
+         an unknown `label` prop, got {against_original:?}"
+    );
+    let against_renamed =
+        parent_diagnostics_when_opened_against(&child_declaring_prop("title")).await;
+    let control_diag = unknown_label_prop(&against_renamed)
+        .unwrap_or_else(|| {
+            panic!(
+                "control: the parent opened against the RENAMED child must report \
+                 `verter/unknown-prop` for `label` — if it does not, the rest of \
+                 this test proves nothing (got {against_renamed:?})"
+            )
+        })
+        .clone();
+
+    // ── The scenario under test: both files open, the CHILD is edited. ──
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let child_uri: Uri = "file:///workspace/src/Child.vue".parse().expect("uri");
+    let parent_uri: Uri = "file:///workspace/src/Parent.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: child_declaring_prop("label"),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: PARENT_PASSING_LABEL.to_string(),
+    });
+    let child_id = documents
+        .get_canonical_id(&child_uri)
+        .expect("open child has a canonical id");
+    let parent_id = documents
+        .get_canonical_id(&parent_uri)
+        .expect("open parent has a canonical id");
+
+    // Fixture precondition: the upsert-recorded parsed edges alone must make
+    // the parent reachable from the child on the workspace's reverse import
+    // graph — the graph production populates on every open/edit.
+    let importers = documents
+        .host()
+        .workspace_read()
+        .affected_canonicals(&child_id);
+    assert!(
+        importers.contains(&parent_id),
+        "fixture precondition: `affected_canonicals({child_id})` must contain the \
+         open parent {parent_id}, got {importers:?}"
+    );
+
+    let deps = verter_only_deps(Arc::clone(&documents));
+    let observer = deps.clone();
+    let handle = spawn_sync_coordinator(deps);
+
+    // ── Appear: rename the child's prop; announce the CHILD only, exactly as
+    // `handle_did_change` announces it. ──
+    let _ = documents.did_change(&child_uri, 2, &child_declaring_prop("title"));
+    observer.needs_provider_sync.insert(child_id.clone());
+    handle.signal(
+        child_id.clone(),
+        child_uri.as_str().to_string(),
+        Instant::now(),
+    );
+
+    let republished = await_parent_republish_with(
+        &observer.cached_verter_diags,
+        parent_uri.as_str(),
+        "the child renamed its prop, so the parent's `label` usage became an \
+         unknown prop — the parent must re-report it",
+        |diags| unknown_label_prop(diags).is_some(),
+    )
+    .await;
+    let republished_diag = unknown_label_prop(&republished)
+        .expect("the awaited set satisfied the predicate")
+        .clone();
+    assert_eq!(
+        (republished_diag.range, republished_diag.severity),
+        (control_diag.range, control_diag.severity),
+        "the republished parent diagnostic must carry the same range and severity \
+         as the one the open-path control produces for the identical state"
+    );
+
+    // ── Clear: restore the child's prop; the parent must republish WITHOUT the
+    // diagnostic. ──
+    let _ = documents.did_change(&child_uri, 3, &child_declaring_prop("label"));
+    observer.needs_provider_sync.insert(child_id.clone());
+    handle.signal(
+        child_id.clone(),
+        child_uri.as_str().to_string(),
+        Instant::now(),
+    );
+
+    await_parent_republish_with(
+        &observer.cached_verter_diags,
+        parent_uri.as_str(),
+        "the child restored its prop, so the parent's stale `verter/unknown-prop` \
+         must clear",
+        |diags| unknown_label_prop(diags).is_none(),
+    )
+    .await;
+}
+
+/// Svelte is first-class on the cross-file republish path, and the fan-out is
+/// bounded by the debounce, never per keystroke.
+///
+/// Provider-backed (mock tsgo): the parent's committed provider surface is
+/// seeded with a sentinel type diagnostic, and a burst of CHILD keystrokes is
+/// announced exactly as `handle_did_change` announces them. The parent's
+/// republish is observed on the provider's own rail — a fresh
+/// `get_diagnostics` pull for the PARENT's committed surface, which can only
+/// happen through the parent's publish path — and the pull COUNT is the storm
+/// bound: five keystrokes coalesce into one settled child window, so the
+/// parent republishes once (two at most under pathological scheduling), never
+/// once per keystroke. The content control pins that the pulled sentinel maps
+/// back into the parent's own source through the exact merge the debounced
+/// publish runs (`compute_merged_diagnostics`, the sanctioned compute/publish
+/// split — the coordinator otherwise pushes to a socket a test cannot read).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_svelte_childs_settled_edit_republishes_the_open_parent_bounded_by_the_debounce() {
+    use crate::type_provider::protocol::{TypeDiagnostic, TypeDiagnosticSeverity};
+
+    let tmp = tempfile::tempdir().expect("workspace");
+    install_svelte_at(tmp.path(), USABLE_SVELTE);
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let root = tmp.path().to_string_lossy().replace('\\', "/");
+
+    let child_canonical = src_dir
+        .join("Child.svelte")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let parent_canonical = src_dir
+        .join("Parent.svelte")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let child_source = |n: usize| {
+        format!(
+            "<script lang=\"ts\">\n  export let label{n}: string;\n</script>\n\
+             <div>{{label{n}}}</div>\n"
+        )
+    };
+    let parent_source = "<script lang=\"ts\">\n  import Child from './Child.svelte';\n\
+         </script>\n<Child label0=\"x\" />\n";
+    std::fs::write(&child_canonical, child_source(0)).expect("child on disk");
+    std::fs::write(&parent_canonical, parent_source).expect("parent on disk");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let child_uri = crate::uri::path_to_file_uri(&child_canonical).expect("child uri");
+    let parent_uri = crate::uri::path_to_file_uri(&parent_canonical).expect("parent uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: child_source(0),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: parent_source.to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: Some(ProjectSync::new_with_kind(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+            crate::TypeProviderKind::Tsgo,
+        )),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: Some(provider.clone()),
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+            &root,
+            Some(&format!("{root}/tsconfig.json")),
+        )),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    // Commit the PARENT's provider surface once — the open-time sync the
+    // server performs — so the debounced republish has a committed surface to
+    // pull provider diagnostics for.
+    sync_file(&deps, &parent_canonical, parent_uri.as_str()).await;
+    let parent_ide_path = deps
+        .provider_sync_states
+        .get(&parent_canonical)
+        .and_then(|state| state.ide_path.clone())
+        .expect("the owner-resolved parent sync must commit an IDE path");
+
+    let recorded = documents
+        .provider_surfaces()
+        .current_snapshot(&parent_ide_path)
+        .expect("a successful sync records the provider surface it delivered");
+    let at = recorded
+        .provider_content
+        .find("label0")
+        .expect("the child usage's attribute is present in the parent's provider buffer");
+    provider.set_diagnostics(
+        &parent_ide_path,
+        vec![TypeDiagnostic {
+            message: "SVELTE_PARENT_SENTINEL".to_string(),
+            severity: TypeDiagnosticSeverity::Error,
+            start: at as u32,
+            end: (at + 5) as u32,
+            code: Some("2322".to_string()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        }],
+    );
+
+    // Content control: the parent's publish-path merge maps the sentinel back
+    // into the parent's `.svelte` source.
+    let merged = compute_merged_diagnostics(&deps, &parent_canonical, &parent_uri).await;
+    assert!(
+        merged.iter().any(|d| d.message == "SVELTE_PARENT_SENTINEL"),
+        "content control: the parent's merge must serve the provider sentinel \
+         mapped into the parent source, got {merged:?}"
+    );
+
+    // Fixture precondition: the reverse import graph reaches the parent from
+    // the child for `.svelte` carriers too.
+    let importers = host.workspace_read().affected_canonicals(&child_canonical);
+    assert!(
+        importers.contains(&parent_canonical),
+        "fixture precondition: `affected_canonicals({child_canonical})` must \
+         contain the open Svelte parent {parent_canonical}, got {importers:?}"
+    );
+
+    provider.clear_calls();
+    let observer = deps.clone();
+    let handle = spawn_sync_coordinator(deps);
+
+    // A burst of child keystrokes inside one quiet window, each announced
+    // exactly as `handle_did_change` announces it.
+    const KEYSTROKES: usize = 5;
+    for i in 1..=KEYSTROKES {
+        let _ = documents.did_change(&child_uri, 1 + i as i32, &child_source(i));
+        observer.needs_provider_sync.insert(child_canonical.clone());
+        handle.signal(
+            child_canonical.clone(),
+            child_uri.as_str().to_string(),
+            Instant::now(),
+        );
+    }
+
+    // The parent must republish: a fresh provider pull for the PARENT's own
+    // committed surface, reachable only through the parent's publish path.
+    let parent_pulls = |provider: &MockTypeProvider| {
+        provider
+            .calls()
+            .iter()
+            .filter(
+                |call| matches!(call, MockCall::GetDiagnostics { path } if path == &parent_ide_path),
+            )
+            .count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while parent_pulls(&provider) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the coordinator never republished the Svelte parent after the \
+             child's settled edit — no fresh provider pull for {parent_ide_path}; \
+             provider calls: {:?}",
+            provider.calls()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // Bounded fan-out: give any storm time to surface, then count. Five
+    // keystrokes must coalesce — not one parent republish per keystroke.
+    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 4)).await;
+    let pulls = parent_pulls(&provider);
+    assert!(
+        (1..=2).contains(&pulls),
+        "the parent republished {pulls} times for {KEYSTROKES} child keystrokes — \
+         the re-arm must ride the debounced settle (once per quiet window, twice \
+         at most under pathological scheduling), never the per-keystroke path"
+    );
+}
+
+/// Does the set contain the parent's `verter/unknown-prop` for `label`?
+fn has_unknown_label_prop(diags: &[Diagnostic]) -> bool {
+    diags.iter().any(|d| {
+        matches!(&d.code, Some(NumberOrString::String(code)) if code == "verter/unknown-prop")
+            && d.message.contains("'label'")
+    })
+}
+
+/// The diagnostics-epoch value a fresh read of `uri` would validate against.
+fn live_epoch(documents: &DocumentRegistry, canonical_id: &str) -> Option<u64> {
+    documents.host().get_diagnostics_generation(canonical_id)
+}
+
+/// The cache entry a computation that ENTERED before the arm eventually
+/// writes: the document version and epoch it snapshotted at entry, and the
+/// diagnostics it derived from the pre-edit world.
+fn snapshot_entry(
+    cached_verter_diags: &DashMap<String, crate::server::CachedVerterDiagEntry>,
+    uri: &Uri,
+    what: &str,
+) -> crate::server::CachedVerterDiagEntry {
+    let entry = cached_verter_diags
+        .get(uri.as_str())
+        .unwrap_or_else(|| panic!("{what}: the compute must warm the cache entry"));
+    (entry.0, entry.1, entry.2.clone())
+}
+
+/// A parent diagnostic computation already IN FLIGHT when the child's settled
+/// edit arms the parent must never have its result served after the arm.
+///
+/// The race (found in review; worse than the bug the arming fixed, because it
+/// republishes WRONG diagnostics rather than none): the arm's cache-entry
+/// removal fences nothing that is already running —
+/// 1. a parent computation begins and captures PRE-edit child state;
+/// 2. the child's settled edit arms the parent and drops its cache entry;
+/// 3. the old computation finishes and lands its write AFTER the drop (the
+///    unconditional insert at the end of the document-half compute in
+///    `server_utils.rs`);
+/// 4. the armed pass reads the cache: the parent's document version and host
+///    diagnostics epoch both still match — warm hit;
+/// 5. the parent republishes pre-edit diagnostics as fresh, and nothing ever
+///    invalidates them again.
+///
+/// The fence under test: arming ADVANCES the parent's host diagnostics epoch —
+/// the value every computation snapshots at entry, stamps into its write, and
+/// every read re-validates against. A computation that began before the arm
+/// carries a pre-arm stamp, so no post-arm read can ever be satisfied by it —
+/// read-side authoritative, no writer coordination.
+///
+/// Why the removal alone was not enough, measured on this very fixture: the
+/// parent's epoch next moves at the ARMED TICK, one full debounce window after
+/// the arm, when `refresh_carrier_ide_surface`'s cold recompile stores
+/// diagnostics — and only IF that recompile is cold, which is an accident of
+/// compile-fact granularity, not a designed fence. Until then the slot
+/// validates a pre-arm stamp: for ~one debounce window every read — the pull
+/// `textDocument/diagnostic` path shares this exact cache — serves the
+/// in-flight computation's pre-edit result as fresh.
+///
+/// Two legs, each unconditional and each discriminating a different mechanism:
+///
+/// - **the fence** runs the arm DIRECTLY, with no coordinator spawned and
+///   nothing else able to touch the parent's slot. That ordering is the
+///   finding's exact interleaving, produced by construction rather than by
+///   winning a race against a debounce window: the plant lands after the arm
+///   because the test puts it there. It is also the only form in which the
+///   assertion is about the ARM: driven through the coordinator, an accidental
+///   cold recompile advances the epoch too, so a green would not distinguish
+///   the fence from a compile that happened to bump the same counter;
+/// - **the armed republish** runs the REAL coordinator over a parent whose
+///   slot already holds a stale entry stamped with the LIVE epoch, so the only
+///   thing that can dislodge it is the arm the child's settle owes. Nothing is
+///   spawned until the plant is in place, so the ordering needs no polling.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_inflight_parent_computation_never_satisfies_a_read_after_the_arm() {
+    // ── Control: fresh content is reachable at all. ──
+    let against_renamed =
+        parent_diagnostics_when_opened_against(&child_declaring_prop("title")).await;
+    assert!(
+        has_unknown_label_prop(&against_renamed),
+        "control: the parent opened against the RENAMED child must report \
+         `verter/unknown-prop` for `label`, got {against_renamed:?}"
+    );
+
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let child_uri: Uri = "file:///workspace/src/Child.vue".parse().expect("uri");
+    let parent_uri: Uri = "file:///workspace/src/Parent.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: child_declaring_prop("label"),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: PARENT_PASSING_LABEL.to_string(),
+    });
+    let child_id = documents
+        .get_canonical_id(&child_uri)
+        .expect("open child has a canonical id");
+    let parent_id = documents
+        .get_canonical_id(&parent_uri)
+        .expect("open parent has a canonical id");
+
+    let deps = verter_only_deps(Arc::clone(&documents));
+    let observer = deps.clone();
+
+    // The pre-arm computation, run to completion through the REAL compute
+    // path. Its cache write is byte-identical to what an in-flight computation
+    // that began before the arm eventually lands: the parent's version, the
+    // parent's PRE-arm host diagnostics epoch (both snapshotted at compute
+    // entry), and diagnostics derived from the pre-edit child.
+    let _ = compute_verter_diagnostics(&observer, &parent_id, &parent_uri);
+    let stale_entry = snapshot_entry(
+        &observer.cached_verter_diags,
+        &parent_uri,
+        "the pre-edit parent compute",
+    );
+    assert!(
+        !has_unknown_label_prop(&stale_entry.2),
+        "control: the pre-edit parent set must NOT contain the unknown-prop — \
+         otherwise stale and fresh are indistinguishable and this test proves \
+         nothing, got {:?}",
+        stale_entry.2
+    );
+
+    // ── The child's edit, landed in the host exactly as `handle_did_change`
+    // lands it. It moves the CHILD's epoch and the CHILD's document version;
+    // it moves neither of the parent's, which is precisely why the parent's
+    // slot still validates and why the arm owes the fence. ──
+    let _ = documents.did_change(&child_uri, 2, &child_declaring_prop("title"));
+    assert_eq!(
+        live_epoch(&documents, &parent_id),
+        stale_entry.1,
+        "fixture: a child edit must leave the PARENT's epoch where the \
+         in-flight computation sampled it — if the edit moved it on its own \
+         the arm's advance would not be what this test observes"
+    );
+
+    // ── Leg 1: the arm, run directly, with nothing else in the process able
+    // to touch the parent's slot or its epoch. ──
+    let mut pending: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
+    arm_open_importer_republish(&observer, std::slice::from_ref(&child_id), &mut pending);
+    assert!(
+        pending.contains_key(&parent_id),
+        "fixture: the child's settled edit must arm the open parent — \
+         armed: {:?}",
+        pending.keys().collect::<Vec<_>>()
+    );
+
+    // Land the in-flight computation's late write AFTER the arm: the same key,
+    // the same value shape, the same shared map as the racing writer.
+    observer
+        .cached_verter_diags
+        .insert(parent_uri.as_str().to_string(), stale_entry.clone());
+
+    // The invariant, on the same validating read every publisher and the pull
+    // `textDocument/diagnostic` path use: a computation that began before the
+    // arm can never satisfy a read that happens after it. Un-fenced, this read
+    // warm-hits the late write — the parent's document version and its host
+    // diagnostics epoch both still match — and serves the pre-edit set as
+    // fresh.
+    let served = compute_verter_diagnostics(&observer, &parent_id, &parent_uri);
+    assert!(
+        has_unknown_label_prop(&served),
+        "a post-arm read was satisfied by the in-flight pre-edit computation's \
+         late write — the parent would serve stale diagnostics as fresh. The \
+         plant was stamped {:?} and the live epoch is {:?}; served: {served:?}",
+        stale_entry.1,
+        live_epoch(&documents, &parent_id)
+    );
+
+    // ── Leg 2: the finding's step 4→5 end to end. The parent's slot is
+    // primed with a stale entry stamped with the LIVE epoch — an entry that
+    // validates, so only the arm the child's settle owes can dislodge it —
+    // and the coordinator is spawned only after the plant is in place, so no
+    // polling is needed to establish the ordering. The child then RESTORES
+    // `label`, making post-edit content lack the unknown-prop the plant
+    // carries: discriminable in the opposite direction. ──
+    let primed: crate::server::CachedVerterDiagEntry = (
+        stale_entry.0,
+        live_epoch(&documents, &parent_id),
+        served.clone(),
+    );
+    assert!(
+        has_unknown_label_prop(&primed.2),
+        "fixture: the primed entry must carry the title-world unknown-prop so \
+         the post-edit republish is distinguishable from it"
+    );
+    observer
+        .cached_verter_diags
+        .insert(parent_uri.as_str().to_string(), primed);
+
+    let handle = spawn_sync_coordinator(deps);
+    let _ = documents.did_change(&child_uri, 3, &child_declaring_prop("label"));
+    observer.needs_provider_sync.insert(child_id.clone());
+    handle.signal(
+        child_id.clone(),
+        child_uri.as_str().to_string(),
+        Instant::now(),
+    );
+
+    await_parent_republish_with(
+        &observer.cached_verter_diags,
+        parent_uri.as_str(),
+        "the armed republish must replace a stale-but-validating entry with \
+         post-edit content (the restored `label` clears the unknown-prop)",
+        |diags| !has_unknown_label_prop(diags),
+    )
+    .await;
+}
+
+/// Grandparent that only knows the middle parent — never imports the child.
+/// Its own diagnostics need not move on a child prop rename; arming is
+/// observed via epoch advance / cache drop, not content.
+const GRANDPARENT_USING_PARENT: &str = "<script setup lang=\"ts\">\n\
+     import Parent from './Parent.vue'\n\
+     </script>\n\
+     <template><Parent /></template>\n";
+
+/// Depth fixture that the shallow one-parent tests cannot pin:
+/// `Grandparent → Parent → Child`, plus a closed direct importer of Child.
+///
+/// The prior tests each use one direct open importer. They pass even if the
+/// implementation armed only direct reverse deps, armed closed documents, or
+/// marked armed parents `requires_sync: true` (which would cascade). There is
+/// no grandparent, so no-cascade is never discriminated.
+///
+/// Every arming property is pinned on ONE direct call to the arm, with no
+/// coordinator spawned — so the armed SET, the epoch advances, and the shape
+/// of each armed signal are exact values, not a race against a debounce
+/// window:
+/// 1. **Transitive open**: the armed set is EXACTLY the two open importers.
+///    The grandparent is reached through the `affected_canonicals` closure
+///    even though it does not import the child directly; direct-only arming
+///    would leave it out.
+/// 2. **Open-only**: the closed direct importer sits in the reverse closure
+///    and is absent from the armed set — its pre-warmed cache entry and host
+///    epoch both survive byte-identical.
+/// 3. **No cascade**: every armed signal carries `requires_sync: false`, and
+///    the tick appends to `settled_edits` — the list this arm consumes — only
+///    for a signal whose `requires_sync` is set (`sync_coordinator.rs`, the
+///    `if signal.requires_sync` push). An armed republish therefore cannot
+///    re-enter the arm as an edit, so it cannot arm the armed file's own
+///    importers. This is the mechanism itself, asserted as a value; the
+///    superseded form counted epoch advances after a wall-clock quiescence
+///    wait, which cannot distinguish "no cascade" from "the cascade's advance
+///    lands after the test stopped looking".
+/// 4. **Exactly one advance per armed file**, counted with nothing else
+///    running.
+///
+/// A final leg drives the REAL coordinator to pin that the same arm publishes
+/// the direct parent's post-edit content, observed on content rather than on
+/// a timer.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_importer_arming_reaches_transitive_open_only_without_cascade() {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let child_uri: Uri = "file:///workspace/src/Child.vue".parse().expect("uri");
+    let parent_uri: Uri = "file:///workspace/src/Parent.vue".parse().expect("uri");
+    let grandparent_uri: Uri = "file:///workspace/src/Grandparent.vue"
+        .parse()
+        .expect("uri");
+    let closed_uri: Uri = "file:///workspace/src/ClosedImporter.vue"
+        .parse()
+        .expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: child_declaring_prop("label"),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: PARENT_PASSING_LABEL.to_string(),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: grandparent_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: GRANDPARENT_USING_PARENT.to_string(),
+    });
+    // Closed direct importer of the child: open just long enough to record the
+    // reverse edge, pre-warm its verter-diag cache, then close. `notify_close`
+    // clears the overlay only — reverse edges survive (see workspace
+    // `notify_close` vs `notify_delete`), so the closed file remains in the
+    // child's affected closure and would be armed by an open-filter miss.
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: closed_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: PARENT_PASSING_LABEL.to_string(),
+    });
+
+    let child_id = documents
+        .get_canonical_id(&child_uri)
+        .expect("open child has a canonical id");
+    let parent_id = documents
+        .get_canonical_id(&parent_uri)
+        .expect("open parent has a canonical id");
+    let grandparent_id = documents
+        .get_canonical_id(&grandparent_uri)
+        .expect("open grandparent has a canonical id");
+    let closed_id = documents
+        .get_canonical_id(&closed_uri)
+        .expect("open closed-importer has a canonical id");
+
+    let deps = verter_only_deps(Arc::clone(&documents));
+    let observer = deps.clone();
+
+    // Pre-warm every importer's cache so the arm's drop is observable.
+    let _ = compute_verter_diagnostics(&observer, &parent_id, &parent_uri);
+    let _ = compute_verter_diagnostics(&observer, &grandparent_id, &grandparent_uri);
+    let _ = compute_verter_diagnostics(&observer, &closed_id, &closed_uri);
+    let closed_entry_before = snapshot_entry(
+        &observer.cached_verter_diags,
+        &closed_uri,
+        "the closed importer's pre-warm",
+    );
+    assert!(
+        observer
+            .cached_verter_diags
+            .contains_key(grandparent_uri.as_str()),
+        "pre-warm must leave a grandparent cache entry so a direct-only arm \
+         (which never touches the grandparent) is distinguishable from a \
+         transitive arm (which drops it)"
+    );
+
+    documents.did_close(&closed_uri);
+    assert!(
+        !documents
+            .open_uris()
+            .iter()
+            .any(|u| u == closed_uri.as_str()),
+        "fixture: ClosedImporter must be closed before the child's edit"
+    );
+
+    // Fixture precondition: reverse closure is transitive AND includes the
+    // closed direct importer. Without this the rest of the test is vacuous.
+    let importers = documents
+        .host()
+        .workspace_read()
+        .affected_canonicals(&child_id);
+    assert!(
+        importers.contains(&parent_id)
+            && importers.contains(&grandparent_id)
+            && importers.contains(&closed_id),
+        "fixture precondition: `affected_canonicals({child_id})` must contain \
+         the direct parent {parent_id}, the transitive grandparent \
+         {grandparent_id}, and the closed direct importer {closed_id}, got \
+         {importers:?}"
+    );
+
+    let parent_epoch_before = live_epoch(&documents, &parent_id);
+    let grandparent_epoch_before = live_epoch(&documents, &grandparent_id);
+    let closed_epoch_before = live_epoch(&documents, &closed_id);
+
+    // ── One arm for one settled child edit, run directly: nothing else in
+    // this process can advance an epoch or touch a slot while it runs. ──
+    let mut pending: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
+    arm_open_importer_republish(&observer, std::slice::from_ref(&child_id), &mut pending);
+
+    // (1) + (2): the armed set is EXACTLY the open transitive closure.
+    let mut armed: Vec<String> = pending.keys().cloned().collect();
+    armed.sort();
+    let mut expected = vec![grandparent_id.clone(), parent_id.clone()];
+    expected.sort();
+    assert_eq!(
+        armed, expected,
+        "one settled child edit must arm EXACTLY the open importers in the \
+         reverse closure: the direct parent, the transitive grandparent, and \
+         nothing else. The closed direct importer {closed_id} is in the \
+         closure and must NOT appear; a direct-only arm would omit the \
+         grandparent {grandparent_id}"
+    );
+
+    // (3) No cascade, as the mechanism itself: the tick appends to
+    // `settled_edits` only for a signal carrying `requires_sync`, so an armed
+    // republish can never re-enter this arm as an edit.
+    for (armed_id, (_, signal)) in pending.iter() {
+        assert!(
+            !signal.requires_sync,
+            "armed importer {armed_id} must carry `requires_sync: false` — a \
+             `true` here puts the armed file into the NEXT tick's \
+             `settled_edits`, which re-arms ITS importers: the republish \
+             cascade this contract forbids"
+        );
+        assert!(
+            signal.force_diagnostics,
+            "armed importer {armed_id} must carry `force_diagnostics: true` — \
+             the arm exists to make the importer republish"
+        );
+    }
+
+    // (4) Exactly one epoch advance per armed file, and the pre-warmed entry
+    // dropped so no stale value survives the arm.
+    for (armed_id, before) in [
+        (&parent_id, parent_epoch_before),
+        (&grandparent_id, grandparent_epoch_before),
+    ] {
+        let after = live_epoch(&documents, armed_id);
+        assert_eq!(
+            after,
+            before.map(|epoch| epoch + 1).or(Some(1)),
+            "arming {armed_id} must advance its diagnostics epoch EXACTLY \
+             once (was {before:?}); a second advance means it was armed twice \
+             from a single settle"
+        );
+    }
+    assert!(
+        !observer
+            .cached_verter_diags
+            .contains_key(parent_uri.as_str())
+            && !observer
+                .cached_verter_diags
+                .contains_key(grandparent_uri.as_str()),
+        "arming must drop each armed importer's cache entry"
+    );
+
+    // (2, continued) The closed importer is frozen in both dimensions.
+    assert_eq!(
+        live_epoch(&documents, &closed_id),
+        closed_epoch_before,
+        "a closed importer must not be armed: its host diagnostics epoch must \
+         stay at the pre-edit baseline {closed_epoch_before:?}"
+    );
+    assert_eq!(
+        observer
+            .cached_verter_diags
+            .get(closed_uri.as_str())
+            .map(|entry| (entry.0, entry.1, entry.2.clone())),
+        Some(closed_entry_before.clone()),
+        "a closed importer must not be armed: its pre-warmed cache entry must \
+         survive the arm byte-identical (arming drops the entry)"
+    );
+
+    // ── The same arm, through the REAL coordinator: the open direct parent
+    // must republish the post-edit content. Observed on content, not a timer.
+    let handle = spawn_sync_coordinator(deps);
+    let _ = documents.did_change(&child_uri, 2, &child_declaring_prop("title"));
+    observer.needs_provider_sync.insert(child_id.clone());
+    handle.signal(
+        child_id.clone(),
+        child_uri.as_str().to_string(),
+        Instant::now(),
+    );
+
+    await_parent_republish_with(
+        &observer.cached_verter_diags,
+        parent_uri.as_str(),
+        "the open direct parent must republish `verter/unknown-prop` after the \
+         child renames its prop",
+        has_unknown_label_prop,
+    )
+    .await;
+}
+
+/// The stale write a pre-arm computation lands, distinguishable from anything
+/// a real recompute can produce.
+fn inflight_sentinel() -> Diagnostic {
+    Diagnostic {
+        range: Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 1,
+            },
+        },
+        severity: Some(DiagnosticSeverity::WARNING),
+        code: Some(NumberOrString::String(
+            "test/pre-arm-inflight-write".to_string(),
+        )),
+        message: "planted by a computation that entered before the arm".to_string(),
+        ..Default::default()
+    }
+}
+
+/// The arm's fence is carrier-agnostic: an OPEN plain `.ts` importer gets the
+/// same guarantee a `.vue` parent does.
+///
+/// The failure this pins is not hypothetical, and it is not about `.ts`
+/// syntax — it is about which files carry a compile row. The epoch the fence
+/// rides lived behind two gates that a plain script reaches routinely and a
+/// freshly-compiled carrier does not:
+///
+/// - `get_diagnostics_generation` reported `None` for any canonical flagged
+///   evicted, while `evict` left the stored counter untouched and
+///   `bump_diagnostics_generation` kept advancing it — so the arm's advance
+///   was invisible;
+/// - reopening a document with byte-identical content takes the `upsert`
+///   quintuple-unchanged fast path, which does not clear that evicted flag.
+///
+/// `did_close` → `did_open` is therefore enough: the reopened document is
+/// OPEN, is in the child's reverse closure, is armed — and its epoch reads the
+/// same value before the arm and after it. With the reader collapsing that
+/// `None` onto `0`, an in-flight computation's pre-arm write validates against
+/// a post-arm read and the parent republishes pre-edit diagnostics as fresh.
+///
+/// Deterministic by construction: the arm is called directly, so the plant
+/// lands after it because the test puts it there, and no compile can advance
+/// the epoch behind the assertion's back. The planted set carries a sentinel
+/// no recompute can produce, so "the read refused the plant" is observable
+/// even for a file whose real diagnostics are empty in both worlds.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_plain_ts_importer_is_fenced_after_an_evict_and_reopen() {
+    let tmp = tempfile::tempdir().expect("workspace");
+    let ws = tmp.path();
+    std::fs::create_dir_all(ws.join("src")).expect("src dir");
+    std::fs::write(ws.join("tsconfig.json"), "{\"include\":[\"src\"]}").expect("tsconfig");
+    let child_source = "export const label = 'x';\n";
+    let parent_source = "import { label } from './child';\nexport const echo = label;\n";
+    std::fs::write(ws.join("src/child.ts"), child_source).expect("child on disk");
+    std::fs::write(ws.join("src/parent.ts"), parent_source).expect("parent on disk");
+
+    let workspace_id = crate::test_utils::canonical_test_path(ws);
+    let child_id = format!("{workspace_id}/src/child.ts");
+    let parent_id = format!("{workspace_id}/src/parent.ts");
+
+    let host = crate::test_utils::make_filesystem_test_host(ws);
+    host.configure_projects(vec![crate::project_resolver::IdeProjectConfig::new(
+        workspace_id.clone(),
+        workspace_id.clone(),
+        Some(format!("{workspace_id}/tsconfig.json")),
+    )]);
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+
+    let child_uri = crate::uri::path_to_file_uri(&child_id).expect("child uri");
+    let parent_uri = crate::uri::path_to_file_uri(&parent_id).expect("parent uri");
+    let open_parent = TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: parent_source.to_string(),
+    };
+    let _ = documents.did_open(&open_parent);
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: child_source.to_string(),
+    });
+
+    // The server's `did_close` handler: drop the cached entry, evict the file
+    // from the host (`server/lifecycle.rs`). Then reopen it byte-identical —
+    // the `upsert` quintuple-unchanged fast path, which leaves the evicted
+    // flag set.
+    documents.did_close(&parent_uri);
+    host.evict(&parent_id);
+    let _ = documents.did_open(&open_parent);
+    assert!(
+        documents
+            .open_uris()
+            .iter()
+            .any(|u| u == parent_uri.as_str()),
+        "fixture: the plain-script parent must be OPEN again after the reopen"
+    );
+
+    // Fixture precondition: the arm can reach it at all.
+    let importers = documents
+        .host()
+        .workspace_read()
+        .affected_canonicals(&child_id);
+    assert!(
+        importers.contains(&parent_id),
+        "fixture precondition: `affected_canonicals({child_id})` must contain \
+         the open plain-script parent {parent_id}, got {importers:?}"
+    );
+
+    let deps = verter_only_deps(Arc::clone(&documents));
+
+    // The pre-arm computation, through the real compute path: its write
+    // carries the parent's version and the epoch it sampled at entry.
+    let _ = compute_verter_diagnostics(&deps, &parent_id, &parent_uri);
+    let warmed = snapshot_entry(
+        &deps.cached_verter_diags,
+        &parent_uri,
+        "the plain-script parent's pre-arm compute",
+    );
+    let stale_entry: crate::server::CachedVerterDiagEntry =
+        (warmed.0, warmed.1, vec![inflight_sentinel()]);
+    let epoch_before_arm = live_epoch(&documents, &parent_id);
+    assert_eq!(
+        warmed.1, epoch_before_arm,
+        "fixture: the compute must stamp the epoch it read, or the plant does \
+         not model an in-flight write"
+    );
+
+    // ── The arm. ──
+    let mut pending: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
+    arm_open_importer_republish(&deps, std::slice::from_ref(&child_id), &mut pending);
+    assert!(
+        pending.contains_key(&parent_id),
+        "the open plain-script parent must be armed by its child's settled \
+         edit — armed: {:?}",
+        pending.keys().collect::<Vec<_>>()
+    );
+
+    // The advance the fence rides must be OBSERVABLE. This is the assertion
+    // the evicted-reopened plain script failed: the arm bumped a counter no
+    // reader could see, so before and after were the same value.
+    let epoch_after_arm = live_epoch(&documents, &parent_id);
+    assert_ne!(
+        epoch_after_arm, epoch_before_arm,
+        "arming an open plain-script importer must move the epoch a reader \
+         validates against: it read {epoch_before_arm:?} before the arm and \
+         {epoch_after_arm:?} after, so a computation that entered before the \
+         arm still validates against every read that follows it"
+    );
+
+    // The in-flight computation's late write lands after the arm.
+    deps.cached_verter_diags
+        .insert(parent_uri.as_str().to_string(), stale_entry.clone());
+
+    let served = compute_verter_diagnostics(&deps, &parent_id, &parent_uri);
+    assert!(
+        !served.iter().any(|d| d.code == stale_entry.2[0].code),
+        "a post-arm read on the open plain-script parent was satisfied by the \
+         pre-arm computation's late write: it served the planted sentinel as \
+         fresh. Plant stamped {:?}, live epoch {:?}; served: {served:?}",
+        stale_entry.1,
+        live_epoch(&documents, &parent_id)
+    );
+}

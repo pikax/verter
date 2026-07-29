@@ -1658,29 +1658,74 @@ impl VerterHost {
         }
     }
 
-    /// Returns the monotonic diagnostics generation counter for a file.
-    /// Incremented on every write to `latest_diagnostics`. Used by the LSP
-    /// cache to detect host-driven recompiles without a document version change.
+    /// Returns the monotonic diagnostics generation counter for a file — the
+    /// EPOCH consumers stamp into a derived cache entry and re-validate that
+    /// entry against. Advanced on every write to `latest_diagnostics`, on
+    /// eviction (which clears them), and by [`Self::bump_diagnostics_generation`].
+    /// Used by the LSP cache to detect host-driven diagnostic changes that
+    /// move no document version.
+    ///
+    /// `None` means "this host has never recorded an epoch for the canonical",
+    /// and it is a value no advance can ever produce — the first advance
+    /// records `1`. That total ordering is what makes the epoch usable as a
+    /// fence: a reader may collapse `None` onto its own "nothing observed"
+    /// sentinel without that sentinel ever colliding with a recorded epoch.
+    ///
+    /// Deliberately NOT gated on the eviction flag. The epoch is not a
+    /// diagnostics payload: hiding it while `evict` was still advancing the
+    /// stored counter made an advance invisible to readers, so a reader that
+    /// sampled `None` before the advance and `None` after it could not tell
+    /// the two apart — the exact collision the fence exists to prevent. An
+    /// evicted file's diagnostics are already empty via
+    /// [`Self::get_diagnostics`], which owns that gate.
     pub fn get_diagnostics_generation(&self, canonical_or_alias: &str) -> Option<u64> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-
-        {
-            if self.is_canonical_evicted(&canonical) {
-                return None;
-            }
-            let cc = self.compile_cache().get(&canonical)?;
-            Some(cc.diagnostics_generation)
-        }
+        let cc = self.compile_cache().get(&canonical)?;
+        Some(cc.diagnostics_generation)
     }
 
-    /// Bump the diagnostics generation counter for a file without changing
-    /// its diagnostics.
+    /// Advance the diagnostics epoch for a file without changing its
+    /// diagnostics — the "everything derived from this file's diagnostics is
+    /// now stale" signal for readers that cannot see a document version move
+    /// (a file's parents after the file itself was edited, for one).
+    ///
+    /// The advance MUST be observable through
+    /// [`Self::get_diagnostics_generation`] for every canonical this host
+    /// knows, whether or not the file ever acquired a `ProfileState` row: a
+    /// row is created lazily by compilation and by dependency ingress, so an
+    /// open document that has never been compiled (a plain script, or any
+    /// carrier reopened onto the byte-identical-content upsert fast path
+    /// after an evict) can legitimately have none. Advancing only an existing
+    /// row made this a silent no-op for exactly those files, leaving their
+    /// readers unable to distinguish before from after.
+    ///
+    /// The no-op is preserved for a canonical this host does not know at all:
+    /// there is nothing to be stale about, and materialising state for an
+    /// unknown path would be an ingress side effect this method does not own.
     pub fn bump_diagnostics_generation(&self, canonical_or_alias: &str) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
         if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
             cc.diagnostics_generation += 1;
+            return;
         }
+        if !self.host_knows_canonical(&canonical) {
+            return;
+        }
+        // Racy-create is fine: `or_default` returns the row a concurrent
+        // writer installed, so the advance lands on whichever row wins.
+        let mut cc = self.compile_cache().entry(canonical).or_default();
+        cc.diagnostics_generation += 1;
+    }
+
+    /// True when this host has ingested the canonical at all — a committed
+    /// scheduler source, or any per-file row a prior ingest left behind.
+    /// Gates [`Self::bump_diagnostics_generation`]'s row materialisation so
+    /// it can never conjure state for a path the host has never seen.
+    fn host_knows_canonical(&self, canonical: &str) -> bool {
+        self.scheduler.try_get_source(canonical).is_some()
+            || self.derived_raw_cache().contains_key(canonical)
+            || self.dependency_cache().contains_key(canonical)
     }
 
     /// Clear all compile slots for a specific file.
