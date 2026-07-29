@@ -14,7 +14,7 @@
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::features::completion::completions_at_position;
 use crate::features::cursor_context::{
     classify_cursor_context_for_language, classify_expression_context_with_trigger,
@@ -171,7 +171,7 @@ pub(super) async fn handle_hover(
         .then(|| {
             let doc = server.documents.get(uri)?;
             let analysis = server.documents.get_analysis(uri);
-            let blocks = scan_sfc_blocks(&doc.source);
+            let blocks = scan_sfc_blocks_for_document(&doc);
             let native = hover_at_position(
                 position,
                 &doc.source,
@@ -692,7 +692,7 @@ async fn handle_completion_attempt(
             source: doc.source.clone(),
             line_index: doc.line_index.clone(),
             analysis: server.documents.get_analysis(uri),
-            blocks: scan_sfc_blocks(&doc.source),
+            blocks: scan_sfc_blocks_for_document(&doc),
             canonical_id: crate::documents::uri_to_canonical_id(uri),
         })
     })();

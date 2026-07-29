@@ -31,6 +31,7 @@ verter_audit = { path = "../verter_audit" }
 verter_scheduler = { path = "../verter_scheduler" }
 verter_workspace = { path = "../verter_workspace" }
 verter_semantic = { path = "../verter_semantic" }
+verter_parser = { path = "../verter_parser" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 verter_span = { path = "../verter_span" }

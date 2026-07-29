@@ -16,7 +16,7 @@ use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::documents::uri_to_canonical_id;
 use crate::features::action_utils::fix_placeholder_uris;
 use crate::features::call_hierarchy;
@@ -47,7 +47,7 @@ pub(super) async fn handle_document_symbol(
     let symbols = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let symbols = build_document_symbols(&blocks, analysis.as_ref(), &doc.line_index);
         if symbols.is_empty() {
             None
@@ -97,7 +97,7 @@ pub(super) async fn handle_folding_range(
     let ranges = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let ranges = build_folding_ranges(&blocks, analysis.as_ref(), &doc.line_index);
         if ranges.is_empty() {
             None
@@ -118,7 +118,7 @@ pub(super) async fn handle_selection_range(
 
     let result = (|| {
         let doc = server.documents.get(uri)?;
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let line_index = &doc.line_index;
         let source_len = doc.source.len() as u32;
 
@@ -235,7 +235,7 @@ pub(super) async fn handle_document_highlight(
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         highlights_at_position(
             position,
             &doc.source,
@@ -361,7 +361,7 @@ pub(super) async fn handle_code_action(
 
         // Extract component refactoring
         if wants_code_action_kind(only, "refactor.extract") {
-            let blocks = scan_sfc_blocks(&doc.source);
+            let blocks = scan_sfc_blocks_for_document(&doc);
             if let Some(extract_action) =
                 crate::features::extract_component::extract_component_action(
                     &doc.source,
@@ -376,7 +376,7 @@ pub(super) async fn handle_code_action(
         }
 
         if wants_code_action_kind(only, "quickfix") {
-            let blocks = scan_sfc_blocks(&doc.source);
+            let blocks = scan_sfc_blocks_for_document(&doc);
 
             // Macro code actions (defineSlots, defineEmits generation/augmentation)
             let cursor_offset = doc.line_index.position_to_offset(&range.start);
@@ -795,7 +795,7 @@ pub(super) async fn handle_code_lens(
     let lenses = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         Some(code_lenses(&blocks, analysis.as_ref(), &doc.line_index))
     })();
 
@@ -872,7 +872,7 @@ pub(super) async fn handle_inlay_hint(
     let mut hints: Vec<InlayHint> = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri)?;
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         Some(crate::features::inlay_hints::verter_inlay_hints(
             &doc.source,
             &blocks,
@@ -1004,7 +1004,7 @@ pub(super) async fn handle_linked_editing_range(
     let result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         linked_editing_ranges(
             position,
             &doc.source,
@@ -1027,7 +1027,7 @@ pub(super) async fn handle_document_link(
     let links = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let links = build_document_links(&doc.source, &blocks, analysis.as_ref(), &doc.line_index);
         if links.is_empty() {
             None
@@ -1048,7 +1048,7 @@ pub(super) async fn handle_document_color(
 
     let colors = (|| {
         let doc = server.documents.get(uri)?;
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         Some(color_info::document_colors(
             &doc.source,
             &blocks,
@@ -1076,7 +1076,7 @@ pub(super) async fn handle_formatting(
 
     let edits = (|| {
         let doc = server.documents.get(uri)?;
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let edits = format_document(&doc.source, &blocks, &doc.line_index, &params.options);
         if edits.is_empty() {
             None
@@ -1182,7 +1182,7 @@ pub(super) async fn handle_prepare_call_hierarchy(
     let result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         call_hierarchy::prepare_call_hierarchy(
             position,
             &doc.source,

@@ -22,7 +22,7 @@
 
 use tower_lsp_server::ls_types::{Position, Range, Uri, WorkspaceEdit};
 
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::features::rename::{
     classify_rename_target, MarkupOccurrenceInventory, RenameTarget, RenameTargetClass,
     SameFileEnumeration, UnenumeratedRegion,
@@ -168,7 +168,7 @@ impl RenameTargetResolution {
                 );
                 return None;
             }
-            let blocks = scan_sfc_blocks(&doc.source);
+            let blocks = scan_sfc_blocks_for_document(&doc);
             let mut target = classify_rename_target(
                 position,
                 &doc.source,

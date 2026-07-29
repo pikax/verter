@@ -13,7 +13,7 @@ use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::documents::uri_to_canonical_id;
 use crate::features::definition::definition_at_position;
 use crate::features::references::references_at_position;
@@ -154,7 +154,7 @@ pub(super) async fn handle_goto_definition(
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let canonical_id = uri_to_canonical_id(uri);
         let resolve_path = {
             let canonical_id = canonical_id.clone();
@@ -792,7 +792,7 @@ pub(super) async fn handle_references(
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let mut locations = references_at_position(
             position,
             &doc.source,

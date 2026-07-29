@@ -16,7 +16,7 @@ pub(super) fn is_style_v_bind_context(
     (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let offset = doc.line_index.position_to_offset(position)?;
         Some(matches!(
             classify_cursor_context_for_language(

@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use tower_lsp_server::ls_types::{GotoDefinitionResponse, Hover, Location, Position, Range, Uri};
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::sfc_scanner::{custom_block_content_kind, scan_sfc_blocks_with};
 use crate::documents::uri_to_canonical_id;
 use crate::features::hover;
 use crate::type_provider::merge;
@@ -1067,7 +1067,13 @@ impl VerterLanguageServer {
         let child_source_arc = self.documents.host().get_source(&child_canonical_id)?;
         let child_source = child_source_arc.to_string();
         let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
-        let blocks = scan_sfc_blocks(&child_source);
+        // Host-loaded child: no editor language_id, so the canonical path
+        // classifies the carrier (a `.svelte` child balances its root
+        // components; a `.vue` child keeps raw-text custom blocks).
+        let blocks = scan_sfc_blocks_with(
+            &child_source,
+            custom_block_content_kind(None, &child_canonical_id),
+        );
         let line_index = LineIndex::new(&child_source, self.documents.encoding());
 
         let inherited_attrs = super::server_utils::resolved_fallthrough_attr_names(

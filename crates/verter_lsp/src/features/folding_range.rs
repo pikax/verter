@@ -71,7 +71,9 @@ pub fn build_folding_ranges(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::sfc_scanner::{
+        scan_sfc_blocks, scan_sfc_blocks_with, CustomBlockContentKind,
+    };
     use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
 
     #[test]
@@ -203,5 +205,42 @@ mod tests {
         let ranges = build_folding_ranges(&blocks, Some(&analysis), &line_index);
         // Only template block fold, single-line element doesn't fold
         assert_eq!(ranges.len(), 1);
+    }
+
+    #[test]
+    fn nested_slot_template_folds_to_the_outer_close_tag_line() {
+        // A nested slot `<template #header>` must NOT truncate the outer
+        // template's fold: the fold must reach the OUTER `</template>` line
+        // (5), not stop at the nested close (line 3).
+        let source = "<template>\n  <template #header>\n    <h1>t</h1>\n  </template>\n  <button>after</button>\n</template>\n";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+        let ranges = build_folding_ranges(&blocks, None, &line_index);
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start_line, 0);
+        assert_eq!(
+            ranges[0].end_line, 5,
+            "the template fold must reach the OUTER </template> line, not the nested slot template's close"
+        );
+    }
+
+    #[test]
+    fn svelte_nested_same_name_component_folds_to_the_outer_close_line() {
+        // The folding handler scans with the document's carrier-resolved kind
+        // (`scan_sfc_blocks_for_document`); a Svelte document resolves to
+        // `Markup`, under which a nested same-name component must not truncate
+        // the outer component's fold.
+        let source = "<script>\n  let n = 1;\n</script>\n<Card>\n  <Card>inner</Card>\n  <p>after</p>\n</Card>\n";
+        let blocks = scan_sfc_blocks_with(source, CustomBlockContentKind::Markup);
+        let line_index = LineIndex::new_utf16(source);
+        let ranges = build_folding_ranges(&blocks, None, &line_index);
+
+        assert_eq!(ranges.len(), 2, "script fold + outer Card fold");
+        assert_eq!(ranges[1].start_line, 3);
+        assert_eq!(
+            ranges[1].end_line, 6,
+            "the outer <Card> fold must reach the OUTER </Card> line, not the nested component's close"
+        );
     }
 }

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::documents::uri_to_canonical_id;
 use crate::type_provider::merge;
 
@@ -246,7 +246,7 @@ impl VerterLanguageServer {
             None => return Ok(None),
         };
 
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         // Compute preferred import path (alias-based if available)
         let canonical_target = crate::documents::uri_to_canonical_id(uri);
         let canonical_dropped = crate::documents::uri_to_canonical_id_from_str(&params.dropped_uri);

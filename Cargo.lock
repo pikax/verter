@@ -4026,6 +4026,7 @@ dependencies = [
  "verter_ffi",
  "verter_lsp",
  "verter_macro_dto",
+ "verter_parser",
  "verter_protocol",
  "verter_scheduler",
  "verter_semantic",

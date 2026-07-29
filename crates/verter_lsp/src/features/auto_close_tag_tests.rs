@@ -164,6 +164,22 @@ fn vue_template_closes_div() {
     );
 }
 
+/// A (malformed, mid-edit) closing tag carrying a quoted attribute whose VALUE contains
+/// `<template>` must not desync the balanced walk into `Unbalanced`: that would extend the Vue
+/// markup window to EOF and a TS generic `Box<Foo>` typed in the FOLLOWING script block would
+/// auto-close as `</Foo>` — the exact keystroke-path regression this pins.
+#[test]
+fn vue_quoted_close_tag_attr_does_not_extend_window_into_script() {
+    let source = "<template>\n  <template #a>x</template data-x=\"<template>\">\n  <p>after</p>\n</template>\n<script setup lang=\"ts\">\nconst b: Box<Foo> = mk();\n</script>\n";
+    let off = after(source, "Box<Foo>");
+    assert_eq!(
+        auto_close_tag_in_carrier(source, off, CarrierKind::Vue),
+        None,
+        "a script-block generic `>` must not auto-close: the quoted `<template>` inside the \
+         close tag's attribute must not unbalance the walk and extend the markup window to EOF",
+    );
+}
+
 /// HTML tag names are case-insensitive, so a `<DIV>` already followed by `</div>` (different
 /// case) is ALREADY CLOSED — auto-close must not insert a duplicate `</DIV>`. Fails if the
 /// already-closed guard compares the `</tag` prefix case-sensitively.

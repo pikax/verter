@@ -94,6 +94,13 @@ const VUE_INTRINSIC_ALLOWLIST: &[&str] = &[
     // check that lives in `verter_session`; referenced by name in carrier
     // docs/tests).
     "is_vue",
+    // The Vue SFC root-block RCDATA rule (owned by `verter_parser`'s SFC
+    // tokenizer and shared with the LSP block scanner's
+    // `CustomBlockContentKind::RawText` arm): at a Vue SFC root only
+    // `<template>` hosts markup; custom blocks are raw text. It is the VUE
+    // carrier's semantics, not a carrier-generic primitive — the Svelte arm
+    // uses its own `Markup` rule.
+    "vue_sfc_root_block_is_raw_text",
     // The `CarrierKind::Vue` carrier-DISCRIMINANT variant (a per-framework enum
     // value on the neutral `CarrierKind` type — names WHICH carrier a markup
     // region belongs to, exactly as the `Svelte` sibling variant does; it is a

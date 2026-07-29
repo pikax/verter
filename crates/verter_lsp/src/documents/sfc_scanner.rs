@@ -1,12 +1,19 @@
+use verter_parser::tokenizer::byte::vue_sfc_root_block_is_raw_text;
+
 /// Lightweight SFC block scanner for LSP structural features.
 ///
 /// Finds `<script>`, `<template>`, `<style>`, and custom block boundaries
-/// by scanning the raw Vue source. Returns byte offsets for each block's
+/// by scanning the raw carrier source. Returns byte offsets for each block's
 /// opening tag, content, and closing tag.
 ///
-/// This is intentionally simple — it doesn't parse attributes or validate
-/// nesting. It's used for document symbols, folding ranges, and determining
-/// which block the cursor is in.
+/// This is intentionally simple — it doesn't build a markup tree. Block close
+/// tags are depth-balanced for markup-bearing blocks and first-close for
+/// raw-text blocks; WHICH custom blocks count as markup is the carrier
+/// decision [`CustomBlockContentKind`] encodes (Vue custom blocks are raw
+/// text, matching `verter_parser`; Svelte root components are markup whose
+/// same-name children nest). `<script>` / `<style>` are always raw text.
+/// It's used for document symbols, folding ranges, and determining which
+/// block the cursor is in.
 ///
 /// A detected SFC block with its byte positions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,11 +301,90 @@ pub fn parse_opening_tag(source: &str, block: &SfcBlock) -> OpeningTagContext {
     }
 }
 
-/// Scan Vue SFC source text and return all top-level blocks found.
+/// How a CUSTOM (non-`script`/`template`/`style`) top-level block's content is
+/// interpreted when finding its close tag. The two variants are the two carrier
+/// semantics this scanner serves:
+///
+/// * [`RawText`](Self::RawText) — the Vue SFC rule: at the root of a Vue SFC
+///   only `<template>` hosts markup; every custom block (`<docs>`, `<i18n>`, …)
+///   is raw text (RCDATA) whose FIRST same-name close ends the block. The
+///   per-tag decision is the SHARED parser predicate
+///   [`vue_sfc_root_block_is_raw_text`] — the exact rule `verter_parser`'s SFC
+///   tokenizer applies when entering RCDATA — so the scanner and the parser
+///   cannot diverge on which Vue blocks nest.
+/// * [`Markup`](Self::Markup) — the Svelte rule: root markup lives at the SFC
+///   root, so a non-`script`/`style` paired tag (`<Card>`) is a component whose
+///   same-name children NEST; its close is depth-balanced.
+///
+/// `<script>` / `<style>` are raw text under BOTH kinds, and `<template>` is
+/// depth-balanced under both (it is the Vue markup host, and an ordinary
+/// element for Svelte).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomBlockContentKind {
+    /// Vue custom-block semantics: raw text, first same-name close wins.
+    RawText,
+    /// Svelte root-markup semantics: components nest, close is depth-balanced.
+    Markup,
+}
+
+/// Resolve the [`CustomBlockContentKind`] for a document.
+///
+/// Mirrors the resolution `DocumentRegistry::document_file_language` performs:
+/// the editor `language_id` is authoritative for a framework carrier when
+/// available (an in-memory carrier document may not carry a `.vue` / `.svelte`
+/// path); otherwise the canonical path classifies through the host's static
+/// classifier. Svelte maps to [`Markup`](CustomBlockContentKind::Markup);
+/// every other language — Vue, plain scripts, unknown carriers — maps to
+/// [`RawText`](CustomBlockContentKind::RawText), the fail-conservative Vue rule
+/// (raw text never swallows a following block, so an unknown carrier can lose
+/// span fidelity but never block discovery).
+pub fn custom_block_content_kind(
+    language_id: Option<&str>,
+    canonical_id: &str,
+) -> CustomBlockContentKind {
+    let registry = verter_session::LanguageRegistry::global();
+    let language = language_id
+        .and_then(|id| registry.carrier_for_editor_language_id(id))
+        .unwrap_or_else(|| registry.classify_static(canonical_id).static_resolution());
+    if language.is_svelte() {
+        CustomBlockContentKind::Markup
+    } else {
+        CustomBlockContentKind::RawText
+    }
+}
+
+/// Scan an open document's SFC blocks with its carrier-resolved
+/// [`CustomBlockContentKind`] ([`custom_block_content_kind`] over the
+/// document's `language_id` + `canonical_id`).
+///
+/// This is the entry point LSP feature handlers use for an open document, so a
+/// Svelte carrier gets depth-balanced component blocks while a Vue carrier
+/// keeps parser-faithful raw-text custom blocks.
+pub fn scan_sfc_blocks_for_document(doc: &super::DocumentState) -> Vec<SfcBlock> {
+    scan_sfc_blocks_with(
+        &doc.source,
+        custom_block_content_kind(Some(&doc.language_id), &doc.canonical_id),
+    )
+}
+
+/// Scan SFC source text and return all top-level blocks found, treating custom
+/// blocks as Vue raw text ([`CustomBlockContentKind::RawText`]).
 ///
 /// Blocks are returned in source order. Self-closing tags (e.g., `<template />`)
 /// are not treated as blocks since they have no content.
+///
+/// Callers with a resolved document use [`scan_sfc_blocks_for_document`];
+/// callers that KNOW the source is Svelte root markup pass
+/// [`CustomBlockContentKind::Markup`] to [`scan_sfc_blocks_with`]. This
+/// carrier-blind default uses the Vue rule because it is discovery-safe: raw
+/// text can mis-span a Svelte component block, but balancing a Vue custom
+/// block can swallow the `<script setup>` that follows its first close.
 pub fn scan_sfc_blocks(source: &str) -> Vec<SfcBlock> {
+    scan_sfc_blocks_with(source, CustomBlockContentKind::RawText)
+}
+
+/// [`scan_sfc_blocks`] with an explicit custom-block content interpretation.
+pub fn scan_sfc_blocks_with(source: &str, custom_blocks: CustomBlockContentKind) -> Vec<SfcBlock> {
     let bytes = source.as_bytes();
     let len = bytes.len();
     let mut blocks = Vec::new();
@@ -389,11 +475,39 @@ pub fn scan_sfc_blocks(source: &str) -> Vec<SfcBlock> {
             continue; // self-closing blocks have no content
         }
 
-        // Find the matching closing tag. The pattern carries the canonical
-        // lowercase tag name; [`find_close_tag`] matches case-insensitively, so
-        // a `</SCRIPT>` still resolves.
+        // Find the matching closing tag. Markup-bearing blocks may nest
+        // same-name tags (a Vue slot `<template #row>`, a nested Svelte
+        // component), so their close is DEPTH-BALANCED
+        // ([`find_balanced_close_tag`]); raw-text blocks end at the FIRST
+        // same-name close (HTML raw-text semantics — a `</script>` in a JS
+        // string ends the block, and a stray `<script>` in a string must not
+        // open a nesting level). WHICH blocks are raw text is the carrier
+        // decision [`CustomBlockContentKind`] encodes: under `RawText` (Vue)
+        // the shared parser predicate [`vue_sfc_root_block_is_raw_text`] makes
+        // everything but `<template>` raw text — a Vue custom block like
+        // `<docs>` must end at its first close or it swallows the
+        // `<script setup>` after it; under `Markup` (Svelte) only
+        // `<script>` / `<style>` are raw text and components balance.
+        // Unbalanced or torn-opaque content fails closed to the historical
+        // first-close boundary so the blocks after it stay discoverable. The
+        // pattern carries the canonical lowercase tag name; both searches match
+        // the close case-insensitively, so a `</SCRIPT>` still resolves.
         let close_pattern = format!("</{tag_name}");
-        match find_close_tag(source, i, &close_pattern) {
+        let raw_text = match custom_blocks {
+            CustomBlockContentKind::RawText => vue_sfc_root_block_is_raw_text(tag_name.as_bytes()),
+            CustomBlockContentKind::Markup => is_raw_text_sfc_tag(&tag_name),
+        };
+        let close_start = if raw_text {
+            find_close_tag(source, i, &close_pattern)
+        } else {
+            match find_balanced_close_tag(source, i, &tag_name) {
+                BalancedClose::Found(pos) => Some(pos),
+                BalancedClose::UnterminatedOpaque | BalancedClose::Unbalanced => {
+                    find_close_tag(source, i, &close_pattern)
+                }
+            }
+        };
+        match close_start {
             Some(close_start) => {
                 let close_end = match source[close_start..].find('>') {
                     Some(offset) => close_start + offset + 1,
@@ -578,6 +692,191 @@ fn is_standard_html_tag_lower(name: &str) -> bool {
             | "caption"
             | "slot"
     )
+}
+
+/// The blocks that are raw text under EVERY [`CustomBlockContentKind`]:
+/// `<script>` / `<style>` content is never parsed as markup, so the FIRST
+/// matching close tag ends the block (HTML raw-text element semantics, which
+/// is how both Vue's SFC parser and Svelte treat them). This is the
+/// [`Markup`](CustomBlockContentKind::Markup)-kind raw-text set; the
+/// [`RawText`](CustomBlockContentKind::RawText) (Vue) kind instead derives its
+/// per-tag decision from the shared parser predicate
+/// [`vue_sfc_root_block_is_raw_text`], under which custom blocks are raw text
+/// too and only `<template>` balances.
+fn is_raw_text_sfc_tag(name: &str) -> bool {
+    matches!(name, "script" | "style")
+}
+
+/// Outcome of a depth-balanced close-tag search ([`find_balanced_close_tag`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BalancedClose {
+    /// Byte offset of the `<` of the depth-matched closing tag.
+    Found(usize),
+    /// An opaque region (`<!--` comment or `<![CDATA[` section) opened after
+    /// the content start and never closes; everything after it reads as
+    /// opaque character data, so no close judgement is possible.
+    UnterminatedOpaque,
+    /// Tag depth never returned to zero before EOF (missing outer close, or a
+    /// stray same-name open inside raw text).
+    Unbalanced,
+}
+
+/// Find the depth-matched `</{tag_name}>` for a block whose content starts at
+/// `content_start` (just past the opening tag's `>`), balancing nested
+/// same-name opens so a nested `<template #slot>` / `<Card>` does not truncate
+/// the enclosing block.
+///
+/// The walk skips `<!-- … -->` comments and `<![CDATA[ … ]]>` sections
+/// wholesale (same-name tokens inside them never shift depth; CDATA is
+/// treated as opaque wherever it appears — the scanner is not a tree parser,
+/// so it does not model the foreign-content-only rule under which HTML grants
+/// CDATA its meaning), scans every tag-like span — OPENING (`<name …>`) and
+/// CLOSING (`</name …>`) alike — to its `>` honoring quoted attribute values
+/// (a `>` or a same-name tag inside a quote never leaks into the walk, even
+/// inside a malformed attribute-bearing close tag like
+/// `</template data-x="<template>">`), and treats a malformed tag-like `<`
+/// (no `>` before EOF or a raw `<`) as plain text. Quotes only matter INSIDE
+/// tag spans — an apostrophe in text (`Bob's`) never desyncs the walk.
+/// Tag-name matching is case-insensitive with proper name boundaries,
+/// consistent with [`find_close_tag`]. Self-closing same-name opens
+/// (`<template #row />`) do not open a nesting level.
+pub(crate) fn find_balanced_close_tag(
+    source: &str,
+    content_start: usize,
+    tag_name: &str,
+) -> BalancedClose {
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let tag = tag_name.as_bytes();
+    let mut depth = 1usize;
+    let mut i = content_start;
+
+    while i < len {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        // Comments never contribute tags.
+        if i + 4 <= len && &bytes[i..i + 4] == b"<!--" {
+            match find_bytes(bytes, i + 4, b"-->") {
+                Some(end) => {
+                    i = end + 3;
+                    continue;
+                }
+                None => return BalancedClose::UnterminatedOpaque,
+            }
+        }
+        // CDATA sections are opaque character data: a same-name open or close
+        // inside `<![CDATA[ … ]]>` never shifts depth.
+        if i + 9 <= len && &bytes[i..i + 9] == b"<![CDATA[" {
+            match find_bytes(bytes, i + 9, b"]]>") {
+                Some(end) => {
+                    i = end + 3;
+                    continue;
+                }
+                None => return BalancedClose::UnterminatedOpaque,
+            }
+        }
+        // `</name …>` — a close tag. Only a same-name close changes depth.
+        // The span is scanned with the SAME quote-awareness as open tags so a
+        // quoted attribute value on a (malformed, mid-edit) close tag —
+        // `</template data-x="<template>">` — never leaks an open into the
+        // walk and desyncs the depth.
+        if i + 1 < len && bytes[i + 1] == b'/' {
+            if close_tag_name_matches(bytes, i, tag) {
+                depth -= 1;
+                if depth == 0 {
+                    return BalancedClose::Found(i);
+                }
+            }
+            match scan_tag_span(bytes, i) {
+                Some((gt, _)) => i = gt + 1,
+                // Malformed (no `>` before EOF or a raw `<`): treat the `</`
+                // as plain text and keep walking.
+                None => i += 2,
+            }
+            continue;
+        }
+        // `<name …>` — an open tag (any name). Scan its span so quoted
+        // attribute values are honored; only a same-name, non-self-closing
+        // open increases depth.
+        if i + 1 < len && bytes[i + 1].is_ascii_alphanumeric() {
+            match scan_tag_span(bytes, i) {
+                Some((gt, self_closing)) => {
+                    if !self_closing && open_tag_name_matches(bytes, i, tag) {
+                        depth += 1;
+                    }
+                    i = gt + 1;
+                }
+                // Malformed (no `>` before EOF or a raw `<`): treat this `<`
+                // as plain text and keep walking.
+                None => i += 1,
+            }
+            continue;
+        }
+        i += 1;
+    }
+    BalancedClose::Unbalanced
+}
+
+/// Whether `bytes[at..]` is `</{tag}` (case-insensitive) with a proper name
+/// boundary (the byte after the name is `>` or whitespace), consistent with
+/// [`find_close_tag`].
+fn close_tag_name_matches(bytes: &[u8], at: usize, tag: &[u8]) -> bool {
+    let name_at = at + 2;
+    if name_at + tag.len() >= bytes.len() {
+        return false;
+    }
+    if !bytes[name_at..name_at + tag.len()].eq_ignore_ascii_case(tag) {
+        return false;
+    }
+    let after = bytes[name_at + tag.len()];
+    after == b'>' || after.is_ascii_whitespace()
+}
+
+/// Whether `bytes[at..]` is `<{tag}` (case-insensitive) with a proper name
+/// boundary (whitespace, `>`, or `/`), so `<templatefoo` never matches.
+fn open_tag_name_matches(bytes: &[u8], at: usize, tag: &[u8]) -> bool {
+    let name_at = at + 1;
+    if name_at + tag.len() > bytes.len() {
+        return false;
+    }
+    if !bytes[name_at..name_at + tag.len()].eq_ignore_ascii_case(tag) {
+        return false;
+    }
+    match bytes.get(name_at + tag.len()) {
+        None => true,
+        Some(&b) => b.is_ascii_whitespace() || b == b'>' || b == b'/',
+    }
+}
+
+/// Scan an open tag's span from its `<` at `lt` to its closing `>`, honoring
+/// quoted attribute values. Returns `(gt_index, self_closing)`; `None` when
+/// the tag never closes (EOF inside the tag or its attribute value) or a raw
+/// `<` appears first (malformed — the caller treats the original `<` as
+/// text).
+fn scan_tag_span(bytes: &[u8], lt: usize) -> Option<(usize, bool)> {
+    let len = bytes.len();
+    let mut j = lt + 1;
+    while j < len {
+        match bytes[j] {
+            b'>' => return Some((j, bytes[j - 1] == b'/')),
+            b'"' | b'\'' => {
+                let quote = bytes[j];
+                j += 1;
+                while j < len && bytes[j] != quote {
+                    j += 1;
+                }
+                if j >= len {
+                    return None; // unterminated attribute value
+                }
+            }
+            b'<' => return None,
+            _ => {}
+        }
+        j += 1;
+    }
+    None
 }
 
 /// Find the position of a closing tag pattern (case-insensitive for the tag name).
@@ -1163,5 +1462,342 @@ const x = 1;
             SfcCursorContext::BlockContent { block_index: style },
             "an offset inside the unclosed style must classify as BlockContent"
         );
+    }
+
+    // ========================================================================
+    // Nested same-name tags — depth-balanced close matching (W20)
+    //
+    // `<template>` and custom/component blocks contain real markup where
+    // same-name tags nest (a Vue slot `<template #row>`, a nested Svelte
+    // component). The block's close must be the DEPTH-MATCHED close tag, not
+    // the first one, or everything after the inner close falls out of the
+    // block (folding, symbols, cursor classification all die there).
+    // ========================================================================
+
+    #[test]
+    fn nested_slot_template_does_not_truncate_the_outer_template_block() {
+        let source = "<template>\n  <Card>\n    <template #header>\n      <h1>title</h1>\n    </template>\n    <button>after</button>\n  </Card>\n</template>\n\n<script setup lang=\"ts\">\nconst x = 1;\n</script>\n\n<style scoped>\n.a {}\n</style>\n";
+        let blocks = scan_sfc_blocks(source);
+
+        // The nested slot template is NOT a top-level block; script/style after
+        // the outer close are still discovered.
+        assert_eq!(
+            blocks.len(),
+            3,
+            "expected exactly template + script + style, got: {:?}",
+            blocks.iter().map(|b| &b.tag_name).collect::<Vec<_>>()
+        );
+        assert_eq!(blocks[0].tag_name, "template");
+        let outer_close = source.rfind("</template>").unwrap();
+        assert_eq!(
+            blocks[0].close_tag_start as usize, outer_close,
+            "the outer template block must close at the OUTER </template>, not the nested slot template's close"
+        );
+        let (cs, ce) = blocks[0].content_range();
+        let content = &source[cs as usize..ce as usize];
+        assert!(
+            content.contains("<button>after</button>"),
+            "markup after the nested </template> must stay inside the outer block's content"
+        );
+        // A cursor on markup after the inner close classifies as template
+        // content, not RootLevel dead zone.
+        let after_off = source.find("after<").unwrap() as u32;
+        assert_eq!(
+            classify_cursor(after_off, &blocks),
+            SfcCursorContext::BlockContent { block_index: 0 }
+        );
+        assert_eq!(blocks[1].tag_name, "script");
+        assert!(blocks[1].is_setup());
+        assert_eq!(blocks[2].tag_name, "style");
+    }
+
+    #[test]
+    fn nested_same_name_component_does_not_truncate_the_outer_block_svelte() {
+        // Svelte carrier sources reach the scanner through the carrier-resolved
+        // routing (`scan_sfc_blocks_for_document` → `custom_block_content_kind`),
+        // and Svelte markup nests same-name components at the root. This pins
+        // the PRODUCTION composition: the svelte editor language id resolves to
+        // `Markup`, under which the original W20 balance fix holds.
+        let source = "<script lang=\"ts\">\n  let n = 1;\n</script>\n\n<Card>\n  <Card>inner</Card>\n  <p>after</p>\n</Card>\n\n<style>\n  .a {}\n</style>\n";
+        let kind = custom_block_content_kind(Some("svelte"), "/proj/src/App.svelte");
+        assert_eq!(kind, CustomBlockContentKind::Markup);
+        let blocks = scan_sfc_blocks_with(source, kind);
+
+        let card = blocks
+            .iter()
+            .find(|b| b.tag_name == "Card")
+            .expect("the outer <Card> must be scanned as a block");
+        let outer_close = source.rfind("</Card>").unwrap();
+        assert_eq!(
+            card.close_tag_start as usize, outer_close,
+            "the outer <Card> block must close at the OUTER </Card>, not the nested component's close"
+        );
+        let (cs, ce) = card.content_range();
+        assert!(
+            source[cs as usize..ce as usize].contains("<p>after</p>"),
+            "markup after the nested </Card> must stay inside the outer block's content"
+        );
+        assert!(blocks.iter().any(|b| b.tag_name == "script"));
+        assert!(
+            blocks.iter().any(|b| b.tag_name == "style"),
+            "the style block after the outer close must still be discovered"
+        );
+    }
+
+    #[test]
+    fn custom_block_content_kind_maps_svelte_to_markup_everything_else_raw_text() {
+        // Editor language id is authoritative when it names a carrier
+        // (mirrors `DocumentRegistry::document_file_language`)…
+        assert_eq!(
+            custom_block_content_kind(Some("svelte"), "/proj/src/App.svelte"),
+            CustomBlockContentKind::Markup
+        );
+        assert_eq!(
+            custom_block_content_kind(Some("vue"), "/proj/src/App.vue"),
+            CustomBlockContentKind::RawText
+        );
+        // …a non-carrier editor id falls back to the canonical path…
+        assert_eq!(
+            custom_block_content_kind(Some("plaintext"), "/proj/src/App.svelte"),
+            CustomBlockContentKind::Markup
+        );
+        assert_eq!(
+            custom_block_content_kind(None, "/proj/src/App.svelte"),
+            CustomBlockContentKind::Markup
+        );
+        // …and everything that is not Svelte gets the fail-conservative Vue
+        // raw-text rule (discovery-safe: never swallows a following block).
+        assert_eq!(
+            custom_block_content_kind(None, "/proj/src/App.vue"),
+            CustomBlockContentKind::RawText
+        );
+        assert_eq!(
+            custom_block_content_kind(Some("typescript"), "/proj/src/main.ts"),
+            CustomBlockContentKind::RawText
+        );
+    }
+
+    #[test]
+    fn self_closing_same_name_tag_does_not_open_a_nesting_level() {
+        // `<template #row />` is self-closing: it must NOT increment depth.
+        // If it did, the walk would end unbalanced and fail back to the
+        // first-close boundary (the #cell close), truncating the outer block.
+        let source = "<template>\n  <template #row />\n  <template #cell>x</template>\n  <div>after</div>\n</template>\n";
+        let blocks = scan_sfc_blocks(source);
+
+        assert_eq!(blocks.len(), 1);
+        let outer_close = source.rfind("</template>").unwrap();
+        assert_eq!(blocks[0].close_tag_start as usize, outer_close);
+        let (cs, ce) = blocks[0].content_range();
+        assert!(source[cs as usize..ce as usize].contains("<div>after</div>"));
+    }
+
+    #[test]
+    fn comment_embedded_same_name_tags_do_not_shift_the_block_boundary() {
+        // A commented-out `</template>` must not close the block, and a
+        // commented-out `<template>` must not open a nesting level.
+        let source = "<template>\n  <!-- </template> -->\n  <!-- <template> -->\n  <template #a>x</template>\n  <p>after</p>\n</template>\n<script setup>\nconst y = 2;\n</script>\n";
+        let blocks = scan_sfc_blocks(source);
+
+        assert_eq!(
+            blocks.len(),
+            2,
+            "expected template + script, got: {:?}",
+            blocks.iter().map(|b| &b.tag_name).collect::<Vec<_>>()
+        );
+        assert_eq!(blocks[0].tag_name, "template");
+        let outer_close = source.rfind("</template>").unwrap();
+        assert_eq!(
+            blocks[0].close_tag_start as usize, outer_close,
+            "comment-embedded tags must not shift the close boundary"
+        );
+        let (cs, ce) = blocks[0].content_range();
+        assert!(source[cs as usize..ce as usize].contains("<p>after</p>"));
+        assert_eq!(blocks[1].tag_name, "script");
+    }
+
+    #[test]
+    fn quoted_attr_value_close_tag_text_does_not_close_the_block() {
+        // `</template>` inside a quoted attribute value of a nested element is
+        // data, not a close tag.
+        let source =
+            "<template>\n  <div data-x=\"</template>\">\n    <p>after</p>\n  </div>\n</template>\n";
+        let blocks = scan_sfc_blocks(source);
+
+        assert_eq!(blocks.len(), 1);
+        let outer_close = source.rfind("</template>").unwrap();
+        assert_eq!(
+            blocks[0].close_tag_start as usize, outer_close,
+            "a quoted `</template>` attribute value must not close the block"
+        );
+        let (cs, ce) = blocks[0].content_range();
+        assert!(source[cs as usize..ce as usize].contains("<p>after</p>"));
+    }
+
+    #[test]
+    fn unbalanced_nested_open_falls_back_to_first_close_without_panic() {
+        // The outer close is missing, so depth never balances. Fail closed to
+        // the historical first-close boundary so the blocks after it stay
+        // discoverable (extending to EOF would swallow the script block).
+        let source = "<template>\n  <template #a>x</template>\n  <p>stranded</p>\n<script setup>\nconst z = 3;\n</script>\n";
+        let blocks = scan_sfc_blocks(source);
+
+        let first_close = source.find("</template>").unwrap();
+        assert_eq!(blocks[0].tag_name, "template");
+        assert_eq!(
+            blocks[0].close_tag_start as usize, first_close,
+            "unbalanced input must fail closed to the first-close boundary"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.tag_name == "script" && b.is_setup()),
+            "the script block after the unbalanced template must still be discovered"
+        );
+    }
+
+    #[test]
+    fn vue_custom_block_is_raw_text_so_a_nested_same_name_pair_never_swallows_the_script() {
+        // Vue custom blocks are RCDATA (raw text) in Vue's own parser and in
+        // `verter_parser` (`check_and_setup_rcdata`): the FIRST `</docs>` ends
+        // the block, so the `<script setup>` that follows it is a real root
+        // block. Balancing `<docs>` instead would span to the SECOND `</docs>`
+        // and swallow the script — hiding it from imports, code lens, document
+        // symbols, and edits.
+        let source = "<docs><docs>example</docs><script setup>\nconst x = 1;\n</script></docs>";
+        let blocks = scan_sfc_blocks(source);
+
+        let script = blocks
+            .iter()
+            .find(|b| b.tag_name == "script")
+            .expect("the <script setup> after the first </docs> must be discovered");
+        assert!(script.is_setup());
+        let (cs, ce) = script.content_range();
+        assert_eq!(
+            &source[cs as usize..ce as usize],
+            "\nconst x = 1;\n",
+            "the script block must carry its own content, not sit inside <docs>"
+        );
+
+        let docs = blocks
+            .iter()
+            .find(|b| b.tag_name == "docs")
+            .expect("<docs> must still be a block");
+        assert_eq!(
+            docs.close_tag_start as usize,
+            source.find("</docs>").unwrap(),
+            "the raw-text <docs> block must end at the FIRST </docs>, matching verter_parser"
+        );
+        assert_eq!(
+            blocks.len(),
+            2,
+            "expected exactly docs + script, got: {:?}",
+            blocks.iter().map(|b| &b.tag_name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn svelte_markup_kind_still_balances_nested_same_name_components() {
+        // The Svelte routing (CustomBlockContentKind::Markup) must keep the
+        // depth-balanced close for root components — the original W20 bug.
+        let source =
+            "<Card>\n  <Card>inner</Card>\n  <p>after</p>\n</Card>\n<style>\n.a {}\n</style>\n";
+        let blocks = scan_sfc_blocks_with(source, CustomBlockContentKind::Markup);
+
+        let card = blocks
+            .iter()
+            .find(|b| b.tag_name == "Card")
+            .expect("the outer <Card> must be scanned as a block");
+        assert_eq!(
+            card.close_tag_start as usize,
+            source.rfind("</Card>").unwrap(),
+            "under Markup custom blocks the outer <Card> must close at the OUTER </Card>"
+        );
+        let (cs, ce) = card.content_range();
+        assert!(source[cs as usize..ce as usize].contains("<p>after</p>"));
+        assert!(
+            blocks.iter().any(|b| b.tag_name == "style"),
+            "the style block after the outer close must still be discovered"
+        );
+    }
+
+    #[test]
+    fn close_tag_attr_quoted_same_name_open_does_not_unbalance_the_walk() {
+        // A close tag may carry (malformed, mid-edit) attributes. The walker
+        // must scan the CLOSE tag's span with the same quote-awareness as open
+        // tags: the quoted `<template>` inside `</template data-x="...">` is
+        // data, not an open — otherwise depth never rebalances, the scanner
+        // falls back to the truncating first-close boundary, and the
+        // auto-close markup window extends to EOF.
+        let source = "<template>\n  <template #a>x</template data-x=\"<template>\">\n  <p>after</p>\n</template>\n<script setup lang=\"ts\">\nconst b: Box<Foo> = mk();\n</script>\n";
+
+        let content_start = source.find('>').unwrap() + 1;
+        let outer_close = source.rfind("</template>").unwrap();
+        assert_eq!(
+            find_balanced_close_tag(source, content_start, "template"),
+            BalancedClose::Found(outer_close),
+            "the quoted <template> inside the close tag's attribute must not count as an open"
+        );
+
+        let blocks = scan_sfc_blocks(source);
+        assert_eq!(blocks[0].tag_name, "template");
+        assert_eq!(
+            blocks[0].close_tag_start as usize, outer_close,
+            "the outer template must close at the OUTER </template>, not the attr-bearing inner close"
+        );
+        let (cs, ce) = blocks[0].content_range();
+        assert!(source[cs as usize..ce as usize].contains("<p>after</p>"));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.tag_name == "script" && b.is_setup()),
+            "the script block after the template must still be discovered"
+        );
+    }
+
+    #[test]
+    fn cdata_section_same_name_tokens_are_opaque_to_the_balanced_walk() {
+        // `<![CDATA[ … ]]>` is opaque character data (a foreign-content
+        // island): a same-name close or open inside it must not shift depth.
+        let source = "<template>\n  <svg><![CDATA[ </template> <template> ]]></svg>\n  <p>after</p>\n</template>\n<script setup>\nconst x = 1;\n</script>\n";
+        let blocks = scan_sfc_blocks(source);
+
+        assert_eq!(blocks[0].tag_name, "template");
+        assert_eq!(
+            blocks[0].close_tag_start as usize,
+            source.rfind("</template>").unwrap(),
+            "CDATA-interior same-name tokens must not close (or open) the block"
+        );
+        let (cs, ce) = blocks[0].content_range();
+        assert!(source[cs as usize..ce as usize].contains("<p>after</p>"));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.tag_name == "script" && b.is_setup()),
+            "the script block after the template must still be discovered"
+        );
+    }
+
+    #[test]
+    fn script_and_style_stay_raw_text_first_close_wins() {
+        // A `<script>` open inside a JS string must NOT open a nesting level:
+        // script/style are raw-text blocks — the first close ends the block
+        // (HTML raw-text semantics), and the style block after must be found.
+        let source = "<script>\nconst s = \"<script>\";\n</script>\n<style>\n.a {}\n</style>\n";
+        let blocks = scan_sfc_blocks(source);
+
+        assert_eq!(
+            blocks.len(),
+            2,
+            "expected script + style, got: {:?}",
+            blocks.iter().map(|b| &b.tag_name).collect::<Vec<_>>()
+        );
+        assert_eq!(blocks[0].tag_name, "script");
+        assert_eq!(
+            blocks[0].close_tag_start as usize,
+            source.find("</script>").unwrap(),
+            "a stray `<script>` in a JS string must not defer the raw-text close"
+        );
+        assert_eq!(blocks[1].tag_name, "style");
     }
 }

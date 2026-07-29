@@ -166,6 +166,8 @@ pub fn resolve_script_import_anchor(
     carrier_source: &str,
     user_import_spans: &[(u32, u32)],
 ) -> ScriptImportInsertionAnchor {
+    // Vue-scoped by contract (see the doc above), so the default Vue raw-text
+    // custom-block scan is the correct mode here.
     let blocks = scan_sfc_blocks(carrier_source);
 
     if let Some(setup) = blocks.iter().find(|b| b.is_setup()) {

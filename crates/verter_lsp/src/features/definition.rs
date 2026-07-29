@@ -57,11 +57,12 @@ pub fn definition_at_position(
             offset >= cs as usize && offset < ce as usize
         }
     }) || analysis.template.as_deref().is_some_and(|template| {
-        // The depth-ignorant SFC scanner closes the real template block at
-        // the first nested `</template>`; the typed element tree is the
-        // authority for template markup in those dead zones (D6 — custom
-        // directive navigation must not die there). Svelte has no element
-        // IR, so its behavior is unchanged.
+        // On MALFORMED input (missing outer close) the SFC scanner's
+        // depth-balanced walk fails closed to the first-close boundary, so
+        // the real template block can still end at a nested `</template>`;
+        // the typed element tree is the authority for template markup in
+        // those dead zones (D6 — custom directive navigation must not die
+        // there). Svelte has no element IR, so its behavior is unchanged.
         template
             .elements
             .iter()
