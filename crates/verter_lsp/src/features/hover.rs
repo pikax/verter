@@ -1337,7 +1337,8 @@ fn slot_attribute_hover_target(
 /// (D3): the slot's defineSlots signature — name, slot-props payload, return
 /// type — resolved with Vue's kebab↔camel equivalence (`#my-slot` → `mySlot`).
 /// Falls back to the child's template-defined slot names (untyped). A slot the
-/// child never declared yields `None` (fail-closed — no fabrication).
+/// child never declared yields `None`; the caller may retain source-derived
+/// syntax documentation, but must not fabricate a child signature.
 pub fn build_child_slot_hover(
     vue_attr: &str,
     slot_name: &str,

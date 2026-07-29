@@ -6742,6 +6742,145 @@ async fn d3_hover_text(needle: &str, character_shift: u32) -> Option<String> {
     text
 }
 
+// @ai-generated - Proves an identified Vue slot consumer retains its source-derived fallback
+// while the imported child's native slot surface is unavailable.
+#[tokio::test]
+async fn contract_slot_name_hover_falls_back_when_child_surface_is_unavailable() {
+    const PARENT_WITH_UNAVAILABLE_CHILD: &str = "<script setup lang=\"ts\">\n\
+import MissingChild from './MissingChild.vue'\n\
+</script>\n\
+<template>\n\
+  <MissingChild>\n\
+    <template #header>content</template>\n\
+  </MissingChild>\n\
+</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", PARENT_WITH_UNAVAILABLE_CHILD)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    assert!(
+        server
+            .hover_native_semantics_enabled
+            .load(std::sync::atomic::Ordering::Acquire),
+        "precondition: the native hover lane must be enabled"
+    );
+
+    let position = find_document_position(server, &app_uri, "#header", 1);
+    let doc = server.documents.get(&app_uri).expect("parent document");
+    let analysis = server
+        .documents
+        .get_analysis(&app_uri)
+        .expect("parent analysis");
+    let offset = doc
+        .line_index
+        .position_to_offset(&position)
+        .expect("slot offset");
+    assert!(
+        matches!(
+            crate::features::hover::child_hover_target_at_offset(offset, &doc.source, &analysis),
+            Some(crate::features::hover::ChildHoverTarget::SlotAttribute(_))
+        ),
+        "precondition: #header must enter the native child-slot path"
+    );
+    drop(doc);
+
+    let hover = server
+        .hover(hover_params(&app_uri, position))
+        .await
+        .expect("hover request should succeed");
+    assert_eq!(
+        hover_text(hover),
+        "**Slot content** — `#header`\n\nProvides content for the **\"header\"** slot.",
+        "an unavailable child slot surface must fall back to the static source-derived answer"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+// @ai-generated - Records the known boundary: an imported defineSlots catalog is not
+// available to the analyzer-backed hover lookup yet, so the resolved child remains silent.
+#[tokio::test]
+async fn contract_imported_define_slots_slot_name_without_analyzer_fields_remains_silent() {
+    const CHILD_WITH_UNRESOLVED_SLOTS: &str = "<script setup lang=\"ts\">\n\
+import type { ImportedSlots } from './slot-types'\n\
+defineSlots<ImportedSlots>()\n\
+</script>\n";
+    const PARENT: &str = "<script setup lang=\"ts\">\n\
+import TypedChild from './TypedChild.vue'\n\
+</script>\n\
+<template>\n\
+  <TypedChild>\n\
+    <template #header=\"{ title }\">{{ title }}</template>\n\
+  </TypedChild>\n\
+</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/TypedChild.vue", "vue", CHILD_WITH_UNRESOLVED_SLOTS),
+        ("src/App.vue", "vue", PARENT),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/TypedChild.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "#header", 1);
+    let target = {
+        let doc = server.documents.get(&app_uri).expect("parent document");
+        let analysis = server
+            .documents
+            .get_analysis(&app_uri)
+            .expect("parent analysis");
+        let offset = doc
+            .line_index
+            .position_to_offset(&position)
+            .expect("slot offset");
+        crate::features::hover::child_hover_target_at_offset(offset, &doc.source, &analysis)
+            .expect("#header must enter the native child-slot path")
+    };
+    let outcome = server
+        .child_hover_for_target(&app_uri, &target)
+        .expect("child hover resolution should succeed");
+    let child_canonical = crate::documents::uri_to_canonical_id(&child_uri);
+    let host = server.documents.host();
+    let child_analysis = host
+        .get_analysis(&child_canonical)
+        .expect("the available child must have analysis");
+    let (macro_index, slot_macro) = child_analysis
+        .macros
+        .iter()
+        .enumerate()
+        .find(|(_, mac)| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+        .expect("the child must have a defineSlots macro");
+    let resolver_surface =
+        host.resolve_vue_macro_surface(&verter_session::typeinfo::VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from(child_canonical.as_str()),
+            macro_index,
+            macro_kind: slot_macro.kind,
+            // The public resolver re-derives the authoritative current hash.
+            root_identity: [0u8; 16],
+            level: verter_session::typeinfo::TypeInfoQueryLevel::FullMetadata,
+        });
+    let actual = server
+        .hover(hover_params(&app_uri, position))
+        .await
+        .expect("hover request should succeed");
+    assert!(
+        resolver_surface.is_none()
+            && matches!(
+                &outcome,
+                crate::server::component_resolve::ChildHoverOutcome::SurfaceAvailableNoMatch
+            )
+            && actual.is_none(),
+        "the unresolved imported slot catalog remains outside analyzer slot_fields: the shared \
+         resolver root is unavailable, but the resolved child classifies as an available no-match \
+         and stays silent; resolver_surface={resolver_surface:?}, \
+         outcome={outcome:?}, hover={actual:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+// @ai-generated - Negative control proving an available child surface still outranks fallback.
 #[tokio::test]
 async fn contract_hash_slot_name_hover_shows_child_slot_signature() {
     let text = d3_hover_text("#header", 1)
@@ -6753,6 +6892,10 @@ async fn contract_hash_slot_name_hover_shows_child_slot_signature() {
             "#header hover must carry the child slot-props signature ({needle}), got: {text}"
         );
     }
+    assert!(
+        !text.contains("**Slot content**"),
+        "the native child signature must win over the static slot fallback: {text}"
+    );
 }
 
 #[tokio::test]
@@ -6796,12 +6939,10 @@ async fn contract_longhand_v_slot_name_hover_shows_child_slot_signature() {
 
 #[tokio::test]
 async fn contract_unknown_slot_name_produces_no_hover() {
-    // Negative control: a slot the child never declared must be silent —
-    // no fabricated slot hover.
     let text = d3_hover_text("#nope", 1).await;
     assert!(
         text.is_none(),
-        "unknown slot name must produce no hover, got: {text:?}"
+        "an authoritative child slot surface must fail closed for an undeclared name, got: {text:?}"
     );
 }
 

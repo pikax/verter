@@ -94,8 +94,8 @@ use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryApi,
-    SemanticQueryKey, SemanticQueryOutput, SurfaceProvenanceContext,
+    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
+    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceProvenanceContext,
 };
 use crate::typeinfo::framework_surface::results::{EmitsSurface, MacroSurfaceDtos, PropsSurface};
 use crate::typeinfo::framework_surface::VueSurfaceKey;
@@ -617,6 +617,21 @@ impl VerterHost {
             crate::semantic_query::HotTypeRef::new(base_carrier),
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
         );
+        if matches!(
+            crate::project_semantic_dispatch::node_data_for(ctx, base).as_deref(),
+            None | Some(
+                SemanticNodeData::BareRef(_)
+                    | SemanticNodeData::ImportType(_)
+                    | SemanticNodeData::RawFallback { .. }
+                    | SemanticNodeData::Opaque(_)
+            )
+        ) {
+            // Navigate preserves an authored reference as a carrier when its
+            // declaration cannot currently be resolved. That carrier is the
+            // resolver-owned proof that the root surface is unavailable, not
+            // an authoritative empty slot surface.
+            return None;
+        }
 
         // Collect the walker's side-band diagnostics so unresolvable
         // SURFACE-COMPOSITION arms (heritage / intersection / union) the
@@ -631,7 +646,6 @@ impl VerterHost {
             terminal_context,
             Some(&mut walker_diagnostics),
         )?;
-
         Some(VueMacroSurface {
             surface,
             macro_kind: request.macro_kind,

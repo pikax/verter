@@ -2,8 +2,11 @@ use super::*;
 
 pub(super) fn transport_child_hover_result(
     canonical_id: &str,
-    result: std::result::Result<Option<Hover>, verter_session::PublicApiProjectionError>,
-) -> Result<Option<Hover>> {
+    result: std::result::Result<
+        crate::server::component_resolve::ChildHoverOutcome,
+        verter_session::PublicApiProjectionError,
+    >,
+) -> Result<crate::server::component_resolve::ChildHoverOutcome> {
     result.map_err(|error| crate::public_api_projection_jsonrpc_error("hover", canonical_id, error))
 }
 

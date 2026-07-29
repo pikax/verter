@@ -211,17 +211,33 @@ pub(super) async fn handle_hover(
         })
         .flatten();
     if let Some(target) = child_hover_target.as_ref() {
-        if let Some(child_hover) = transport_child_hover_result(
+        let child_hover = transport_child_hover_result(
             &crate::documents::uri_to_canonical_id(uri),
             server.child_hover_for_target(uri, target),
-        )? {
-            return Ok(Some(child_hover));
-        }
-        // D3 fail-closed: an identified slot-name token on a resolved child
-        // whose slots surface declares no such slot is SILENT — never the
-        // untyped static fallback, never a fabricated signature.
-        if matches!(target, hover::ChildHoverTarget::SlotAttribute(_)) {
-            return Ok(None);
+        )?;
+        match child_hover {
+            super::component_resolve::ChildHoverOutcome::Hover(child_hover) => {
+                return Ok(Some(child_hover));
+            }
+            super::component_resolve::ChildHoverOutcome::SurfaceUnavailable
+                if matches!(target, hover::ChildHoverTarget::SlotAttribute(_)) =>
+            {
+                // The parent analysis still owns a source-derived slot-syntax
+                // answer. Missing child data must not suppress it; the fallback
+                // describes authored syntax and does not claim that the child
+                // declared a matching slot.
+                return Ok(verter_result);
+            }
+            super::component_resolve::ChildHoverOutcome::SurfaceAvailableNoMatch
+                if matches!(target, hover::ChildHoverTarget::SlotAttribute(_)) =>
+            {
+                // A resolved child slot surface is authoritative. An absent name
+                // fails closed instead of turning authored parent syntax into
+                // an affirmative declaration claim.
+                return Ok(None);
+            }
+            super::component_resolve::ChildHoverOutcome::SurfaceAvailableNoMatch
+            | super::component_resolve::ChildHoverOutcome::SurfaceUnavailable => {}
         }
     }
 
