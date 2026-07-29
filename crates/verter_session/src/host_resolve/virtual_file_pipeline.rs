@@ -2725,7 +2725,7 @@ impl VerterHost {
                     diagnostics =
                         diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
                             severity: HostSeverity::Error,
-                            code: "HOST_MISSING_EXTERNAL_SOURCE".to_string(),
+                            code: crate::types::HOST_MISSING_EXTERNAL_SOURCE.to_string(),
                             message: format!(
                                 "missing external source '{}' for '{}'",
                                 req.specifier, snapshot.canonical_id
@@ -3210,7 +3210,7 @@ impl VerterHost {
                     diagnostics =
                         diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
                             severity: HostSeverity::Error,
-                            code: "HOST_MISSING_EXTERNAL_SOURCE".to_string(),
+                            code: crate::types::HOST_MISSING_EXTERNAL_SOURCE.to_string(),
                             message: format!(
                                 "missing external source '{}' for '{}'",
                                 req.specifier, snapshot.canonical_id

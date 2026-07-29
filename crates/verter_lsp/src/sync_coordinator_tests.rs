@@ -2837,16 +2837,17 @@ async fn a_late_arriving_older_receipt_does_not_walk_the_quiet_window_backwards(
 }
 
 /// A carrier whose open-time compile FAILED has no provider projection, and a
-/// document with no projection fails closed downstream forever
-/// (`capture_provider_request_surface` returns `None`, and
-/// `current_file_needs_inline_type_provider_sync` reads that absence as "not a
-/// carrier, nothing to repair").
+/// document with no projection fails closed on every capture
+/// (`capture_provider_request_surface` returns `None`) until a repair path
+/// compiles one.
 ///
 /// The document commit deliberately does not compile — doing so per keystroke is
 /// https://github.com/pikax/verter/issues/96, and a compile that FAILS installs
 /// no projection, so "compile until one exists" never terminates on a file being
-/// typed. Recovery therefore belongs to the debounced coordinator, which already
-/// compiles the IDE surface once per quiet window.
+/// typed. The interactive repair heals a projection-less carrier on the next
+/// provider-backed request (attempt-bounded), but only when a request arrives;
+/// the debounced coordinator is the request-INDEPENDENT recovery, compiling the
+/// IDE surface once per quiet window.
 ///
 /// Drives the real `sync_file`, so it fails if the install is not wired into it —
 /// not merely if the method is wrong.
@@ -2904,10 +2905,11 @@ async fn the_coordinator_installs_a_projection_the_failed_open_compile_never_bui
 /// again before a resolver snapshot is published — the ordinary state of a
 /// workspace that is still settling, and of every editor-owned-tsserver /
 /// verter-only session. A carrier whose open-time compile failed has no provider
-/// projection, the commit never compiles one, and the foreground repair declines
-/// projection-less documents by design, so if the debounced tick also skips it
-/// the document is stranded with NO IDE features at all — worse than the latency
-/// bug this change is about.
+/// projection and the commit never compiles one. The interactive repair heals it
+/// only when a provider-backed request arrives (and a provider-less route has no
+/// provider to ask), so if the debounced tick also skips it the document is
+/// stranded with NO IDE features at all — worse than the latency bug this
+/// change is about.
 ///
 /// Both early-return paths are covered here because they are different gates:
 /// the previous fixture always supplied a provider AND a published VFS, so it

@@ -12,6 +12,7 @@
 //! visibility widening.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use tower_lsp_server::ls_types::Uri;
 
@@ -125,6 +126,43 @@ impl VerterLanguageServer {
         ide_code: &str,
         source_map_json: Option<&str>,
     ) {
+        let _ = self.record_carrier_ide_snapshot_inner(
+            None,
+            canonical_id,
+            ide_path,
+            ide_code,
+            source_map_json,
+        );
+    }
+
+    /// Record retained IDE output only if `revision` is still the live open
+    /// document at the store-write linearization point.
+    pub(super) fn record_carrier_ide_snapshot_if_current(
+        &self,
+        uri: &Uri,
+        revision: &crate::documents::DocumentSnapshotIdentity,
+        canonical_id: &str,
+        ide_path: &str,
+        ide_code: &str,
+        source_map_json: Option<&str>,
+    ) -> bool {
+        self.record_carrier_ide_snapshot_inner(
+            Some((uri, revision)),
+            canonical_id,
+            ide_path,
+            ide_code,
+            source_map_json,
+        )
+    }
+
+    fn record_carrier_ide_snapshot_inner(
+        &self,
+        retained: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
+        canonical_id: &str,
+        ide_path: &str,
+        ide_code: &str,
+        source_map_json: Option<&str>,
+    ) -> bool {
         let store = self.documents.provider_surfaces();
         let host = self.documents.host();
         let owned_map: Option<std::sync::Arc<str>> = match source_map_json {
@@ -168,8 +206,23 @@ impl VerterLanguageServer {
             tracing::debug!(
                 "record_carrier_ide_snapshot: no modellable provider surface for {ide_path}"
             );
-            return;
+            return false;
         };
+        if let Some((uri, revision)) = retained {
+            return self
+                .documents
+                .with_current_snapshot_identity(uri, revision, |document| {
+                    crate::provider_surface_store::record_carrier_ide_surface_with_source(
+                        store,
+                        canonical_id,
+                        ide_path,
+                        &delivered,
+                        map_json,
+                        Arc::clone(&document.source),
+                    );
+                })
+                .is_some();
+        }
         crate::provider_surface_store::record_carrier_ide_surface(
             store,
             Some(&self.documents),
@@ -179,6 +232,7 @@ impl VerterLanguageServer {
             &delivered,
             map_json,
         );
+        true
     }
 
     /// The bytes of the carrier's CURRENT public-API projection — the identity
@@ -237,6 +291,26 @@ impl VerterLanguageServer {
     /// file first when `didChange` has advanced beyond the committed snapshot.
     /// Every provider-backed interactive feature uses this entry point so tsgo
     /// and tsserver have identical immediate-post-edit behavior.
+    ///
+    /// A PROJECTION-LESS carrier (failed open-time compile, or the startup
+    /// race) is also repaired here — the full current-file repair
+    /// (`ensure_current_file_synced`: recompile → carrier gateway → provider
+    /// sync → surface record → commit), never a cache-only mapper install.
+    /// The generation-local repair lane bounds a concurrent request storm to
+    /// one compile. A genuinely later request retries unchanged bytes after an
+    /// unavailable-input or host-transient failure, so scheduler cancellation
+    /// cannot strand the carrier behind a durable failure memo. Only a
+    /// deterministic source-byte verdict is retained across requests.
+    ///
+    /// FEATURE SET: hover, completion, definition, type-definition,
+    /// references, prepare-rename/rename, signature help, and quickfix code
+    /// actions repair through this entry point — every request-answering
+    /// provider-backed feature. Passive decoration surfaces (document
+    /// highlights, semantic tokens, inlay hints, code lens) deliberately do
+    /// NOT: they fire on cursor-move/render cadence, so an inline repair
+    /// there would put a compile on that cadence; they read the current
+    /// surface (`type_provider_context`) and self-serve once a
+    /// request-answering feature or the background coordinator installs it.
     pub(super) async fn repaired_type_provider_context(
         &self,
         uri: &Uri,
@@ -809,6 +883,7 @@ impl VerterLanguageServer {
         canonical_id: &str,
         is_jsx: bool,
         ide_code: Option<&str>,
+        retained: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     ) {
         let previous = self.provider_sync_state_for_source(canonical_id);
         // Converting a previously-committed OWNED carrier (it carried a commit stamp) to
@@ -837,6 +912,15 @@ impl VerterLanguageServer {
         if let (Some(sync), Some(ide_code), Some(ide_path)) =
             (&self.project_sync, ide_code, target.ide_path.clone())
         {
+            #[cfg(test)]
+            self.maybe_pause_ide_sync_before_provider_write(canonical_id)
+                .await;
+            if let Some((uri, revision)) = retained {
+                if !self.retained_ide_response_is_current(uri, Some(revision)) {
+                    self.needs_ide_sync.insert(canonical_id.to_string());
+                    return;
+                }
+            }
             let result = if target.ide_background_loaded {
                 sync.sync_tsx(&ide_path, ide_code).await
             } else {
@@ -849,7 +933,26 @@ impl VerterLanguageServer {
                     // synced (interactive queries capture this surface). No source
                     // map in scope → the choke attaches the live IDE artifact's
                     // map only if it still byte-matches `ide_code`.
-                    self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None);
+                    #[cfg(test)]
+                    self.maybe_pause_ide_sync_before_surface_record(canonical_id)
+                        .await;
+                    let recorded = if let Some((uri, revision)) = retained {
+                        self.record_carrier_ide_snapshot_if_current(
+                            uri,
+                            revision,
+                            canonical_id,
+                            &ide_path,
+                            ide_code,
+                            None,
+                        )
+                    } else {
+                        self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None);
+                        true
+                    };
+                    if !recorded {
+                        self.needs_ide_sync.insert(canonical_id.to_string());
+                        return;
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(

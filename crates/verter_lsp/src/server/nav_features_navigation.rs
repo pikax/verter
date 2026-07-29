@@ -1052,7 +1052,11 @@ pub(super) async fn handle_rename(
             );
         }
         if let Some(tp) = &server.type_provider {
-            if let Some(ctx) = server.repaired_type_provider_context(uri).await {
+            // The rename consistency boundary above already ran this request's
+            // repair. Capture directly so one request cannot retry the same
+            // projection-less failure twice; a later request remains free to
+            // retry.
+            if let Some(ctx) = server.type_provider_context(uri) {
                 if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                     position,
                     &ctx.carrier_line_index,

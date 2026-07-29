@@ -247,6 +247,9 @@ pub(super) async fn handle_document_highlight(
 
     // Enhance with TypeProvider if available. The context is built from ONE
     // captured immutable provider surface (path, content, mapper, indexes).
+    // Deliberately NOT `repaired_type_provider_context`: highlights fire on
+    // cursor-move cadence, and the Verter-native result above already serves —
+    // see the healing-feature list on `repaired_type_provider_context`.
     if let Some(tp) = &server.type_provider {
         if let Some(ctx) = server.type_provider_context(uri) {
             if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
@@ -308,9 +311,12 @@ pub(super) async fn handle_signature_help(
         }
     }
 
-    // Extract all context synchronously — no DashMap guard held across await.
+    // Signature help is a request-answering feature (the user typed `(` or
+    // invoked it), so it repairs a dirty or projection-less carrier through
+    // the same attempt-bounded interactive repair hover/completion use —
+    // it must not stay dark until a background tick.
     if let Some(tp) = &server.type_provider {
-        if let Some(ctx) = server.type_provider_context(uri) {
+        if let Some(ctx) = server.repaired_type_provider_context(uri).await {
             if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
                 &ctx.carrier_line_index,
@@ -482,7 +488,12 @@ pub(super) async fn handle_code_action(
         && wants_code_action_kind(only, "quickfix")
     {
         if let Some(tp) = &server.type_provider {
-            if let Some(ctx) = server.type_provider_context(uri) {
+            // Quickfix code actions are request-answering (the user opened the
+            // lightbulb), so they repair a dirty or projection-less carrier
+            // through the same attempt-bounded interactive repair as hover —
+            // the typing-cooldown gate above keeps the repair off the
+            // per-keystroke path.
+            if let Some(ctx) = server.repaired_type_provider_context(uri).await {
                 let start_offset = merge::carrier_position_to_tsx_offset_validated(
                     &range.start,
                     &ctx.carrier_line_index,
@@ -724,6 +735,9 @@ pub(super) async fn handle_semantic_tokens_full(
     // Skip TSGO while typing — serial TSGO pipeline must stay clear
     // for interactive requests. VS Code re-requests after the typing pause.
     // Extract all context synchronously — no DashMap guard held across await.
+    // Deliberately NOT `repaired_type_provider_context`: semantic tokens are a
+    // render-cadence decoration and the client re-requests them — see the
+    // healing-feature list on `repaired_type_provider_context`.
     if !server.is_typing_cooldown() {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
@@ -884,6 +898,9 @@ pub(super) async fn handle_inlay_hint(
 
     // Standard .vue file: merge with type provider hints when available.
     // Extract all context synchronously — no DashMap guard held across await.
+    // Deliberately NOT `repaired_type_provider_context`: inlay hints are a
+    // render-cadence decoration and the client re-requests them — see the
+    // healing-feature list on `repaired_type_provider_context`.
     if !typing && inlay_enabled {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {

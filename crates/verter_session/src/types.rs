@@ -1980,6 +1980,84 @@ pub struct CompileFailure {
     pub downgrade_reason: Option<DowngradeReason>,
 }
 
+/// The compile needed an external `src=` file the host could not supply.
+///
+/// One of the [`CompileFailure::blocked_on_unavailable_input`] codes: the
+/// blocker is a file OUTSIDE the compiled bytes, so the SAME bytes compile
+/// once it arrives.
+pub(crate) const HOST_MISSING_EXTERNAL_SOURCE: &str = "HOST_MISSING_EXTERNAL_SOURCE";
+
+/// The compile needed a Vue macro type dependency the host could not resolve.
+///
+/// One of the [`CompileFailure::blocked_on_unavailable_input`] codes: the
+/// blocker is a declaration OUTSIDE the compiled bytes, so the SAME bytes
+/// compile once its owner is loaded.
+pub(crate) const HOST_MISSING_MACRO_TYPE_DEP: &str = "HOST_MISSING_MACRO_TYPE_DEP";
+
+/// The compile could not obtain an authoritative Vue macro semantic bundle.
+///
+/// The terminal-partial producer can acknowledge a transient scheduler outcome
+/// with an empty bundle, which the compiler reports with this code. It is
+/// therefore unavailable input, not a verdict on the source bytes.
+pub(crate) const HOST_MISSING_MACRO_SEMANTIC_BUNDLE: &str =
+    verter_compiler::diagnostics::X_MISSING_MACRO_SEMANTIC_BUNDLE;
+
+/// The compile could not obtain an authoritative Vue macro semantic result.
+///
+/// It is a "could not decide YET", not a verdict on the bytes. The macro
+/// codegen producer converts a CANCELLED, superseded, shut-down, or otherwise
+/// unstable scheduler outcome into a bundle whose per-macro entries are
+/// `MacroRuntimeOutcome::Partial` / `MacroTscOutcome::Partial`
+/// (`typeinfo::vue_macro_codegen::terminal_partial_vue_macro_codegen_output`),
+/// and the compiler raises those as this FATAL code. The same bytes compile on
+/// the next stable request.
+pub(crate) const HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT: &str =
+    verter_compiler::diagnostics::X_UNAVAILABLE_MACRO_SEMANTIC_RESULT;
+
+impl CompileFailure {
+    /// Whether this compile was blocked on an input OUTSIDE the compiled
+    /// bytes, rather than reaching a verdict from those bytes alone.
+    ///
+    /// `false` — the DEFAULT — is a verdict ON the bytes: a parse error, a
+    /// carrier that cannot produce a bundle, a `CodeTransform` failure. Those
+    /// are reproducible from the source text, so recompiling identical bytes
+    /// cannot change the outcome.
+    ///
+    /// `true` — the compile could not decide, because an input OUTSIDE the
+    /// bytes was unavailable at this moment: an external `src=` file the host
+    /// has not ingested, a macro type dependency whose owner is not loaded, or
+    /// an authoritative macro semantic result the producer could not deliver
+    /// (cancellation / supersession / shutdown / an unstable scheduler
+    /// outcome, all of which arrive as `Partial` macro entries and are raised
+    /// as either [`HOST_MISSING_MACRO_SEMANTIC_BUNDLE`] or
+    /// [`HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT`]).
+    /// **Identical bytes DO compile once that input arrives.**
+    ///
+    /// Every code is named by a constant rather than a literal, so the
+    /// classification cannot drift away from its producer behind a crate
+    /// boundary: the first two are emitted by this crate's compile pipeline
+    /// (`host_resolve::virtual_file_pipeline` and
+    /// `host_resolve::vue_macro_dependency_diagnostics`); the last two are
+    /// re-exported from `verter_compiler`, which raises them.
+    ///
+    /// EVERY OTHER code a `CompileFailure` can carry is a verdict on the bytes
+    /// — enumerated, with the reasoning per class, in
+    /// `compile_failure_code_classification` in this module's tests.
+    #[must_use]
+    pub fn blocked_on_unavailable_input(&self) -> bool {
+        self.diagnostics.diagnostics.iter().any(|diagnostic| {
+            matches!(diagnostic.severity, HostSeverity::Error)
+                && matches!(
+                    diagnostic.code.as_str(),
+                    HOST_MISSING_EXTERNAL_SOURCE
+                        | HOST_MISSING_MACRO_TYPE_DEP
+                        | HOST_MISSING_MACRO_SEMANTIC_BUNDLE
+                        | HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT
+                )
+        })
+    }
+}
+
 /// Errors returned by [`VerterHost`](crate::VerterHost) operations.
 #[derive(Debug, Error)]
 pub enum HostError {
@@ -4052,6 +4130,228 @@ pub(crate) struct HostMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // CompileFailure classification
+    // -----------------------------------------------------------------------
+
+    fn failure_with(code: &str, severity: HostSeverity) -> CompileFailure {
+        CompileFailure {
+            diagnostics: DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                severity,
+                code: code.to_string(),
+                message: String::new(),
+                span: None,
+            }]),
+            requested_mode: CompileCacheMode::Content,
+            actual_mode: CompileCacheMode::Content,
+            downgrade_reason: None,
+        }
+    }
+
+    /// THE structurally exhaustive classification of every compiler code a
+    /// `CompileFailure` can carry, split into the two classes
+    /// [`CompileFailure::blocked_on_unavailable_input`] decides between.
+    ///
+    /// BLOCKED — an input outside the compiled bytes was unavailable, so the
+    /// SAME bytes compile once it arrives and a caller must not memoize the
+    /// failure against content alone:
+    ///
+    /// * `HOST_MISSING_EXTERNAL_SOURCE` — an external `src=` file the host has
+    ///   not ingested (`host_resolve::virtual_file_pipeline`).
+    /// * `HOST_MISSING_MACRO_TYPE_DEP` — a macro type dependency whose owner is
+    ///   not loaded (`host_resolve::vue_macro_dependency_diagnostics`).
+    /// * `XMissingMacroSemanticBundle` / `XUnavailableMacroSemanticResult` —
+    ///   the macro codegen producer could not deliver an authoritative result.
+    ///   Its reason set is
+    ///   `MacroPartialReason::{Cancelled, SupersededGeneration, UnstableState,
+    ///   BudgetExceeded, Recursion, IncompleteTraversal}`, produced by
+    ///   `terminal_partial_vue_macro_codegen_output` from a cancelled /
+    ///   shut-down / panicked / re-entrant scoped cache node — every one of
+    ///   which succeeds on a later stable request. The acknowledged
+    ///   empty-bundle terminal-partial path emits the former code.
+    ///
+    /// VERDICT ON THE BYTES — reproducible from the source text, so identical
+    /// bytes cannot succeed and the memo may bind content alone:
+    ///
+    /// * every OTHER `CompilerErrorCode` (`{:?}`-spelled), i.e. the HTML parse
+    ///   errors, the Vue template + directive validation errors, the
+    ///   `<script>` block errors, `XInvalidExpression`, `XCssParseError`, and
+    ///   the two remaining fatal macro verdicts — `XInvalidMacroType` (a
+    ///   RESOLVED type of the wrong shape) and
+    ///   `XInvalidMacroScopeReference`;
+    /// * the Svelte carrier's own codes (`svelte-runtime-*`, its CSS and
+    ///   rejected-rule codes) — all unsupported/invalid constructs in the
+    ///   bytes;
+    /// * `HOST_NO_CARRIER_ARTIFACT` / `HOST_NO_CARRIER_COMPILER` — no parse
+    ///   artifact for these bytes / no compiler registered for the adapter;
+    ///   neither is waiting on a file;
+    /// * `HOST_COMPILE_TARGET_MISSING_IDE` / `HOST_COMPILE_UNSUPPORTED` — the
+    ///   carrier refused to produce the demanded surface for these bytes;
+    /// * `script-owner-index` — an owner-table invariant over the file's OWN
+    ///   program.
+    ///
+    /// `XUnresolvedImportedMacroType` and `HOST_ANALYSIS_PANIC` are emitted at
+    /// WARNING severity, so they never make a `CompileFailure` in the first
+    /// place; the severity gate is asserted below so that stays true by
+    /// construction rather than by inspection.
+    ///
+    #[test]
+    fn compile_failure_code_classification() {
+        use verter_compiler::diagnostics::CompilerErrorCode;
+
+        fn blocked_expected(code: CompilerErrorCode) -> bool {
+            use CompilerErrorCode::*;
+
+            // Intentionally exhaustive: adding a compiler diagnostic cannot
+            // compile this audit until its liveness class is chosen.
+            match code {
+                XMissingMacroSemanticBundle | XUnavailableMacroSemanticResult => true,
+                AbruptClosingOfEmptyComment
+                | CdataInHtmlContent
+                | DuplicateAttribute
+                | EndTagWithAttributes
+                | EofBeforeTagName
+                | EofInCdata
+                | EofInComment
+                | EofInTag
+                | IncorrectlyClosedComment
+                | IncorrectlyOpenedComment
+                | InvalidFirstCharacterOfTagName
+                | MissingAttributeValue
+                | MissingEndTagName
+                | MissingWhitespaceBetweenAttributes
+                | NestedComment
+                | UnexpectedCharacterInAttributeName
+                | UnexpectedCharacterInUnquotedAttributeValue
+                | UnexpectedEqualsSignBeforeAttributeName
+                | UnexpectedQuestionMarkInsteadOfTagName
+                | XInvalidEndTag
+                | XMissingEndTag
+                | XMissingInterpolationEnd
+                | XMissingDirectiveName
+                | XMissingDynamicDirectiveArgumentEnd
+                | XVIfNoExpression
+                | XVIfSameKey
+                | XVElseNoAdjacentIf
+                | XVForNoExpression
+                | XVForMalformedExpression
+                | XVBindNoExpression
+                | XVOnNoExpression
+                | XVSlotMisplaced
+                | XVSlotDuplicateSlotNames
+                | XVModelNoExpression
+                | XVModelMalformedExpression
+                | DuplicateScriptSetup
+                | DuplicateScript
+                | ScriptLangMismatch
+                | XDuplicateDirective
+                | XInvalidExpression
+                | XInvalidMacroType
+                | XInvalidMacroScopeReference
+                | XUnresolvedImportedMacroType
+                | XCssParseError => false,
+            }
+        }
+
+        let compiler_codes = [
+            CompilerErrorCode::AbruptClosingOfEmptyComment,
+            CompilerErrorCode::CdataInHtmlContent,
+            CompilerErrorCode::DuplicateAttribute,
+            CompilerErrorCode::EndTagWithAttributes,
+            CompilerErrorCode::EofBeforeTagName,
+            CompilerErrorCode::EofInCdata,
+            CompilerErrorCode::EofInComment,
+            CompilerErrorCode::EofInTag,
+            CompilerErrorCode::IncorrectlyClosedComment,
+            CompilerErrorCode::IncorrectlyOpenedComment,
+            CompilerErrorCode::InvalidFirstCharacterOfTagName,
+            CompilerErrorCode::MissingAttributeValue,
+            CompilerErrorCode::MissingEndTagName,
+            CompilerErrorCode::MissingWhitespaceBetweenAttributes,
+            CompilerErrorCode::NestedComment,
+            CompilerErrorCode::UnexpectedCharacterInAttributeName,
+            CompilerErrorCode::UnexpectedCharacterInUnquotedAttributeValue,
+            CompilerErrorCode::UnexpectedEqualsSignBeforeAttributeName,
+            CompilerErrorCode::UnexpectedQuestionMarkInsteadOfTagName,
+            CompilerErrorCode::XInvalidEndTag,
+            CompilerErrorCode::XMissingEndTag,
+            CompilerErrorCode::XMissingInterpolationEnd,
+            CompilerErrorCode::XMissingDirectiveName,
+            CompilerErrorCode::XMissingDynamicDirectiveArgumentEnd,
+            CompilerErrorCode::XVIfNoExpression,
+            CompilerErrorCode::XVIfSameKey,
+            CompilerErrorCode::XVElseNoAdjacentIf,
+            CompilerErrorCode::XVForNoExpression,
+            CompilerErrorCode::XVForMalformedExpression,
+            CompilerErrorCode::XVBindNoExpression,
+            CompilerErrorCode::XVOnNoExpression,
+            CompilerErrorCode::XVSlotMisplaced,
+            CompilerErrorCode::XVSlotDuplicateSlotNames,
+            CompilerErrorCode::XVModelNoExpression,
+            CompilerErrorCode::XVModelMalformedExpression,
+            CompilerErrorCode::DuplicateScriptSetup,
+            CompilerErrorCode::DuplicateScript,
+            CompilerErrorCode::ScriptLangMismatch,
+            CompilerErrorCode::XDuplicateDirective,
+            CompilerErrorCode::XInvalidExpression,
+            CompilerErrorCode::XInvalidMacroType,
+            CompilerErrorCode::XInvalidMacroScopeReference,
+            CompilerErrorCode::XUnresolvedImportedMacroType,
+            CompilerErrorCode::XMissingMacroSemanticBundle,
+            CompilerErrorCode::XUnavailableMacroSemanticResult,
+            CompilerErrorCode::XCssParseError,
+        ];
+        for code in compiler_codes {
+            let emitted = format!("{code:?}");
+            assert_eq!(
+                failure_with(&emitted, HostSeverity::Error).blocked_on_unavailable_input(),
+                blocked_expected(code),
+                "{emitted} has the wrong compile-failure liveness classification"
+            );
+        }
+
+        for blocked in [
+            HOST_MISSING_EXTERNAL_SOURCE,
+            HOST_MISSING_MACRO_TYPE_DEP,
+            HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT,
+        ] {
+            assert!(
+                failure_with(blocked, HostSeverity::Error).blocked_on_unavailable_input(),
+                "{blocked} is blocked on an input outside the bytes: the same \
+                 bytes compile once it arrives, so a content-keyed memo must \
+                 not treat it as a verdict"
+            );
+        }
+
+        for verdict in [
+            // The Svelte carrier's own refusals.
+            "svelte-runtime-generated-module-invalid",
+            // The host-side compile-routing refusals.
+            "HOST_NO_CARRIER_ARTIFACT",
+            "HOST_NO_CARRIER_COMPILER",
+            "HOST_COMPILE_TARGET_MISSING_IDE",
+            "HOST_COMPILE_UNSUPPORTED",
+            "script-owner-index",
+        ] {
+            assert!(
+                !failure_with(verdict, HostSeverity::Error).blocked_on_unavailable_input(),
+                "{verdict} is a verdict on the bytes — classifying it as \
+                 blocked would re-arm a compile that cannot succeed on every \
+                 unrelated host mutation"
+            );
+        }
+
+        // Severity gates the whole classification: a WARNING carrying a
+        // blocked code is not a failure at all, and must not classify.
+        for severity in [HostSeverity::Warning, HostSeverity::Info] {
+            assert!(
+                !failure_with(HOST_UNAVAILABLE_MACRO_SEMANTIC_RESULT, severity)
+                    .blocked_on_unavailable_input(),
+                "only an ERROR diagnostic can be the reason a compile failed"
+            );
+        }
+    }
 
     // -----------------------------------------------------------------------
     // HostConfig default tests

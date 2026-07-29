@@ -476,6 +476,28 @@ pub(crate) fn record_carrier_ide_surface(
     );
 }
 
+/// Identity-fenced variant for an OPEN carrier. The caller supplies the exact
+/// live source while holding the document registry shard guard that proved its
+/// retained revision current, so source resolution cannot drift between the
+/// comparison and the store write.
+pub(crate) fn record_carrier_ide_surface_with_source(
+    store: &ProviderSurfaceStore,
+    canonical_id: &str,
+    provider_path: &str,
+    delivered: &PreparedCarrierProviderContent,
+    source_map_json: Option<&str>,
+    carrier_source: Arc<str>,
+) {
+    let _ = record_carrier_companion_surface_with_source(
+        store,
+        canonical_id,
+        provider_path,
+        RecordedProviderSurface::CarrierIde(delivered),
+        source_map_json,
+        carrier_source,
+    );
+}
+
 /// The bytes to record for a companion surface, and — for the projected carrier
 /// IDE role — the mapper describing exactly those bytes.
 ///
@@ -524,6 +546,25 @@ pub(crate) fn record_carrier_companion_surface(
     surface: RecordedProviderSurface<'_>,
     source_map_json: Option<&str>,
 ) -> Option<u64> {
+    let carrier_source = resolve_carrier_source(documents, host, canonical_id)?;
+    record_carrier_companion_surface_with_source(
+        store,
+        canonical_id,
+        provider_path,
+        surface,
+        source_map_json,
+        carrier_source,
+    )
+}
+
+fn record_carrier_companion_surface_with_source(
+    store: &ProviderSurfaceStore,
+    canonical_id: &str,
+    provider_path: &str,
+    surface: RecordedProviderSurface<'_>,
+    source_map_json: Option<&str>,
+    carrier_source: Arc<str>,
+) -> Option<u64> {
     let (kind, code, rewrites) = match surface {
         RecordedProviderSurface::Verbatim { kind, code } => (kind, code, None),
         RecordedProviderSurface::CarrierIde(delivered) => (
@@ -532,7 +573,6 @@ pub(crate) fn record_carrier_companion_surface(
             Some(delivered.rewrites().clone()),
         ),
     };
-    let carrier_source = resolve_carrier_source(documents, host, canonical_id)?;
     // The receipt contract stamps the compiler map JSON identity separately
     // from provider-content identity. Post-compile rewrites are already covered
     // by the content hash and must not manufacture a different map hash than

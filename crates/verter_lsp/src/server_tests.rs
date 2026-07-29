@@ -9328,6 +9328,977 @@ const persistentFailureTarget: string = "ok"
     }
 }
 
+// =========================================================================
+// W02 — a carrier with a MISSING IDE projection heals on the FIRST
+// interactive request, not only after a debounced coordinator tick, a
+// pending-snapshot drain, a reopen, or a restart.
+//
+// How these tests EXCLUDE background repair as the explanation: both heal
+// paths that already exist are STRUCTURALLY unreachable here, not merely
+// slow. (1) The debounced coordinator loop (spawned by
+// `VerterLanguageServer::new`) acts only on files signalled through
+// `sync_coordinator.signal(..)` — sent exclusively by the SERVER handlers
+// `handle_did_open` / `handle_did_change`, which these tests never invoke
+// (they drive the REGISTRY `documents.did_open` / `documents.did_change`
+// directly, the same ingress the coordinator-recovery tests use), so the
+// coordinator's pending map stays empty and its tick never calls
+// `install_missing_carrier_projection`. (2) The pending-snapshot drain and
+// the workspace scanner run only from `initialized()` / background init,
+// which these tests never call. The projection-precondition asserts after
+// every commit prove the document is still projection-less at the moment
+// the interactive request is issued.
+// =========================================================================
+
+/// The compute half of `set_type_hover_at_vue_position`, run on a TWIN server:
+/// resolve the provider (path, offset) a healed surface will serve for
+/// `position` — same bytes, same compile profile, same resolver root, same
+/// provider kind ⇒ the identical deterministic mapping — WITHOUT touching the
+/// server under test (the seeding helper would itself compile + install the
+/// projection and destroy the broken-state precondition).
+fn provider_target_via_twin_server(
+    kind: crate::TypeProviderKind,
+    path: &str,
+    language_id: &str,
+    source: &str,
+    needle: &str,
+    delta: usize,
+) -> (String, u32, Position) {
+    let twin_provider = Arc::new(MockTypeProvider::new());
+    let twin_service = make_hover_test_service_with_kind(twin_provider, kind);
+    let twin = twin_service.inner();
+    install_test_resolver(twin);
+    let uri: Uri = format!("file://{path}").parse().expect("valid twin uri");
+    let _ = twin.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: language_id.to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    assert!(
+        twin.documents.get_projection(&uri).is_some(),
+        "twin precondition: the FIXED source must compile — otherwise the heal \
+         under test has no healthy surface to converge to"
+    );
+    let position = find_document_position(twin, &uri, needle, delta);
+    let ctx = synced_type_provider_context_surface_only(twin, &uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("twin: the healthy surface must map the hover position");
+    (ctx.tsx_path.clone(), tsx_offset, position)
+}
+
+/// W02 discriminator (Vue, both provider kinds): a carrier opened MALFORMED
+/// (no projection), then FIXED by a commit that compiles nothing, must get a
+/// real provider-backed hover on the FIRST interactive request — with the
+/// background coordinator structurally excluded (see the section comment).
+///
+/// `.length` is a member only the provider can answer (the native hover lane
+/// has no member types), so the assertion is observable strictly through the
+/// provider rail: pre-change the projection-less document fails the surface
+/// capture, the provider is never queried, and hover is None.
+#[tokio::test(flavor = "multi_thread")]
+async fn projectionless_carrier_heals_on_the_first_interactive_request() {
+    let broken_source = "<script setup lang=\"ts\">\nconst broken = (((\n";
+    let fixed_source = "<script setup lang=\"ts\">\nconst healedTarget: string = \"ok\"\n</script>\n<template><div>{{ healedTarget.length }}</div></template>\n";
+    for kind in [
+        crate::TypeProviderKind::Tsserver,
+        crate::TypeProviderKind::Tsgo,
+    ] {
+        let (tsx_path, tsx_offset, position) = provider_target_via_twin_server(
+            kind,
+            "/workspace/src/App.vue",
+            "vue",
+            fixed_source,
+            ".length",
+            1,
+        );
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        // Opened malformed: the open-time compile fails, so no projection.
+        let uri = open_test_vue(server, "/workspace/src/App.vue", broken_source);
+        assert!(
+            server.documents.get_projection(&uri).is_none(),
+            "{kind}: precondition — the malformed open must leave the carrier \
+             projection-less, or this test exercises nothing"
+        );
+
+        // The user fixes the file. The REGISTRY commit stores text and compiles
+        // nothing — and sends NO coordinator signal, so no background path can
+        // install the projection before the interactive request below.
+        let _ = server.documents.did_change(&uri, 2, fixed_source);
+        assert!(
+            server.documents.get_projection(&uri).is_none(),
+            "{kind}: the commit must not compile — if it did, the per-keystroke \
+             compile is back and this asserts nothing about interactive repair"
+        );
+
+        provider.set_hover(
+            &tsx_path,
+            tsx_offset,
+            Some(HoverInfo {
+                contents: "(property) String.length: number".to_string(),
+                range_start: None,
+                range_end: None,
+            }),
+        );
+
+        let hover = server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request must not error to the client");
+        assert!(
+            hover.is_some(),
+            "{kind}: the FIRST interactive request after the fix must heal the \
+             missing projection and answer through the provider — None means the \
+             document stayed dark until a background tick"
+        );
+        let text = hover_text(hover);
+        assert!(
+            text.contains("String.length"),
+            "{kind}: the healed hover must be the provider answer, got: {text}"
+        );
+        assert!(
+            server.documents.get_projection(&uri).is_some(),
+            "{kind}: the interactive repair must have installed the projection"
+        );
+        let hover_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetHover { .. }))
+            .count();
+        assert!(
+            hover_calls >= 1,
+            "{kind}: the answer must have come through the provider rail"
+        );
+    }
+}
+
+/// W02 Svelte coverage: the interactive projection heal is carrier-generic.
+///
+/// Svelte's IDE lowering is ERROR-RECOVERING — every malformed fixture tried
+/// (unterminated script/tag/expression/block, legacy+runes conflicts,
+/// double `$props()`, …) still compiles an IDE surface — so the Vue tests'
+/// "broken open" construction cannot reach the projection-less state for a
+/// `.svelte` carrier. The state Svelte DOES occupy in production is the
+/// startup race documented on `DocumentRegistry::get_ide`: `did_open` runs
+/// before the host can serve the compile, so the document carries NO
+/// projection while the host artifact may exist. `clear_projection_for_test`
+/// reconstructs exactly that state on an otherwise pristine server (no
+/// committed sync state, no recorded provider surface), so the heal must run
+/// the FULL repair — recompile → gateway → sync → surface record → commit —
+/// not merely stuff a mapper onto the document. One provider kind suffices
+/// (the repair path is kind-agnostic above the sync verbs; the Vue
+/// discriminator covers both kinds).
+#[tokio::test(flavor = "multi_thread")]
+async fn projectionless_svelte_carrier_heals_on_the_first_interactive_request() {
+    let fixed_source = "<script lang=\"ts\">\nconst healedTarget: string = \"ok\";\n</script>\n<p>{healedTarget.length}</p>\n";
+    let kind = crate::TypeProviderKind::Tsgo;
+    let (tsx_path, tsx_offset, position) = provider_target_via_twin_server(
+        kind,
+        "/workspace/src/App.svelte",
+        "svelte",
+        fixed_source,
+        ".length",
+        1,
+    );
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_with_kind(type_provider, kind);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri: Uri = "file:///workspace/src/App.svelte".parse().expect("uri");
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: fixed_source.to_string(),
+    });
+    // Reconstruct the startup-race state: the open document has NO projection
+    // (as if did_open ran before the host could compile). Nothing else is
+    // seeded — no committed sync state, no recorded surface — so a cache-only
+    // mapper install could NOT make the capture below succeed.
+    //
+    // The repair lane admits this projection-less carrier and coalesces
+    // concurrent callers without retaining failure across later requests.
+    server.documents.clear_projection_for_test(&uri);
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the Svelte carrier must be projection-less at the moment \
+         of the interactive request"
+    );
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "precondition: the reconstructed startup-race state must admit the \
+         interactive repair"
+    );
+
+    provider.set_hover(
+        &tsx_path,
+        tsx_offset,
+        Some(HoverInfo {
+            contents: "(property) String.length: number".to_string(),
+            range_start: None,
+            range_end: None,
+        }),
+    );
+
+    let hover = server
+        .hover(hover_params(&uri, position))
+        .await
+        .expect("hover request must not error to the client");
+    assert!(
+        hover.is_some(),
+        "the FIRST interactive request after the fix must heal the missing \
+         Svelte projection and answer through the provider"
+    );
+    let text = hover_text(hover);
+    assert!(
+        text.contains("String.length"),
+        "the healed Svelte hover must be the provider answer, got: {text}"
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_some(),
+        "the interactive repair must have installed the Svelte projection"
+    );
+}
+
+/// W02 deterministic bound: a syntax verdict binds only its exact source
+/// bytes, fails closed, and prevents later requests from recompiling it.
+#[tokio::test(flavor = "multi_thread")]
+async fn broken_projectionless_carrier_fails_closed_and_bounds_content_verdicts() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_with_kind(type_provider, crate::TypeProviderKind::Tsgo);
+    let server = service.inner();
+    install_test_resolver(server);
+    // Provider-rail only: with the native lane off, a hover answer could only
+    // come from a (wrong) provider query against a surface that must not exist.
+    server
+        .hover_native_semantics_enabled
+        .store(false, std::sync::atomic::Ordering::Release);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        "<script setup lang=\"ts\">\nconst broken = (((\n",
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less"
+    );
+    assert!(
+        !server.current_file_needs_inline_type_provider_sync(&uri),
+        "the open-time syntax verdict must bind these exact bytes"
+    );
+    // A later revision, STILL malformed (the ordinary state of a file being
+    // typed). The commit stores text only.
+    let _ =
+        server
+            .documents
+            .did_change(&uri, 2, "<script setup lang=\"ts\">\nconst broken = ((((\n");
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "the commit must not compile"
+    );
+
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "new bytes have no deterministic verdict yet"
+    );
+
+    let position = Position {
+        line: 1,
+        character: 8,
+    };
+    let first = server
+        .hover(hover_params(&uri, position))
+        .await
+        .expect("hover request must not error to the client");
+    assert!(
+        first.is_none(),
+        "a broken carrier fails closed on the interactive path — a clean \
+         no-result, never a wrong or stale one"
+    );
+
+    assert!(
+        !server.current_file_needs_inline_type_provider_sync(&uri),
+        "the repair's syntax verdict must bind these exact bytes"
+    );
+
+    let cold_before_second = server
+        .documents
+        .host()
+        .provenance_snapshot()
+        .compile_cold_runs;
+    let second = server
+        .hover(hover_params(&uri, position))
+        .await
+        .expect("hover request must not error to the client");
+    assert!(second.is_none(), "still fails closed on repeat");
+    assert_eq!(
+        server
+            .documents
+            .host()
+            .provenance_snapshot()
+            .compile_cold_runs,
+        cold_before_second,
+        "a later request must not recompile bytes with a deterministic verdict"
+    );
+
+    let hover_calls = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetHover { .. }))
+        .count();
+    assert_eq!(
+        hover_calls, 0,
+        "a projection-less broken carrier must never reach the provider — there \
+         is no committed surface to query"
+    );
+
+    // A new revision is likewise repairable.
+    let _ = server.documents.did_change(
+        &uri,
+        3,
+        "<script setup lang=\"ts\">\nconst broken = (((((\n",
+    );
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "a content change remains eligible for interactive repair"
+    );
+}
+
+/// W02 concurrency bound: N callers that observe the same repair sequence
+/// still run exactly one compile. The first attempt advances the sequence
+/// under the lane; queued callers join it, while a later request may retry.
+///
+/// Measured on `compile_cold_runs`, the host's own count of cold compiles
+/// STARTED.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_requests_on_a_broken_revision_compile_at_most_once() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_with_kind(type_provider, crate::TypeProviderKind::Tsgo);
+    let server = service.inner();
+    install_test_resolver(server);
+    server
+        .hover_native_semantics_enabled
+        .store(false, std::sync::atomic::Ordering::Release);
+
+    let canonical_id = "/workspace/src/App.vue";
+    let uri = open_test_vue(
+        server,
+        canonical_id,
+        "<script setup lang=\"ts\" src=\"./missing.ts\"></script>\n<template><div/></template>\n",
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: unavailable input must leave the carrier projection-less"
+    );
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "unavailable input is not memoized, so the concurrent cohort is admitted"
+    );
+    let cold_before = server
+        .documents
+        .host()
+        .provenance_snapshot()
+        .compile_cold_runs;
+    // What ONE admitted repair of a revision whose compile fails costs in cold
+    // compiles. The repair drives `ensure_ide_compiled` once; a failing compile
+    // caches no surface, so the surface read behind it finds nothing and the
+    // repair returns without a second host round trip.
+    const COLD_RUNS_PER_ADMITTED_REPAIR: u64 = 1;
+
+    // Hold all four callers after they capture the repair sequence and before
+    // any can acquire the lane. This makes the concurrent cohort structural,
+    // independent of executor polling order.
+    let pauses: Vec<_> = (0..4)
+        .map(|_| server.pause_next_ide_sync_after_lease(canonical_id))
+        .collect();
+
+    let position = Position {
+        line: 0,
+        character: 1,
+    };
+    let requests = futures_util::future::join_all((0..4).map(|_| async {
+        let hover = server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request must not error to the client");
+        assert!(hover.is_none(), "a broken carrier fails closed");
+    }));
+    let release_cohort = async {
+        for (arrived, _) in &pauses {
+            arrived.notified().await;
+        }
+        for (_, release) in &pauses {
+            release.notify_one();
+        }
+    };
+    let (_results, ()) = futures_util::future::join(requests, release_cohort).await;
+
+    let cold_after = server
+        .documents
+        .host()
+        .provenance_snapshot()
+        .compile_cold_runs;
+    assert_eq!(
+        cold_after - cold_before,
+        COLD_RUNS_PER_ADMITTED_REPAIR,
+        "one broken revision owes ONE repair across all concurrent requests — \
+         a higher cold-compile count means the waiters did not join the \
+         completed sequence under the lane lock and each recompiled the same broken \
+         bytes (four requests raced here, so an unbounded lane would show \
+         four repairs' worth)"
+    );
+    let hover_calls = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetHover { .. }))
+        .count();
+    assert_eq!(
+        hover_calls, 0,
+        "a projection-less broken carrier must never reach the provider"
+    );
+}
+
+/// W02 source-identity fence: the repair retains the response its own compile
+/// returned, so every consumer of that response must first prove the carrier
+/// source has not moved underneath it.
+///
+/// The ordering this reproduces is the whole defect: the repair compiles
+/// revision A and holds A's provider bytes + mapper, it AWAITS (the carrier
+/// gateway, then the provider sync), a `didChange` commits revision B while it
+/// is parked, and it then syncs and RECORDS. `record_carrier_ide_surface`
+/// resolves the carrier source from the LIVE open document
+/// (`resolve_carrier_source`), so an unfenced record pairs A's bytes and A's
+/// map with source B — and the recorded pair then PASSES the source-hash
+/// validation `capture_provider_request_surface` runs, because both halves of
+/// that comparison are B. A later request maps positions in B through A's map:
+/// not a transient miss, a genuine MIS-MAPPING, which the Carrier IDE TS
+/// Surface Principle forbids outright.
+///
+/// The fence discards the retained response instead and fails the request
+/// closed, exactly as `provider_recovery`'s retry fence does for the same
+/// hazard on the query side.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repair_whose_carrier_source_moved_mid_flight_records_nothing() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Revision B: different bytes, and a source that compiles cleanly — so a
+    // failed compile can never be what this test observes.
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'edited-into-a-longer-and-quite-different-string'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("the baseline sync must commit a live IDE path");
+    let baseline = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the baseline sync records a CarrierIde surface");
+    assert_eq!(
+        baseline.carrier_source.as_ref(),
+        REQUEST_SURFACE_APP,
+        "precondition: the baseline surface describes revision A"
+    );
+
+    // Force a repair, and park it between its own compile and every consumer
+    // of the response that compile returned.
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    let (arrived, release) = server.pause_next_ide_sync_after_recompile(canonical_id);
+
+    let repair = server.ensure_current_file_synced(&uri);
+    let edit = async {
+        arrived.notified().await;
+        // The repair now holds revision A's response and has installed
+        // nothing, synced nothing, recorded nothing. Commit revision B.
+        let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+        assert_eq!(
+            server
+                .documents
+                .get(&uri)
+                .expect("document stays open")
+                .source
+                .as_ref(),
+            SOURCE_B,
+            "the interleaved edit must really have committed revision B, or \
+             this test exercises no supersession at all"
+        );
+        release.notify_one();
+    };
+    futures_util::future::join(repair, edit).await;
+
+    // NOTHING may pair revision A's provider bytes with revision B's source.
+    if let Some(recorded) = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+    {
+        assert_eq!(
+            recorded.carrier_source.as_ref(),
+            REQUEST_SURFACE_APP,
+            "a surface recorded from the retained response must still describe \
+             the revision it was compiled from. Recording revision A's provider \
+             bytes and map against the newly committed revision B is the \
+             mis-mapping: the pair then validates (both sides are B) and a later \
+             request maps B's positions through A's map"
+        );
+        assert_eq!(
+            recorded.provider_content.as_ref(),
+            baseline.provider_content.as_ref(),
+            "and the surface that survives is the pre-edit one, unchanged — the \
+             superseded repair published no new generation"
+        );
+    }
+
+    // The request-facing consequence: the live source is B and no surface for
+    // B has been synced, so the capture fails CLOSED. Under the unfenced
+    // record it succeeds — with A's content and A's mapper.
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "a carrier whose live source has no synced surface must fail the \
+         capture closed, never hand out a stale mapper that validates"
+    );
+}
+
+/// The retained-source comparison must guard the provider WRITE itself. This
+/// pauses after the old pre-sync fence, then commits revision B before the
+/// provider call can consume revision A's retained bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_change_after_the_check_prevents_the_provider_write() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'provider-write-window'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    provider.clear_calls();
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    let (arrived, release) = server.pause_next_ide_sync_before_provider_write(canonical_id);
+
+    let repair = server.ensure_current_file_synced(&uri);
+    let edit = async {
+        arrived.notified().await;
+        let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+        release.notify_one();
+    };
+    futures_util::future::join(repair, edit).await;
+
+    assert!(
+        provider.file_sync_calls().is_empty(),
+        "revision A's retained bytes must not be written to the provider after \
+         revision B commits in the check-to-sync window"
+    );
+}
+
+/// Recording is a second write point: the retained identity must be compared
+/// while installing the surface, so an edit between the old check and the
+/// record cannot pair A's provider bytes/map with B's live source.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_change_after_the_check_prevents_the_surface_record() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'surface-record-window'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("baseline IDE path");
+    let baseline = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("baseline CarrierIde surface");
+
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    let (arrived, release) = server.pause_next_ide_sync_before_surface_record(canonical_id);
+    let repair = server.ensure_current_file_synced(&uri);
+    let edit = async {
+        arrived.notified().await;
+        let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+        release.notify_one();
+    };
+    futures_util::future::join(repair, edit).await;
+
+    let recorded = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the baseline surface remains");
+    assert_eq!(
+        recorded.carrier_source.as_ref(),
+        REQUEST_SURFACE_APP,
+        "the record write must retain the baseline revision A surface, never \
+         install A's bytes and map under revision B's live source"
+    );
+    assert_eq!(
+        recorded.provider_content.as_ref(),
+        baseline.provider_content.as_ref(),
+        "the superseded repair must publish no new surface generation"
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "revision B has no synced surface yet and must fail closed"
+    );
+}
+
+/// The unresolved-preserve helper owns its own provider await and surface
+/// record, so it must carry the same retained revision through that await and
+/// use the identity-fenced record choke point.
+#[tokio::test(flavor = "multi_thread")]
+async fn unresolved_preserve_rechecks_retained_identity_at_the_record_write() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'unresolved-record-window'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    let revision = server
+        .documents
+        .snapshot_identity(&uri)
+        .expect("open revision A");
+    let ide = server
+        .documents
+        .get_ide(&uri)
+        .expect("revision A IDE output");
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("baseline IDE path");
+    let baseline = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("baseline CarrierIde surface");
+    let (arrived, release) = server.pause_next_ide_sync_before_surface_record(canonical_id);
+
+    let preserve = server.preserve_open_unresolved_carrier(
+        canonical_id,
+        false,
+        Some(&ide.code),
+        Some((&uri, &revision)),
+    );
+    let edit = async {
+        arrived.notified().await;
+        let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+        release.notify_one();
+    };
+    futures_util::future::join(preserve, edit).await;
+
+    let recorded = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the baseline surface remains");
+    assert_eq!(
+        recorded.carrier_source.as_ref(),
+        REQUEST_SURFACE_APP,
+        "the unresolved helper must not pair retained A output with live B"
+    );
+    assert_eq!(
+        recorded.provider_content.as_ref(),
+        baseline.provider_content.as_ref(),
+        "the superseded unresolved preserve must publish no new surface"
+    );
+}
+
+/// A dirty flag cannot override a deterministic verdict for the exact bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn dirty_flag_does_not_readmit_a_deterministic_content_verdict() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_with_kind(provider, crate::TypeProviderKind::Tsgo);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let canonical_id = "/workspace/src/App.vue";
+    let uri = open_test_vue(
+        server,
+        canonical_id,
+        "<script setup lang=\"ts\">\nconst broken = (((\n",
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less"
+    );
+    // The registry-only open above does not mark the server dirty flag.
+    // Reconstruct the production state explicitly.
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    assert!(
+        !server.current_file_needs_inline_type_provider_sync(&uri),
+        "the exact syntax-verdict bytes remain declined despite a dirty flag"
+    );
+
+    // A genuinely NEW revision still owes its one attempt.
+    let _ =
+        server
+            .documents
+            .did_change(&uri, 2, "<script setup lang=\"ts\">\nconst broken = ((((\n");
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "new content remains repairable"
+    );
+}
+
+/// W02 liveness (rename ingress): a compile blocked on unavailable input is
+/// never memoized as a verdict on its bytes, so a genuinely later request
+/// retries it.
+///
+/// Driven through `handle_rename` itself, so the whole request path is under
+/// test — admission, the repair, plan resolution — rather than the internal
+/// helper the handler calls:
+///
+/// Both the open-time attempt and each rename observe a missing external
+/// `src=` file. `XUnavailableMacroSemanticResult` and
+/// `XMissingMacroSemanticBundle` share the same non-memoized classification,
+/// covering scheduler cancellation without requiring a cancellation race in
+/// this request-path test.
+///
+/// Measured on the host's `compile_cold_runs`, not only on calls into the
+/// registry accounting ingress: the claim is about compiles the rename
+/// ingress causes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_rename_retries_a_failed_projectionless_revision() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_with_kind(provider, crate::TypeProviderKind::Tsgo);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let canonical_id = "/workspace/src/App.vue";
+    let uri = open_test_vue(
+        server,
+        canonical_id,
+        "<script setup lang=\"ts\" src=\"./missing.ts\"></script>\n<template><div/></template>\n",
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the unavailable external input must leave the carrier projection-less"
+    );
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "an unavailable-input failure must not bind the open bytes"
+    );
+
+    let rename_at = |position: Position| RenameParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        new_name: "renamed".into(),
+        work_done_progress_params: Default::default(),
+    };
+    let position = Position {
+        line: 0,
+        character: 1,
+    };
+    let rename_once = || async {
+        let edit = super::nav_features_navigation::handle_rename(server, rename_at(position))
+            .await
+            .expect("a rename on a broken carrier must not error to the client");
+        assert!(
+            edit.is_none(),
+            "a projection-less broken carrier has no surface to rename against — \
+             it fails closed, never a partial or mis-mapped WorkspaceEdit, got {edit:?}"
+        );
+    };
+
+    let cold_runs = || {
+        server
+            .documents
+            .host()
+            .provenance_snapshot()
+            .compile_cold_runs
+    };
+    let cold_before_first = cold_runs();
+    rename_once().await;
+    let cold_after_first = cold_runs();
+    assert_eq!(
+        cold_after_first - cold_before_first,
+        1,
+        "rename is an interactive consistency boundary: the first rename on an \
+         unattempted revision must drive the repair. Zero here means rename no \
+         longer repairs the current file before capturing its surface"
+    );
+    rename_once().await;
+    assert_eq!(
+        cold_runs() - cold_after_first,
+        1,
+        "a later request must retry the projection-less carrier even when its \
+         bytes are unchanged: cancellation is transient but advances no host \
+         generation, so a cross-request failure memo would decline forever"
+    );
+}
+
+/// W02 feature-set consistency (signature help): signature help is a
+/// request-answering provider-backed feature, so it heals a projection-less
+/// carrier through the SAME attempt-bounded interactive repair hover and
+/// completion use — it must not stay dark until a background tick.
+#[tokio::test(flavor = "multi_thread")]
+async fn signature_help_heals_a_projectionless_carrier_on_the_first_request() {
+    let broken_source = "<script setup lang=\"ts\">\nconst broken = (((\n";
+    let fixed_source = "<script setup lang=\"ts\">\nconst healedTarget: string = \"ok\"\n</script>\n<template><div>{{ healedTarget.at(0) }}</div></template>\n";
+    let kind = crate::TypeProviderKind::Tsgo;
+    let (tsx_path, tsx_offset, position) = provider_target_via_twin_server(
+        kind,
+        "/workspace/src/App.vue",
+        "vue",
+        fixed_source,
+        "at(0)",
+        3,
+    );
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_with_kind(type_provider, kind);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(server, "/workspace/src/App.vue", broken_source);
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less"
+    );
+    let _ = server.documents.did_change(&uri, 2, fixed_source);
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "the commit must not compile"
+    );
+
+    provider.set_signature_help(
+        &tsx_path,
+        tsx_offset,
+        Some(crate::type_provider::protocol::SignatureHelp {
+            signatures: vec![crate::type_provider::protocol::SignatureInfo {
+                label: "at(index: number): string | undefined".to_string(),
+                documentation: None,
+                parameters: vec![],
+                active_parameter: None,
+            }],
+            active_signature: Some(0),
+            active_parameter: None,
+        }),
+    );
+
+    let help = server
+        .signature_help(SignatureHelpParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            context: None,
+        })
+        .await
+        .expect("signature help request must not error to the client");
+    assert!(
+        help.is_some(),
+        "the FIRST signature-help request after the fix must heal the missing \
+         projection and answer through the provider — None means signature \
+         help stays dark on a carrier hover already heals"
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_some(),
+        "the interactive repair must have installed the projection"
+    );
+    let signature_calls = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetSignatureHelp { .. }))
+        .count();
+    assert!(
+        signature_calls >= 1,
+        "the answer must have come through the provider rail"
+    );
+}
+
+/// W02 feature-set consistency (code actions): quickfix code actions are a
+/// request-answering provider-backed feature, so they heal a projection-less
+/// carrier through the same attempt-bounded interactive repair.
+#[tokio::test(flavor = "multi_thread")]
+async fn code_action_heals_a_projectionless_carrier_on_the_first_request() {
+    let broken_source = "<script setup lang=\"ts\">\nconst broken = (((\n";
+    let fixed_source = "<script setup lang=\"ts\">\nconst healedTarget: string = \"ok\"\n</script>\n<template><div>{{ healedTarget.length }}</div></template>\n";
+    let kind = crate::TypeProviderKind::Tsgo;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_with_kind(type_provider, kind);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(server, "/workspace/src/App.vue", broken_source);
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less"
+    );
+    let _ = server.documents.did_change(&uri, 2, fixed_source);
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "the commit must not compile"
+    );
+
+    let position = find_document_position(server, &uri, "healedTarget.length", 1);
+    let _ = server
+        .code_action(CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range: Range {
+                start: position,
+                end: position,
+            },
+            context: CodeActionContext::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .expect("code action request must not error to the client");
+    assert!(
+        server.documents.get_projection(&uri).is_some(),
+        "the interactive repair must have installed the projection — a \
+         projection-less carrier must not silently skip the provider action \
+         surface while hover on the same carrier heals"
+    );
+    let action_calls = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetCodeActions { .. }))
+        .count();
+    assert!(
+        action_calls >= 1,
+        "the healed request must have queried the provider action surface"
+    );
+}
+
 /// Shared fixture for the definition transient-recovery pair: a member access
 /// (`foo.bar`) whose receiver the native path could resolve but whose MEMBER
 /// only the provider can — the exact asymmetry of the reported defect ("`foo`
@@ -13244,6 +14215,7 @@ const msg = 'hello'
             canonical_id,
             false,
             Some("export default { updated: true }"),
+            None,
         )
         .await;
 
@@ -13338,7 +14310,12 @@ const msg = 'hello'
     // Flip to TS: is_jsx = false → desired path is `.tsx`. Fresh IDE code; the
     // new `.tsx` open SUCCEEDS (no failure injection).
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
+        .preserve_open_unresolved_carrier(
+            canonical_id,
+            false,
+            Some("export default { ts: true }"),
+            None,
+        )
         .await;
 
     let calls = provider.file_sync_calls();
@@ -13455,7 +14432,7 @@ const msg = 'hello'
 
     // Flip to TS (is_jsx = false → desired `.tsx`) but with NO IDE code this pass.
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, None)
+        .preserve_open_unresolved_carrier(canonical_id, false, None, None)
         .await;
 
     let calls = provider.file_sync_calls();
@@ -13548,7 +14525,12 @@ const msg = 'hello'
     // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
+        .preserve_open_unresolved_carrier(
+            canonical_id,
+            false,
+            Some("export default { ts: true }"),
+            None,
+        )
         .await;
 
     let calls = provider.file_sync_calls();
@@ -13651,7 +14633,12 @@ const msg = 'hello'
     // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
+        .preserve_open_unresolved_carrier(
+            canonical_id,
+            false,
+            Some("export default { ts: true }"),
+            None,
+        )
         .await;
 
     let calls = provider.file_sync_calls();
@@ -13800,7 +14787,7 @@ const msg = 'hello'
 
     // No prior committed state seeded; no IDE code this pass.
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, None)
+        .preserve_open_unresolved_carrier(canonical_id, false, None, None)
         .await;
 
     let state = server
@@ -30353,9 +31340,10 @@ fn service_projection_still_absent(host: &Arc<VerterHost>, canonical_id: &str) -
 /// too.
 ///
 /// A carrier whose open-time compile failed has no provider projection; the
-/// document commit never compiles one, and the foreground repair declines
-/// projection-less documents by design. If the path that DOES compile here does
-/// not install the projection, the document is stranded with no IDE features.
+/// document commit never compiles one, and the interactive repair heals it only
+/// when a provider-backed request arrives (attempt-bounded). If the path that
+/// DOES compile here does not install the projection, a document nobody hovers
+/// stays stranded with no IDE features.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
     let temp = tempfile::tempdir().expect("temp dir");

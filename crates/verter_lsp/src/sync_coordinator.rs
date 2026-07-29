@@ -711,10 +711,12 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
         return;
     }
     // A carrier whose open-time compile FAILED has no provider projection and
-    // fails closed downstream forever; the foreground repair declines to build
-    // one by design. Cache read only — the compile just above already ran — and
-    // a no-op once a projection exists, so it never disturbs the steady-state
-    // carry.
+    // fails closed on every capture until a repair path compiles one. The
+    // interactive repair heals it on the next provider-backed request, but only
+    // attempt-bounded and only when a request arrives — this tick is the
+    // request-INDEPENDENT recovery. Cache read only — the compile just above
+    // already ran — and a no-op once a projection exists, so it never disturbs
+    // the steady-state carry.
     deps.documents
         .install_missing_carrier_projection(canonical_id);
 }

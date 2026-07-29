@@ -44,6 +44,149 @@ fn did_open_rune_module_builds_self_file_projection_with_prelude_offset() {
     assert!(mapper.tsx_to_carrier(TsPosition::new(0, 0)).is_none());
 }
 
+mod source_identity_fence {
+    use super::*;
+
+    fn registry_with_host() -> DocumentRegistry {
+        DocumentRegistry::new(Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        )))
+    }
+
+    const REVISION_A: &str =
+        "<script setup lang=\"ts\">\nconst msg = 'a'\n</script>\n<template><div>{{ msg }}</div></template>\n";
+    const REVISION_B: &str =
+        "<script setup lang=\"ts\">\nconst msg = 'b'\nconst extra = 2\n</script>\n<template><div>{{ msg }}{{ extra }}</div></template>\n";
+
+    fn projectionless_registry() -> (DocumentRegistry, Uri) {
+        let registry = registry_with_host();
+        let uri: Uri = "file:///x/App.vue".parse().expect("uri");
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".into(),
+            version: 1,
+            text: REVISION_A.into(),
+        });
+        assert!(
+            registry.get_projection(&uri).is_some(),
+            "precondition: revision A compiles"
+        );
+        registry.clear_projection_for_test(&uri);
+        (registry, uri)
+    }
+
+    /// A source move while the blocking compile runs must discard its output.
+    #[test]
+    fn a_compile_whose_source_moved_installs_no_mapper_and_returns_nothing() {
+        let (registry, uri) = projectionless_registry();
+        registry.set_after_compile_hook(Box::new(|registry, uri| {
+            let _ = registry.did_change(uri, 2, REVISION_B);
+        }));
+
+        let response = registry.recompile_and_refresh_mapper(&uri);
+
+        assert!(
+            registry
+                .get(&uri)
+                .is_some_and(|doc| doc.source.as_ref() == REVISION_B),
+            "the interleaved edit must commit revision B"
+        );
+        assert!(
+            response.is_none(),
+            "revision A's retained response must be discarded"
+        );
+        assert!(
+            registry.get_projection(&uri).is_none(),
+            "revision A's mapper must not be installed over revision B"
+        );
+    }
+
+    /// The comparison must also hold at the projection write itself. This
+    /// pauses after the early check and commits B in the check→`get_mut` window.
+    #[test]
+    fn a_source_change_after_the_check_cannot_install_the_retained_mapper() {
+        let (registry, uri) = projectionless_registry();
+        registry.set_before_projection_install_hook(Box::new(|registry, uri| {
+            let _ = registry.did_change(uri, 2, REVISION_B);
+        }));
+
+        let response = registry.recompile_and_refresh_mapper(&uri);
+
+        assert!(
+            registry
+                .get(&uri)
+                .is_some_and(|doc| doc.source.as_ref() == REVISION_B),
+            "the post-check edit must commit revision B"
+        );
+        assert!(
+            response.is_none(),
+            "revision A's retained response must not escape after revision B \
+             commits at the installation write point"
+        );
+        assert!(
+            registry.get_projection(&uri).is_none(),
+            "revision A's mapper must not be installed over revision B"
+        );
+    }
+
+    fn compile_error(code: &str) -> Result<bool, verter_session::HostError> {
+        Err(verter_session::HostError::CompileError(
+            verter_session::CompileFailure {
+                diagnostics: verter_session::DiagnosticsSnapshot {
+                    diagnostics: vec![verter_session::HostDiagnostic {
+                        severity: verter_session::HostSeverity::Error,
+                        code: code.to_string(),
+                        message: String::new(),
+                        span: None,
+                    }],
+                    has_errors: true,
+                },
+                requested_mode: verter_session::CompileCacheMode::Content,
+                actual_mode: verter_session::CompileCacheMode::Content,
+                downgrade_reason: None,
+            },
+        ))
+    }
+
+    /// Cancellation-shaped macro semantic failures are transient and must not
+    /// bind unchanged bytes across requests.
+    #[test]
+    fn cancellation_codes_never_bind_projection_repair_content() {
+        let registry = registry_with_host();
+        const CANONICAL: &str = "/x/App.vue";
+        const SOURCE: &str = "<script setup lang=\"ts\">defineProps<P>()</script>";
+
+        for code in [
+            verter_compiler::diagnostics::X_MISSING_MACRO_SEMANTIC_BUNDLE,
+            verter_compiler::diagnostics::X_UNAVAILABLE_MACRO_SEMANTIC_RESULT,
+        ] {
+            registry.account_carrier_ide_content_verdict(
+                CANONICAL,
+                SOURCE,
+                &compile_error(code),
+                false,
+                false,
+            );
+            assert!(
+                !registry.carrier_ide_compile_has_content_verdict(CANONICAL, SOURCE),
+                "{code} is transient unavailable input and must remain retryable"
+            );
+        }
+
+        registry.account_carrier_ide_content_verdict(
+            CANONICAL,
+            SOURCE,
+            &compile_error("XInvalidExpression"),
+            false,
+            false,
+        );
+        assert!(
+            registry.carrier_ide_compile_has_content_verdict(CANONICAL, SOURCE),
+            "the seam must still bind a deterministic compiler verdict"
+        );
+    }
+}
+
 #[test]
 fn position_mapper_not_overwritten_when_present() {
     let host = Arc::new(verter_session::VerterHost::new_standalone(
