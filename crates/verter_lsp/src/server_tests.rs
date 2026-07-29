@@ -1306,7 +1306,11 @@ fn install_test_resolver_for_root_with_options(
         snapshot,
         Box::new(views),
     ));
-    server.install_vfs_workspace(vfs_ws);
+    // This helper models the completed production publication, so install the
+    // authoritative workspace into both the server and the host. A server-only
+    // handle would leave rename admission reading the host's earlier
+    // non-authoritative graph.
+    server.swap_vfs_workspace(vfs_ws);
 }
 
 /// A `FilesystemWorkspace` publishing ONE `Configured` project owning everything under
@@ -3331,13 +3335,10 @@ async fn editor_tsserver_yields_only_rename_and_keeps_serving_merged_features() 
     );
 }
 
-/// Publish a READY root with TWO sibling configured projects (`tsconfig.json` +
-/// `tsconfig.app.json`) both `include`-ing everything under `root`, with no
-/// reference edge — so every carrier under `root` is a genuine MULTI-CLAIMANT
-/// overlap (`configured_owner_resolution_for_file` ⇒ `Ambiguous`) onto an EXISTING
-/// workspace. Published LAST (after server construction + `did_open`) so it wins
-/// over any bootstrap/rescan root those steps publish.
-fn publish_multi_claimant_root(vfs_ws: &verter_workspace::FilesystemWorkspace, root: &str) {
+fn configured_claimant_snapshot(
+    root: &str,
+    tsconfig_names: &[&str],
+) -> Arc<verter_workspace::WorkspaceSnapshot> {
     let root_cp = verter_workspace::CanonicalPath::new(root);
     let make_configured = |tsconfig: &str| {
         let spec = verter_workspace::StaticMembershipSpec {
@@ -3369,21 +3370,67 @@ fn publish_multi_claimant_root(vfs_ws: &verter_workspace::FilesystemWorkspace, r
             },
         }
     };
-    let projects = vec![
-        make_configured(&format!("{root}/tsconfig.json")),
-        make_configured(&format!("{root}/tsconfig.app.json")),
-    ];
-    let snapshot = std::sync::Arc::new(
+    let projects = tsconfig_names
+        .iter()
+        .map(|name| make_configured(&format!("{root}/{name}")))
+        .collect();
+    Arc::new(
         verter_workspace::snapshot_builder::build_workspace_snapshot_simple(
             projects,
             verter_workspace::workspace_snapshot::SnapshotGeneration(1),
         ),
-    );
+    )
+}
+
+/// Publish a READY root with TWO sibling configured projects (`tsconfig.json` +
+/// `tsconfig.app.json`) both `include`-ing everything under `root`, with no
+/// reference edge — so every carrier under `root` is a genuine MULTI-CLAIMANT
+/// overlap (`configured_owner_resolution_for_file` ⇒ `Ambiguous`) onto an EXISTING
+/// workspace. Published LAST (after server construction + `did_open`) so it wins
+/// over any bootstrap/rescan root those steps publish.
+fn publish_multi_claimant_root(vfs_ws: &verter_workspace::FilesystemWorkspace, root: &str) {
+    let snapshot = configured_claimant_snapshot(root, &["tsconfig.json", "tsconfig.app.json"]);
     let views = crate::workspace_state::build_lsp_views(vfs_ws, &snapshot, vec![]);
     vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
         snapshot,
         Box::new(views),
     ));
+}
+
+/// Build a provider-backed rename server without the managed carrier-publish
+/// coordinator. That keeps this admission test focused: before the admission
+/// fix, the provider request reaches the mock and exposes the partial edit
+/// instead of being independently stopped by workspace-frontier readiness.
+fn make_claimancy_rename_test_server(
+    ws: Arc<verter_workspace::FilesystemWorkspace>,
+) -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tower_lsp_server::ClientSocket,
+    Arc<MockTypeProvider>,
+) {
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws));
+    let provider = Arc::new(MockTypeProvider::new());
+    let host_for_server = Arc::clone(&host);
+    let provider_for_server: Arc<dyn TypeProvider> = provider.clone();
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&provider_for_server)),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::None,
+                type_provider_topology: crate::TypeProviderTopology::implied_by(
+                    crate::TypeProviderKind::None,
+                ),
+                mcp_port: None,
+                type_provider_reason: Some("test provider".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    (service, socket, provider)
 }
 
 // A carrier owned by MULTIPLE configured projects must FAIL rename CLOSED (a
@@ -3431,7 +3478,10 @@ async fn multi_claimant_carrier_fails_rename_closed_never_partial() {
     // `did_open` — so it is the authoritative root the rename gate observes.
     publish_multi_claimant_root(&ws, "/workspace");
     assert!(
-        server.carrier_is_multi_claimant(&uri),
+        matches!(
+            server.carrier_multi_claimancy(&uri),
+            super::provider_state::CarrierMultiClaimancy::Ready
+        ),
         "the carrier must be detected as multi-claimant for this test to be meaningful"
     );
     let position = find_document_position(server, &uri, "shared", 0);
@@ -3473,11 +3523,350 @@ async fn multi_claimant_carrier_fails_rename_closed_never_partial() {
     }
 }
 
+// Genuine-bootstrap mirror of
+// `multi_claimant_carrier_fails_rename_closed_never_partial`. The workspace is
+// left on the exact eager root `Engine::new()` publishes: ownership is not
+// authoritative and the project graph is empty. Rename must not infer unique
+// ownership from that absence of claimants.
+//
+// DISCRIMINATING: without the authority-first check, the gate recognizes a cold
+// snapshot only when its already-populated graph says `Ambiguous`. Against the
+// genuine empty bootstrap root it returns `NotMultiClaimant`; both prepare and
+// rename proceed, and the injected provider's single-file `WorkspaceEdit`
+// escapes.
+#[tokio::test(flavor = "multi_thread")]
+async fn genuine_bootstrap_carrier_fails_rename_closed_never_partial() {
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let (service, _socket, provider) = make_claimancy_rename_test_server(Arc::clone(&ws));
+    let server = service.inner();
+
+    let source = "<script setup lang=\"ts\">\nexport const shared = 1\n</script>\n<template><div>{{ shared }}</div></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+    let bootstrap = ws
+        .load_published()
+        .expect("Engine::new must eagerly publish the bootstrap root");
+    assert!(
+        !bootstrap.ownership_ready
+            && bootstrap.snapshot.projects.is_empty()
+            && matches!(
+                server.carrier_multi_claimancy(&uri),
+                super::provider_state::CarrierMultiClaimancy::NotReady
+            ),
+        "the genuine empty bootstrap graph must classify carrier rename as NotReady, got \
+         ownership_ready={}, projects={}, claimancy={:?}",
+        bootstrap.ownership_ready,
+        bootstrap.snapshot.projects.len(),
+        server.carrier_multi_claimancy(&uri),
+    );
+    let position = find_document_position(server, &uri, "{{ shared }}", 3);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+    let after_sync = ws
+        .load_published()
+        .expect("provider sync must leave the eager bootstrap root published");
+    assert!(
+        Arc::ptr_eq(&bootstrap, &after_sync)
+            && !after_sync.ownership_ready
+            && after_sync.snapshot.projects.is_empty()
+            && matches!(
+                server.carrier_multi_claimancy(&uri),
+                super::provider_state::CarrierMultiClaimancy::NotReady
+            ),
+        "provider sync helpers must not manufacture ownership authority; got \
+         same_root={}, ownership_ready={}, projects={}, claimancy={:?}",
+        Arc::ptr_eq(&bootstrap, &after_sync),
+        after_sync.ownership_ready,
+        after_sync.snapshot.projects.len(),
+        server.carrier_multi_claimancy(&uri),
+    );
+    let ctx = synced_type_provider_context(server, &uri).await;
+    let usage_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("usage position should map into TSX");
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        usage_offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: ctx.tsx_path.clone(),
+            start: usage_offset,
+            end: usage_offset + "shared".len() as u32,
+        }],
+    );
+
+    let rename = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "renamed".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await;
+    match rename {
+        Err(err) => assert!(
+            err.message.contains("authoritative project ownership"),
+            "the bootstrap refusal must explain the missing authority, got {err:?}"
+        ),
+        Ok(edit) => {
+            panic!("a genuine-bootstrap carrier must NEVER return a rename edit, got {edit:?}")
+        }
+    }
+
+    let prepare = super::rename_prepare::handle_prepare_rename(
+        server,
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position,
+        },
+    )
+    .await;
+    match prepare {
+        Err(err) => assert!(
+            err.message.contains("authoritative project ownership"),
+            "prepare-rename must expose the missing-authority cause, got {err:?}"
+        ),
+        Ok(response) => {
+            panic!("prepare-rename must expose the bootstrap refusal, got {response:?}")
+        }
+    }
+}
+
+/// Proves that rename admission refuses a pre-scripted provider response when
+/// the ownership authority-assignment marker moves away from the published root
+/// generation during the provider await. The rebuild pauses in `configure_paths`
+/// after assigning the new authority but before production's per-file rebinding
+/// step and before publishing the rebuilt root; releasing it afterward also
+/// proves that the held rebuild publishes the expected ambiguous graph.
+///
+/// This mock's response is independent of ownership, and its open/query paths do
+/// not consume the stored authority or perform production's `resync_open_files`
+/// rebinding. This test therefore does NOT prove that an open provider file moved
+/// to the rebuilt winner.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_refuses_when_ownership_assignment_marker_moves_during_provider_await() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("workspace source dir");
+    let source = "<script setup lang=\"ts\">\nexport const shared = 1\n</script>\n<template><div>{{ shared }}</div></template>\n";
+    std::fs::write(workspace.join("src/App.vue"), source).expect("write carrier");
+    let config = r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] }
+  },
+  "include": ["src/**/*.vue"]
+}"#;
+    std::fs::write(workspace.join("tsconfig.zzz.json"), config)
+        .expect("write initial unique config");
+
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let (service, socket, provider) = make_claimancy_rename_test_server(Arc::clone(&ws));
+    let drain_handle = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    server.swap_vfs_workspace(Arc::clone(&ws));
+    server.vite_config_options.lock().await.enabled = false;
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_id)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    server
+        .spawn_background_init(None, "stale-authority regression initial build")
+        .await;
+    let initial_root = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(root) = ws.load_published() {
+                if root.ownership_ready
+                    && root.snapshot.generation
+                        == verter_workspace::workspace_snapshot::SnapshotGeneration(1)
+                {
+                    break root;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial background init must publish a ready root");
+
+    let canonical = format!("{workspace_id}/src/App.vue");
+    let initial_resolution = initial_root
+        .snapshot
+        .configured_owner_resolution_for_file(&canonical);
+    assert!(
+        matches!(
+            initial_resolution,
+            verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Unique(_)
+        ),
+        "the pre-rebuild root must genuinely prove unique ownership, got \
+         {initial_resolution:?} from projects {:?}",
+        initial_root
+            .snapshot
+            .projects
+            .iter()
+            .map(|project| (&project.root, &project.payload))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        matches!(
+            provider.configured_owner(&canonical),
+            Some(verter_type_runtime::traits::ProjectOwnership::Owned(owner))
+                if owner.config_path.ends_with("/tsconfig.zzz.json")
+        ),
+        "the provider must initially consume the unique root's owner"
+    );
+
+    let uri = open_test_vue(server, &canonical, source);
+    let position = find_document_position(server, &uri, "{{ shared }}", 3);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+    let ctx = synced_type_provider_context(server, &uri).await;
+    let usage_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("usage position should map into TSX");
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        usage_offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: ctx.tsx_path.clone(),
+            start: usage_offset,
+            end: usage_offset + "shared".len() as u32,
+        }],
+    );
+
+    // Suspend the provider response only after admission has observed a matching
+    // initial marker/root generation. The rebuild then advances the assignment
+    // marker while this exact request is awaiting its answer.
+    let (rename_arrived, rename_release) = provider.block_get_rename_locations(&ctx.tsx_path);
+    let (configure_arrived, configure_release) = provider.block_configure_paths();
+    let rename = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "renamed".into(),
+            work_done_progress_params: Default::default(),
+        },
+    );
+    let rebuild_during_provider_await = async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            rename_arrived.notified(),
+        )
+        .await
+        .expect("rename must reach the provider under the initial ownership witness");
+
+        std::fs::write(workspace.join("tsconfig.json"), config)
+            .expect("add the second claimant config");
+        server
+            .spawn_background_init(None, "stale-authority regression rebuild")
+            .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            configure_arrived.notified(),
+        )
+        .await
+        .expect("rebuild must pause after installing provider ownership");
+
+        let held_root = ws
+            .load_published()
+            .expect("the previous ready root must remain published during rebuild");
+        assert!(
+            Arc::ptr_eq(&initial_root, &held_root)
+                && held_root.ownership_ready
+                && matches!(
+                    held_root
+                        .snapshot
+                        .configured_owner_resolution_for_file(&canonical),
+                    verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Unique(_)
+                ),
+            "the held rebuild window must expose the old ready Unique root"
+        );
+        assert!(
+            matches!(
+                provider.configured_owner(&canonical),
+                Some(verter_type_runtime::traits::ProjectOwnership::Owned(owner))
+                    if owner.config_path.ends_with("/tsconfig.json")
+            ),
+            "the mock must expose the rebuilt authority's new default winner"
+        );
+        assert!(
+            matches!(
+                server.carrier_multi_claimancy(&uri),
+                super::provider_state::CarrierMultiClaimancy::NotReady
+            ),
+            "a new request entering the root/provider mismatch must refuse as NotReady"
+        );
+
+        rename_release.notify_one();
+    };
+    let (rename, ()) = futures_util::future::join(rename, rebuild_during_provider_await).await;
+    match rename {
+        Err(err) => assert!(
+            err.message.contains("ownership changed"),
+            "the rebuild-window refusal must name ownership instability, got {err:?}"
+        ),
+        Ok(edit) => panic!(
+            "a stale ready root must NEVER license a provider rename after ownership moved, \
+             got {edit:?}"
+        ),
+    }
+
+    configure_release.notify_one();
+    let rebuilt_root = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(root) = ws.load_published() {
+                if root.snapshot.generation
+                    == verter_workspace::workspace_snapshot::SnapshotGeneration(2)
+                {
+                    break root;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("released rebuild must publish its root");
+    assert!(
+        rebuilt_root.ownership_ready
+            && matches!(
+                rebuilt_root
+                    .snapshot
+                    .configured_owner_resolution_for_file(&canonical),
+                verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Ambiguous(_)
+            ),
+        "the exact held rebuild must publish the ambiguous graph"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 // Positive control for the multi-claimant fail-closed rename gate: a UNIQUE
-// (single-claimant) carrier must STILL rename normally — a real `WorkspaceEdit`,
-// never the fail-closed error. This guards against an over-broad regression where
-// the `carrier_is_multi_claimant` gate fires on a normally-owned carrier and breaks
-// rename everywhere. Rename behavior itself is UNTOUCHED — this is a guard test.
+// carrier in an AUTHORITATIVE snapshot must STILL rename normally — a real
+// `WorkspaceEdit`, never the fail-closed error. This guards against an over-broad
+// regression where rename is refused after ownership publication.
 //
 // DISCRIMINATING: widen the gate to fire on a unique carrier and `prepare` becomes
 // `Err` / `rename` becomes the fail-closed `Err`, failing the assertions below.
@@ -3489,11 +3878,37 @@ async fn unique_carrier_still_renames_normally_not_fail_closed() {
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
     let server = service.inner();
 
-    // The carrier has a SINGLE configured owner — the multi-claimant fail-closed gate
-    // must NOT apply.
+    let canonical = server
+        .documents
+        .get_canonical_id(&app_uri)
+        .expect("the open carrier must have a canonical id");
+    let published = server
+        .documents
+        .host()
+        .workspace_read()
+        .published_root()
+        .expect("the definition fixture must publish its ownership graph");
+    // The carrier has a SINGLE configured owner in an AUTHORITATIVE snapshot —
+    // the admission gate must serve.
     assert!(
-        !server.carrier_is_multi_claimant(&app_uri),
-        "a normally-owned carrier must not be classified multi-claimant"
+        published.ownership_ready
+            && matches!(
+                published
+                    .snapshot
+                    .configured_owner_resolution_for_file(&canonical),
+                verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Unique(_)
+            )
+            && matches!(
+                server.carrier_multi_claimancy(&app_uri),
+                super::provider_state::CarrierMultiClaimancy::NotMultiClaimant(_)
+            ),
+        "the control must be authoritatively unique and admitted, got \
+         ownership_ready={}, resolution={:?}, claimancy={:?}",
+        published.ownership_ready,
+        published
+            .snapshot
+            .configured_owner_resolution_for_file(&canonical),
+        server.carrier_multi_claimancy(&app_uri),
     );
 
     let position = find_document_position(server, &app_uri, "{{ vueTsTitle }}", 3);

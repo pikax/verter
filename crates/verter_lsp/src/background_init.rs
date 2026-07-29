@@ -43,6 +43,7 @@ pub(super) struct BackgroundInitArgs {
     pub(super) workspace_scanner:
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
     pub(super) init_generation: Arc<std::sync::atomic::AtomicU64>,
+    pub(super) ownership_generation_fence: Arc<crate::configured_owner::OwnershipGenerationFence>,
     pub(super) project_sync: Option<ProjectSync>,
     pub(super) documents: Arc<DocumentRegistry>,
     pub(super) provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
@@ -160,6 +161,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         type_provider,
         workspace_scanner,
         init_generation,
+        ownership_generation_fence,
         project_sync,
         documents,
         provider_sync_states,
@@ -265,6 +267,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         // owner available before it stamps one, or every file opened in the
         // meantime carries a folder-derived root and a monorepo package is
         // resolved against the wrong `node_modules`.
+        ownership_generation_fence.begin_provider_install(published_root.snapshot.generation);
         tp.set_project_ownership(Arc::clone(&ownership)
             as Arc<dyn verter_type_runtime::traits::ConfiguredOwnerAuthority>);
 

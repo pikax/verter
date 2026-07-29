@@ -23,7 +23,8 @@ use super::child_prop_rename::{ChildPropDeclarationProof, ChildPropRenameClass};
 use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::provider_recovery::provider_query_with_bounded_recovery;
 use super::rename_plan::{
-    rename_request_admission, RenameAdmission, RenameTargetResolution, SameFileProof,
+    ownership_changed_during_rename_error, rename_request_admission, RenameAdmission,
+    RenameTargetResolution, SameFileProof,
 };
 use super::rename_prepare::rename_incompleteness_error;
 use super::server_utils::location_from_span;
@@ -978,11 +979,11 @@ pub(super) async fn handle_rename(
     // handshake cannot advertise a rename this handler would refuse: an
     // editor-owned carrier rename and a generated virtual buffer answer nothing,
     // and a multi-claimant carrier fails closed with a user-visible reason.
-    match rename_request_admission(server, uri) {
+    let ownership_witness = match rename_request_admission(server, uri) {
         RenameAdmission::Decline => return Ok(None),
         RenameAdmission::Refuse(error) => return Err(error),
-        RenameAdmission::Serve => {}
-    }
+        RenameAdmission::Serve { ownership_witness } => ownership_witness,
+    };
 
     // `didChange` never performs provider I/O. A rename is an interactive
     // consistency boundary, so repair the current authored buffer here before
@@ -1344,6 +1345,16 @@ pub(super) async fn handle_rename(
             "rename: refusing native-only partial edit without provider/dependency completeness"
         );
         return Ok(None);
+    }
+
+    // The provider ownership authority is installed before a rebuilt workspace
+    // root publishes. A response may therefore have been computed after the
+    // provider crossed generations while admission still saw the previous ready
+    // root. Consume no edit unless the root/provider pair captured at admission
+    // still names both live authorities after the provider work returns.
+    if ownership_witness.is_some_and(|witness| !server.ownership_generation_still_current(witness))
+    {
+        return Err(ownership_changed_during_rename_error());
     }
 
     // The two fail-closed completeness gates, applied ONCE over the final result

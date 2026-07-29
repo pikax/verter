@@ -8,7 +8,8 @@ use crate::type_provider::merge;
 
 use super::handler_guard::HandlerGuard;
 use super::rename_plan::{
-    rename_request_admission, RenameAdmission, RenamePlan, RenameTargetResolution,
+    ownership_changed_during_rename_error, rename_request_admission, RenameAdmission, RenamePlan,
+    RenameTargetResolution,
 };
 use super::VerterLanguageServer;
 
@@ -87,14 +88,14 @@ pub(super) async fn handle_prepare_rename(
     let uri = &params.text_document.uri;
     let position = &params.position;
 
-    match rename_request_admission(server, uri) {
+    let ownership_witness = match rename_request_admission(server, uri) {
         RenameAdmission::Decline => return Ok(None),
         RenameAdmission::Refuse(error) => return Err(error),
-        RenameAdmission::Serve => {}
-    }
+        RenameAdmission::Serve { ownership_witness } => ownership_witness,
+    };
 
     let resolution = RenameTargetResolution::resolve(server, uri, position).await;
-    Ok(match resolution.prepare_plan() {
+    let response = match resolution.prepare_plan() {
         RenamePlan::Offer(range) => Some(PrepareRenameResponse::Range(range)),
         RenamePlan::ProbeProvider { anchor } => {
             provider_proves_rename_target(server, uri, position, anchor)
@@ -102,7 +103,12 @@ pub(super) async fn handle_prepare_rename(
                 .then_some(PrepareRenameResponse::Range(anchor))
         }
         RenamePlan::Decline => None,
-    })
+    };
+    if ownership_witness.is_some_and(|witness| !server.ownership_generation_still_current(witness))
+    {
+        return Err(ownership_changed_during_rename_error());
+    }
+    Ok(response)
 }
 
 /// Whether the TypeScript provider — the SOLE semantic authority at a

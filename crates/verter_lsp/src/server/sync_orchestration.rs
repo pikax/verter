@@ -2229,6 +2229,7 @@ impl VerterLanguageServer {
             type_provider: self.type_provider.clone(),
             workspace_scanner: Arc::clone(&self.workspace_scanner),
             init_generation: Arc::clone(&self.init_generation),
+            ownership_generation_fence: Arc::clone(&self.ownership_generation_fence),
             project_sync: self.project_sync.clone(),
             documents: Arc::clone(&self.documents),
             provider_sync_states: Arc::clone(&self.provider_sync_states),

@@ -28,6 +28,7 @@ use crate::features::rename::{
     SameFileEnumeration, UnenumeratedRegion,
 };
 
+use super::provider_state::CarrierMultiClaimancy;
 use super::rename_prepare::multi_claimant_rename_unavailable_error;
 use super::server_utils::carrier_language_for;
 use super::VerterLanguageServer;
@@ -36,7 +37,11 @@ use super::VerterLanguageServer;
 /// before any position is classified, and identically for prepare and rename.
 pub(super) enum RenameAdmission {
     /// Classify the position and serve.
-    Serve,
+    Serve {
+        /// Root/provider ownership generation captured by the admission gate.
+        /// `None` only for non-carrier documents.
+        ownership_witness: Option<crate::configured_owner::OwnershipGenerationWitness>,
+    },
     /// Another authority owns rename here (the editor's own TypeScript plugin,
     /// or a GENERATED virtual buffer whose renames are not meaningful): answer
     /// nothing, so the editor keeps its own behaviour.
@@ -52,8 +57,14 @@ pub(super) enum RenameAdmission {
 /// that one project: renaming a symbol that ESCAPES the owner would leave it
 /// dangling in the siblings. Proving escape needs the cross-project rename
 /// fan-out, so rename (and its prepare handshake) FAILS CLOSED with a clear
-/// message instead of shipping a partial edit. Checked AFTER the editor-owned
-/// yield so an editor-plugin route still defers to the editor's own rename.
+/// message instead of shipping a partial edit. The same overlap cannot be
+/// observed coherently during bootstrap or while a rebuild has moved provider
+/// ownership ahead of the published root: both states are `NotReady`, because
+/// neither can prove one generation's unique ownership. Refuse this request and
+/// invite a retry rather than inferring authority from absent or stale
+/// claimants.
+/// Checked AFTER the editor-owned yield so an editor-plugin route still defers
+/// to the editor's own rename.
 pub(super) fn rename_request_admission(
     server: &VerterLanguageServer,
     uri: &Uri,
@@ -64,10 +75,39 @@ pub(super) fn rename_request_admission(
     if server.documents.get_virtual_source_uri(uri).is_some() {
         return RenameAdmission::Decline;
     }
-    if server.carrier_is_multi_claimant(uri) {
-        return RenameAdmission::Refuse(multi_claimant_rename_unavailable_error());
+    match server.carrier_multi_claimancy(uri) {
+        CarrierMultiClaimancy::Ready => {
+            RenameAdmission::Refuse(multi_claimant_rename_unavailable_error())
+        }
+        CarrierMultiClaimancy::NotReady => {
+            RenameAdmission::Refuse(cold_ownership_rename_not_ready_error())
+        }
+        CarrierMultiClaimancy::NotMultiClaimant(ownership_witness) => {
+            RenameAdmission::Serve { ownership_witness }
+        }
     }
-    RenameAdmission::Serve
+}
+
+fn cold_ownership_rename_not_ready_error() -> tower_lsp_server::jsonrpc::Error {
+    tower_lsp_server::jsonrpc::Error {
+        code: tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803),
+        message: "verter: rename requires a coherent authoritative project ownership snapshot, \
+                  but none is available for this request. Retry after workspace initialization \
+                  completes; if ownership remains unavailable, reload the workspace or inspect \
+                  Verter's logs."
+            .into(),
+        data: None,
+    }
+}
+
+pub(super) fn ownership_changed_during_rename_error() -> tower_lsp_server::jsonrpc::Error {
+    tower_lsp_server::jsonrpc::Error {
+        code: tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803),
+        message: "verter: project ownership changed while rename was running. Retry after the \
+                  workspace rebuild completes; no rename edit was produced."
+            .into(),
+        data: None,
+    }
 }
 
 /// Whether the file at `canonical_id` has its MARKUP occurrences enumerated for

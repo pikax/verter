@@ -32,7 +32,73 @@ use std::sync::Arc;
 
 use verter_session::framework::descriptor::classify_carrier_companion;
 use verter_type_runtime::traits::{ConfiguredOwner, ConfiguredOwnerAuthority, ProjectOwnership};
-use verter_workspace::WorkspaceSnapshot;
+use verter_workspace::workspace_snapshot::SnapshotGeneration;
+use verter_workspace::{PublishedRoot, WorkspaceSnapshot};
+
+/// The ownership generations observed by one request.
+///
+/// This is deliberately feature-neutral: any provider-backed operation whose
+/// safety proof depends on a published ownership root can capture it before an
+/// await and validate it before consuming the provider response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnershipGenerationWitness {
+    published_root: SnapshotGeneration,
+    provider_authority: Option<SnapshotGeneration>,
+}
+
+/// Tracks the exact snapshot generation most recently handed to the provider.
+///
+/// Background initialization marks the new generation immediately before the
+/// synchronous provider-authority swap. That ordering makes the marker lead the
+/// provider by at most one call instruction: a request may conservatively refuse
+/// just before the swap, but it can never observe the provider on a newer graph
+/// while the marker still vouches for the old one.
+#[derive(Debug, Default)]
+pub(crate) struct OwnershipGenerationFence {
+    provider_authority: parking_lot::RwLock<Option<SnapshotGeneration>>,
+}
+
+impl OwnershipGenerationFence {
+    /// Begin installing `generation` as the provider's ownership authority.
+    pub(crate) fn begin_provider_install(&self, generation: SnapshotGeneration) {
+        *self.provider_authority.write() = Some(generation);
+    }
+
+    /// Capture a coherent ready-root/provider pair.
+    ///
+    /// `None` means ownership is either bootstrap-cold or currently crossing the
+    /// provider/root publication boundary. An untracked provider is allowed for
+    /// provider-free sessions and direct unit fixtures; if background init later
+    /// installs one, validation of the captured `None` witness fails.
+    pub(crate) fn capture(&self, published: &PublishedRoot) -> Option<OwnershipGenerationWitness> {
+        if !published.ownership_ready {
+            return None;
+        }
+        let provider_authority = *self.provider_authority.read();
+        if provider_authority.is_some_and(|generation| generation != published.snapshot.generation)
+        {
+            return None;
+        }
+        Some(OwnershipGenerationWitness {
+            published_root: published.snapshot.generation,
+            provider_authority,
+        })
+    }
+
+    /// Whether `witness` still names the live ready-root/provider pair.
+    pub(crate) fn validates(
+        &self,
+        witness: OwnershipGenerationWitness,
+        published: Option<&PublishedRoot>,
+    ) -> bool {
+        let Some(published) = published else {
+            return false;
+        };
+        published.ownership_ready
+            && published.snapshot.generation == witness.published_root
+            && *self.provider_authority.read() == witness.provider_authority
+    }
+}
 
 /// [`ConfiguredOwnerAuthority`] backed by the published workspace snapshot.
 pub struct SnapshotOwnerAuthority {

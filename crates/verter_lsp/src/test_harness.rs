@@ -540,7 +540,9 @@ impl TestSessionBuilder {
                     Box::new(views),
                 ));
             }
-            server.install_vfs_workspace(vfs_ws);
+            // This harness models completed `background_init`, including the
+            // host-side authority the rename admission gate reads.
+            server.swap_vfs_workspace_for_test(vfs_ws);
         }
 
         // Replicate the lifecycle from `initialized()`:

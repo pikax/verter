@@ -554,6 +554,10 @@ pub struct ServerCore {
     /// init task. Background tasks check this before committing results to discard
     /// stale work when a newer init supersedes them.
     init_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Generation fence joining the provider's configured-owner authority to the
+    /// atomically published workspace root. Provider-backed consumers capture a
+    /// witness before awaiting and revalidate it before using the response.
+    ownership_generation_fence: Arc<crate::configured_owner::OwnershipGenerationFence>,
     /// Actual MCP HTTP port (already bound). Sent to the extension during `initialized()`.
     mcp_port: Option<u16>,
     /// Selection provenance, or why no provider could be started. Sent via
@@ -1169,6 +1173,9 @@ impl VerterLanguageServer {
             completion_final_snapshot_pause: parking_lot::Mutex::new(None),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            ownership_generation_fence: Arc::new(
+                crate::configured_owner::OwnershipGenerationFence::default(),
+            ),
             mcp_port: config.mcp_port,
             type_provider_reason: config.type_provider_reason,
             type_provider_advisory: config.type_provider_advisory,
@@ -1272,6 +1279,15 @@ impl VerterLanguageServer {
         workspace: Arc<verter_workspace::FilesystemWorkspace>,
     ) {
         *self.vfs_workspace.write() = Some(workspace);
+    }
+
+    /// Install a completed production-shaped workspace publication into both
+    /// the server and its host (test harness access).
+    pub(crate) fn swap_vfs_workspace_for_test(
+        &self,
+        workspace: Arc<verter_workspace::FilesystemWorkspace>,
+    ) {
+        self.swap_vfs_workspace(workspace);
     }
 
     /// RAW (unmerged) provider code actions for a carrier URI + range + editor diagnostics — the

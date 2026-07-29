@@ -118,9 +118,10 @@ async fn fixture_for_carrier(
     std::fs::write(workspace.join("tsconfig.json"), "{}").expect("write tsconfig");
     std::fs::write(workspace.join("src").join(file_name), source).expect("write carrier");
 
-    let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
-        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
-    );
+    let vfs_workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = vfs_workspace.clone();
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
     let host_for_server = Arc::clone(&host);
     let (service, socket) = tower_lsp_server::LspService::new(move |client| {
@@ -152,6 +153,16 @@ async fn fixture_for_carrier(
         workspace_id.clone(),
         Some(format!("{workspace_id}/tsconfig.json")),
     )]);
+    let configured = vfs_workspace
+        .load_published()
+        .expect("configure_projects must publish the complete test graph");
+    let snapshot = Arc::clone(&configured.snapshot);
+    let views = crate::workspace_state::build_lsp_views(&*vfs_workspace, &snapshot, vec![]);
+    vfs_workspace.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
+        snapshot,
+        Box::new(views),
+    ));
+    server.install_vfs_workspace(vfs_workspace);
 
     let canonical_id = format!("{workspace_id}/src/{file_name}");
     let uri = crate::uri::path_to_file_uri(&canonical_id).expect("file uri");

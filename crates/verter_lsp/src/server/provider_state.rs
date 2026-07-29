@@ -654,36 +654,50 @@ impl VerterLanguageServer {
             .is_some_and(|projection| projection.is_self_file())
     }
 
-    /// Whether `uri` is a carrier owned by MULTIPLE configured projects (a genuine
-    /// tsconfig overlap resolved to a single tsgo default owner for per-file
-    /// features). A PROVIDER rename runs only within that one owner project, so a
-    /// symbol that ESCAPES the owner (exported + imported by a sibling configured
-    /// project) would rename partially and leave the symbol dangling in the
-    /// siblings. Cheaply detecting escape is not feasible without the cross-project
-    /// rename fan-out (not yet implemented), so rename fails CLOSED for this case — this
-    /// predicate is the gate. A uniquely-owned carrier (`Unique`), an unowned one
-    /// (`None`), and a non-carrier all return `false` (rename unaffected).
+    /// Rename claimancy for `uri`, preserving the authority boundary between a
+    /// published ownership graph and a transient bootstrap revision.
     ///
-    /// Gated on `ownership_ready`: a bootstrap snapshot's overlap is not yet
-    /// authoritative, so it never trips the gate.
-    pub(super) fn carrier_is_multi_claimant(&self, uri: &Uri) -> bool {
+    /// A carrier is never classified from a missing/non-authoritative snapshot
+    /// or while the root and provider generations disagree: an empty bootstrap
+    /// graph and a rebuild transition both mean "not known coherently", not "no
+    /// other claimant". Once ownership is coherent and authoritative, an
+    /// overlap is `Ready`; a unique or unowned carrier is
+    /// `NotMultiClaimant`. Non-carriers do not use this carrier-only gate.
+    pub(super) fn carrier_multi_claimancy(&self, uri: &Uri) -> CarrierMultiClaimancy {
         let host = self.documents.host();
         let canonical = crate::documents::uri_to_canonical_id(uri);
         if !verter_workspace::resolver::path_is_carrier(&canonical) {
-            return false;
+            return CarrierMultiClaimancy::NotMultiClaimant(None);
         }
         let Some(published) = host.workspace_read().published_root() else {
-            return false;
+            return CarrierMultiClaimancy::NotReady;
         };
-        if !published.ownership_ready {
-            return false;
-        }
-        matches!(
+        let Some(witness) = self.ownership_generation_fence.capture(&published) else {
+            return CarrierMultiClaimancy::NotReady;
+        };
+        if matches!(
             published
                 .snapshot
                 .configured_owner_resolution_for_file(&canonical),
             verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Ambiguous(_)
-        )
+        ) {
+            CarrierMultiClaimancy::Ready
+        } else {
+            CarrierMultiClaimancy::NotMultiClaimant(Some(witness))
+        }
+    }
+
+    /// Revalidate a request's ownership witness against both live authorities.
+    ///
+    /// The root alone is insufficient during background rebuild: the provider
+    /// authority moves first, while the previous ready root remains published.
+    pub(super) fn ownership_generation_still_current(
+        &self,
+        witness: crate::configured_owner::OwnershipGenerationWitness,
+    ) -> bool {
+        let published = self.documents.host().workspace_read().published_root();
+        self.ownership_generation_fence
+            .validates(witness, published.as_deref())
     }
 
     /// Find the Vue URI corresponding to an IDE path.
@@ -1221,6 +1235,13 @@ impl VerterLanguageServer {
                 .get(uri)
                 .is_some_and(|doc| *doc.source == *ctx.snapshot.provider_content)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CarrierMultiClaimancy {
+    NotMultiClaimant(Option<crate::configured_owner::OwnershipGenerationWitness>),
+    NotReady,
+    Ready,
 }
 
 /// The tsconfig key of the ONE configured project that owns `path`, or `None`
