@@ -883,13 +883,10 @@ export function logMark(): number {
  * The profile the runner LAUNCHED this extension host with.
  *
  * A launch configures one server. Verter's native hover lane is an
- * INITIALIZATION option, and the extension builds `initializationOptions` once
- * at activation and re-sends that frozen object on every restart
- * (`src/extension.ts`), so a running server cannot be moved onto another
- * profile — measured: after a confirmed `verter.hover.nativeSemantics: true` in
- * the extension host's configuration and a confirmed server restart, the server
- * still logged `native hover semantics: disabled (default)`. Each profile
- * therefore gets its own launch, and this value says which one is running.
+ * INITIALIZATION option, so a configuration change replaces the server with one
+ * initialized from the current settings. The runner nevertheless isolates each
+ * profile in its own launch so one suite cannot change another suite's baseline;
+ * this value says which profile the isolated launch started with.
  */
 export function launchServerProfile(): E2eServerProfile {
   const declared = readE2eEnv(E2E_SERVER_PROFILE_ENV);

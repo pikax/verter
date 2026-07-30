@@ -6,6 +6,7 @@ const RESTART_REQUIRED_SETTINGS = [
   "verter.server.logLevel",
   "verter.typeProvider",
   "verter.typescript.tsdk",
+  "verter.analysis.enabled",
   "verter.mcp.enabled",
   "verter.mcp.port",
   "verter.inlayHints.enabled",

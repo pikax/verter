@@ -29,10 +29,11 @@ describe("shouldRestartLanguageServerForConfigurationChange", () => {
     ).toBe(true);
   });
 
-  it("does not restart for unrelated settings", () => {
+  // @ai-generated - Pins analysis.enabled as init-only until the server supports live updates.
+  it("restarts for the init-only analysis setting", () => {
     expect(
       shouldRestartLanguageServerForConfigurationChange(makeEvent(["verter.analysis.enabled"])),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("restarts for init-only hover policy settings", () => {

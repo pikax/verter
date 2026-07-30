@@ -112,14 +112,11 @@ export function isE2eServerProfile(value: string | undefined): value is E2eServe
  * Suites that assert an OPT-IN surface, and the profile they need.
  *
  * A suite is the unit here because a VS Code launch configures one server, and
- * Verter's native lane is an INITIALIZATION option: the running server cannot be
- * reconfigured — `packages/vue-vscode/src/extension.ts` builds
- * `clientOptions.initializationOptions` once at activation and re-sends that same
- * frozen object on restart, so flipping the setting mid-run restarts the server
- * with the OLD options (measured: `native hover semantics: disabled (default)` on
- * every restart after a confirmed `true` in the extension host's configuration).
- * Each profile therefore gets its own launch, exactly as the editor-neutral
- * contract gives each profile its own server.
+ * Verter's native lane is an INITIALIZATION option: changing it takes effect by
+ * replacing the server, not by reconfiguring the running process. The extension
+ * rebuilds initialization options from current settings for that replacement.
+ * The E2E runner still gives each profile its own launch so suites never mutate
+ * configuration shared by unrelated cases.
  *
  * Keys are the suite path under `e2e/suite/` without the `.ts`, matching the
  * spelling in `fixtureSuiteMap.ts`.

@@ -356,8 +356,8 @@ async function main() {
     // their BASELINE is that profile; every other fixture baselines on the shipped
     // default. Individual suites may declare a different profile
     // (`lib/serverProfiles.ts`), and each distinct profile gets its OWN launch: a
-    // running server cannot be moved between them, because the extension freezes
-    // `initializationOptions` at activation and re-sends them unchanged on restart.
+    // restart can adopt current settings, but a separate launch keeps one suite's
+    // configuration changes from becoming another suite's baseline.
     // The set is derived from this fixture's suite GLOBS, not from the authored
     // suite files on disk.
     const baseServerProfile: E2eServerProfile =
