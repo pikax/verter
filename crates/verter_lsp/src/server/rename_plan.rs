@@ -53,6 +53,39 @@ pub(super) enum RenameAdmission {
     Refuse(tower_lsp_server::jsonrpc::Error),
 }
 
+pub(crate) enum SvelteRenameScriptFactState<'a> {
+    ExactSyntax(&'a verter_semantic::analysis::framework_facts::svelte::ExactSveltePropsCalls),
+    SyntaxIncomplete,
+    Unavailable,
+    NotApplicable,
+}
+
+impl<'a> SvelteRenameScriptFactState<'a> {
+    pub(crate) fn from_svelte_evidence(
+        evidence: &'a verter_session::framework::script_facts::ScriptFactEvidence<
+            verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+        >,
+    ) -> Self {
+        match evidence {
+            verter_session::framework::script_facts::ScriptFactEvidence::Exact(exact) => {
+                Self::ExactSyntax(exact.facts().syntax().props_calls())
+            }
+            verter_session::framework::script_facts::ScriptFactEvidence::Partial(partial) => {
+                match partial.exact_syntax() {
+                    Some(syntax) => Self::ExactSyntax(syntax.props_calls()),
+                    None => Self::SyntaxIncomplete,
+                }
+            }
+            verter_session::framework::script_facts::ScriptFactEvidence::Unavailable(_) => {
+                Self::Unavailable
+            }
+            verter_session::framework::script_facts::ScriptFactEvidence::NotApplicable(_) => {
+                Self::NotApplicable
+            }
+        }
+    }
+}
+
 /// The shared rename admission gate.
 ///
 /// A carrier owned by MULTIPLE configured projects resolves to a single tsgo
@@ -202,14 +235,12 @@ impl RenameTargetResolution {
             let analysis = server.documents.get_analysis(uri);
             let is_svelte = carrier_language_for(&doc.canonical_id)
                 .is_some_and(|language| language.is_svelte());
-            let svelte_script_facts = is_svelte
-                .then(|| {
-                    server
-                        .documents
-                        .host()
-                        .resolve_svelte_script_facts(&doc.canonical_id)
-                })
-                .flatten();
+            let svelte_script_facts = is_svelte.then(|| {
+                server
+                    .documents
+                    .host()
+                    .resolve_svelte_script_facts(&doc.canonical_id)
+            });
             // Post-read validation (fail closed): only an analysis proven to
             // describe THESE bytes may classify THIS cursor.
             let host_source = server.documents.host().get_source(&doc.canonical_id)?;
@@ -229,18 +260,29 @@ impl RenameTargetResolution {
                 analysis.as_ref(),
                 &doc.line_index,
             );
-            let svelte_props_call_refuses = doc
-                .line_index
-                .position_to_offset(position)
-                .is_some_and(|offset| {
-                    svelte_script_facts.as_deref().is_some_and(|facts| {
-                        svelte_props_call_requires_public_refusal_at(facts, offset)
-                    })
-                });
-            let svelte_native_edit_touches_public_key =
-                svelte_script_facts.as_deref().is_some_and(|facts| {
-                    svelte_native_edit_touches_public_key(&target, facts, &doc.line_index)
-                });
+            let svelte_script_facts_refuse = match svelte_script_facts
+                .as_ref()
+                .map(SvelteRenameScriptFactState::from_svelte_evidence)
+            {
+                Some(SvelteRenameScriptFactState::ExactSyntax(props_calls)) => {
+                    doc.line_index
+                        .position_to_offset(position)
+                        .is_some_and(|offset| {
+                            svelte_props_call_requires_public_refusal_at(props_calls, offset)
+                        })
+                        || svelte_native_edit_touches_public_key(
+                            &target,
+                            props_calls,
+                            &doc.line_index,
+                        )
+                }
+                Some(
+                    SvelteRenameScriptFactState::SyntaxIncomplete
+                    | SvelteRenameScriptFactState::Unavailable
+                    | SvelteRenameScriptFactState::NotApplicable,
+                ) => true,
+                None => false,
+            };
             // Typed public members and legacy `export let` declarations are
             // covered by the public-API projection. Untyped `$props()` roles
             // come from their exact producer-owned key/binding inventories. A
@@ -248,8 +290,7 @@ impl RenameTargetResolution {
             // span is unsafe as a whole even when the cursor names another
             // symbol, so it takes the same refusal path.
             if is_svelte
-                && (svelte_props_call_refuses
-                    || svelte_native_edit_touches_public_key
+                && (svelte_script_facts_refuse
                     || svelte_public_prop_at(
                         server,
                         &doc.canonical_id,
@@ -388,11 +429,13 @@ impl RenameTargetResolution {
 /// A public key always refuses, including a shorthand span that also appears
 /// as a local binding. A local-only binding refuses only when its call's key
 /// set is open. Positions in neither inventory are unchanged.
-fn svelte_props_call_requires_public_refusal_at(
-    facts: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
-    offset: u32,
-) -> bool {
-    facts.props_calls.iter().any(|props_call| {
+fn svelte_props_call_requires_public_refusal_at<E>(facts: &E, offset: u32) -> bool
+where
+    E: verter_semantic::analysis::framework_facts::NegativeEvidence<
+        Observation = verter_semantic::analysis::framework_facts::svelte::SveltePropsCall,
+    >,
+{
+    facts.observations().iter().any(|props_call| {
         props_call
             .public_keys
             .iter()
@@ -412,11 +455,16 @@ fn svelte_props_call_requires_public_refusal_at(
 /// unrelated symbol with the same spelling can therefore propose an edit at a
 /// public key. The producer-owned public-key spans are the safety boundary: any
 /// intersection refuses the whole rename rather than changing component API.
-fn svelte_native_edit_touches_public_key(
+fn svelte_native_edit_touches_public_key<E>(
     target: &RenameTarget,
-    facts: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    facts: &E,
     line_index: &LineIndex,
-) -> bool {
+) -> bool
+where
+    E: verter_semantic::analysis::framework_facts::NegativeEvidence<
+        Observation = verter_semantic::analysis::framework_facts::svelte::SveltePropsCall,
+    >,
+{
     if target.class != RenameTargetClass::Native {
         return false;
     }
@@ -429,7 +477,7 @@ fn svelte_native_edit_touches_public_key(
             return false;
         };
 
-        facts.props_calls.iter().any(|props_call| {
+        facts.observations().iter().any(|props_call| {
             props_call
                 .public_keys
                 .iter()

@@ -697,9 +697,8 @@ pub struct VerterHost {
     /// Host-owned framework script-fact caches — the resolved-validation half
     /// of the script-fact seam. The content-addressed candidate store + the
     /// resolved-fact store the registry's active providers write through.
-    /// Empty for every adapter in this program (no production provider
-    /// registers; the fixture provider exercises the path). See
-    /// `framework::script_facts::FrameworkScriptCaches`.
+    /// Svelte uses this path in production; partial and unavailable results are
+    /// never admitted. See `framework::script_facts::FrameworkScriptCaches`.
     ///
     /// PROVISIONAL: a fact-validated cache family OUTSIDE the single
     /// `ProjectTypeStore`, to be consolidated onto `ProjectTypeStore` at block

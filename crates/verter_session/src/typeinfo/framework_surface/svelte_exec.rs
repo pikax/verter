@@ -23,15 +23,19 @@ use std::sync::Arc;
 use verter_compiler::svelte::parser::template_ast::{
     SvelteAttributeKind, SvelteElementKind, SvelteNode,
 };
-use verter_semantic::analysis::framework_facts::svelte::{SvelteLegacyProp, SvelteScriptFacts};
+use verter_semantic::analysis::framework_facts::svelte::{
+    SvelteInstanceExport, SvelteLegacyProp, SvelteScriptFacts,
+};
 use verter_semantic::analysis::types::{
     AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     AnalyzedSlotFieldBinding, TypeResolutionSource,
 };
+use verter_type_expr::locators::AuthoredTypePayloadRef;
 use verter_type_expr::TypeExpr;
 
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 
+use crate::framework::script_facts::ScriptFactEvidence;
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
 use crate::meta_resolve::callable_view::{CallableNodeView, PositionalParamNode};
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
@@ -208,25 +212,139 @@ fn compute_svelte_surface(
     owner: &str,
     source: SvelteSurfaceSource,
 ) -> ResolvedMacroPayload {
+    if source == SvelteSurfaceSource::LegacySlotInventory {
+        return resolve_legacy_slot_inventory(ctx, owner);
+    }
     // The typed Svelte facts (provenance-validated) for every script-derived
     // family, resolved against the executor's ONE request view `ctx` (NOT
     // a second `current_store_view_for_query`). The legacy-slot family reads the
     // content-addressed parse carrier instead.
     let facts = host.resolve_svelte_script_facts_with_ctx(ctx, owner);
 
-    match source {
-        SvelteSurfaceSource::RunesProps => resolve_runes_props(ctx, owner, facts.as_deref()),
-        SvelteSurfaceSource::LegacyExportLet => resolve_legacy_export_let(facts.as_deref()),
-        SvelteSurfaceSource::Bindable => resolve_bindable(ctx, owner, facts.as_deref()),
-        SvelteSurfaceSource::SnippetProps => resolve_snippet_props(ctx, owner, facts.as_deref()),
+    let resolve = |facts: &SvelteFactObservations<'_>| match source {
+        SvelteSurfaceSource::RunesProps => resolve_runes_props(ctx, owner, Some(facts)),
+        SvelteSurfaceSource::LegacyExportLet => resolve_legacy_export_let(Some(facts)),
+        SvelteSurfaceSource::Bindable => resolve_bindable(ctx, owner, Some(facts)),
+        SvelteSurfaceSource::SnippetProps => resolve_snippet_props(ctx, owner, Some(facts)),
         SvelteSurfaceSource::LegacySlotInventory => resolve_legacy_slot_inventory(ctx, owner),
-        SvelteSurfaceSource::LegacyDispatcher => resolve_dispatcher(ctx, owner, facts.as_deref()),
+        SvelteSurfaceSource::LegacyDispatcher => resolve_dispatcher(ctx, owner, Some(facts)),
         SvelteSurfaceSource::CallbackPropEvents => {
-            resolve_callback_prop_events(ctx, owner, facts.as_deref())
+            resolve_callback_prop_events(ctx, owner, Some(facts))
         }
-        SvelteSurfaceSource::InstanceExports => {
-            resolve_instance_exports(ctx, owner, facts.as_deref())
+        SvelteSurfaceSource::InstanceExports => resolve_instance_exports(ctx, owner, Some(facts)),
+    };
+
+    match facts {
+        ScriptFactEvidence::Exact(exact) => {
+            let observations = SvelteFactObservations::exact(exact.facts());
+            resolve(&observations)
         }
+        ScriptFactEvidence::Partial(partial) => {
+            let observations =
+                SvelteFactObservations::conservative(partial.conservative_svelte_observations());
+            let outcome = resolve(&observations);
+            match partial.exact_syntax() {
+                Some(_) => match source {
+                    SvelteSurfaceSource::RunesProps
+                    | SvelteSurfaceSource::LegacyExportLet
+                    | SvelteSurfaceSource::Bindable
+                    | SvelteSurfaceSource::CallbackPropEvents
+                    | SvelteSurfaceSource::InstanceExports => outcome,
+                    SvelteSurfaceSource::SnippetProps | SvelteSurfaceSource::LegacyDispatcher => {
+                        script_fact_partial(outcome)
+                    }
+                    SvelteSurfaceSource::LegacySlotInventory => {
+                        unreachable!("legacy slots return before script-fact resolution")
+                    }
+                },
+                None => {
+                    debug_assert_ne!(source, SvelteSurfaceSource::LegacySlotInventory);
+                    script_fact_partial(outcome)
+                }
+            }
+        }
+        ScriptFactEvidence::Unavailable(_) | ScriptFactEvidence::NotApplicable(_) => {
+            script_fact_partial(ResolvedOutcome::Missing)
+        }
+    }
+}
+
+struct SvelteFactObservations<'a> {
+    props_type: Option<&'a AuthoredTypePayloadRef>,
+    prop_defaults: Vec<&'a verter_semantic::analysis::types::AnalyzedDefaultValue>,
+    bindable_members: Vec<&'a String>,
+    legacy_props: Vec<&'a SvelteLegacyProp>,
+    validated_snippet_members: Vec<&'a String>,
+    dispatcher_events: Option<&'a AuthoredTypePayloadRef>,
+    instance_exports: Vec<&'a SvelteInstanceExport>,
+}
+
+impl<'a> SvelteFactObservations<'a> {
+    fn exact(facts: &'a SvelteScriptFacts) -> Self {
+        Self {
+            props_type: facts.syntax().props_type.as_ref(),
+            prop_defaults: facts.syntax().prop_defaults.iter().collect(),
+            bindable_members: facts.syntax().bindable_members.iter().collect(),
+            legacy_props: facts.syntax().legacy_props.iter().collect(),
+            validated_snippet_members: facts
+                .resolution()
+                .validated_snippet_members
+                .iter()
+                .collect(),
+            dispatcher_events: facts.resolution().dispatcher_events.as_ref(),
+            instance_exports: facts.syntax().instance_exports.iter().collect(),
+        }
+    }
+
+    fn conservative(
+        observations: crate::framework::script_facts::ConservativeSvelteScriptObservations<'a>,
+    ) -> Self {
+        let mut facts = Self {
+            props_type: None,
+            prop_defaults: Vec::new(),
+            bindable_members: Vec::new(),
+            legacy_props: Vec::new(),
+            validated_snippet_members: Vec::new(),
+            dispatcher_events: None,
+            instance_exports: Vec::new(),
+        };
+        observations
+            .props_type()
+            .visit(|value| facts.props_type = Some(value));
+        observations
+            .prop_defaults()
+            .visit(|value| facts.prop_defaults.push(value));
+        observations
+            .bindable_members()
+            .visit(|value| facts.bindable_members.push(value));
+        observations
+            .legacy_props()
+            .visit(|value| facts.legacy_props.push(value));
+        observations
+            .validated_snippet_members()
+            .visit(|value| facts.validated_snippet_members.push(value));
+        observations
+            .dispatcher_events()
+            .visit(|value| facts.dispatcher_events = Some(value));
+        observations
+            .instance_exports()
+            .visit(|value| facts.instance_exports.push(value));
+        facts
+    }
+}
+
+fn script_fact_partial(outcome: ResolvedMacroPayload) -> ResolvedMacroPayload {
+    let value = match outcome {
+        ResolvedOutcome::Resolved(value) | ResolvedOutcome::Partial { value, .. } => value,
+        ResolvedOutcome::Unsupported { .. } | ResolvedOutcome::Missing => {
+            Arc::new(MacroSurfaceDtos::default())
+        }
+    };
+    ResolvedOutcome::Partial {
+        value,
+        diagnostics: vec![
+            "Svelte script facts were unavailable, so absence is not authoritative.".to_string(),
+        ],
     }
 }
 
@@ -329,12 +447,12 @@ fn macro_surface_shell(
 fn resolve_runes_props(
     ctx: &dyn ResolverContext,
     owner: &str,
-    facts: Option<&SvelteScriptFacts>,
+    facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
     let Some(facts) = facts else {
         return ResolvedOutcome::Missing;
     };
-    let Some(props_type) = facts.props_type.as_ref() else {
+    let Some(props_type) = facts.props_type else {
         return ResolvedOutcome::Missing;
     };
     // Navigate the props type to its one-level object surface ONCE, then derive
@@ -373,7 +491,11 @@ fn resolve_runes_props(
         props: Some(PropsSurface {
             fields,
             index_signatures: Vec::new(),
-            prop_defaults: facts.prop_defaults.to_vec(),
+            prop_defaults: facts
+                .prop_defaults
+                .iter()
+                .map(|default| (*default).clone())
+                .collect(),
             prop_origins,
         }),
         ..Default::default()
@@ -477,7 +599,7 @@ fn member_declaration_origin(
 /// PROPS from legacy `export let` props. The legacy props carry no type
 /// information at the script-fact layer, so each surfaces as an
 /// annotation-less prop (optional when it declares a default).
-fn resolve_legacy_export_let(facts: Option<&SvelteScriptFacts>) -> ResolvedMacroPayload {
+fn resolve_legacy_export_let(facts: Option<&SvelteFactObservations<'_>>) -> ResolvedMacroPayload {
     let Some(facts) = facts else {
         return ResolvedOutcome::Missing;
     };
@@ -487,7 +609,7 @@ fn resolve_legacy_export_let(facts: Option<&SvelteScriptFacts>) -> ResolvedMacro
     let fields = facts
         .legacy_props
         .iter()
-        .map(legacy_prop_field)
+        .map(|prop| legacy_prop_field(prop))
         .collect::<Vec<_>>();
     let dtos = MacroSurfaceDtos {
         props: Some(PropsSurface {
@@ -534,7 +656,7 @@ fn legacy_prop_field(
 fn resolve_bindable(
     ctx: &dyn ResolverContext,
     owner: &str,
-    facts: Option<&SvelteScriptFacts>,
+    facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
     let Some(facts) = facts else {
         return ResolvedOutcome::Missing;
@@ -546,6 +668,7 @@ fn resolve_bindable(
     let props_fields: Vec<crate::typeinfo::framework_surface::results::ResolvedPropField> = facts
         .props_type
         .as_ref()
+        .copied()
         .and_then(|props_type| navigate_param_to_object_surface(ctx, owner, props_type))
         .map(|surface| {
             props_from_typeinfo_surface(
@@ -561,10 +684,10 @@ fn resolve_bindable(
         .map(|name| {
             let prop = props_fields
                 .iter()
-                .find(|row| &row.analysis.name == name)
+                .find(|row| row.analysis.name.as_str() == name.as_str())
                 .map(|row| row.analysis.clone())
                 .unwrap_or_else(|| AnalyzedPropField {
-                    name: name.clone(),
+                    name: name.as_str().to_string(),
                     is_optional: false,
                     span: verter_span::Span::default(),
                     type_annotation: None,
@@ -581,7 +704,7 @@ fn resolve_bindable(
                     declared_in_macro_type_arg: false,
                 });
             ModelBinding {
-                name: name.clone(),
+                name: name.as_str().to_string(),
                 prop,
             }
         })
@@ -600,7 +723,7 @@ fn resolve_bindable(
 fn resolve_snippet_props(
     ctx: &dyn ResolverContext,
     owner: &str,
-    facts: Option<&SvelteScriptFacts>,
+    facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
     let Some(facts) = facts else {
         return ResolvedOutcome::Missing;
@@ -608,14 +731,19 @@ fn resolve_snippet_props(
     if facts.validated_snippet_members.is_empty() {
         return ResolvedOutcome::Missing;
     }
-    let Some(props_type) = facts.props_type.as_ref() else {
+    let Some(props_type) = facts.props_type else {
         return ResolvedOutcome::Missing;
     };
     let slots = navigate_param_to_object_surface(ctx, owner, props_type)
         .map(|surface| {
             // Retain only the snippet-validated members BEFORE the slot
             // normalizer (the other props are not slots).
-            let filtered = retain_members(&surface, &facts.validated_snippet_members);
+            let validated_snippet_members = facts
+                .validated_snippet_members
+                .iter()
+                .map(|name| (*name).clone())
+                .collect::<Vec<_>>();
+            let filtered = retain_members(&surface, &validated_snippet_members);
             // The SVELTE-SPECIFIC snippet normalizer (NOT Vue's shared
             // `slots_from_typeinfo_surface`): a Svelte `Snippet<[a, b]>`
             // contributes ALL positional parameters as ordered slot bindings,
@@ -989,9 +1117,9 @@ fn slice_attr_value(
 fn resolve_dispatcher(
     ctx: &dyn ResolverContext,
     owner: &str,
-    facts: Option<&SvelteScriptFacts>,
+    facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
-    let Some(event_map) = facts.and_then(|f| f.dispatcher_events.as_ref()) else {
+    let Some(event_map) = facts.and_then(|facts| facts.dispatcher_events) else {
         return ResolvedOutcome::Missing;
     };
     let fields = navigate_param_to_object_surface(ctx, owner, event_map)
@@ -1030,9 +1158,9 @@ fn resolve_dispatcher(
 fn resolve_callback_prop_events(
     ctx: &dyn ResolverContext,
     owner: &str,
-    facts: Option<&SvelteScriptFacts>,
+    facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
-    let Some(props_type) = facts.and_then(|f| f.props_type.as_ref()) else {
+    let Some(props_type) = facts.and_then(|facts| facts.props_type) else {
         return ResolvedOutcome::Missing;
     };
     let fields = navigate_param_to_object_surface(ctx, owner, props_type)
@@ -1328,7 +1456,7 @@ pub(crate) fn resolve_svelte_value_export_member(
 fn resolve_instance_exports(
     ctx: &dyn ResolverContext,
     owner: &str,
-    facts: Option<&SvelteScriptFacts>,
+    facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
     use crate::typeinfo::framework_surface::results::ExposeSurface;
     let Some(facts) = facts else {

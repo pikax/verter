@@ -302,15 +302,16 @@ fn userland_snippet_lookalike_is_not_classified_snippet_typed() {
     );
 
     // Drive the resolved-validation half via the host's script-facts seam: the
-    // Svelte provider rejects the userland candidate, so no resolved snippet
-    // facts are produced.
-    let facts = host.resolve_svelte_script_facts("/Userland.svelte");
+    // Svelte provider proves that the userland candidate contributes no
+    // resolved snippet facts.
+    let facts = host
+        .resolve_svelte_script_facts("/Userland.svelte")
+        .expect_exact("the userland look-alike is an exact negative");
+    let members = &facts.resolution().validated_snippet_members;
     assert!(
-        facts
-            .as_ref()
-            .is_none_or(|f| f.validated_snippet_members.is_empty()),
+        members.is_empty(),
         "a userland `Snippet` look-alike must NOT be classified snippet-typed, got {:?}",
-        facts.map(|f| f.validated_snippet_members.clone())
+        members
     );
 }
 
@@ -339,13 +340,30 @@ fn real_svelte_snippet_is_classified_snippet_typed() {
     // discriminator either way. Assert the validated set is EITHER exactly
     // `["row"]` (resolved) OR empty (unresolved) — NEVER a different member, and
     // NEVER a userland member.
-    if let Some(facts) = facts {
-        assert!(
-            facts.validated_snippet_members.is_empty()
-                || facts.validated_snippet_members.as_ref() == ["row".to_string()].as_slice(),
-            "the only validatable snippet member is `row` (or none when `svelte` did not resolve), got {:?}",
-            facts.validated_snippet_members
-        );
+    match facts {
+        crate::framework::script_facts::ScriptFactEvidence::Exact(exact) => {
+            let members = &exact.facts().resolution().validated_snippet_members;
+            assert!(
+                members.is_empty() || members.as_ref() == ["row".to_string()].as_slice(),
+                "the only exact snippet member is `row` (or none when the import resolved \
+                 conclusively elsewhere), got {members:?}"
+            );
+        }
+        crate::framework::script_facts::ScriptFactEvidence::Partial(partial) => partial
+            .conservative_svelte_observations()
+            .validated_snippet_members()
+            .visit(|member| {
+                assert_eq!(
+                    member, "row",
+                    "a partial payload may retain only the positive `row` observation"
+                );
+            }),
+        crate::framework::script_facts::ScriptFactEvidence::Unavailable(_) => {
+            panic!("the Svelte provider unexpectedly returned unavailable facts")
+        }
+        crate::framework::script_facts::ScriptFactEvidence::NotApplicable(_) => {
+            panic!("the Svelte provider unexpectedly returned not-applicable facts")
+        }
     }
 }
 
@@ -635,6 +653,33 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
     assert!(
         !code.contains("./module-props") && !code.contains("wrongOwner"),
         "the instance props reference must never resolve through the same-name module owner:\n{code}"
+    );
+}
+
+#[test]
+fn svelte_public_api_recovered_script_never_claims_exact_empty_bindings() {
+    let host = host();
+    upsert_svelte(
+        &host,
+        "/RecoveredBindings.svelte",
+        "<script lang=\"ts\">\n\
+         let { title }: { title: string } = $props();\n\
+         return;\n\
+         </script>\n",
+    );
+
+    let api = host
+        .get_public_api("/RecoveredBindings.svelte")
+        .expect("Svelte public API projection")
+        .expect("the recovered component still projects its conservative API");
+    let code = api.ts_labeled_code().as_ref();
+    assert!(
+        code.contains(",\n  string\n>;"),
+        "partial script facts must keep Svelte's permissive binding generic:\n{code}"
+    );
+    assert!(
+        !code.contains(",\n  \"\"\n>;"),
+        "only exact-empty evidence may claim that the component has no bindable props:\n{code}"
     );
 }
 
@@ -1169,8 +1214,9 @@ fn stored_macro_payload_locator_anchors_absolutize_to_the_producing_canonical() 
     let facts = crate::framework::script_facts::resolve_script_facts::<
         verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
     >(&host, registration, "/Widget.svelte")
-    .expect("the runes component resolves script facts");
+    .expect_exact("the runes component resolves script facts");
     let props_ref = facts
+        .syntax()
         .props_type
         .as_ref()
         .expect("the annotation payload ref");

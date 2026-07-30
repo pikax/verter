@@ -64,8 +64,9 @@ use crate::facts::hashing::{compute_semantic_hash, UnresolvedLens};
 use crate::facts::registry::SymbolSpace;
 
 use super::{
-    FrameworkScriptCandidates, FrameworkScriptFactPayload, ResolvedValidationCx, ScriptCandidateCx,
-    ScriptFactProvider, ScriptFactSyntaxGate,
+    FrameworkScriptCandidates, FrameworkScriptFactPayload, NegativeEvidence, ResolvedValidationCx,
+    ScriptCandidateCx, ScriptFactPartialReason, ScriptFactProvider, ScriptFactSyntaxGate,
+    ScriptFactUnavailableReason, ScriptFactValidation,
 };
 
 /// The carrier language id Svelte components classify under.
@@ -147,6 +148,41 @@ pub struct SveltePropsCall {
     /// Whether the statically enumerated public-key set is open. This is true
     /// for a top-level rest element or an undestructured whole-object binding.
     pub has_rest: bool,
+}
+
+/// The exact source-ordered `$props()` call inventory for one Svelte script.
+///
+/// The constructor is private to this producer module. This is the only Svelte
+/// props-call type implementing [`NegativeEvidence`], so an absence-sensitive
+/// consumer cannot accept partial or unavailable script facts by accident.
+#[derive(Debug, Clone, NoTypeExpr)]
+pub struct ExactSveltePropsCalls(Arc<[SveltePropsCall]>);
+
+impl ExactSveltePropsCalls {
+    fn captured(calls: Vec<SveltePropsCall>) -> Self {
+        Self(calls.into())
+    }
+
+    /// Whether the complete inventory contains no `$props()` calls.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Iterate over every call in the complete inventory.
+    pub fn iter(&self) -> std::slice::Iter<'_, SveltePropsCall> {
+        self.0.iter()
+    }
+}
+
+impl super::negative_evidence_seal::Sealed for ExactSveltePropsCalls {}
+
+impl NegativeEvidence for ExactSveltePropsCalls {
+    type Observation = SveltePropsCall;
+
+    fn observations(&self) -> &[Self::Observation] {
+        &self.0
+    }
 }
 
 /// One exact authored public prop key.
@@ -269,21 +305,6 @@ pub struct SvelteScriptCandidates {
     pub dispatcher_import_source: Option<String>,
 }
 
-impl SvelteScriptCandidates {
-    /// Whether the component carries any captured candidate.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.props.is_none()
-            && self.props_calls.is_empty()
-            && self.snippet_candidates.is_empty()
-            && self.instance_exports.is_empty()
-            && self.module_exports.is_empty()
-            && self.legacy_props.is_empty()
-            && self.dispatcher_events.is_none()
-            && self.dispatcher_import_source.is_none()
-    }
-}
-
 impl FrameworkScriptFactPayload for SvelteScriptCandidates {
     fn as_any(&self) -> &dyn Any {
         self
@@ -293,27 +314,12 @@ impl FrameworkScriptFactPayload for SvelteScriptCandidates {
     }
 }
 
-/// The Svelte resolved facts (resolved-validation output) — the full per-source
-/// inventory the typeinfo surface adapter reads, with package-provenance applied
-/// where it matters.
+/// Syntax-owned Svelte script facts.
 ///
-/// The parse-domain inventory (`props_type`, `bindable_members`, `props_calls`,
-/// `legacy_props`, `instance_exports`) passes through verbatim — those carry no
-/// package provenance. The provenance-gated members are structurally validated
-/// against the typed [`ResolvedPackage`](super::ResolvedPackage) identity
-/// (NEVER a path/name substring): `validated_snippet_members` keep only the
-/// members whose `Snippet` import resolved to the `svelte` package, and
-/// `dispatcher_events` is `Some` only when `createEventDispatcher` resolved to
-/// the `svelte` package. A userland look-alike never contributes to either.
-///
-/// The shape MIRRORS the shared persisted fact
-/// [`verter_type_expr::facts::SvelteScriptFactsFact`] (authored-type payload
-/// refs + `Arc<[…]>` lists, `NoTypeExpr`); it stays a distinct in-crate
-/// struct only because it additionally carries `prop_defaults` (source-text
-/// runtime defaults) and `props_calls` (authored key/binding geometry), both
-/// span-bearing and therefore not part of the shared span-free fact schema.
-#[derive(Debug, Clone, Default, NoTypeExpr)]
-pub struct SvelteScriptFacts {
+/// These observations require only the successfully parsed script. Import or
+/// package resolution cannot erase them.
+#[derive(Debug, Clone, NoTypeExpr)]
+pub struct SvelteScriptSyntaxFacts {
     /// The runes `$props()` authored-type payload ref (shallow-by-default —
     /// the authored payload is carried by content-free locator + structural
     /// payload hash; the session re-resolves it on demand). `None` for a
@@ -334,37 +340,68 @@ pub struct SvelteScriptFacts {
     /// span-free persisted type fact. Geometry remains per-call defensively,
     /// while the sibling type/default/bindable facts are last-wins because
     /// Svelte rejects duplicate `$props()` calls.
-    pub props_calls: Arc<[SveltePropsCall]>,
-    /// The member names whose `Snippet`-candidate import RESOLVED to the
-    /// `svelte` package — the snippet-typed props (structurally validated). A
-    /// userland look-alike never appears here.
-    pub validated_snippet_members: Arc<[String]>,
+    props_calls: ExactSveltePropsCalls,
     /// The legacy `export let` props (legacy-mode PROPS).
     pub legacy_props: Arc<[SvelteLegacyProp]>,
-    /// The `createEventDispatcher<E>()` event-map authored-type payload ref —
-    /// PRESENT only when the `createEventDispatcher` import resolved to the
-    /// `svelte` package (provenance-validated; a userland look-alike
-    /// contributes `None`).
-    pub dispatcher_events: Option<AuthoredTypePayloadRef>,
-    /// Exact syntax display of the provenance-validated dispatcher map.
-    pub dispatcher_events_display: Option<String>,
-    /// Syntactic reference inventory of the validated dispatcher map.
-    pub dispatcher_event_references: Arc<[String]>,
     /// The exported instance-script members (the EXPOSE surface).
     pub instance_exports: Arc<[SvelteInstanceExport]>,
     /// Module-script exports with exact owner-qualified local bindings.
     pub module_exports: Arc<[SvelteModuleExportFact]>,
 }
 
+impl SvelteScriptSyntaxFacts {
+    /// The exact `$props()` call inventory.
+    #[must_use]
+    pub fn props_calls(&self) -> &ExactSveltePropsCalls {
+        &self.props_calls
+    }
+}
+
+/// Resolution-owned Svelte script facts.
+///
+/// These fields depend on structural package provenance and therefore remain a
+/// distinct channel from [`SvelteScriptSyntaxFacts`].
+#[derive(Debug, Clone, Default, NoTypeExpr)]
+pub struct SvelteScriptResolutionFacts {
+    /// Members whose `Snippet` import resolved to the `svelte` package.
+    pub validated_snippet_members: Arc<[String]>,
+    /// The dispatcher event-map payload when its import resolved to `svelte`.
+    pub dispatcher_events: Option<AuthoredTypePayloadRef>,
+    /// Exact syntax display paired with [`Self::dispatcher_events`].
+    pub dispatcher_events_display: Option<String>,
+    /// Syntactic references paired with [`Self::dispatcher_events`].
+    pub dispatcher_event_references: Arc<[String]>,
+}
+
+/// The Svelte script-fact payload with syntax and resolution facts separated.
+#[derive(Debug, Clone, NoTypeExpr)]
+pub struct SvelteScriptFacts {
+    syntax: SvelteScriptSyntaxFacts,
+    resolution: SvelteScriptResolutionFacts,
+}
+
 impl SvelteScriptFacts {
+    /// Syntax-owned facts, including the exact props-call inventory.
+    #[must_use]
+    pub fn syntax(&self) -> &SvelteScriptSyntaxFacts {
+        &self.syntax
+    }
+
+    /// Resolution-owned provenance facts.
+    #[must_use]
+    pub fn resolution(&self) -> &SvelteScriptResolutionFacts {
+        &self.resolution
+    }
+
     /// Convert the resolved payload into its shared, span-free persisted fact.
     #[must_use]
     pub fn to_persisted_fact(&self) -> SvelteScriptFactsFact {
         SvelteScriptFactsFact {
-            props_type: self.props_type.clone(),
-            bindable_members: Arc::clone(&self.bindable_members),
-            validated_snippet_members: Arc::clone(&self.validated_snippet_members),
+            props_type: self.syntax.props_type.clone(),
+            bindable_members: Arc::clone(&self.syntax.bindable_members),
+            validated_snippet_members: Arc::clone(&self.resolution.validated_snippet_members),
             legacy_props: self
+                .syntax
                 .legacy_props
                 .iter()
                 .map(|prop| SvelteLegacyPropFact {
@@ -372,13 +409,14 @@ impl SvelteScriptFacts {
                     has_default: prop.has_default,
                 })
                 .collect(),
-            dispatcher_events: self.dispatcher_events.clone(),
+            dispatcher_events: self.resolution.dispatcher_events.clone(),
             instance_exports: self
+                .syntax
                 .instance_exports
                 .iter()
                 .map(|export| export.exported_name.clone())
                 .collect(),
-            module_exports: Arc::clone(&self.module_exports),
+            module_exports: Arc::clone(&self.syntax.module_exports),
         }
     }
 }
@@ -435,7 +473,10 @@ impl SvelteScriptProvider {
     /// `10` — syntax-capture and resolved facts retain per-call `$props()`
     /// public-key/local-binding spans plus top-level rest openness. Old
     /// candidate and resolved-fact keys intentionally miss.
-    pub const VERSION: u32 = 10;
+    ///
+    /// `11` — exact-empty candidates are retained and resolved facts split
+    /// syntax-owned observations from resolution-owned provenance.
+    pub const VERSION: u32 = 11;
 }
 
 impl ScriptFactProvider for SvelteScriptProvider {
@@ -451,7 +492,7 @@ impl ScriptFactProvider for SvelteScriptProvider {
         ScriptFactSyntaxGate::CarrierLanguage(LanguageId::new(SVELTE_CARRIER_LANGUAGE))
     }
 
-    fn capture(&self, cx: ScriptCandidateCx<'_>) -> Option<FrameworkScriptCandidates> {
+    fn capture(&self, cx: ScriptCandidateCx<'_>) -> FrameworkScriptCandidates {
         let (forced_runes, template_uses_host_rune) = match cx.framework_mode_hint {
             Some(super::FrameworkScriptModeHint::Svelte {
                 forced_runes,
@@ -467,19 +508,16 @@ impl ScriptFactProvider for SvelteScriptProvider {
             forced_runes,
             template_uses_host_rune,
         );
-        if candidates.is_empty() {
-            return None;
-        }
         let payload = Arc::new(candidates);
-        Some(FrameworkScriptCandidates {
+        FrameworkScriptCandidates {
             adapter_id: self.adapter_id(),
             provider_version: self.provider_version(),
             stable_hash: stable_candidate_hash(&payload),
             payload,
-        })
+        }
     }
 
-    fn absolutize_candidates(
+    fn absolutize_candidate_observations(
         &self,
         candidates: FrameworkScriptCandidates,
         canonical: &str,
@@ -511,26 +549,32 @@ impl ScriptFactProvider for SvelteScriptProvider {
             adapter_id: candidates.adapter_id,
             provider_version: candidates.provider_version,
             // REBUILT hash: the candidate hash folds the payload refs
-            // (locator anchors included), so the re-anchored payload
-            // re-hashes — the envelope never carries a hash that disagrees
-            // with its payload.
+            // (locator anchors included), so the re-anchored payload re-hashes
+            // — the envelope never carries a hash that disagrees with its
+            // payload.
             stable_hash: stable_candidate_hash(&payload),
             payload,
         }
     }
 
-    fn validate(
-        &self,
-        cx: ResolvedValidationCx<'_>,
-    ) -> Option<Arc<dyn FrameworkScriptFactPayload>> {
+    fn validate(&self, cx: ResolvedValidationCx<'_>) -> ScriptFactValidation {
         // Recover the typed candidates from the neutral envelope.
-        let candidates = cx
+        let Some(candidates) = cx
             .candidates
             .payload
-            .downcast_ref::<SvelteScriptCandidates>()?;
-        if candidates.is_empty() {
-            // Nothing captured ⇒ no resolved facts.
-            return None;
+            .downcast_ref::<SvelteScriptCandidates>()
+        else {
+            return ScriptFactValidation::Unavailable(
+                ScriptFactUnavailableReason::ProviderPayloadMismatch,
+            );
+        };
+        if candidates.props_calls.len() > 1 {
+            // Svelte rejects duplicate `$props()` calls. There is no coherent
+            // single public-props surface to validate, so this is unavailable
+            // rather than an exact empty or last-wins claim.
+            return ScriptFactValidation::Unavailable(
+                ScriptFactUnavailableReason::ValidationProducedNoFacts,
+            );
         }
 
         // A snippet-candidate member is REAL only when its import source resolved
@@ -556,7 +600,7 @@ impl ScriptFactProvider for SvelteScriptProvider {
             .then(|| candidates.dispatcher_events.clone())
             .flatten();
 
-        let facts = SvelteScriptFacts {
+        let syntax = SvelteScriptSyntaxFacts {
             props_type: candidates.props.as_ref().and_then(|p| p.props_type.clone()),
             props_type_display: candidates
                 .props
@@ -580,18 +624,8 @@ impl ScriptFactProvider for SvelteScriptProvider {
                 .map(|p| p.prop_defaults.clone())
                 .unwrap_or_default()
                 .into(),
-            props_calls: candidates.props_calls.clone().into(),
-            validated_snippet_members: validated_snippet_members.into(),
+            props_calls: ExactSveltePropsCalls::captured(candidates.props_calls.clone()),
             legacy_props: candidates.legacy_props.clone().into(),
-            dispatcher_events,
-            dispatcher_events_display: dispatcher_validated
-                .then(|| candidates.dispatcher_events_display.clone())
-                .flatten(),
-            dispatcher_event_references: if dispatcher_validated {
-                candidates.dispatcher_event_references.clone().into()
-            } else {
-                Arc::from([])
-            },
             instance_exports: candidates.instance_exports.clone().into(),
             module_exports: candidates
                 .module_exports
@@ -604,23 +638,39 @@ impl ScriptFactProvider for SvelteScriptProvider {
                 })
                 .collect(),
         };
+        let resolution = SvelteScriptResolutionFacts {
+            validated_snippet_members: validated_snippet_members.into(),
+            dispatcher_events,
+            dispatcher_events_display: dispatcher_validated
+                .then(|| candidates.dispatcher_events_display.clone())
+                .flatten(),
+            dispatcher_event_references: if dispatcher_validated {
+                candidates.dispatcher_event_references.clone().into()
+            } else {
+                Arc::from([])
+            },
+        };
+        let facts = Arc::new(SvelteScriptFacts { syntax, resolution });
 
-        // The honest answer: emit facts whenever the component carries ANY
-        // resolved-surface-relevant inventory. A pure-markup component with no
-        // props / exports / dispatcher / snippets produces no facts (the synth
-        // still synthesises its empty `$props`).
-        if facts.props_type.is_none()
-            && facts.bindable_members.is_empty()
-            && facts.props_calls.is_empty()
-            && facts.validated_snippet_members.is_empty()
-            && facts.legacy_props.is_empty()
-            && facts.dispatcher_events.is_none()
-            && facts.instance_exports.is_empty()
-            && facts.module_exports.is_empty()
-        {
-            return None;
+        let unresolved_provenance = candidates
+            .snippet_candidates
+            .iter()
+            .map(|candidate| candidate.import_source.as_str())
+            .chain(candidates.dispatcher_import_source.as_deref())
+            .any(|specifier| {
+                cx.resolved_import_targets
+                    .iter()
+                    .find(|target| target.specifier == specifier)
+                    .is_none_or(|target| target.resolved_canonical.is_none())
+            });
+        if unresolved_provenance {
+            ScriptFactValidation::Partial {
+                payload: facts,
+                reason: ScriptFactPartialReason::UnresolvedImportProvenance,
+            }
+        } else {
+            ScriptFactValidation::Exact(facts)
         }
-        Some(Arc::new(facts))
     }
 }
 

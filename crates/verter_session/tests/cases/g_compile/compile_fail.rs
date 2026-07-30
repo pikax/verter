@@ -15,15 +15,13 @@
 //! the final state, not a pre/post discrimination.
 
 // trybuild spawns a full `cargo build` of the fixture crate (linking
-// `verter_session`), which dominates this test's ~100s runtime. Every fixture
-// here is `#[ignore]`d unless the `compile-fail` feature is on, and that
-// feature is NOT wired into the default gate (`node scripts/gate.mjs`) or any
-// CI workflow — run it LOCALLY with
+// `verter_session`), which dominates this test's ~100s cold runtime. Most
+// fixtures here are `#[ignore]`d unless the `compile-fail` feature is on; run
+// the full suite locally with
 // `cargo nextest run -p verter_session --features compile-fail`. The
-// underlying constraint is also enforced structurally by the normal build
-// (a private/`pub(crate)` accessor called from an external unit fails the
-// ordinary compile), so this fixture is a belt-and-braces assertion, not the
-// sole rail.
+// combined hot-materialize/script-fact evidence rail is deliberately always-on
+// because those fixtures are primary structural enforcement in both
+// default canonical surfaces.
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
@@ -259,29 +257,42 @@ fn member_role_stamps_are_not_mintable_without_a_witness() {
 }
 
 /// ALWAYS-ON structural-rail smoke — the load-bearing proof that the
-/// hot-materialize STRUCTURAL rails reject their regression shapes in the
-/// DEFAULT gate (no feature flag; the full compile-fail suite above stays
-/// feature-gated as-is). Scoped to exactly the hot-materialize regressions,
-/// reusing the existing fixtures:
+/// hot-materialize and script-fact evidence rails reject their regression
+/// shapes in the DEFAULT gate (no feature flag; the full compile-fail suite
+/// above stays feature-gated as-is). One `TestCases` invocation shares the
+/// expensive fixture dependency build across both focused rails.
 ///
 /// 1. a carrier owning a DIRECT `TypeExpr` field cannot derive `NoTypeExpr`;
 /// 2. a carrier owning an ALIASED `TypeExpr` field (type-alias laundering)
 ///    cannot derive `NoTypeExpr`;
 /// 3. an out-of-crate `impl OutputProjector` fails the seal (the trait is not
-///    even nameable outside `verter_session`).
+///    even nameable outside `verter_session`);
+/// 4. partial script facts expose only positive/conservative observations, with
+///    exact syntax available solely through the separately proven facet;
+/// 5. unavailable script facts cannot be constructed, iterated, dereferenced,
+///    or passed to a negative-evidence API.
 ///
 /// The compile-fail fixture IS the discrimination: if a rail went hollow (the
-/// derive stopped recursing into fields, the alias resolution broke, the seal
-/// visibility widened), the fixture would COMPILE and trybuild would fail this
-/// test. Together with the in-memory scanner revert-probe
-/// (`hot_materialize_scanner_flags_in_memory_injected_offender`) this pins both
-/// hot-materialize rails as live in every default-gate run.
+/// derive stopped recursing into fields, alias resolution broke, seal
+/// visibility widened, or degraded script facts regained exact-looking
+/// access), the fixture would COMPILE and trybuild would fail this test.
+/// Together with the in-memory scanner revert-probe
+/// (`hot_materialize_scanner_flags_in_memory_injected_offender`) this pins the
+/// focused hot-materialize and script-fact rails as live in every default-gate
+/// run.
 #[test]
-fn hot_materialize_structural_rails_smoke() {
+fn hot_materialize_and_script_fact_structural_rails_smoke() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/no_typeexpr_direct_field.rs");
     t.compile_fail("tests/cases/compile-fail/no_typeexpr_aliased_field.rs");
     t.compile_fail("tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs");
+    t.compile_fail("tests/cases/compile-fail/script_fact_partial_has_no_payload_escape.rs");
+    t.compile_fail("tests/cases/compile-fail/script_fact_partial_conservative_not_negative.rs");
+    t.pass("tests/cases/compile-fail/script_fact_partial_exact_syntax.rs");
+    t.compile_fail("tests/cases/compile-fail/script_fact_unavailable_not_constructible.rs");
+    t.compile_fail("tests/cases/compile-fail/script_fact_unavailable_no_negative_evidence.rs");
+    t.compile_fail("tests/cases/compile-fail/script_fact_unavailable_not_iterable.rs");
+    t.compile_fail("tests/cases/compile-fail/script_fact_unavailable_not_deref.rs");
 }
 
 /// The sealed `InstantiateBodySource` construction: the source-kind

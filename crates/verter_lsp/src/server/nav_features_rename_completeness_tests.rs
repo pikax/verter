@@ -436,6 +436,132 @@ async fn svelte_untyped_props_shorthand_refuses_before_provider_rename() {
     unaffected.shutdown().await;
 }
 
+/// Source and native analysis are both available, but duplicate `$props()`
+/// calls make the provider's resolved validation unavailable. The rename
+/// consumer must refuse the whole file instead of treating unavailable facts
+/// as an exact empty inventory and skipping the public-prop guards.
+#[tokio::test]
+async fn svelte_rename_refuses_when_script_fact_validation_is_unavailable() {
+    const SOURCE: &str = "<script lang=\"ts\">\nlet { first } = $props();\nlet { second } = $props();\nconst ordinary = 1;\nconsole.log(ordinary);\n</script>\n";
+    let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
+    let f = fixture_for_carrier(
+        SOURCE,
+        Some(provider.clone()),
+        crate::TypeProviderKind::Tsgo,
+        "UnavailableFacts.svelte",
+        "svelte",
+    )
+    .await;
+    let position = position_of(SOURCE, "const ordinary", "const ".len());
+    let before = rename_query_count(&provider);
+
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, position)
+            .await
+            .is_none(),
+        "prepare must not offer a rename when script-fact validation is unavailable"
+    );
+    let error = rename_result_at(f.server(), &f.uri, position, "renamed")
+        .await
+        .expect_err("unavailable script facts must fail closed");
+    assert_public_prop_refusal(&error);
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "the refusal must happen before provider rename"
+    );
+    f.shutdown().await;
+}
+
+#[test]
+fn svelte_rename_script_fact_state_preserves_evidence_distinctions() {
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+
+    fn inspect(
+        canonical: &str,
+        source: &str,
+        language: FileLanguage,
+        assertion: impl FnOnce(crate::server::rename_plan::SvelteRenameScriptFactState<'_>),
+    ) {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: canonical.to_string(),
+                source: Arc::from(source),
+                file_language: language,
+                aliases: Vec::new(),
+            })
+            .expect("upsert script-fact state fixture");
+        let evidence = host.resolve_svelte_script_facts(canonical);
+        let state = crate::server::rename_plan::SvelteRenameScriptFactState::from_svelte_evidence(
+            &evidence,
+        );
+        assertion(state);
+    }
+
+    inspect(
+        "/ExactEmpty.svelte",
+        "<script>const ordinary = 1;</script>",
+        FileLanguage::svelte(),
+        |state| match state {
+            crate::server::rename_plan::SvelteRenameScriptFactState::ExactSyntax(calls) => {
+                assert!(calls.is_empty(), "exact-empty remains authoritative");
+            }
+            _ => panic!("exact-empty must retain exact syntax authority"),
+        },
+    );
+    inspect(
+        "/ResolutionPartial.svelte",
+        "<script lang=\"ts\">import type { Snippet } from 'svelte';\n\
+         let { row }: { row: Snippet } = $props();</script>",
+        FileLanguage::svelte(),
+        |state| match state {
+            crate::server::rename_plan::SvelteRenameScriptFactState::ExactSyntax(calls) => {
+                assert_eq!(
+                    calls.iter().count(),
+                    1,
+                    "resolution partiality retains exact syntax authority"
+                );
+            }
+            _ => panic!("resolution-only partiality must retain exact syntax"),
+        },
+    );
+    inspect(
+        "/SyntaxPartial.svelte",
+        "<script lang=\"ts\">let { row } = $props(); return;</script>",
+        FileLanguage::svelte(),
+        |state| {
+            assert!(matches!(
+                state,
+                crate::server::rename_plan::SvelteRenameScriptFactState::SyntaxIncomplete
+            ))
+        },
+    );
+    inspect(
+        "/Unavailable.svelte",
+        "<script>let { first } = $props(); let { second } = $props();</script>",
+        FileLanguage::svelte(),
+        |state| {
+            assert!(matches!(
+                state,
+                crate::server::rename_plan::SvelteRenameScriptFactState::Unavailable
+            ))
+        },
+    );
+    inspect(
+        "/NotApplicable.vue",
+        "<script setup>const ordinary = 1;</script>",
+        FileLanguage::vue(),
+        |state| {
+            assert!(matches!(
+                state,
+                crate::server::rename_plan::SvelteRenameScriptFactState::NotApplicable
+            ))
+        },
+    );
+}
+
 /// An aliased `$props()` entry has two distinct exact spans. The public key
 /// refuses, while the closed-call local alias remains an ordinary local rename.
 #[tokio::test]

@@ -33,11 +33,12 @@ filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_car
 test-group = 'shared-provider-live'
 
 # ── trybuild compile-fail tests: a real `cargo` build, not a unit test ───────
-# `hot_materialize_structural_rails_smoke` is the always-on structural-rail
-# smoke. trybuild compiles its three fixtures by SPAWNING cargo against a
-# generated crate in its own `target/tests/trybuild` directory, which shares
-# nothing with the main build, so a cold run compiles verter_session's entire
-# ~233-crate dependency closure before the first fixture is even checked.
+# `hot_materialize_and_script_fact_structural_rails_smoke` is the combined
+# always-on structural-rail smoke. One trybuild invocation compiles all focused
+# fixtures by SPAWNING cargo against a generated crate in its own
+# `target/tests/trybuild` directory, which shares nothing with the main build,
+# so a cold run compiles verter_session's entire ~233-crate dependency closure
+# before the first fixture is even checked.
 #
 # Measured on a 4-job Linux build: 83.5s cold, 1.4s warm. CI is always cold
 # (the trybuild target dir is not part of the cached `target` layout) and runs

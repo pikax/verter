@@ -805,8 +805,7 @@ impl VerterHost {
     }
 
     /// The framework script-fact caches — the resolved-validation half's
-    /// content-addressed candidate store + resolved-fact store. Empty for every
-    /// adapter in this program (no production provider registers).
+    /// content-addressed candidate store + exact-only resolved-fact store.
     pub(crate) fn framework_script_caches(
         &self,
     ) -> &crate::framework::script_facts::FrameworkScriptCaches {
