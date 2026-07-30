@@ -182,12 +182,12 @@ impl VerterLanguageServer {
             self.publish_full_diagnostics(uri).await;
             return;
         }
-        let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), uri);
+        let target_identity = crate::audit_harness::target_identity_for_uri(&self.documents, uri);
         let uri_for_body = uri.clone();
         let _ = crate::audit_harness::run_with_audit::<usize, _, _>(
             &host,
             verter_audit::payloads::tags::LspMethodTag::Diagnostics,
-            canonical_id,
+            target_identity,
             None,
             async move {
                 self.publish_full_diagnostics(&uri_for_body).await;

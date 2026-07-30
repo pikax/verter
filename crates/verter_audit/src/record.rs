@@ -24,6 +24,67 @@ use crate::waits::WaitAudit;
 /// `verter_session::types::Hash16` re-exports this alias.
 pub type Hash16 = [u8; 16];
 
+/// Identity of the single document targeted by an audit record.
+///
+/// The variants distinguish the three states that the legacy
+/// [`RequestAuditRecord::canonical_id`] string cannot represent:
+///
+/// - [`Self::RegisteredCanonical`] carries the production registry's exact
+///   canonical or encoded-virtual identity.
+/// - [`Self::UnregisteredUri`] carries the request's raw URI when the document
+///   has not entered the registry yet.
+/// - [`Self::NotApplicable`] is reserved for request kinds that genuinely do
+///   not have one document target.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
+#[ts(export_to = "audit.generated.ts")]
+#[serde(tag = "kind", content = "value")]
+pub enum RequestTargetIdentity {
+    /// Exact canonical identity stored by the production document registry.
+    RegisteredCanonical(String),
+    /// Raw request URI for a document that is not registered yet.
+    UnregisteredUri(String),
+    /// The request kind has no single document target.
+    NotApplicable,
+}
+
+impl RequestTargetIdentity {
+    /// Construct a registered target without interpreting the canonical value
+    /// as a sentinel.
+    #[must_use]
+    pub fn registered(canonical_id: impl Into<String>) -> Self {
+        Self::RegisteredCanonical(canonical_id.into())
+    }
+
+    /// Return the exact registered canonical identity, when one exists.
+    #[must_use]
+    pub fn registered_canonical(&self) -> Option<&str> {
+        match self {
+            Self::RegisteredCanonical(canonical_id) => Some(canonical_id),
+            Self::UnregisteredUri(_) | Self::NotApplicable => None,
+        }
+    }
+
+    /// Return the raw unregistered request URI, when one exists.
+    #[must_use]
+    pub fn unregistered_uri(&self) -> Option<&str> {
+        match self {
+            Self::UnregisteredUri(uri) => Some(uri),
+            Self::RegisteredCanonical(_) | Self::NotApplicable => None,
+        }
+    }
+
+    /// Project the tagged identity onto the legacy `canonical_id` field.
+    ///
+    /// Only a registered canonical has a legacy representation. Both an
+    /// unregistered URI and a request with no single target project to the
+    /// historical empty string; consumers that need correlation must read the
+    /// tagged identity instead.
+    #[must_use]
+    pub fn legacy_canonical_id(&self) -> &str {
+        self.registered_canonical().unwrap_or_default()
+    }
+}
+
 /// Walker depth cap shared by every depth-sensitive consumer.
 ///
 /// Mirrors `verter_session::component_meta_audit::assertions::WALKER_DEPTH_CAP`
@@ -108,10 +169,24 @@ pub struct RequestAuditRecord {
     #[serde(with = "u64_as_decimal_string")]
     #[ts(type = "string")]
     pub request_id: u64,
-    /// Canonical file id the request targeted. Empty allowed for
-    /// kinds that do not have a single canonical (e.g. some MCP
-    /// tool calls).
+    /// Legacy canonical-id projection retained for wire compatibility.
+    ///
+    /// This is the registered canonical value when
+    /// [`Self::target_identity`] is
+    /// `Some(RequestTargetIdentity::RegisteredCanonical(_))`, otherwise the
+    /// empty string. New consumers must use [`Self::target_identity`] so an
+    /// unregistered URI cannot collide with a request that has no single
+    /// target.
     pub canonical_id: String,
+    /// Tagged single-target identity.
+    ///
+    /// New producers always emit `Some`. `None` is reserved for deserializing
+    /// audit records emitted before this additive field existed; it is not an
+    /// identity state and must not be treated as
+    /// [`RequestTargetIdentity::NotApplicable`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target_identity: Option<RequestTargetIdentity>,
     /// Discriminant identifying which `RequestKind` this record is
     /// for. Producers populate the matching variant in
     /// [`Self::kind_payload`].

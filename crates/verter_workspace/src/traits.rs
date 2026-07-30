@@ -6,7 +6,7 @@ use verter_audit::origin_graph::VfsLayer;
 use verter_audit::payloads::WorkspacePayload;
 use verter_audit::{
     RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit, RequestStoreAudit,
-    RequestTimingAudit, WorkspaceOp,
+    RequestTargetIdentity, RequestTimingAudit, WorkspaceOp,
 };
 
 use verter_scheduler::invalidation::Hash16;
@@ -708,10 +708,18 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// visible when the trait method runs.
     fn audit_op(&self, op: WorkspaceOp) -> RequestAuditRecord {
         let request_id = verter_scheduler::request_context::current_request_id().unwrap_or(0);
-        let canonical_id = match &op {
-            WorkspaceOp::AuditResolve { from, .. } => from.clone(),
-            WorkspaceOp::DepGraphTraverse { root } => root.clone(),
-            WorkspaceOp::ResolverWalk { .. } => String::new(),
+        let (canonical_id, target_identity) = match &op {
+            WorkspaceOp::AuditResolve { from, .. } => (
+                from.clone(),
+                RequestTargetIdentity::registered(from.clone()),
+            ),
+            WorkspaceOp::DepGraphTraverse { root } => (
+                root.clone(),
+                RequestTargetIdentity::registered(root.clone()),
+            ),
+            WorkspaceOp::ResolverWalk { .. } => {
+                (String::new(), RequestTargetIdentity::NotApplicable)
+            }
         };
 
         let start = std::time::Instant::now();
@@ -785,6 +793,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
         RequestAuditRecord {
             request_id,
             canonical_id,
+            target_identity: Some(target_identity),
             kind: RequestKind::Workspace { op },
             parent_request_id: None,
             from_cache: false,

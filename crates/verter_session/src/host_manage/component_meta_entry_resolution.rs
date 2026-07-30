@@ -727,6 +727,7 @@ impl VerterHost {
             let synthesized = crate::component_meta_audit::RequestAuditRecord {
                 request_id,
                 canonical_id: canonical.to_string(),
+                target_identity: Some(verter_audit::RequestTargetIdentity::registered(canonical)),
                 kind: crate::component_meta_audit::RequestKind::ComponentMeta,
                 parent_request_id,
                 timings: crate::component_meta_audit::RequestTimingAudit::default(),

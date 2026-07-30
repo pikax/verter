@@ -22,7 +22,10 @@ async fn diagnostics_audit_records_num_diagnostics() {
 
     // The session API mirrors what `publish_full_diagnostics_with_audit`
     // emits internally — bind a known diagnostics count and finalize.
-    let session = host.lsp_audit_begin(LspMethodTag::Diagnostics, "/diag.vue");
+    let session = host.lsp_audit_begin(
+        LspMethodTag::Diagnostics,
+        verter_audit::RequestTargetIdentity::RegisteredCanonical("/diag.vue".to_string()),
+    );
     let request_id = session
         .request_id()
         .expect("Active session for Diagnostics");
@@ -64,7 +67,7 @@ async fn completion_audit_records_num_completion_items() {
     let result = audit_harness::run_with_audit::<usize, _, _>(
         &host,
         LspMethodTag::Completion,
-        "/comp.vue".to_string(),
+        verter_audit::RequestTargetIdentity::RegisteredCanonical("/comp.vue".to_string()),
         Some(tower_lsp_server::ls_types::Position {
             line: 0,
             character: 0,

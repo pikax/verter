@@ -97,9 +97,10 @@ impl VerterHost {
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
-        // Best-effort canonical id for the audit record (the selector may be
-        // absent on a malformed envelope).
-        let canonical_for_audit = framework_selector_canonical(&envelope);
+        // Best-effort target for the audit record. A malformed envelope with
+        // no selector or an empty selector canonical has no applicable
+        // document target.
+        let (canonical_for_audit, target_identity) = framework_selector_target(&envelope);
         let ctx = RequestContext::with_kind_timing_and_projection_budget(
             request_id,
             Arc::<str>::from(canonical_for_audit.as_str()),
@@ -139,6 +140,7 @@ impl VerterHost {
             let record = noop_framework_record(
                 request_id,
                 &canonical_for_audit,
+                target_identity.clone(),
                 ctx.parent_request_id,
                 ctx.trace_id.clone(),
                 state,
@@ -172,6 +174,7 @@ impl VerterHost {
 
         let record = RequestAuditRecord {
             request_id,
+            target_identity: Some(target_identity),
             canonical_id: canonical_for_audit,
             kind: RequestKind::TypeInfoGraph,
             parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
@@ -749,19 +752,34 @@ fn fold_requested_slot(
     }
 }
 
-/// The canonical id the audit record uses, best-effort from the envelope's
-/// framework selector. Returns an empty string when the envelope carries no
-/// framework selector (a malformed envelope).
-fn framework_selector_canonical(envelope: &TypeInfoGraphRequest) -> String {
+/// The audit target, best-effort from the envelope's framework selector.
+///
+/// A missing selector or empty selector canonical is a malformed request with
+/// no document target, so it uses `NotApplicable` explicitly.
+fn framework_selector_target(
+    envelope: &TypeInfoGraphRequest,
+) -> (String, verter_audit::RequestTargetIdentity) {
     match &envelope.payload {
         Some(verter_protocol::verter::v1::type_info_graph_request::Payload::FrameworkSurface(
             r,
-        )) => r
-            .selector
-            .as_ref()
-            .map(|s| s.canonical_id.clone())
-            .unwrap_or_default(),
-        _ => String::new(),
+        )) => match &r.selector {
+            Some(selector) if selector.canonical_id.is_empty() => (
+                String::new(),
+                verter_audit::RequestTargetIdentity::NotApplicable,
+            ),
+            Some(selector) => (
+                selector.canonical_id.clone(),
+                verter_audit::RequestTargetIdentity::registered(selector.canonical_id.clone()),
+            ),
+            None => (
+                String::new(),
+                verter_audit::RequestTargetIdentity::NotApplicable,
+            ),
+        },
+        _ => (
+            String::new(),
+            verter_audit::RequestTargetIdentity::NotApplicable,
+        ),
     }
 }
 
@@ -864,6 +882,7 @@ fn audited_from_outcome(
 fn noop_framework_record(
     request_id: u64,
     canonical_id: &str,
+    target_identity: verter_audit::RequestTargetIdentity,
     parent_request_id: Option<u64>,
     trace_id: String,
     state: verter_audit::AuditCaptureState,
@@ -872,6 +891,7 @@ fn noop_framework_record(
     RequestAuditRecord {
         request_id,
         canonical_id: canonical_id.to_string(),
+        target_identity: Some(target_identity),
         kind: RequestKind::TypeInfoGraph,
         parent_request_id: parent_request_id.map(|id| id.to_string()),
         from_cache: false,

@@ -15,7 +15,7 @@ Audit state is split between a leaf substrate crate (`verter_audit`) and the ses
 
 | Layer | Crate | Owns |
 | --- | --- | --- |
-| **Substrate** (DTOs + observer trait) | `verter_audit` | `RequestAuditRecord`, `RequestKind`, `RequestKindPayload`, per-kind payload structs, `AuditedResult<T, E>` (audit-bearing execution carrier), `AuditObserver` trait, `current_observer()` TLS accessor, `NoOpObserver`, `AuditConfig` + `AuditConsumerFilter`, the `StructuredAuditEvent` enum + variant payloads (in `verter_audit::origin_graph`), `AuditEvent` counter hook, `BatchAuditAggregator` + `AuditRecordSource`, `IncidentalFields` masking trait, `WALKER_DEPTH_CAP` |
+| **Substrate** (DTOs + observer trait) | `verter_audit` | `RequestAuditRecord`, `RequestTargetIdentity`, `RequestKind`, `RequestKindPayload`, per-kind payload structs, `AuditedResult<T, E>` (audit-bearing execution carrier), `AuditObserver` trait, `current_observer()` TLS accessor, `NoOpObserver`, `AuditConfig` + `AuditConsumerFilter`, the `StructuredAuditEvent` enum + variant payloads (in `verter_audit::origin_graph`), `AuditEvent` counter hook, `BatchAuditAggregator` + `AuditRecordSource`, `IncidentalFields` masking trait, `WALKER_DEPTH_CAP` |
 | **Session** (lifecycle + runtime) | `verter_session` | `HostAuditRuntime`, `AuditRequestRegistration::{Active, Noop}`, `AuditRecordsStore`, `RequestContext` (implements `AuditObserver`), `RequestContextGuard`, peak-RSS sampler thread, the per-request accumulator + footprint miner (audit endpoints `why_loaded` / `why_instantiated` read from the accumulator), `LspAuditSession`, audited entry-points (`compile_with_audit`, `analyze_with_audit`, `resolve_type_with_audit`, `audit_workspace_op`, `audit_mcp_tool_call`, `get_component_meta_with_resolution`) |
 
 Isolation enforced by: `verter_audit_no_upward_deps` guard (rejects any `verter_*` dep in `verter_audit/Cargo.toml` other than `verter_span`) and `audit_substrate_isolation` guard (rejects any `use verter_*` under `crates/verter_audit/src/` other than `verter_span`).
@@ -27,7 +27,8 @@ Top-level record (`crates/verter_audit/src/record.rs`):
 | Field | Type | Description |
 | --- | --- | --- |
 | `request_id` | `u64` (decimal-string transport) | Monotonic id stamped at the public entry-point. Unique per audited request |
-| `canonical_id` | `String` | Canonical file id targeted. Empty for kinds without a single canonical (some MCP tools) |
+| `canonical_id` | `String` | Legacy compatibility projection: exact registered canonical, otherwise empty |
+| `target_identity` | `Option<RequestTargetIdentity>` | Additive tagged identity: `RegisteredCanonical(String)`, `UnregisteredUri(String)`, or `NotApplicable`. New producers always emit `Some`; `None` is reserved for older serialized records |
 | `kind` | `RequestKind` | Discriminant naming the producer surface |
 | `parent_request_id` | `Option<String>` | Correlation id for nested audited requests (sniffed from scheduler-side TLS slot at construction) |
 | `from_cache` | `bool` | `true` when satisfied from warm result cache |
@@ -104,18 +105,20 @@ Every public audited entry-point follows the same lifecycle: stamp a request id,
 
 ### LSP
 
-`verter_lsp::audit_harness::run_with_audit(host, method, canonical_id, position, body, populate)` wraps each LSP handler future in:
+`verter_lsp::audit_harness::run_with_audit(host, method, target_identity, position, body, populate)` wraps each LSP handler future in:
 
-1. An `LspAuditSession` keyed by `LspMethodTag` and the canonical (constructed via `VerterHost::lsp_audit_begin`).
+1. An `LspAuditSession` keyed by `LspMethodTag` and `RequestTargetIdentity` (constructed via `VerterHost::lsp_audit_begin`). Registered URIs use the registry's exact stored identity; request-before-registration uses the raw URI; `NotApplicable` is reserved for operations with no single document target.
 2. The same explicit `request_deadlines` policy used when audit is disabled. Production defaults every request deadline to zero (unbounded); audit never adds a feature/provider timeout.
 3. `finalize_ok(payload)` on success or RPC error. `audit_supersede` is an observational latency SLO only: exceeding it emits telemetry but does not cancel or alter the response. Explicit client cancellation may still finalize a session with `finalize_cancelled()` through the cancellation lifecycle.
 4. Optional drain to `VERTER_LSP_AUDIT_TRACE_OUT` (JSON-lines append, configurable via env var).
 
 Audit-disabled fast path runs the body under the identical explicit request-deadline policy without registration cost. The audit-on and audit-off paths are therefore semantically equivalent.
 
+Position-bound LSP payloads carry the same additive tagged identity in `PositionInfo::target_identity`. `PositionInfo::canonical_id` remains the legacy projection; an unregistered URI never becomes `NotApplicable`.
+
 ### MCP
 
-`VerterHost::audit_mcp_tool_call(tool_name, canonical_id, args_size_bytes, f) -> (T, Option<RequestAuditRecord>)` wraps a closure `FnOnce(&Arc<Self>) -> McpToolOutcome<T>` under audit. `McpToolOutcome { value, result_size_bytes, error }` carries the two facts the wrapper cannot infer (response size and optional error message). Sub-requests inherit the MCP request's id as `parent_request_id` via the scheduler-side TLS slot.
+`VerterHost::audit_mcp_tool_call(tool_name, canonical_id, args_size_bytes, f) -> (T, Option<RequestAuditRecord>)` wraps a closure `FnOnce(&Arc<Self>) -> McpToolOutcome<T>` under audit. `McpToolOutcome { value, result_size_bytes, error }` carries the two facts the wrapper cannot infer (response size and optional error message). A non-empty `canonical_id` is tagged `RegisteredCanonical`; an empty value represents a tool with no single file target and is tagged `NotApplicable` while the retained legacy field stays empty. Sub-requests inherit the MCP request's id as `parent_request_id` via the scheduler-side TLS slot.
 
 ## `AuditRequestRegistration` Lifecycle
 
@@ -238,7 +241,7 @@ trait AuditRecordSource {
 }
 ```
 
-`AuditRecordsStore` implements `AuditRecordSource`; non-destructive iteration exposes each record with its insertion `Instant`. `BatchAuditAggregator::summarize(since)` partitions by `RequestKind`, accumulates total duration, total bytes parsed, `from_cache_count`, and `cache_hit_rate`, and tracks the top-`SLOWEST_RECORD_LIMIT` (= 5) slowest records as `SlowRecordSummary` entries. Empty sources yield a zeroed payload with no division-by-zero on `cache_hit_rate`.
+`AuditRecordsStore` implements `AuditRecordSource`; non-destructive iteration exposes each record with its insertion `Instant`. `BatchAuditAggregator::summarize(since)` partitions by `RequestKind`, accumulates total duration, total bytes parsed, `from_cache_count`, and `cache_hit_rate`, and tracks the top-`SLOWEST_RECORD_LIMIT` (= 5) slowest records as `SlowRecordSummary` entries. Each slow summary carries the additive `target_identity` alongside the retained legacy `canonical_id`; CLI rendering reads the tag and falls back to the legacy field only when the source record predates the tag. Empty sources yield a zeroed payload with no division-by-zero on `cache_hit_rate`.
 
 `since` filters records inserted strictly after the supplied `Instant`. Bundler integrations call `summarize(Some(last_summary_instant))` on every flush so each batch reports only work since the last call.
 
@@ -255,7 +258,7 @@ The `wave_3_entry_points_propagate_tls` guard pins the `(entry_point_symbol, pai
 | File | Role |
 | --- | --- |
 | `crates/verter_audit/src/lib.rs` | Substrate root + re-exports |
-| `crates/verter_audit/src/record.rs` | `RequestAuditRecord`, `RequestKind`, `RequestKindPayload`, `IncidentalFields` |
+| `crates/verter_audit/src/record.rs` | `RequestAuditRecord`, `RequestTargetIdentity`, `RequestKind`, `RequestKindPayload`, `IncidentalFields` |
 | `crates/verter_audit/src/observer.rs` | `AuditObserver` trait, `current_observer()`, `install_observer` guard |
 | `crates/verter_audit/src/noop.rs` | `NoOpObserver`, `install_noop_observer()` |
 | `crates/verter_audit/src/config.rs` | `AuditConfig`, `AuditConsumerFilter`, `KindBit` |

@@ -154,6 +154,9 @@ mod tests {
         RequestAuditRecord {
             request_id,
             canonical_id: "/sample.vue".to_string(),
+            target_identity: Some(crate::RequestTargetIdentity::RegisteredCanonical(
+                "/sample.vue".to_string(),
+            )),
             kind: RequestKind::TypeInfoGraph,
             parent_request_id: None,
             from_cache: false,
@@ -168,6 +171,41 @@ mod tests {
             capture_state: crate::record::AuditCaptureState::ActiveStored,
             trace_id: String::new(),
         }
+    }
+
+    #[test]
+    fn additive_target_identity_absence_stays_schema_absence() {
+        let mut value =
+            serde_json::to_value(sample_record(10)).expect("sample audit record must serialize");
+        value
+            .as_object_mut()
+            .expect("audit record must serialize as an object")
+            .remove("target_identity");
+
+        let legacy_record: RequestAuditRecord =
+            serde_json::from_value(value).expect("legacy record without additive field must load");
+        assert_eq!(legacy_record.target_identity, None);
+        let emitted =
+            serde_json::to_value(legacy_record).expect("legacy audit record must re-serialize");
+        assert!(
+            emitted.get("target_identity").is_none(),
+            "schema absence must remain omitted instead of acquiring an identity-state field"
+        );
+
+        let legacy_position: crate::payloads::PositionInfo =
+            serde_json::from_value(serde_json::json!({
+                "canonical_id": "",
+                "line": 3,
+                "character": 5
+            }))
+            .expect("legacy position without additive field must load");
+        assert_eq!(legacy_position.target_identity, None);
+        let emitted_position =
+            serde_json::to_value(legacy_position).expect("legacy position must re-serialize");
+        assert!(
+            emitted_position.get("target_identity").is_none(),
+            "PositionInfo schema absence must remain omitted instead of acquiring an identity-state field"
+        );
     }
 
     #[test]

@@ -99,6 +99,9 @@ fn synthesize_record() -> RequestAuditRecord {
     RequestAuditRecord {
         request_id: 7,
         canonical_id: "/Widget.vue".to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            "/Widget.vue".to_string(),
+        )),
         kind: RequestKind::ComponentMeta,
         parent_request_id: None,
         timings: RequestTimingAudit {

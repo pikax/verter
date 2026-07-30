@@ -363,6 +363,9 @@ impl VerterHost {
         let record = RequestAuditRecord {
             request_id,
             canonical_id: canonical_id.to_string(),
+            target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+                canonical_id,
+            )),
             kind: RequestKind::Compile { target: tag },
             parent_request_id,
             from_cache: false,
@@ -512,6 +515,9 @@ fn noop_compile_record(
     RequestAuditRecord {
         request_id,
         canonical_id: canonical_id.to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+            canonical_id,
+        )),
         kind: RequestKind::Compile { target },
         parent_request_id,
         from_cache: false,

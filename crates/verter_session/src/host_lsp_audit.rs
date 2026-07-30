@@ -38,7 +38,7 @@ use std::sync::Arc;
 use verter_audit::payloads::tags::LspMethodTag;
 use verter_audit::{
     LspRequestPayload, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
-    RequestStoreAudit, RequestTimingAudit,
+    RequestStoreAudit, RequestTargetIdentity, RequestTimingAudit,
 };
 
 use crate::host_audit_runtime::AuditRequestRegistration;
@@ -75,7 +75,7 @@ pub enum LspAuditSession {
 pub struct ActiveLspSession {
     request_id: u64,
     method: LspMethodTag,
-    canonical_id: String,
+    target_identity: RequestTargetIdentity,
     /// Parent-request id captured off the `RequestContext` at
     /// `lsp_audit_begin` (sniffed from the scheduler TLS). Populates
     /// the record's `parent_request_id` so a sub-request LSP handler
@@ -127,7 +127,7 @@ impl LspAuditSession {
             Self::Active(mut active) => {
                 let record = build_record(
                     active.request_id,
-                    &active.canonical_id,
+                    active.target_identity,
                     active.parent_request_id,
                     payload,
                 );
@@ -147,7 +147,7 @@ impl LspAuditSession {
     /// Finalise with the cancellation marker required by the LSP
     /// cancellation contract. The produced payload carries
     /// `error: Some("cancelled".to_string())` and matches the
-    /// session's method / canonical id; sibling fields stay at
+    /// session's method / target identity; sibling fields stay at
     /// their `Default` values.
     ///
     /// Idempotent — the underlying registration ignores subsequent
@@ -164,7 +164,7 @@ impl LspAuditSession {
                 };
                 let record = build_record(
                     active.request_id,
-                    &active.canonical_id,
+                    active.target_identity,
                     active.parent_request_id,
                     payload,
                 );
@@ -182,13 +182,14 @@ impl LspAuditSession {
 
 fn build_record(
     request_id: u64,
-    canonical_id: &str,
+    target_identity: RequestTargetIdentity,
     parent_request_id: Option<u64>,
     payload: LspRequestPayload,
 ) -> RequestAuditRecord {
     RequestAuditRecord {
         request_id,
-        canonical_id: canonical_id.to_string(),
+        canonical_id: target_identity.legacy_canonical_id().to_string(),
+        target_identity: Some(target_identity),
         kind: RequestKind::Lsp {
             method: payload.method.clone(),
         },
@@ -224,20 +225,21 @@ impl VerterHost {
     /// centralised; the `Noop` path bypasses both the active-request
     /// registry insertion and the records store.
     ///
-    /// `canonical_id` is the canonical / virtual id of the file the
-    /// request operates on (e.g. the LSP URI's resolved canonical).
-    /// Passing the empty string is acceptable for handlers that
-    /// operate workspace-wide.
+    /// `target_identity` is the exact registered canonical / virtual id, the
+    /// raw request URI when registration has not happened yet, or
+    /// [`RequestTargetIdentity::NotApplicable`] for a genuinely
+    /// workspace-wide operation.
     #[must_use]
     pub fn lsp_audit_begin(
         self: &Arc<Self>,
         method: LspMethodTag,
-        canonical_id: &str,
+        target_identity: RequestTargetIdentity,
     ) -> LspAuditSession {
         if !self.config.audit_enabled {
             return LspAuditSession::Noop;
         }
 
+        let canonical_id = target_identity.legacy_canonical_id();
         let request_id = self.next_request_id();
         crate::request_context::increment_requests_created();
 
@@ -270,7 +272,7 @@ impl VerterHost {
                 LspAuditSession::Active(ActiveLspSession {
                     request_id,
                     method,
-                    canonical_id: canonical_id.to_string(),
+                    target_identity,
                     parent_request_id,
                     registration,
                     tls_guard: Some(tls_guard),

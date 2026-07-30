@@ -117,6 +117,9 @@ mod tests {
         RequestAuditRecord {
             request_id,
             canonical_id: format!("/req{request_id}.vue"),
+            target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+                format!("/req{request_id}.vue"),
+            )),
             kind: super::super::RequestKind::ComponentMeta,
             parent_request_id: None,
             timings: RequestTimingAudit::default(),

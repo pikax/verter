@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use std::convert::Infallible;
 
-use verter_audit::{AuditCaptureState, RequestKind, RequestKindPayload};
+use verter_audit::{AuditCaptureState, RequestKind, RequestKindPayload, RequestTargetIdentity};
 use verter_compiler::compile::CompileTarget;
 use verter_session::host_mcp_audit::McpToolSuccess;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
@@ -253,4 +253,32 @@ fn audit_mcp_tool_call_propagates_error_into_payload() {
         "error message must round-trip into the McpToolPayload — \
          discriminates a regression that drops or rewrites the message"
     );
+}
+
+// @ai-generated - Verifies target-less MCP records never construct an empty registered identity.
+#[test]
+fn empty_mcp_host_target_is_not_applicable_in_active_and_disabled_records() {
+    for audit_enabled in [true, false] {
+        let host = build_host(audit_enabled);
+        let (outcome, record) = host
+            .audit_mcp_tool_call::<(), Infallible, _>("workspace_status", "", 0, |_host| {
+                Ok(McpToolSuccess {
+                    value: (),
+                    result_size_bytes: 0,
+                })
+            })
+            .into_parts();
+        outcome.expect("infallible target-less MCP tool body");
+
+        assert_eq!(
+            record.canonical_id, "",
+            "the retained legacy projection stays empty for a target-less MCP request"
+        );
+        assert_eq!(
+            record.target_identity,
+            Some(RequestTargetIdentity::NotApplicable),
+            "an empty MCP host target must never be tagged RegisteredCanonical(\"\"); \
+             audit_enabled={audit_enabled}"
+        );
+    }
 }

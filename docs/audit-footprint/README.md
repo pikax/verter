@@ -14,6 +14,15 @@ DTOs and the producer-side `AuditObserver` trait; the session layer
 (`verter_session`) owns the host runtime, records store,
 registration lifecycle, and footprint miner.
 
+Every new record carries an additive `target_identity` tag:
+`RegisteredCanonical(String)` for the exact production registry
+identity, `UnregisteredUri(String)` for request-before-registration,
+or `NotApplicable` for a request kind with no single document target.
+The older `canonical_id` string remains as a compatibility projection
+and is empty for the latter two states. Serialized records from before
+the additive field deserialize with `target_identity: None`, which is
+schema absence rather than a fourth identity state.
+
 ## Concepts
 
 ### Request context

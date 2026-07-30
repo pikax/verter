@@ -153,6 +153,9 @@ fn active_request_registration_survives_worker_tls_install_drop_churn() {
     let synthetic_record = RequestAuditRecord {
         request_id,
         canonical_id: "/churn.vue".to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            "/churn.vue".to_string(),
+        )),
         kind: RequestKind::ComponentMeta,
         parent_request_id: None,
         from_cache: false,

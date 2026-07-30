@@ -66,11 +66,11 @@ pub(super) async fn handle_document_symbol_with_audit(
 ) -> Result<Option<DocumentSymbolResponse>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::DocumentSymbols,
-        canonical_id,
+        target_identity,
         None,
         async move { handle_document_symbol(server, params).await },
         |payload, value| {
@@ -709,11 +709,11 @@ pub(super) async fn handle_code_action_with_audit(
 ) -> Result<Option<CodeActionResponse>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::CodeAction,
-        canonical_id,
+        target_identity,
         None,
         async move { handle_code_action(server, params).await },
         |payload, value| {
@@ -779,11 +779,11 @@ pub(super) async fn handle_semantic_tokens_full_with_audit(
 ) -> Result<Option<SemanticTokensResult>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::SemanticTokens,
-        canonical_id,
+        target_identity,
         None,
         async move { handle_semantic_tokens_full(server, params).await },
         |payload, value| {
@@ -994,11 +994,11 @@ pub(super) async fn handle_inlay_hint_with_audit(
 ) -> Result<Option<Vec<InlayHint>>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::InlayHints,
-        canonical_id,
+        target_identity,
         None,
         async move { handle_inlay_hint(server, params).await },
         |payload, value| {

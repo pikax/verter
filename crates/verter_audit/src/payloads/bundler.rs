@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::payloads::tags::BundlerKindTag;
-use crate::record::{u64_as_decimal_string, RequestKind};
+use crate::record::{u64_as_decimal_string, RequestKind, RequestTargetIdentity};
 
 /// Aggregate summary produced by the bundler's batch run.
 ///
@@ -66,7 +66,7 @@ pub struct BundlerBatchPayload {
     /// batch (no division-by-zero).
     pub cache_hit_rate: f32,
     /// Up to five slowest records descending by `total_ms`. Each
-    /// summary carries enough identity (`request_id`, `canonical_id`,
+    /// summary carries enough identity (`request_id`, `target_identity`,
     /// `kind`) to pivot back to the full record via
     /// `AuditRecordsStore::take`.
     pub slowest_5: Vec<SlowRecordSummary>,
@@ -85,8 +85,21 @@ pub struct SlowRecordSummary {
     #[serde(with = "u64_as_decimal_string")]
     #[ts(type = "string")]
     pub request_id: u64,
-    /// Canonical file id the original request targeted.
+    /// Legacy canonical-id projection retained for wire compatibility.
+    ///
+    /// New consumers must use [`Self::target_identity`]. This field is the
+    /// exact registered canonical when one exists and the empty string for
+    /// unregistered or target-less requests.
     pub canonical_id: String,
+    /// Tagged target identity copied from the original record.
+    ///
+    /// New summaries preserve all three identity states. `None` is reserved
+    /// for summaries built from audit records emitted before the additive
+    /// target-identity field existed; consumers may fall back to
+    /// [`Self::canonical_id`] only in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target_identity: Option<RequestTargetIdentity>,
     /// Original `RequestKind` discriminant — preserved verbatim so
     /// callers can tell which surface produced the slow record.
     pub kind: RequestKind,

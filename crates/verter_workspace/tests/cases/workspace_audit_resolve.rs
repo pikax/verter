@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use verter_audit::{RequestKind, RequestKindPayload, WorkspaceOp};
+use verter_audit::{RequestKind, RequestKindPayload, RequestTargetIdentity, WorkspaceOp};
 use verter_workspace::{
     CanonicalPath, ConfiguredMembership, IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace,
     ParsedEdge, ProjectGraph, ProjectRank, ResolutionContext, ResolvePhase, ResolveRequestKind,
@@ -139,6 +139,31 @@ fn audit_op_resolve_records_exactly_the_resolved_target_in_files() {
          `unrelated.ts` is present in the workspace but not on the resolved path \
          and must not appear in record.files"
     );
+}
+
+#[test]
+fn target_identity_uses_not_applicable_only_for_workspace_wide_operations() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let from = "d:/project/src/app.vue";
+
+    let targeted = ws.audit_op(WorkspaceOp::AuditResolve {
+        specifier: "./missing".to_string(),
+        from: from.to_string(),
+    });
+    assert_eq!(
+        targeted.target_identity,
+        Some(RequestTargetIdentity::RegisteredCanonical(from.to_string()))
+    );
+    assert_eq!(targeted.canonical_id, from);
+
+    let workspace_wide = ws.audit_op(WorkspaceOp::ResolverWalk {
+        specifier: "vue".to_string(),
+    });
+    assert_eq!(
+        workspace_wide.target_identity,
+        Some(RequestTargetIdentity::NotApplicable)
+    );
+    assert_eq!(workspace_wide.canonical_id, "");
 }
 
 #[test]

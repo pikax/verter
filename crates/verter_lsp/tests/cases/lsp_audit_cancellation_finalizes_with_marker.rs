@@ -52,7 +52,7 @@ async fn audit_slo_does_not_cancel_a_slow_successful_request() {
     let result = audit_harness::run_with_audit::<u8, _, _>(
         &host,
         LspMethodTag::Hover,
-        canonical.clone(),
+        verter_audit::RequestTargetIdentity::RegisteredCanonical(canonical.clone()),
         Some(position),
         async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -133,7 +133,10 @@ async fn cancellation_drains_request_id_from_active_registry() {
     // Open the session manually so we have a first-class id; then
     // finalize with the cancellation marker the harness would
     // produce.
-    let session = host.lsp_audit_begin(LspMethodTag::Hover, "/probe.vue");
+    let session = host.lsp_audit_begin(
+        LspMethodTag::Hover,
+        verter_audit::RequestTargetIdentity::RegisteredCanonical("/probe.vue".to_string()),
+    );
     let request_id = session.request_id().expect("Active session has an id");
     let mid = host.host_audit_runtime().snapshot();
     assert!(

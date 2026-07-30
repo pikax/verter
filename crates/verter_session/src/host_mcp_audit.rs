@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use verter_audit::{
     AuditedResult, McpToolPayload, RequestAuditRecord, RequestKind, RequestKindPayload,
-    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, WaitAudit,
+    RequestMemoryAudit, RequestStoreAudit, RequestTargetIdentity, RequestTimingAudit, WaitAudit,
 };
 
 use crate::host_audit_runtime::AuditRequestRegistration;
@@ -61,6 +61,10 @@ pub struct McpToolSuccess<T> {
 
 impl VerterHost {
     /// Drive an MCP tool invocation under audit.
+    ///
+    /// `canonical_id` names the tool's single registered file target. An empty
+    /// value means the tool has no single file target: the retained legacy
+    /// field stays empty and `target_identity` is `NotApplicable`.
     ///
     /// Lifecycle:
     /// 1. Stamps a fresh request id from the host's monotonic counter
@@ -234,6 +238,7 @@ impl VerterHost {
         let record = RequestAuditRecord {
             request_id,
             canonical_id: canonical_id.to_string(),
+            target_identity: Some(mcp_target_identity(canonical_id)),
             kind: RequestKind::Mcp {
                 tool: tool_name.to_string(),
             },
@@ -286,6 +291,7 @@ fn noop_mcp_record(
     RequestAuditRecord {
         request_id,
         canonical_id: canonical_id.to_string(),
+        target_identity: Some(mcp_target_identity(canonical_id)),
         kind: RequestKind::Mcp {
             tool: tool_name.to_string(),
         },
@@ -306,5 +312,18 @@ fn noop_mcp_record(
         }),
         capture_state,
         trace_id: String::new(),
+    }
+}
+
+/// Classify the MCP wrapper's optional single-file target.
+///
+/// The public wrapper accepts an empty canonical string for MCP tools without
+/// one file target. Preserve the empty legacy projection on the record while
+/// representing that state explicitly in the additive identity.
+fn mcp_target_identity(canonical_id: &str) -> RequestTargetIdentity {
+    if canonical_id.is_empty() {
+        RequestTargetIdentity::NotApplicable
+    } else {
+        RequestTargetIdentity::registered(canonical_id)
     }
 }
