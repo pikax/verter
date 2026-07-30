@@ -297,6 +297,7 @@ pub(super) fn capture_ordinal_macro_call(
             if let Some(generic_ty) = props_generic_argument_ts_type(init) {
                 collect_snippet_candidate_members(generic_ty, snippet_imports, out);
             }
+            out.props_calls.push(capture_props_call(&d.id, init.span()));
             out.props = Some(candidate);
         }
         OrdinalMacroCall::Dispatcher {

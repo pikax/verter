@@ -13,6 +13,9 @@
 //!   {…} = $props()`); the `$bindable()` member names; and the members
 //!   annotated with a binding IMPORTED-AS-`Snippet`-CANDIDATE — recorded as
 //!   `(local_binding, raw_import_source)` pairs, NOT validated here;
+//! * `SveltePropsCall` — one source-ordered record per `$props()` call, with
+//!   exact top-level public-key spans, recursively collected local-binding
+//!   spans, and top-level rest openness;
 //! * the top-level export inventory (instance-script exports the synth folds
 //!   onto the component instance);
 //! * the legacy `export let` props + `createEventDispatcher<E>()` type
@@ -125,6 +128,45 @@ pub struct SveltePropsCandidate {
     pub props_leaf_members: Option<Vec<verter_type_expr::facts::SynthesizedLeafMember>>,
 }
 
+/// One `$props()` call's exact authored key/binding geometry.
+///
+/// Public keys and local bindings are deliberately separate inventories. A
+/// shorthand identifier appears in BOTH with the same span; an alias has a
+/// public-key span and a distinct local-binding span. Identifiers inside
+/// default expressions never enter either inventory.
+#[derive(Debug, Clone, Default, NoTypeExpr)]
+pub struct SveltePropsCall {
+    /// The `$props()` call span.
+    pub call_span: Span,
+    /// Top-level destructuring property keys: the component's public prop
+    /// names. Nested destructuring keys are not component public keys.
+    pub public_keys: Vec<SveltePropsPublicKey>,
+    /// Every leaf local binding introduced by the left-hand pattern,
+    /// including shorthand, aliases, nested leaves, and rest bindings.
+    pub local_bindings: Vec<SveltePropsLocalBinding>,
+    /// Whether the statically enumerated public-key set is open. This is true
+    /// for a top-level rest element or an undestructured whole-object binding.
+    pub has_rest: bool,
+}
+
+/// One exact authored public prop key.
+#[derive(Debug, Clone, NoTypeExpr)]
+pub struct SveltePropsPublicKey {
+    /// The static public prop name.
+    pub name: String,
+    /// Exact carrier-absolute span of the authored property key.
+    pub span: Span,
+}
+
+/// One exact local binding introduced by a `$props()` binding pattern.
+#[derive(Debug, Clone, NoTypeExpr)]
+pub struct SveltePropsLocalBinding {
+    /// The local binding name.
+    pub name: String,
+    /// Exact carrier-absolute span of the binding identifier.
+    pub span: Span,
+}
+
 /// One member annotated with a type IMPORTED-AS-`Snippet`-CANDIDATE.
 ///
 /// Recorded as `(local_binding, raw_import_source)` — the local type name and
@@ -186,7 +228,16 @@ pub struct SvelteModuleExport {
 #[derive(Debug, Clone, Default, NoTypeExpr)]
 pub struct SvelteScriptCandidates {
     /// The `$props()` candidate, when the component uses runes-mode props.
+    /// This is intentionally singular and last-wins: Svelte rejects duplicate
+    /// `$props()` calls, so every valid component has at most one candidate.
     pub props: Option<SveltePropsCandidate>,
+    /// Exact key/binding geometry for EVERY `$props()` call, in source order.
+    ///
+    /// Geometry remains defensive and per-call, while [`Self::props`] keeps
+    /// type/default/bindable facts from the last call. That split is acceptable
+    /// because duplicate calls are invalid Svelte and therefore have no valid
+    /// combined semantic surface.
+    pub props_calls: Vec<SveltePropsCall>,
     /// Members annotated with a `Snippet`-candidate import (validated by the resolved-validation half).
     pub snippet_candidates: Vec<SvelteSnippetImportCandidate>,
     /// INSTANCE-script export names — the synth folds these onto the component
@@ -223,6 +274,7 @@ impl SvelteScriptCandidates {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.props.is_none()
+            && self.props_calls.is_empty()
             && self.snippet_candidates.is_empty()
             && self.instance_exports.is_empty()
             && self.module_exports.is_empty()
@@ -245,20 +297,21 @@ impl FrameworkScriptFactPayload for SvelteScriptCandidates {
 /// inventory the typeinfo surface adapter reads, with package-provenance applied
 /// where it matters.
 ///
-/// The parse-domain inventory (`props_type`, `bindable_members`, `legacy_props`,
-/// `instance_exports`) passes through verbatim — those carry no package
-/// provenance. The provenance-gated members are structurally validated against
-/// the typed [`ResolvedPackage`](super::ResolvedPackage) identity (NEVER a
-/// path/name substring): `validated_snippet_members` keep only the members whose
-/// `Snippet` import resolved to the `svelte` package, and `dispatcher_events` is
-/// `Some` only when `createEventDispatcher` resolved to the `svelte` package. A
-/// userland look-alike never contributes to either.
+/// The parse-domain inventory (`props_type`, `bindable_members`, `props_calls`,
+/// `legacy_props`, `instance_exports`) passes through verbatim — those carry no
+/// package provenance. The provenance-gated members are structurally validated
+/// against the typed [`ResolvedPackage`](super::ResolvedPackage) identity
+/// (NEVER a path/name substring): `validated_snippet_members` keep only the
+/// members whose `Snippet` import resolved to the `svelte` package, and
+/// `dispatcher_events` is `Some` only when `createEventDispatcher` resolved to
+/// the `svelte` package. A userland look-alike never contributes to either.
 ///
 /// The shape MIRRORS the shared persisted fact
 /// [`verter_type_expr::facts::SvelteScriptFactsFact`] (authored-type payload
 /// refs + `Arc<[…]>` lists, `NoTypeExpr`); it stays a distinct in-crate
 /// struct only because it additionally carries `prop_defaults` (source-text
-/// runtime defaults with spans — not part of the shared fact schema).
+/// runtime defaults) and `props_calls` (authored key/binding geometry), both
+/// span-bearing and therefore not part of the shared span-free fact schema.
 #[derive(Debug, Clone, Default, NoTypeExpr)]
 pub struct SvelteScriptFacts {
     /// The runes `$props()` authored-type payload ref (shallow-by-default —
@@ -276,6 +329,12 @@ pub struct SvelteScriptFacts {
     /// the parse-domain capture — a destructuring default or a
     /// `$bindable(<arg0>)` fallback. No package provenance applies.
     pub prop_defaults: Arc<[AnalyzedDefaultValue]>,
+    /// Exact public-key/local-binding geometry for every `$props()` call.
+    /// Syntax-only and span-bearing; intentionally excluded from the shared
+    /// span-free persisted type fact. Geometry remains per-call defensively,
+    /// while the sibling type/default/bindable facts are last-wins because
+    /// Svelte rejects duplicate `$props()` calls.
+    pub props_calls: Arc<[SveltePropsCall]>,
     /// The member names whose `Snippet`-candidate import RESOLVED to the
     /// `svelte` package — the snippet-typed props (structurally validated). A
     /// userland look-alike never appears here.
@@ -372,7 +431,11 @@ impl SvelteScriptProvider {
     ///
     /// `9` — resolved and persisted Svelte facts retain module-script exports
     /// as exact, span-free owner-qualified facts. Old resolved-fact keys miss.
-    pub const VERSION: u32 = 9;
+    ///
+    /// `10` — syntax-capture and resolved facts retain per-call `$props()`
+    /// public-key/local-binding spans plus top-level rest openness. Old
+    /// candidate and resolved-fact keys intentionally miss.
+    pub const VERSION: u32 = 10;
 }
 
 impl ScriptFactProvider for SvelteScriptProvider {
@@ -517,6 +580,7 @@ impl ScriptFactProvider for SvelteScriptProvider {
                 .map(|p| p.prop_defaults.clone())
                 .unwrap_or_default()
                 .into(),
+            props_calls: candidates.props_calls.clone().into(),
             validated_snippet_members: validated_snippet_members.into(),
             legacy_props: candidates.legacy_props.clone().into(),
             dispatcher_events,
@@ -547,6 +611,7 @@ impl ScriptFactProvider for SvelteScriptProvider {
         // still synthesises its empty `$props`).
         if facts.props_type.is_none()
             && facts.bindable_members.is_empty()
+            && facts.props_calls.is_empty()
             && facts.validated_snippet_members.is_empty()
             && facts.legacy_props.is_empty()
             && facts.dispatcher_events.is_none()
@@ -1260,7 +1325,7 @@ fn collect_bindable_and_defaults(
         return;
     };
     for prop in &obj.properties {
-        let key = property_key_name(&prop.key).map(|n| n.to_string());
+        let key = property_key_name(&prop.key);
         if let BindingPattern::AssignmentPattern(assign) = &prop.value {
             if is_rune_call(&assign.right, "$bindable") {
                 if let Some(name) = &key {
@@ -1277,6 +1342,75 @@ fn collect_bindable_and_defaults(
                 // expression source IS the default value.
                 push_default(candidate, name, source, assign.right.span());
             }
+        }
+    }
+}
+
+/// Capture one `$props()` call's public-key and local-binding roles.
+///
+/// Syntax-only: public keys come from the TOP-LEVEL object properties, while
+/// local bindings are the recursively collected binding identifiers on the
+/// left-hand side. Assignment right-hand expressions are never traversed.
+fn capture_props_call(pattern: &BindingPattern<'_>, call_span: oxc_span::Span) -> SveltePropsCall {
+    let mut call = SveltePropsCall {
+        call_span: oxc_span_to_verter(call_span),
+        ..Default::default()
+    };
+
+    if let BindingPattern::ObjectPattern(object) = pattern {
+        for property in &object.properties {
+            if let Some(name) = property_key_name(&property.key) {
+                call.public_keys.push(SveltePropsPublicKey {
+                    name,
+                    span: oxc_span_to_verter(property.key.span()),
+                });
+            }
+            collect_props_local_bindings(&property.value, &mut call.local_bindings);
+        }
+        if let Some(rest) = &object.rest {
+            call.has_rest = true;
+            collect_props_local_bindings(&rest.argument, &mut call.local_bindings);
+        }
+    } else {
+        call.has_rest = true;
+        collect_props_local_bindings(pattern, &mut call.local_bindings);
+    }
+
+    call
+}
+
+/// Recursively collect binding identifiers without visiting default
+/// expressions. Nested property keys are intentionally skipped: they select
+/// fields within one public prop value, but are not component public keys.
+fn collect_props_local_bindings(
+    pattern: &BindingPattern<'_>,
+    out: &mut Vec<SveltePropsLocalBinding>,
+) {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => {
+            out.push(SveltePropsLocalBinding {
+                name: identifier.name.to_string(),
+                span: oxc_span_to_verter(identifier.span),
+            });
+        }
+        BindingPattern::ObjectPattern(object) => {
+            for property in &object.properties {
+                collect_props_local_bindings(&property.value, out);
+            }
+            if let Some(rest) = &object.rest {
+                collect_props_local_bindings(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(array) => {
+            for element in array.elements.iter().flatten() {
+                collect_props_local_bindings(element, out);
+            }
+            if let Some(rest) = &array.rest {
+                collect_props_local_bindings(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(assignment) => {
+            collect_props_local_bindings(&assignment.left, out);
         }
     }
 }

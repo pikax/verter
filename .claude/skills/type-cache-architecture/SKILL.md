@@ -1274,9 +1274,10 @@ The coordinated invalidation boundaries are:
   exact owners.
 - `ROUTE_DB_RESOLVER_VERSION = 2` rejects route values that do not carry the
   defining declaration owner.
-- `SvelteScriptProvider::VERSION = 9` independently rejects Svelte candidate
+- `SvelteScriptProvider::VERSION = 10` independently rejects Svelte candidate
   payloads without the persisted exact module-export inventory, export owners,
-  and owner-qualified binding keys.
+  owner-qualified binding keys, or the per-call `$props()` public-key/local-
+  binding span inventory.
 
 Exact-owner shallow facts also govern qualified namespace roots. For
 `import * as Ns from './dep'`, the cached binding for `(owner, Ns)` is a MODULE
