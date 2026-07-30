@@ -26,7 +26,9 @@ use super::rename_plan::{
     ownership_changed_during_rename_error, rename_request_admission, RenameAdmission,
     RenameTargetResolution, SameFileProof,
 };
-use super::rename_prepare::rename_incompleteness_error;
+use super::rename_prepare::{
+    public_component_prop_rename_unavailable_error, rename_incompleteness_error,
+};
 use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
 
@@ -985,6 +987,15 @@ pub(super) async fn handle_rename(
         RenameAdmission::Serve { ownership_witness } => ownership_witness,
     };
 
+    // Resolve the target before any provider synchronization/query. A public
+    // component prop is categorically unavailable until complete workspace
+    // usage proof exists, so it must not reach the provider rename path at all.
+    // This is the same one-shot resolution used by every later rename gate.
+    let resolution = RenameTargetResolution::resolve(server, uri, position).await;
+    if resolution.is_public_component_prop() {
+        return Err(public_component_prop_rename_unavailable_error());
+    }
+
     // `didChange` never performs provider I/O. A rename is an interactive
     // consistency boundary, so repair the current authored buffer here before
     // capturing its provider surface. The per-document repair lane coalesces a
@@ -997,10 +1008,11 @@ pub(super) async fn handle_rename(
     // which background publication delivers and receipts as DependencyReady.
     // The handler only captures a committed receipt. On a miss it enqueues
     // background publication but may still query the provider for symbols whose
-    // project graph is already complete (notably local/script bindings). A
-    // cross-carrier child-prop edit still has to pass the exact declaration +
-    // usage completeness gate below, so missing API publication cannot leak a
-    // partial edit. The request never joins the background lane.
+    // project graph is already complete (notably local/script bindings). Public
+    // prop cursors are normally refused above. If classification ever misses one
+    // and the child-prop classifier returns `Confirmed`, finalization refuses it
+    // unconditionally; readiness cannot authorize a partial prop edit. The
+    // request never joins the background lane.
     let dependency_readiness = server.dependency_readiness_capture(uri);
 
     // ONE classification of the cursor, from ONE document snapshot, through the
@@ -1012,18 +1024,16 @@ pub(super) async fn handle_rename(
     // the offsets it measures and the spans it reads describe one revision.
     // Re-resolved HERE, per request: a prepare that said yes is not authority
     // transferable across a race.
-    let resolution = RenameTargetResolution::resolve(server, uri, position).await;
     let verter_result = resolution.native_workspace_edit(uri, new_name);
     let same_file_proof = resolution.same_file_proof();
     let native_rename_is_css = resolution.is_css();
 
-    // Classify the cursor with respect to the cross-file `<Child prop=…>` rename
-    // ONCE, up front — so the MERGED-EDIT COMPLETENESS GATE applies on EVERY return
-    // path (the provider-query success branch, the verter-only fallthrough, AND the
-    // provider-Err branch), never only on provider success. A SELF-FILE rune-module
-    // projection never participates (its edits are deferred), so it stays
-    // `NotChildProp` (ungated). Sync resolution covers the INLINE case; the imported
-    // case is upgraded async below.
+    // Classify the cursor with respect to a cross-file `<Child prop=…>` rename
+    // ONCE, up front. Any `Confirmed` result is refused at finalization on every
+    // return path as defense in depth behind the public-prop resolution above.
+    // A SELF-FILE rune-module projection never participates (its edits are
+    // deferred), so it stays `NotChildProp` (ungated). Sync resolution covers
+    // the INLINE case; the imported case is upgraded async below.
     let mut rename_class = if server.is_self_file_projection(uri) {
         ChildPropRenameClass::NotChildProp
     } else {
@@ -1039,9 +1049,9 @@ pub(super) async fn handle_rename(
     // CORRUPT the module. Rename stays DEFERRED for the self-file projection —
     // a clean no-op, never a wrong/unmapped edit. (Carrier rename unchanged.)
     //
-    // The merged/available result is captured into `result` and the gate is applied
-    // ONCE at the end over `rename_class`, so a confirmed child-prop rename cannot
-    // escape the gate on any branch.
+    // The merged/available result is captured into `result` and finalization is
+    // applied ONCE at the end over `rename_class`, so a `Confirmed` child-prop
+    // rename cannot escape the unconditional refusal on any branch.
     let mut result = verter_result.clone();
     let mut provider_rename_complete = server.type_provider.is_none()
         || server.is_self_file_projection(uri)
@@ -1144,10 +1154,8 @@ pub(super) async fn handle_rename(
                             // complete one.
                             provider_rename_complete =
                                 provider_rename_complete || !type_locs.is_empty();
-                            // PROVIDER-AGNOSTIC inline child-declaration synthesis. A
-                            // cross-file `<Child prop=…>` rename must edit BOTH the
-                            // parent usage AND the prop declaration. For an INLINE
-                            // `defineProps` declaration the provider's own
+                            // PROVIDER-AGNOSTIC inline child-declaration normalization.
+                            // For an INLINE `defineProps` declaration the provider's own
                             // `textDocument/rename` does not reliably enumerate the
                             // child-declaration leg across the synthesized
                             // `{carrier}.ts` API surface (tsgo does not), so Verter
@@ -1157,7 +1165,9 @@ pub(super) async fn handle_rename(
                             // providers. (The imported-member declaration is the
                             // provider's own native edit; nothing is synthesized for
                             // it.) Only a `Known` declaration with an `inline_decl_span`
-                            // synthesizes.
+                            // synthesizes. This normalization cannot authorize a
+                            // child-prop rename: finalization refuses every
+                            // `Confirmed` result regardless of its edit legs.
                             if let ChildPropRenameClass::Confirmed(target) = &rename_class {
                                 if let ChildPropDeclarationProof::Known {
                                     uri: child_decl_uri,
@@ -1292,17 +1302,18 @@ pub(super) async fn handle_rename(
                                 return Ok(None);
                             }
                             result = merged.edit;
-                            // INITIATING-USAGE LEG SYNTHESIS (provider-agnostic,
-                            // same doctrine as the child-declaration leg): the
-                            // provider's own usage edit maps back through the
+                            // INITIATING-USAGE LEG NORMALIZATION (provider-agnostic,
+                            // same source-exactness doctrine as the child declaration):
+                            // the provider's own usage edit maps back through the
                             // case-mapped tsx token (kebab `my-prop` → camel
                             // `myProp`) and lands a PREFIX of the authored
-                            // kebab name — a corrupt edit the completeness gate
-                            // rightly rejects. Verter owns the exact authored
+                            // kebab name. Verter owns the exact authored
                             // usage span, so it re-anchors the initiating usage
                             // edit itself. For exact-case names this rewrites
                             // the provider's correct edit with the identical
-                            // range — a deterministic no-op.
+                            // range — a deterministic no-op. The normalized edit
+                            // still cannot ship: finalization refuses every
+                            // `Confirmed` child-prop result.
                             if let ChildPropRenameClass::Confirmed(target) = &rename_class {
                                 if let Some(usage_range) = target.expected_parent_usage_range {
                                     synthesize_parent_usage_rename_edit(
@@ -1317,9 +1328,8 @@ pub(super) async fn handle_rename(
                         // Post-await validation failed (STRICT for rename: a corrupt
                         // edit is worse than no edit): drop the WHOLE provider edit
                         // set. The verter-only result (already in `result`) still
-                        // passes through the completeness gate below, so a confirmed
-                        // child-prop rename fails closed rather than shipping a
-                        // usage-only partial.
+                        // reaches finalization below, where any `Confirmed`
+                        // child-prop classification is refused unconditionally.
                         Ok(_) => {
                             tracing::warn!(
                                 "rename: dropping provider rename locations — captured \
@@ -1328,10 +1338,9 @@ pub(super) async fn handle_rename(
                         }
                         Err(e) => {
                             // The provider rename failed: fall back to the verter-only
-                            // result (already in `result`). It is STILL run through the
-                            // gate below — a confirmed child-prop rename whose merged
-                            // edit lacks the declaration leg fails closed here too,
-                            // never a usage-only partial on the Err path.
+                            // result (already in `result`). It is STILL finalized
+                            // below, so a `Confirmed` child-prop rename is refused on
+                            // the error path regardless of which edit legs remain.
                             tracing::warn!("rename: type provider error: {e}");
                         }
                     }
@@ -1456,68 +1465,6 @@ fn inject_synthesized_carrier_rename_location(
         start,
         end,
     });
-}
-
-/// Whether the merged cross-file rename `WorkspaceEdit` actually contains the
-/// SOURCE edits a confirmed `<Child prop=…>` rename MUST produce — the MERGED-EDIT
-/// COMPLETENESS GATE.
-///
-/// A confirmed child-prop rename is incomplete unless the EMITTED `WorkspaceEdit`
-/// edits BOTH:
-///   1. the prop DECLARATION at `expected_decl_range` in `expected_decl_uri` with
-///      `new_text == new_name` — the child component's `.vue` macro field (inline
-///      case) OR a `defineProps<ImportedType>()` member declaration in a THIRD file
-///      (imported case); AND
-///   2. the parent's `.vue` prop USAGE at `expected_parent_range` with
-///      `new_text == new_name`.
-///
-/// PROVIDER-AGNOSTIC by construction: it inspects only the merged, mapped source
-/// `WorkspaceEdit` (`changes: HashMap<Uri, Vec<TextEdit>>`) — it does NOT care
-/// whether the declaration edit came from Verter's inline synthesis or from the
-/// provider's own native leg (tsserver enumerates it; tsgo does not; the imported
-/// member is the provider's native edit for both). So a result whose declaration
-/// leg is present passes even when Verter's own synthesis could not locate it — no
-/// `is_tsgo`/`is_tsserver` branch, no regression.
-///
-/// Each `expected_*` range is `None` when the originating span did not resolve to
-/// a position; the gate then cannot prove that leg precisely and FAILS CLOSED
-/// (returns `false`) — the fail-closed boundary for an unmappable edit.
-///
-/// Range match is FULL-RANGE EXACT (both `start` AND `end`): an edit at the right
-/// anchor but a WRONG span (e.g. the provider ranged the whole `name: type` member,
-/// or the wrong end) does NOT satisfy the leg — a start-only check is too weak. A
-/// `new_text` mismatch (a stray edit at the same anchor with different text) does
-/// NOT satisfy the leg either.
-fn workspace_edit_satisfies_child_prop_rename(
-    merged: &WorkspaceEdit,
-    expected_decl_uri: &Uri,
-    expected_decl_range: Option<Range>,
-    expected_parent_uri: &Uri,
-    expected_parent_range: Option<Range>,
-    new_name: &str,
-) -> bool {
-    let has_edit_at = |uri: &Uri, expected: Option<Range>| -> bool {
-        let Some(expected) = expected else {
-            // No precise range to assert → cannot prove this leg → fail closed.
-            return false;
-        };
-        let Some(changes) = merged.changes.as_ref() else {
-            return false;
-        };
-        let expected_path = crate::documents::uri_to_canonical_id(uri);
-        // FULL-RANGE equality (start AND end) — a right-anchor wrong-span edit must
-        // NOT pass (the start-only check this replaced was too weak).
-        changes.iter().any(|(edited_uri, edits)| {
-            let edited_path = crate::documents::uri_to_canonical_id(edited_uri);
-            verter_span::path::fs_paths_equal(&edited_path, &expected_path)
-                && edits
-                    .iter()
-                    .any(|e| e.range == expected && e.new_text == new_name)
-        })
-    };
-
-    has_edit_at(expected_decl_uri, expected_decl_range)
-        && has_edit_at(expected_parent_uri, expected_parent_range)
 }
 
 #[path = "nav_features_navigation_rename_gate.rs"]

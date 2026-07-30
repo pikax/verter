@@ -63,6 +63,12 @@ pub(crate) fn offset_is_instance_member_access(
 /// and rename read the same one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameTargetClass {
+    /// The cursor names a component's public prop, either at its declaration
+    /// or at a parent component usage. A complete rename would have to edit
+    /// every parent, but the current workspace surfaces cannot prove that
+    /// negative, so both rename entry points refuse this class before provider
+    /// rename is queried.
+    PublicComponentProp,
     /// Verter's own name-based analysis resolves the symbol (a script binding,
     /// a value import, or a macro binding). Its same-file occurrence set is
     /// complete for this file; a provider may add cross-file occurrences.
@@ -190,6 +196,19 @@ pub struct RenameTarget {
 }
 
 impl RenameTarget {
+    /// A public component-prop cursor: positively classified, but deliberately
+    /// owned by no rename authority until complete cross-file usage proof exists.
+    fn public_component_prop(anchor: Option<Range>) -> Self {
+        Self {
+            class: RenameTargetClass::PublicComponentProp,
+            anchor,
+            same_file_ranges: Vec::new(),
+            same_file_enumeration: SameFileEnumeration::Partial(
+                UnenumeratedRegion::NoOccurrenceInventory,
+            ),
+        }
+    }
+
     /// The fail-closed target: no authority, no anchor, no claimed occurrence,
     /// and no enumeration of anything.
     /// Also what a caller with no open document resolves to.
@@ -260,14 +279,18 @@ impl RenameTarget {
 /// 1. No analysis, no position, or no identifier word under the cursor ⇒
 ///    [`RenameTargetClass::Unavailable`]. (Both rename surfaces have always
 ///    required an authored word here, the CSS legs included.)
-/// 2. Inside an instance-member template access ⇒ the POSITIONAL CSS owner
+/// 2. A public component-prop declaration or parent usage ⇒
+///    [`RenameTargetClass::PublicComponentProp`]. This positional check runs
+///    before name-based binding classification, so a Svelte/Vue prop key that
+///    is also a local binding cannot fall through as an ordinary script rename.
+/// 3. Inside an instance-member template access ⇒ the POSITIONAL CSS owner
 ///    still wins when a class/id token lives at that offset (its surface needs
 ///    no provider); otherwise [`RenameTargetClass::ProviderOnlyInstanceMember`]
 ///    — Verter's name-based branch must not answer, because it would hand back
 ///    the word range of a same-named script declaration, a different symbol.
-/// 3. A known binding / value import / macro binding ⇒
+/// 4. A known binding / value import / macro binding ⇒
 ///    [`RenameTargetClass::Native`].
-/// 4. Otherwise the positional CSS owner, else
+/// 5. Otherwise the positional CSS owner, else
 ///    [`RenameTargetClass::Unavailable`].
 pub fn classify_rename_target(
     position: &Position,
@@ -288,6 +311,10 @@ pub fn classify_rename_target(
     let Some(word) = word_at_offset(source, offset) else {
         return RenameTarget::unavailable();
     };
+
+    if analysis_public_component_prop_at(offset as u32, analysis) {
+        return RenameTarget::public_component_prop(word_range(source, offset, &word, line_index));
+    }
 
     // THE read of the positional `unresolved_bindings` rule for rename
     // semantics. Nothing else in the rename path consults it.
@@ -333,6 +360,41 @@ pub fn classify_rename_target(
         ),
         same_file_enumeration: claim_enumeration_without_markup(&word, analysis),
     }
+}
+
+/// Whether existing shallow analysis positively identifies `offset` as a
+/// public component-prop name token.
+///
+/// This is deliberately positional and rename-local. It consumes only exact
+/// spans already owned by the framework analyses:
+///
+/// * Vue macro/runtime prop fields;
+/// * Vue Options-API prop keys;
+/// * a component usage's prop-name span in either Vue or Svelte markup.
+///
+/// The usage leg does not resolve the child first. A prop-shaped cursor on an
+/// unresolved component must fail closed too; requiring successful resolution
+/// here would recreate the `NotChildProp` passthrough hole.
+fn analysis_public_component_prop_at(offset: u32, analysis: &FileAnalysisSnapshot) -> bool {
+    let contains = |span: verter_span::Span| offset >= span.start && offset < span.end;
+
+    analysis
+        .macros
+        .iter()
+        .flat_map(|mac| &mac.prop_fields)
+        .any(|field| contains(field.span))
+        || analysis
+            .options_api
+            .iter()
+            .flat_map(|options| &options.props)
+            .any(|prop| contains(prop.span))
+        || analysis.template.as_ref().is_some_and(|template| {
+            template
+                .components
+                .iter()
+                .flat_map(|component| &component.props)
+                .any(|prop| contains(prop.name_span))
+        })
 }
 
 /// The [`SameFileEnumeration`] witness a claim over `name` can establish WITHOUT

@@ -33,6 +33,19 @@ pub(super) fn multi_claimant_rename_unavailable_error() -> tower_lsp_server::jso
     }
 }
 
+/// The fail-closed error for a public component prop. The current workspace
+/// surfaces can prove discovered usages, but cannot prove that no unseen parent
+/// exists, so returning any edit would risk a silent partial rename.
+pub(super) fn public_component_prop_rename_unavailable_error() -> tower_lsp_server::jsonrpc::Error {
+    tower_lsp_server::jsonrpc::Error {
+        code: REQUEST_FAILED,
+        message: "verter: rename is unavailable for public component props because complete \
+                  cross-file usage proof is unavailable; no rename edit was produced."
+            .into(),
+        data: None,
+    }
+}
+
 /// The user-visible reason a rename was refused because Verter's own same-file
 /// occurrence inventory can never cover this file — `None` when the shortfall
 /// has no user-actionable cause to state.

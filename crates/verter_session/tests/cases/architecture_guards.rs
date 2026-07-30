@@ -9092,10 +9092,6 @@ mod foundations_guards {
             "LSP unit-test utilities — temp workspace creation and `canonicalize` for fixture path resolution.",
         ),
         (
-            "crates/verter_lsp/src/real_provider_tests/rename.rs",
-            "real-provider rename integration tests (`#[cfg(test)] mod real_provider_tests`) — the `read_file` helper uses `std::fs::read_to_string` to read on-disk fixture content for a CLOSED file and assert the on-disk-vs-LSP-edit contract. Same test-fixture-read category as `test_harness.rs`/`test_utils.rs`; not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
-        ),
-        (
             "crates/verter_lsp/src/type_provider/project_sync.rs",
             "managed-tsgo project-sync tests (`#[cfg(test)] mod tests`) stage temporary dependency packages and carrier paths to assert virtual-fallback and exact-delivery behavior; test fixtures only.",
         ),

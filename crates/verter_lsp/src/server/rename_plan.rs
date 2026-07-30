@@ -21,7 +21,10 @@
 //! rename to skip any of its own checks.
 
 use tower_lsp_server::ls_types::{Position, Range, Uri, WorkspaceEdit};
+use verter_span::LspPosition;
 
+use crate::documents::line_index::LineIndex;
+use crate::documents::position_map::PositionMapper;
 use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::features::rename::{
     classify_rename_target, MarkupOccurrenceInventory, RenameTarget, RenameTargetClass,
@@ -216,6 +219,28 @@ impl RenameTargetResolution {
                 analysis.as_ref(),
                 &doc.line_index,
             );
+            // Svelte public prop declarations are classified only where the
+            // public-API projection maps an exact authored prop-name anchor.
+            // This covers typed public members and legacy `export let`. Untyped
+            // `$props()` destructured keys remain unclassified until their
+            // producer owns an exact key-span inventory; the call and leaf
+            // binding facts cannot supply structural pattern bounds.
+            let is_svelte = carrier_language_for(&doc.canonical_id)
+                .is_some_and(|language| language.is_svelte());
+            if is_svelte
+                && svelte_public_prop_at(
+                    server,
+                    &doc.canonical_id,
+                    &doc.source,
+                    &doc.line_index,
+                    position,
+                )
+            {
+                target.class = RenameTargetClass::PublicComponentProp;
+                target.same_file_ranges.clear();
+                target.same_file_enumeration =
+                    SameFileEnumeration::Partial(UnenumeratedRegion::NoOccurrenceInventory);
+            }
             // THE ONE grant of the markup conjunct. The classifier leaves it
             // ungranted (fail-closed); this owner knows the file's carrier and so
             // is the only place that can assert the capability.
@@ -235,6 +260,11 @@ impl RenameTargetResolution {
     /// revoke the native edit's completeness.
     pub(super) fn is_css(&self) -> bool {
         matches!(self.target.class, RenameTargetClass::Css)
+    }
+
+    /// Whether this cursor is positively classified as a public component prop.
+    pub(super) fn is_public_component_prop(&self) -> bool {
+        matches!(self.target.class, RenameTargetClass::PublicComponentProp)
     }
 
     /// What the emitted transaction must prove about the REQUESTED file — the
@@ -269,6 +299,7 @@ impl RenameTargetResolution {
             SameFileEnumeration::Complete
         );
         match (self.target.class, self.target.anchor) {
+            (RenameTargetClass::PublicComponentProp, _) => SameFileProof::Unprovable,
             (RenameTargetClass::Native | RenameTargetClass::Css, _) => SameFileProof::Requires {
                 ranges: self.target.same_file_ranges.clone(),
                 enumerates_whole_file: whole_file,
@@ -312,6 +343,9 @@ impl RenameTargetResolution {
     /// The prepare projection of this resolution — see [`RenamePlan`].
     pub(super) fn prepare_plan(&self) -> RenamePlan {
         match (self.target.class, self.target.anchor) {
+            // No offer: the editor must never begin a public-prop rename the
+            // direct request is required to refuse.
+            (RenameTargetClass::PublicComponentProp, _) => RenamePlan::Decline,
             // Verter's own analysis is the authority and its range is exact.
             (RenameTargetClass::Native | RenameTargetClass::Css, Some(range)) => {
                 RenamePlan::Offer(range)
@@ -325,6 +359,47 @@ impl RenameTargetResolution {
             _ => RenamePlan::Decline,
         }
     }
+}
+
+/// Whether the existing Svelte public-API projection maps the authored cursor
+/// as a local public prop name.
+///
+/// The projector emits source-map runs only for byte-verified prop-name
+/// anchors. Mapping succeeds only inside one such exact run. Convert the
+/// negotiated editor position through the document's byte offset into UTF-16,
+/// which is the source-map coordinate convention.
+fn svelte_public_prop_at(
+    server: &VerterLanguageServer,
+    canonical_id: &str,
+    source: &str,
+    line_index: &LineIndex,
+    position: &Position,
+) -> bool {
+    let Some(offset) = line_index.position_to_offset(position) else {
+        return false;
+    };
+    let Some(utf16_position) = LineIndex::new_utf16(source).offset_to_position(offset) else {
+        return false;
+    };
+    let Some(source_map) = server
+        .documents
+        .host()
+        .get_public_api_projection(canonical_id)
+        .ok()
+        .flatten()
+        .and_then(|projection| projection.response.source_map)
+    else {
+        return false;
+    };
+    let Ok(mapper) = PositionMapper::from_json(&source_map) else {
+        return false;
+    };
+    mapper
+        .carrier_to_tsx(LspPosition::new(
+            utf16_position.line,
+            utf16_position.character,
+        ))
+        .is_some()
 }
 
 /// What the emitted rename transaction must prove about the requested file — see

@@ -8306,22 +8306,23 @@ async fn contract_kebab_prop_rename_classifies_cross_file_usage() {
 }
 
 #[tokio::test]
-async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_template() {
-    // EXECUTED rename (not classification): renaming the kebab `:my-prop`
-    // usage must produce a merged edit covering BOTH the parent template usage
-    // AND the child's camel `myProp` defineProps declaration — the
-    // child-declaration leg Verter synthesizes must key on the DECLARED name
-    // (the carrier API spells it verbatim), never the kebab usage alias.
+async fn contract_kebab_prop_rename_refuses_when_a_second_parent_is_unproven() {
+    // EXECUTED rename (not classification): a SECOND parent also passes
+    // `:my-prop`, while the provider answer below names only the initiating
+    // parent. The old declaration+initiating-parent gate shipped that partial
+    // WorkspaceEdit; the public-prop admission must now refuse before asking the
+    // provider because no available authority proves every parent was found.
     let child_source = "<script setup lang=\"ts\">\ndefineProps<{ myProp: string }>()\n</script>\n";
     let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst v = 'x'\n</script>\n<template>\n  <MyComp :my-prop=\"v\" />\n</template>\n";
+    let second_parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst other = 'y'\n</script>\n<template>\n  <MyComp :my-prop=\"other\" />\n</template>\n";
     let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
         ("src/MyComp.vue", "vue", child_source),
         ("src/App.vue", "vue", parent_source),
+        ("src/SecondParent.vue", "vue", second_parent_source),
     ])
     .await;
 
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
-    let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
     let server = service.inner();
     let position = find_document_position(server, &app_uri, ":my-prop=", 1);
 
@@ -8355,7 +8356,33 @@ async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_tem
         }],
     );
 
-    let edit = super::nav_features_navigation::handle_rename(
+    let rename_queries_before = provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                crate::type_provider::mock::MockCall::GetRenameLocations { .. }
+            )
+        })
+        .count();
+    let prepared = super::rename_prepare::handle_prepare_rename(
+        server,
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: app_uri.clone(),
+            },
+            position,
+        },
+    )
+    .await
+    .expect("prepare request succeeds");
+    assert!(
+        prepared.is_none(),
+        "prepare must not offer a public component-prop rename"
+    );
+
+    let result = super::nav_features_navigation::handle_rename(
         server,
         RenameParams {
             text_document_position: TextDocumentPositionParams {
@@ -8368,43 +8395,32 @@ async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_tem
             work_done_progress_params: Default::default(),
         },
     )
-    .await
-    .expect("rename request should succeed")
-    .expect("a confirmed kebab rename must return the merged edit, not fail closed");
-
-    let triples = workspace_edit_triples(&edit);
-    let expected_usage = range_for_authored_snippet(server, &app_uri, "my-prop");
-    let expected_decl = range_for_authored_snippet(server, &child_uri, "myProp");
-    let app_path = crate::documents::uri_to_canonical_id(&app_uri);
-    let child_path = crate::documents::uri_to_canonical_id(&child_uri);
-    assert!(
-        triples.iter().any(|(uri, range, new_text)| {
-            verter_span::path::fs_paths_equal(
-                &crate::documents::uri_to_canonical_id(uri),
-                &app_path,
-            ) && *range == expected_usage
-                && new_text == "myPropRenamed"
-        }),
-        "the parent template usage leg must be edited range-exact: {triples:?}"
+    .await;
+    let error = result.expect_err(
+        "a public component-prop rename with an unproven sibling parent must return no edit",
+    );
+    assert_eq!(
+        error.code,
+        tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803)
     );
     assert!(
-        triples.iter().any(|(uri, range, new_text)| {
-            verter_span::path::fs_paths_equal(
-                &crate::documents::uri_to_canonical_id(uri),
-                &child_path,
-            ) && *range == expected_decl
-                && new_text == "myPropRenamed"
-        }),
-        "the child script declaration leg must be edited range-exact \
-         (synthesized from the DECLARED name, not the kebab alias): {triples:?}"
+        error.message.contains("complete cross-file usage proof"),
+        "the refusal must explain why no WorkspaceEdit is safe, got {:?}",
+        error.message
     );
-    // The mis-ranged provider leg (a PREFIX of the authored kebab name) must
-    // be pruned — only the exact synthesized usage edit survives.
-    assert!(
-        triples
-            .iter()
-            .all(|(_, range, _)| *range == expected_usage || *range == expected_decl),
-        "no mis-ranged provider leg may survive the synthesis: {triples:?}"
+    let rename_queries_after = provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                crate::type_provider::mock::MockCall::GetRenameLocations { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        rename_queries_after, rename_queries_before,
+        "public-prop admission must refuse before provider rename is called"
     );
 
     drain_handle.abort();
