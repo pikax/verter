@@ -200,6 +200,16 @@ impl RenameTargetResolution {
         let target = (|| {
             let doc = server.documents.get(uri)?;
             let analysis = server.documents.get_analysis(uri);
+            let is_svelte = carrier_language_for(&doc.canonical_id)
+                .is_some_and(|language| language.is_svelte());
+            let svelte_script_facts = is_svelte
+                .then(|| {
+                    server
+                        .documents
+                        .host()
+                        .resolve_svelte_script_facts(&doc.canonical_id)
+                })
+                .flatten();
             // Post-read validation (fail closed): only an analysis proven to
             // describe THESE bytes may classify THIS cursor.
             let host_source = server.documents.host().get_source(&doc.canonical_id)?;
@@ -219,22 +229,34 @@ impl RenameTargetResolution {
                 analysis.as_ref(),
                 &doc.line_index,
             );
-            // Svelte public prop declarations are classified only where the
-            // public-API projection maps an exact authored prop-name anchor.
-            // This covers typed public members and legacy `export let`. Untyped
-            // `$props()` destructured keys remain unclassified until their
-            // producer owns an exact key-span inventory; the call and leaf
-            // binding facts cannot supply structural pattern bounds.
-            let is_svelte = carrier_language_for(&doc.canonical_id)
-                .is_some_and(|language| language.is_svelte());
+            let svelte_props_call_refuses = doc
+                .line_index
+                .position_to_offset(position)
+                .is_some_and(|offset| {
+                    svelte_script_facts.as_deref().is_some_and(|facts| {
+                        svelte_props_call_requires_public_refusal_at(facts, offset)
+                    })
+                });
+            let svelte_native_edit_touches_public_key =
+                svelte_script_facts.as_deref().is_some_and(|facts| {
+                    svelte_native_edit_touches_public_key(&target, facts, &doc.line_index)
+                });
+            // Typed public members and legacy `export let` declarations are
+            // covered by the public-API projection. Untyped `$props()` roles
+            // come from their exact producer-owned key/binding inventories. A
+            // native same-name occurrence set that reaches any exact public-key
+            // span is unsafe as a whole even when the cursor names another
+            // symbol, so it takes the same refusal path.
             if is_svelte
-                && svelte_public_prop_at(
-                    server,
-                    &doc.canonical_id,
-                    &doc.source,
-                    &doc.line_index,
-                    position,
-                )
+                && (svelte_props_call_refuses
+                    || svelte_native_edit_touches_public_key
+                    || svelte_public_prop_at(
+                        server,
+                        &doc.canonical_id,
+                        &doc.source,
+                        &doc.line_index,
+                        position,
+                    ))
             {
                 target.class = RenameTargetClass::PublicComponentProp;
                 target.same_file_ranges.clear();
@@ -359,6 +381,61 @@ impl RenameTargetResolution {
             _ => RenamePlan::Decline,
         }
     }
+}
+
+/// Whether an exact `$props()` key/binding span requires public-prop refusal.
+///
+/// A public key always refuses, including a shorthand span that also appears
+/// as a local binding. A local-only binding refuses only when its call's key
+/// set is open. Positions in neither inventory are unchanged.
+fn svelte_props_call_requires_public_refusal_at(
+    facts: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    offset: u32,
+) -> bool {
+    facts.props_calls.iter().any(|props_call| {
+        props_call
+            .public_keys
+            .iter()
+            .any(|key| key.span.contains_offset(offset))
+            || (props_call.has_rest
+                && props_call
+                    .local_bindings
+                    .iter()
+                    .any(|binding| binding.span.contains_offset(offset)))
+    })
+}
+
+/// Whether Verter's proposed native same-file edit set intersects an exact
+/// `$props()` public-key span.
+///
+/// Native occurrence collection is spelling-based within the file. An
+/// unrelated symbol with the same spelling can therefore propose an edit at a
+/// public key. The producer-owned public-key spans are the safety boundary: any
+/// intersection refuses the whole rename rather than changing component API.
+fn svelte_native_edit_touches_public_key(
+    target: &RenameTarget,
+    facts: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    line_index: &LineIndex,
+) -> bool {
+    if target.class != RenameTargetClass::Native {
+        return false;
+    }
+
+    target.same_file_ranges.iter().any(|range| {
+        let Some(start) = line_index.position_to_offset(&range.start) else {
+            return false;
+        };
+        let Some(end) = line_index.position_to_offset(&range.end) else {
+            return false;
+        };
+
+        facts.props_calls.iter().any(|props_call| {
+            props_call
+                .public_keys
+                .iter()
+                .any(|key| start < key.span.end && key.span.start < end)
+        })
+    })
 }
 
 /// Whether the existing Svelte public-API projection maps the authored cursor

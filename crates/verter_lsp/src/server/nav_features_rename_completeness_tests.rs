@@ -367,49 +367,79 @@ async fn svelte_props_member_refuses_without_provider_passthrough() {
     f.shutdown().await;
 }
 
-/// KNOWN OPEN: untyped `$props()` destructured keys are not classified as public
-/// props. This is unsound pending a producer-owned destructured-key span
-/// inventory: the name-only fallback treats the shorthand key as an ordinary
-/// binding and can emit a same-file edit without proving parent usages.
+/// An untyped `$props()` shorthand is both a public key and a local binding.
+/// The public-key role wins, so both prepare and direct rename must refuse
+/// without consulting the provider.
 #[tokio::test]
-async fn known_open_svelte_untyped_props_key_is_not_refused_without_producer_inventory() {
+async fn svelte_untyped_props_shorthand_refuses_before_provider_rename() {
     const SOURCE: &str =
         "<script lang=\"ts\">\nlet { title } = $props();\nconsole.log(title)\n</script>\n";
+    let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
     let f = fixture_for_carrier(
         SOURCE,
-        None,
+        Some(provider.clone()),
         crate::TypeProviderKind::Tsgo,
         "Untyped.svelte",
         "svelte",
     )
     .await;
     let position = position_of(SOURCE, "{ title }", 3);
+    let before = rename_query_count(&provider);
 
     assert!(
         prepare_rename_at(f.server(), &f.uri, position)
             .await
-            .is_some(),
-        "the known-open untyped key currently follows ordinary binding behavior"
+            .is_none(),
+        "prepare must not offer an untyped Svelte public prop"
     );
-    let edit = rename_result_at(f.server(), &f.uri, position, "heading")
-        .await
-        .expect("the known-open untyped key is not categorically refused")
-        .expect("the current name-only fallback emits its same-file binding edit");
     assert_eq!(
-        edit_starts(&edit, &f.uri),
-        vec![(1, 6), (2, 12)],
-        "current honest behavior renames only the key/local binding spellings"
+        rename_query_count(&provider),
+        before,
+        "prepare must classify the shorthand without probing provider rename"
+    );
+    let error = rename_result_at(f.server(), &f.uri, position, "heading")
+        .await
+        .expect_err("a shorthand public prop must refuse instead of producing an edit");
+    assert_public_prop_refusal(&error);
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "direct shorthand rename must refuse before calling the provider"
     );
     f.shutdown().await;
+
+    const NO_PROPS_SOURCE: &str =
+        "<script lang=\"ts\">\nconst title = 1;\nconsole.log(title);\n</script>\n";
+    let unaffected = fixture_for_carrier(
+        NO_PROPS_SOURCE,
+        None,
+        crate::TypeProviderKind::Tsgo,
+        "NoProps.svelte",
+        "svelte",
+    )
+    .await;
+    let ordinary_position = position_of(NO_PROPS_SOURCE, "const title", "const ".len());
+    let edit = rename_result_at(
+        unaffected.server(),
+        &unaffected.uri,
+        ordinary_position,
+        "heading",
+    )
+    .await
+    .expect("ordinary rename in a Svelte file without `$props()` succeeds")
+    .expect("ordinary binding rename produces an edit");
+    assert_eq!(
+        edit_starts(&edit, &unaffected.uri),
+        vec![(1, 6), (2, 12)],
+        "a Svelte file without `$props()` is unaffected"
+    );
+    unaffected.shutdown().await;
 }
 
-/// KNOWN OPEN: the untyped `$props()` construct has no blanket refusal because
-/// the available facts cannot distinguish public destructured keys from local
-/// bindings. This local alias therefore follows ordinary binding behavior. The
-/// unsound public-key side stays open until a producer-owned destructured-key
-/// span inventory exists.
+/// An aliased `$props()` entry has two distinct exact spans. The public key
+/// refuses, while the closed-call local alias remains an ordinary local rename.
 #[tokio::test]
-async fn known_open_svelte_props_local_alias_is_not_refused_without_producer_inventory() {
+async fn svelte_untyped_props_alias_public_key_refuses_but_local_binding_renames() {
     const SOURCE: &str =
         "<script lang=\"ts\">\nlet { title: localTitle } = $props();\nconsole.log(localTitle)\n</script>\n";
     let f = fixture_for_carrier(
@@ -420,19 +450,30 @@ async fn known_open_svelte_props_local_alias_is_not_refused_without_producer_inv
         "svelte",
     )
     .await;
-    let position = position_of(SOURCE, "localTitle", 3);
+    let public_key_position = position_of(SOURCE, "{ title:", 3);
 
     assert!(
-        prepare_rename_at(f.server(), &f.uri, position)
+        prepare_rename_at(f.server(), &f.uri, public_key_position)
+            .await
+            .is_none(),
+        "prepare must not offer the aliased public key"
+    );
+    let error = rename_result_at(f.server(), &f.uri, public_key_position, "heading")
+        .await
+        .expect_err("the aliased public key must refuse instead of producing an edit");
+    assert_public_prop_refusal(&error);
+
+    let local_binding_position = position_of(SOURCE, "localTitle", 3);
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, local_binding_position)
             .await
             .is_some(),
-        "the local binding is not categorically refused with the untyped construct"
+        "the closed-call local alias remains renameable"
     );
-
-    let edit = rename_result_at(f.server(), &f.uri, position, "heading")
+    let edit = rename_result_at(f.server(), &f.uri, local_binding_position, "heading")
         .await
-        .expect("the local alias inside untyped `$props()` destructuring is not refused")
-        .expect("the ordinary binding path emits a same-file edit");
+        .expect("local alias rename request succeeds")
+        .expect("the ordinary local-binding path emits a same-file edit");
     assert_eq!(
         edit_starts(&edit, &f.uri),
         vec![(1, 13), (2, 12)],
@@ -441,13 +482,12 @@ async fn known_open_svelte_props_local_alias_is_not_refused_without_producer_inv
     f.shutdown().await;
 }
 
-/// The finding-1 shape: a public key preceding its aliased leaf has no
-/// producer-owned key-span anchor. With a same-named import, the name-only
-/// fallback currently mistakes the public key for that import and emits a
-/// native edit. This deliberately pins the honest known-open behavior so a
-/// future producer-owned destructured-key inventory has a discriminating case.
+/// A same-named import precedes an aliased `$props()` key. The native occurrence
+/// scan currently conflates their spellings, so its proposed import rename would
+/// also overwrite the public key. Refuse that whole transaction rather than
+/// changing the component API through an unrelated symbol rename.
 #[tokio::test]
-async fn known_open_svelte_props_key_before_alias_can_follow_same_named_import() {
+async fn svelte_props_refuses_native_edit_that_would_touch_same_named_public_key() {
     const SOURCE: &str = "<script lang=\"ts\">\nimport { title } from \"./constants\";\nlet { title: localTitle } = $props();\nconsole.log(localTitle);\n</script>\n";
     let f = fixture_for_carrier(
         SOURCE,
@@ -457,22 +497,105 @@ async fn known_open_svelte_props_key_before_alias_can_follow_same_named_import()
         "svelte",
     )
     .await;
-    let position = position_of(SOURCE, "let { title", "let { ".len());
+    let public_key_position = position_of(SOURCE, "let { title", "let { ".len());
+
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, public_key_position)
+            .await
+            .is_none(),
+        "the `$props()` public key must not be mistaken for the import"
+    );
+    let error = rename_result_at(f.server(), &f.uri, public_key_position, "heading")
+        .await
+        .expect_err("the `$props()` public key must refuse");
+    assert_public_prop_refusal(&error);
+
+    let import_position = position_of(SOURCE, "import { title", "import { ".len());
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, import_position)
+            .await
+            .is_none(),
+        "prepare must not offer a rename whose native edit would touch a `$props()` public key"
+    );
+    let error = rename_result_at(f.server(), &f.uri, import_position, "heading")
+        .await
+        .expect_err("a native edit touching a public key must refuse, never emit a WorkspaceEdit");
+    assert_public_prop_refusal(&error);
+    f.shutdown().await;
+}
+
+/// A rest element makes a `$props()` call's public-key set open. No binding in
+/// that call can be proven local-only, including an aliased binding and the
+/// rest binding itself.
+#[tokio::test]
+async fn svelte_props_open_rest_call_bindings_refuse_before_provider_rename() {
+    const SOURCE: &str = "<script lang=\"ts\">\nlet { title: localTitle, ...rest } = $props();\nconsole.log(localTitle, rest);\n</script>\n";
+    let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
+    let f = fixture_for_carrier(
+        SOURCE,
+        Some(provider.clone()),
+        crate::TypeProviderKind::Tsgo,
+        "Rest.svelte",
+        "svelte",
+    )
+    .await;
+    let before = rename_query_count(&provider);
+
+    for position in [
+        position_of(SOURCE, "localTitle", 3),
+        position_of(SOURCE, "...rest", 3),
+    ] {
+        assert!(
+            prepare_rename_at(f.server(), &f.uri, position)
+                .await
+                .is_none(),
+            "prepare must not offer a binding from an open `$props()` call"
+        );
+        let error = rename_result_at(f.server(), &f.uri, position, "renamed")
+            .await
+            .expect_err("a binding from an open `$props()` call must refuse");
+        assert_public_prop_refusal(&error);
+    }
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "open-call bindings must refuse before provider rename"
+    );
+    f.shutdown().await;
+}
+
+/// Svelte classifies an undestructured `$props()` binding as an open rest-prop
+/// surface, so renaming the whole-object binding cannot be proven local-only.
+#[tokio::test]
+async fn svelte_undestructured_props_binding_refuses_before_provider_rename() {
+    const SOURCE: &str =
+        "<script lang=\"ts\">\nlet props = $props();\nconsole.log(props.title);\n</script>\n";
+    let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
+    let f = fixture_for_carrier(
+        SOURCE,
+        Some(provider.clone()),
+        crate::TypeProviderKind::Tsgo,
+        "WholeProps.svelte",
+        "svelte",
+    )
+    .await;
+    let position = position_of(SOURCE, "let props", "let ".len());
+    let before = rename_query_count(&provider);
 
     assert!(
         prepare_rename_at(f.server(), &f.uri, position)
             .await
-            .is_some(),
-        "the known-open key is currently mistaken for the same-named import"
+            .is_none(),
+        "prepare must not offer an undestructured `$props()` binding"
     );
-    let edit = rename_result_at(f.server(), &f.uri, position, "heading")
+    let error = rename_result_at(f.server(), &f.uri, position, "componentProps")
         .await
-        .expect("the known-open public key is not categorically refused")
-        .expect("the name-only import fallback emits a native WorkspaceEdit");
+        .expect_err("an undestructured `$props()` binding must refuse");
+    assert_public_prop_refusal(&error);
     assert_eq!(
-        edit_starts(&edit, &f.uri),
-        vec![(1, 9), (2, 6)],
-        "current behavior renames the unrelated import and public key, but not the local alias"
+        rename_query_count(&provider),
+        before,
+        "undestructured `$props()` must refuse before provider rename"
     );
     f.shutdown().await;
 }
