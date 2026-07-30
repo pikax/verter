@@ -1900,6 +1900,47 @@ async fn make_definition_test_server_with_kind_and_deadlines(
     Arc<MockTypeProvider>,
     String,
 ) {
+    let mut host_config = HostConfig::default();
+    host_config.lsp_method_timeouts.request_deadlines = request_deadlines;
+    make_definition_test_server_with_config(files, kind, host_config, true).await
+}
+
+/// Build the production default-profile definition server: the projection host
+/// runs BUILD and optional semantic analysis stays off. Carrier `did_open`
+/// still compiles the normal IDE + TEMPLATE_DATA projection.
+async fn make_default_profile_definition_test_server(
+    files: &[(&str, &str, &str)],
+) -> (
+    tempfile::TempDir,
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tokio::task::JoinHandle<()>,
+    Arc<MockTypeProvider>,
+    String,
+) {
+    make_definition_test_server_with_config(
+        files,
+        crate::TypeProviderKind::Tsserver,
+        HostConfig {
+            analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+            ..HostConfig::default()
+        },
+        false,
+    )
+    .await
+}
+
+async fn make_definition_test_server_with_config(
+    files: &[(&str, &str, &str)],
+    kind: crate::TypeProviderKind,
+    host_config: HostConfig,
+    enable_semantic_analysis: bool,
+) -> (
+    tempfile::TempDir,
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tokio::task::JoinHandle<()>,
+    Arc<MockTypeProvider>,
+    String,
+) {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
@@ -1920,8 +1961,6 @@ async fn make_definition_test_server_with_kind_and_deadlines(
     let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
     );
-    let mut host_config = HostConfig::default();
-    host_config.lsp_method_timeouts.request_deadlines = request_deadlines;
     let host = Arc::new(VerterHost::new(host_config, vfs_workspace));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
@@ -1941,13 +1980,16 @@ async fn make_definition_test_server_with_kind_and_deadlines(
             },
         )
     });
-    // Definition-server fixtures also back the native component/directive/slot
-    // hover contract matrix. Keep that optional lane explicit in tests now that
-    // the production initialization default is disabled.
-    service
-        .inner()
-        .hover_native_semantics_enabled
-        .store(true, std::sync::atomic::Ordering::Release);
+    if enable_semantic_analysis {
+        // Definition-server fixtures also back the native
+        // component/directive/slot hover contract matrix. Keep that optional
+        // lane explicit in tests now that the production initialization default
+        // is disabled.
+        service
+            .inner()
+            .hover_native_semantics_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
     let drain_handle = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -1955,7 +1997,9 @@ async fn make_definition_test_server_with_kind_and_deadlines(
 
     let workspace_id = crate::test_utils::canonical_test_path(&workspace);
     let server = service.inner();
-    server.documents.set_semantic_analysis_enabled(true);
+    if enable_semantic_analysis {
+        server.documents.set_semantic_analysis_enabled(true);
+    }
     let ide_project = crate::project_resolver::IdeProjectConfig::new(
         workspace_id.clone(),
         workspace_id.clone(),
@@ -1980,7 +2024,7 @@ async fn make_definition_test_server_with_kind_and_deadlines(
             version: 1,
             text: (*source).to_string(),
         });
-        if matches!(*language_id, "vue" | "svelte") {
+        if enable_semantic_analysis && matches!(*language_id, "vue" | "svelte") {
             scheduled_semantic += 1;
             server.documents.schedule_semantic_analysis(&uri);
         }
@@ -29462,6 +29506,138 @@ async fn svelte_real_pipeline_class_definition_reaches_style_rule() {
     let target = &locations[0];
     assert_eq!(
         target.range.start.line,
+        line_for_snippet(source, ".chip-live {"),
+        "definition lands on the .chip-live rule line"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Default-profile Vue CSS definition uses template data emitted by the normal
+/// IDE projection compile even though optional semantic analysis is disabled.
+#[tokio::test]
+async fn vue_default_profile_class_definition_reaches_style_rule() {
+    let source = "<template>\n  <div class=\"chip-live\">chip</div>\n</template>\n\n<style>\n.chip-live {\n  color: red;\n}\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_default_profile_definition_test_server(&[("src/CssIntel.vue", "vue", source)]).await;
+
+    let uri = workspace_uri(&workspace_id, "src/CssIntel.vue");
+    let server = service.inner();
+    assert!(
+        !server.documents.semantic_analysis_enabled(),
+        "the production default must leave optional semantic analysis off"
+    );
+    assert_eq!(
+        server.documents.host().config().effective_scope(),
+        verter_semantic::analysis::AnalysisScope::BUILD,
+        "the projection host must use the production BUILD scope"
+    );
+
+    let analysis = server
+        .documents
+        .get_analysis(&uri)
+        .expect("BUILD projection analysis must serve");
+    let template = analysis
+        .template
+        .as_deref()
+        .expect("the IDE projection's TEMPLATE_DATA target must publish Vue template facts");
+    assert!(
+        template
+            .elements
+            .iter()
+            .any(|element| element.static_classes().any(|class| class == "chip-live")),
+        "the compiled template data must carry the authored class"
+    );
+    assert!(
+        analysis.markup_class_tokens.is_empty(),
+        "Vue currently has no parse-domain markup class-token producer"
+    );
+    assert!(
+        analysis.styles.iter().any(|style| {
+            style
+                .css
+                .as_ref()
+                .is_some_and(|css| css.classes.iter().any(|class| class.name == "chip-live"))
+        }),
+        "the declaring style rule must still be present"
+    );
+
+    let position = find_document_position(server, &uri, "class=\"chip-live\"", 8);
+    let response = server
+        .goto_definition(goto_definition_params(&uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("Vue class token should navigate to its style rule");
+    let locations = definition_locations(response);
+    assert_eq!(
+        locations[0].range.start.line,
+        line_for_snippet(source, ".chip-live {"),
+        "definition lands on the .chip-live rule line"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Default-profile Svelte CSS definition uses parse-domain markup class tokens
+/// and therefore remains available without optional semantic analysis.
+#[tokio::test]
+async fn svelte_default_profile_class_definition_reaches_style_rule() {
+    let source = "<script lang=\"ts\">\n  let on = true;\n</script>\n\n<div class=\"chip-live\" class:on>chip</div>\n\n<style>\n  .chip-live {\n    color: red;\n  }\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_default_profile_definition_test_server(&[("src/CssIntel.svelte", "svelte", source)])
+            .await;
+
+    let uri = workspace_uri(&workspace_id, "src/CssIntel.svelte");
+    let server = service.inner();
+    assert!(
+        !server.documents.semantic_analysis_enabled(),
+        "the production default must leave optional semantic analysis off"
+    );
+    assert_eq!(
+        server.documents.host().config().effective_scope(),
+        verter_semantic::analysis::AnalysisScope::BUILD,
+        "the projection host must use the production BUILD scope"
+    );
+
+    let analysis = server
+        .documents
+        .get_analysis(&uri)
+        .expect("BUILD projection analysis must serve");
+    assert!(
+        analysis
+            .template
+            .as_ref()
+            .is_none_or(|template| template.elements.is_empty()),
+        "Svelte class navigation must not rely on a template element inventory"
+    );
+    assert!(
+        analysis
+            .markup_class_tokens
+            .iter()
+            .any(|token| token.name == "chip-live"),
+        "Svelte parse-domain markup tokens must survive the served snapshot"
+    );
+    assert!(
+        analysis.styles.iter().any(|style| {
+            style
+                .css
+                .as_ref()
+                .is_some_and(|css| css.classes.iter().any(|class| class.name == "chip-live"))
+        }),
+        "the declaring style rule must be present"
+    );
+
+    let position = find_document_position(server, &uri, "class=\"chip-live\"", 8);
+    let response = server
+        .goto_definition(goto_definition_params(&uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("Svelte class token must navigate to its style rule");
+    let locations = definition_locations(response);
+    assert_eq!(
+        locations[0].range.start.line,
         line_for_snippet(source, ".chip-live {"),
         "definition lands on the .chip-live rule line"
     );
