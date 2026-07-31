@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 //
 // Behavioral smoke for the native Svelte client element lifecycle-directive surface
-// (5f-c). It mounts Verter's EMITTED modules against the REAL pinned `svelte@5.56.3`
+// (5f-c). It mounts Verter's EMITTED modules against the REAL pinned `svelte@5.56.8`
 // client runtime and asserts the observable runtime behavior of each lifecycle
 // helper:
 //   - `use:act`        — the action fn RUNS on mount, receiving the mounted element;

@@ -1,10 +1,10 @@
-//! The Svelte runtime pre-lowering substrate.
+//! The native Svelte conformance compiler.
 //!
-//! This module owns the SHARED pre-lowering surface the client (`svelte/internal/client`)
-//! and server (`svelte/internal/server`) backends build on. It is physically
-//! separate from the IDE TSX projection ([`crate::svelte::ide`]) — the two
-//! codegen paths consume the same [`ParsedSvelte`](crate::svelte::ParsedSvelte)
-//! AST but never share code (the two-codegen-paths rule).
+//! This module owns Verter's native Svelte analysis and client-codegen surface.
+//! It is physically separate from the IDE TSX projection
+//! ([`crate::svelte::ide`]) and remains public for conformance tooling. The
+//! registered carrier runtime path is [`crate::svelte::rsvelte_bridge`], which
+//! supplies both client and server output through rsvelte.
 //!
 //! The pipeline is:
 //!
@@ -17,14 +17,12 @@
 //!   → client.rs  ClientModule        (the emitted `svelte/internal/client` JS)
 //! ```
 //!
-//! [`compile_client`] drives this end-to-end and is wired into the Svelte carrier's
-//! `compile_bundle` (`crate::svelte::carrier`): a supported runes component
-//! populates `bundle.main.body_code` (so `has_runtime_surface()` becomes true and
-//! the host emits the `Main` virtual node), and every unsupported surface FAILS
-//! CLOSED with a typed [`client::UnsupportedSvelteRuntimeSurface`] carrying its
-//! owning vertical. The expression / script emission routes its source-derived
-//! rewrites through [`CodeTransform`](crate::code_transform::CodeTransform); the
-//! synthesized helper scaffolding is unmapped.
+//! [`compile_client`] drives this end-to-end for native conformance consumers.
+//! Every unsupported surface fails closed with a typed
+//! [`client::UnsupportedSvelteRuntimeSurface`] carrying its owning vertical.
+//! Expression and script emission route source-derived rewrites through
+//! [`CodeTransform`](crate::code_transform::CodeTransform); synthesized helper
+//! scaffolding is unmapped.
 
 mod attr_lowering;
 mod bind_target;

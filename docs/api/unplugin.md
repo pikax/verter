@@ -32,7 +32,9 @@ export default defineConfig({
 });
 ```
 
-Install and pin `svelte@5.56.3` in the application; emitted `svelte/internal/client` imports are deliberately resolved from the application's Svelte package.
+Install and pin `svelte@5.56.8` in the application; emitted
+`svelte/internal/client` and `svelte/internal/server` imports are deliberately
+resolved from the application's Svelte package.
 
 For a mixed Vue/Svelte project:
 
@@ -46,7 +48,10 @@ export default defineConfig({
 ```
 
 ::: warning Experimental Svelte support
-Svelte support is **experimental — not yet validated in real-world use**. The client compiler, external scoped CSS, dependency routing, and preview mount path are integrated. Unsupported runtime surfaces, including unavailable server output, fail closed with typed diagnostics rather than producing successful empty modules.
+Svelte support is **experimental — not yet validated in real-world use**. The
+rsvelte-backed client and server compilers, external scoped CSS, dependency
+routing, and preview mount path are integrated. Compiler failures fail closed
+with typed diagnostics rather than producing successful empty modules.
 :::
 
 ## Bundler Setup

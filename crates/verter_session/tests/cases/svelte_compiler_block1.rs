@@ -562,7 +562,7 @@ fn runtime_main_request_on_a_refused_special_element_is_an_explicit_refusal_yet_
     // still refused; the window/document/body host + `<svelte:element>` + `<svelte:boundary>` +
     // `<svelte:head>` surfaces now EMIT, so a still-refused special fixture is a standalone
     // `<svelte:fragment>`) yields the EXPLICIT `HostError::RuntimeSurfaceRefused` (carrying the
-    // precise `svelte-runtime-unsupported-*` reason) — NOT a silent `MissingVirtualNode`, and NOT
+    // precise rsvelte compiler reason) — NOT a silent `MissingVirtualNode`, and NOT
     // a successful compile. YET the IDE projection (`get_ide`) still resolves (type-checking
     // survives). RED against the prior host path (which ignored `runtime_surface_refused` and
     // collapsed the request to a generic missing node, indistinguishable from a clean IDE-only
@@ -583,15 +583,15 @@ fn runtime_main_request_on_a_refused_special_element_is_an_explicit_refusal_yet_
             diagnostic_code, ..
         }) => {
             assert!(
-                diagnostic_code.starts_with("svelte-runtime-unsupported-"),
+                diagnostic_code.starts_with("rsvelte-"),
                 "the refusal must carry the precise reason, got: {diagnostic_code}"
             );
             // A standalone `<svelte:fragment>` special refuses with the EXACT
-            // `ComponentOrSnippet` diagnostic code (`special_label`) — assert it precisely.
+            // rsvelte/Svelte diagnostic code — assert it precisely.
             assert_eq!(
-                diagnostic_code, "svelte-runtime-unsupported-component",
+                diagnostic_code, "rsvelte-svelte_fragment_invalid_placement",
                 "a refused special-element host must refuse with the exact \
-                 `svelte-runtime-unsupported-component` code, got: {diagnostic_code}"
+                 rsvelte diagnostic code, got: {diagnostic_code}"
             );
         }
         Err(HostError::MissingVirtualNode { .. }) => panic!(
@@ -799,7 +799,7 @@ fn runtime_main_request_on_a_supported_svelte_component_returns_the_main_module(
 #[test]
 fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
     // The refused runtime surface here is a standalone `<svelte:fragment>` (the transparent-
-    // wrapper surface, still refused with `svelte-runtime-unsupported-component`; the
+    // wrapper surface, refused with `rsvelte-svelte_fragment_invalid_placement`; the
     // window/document/body host + `<svelte:element>` + `<svelte:boundary>` + `<svelte:head>`
     // surfaces now EMIT); its IDE projection still resolves.
     // A WARM cached runtime refusal (`runtime_surface_refused = true`, no `Main`
@@ -833,14 +833,14 @@ fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
     };
 
     // First request: the cold compile runs, fails closed, and the refusal is cached
-    // carrying the EXACT `svelte-runtime-unsupported-component` code.
+    // carrying the exact rsvelte/Svelte diagnostic code.
     match request() {
         Err(HostError::RuntimeSurfaceRefused {
             diagnostic_code, ..
         }) => assert_eq!(
-            diagnostic_code, "svelte-runtime-unsupported-component",
+            diagnostic_code, "rsvelte-svelte_fragment_invalid_placement",
             "the first runtime Main request on a refused component is a typed refusal \
-             carrying the exact `svelte-runtime-unsupported-component` code, got: \
+             carrying the exact rsvelte diagnostic code, got: \
              {diagnostic_code}"
         ),
         Ok(_) => panic!(
@@ -860,9 +860,9 @@ fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
         Err(HostError::RuntimeSurfaceRefused {
             diagnostic_code, ..
         }) => assert_eq!(
-            diagnostic_code, "svelte-runtime-unsupported-component",
+            diagnostic_code, "rsvelte-svelte_fragment_invalid_placement",
             "the warm-served runtime Main request on a refused component is STILL a typed \
-             refusal carrying the exact `svelte-runtime-unsupported-component` code, got: \
+             refusal carrying the exact rsvelte diagnostic code, got: \
              {diagnostic_code}"
         ),
         Ok(_) => panic!(

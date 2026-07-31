@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 //
 // Behavioral smoke for the native Svelte client DOM-hosted bind family. It
-// mounts Verter's EMITTED §1.2 modules against the REAL pinned `svelte@5.56.3`
+// mounts Verter's EMITTED §1.2 modules against the REAL pinned `svelte@5.56.8`
 // client runtime and asserts the observable DOM↔signal behavior of each
 // `$.bind_*` host:
 //   - `<textarea bind:value>`  — typing into the textarea updates the reflected `<p>`;

@@ -6,7 +6,7 @@
 Online playground for live framework-carrier compilation using Verter. Write Vue or Svelte components in a browser-based editor and inspect the generated TypeScript, JavaScript, CSS, diagnostics, and live preview.
 
 > [!IMPORTANT]
-> Svelte support is **experimental — not yet validated in real-world use**. The preview uses the compiler-pinned Svelte 5.56.3 runtime. Unsupported runtime surfaces remain visible as diagnostics instead of being previewed as successful empty output.
+> Svelte support is **experimental — not yet validated in real-world use**. The preview uses the compiler-pinned Svelte 5.56.8 runtime. Unsupported runtime surfaces remain visible as diagnostics instead of being previewed as successful empty output.
 
 This is a **private** package (not published to npm). It is deployed to Netlify via the release CI workflow.
 

@@ -212,14 +212,17 @@ impl ResolveGraph {
             .unwrap_or_else(|| panic!("resolve node `{id}` must have a package entry"))
     }
 
-    /// BFS over production edges from `root_name`, returning every reached
+    /// BFS over production edges from `root_id`, returning every reached
     /// package id (including the root).
-    fn production_closure(&self, root_name: &str) -> HashSet<String> {
-        let root = self.id_of(root_name).to_string();
+    fn production_closure_from_id(&self, root_id: &str) -> HashSet<String> {
+        assert!(
+            self.names.contains_key(root_id),
+            "package id `{root_id}` must exist in the resolve graph"
+        );
         let mut seen: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<String> = VecDeque::new();
-        seen.insert(root.clone());
-        queue.push_back(root);
+        seen.insert(root_id.to_string());
+        queue.push_back(root_id.to_string());
         while let Some(id) = queue.pop_front() {
             let deps = self
                 .production_deps
@@ -233,14 +236,32 @@ impl ResolveGraph {
         }
         seen
     }
+
+    /// BFS over production edges from the uniquely named workspace root.
+    fn production_closure(&self, root_name: &str) -> HashSet<String> {
+        self.production_closure_from_id(self.id_of(root_name))
+    }
 }
 
 /// The sanctioned span-primitive subtree: `oxc_span`'s OWN production
 /// closure, computed structurally from the live resolve graph, canaried
 /// against front-end rot, and equality-pinned against the audited
 /// `oxc`-prefixed allowlist before use.
-fn sanctioned_span_subtree(graph: &ResolveGraph) -> HashSet<String> {
-    let subtree = graph.production_closure(OXC_EXCEPTION_ROOT);
+fn sanctioned_span_subtree(
+    graph: &ResolveGraph,
+    firewalled_closure: &HashSet<String>,
+) -> HashSet<String> {
+    let mut roots = firewalled_closure
+        .iter()
+        .filter(|id| graph.name_of(id) == OXC_EXCEPTION_ROOT);
+    let root = roots.next().unwrap_or_else(|| {
+        panic!("firewalled closure must contain its sanctioned `{OXC_EXCEPTION_ROOT}` package")
+    });
+    assert!(
+        roots.next().is_none(),
+        "firewalled closure must reach exactly one `{OXC_EXCEPTION_ROOT}` package id"
+    );
+    let subtree = graph.production_closure_from_id(root);
     for id in &subtree {
         let name = graph.name_of(id);
         assert!(
@@ -285,7 +306,7 @@ fn sanctioned_span_subtree(graph: &ResolveGraph) -> HashSet<String> {
 fn assert_firewalled_closure(graph: &ResolveGraph, root: &str, required_reachable: &[&str]) {
     let closure = graph.production_closure(root);
     let closure_names: HashSet<&str> = closure.iter().map(|id| graph.name_of(id)).collect();
-    let sanctioned = sanctioned_span_subtree(graph);
+    let sanctioned = sanctioned_span_subtree(graph, &closure);
 
     // Non-vacuity: a broken walk that reached nothing must not pass.
     for &required in required_reachable {

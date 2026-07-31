@@ -45,7 +45,7 @@ pnpm bench:json
 ## Svelte Compiler Fence
 
 The Svelte fence compares Verter's experimental native client compiler with the
-pinned official `svelte@5.56.3` compiler:
+pinned official `svelte@5.56.8` compiler:
 
 ```bash
 pnpm --filter @verter/benchmark bench:svelte:compiler

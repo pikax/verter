@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 //
 // Behavioral smoke for the native Svelte client CONTROL-FLOW blocks (5e). It mounts
-// Verter's EMITTED modules against the REAL pinned `svelte@5.56.3` client runtime and
+// Verter's EMITTED modules against the REAL pinned `svelte@5.56.8` client runtime and
 // asserts the observable mount-and-react behavior of each block:
 //   - `{#if}`   — the truthy branch renders its body;
 //   - `{#each}` — a `$props()`-sourced array renders one body per item, the item read

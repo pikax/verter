@@ -80,6 +80,7 @@ sha2 = { workspace = true }
 hex = "0.4.3"
 lightningcss = { workspace = true }
 phf = { version = "0.13.1", features = ["macros"] }
+rsvelte_core = { version = "=0.9.4", git = "https://github.com/baseballyama/rsvelte", rev = "805ea90f75697a942819fb1dd7c2ad648933acd9", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1.1"

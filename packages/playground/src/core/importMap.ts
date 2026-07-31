@@ -3,7 +3,7 @@ export interface ImportMap {
   scopes?: Record<string, Record<string, string>>;
 }
 
-export const SVELTE_RUNTIME_VERSION = "5.56.3";
+export const SVELTE_RUNTIME_VERSION = "5.56.8";
 
 export function getDefaultImportMap(vueVersion = "3.5.26"): ImportMap {
   const svelteBase = `https://cdn.jsdelivr.net/npm/svelte@${SVELTE_RUNTIME_VERSION}`;
