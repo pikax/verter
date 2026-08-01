@@ -506,9 +506,22 @@ pub struct ResolutionFactRef {
     pub(crate) version: ResolutionFactVersion,
 }
 
+/// Version ledger for one immutable resolution root.
+///
+/// The map is point-lookup only — `version` / `advance` / `remove`, never an
+/// iteration — so its hasher is free to be chosen for speed. Validating one
+/// warm candidate's witness is a `version` lookup per recorded fact, and a
+/// `ResolutionFactKey` carries a full canonical path, so the hash of that path
+/// is charged on every fact of every candidate of every resolve. Nothing about
+/// the ledger's contents, ordering, or the signatures derived from it depends
+/// on which hasher produced the buckets: witness canonicalisation orders facts
+/// structurally, never by hash.
+type FactVersionLedger =
+    HashMap<ResolutionFactKey, ResolutionFactVersion, rustc_hash::FxBuildHasher>;
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ResolutionFactRoot {
-    versions: HashMap<ResolutionFactKey, ResolutionFactVersion>,
+    versions: FactVersionLedger,
 }
 
 impl ResolutionFactRoot {
@@ -1499,8 +1512,27 @@ pub fn manifest_fingerprint_of(manifest: &crate::types::PackageManifest) -> [u8;
 /// Private capability which records and finalises one attempt exactly once.
 pub(crate) struct ResolutionTransaction {
     root: Arc<CapturedResolutionWorld>,
-    /// Facts this attempt observed itself, in observation order.
+    /// Facts this attempt observed itself, in first-observation order, with
+    /// no key recorded twice — see [`Self::observed_keys`].
     observations: Vec<FactVersionRef>,
+    /// Every key already present in [`Self::observations`].
+    ///
+    /// A resolver attempt re-reads the same inputs constantly: each path
+    /// probe and each realpath observes its whole ancestor recovery chain,
+    /// so probing many candidates inside one directory re-observes that
+    /// directory's ancestors once per candidate. Measured on a 200-SFC
+    /// corpus, four out of every five observations recorded were a key the
+    /// attempt had already recorded.
+    ///
+    /// Recording a key once is not a weaker read set. `root` is an immutable
+    /// captured world, so `fact_version` is a pure function of the key for
+    /// this transaction's whole life: a repeat observation produces a
+    /// byte-identical `FactVersionRef`, and finalisation's sort + dedup
+    /// discarded it anyway. Suppressing it at the recording point drops the
+    /// redundant world lookup, the redundant key clone, and the sort work
+    /// they created, while leaving the finalised set — and the merge with
+    /// any absorbed canonical run — exactly as it was.
+    observed_keys: rustc_hash::FxHashSet<ResolutionFactKey>,
     /// Witnesses absorbed wholesale from reused warm candidates. Each is
     /// an already-canonical signature minted by a previous [`Self::finish`],
     /// so finalisation MERGES them rather than re-sorting them (see
@@ -1856,6 +1888,7 @@ impl ResolutionTransaction {
         Self {
             root,
             observations: Vec::new(),
+            observed_keys: rustc_hash::FxHashSet::default(),
             absorbed: Vec::new(),
             observed_values: ObservedResolutionValues::default(),
             non_admission: None,
@@ -1871,7 +1904,12 @@ impl ResolutionTransaction {
     }
 
     pub(crate) fn observe(&mut self, key: ResolutionFactKey) {
+        if self.observed_keys.contains(&key) {
+            crate::probe_tally!(OBS_SUPPRESSED, 1);
+            return;
+        }
         let version = self.root.fact_version(&key);
+        self.observed_keys.insert(key.clone());
         self.observations.push(FactVersionRef::ResolveImports(
             ResolveImportsFactRef::Resolution(ResolutionFactRef { key, version }),
         ));
@@ -2190,6 +2228,172 @@ mod transaction_contract_tests {
         assert_eq!(
             finished_signature(absorb_first).facts.as_ref(),
             finished_signature(absorb_last).facts.as_ref()
+        );
+    }
+
+    /// Every key that differs in ANY component is a distinct observation.
+    ///
+    /// Suppressing a repeat observation is only sound while the suppression
+    /// is keyed on the WHOLE `ResolutionFactKey`. These keys agree on their
+    /// most conspicuous component and differ elsewhere — same canonical with
+    /// a different variant, a different population, a prefix relationship,
+    /// an `ExactResolution` differing only in phase or in request kind — so a
+    /// suppression keyed on canonical, on variant, or on any proper subset of
+    /// the key collapses at least one pair and shortens the witness.
+    fn distinguishing_keys() -> Vec<ResolutionFactKey> {
+        let session = ResolutionPopulation::Session(SessionFingerprint::fresh(7));
+        vec![
+            ResolutionFactKey::PathProbe {
+                canonical: CanonicalResolutionId::new("/p/a.ts"),
+                population: ResolutionPopulation::Base,
+            },
+            // Same canonical, different population.
+            ResolutionFactKey::PathProbe {
+                canonical: CanonicalResolutionId::new("/p/a.ts"),
+                population: session,
+            },
+            // Same canonical and population, different variant.
+            ResolutionFactKey::Manifest {
+                canonical: CanonicalResolutionId::new("/p/a.ts"),
+                population: ResolutionPopulation::Base,
+            },
+            ResolutionFactKey::DirectoryMembers {
+                canonical: CanonicalResolutionId::new("/p/a.ts"),
+                population: ResolutionPopulation::Base,
+            },
+            ResolutionFactKey::Realpath {
+                requested: CanonicalResolutionId::new("/p/a.ts"),
+                population: ResolutionPopulation::Base,
+            },
+            ResolutionFactKey::RecoveryScope {
+                canonical_prefix: CanonicalResolutionId::new("/p/a.ts"),
+                population: ResolutionPopulation::Base,
+            },
+            // Prefix relationship with the canonical above.
+            ResolutionFactKey::PathProbe {
+                canonical: CanonicalResolutionId::new("/p/a.ts.map"),
+                population: ResolutionPopulation::Base,
+            },
+            ResolutionFactKey::ContextSelection {
+                entry: ResolutionEntry::Importer(CanonicalResolutionId::new("/p/a.ts")),
+                population: ResolutionPopulation::Base,
+            },
+            // Three exact-resolution keys agreeing on entry+specifier and
+            // differing only in phase, then only in request kind.
+            ResolutionFactKey::ExactResolution {
+                entry: ResolutionEntry::Importer(CanonicalResolutionId::new("/p/a.ts")),
+                specifier: RawSpecifier::new("./dep"),
+                phase: ResolvePhase::ProviderGraph,
+                kind: ResolveRequestKind::EsmImport,
+                population: ResolutionPopulation::Base,
+            },
+            ResolutionFactKey::ExactResolution {
+                entry: ResolutionEntry::Importer(CanonicalResolutionId::new("/p/a.ts")),
+                specifier: RawSpecifier::new("./dep"),
+                phase: ResolvePhase::CodegenBlocker,
+                kind: ResolveRequestKind::EsmImport,
+                population: ResolutionPopulation::Base,
+            },
+            ResolutionFactKey::ExactResolution {
+                entry: ResolutionEntry::Importer(CanonicalResolutionId::new("/p/a.ts")),
+                specifier: RawSpecifier::new("./dep"),
+                phase: ResolvePhase::ProviderGraph,
+                kind: ResolveRequestKind::TypeImport,
+                population: ResolutionPopulation::Base,
+            },
+        ]
+    }
+
+    /// A key observed many times is recorded once, and the witness is
+    /// byte-identical to the one a caller that never repeated itself mints.
+    ///
+    /// Both halves matter. Without the second, a suppression that dropped a
+    /// DISTINCT key would still pass the "records once" half.
+    #[test]
+    fn repeat_observations_collapse_to_the_same_witness_as_observing_each_key_once() {
+        let keys = distinguishing_keys();
+
+        // Every key observed once, in order.
+        let mut once = ResolutionTransaction::new(captured_world());
+        once.set_query(query());
+        for key in &keys {
+            once.observe(key.clone());
+        }
+        let once = finished_signature(once);
+        assert_eq!(
+            once.facts.len(),
+            keys.len(),
+            "each key in the fixture must survive as its own observation"
+        );
+
+        // The same keys, each observed several times, interleaved and in a
+        // different order — the shape a recovery-chain walk produces.
+        let mut repeated = ResolutionTransaction::new(captured_world());
+        repeated.set_query(query());
+        for round in 0..4 {
+            for key in keys.iter().rev().skip(round % 3).chain(keys.iter()) {
+                repeated.observe(key.clone());
+            }
+        }
+        let repeated = finished_signature(repeated);
+
+        assert_eq!(
+            repeated.facts.as_ref(),
+            once.facts.as_ref(),
+            "repeating an observation must change neither the witness contents nor its order"
+        );
+
+        // Mutation recipe: key the suppression on the fact's canonical id, on
+        // its variant, or on any proper subset of the key. The near-miss
+        // pairs above then collapse and `once.facts.len()` drops below the
+        // fixture size.
+    }
+
+    /// Record-time suppression must not disturb the absorbed-run merge: the
+    /// witness stays the exact union of the absorbed run and the
+    /// attempt-local observations, however often either side is repeated.
+    #[test]
+    fn repeat_observations_do_not_disturb_the_absorbed_run_merge() {
+        let keys = distinguishing_keys();
+        let (absorbed_keys, local_keys) = keys.split_at(5);
+
+        let mut producer = ResolutionTransaction::new(captured_world());
+        producer.set_query(query());
+        for key in absorbed_keys {
+            producer.observe(key.clone());
+        }
+        let reused = finished_signature(producer);
+        assert_eq!(reused.facts.len(), absorbed_keys.len());
+
+        // The attempt repeats BOTH sides: keys the absorbed run already
+        // carries, and its own.
+        let mut attempt = ResolutionTransaction::new(captured_world());
+        attempt.set_query(query());
+        for key in keys.iter().chain(keys.iter()) {
+            attempt.observe(key.clone());
+        }
+        attempt.absorb(&reused);
+        for key in keys.iter().rev() {
+            attempt.observe(key.clone());
+        }
+        let merged = finished_signature(attempt);
+
+        // Reference: the same union built with no repetition at all.
+        let mut reference = ResolutionTransaction::new(captured_world());
+        reference.set_query(query());
+        for key in local_keys {
+            reference.observe(key.clone());
+        }
+        for key in absorbed_keys {
+            reference.observe(key.clone());
+        }
+        let reference = finished_signature(reference);
+
+        assert_eq!(merged.facts.len(), keys.len());
+        assert_eq!(
+            merged.facts.as_ref(),
+            reference.facts.as_ref(),
+            "the absorbed-run merge must yield the exact union regardless of repetition"
         );
     }
 }

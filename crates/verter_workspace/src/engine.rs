@@ -2473,14 +2473,17 @@ impl Engine {
             transaction.lock().observe(exact_fact.clone());
             let observed_exact_version = captured.world.fact_version(&exact_fact);
 
-            let candidates: LazyResolutionCandidates = if request_local_snapshot {
-                LazyResolutionCandidates::new()
-            } else {
-                self.lazy_resolution_cache
-                    .read()
-                    .get(&cache_key)
-                    .cloned()
-                    .unwrap_or_default()
+            let candidates: LazyResolutionCandidates = {
+                crate::probe_scope!(RESOLVE_CANDIDATE_READ);
+                if request_local_snapshot {
+                    LazyResolutionCandidates::new()
+                } else {
+                    self.lazy_resolution_cache
+                        .read()
+                        .get(&cache_key)
+                        .cloned()
+                        .unwrap_or_default()
+                }
             };
             // Every retained candidate is screened against the captured
             // world's exact fact, not just the most recent one: a slot that
@@ -2488,43 +2491,51 @@ impl Engine {
             // the demand that supersedes it must name every witness it
             // rejected.
             let mut rejected_exact_targets = Vec::new();
-            for candidate in candidates.iter() {
-                let candidate_exact_version =
-                    candidate.signature.resolution_fact_version(&exact_fact);
-                if candidate_exact_version.is_some()
-                    && candidate_exact_version != Some(observed_exact_version)
-                {
-                    rejected_exact_targets.push(
-                        candidate
-                            .result
-                            .as_ref()
-                            .map(|result| result.source_id.clone()),
-                    );
+            {
+                crate::probe_scope!(RESOLVE_SCREEN_EXACT);
+                for candidate in candidates.iter() {
+                    let candidate_exact_version =
+                        candidate.signature.resolution_fact_version(&exact_fact);
+                    if candidate_exact_version.is_some()
+                        && candidate_exact_version != Some(observed_exact_version)
+                    {
+                        rejected_exact_targets.push(
+                            candidate
+                                .result
+                                .as_ref()
+                                .map(|result| result.source_id.clone()),
+                        );
+                    }
                 }
             }
 
             // Exact lookup is rooted in the captured immutable world, including
             // the miss. The hook fires after the observation but before the
             // attempt can select a resolver or admit.
-            let exact = captured
-                .world
-                .base
-                .exact(importer_id, specifier, ctx)
-                .cloned();
+            let exact = {
+                crate::probe_scope!(RESOLVE_EXACT_LOOKUP);
+                captured
+                    .world
+                    .base
+                    .exact(importer_id, specifier, ctx)
+                    .cloned()
+            };
             let exact_hit = exact.is_some();
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::ExactTableLookup);
 
             let context_fact = ResolutionFactKey::context_importer(importer_id, population);
             transaction.lock().observe(context_fact);
-            let selected_context =
+            let selected_context = {
+                crate::probe_scope!(RESOLVE_CONTEXT_SELECT);
                 match selected_context_for_path(captured.world.base.as_ref(), importer_id) {
                     Ok(context) => Some(context),
                     Err(_) => {
                         transaction.lock().mark_incomplete_provenance();
                         None
                     }
-                };
+                }
+            };
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::ProjectSelection);
 
@@ -2553,25 +2564,40 @@ impl Engine {
             // exact change invalidates the candidate through the same rail
             // as any other resolution input, and the recomputed result —
             // exact or resolver-derived — republishes through the same slot.
-            let reusable = candidates.iter().find(|entry| {
-                let Some(candidate_context) = Self::complete_provider_context(
-                    captured.world.base.as_ref(),
-                    selected_context.clone(),
-                    entry.result.as_ref(),
-                    population,
-                    &transaction,
-                ) else {
-                    return false;
-                };
-                let query = ResolutionQueryKey::importer(
-                    importer_id,
-                    specifier,
-                    ctx,
-                    candidate_context,
-                    population,
-                );
-                entry.query == query && entry.signature.validates(captured.world.as_ref())
-            });
+            let reusable = {
+                crate::probe_scope!(RESOLVE_REUSE_FIND);
+                candidates.iter().find(|entry| {
+                    let candidate_context = {
+                        crate::probe_scope!(RESOLVE_REUSE_CTX);
+                        Self::complete_provider_context(
+                            captured.world.base.as_ref(),
+                            selected_context.clone(),
+                            entry.result.as_ref(),
+                            population,
+                            &transaction,
+                        )
+                    };
+                    let Some(candidate_context) = candidate_context else {
+                        return false;
+                    };
+                    let query_matches = {
+                        crate::probe_scope!(RESOLVE_REUSE_QUERY);
+                        let query = ResolutionQueryKey::importer(
+                            importer_id,
+                            specifier,
+                            ctx,
+                            candidate_context,
+                            population,
+                        );
+                        entry.query == query
+                    };
+                    if !query_matches {
+                        return false;
+                    }
+                    crate::probe_scope!(RESOLVE_REUSE_VALIDATE);
+                    entry.signature.validates(captured.world.as_ref())
+                })
+            };
             let result = if let Some(entry) = reusable {
                 transaction.lock().absorb(&entry.signature);
                 transaction.lock().set_query(entry.query.clone());
