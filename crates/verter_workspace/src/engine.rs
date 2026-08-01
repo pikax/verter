@@ -797,6 +797,7 @@ impl Engine {
         fingerprint: SessionFingerprint,
         mutation: impl FnOnce(&ResolutionWorldRoot, &mut ResolutionSessionRoot) -> (R, bool),
     ) -> R {
+        crate::probe_scope!(MUTATE_RESOLUTION_SESS);
         let domain = self.session_resolution_domain(fingerprint);
         let _base_read_fence = self.resolution_world_write.lock();
         let base = self.resolution_world.load_full();
@@ -1291,6 +1292,7 @@ impl Engine {
         canonical_id: &str,
         mutation: impl FnOnce() -> (R, bool),
     ) -> R {
+        crate::probe_scope!(MUTATE_OVERLAY_UPSERT);
         let fingerprint = self.default_resolution_session;
         self.mutate_resolution_session(fingerprint, |base, session| {
             let (result, changed) = mutation();
@@ -2420,6 +2422,7 @@ impl Engine {
         specifier: &str,
         ctx: crate::types::ResolutionContext,
     ) -> ResolutionOutcome {
+        crate::probe_scope!(RESOLVE_IN_PUBLISHED);
         const MAX_WORLD_ATTEMPTS: usize = 8;
         let population = reader.resolution_population();
         let cache_key = LazyResolutionCacheKey {
@@ -2434,7 +2437,12 @@ impl Engine {
         let request_local_snapshot = reader.resolution_snapshot_is_request_local();
 
         for _ in 0..MAX_WORLD_ATTEMPTS {
-            let Some(captured) = self.capture_stable_resolution_world(population) else {
+            crate::probe_scope!(RESOLVE_ATTEMPT);
+            let captured = {
+                crate::probe_scope!(RESOLVE_CAPTURE_WORLD);
+                self.capture_stable_resolution_world(population)
+            };
+            let Some(captured) = captured else {
                 continue;
             };
             if expected_published.is_some_and(|expected| {
@@ -2527,8 +2535,12 @@ impl Engine {
             // recorded canonicals; a refreshed (changed) world means the
             // captured root is superseded — retry against the new world.
             let mut refreshed = false;
-            for entry in candidates.iter() {
-                refreshed |= self.refresh_resolution_evidence(reader, evidence, &entry.signature);
+            {
+                crate::probe_scope!(RESOLVE_REFRESH_EVID);
+                for entry in candidates.iter() {
+                    refreshed |=
+                        self.refresh_resolution_evidence(reader, evidence, &entry.signature);
+                }
             }
             if refreshed {
                 continue;
@@ -2595,6 +2607,7 @@ impl Engine {
                             })
                     })
                 } else {
+                    crate::probe_scope!(RESOLVE_TRACKED);
                     let tracked = TransactionReader::new(reader, &transaction);
                     let capability = TrackedResolutionCapability::new();
                     captured.world.base.published.as_ref().and_then(|root| {
@@ -2644,11 +2657,16 @@ impl Engine {
 
             // The final fence and publication are serialized against all world
             // writers. No mutation can land between validation and insertion.
-            let _publication = self.resolution_world_write.lock();
-            let _session_publication = captured
-                .session_domain
-                .as_ref()
-                .map(|domain| domain.write.lock());
+            let (_publication, _session_publication) = {
+                crate::probe_scope!(RESOLVE_PUBLISH_LOCK);
+                (
+                    self.resolution_world_write.lock(),
+                    captured
+                        .session_domain
+                        .as_ref()
+                        .map(|domain| domain.write.lock()),
+                )
+            };
             if !self.resolution_world_still_current(&captured) {
                 continue;
             }
@@ -2658,7 +2676,10 @@ impl Engine {
             let query = transaction.lock().query().cloned();
             let mut transaction = transaction.into_inner();
             let observed_values = transaction.take_observed_values();
-            let mut admission = transaction.finish();
+            let mut admission = {
+                crate::probe_scope!(RESOLVE_TXN_FINISH);
+                transaction.finish()
+            };
             if matches!(
                 &admission,
                 SignatureAdmission::Cacheable(signature)
@@ -2671,7 +2692,10 @@ impl Engine {
             if publish_candidate
                 && !request_local_snapshot
                 && matches!(&admission, SignatureAdmission::Cacheable(_))
-                && self.fold_observed_base_evidence(observed_values)
+                && {
+                    crate::probe_scope!(RESOLVE_FOLD_EVIDENCE);
+                    self.fold_observed_base_evidence(observed_values)
+                }
             {
                 // An observed value conflicted with the recorded baseline:
                 // state newer than the captured root entered through the
@@ -2695,6 +2719,7 @@ impl Engine {
             }
             if publish_candidate && !request_local_snapshot {
                 if let (Some(signature), Some(query)) = (cacheable_signature, query.clone()) {
+                    crate::probe_scope!(RESOLVE_ADMIT);
                     admit_resolution_candidate(
                         self.lazy_resolution_cache
                             .write()
@@ -3213,6 +3238,7 @@ impl Engine {
         canonical_id: &str,
         edges: &[crate::types::ParsedEdge],
     ) {
+        crate::probe_scope!(RECORD_PARSED_EDGES);
         for _ in 0..8 {
             let population = reader.resolution_population();
             let Some(captured) = self.capture_stable_resolution_world(population) else {

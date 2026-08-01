@@ -71,6 +71,7 @@ pub mod carrier_discovery;
 pub mod changes;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config;
+pub mod currency_probe;
 pub(crate) mod dir_index;
 pub mod env_hash;
 pub mod error;

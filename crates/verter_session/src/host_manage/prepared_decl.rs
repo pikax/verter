@@ -1616,6 +1616,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<IndexedReadyServe> {
+        verter_workspace::probe_scope!(ENSURE_INDEXED_READY);
         let serve = self.ensure_indexed_ready_serve_uninstrumented(canonical_id);
         // Test-only deterministic fenced-serve override: convert a would-be
         // PUBLISHED serve into a FENCED one (fire the non-cacheability fan-out +
@@ -1757,6 +1758,7 @@ impl VerterHost {
         }
 
         let materialize = || -> Option<crate::project_type_store::IndexedFlightOutcome> {
+            verter_workspace::probe_scope!(ENSURE_INDEXED_COLD);
             self.provenance
                 .indexed_ready_materializes
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

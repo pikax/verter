@@ -546,6 +546,7 @@ impl VerterHost {
         canonical_or_alias: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<FileAnalysisSnapshot> {
+        verter_workspace::probe_scope!(GET_ANALYSIS);
         self.provenance
             .get_analysis_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1554,6 +1555,7 @@ impl VerterHost {
         parent_canonical_id: &str,
         snapshot: &mut FileAnalysisSnapshot,
     ) {
+        verter_workspace::probe_scope!(RESOLVE_SNAPSHOT_IMPS);
         // Establish the owner's canonical post-parse artifact FIRST. The
         // snapshot being enriched here is the owner's, and its authored
         // import inventory is that artifact's shallow surface — so the

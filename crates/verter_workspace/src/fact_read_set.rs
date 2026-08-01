@@ -78,7 +78,7 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::fact_cache::{FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef};
+use crate::fact_cache::FactVersionRef;
 
 pub const FACT_SIGNATURE_CAP: usize = 1_024;
 
@@ -115,6 +115,13 @@ pub enum NonCacheablePropagation {
 /// marker enforces this at compile time.
 pub struct FactReadSet {
     observations: SmallVec<[FactVersionRef; INLINE_CAPACITY]>,
+    /// Already-canonical signatures absorbed wholesale from a completed
+    /// compute (see [`FactReadSet::absorb_canonical_signature`]). Kept as
+    /// separate strictly-increasing runs instead of being splatted into
+    /// `observations`, so finalisation MERGES them in `O(n)` instead of
+    /// re-sorting a set that was already sorted once. Every run in here has
+    /// been verified strictly increasing at insertion.
+    canonical_runs: Vec<Arc<[FactVersionRef]>>,
     /// TRUE when a NON-CACHEABLE read was consumed inside this tracer's
     /// scope. The class is: a FENCED (ReturnOnly, `store_published ==
     /// false`) `IndexedReady` serve; a broken decl-body lease
@@ -146,7 +153,7 @@ impl Default for FactReadSet {
 impl std::fmt::Debug for FactReadSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FactReadSet")
-            .field("len", &self.observations.len())
+            .field("len", &self.len())
             .field("non_cacheable_propagation", &self.non_cacheable_propagation)
             .finish()
     }
@@ -159,6 +166,7 @@ impl FactReadSet {
     pub fn new() -> Self {
         Self {
             observations: SmallVec::new(),
+            canonical_runs: Vec::new(),
             non_cacheable_propagation: None,
             _not_send_sync: PhantomData,
         }
@@ -209,18 +217,80 @@ impl FactReadSet {
         }
     }
 
-    /// Number of observations recorded so far (pre-dedup).
+    /// Absorb an ALREADY-CANONICAL signature — the output of a previous
+    /// [`Self::finalise`], retained on a warm cache candidate — without
+    /// re-sorting it.
+    ///
+    /// The warm-reuse path of a cache slot appends the reused candidate's
+    /// whole witness and then adds only a handful of attempt-local
+    /// observations of its own. Splatting the witness into `observations`
+    /// made every reuse pay an `O(n log n)` re-sort of a run that was
+    /// sorted when it was minted; retaining it as a run makes finalisation
+    /// merge instead, `O(n + m)` with no comparison wasted re-discovering
+    /// an order the run already has.
+    ///
+    /// The finalised set is EXACTLY the union of the absorbed runs and the
+    /// locally-observed facts — absorbing never drops an attempt-local
+    /// observation, and merging never drops a fact present in only one
+    /// side.
+    ///
+    /// An `Arc<[FactVersionRef]>` carries no proof that it is canonical, so
+    /// the fast lane VERIFIES the precondition with a linear
+    /// [`is_canonical_run`] check rather than trusting the caller; a
+    /// non-canonical input is recorded as ordinary observations and sorted
+    /// by the same finalisation pass. Either way the result is the same
+    /// canonical set — there is exactly one canonicaliser.
+    #[inline]
+    pub fn absorb_canonical_signature(&mut self, signature: &Arc<[FactVersionRef]>) {
+        if signature.is_empty() {
+            return;
+        }
+        if is_canonical_run(signature) {
+            self.canonical_runs.push(Arc::clone(signature));
+        } else {
+            self.observe_borrowed_signature(signature);
+        }
+    }
+
+    /// Number of observations recorded so far (pre-dedup), counting facts
+    /// held in absorbed canonical runs.
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.observations.len()
+            + self
+                .canonical_runs
+                .iter()
+                .map(|run| run.len())
+                .sum::<usize>()
     }
 
     /// Whether no observations have been recorded.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.observations.is_empty()
+        self.observations.is_empty() && self.canonical_runs.is_empty()
+    }
+
+    /// Collapse the tracer into ONE strictly-increasing observation vector:
+    /// sort + dedup the local observations, then merge every absorbed
+    /// canonical run into them.
+    ///
+    /// Idempotent, and leaves the tracer in an equivalent state (all facts
+    /// in `observations`, no runs outstanding), so a mid-scope
+    /// [`Self::would_overflow`] peek can call it without disturbing a later
+    /// [`Self::finalise`].
+    fn canonicalise(&mut self) {
+        self.observations.sort_unstable_by(compare_fact_refs);
+        self.observations.dedup();
+        if self.canonical_runs.is_empty() {
+            return;
+        }
+        let mut merged: Vec<FactVersionRef> = self.observations.as_slice().to_vec();
+        for run in std::mem::take(&mut self.canonical_runs) {
+            merged = merge_canonical_runs(&merged, &run);
+        }
+        self.observations = SmallVec::from_vec(merged);
     }
 
     /// Whether sealing this tracer WOULD report
@@ -238,17 +308,18 @@ impl FactReadSet {
     /// tracer level).
     ///
     /// Cheap by construction: dedup can only SHRINK the observation set,
-    /// so a raw count at-or-under [`FACT_SIGNATURE_CAP`] cannot overflow
-    /// and short-circuits before any sort. The over-cap branch sorts and
-    /// dedups in place — the observations stay a valid multiset for a
-    /// later `finalise`, which re-sorts regardless.
+    /// so a raw count at-or-under [`FACT_SIGNATURE_CAP`] — local
+    /// observations PLUS every absorbed run, since the cap is a property
+    /// of the finalised set — cannot overflow and short-circuits before
+    /// any sort. The over-cap branch collapses the tracer to canonical
+    /// form in place; the collapse is equivalence-preserving and
+    /// idempotent, so a later `finalise` still sees the same set.
     #[must_use]
     pub fn would_overflow(&mut self) -> bool {
-        if self.observations.len() <= FACT_SIGNATURE_CAP {
+        if self.len() <= FACT_SIGNATURE_CAP {
             return false;
         }
-        self.observations.sort_by(compare_fact_refs);
-        self.observations.dedup();
+        self.canonicalise();
         self.observations.len() > FACT_SIGNATURE_CAP
     }
 
@@ -262,17 +333,29 @@ impl FactReadSet {
     /// the appropriate audit event.
     #[must_use]
     pub fn finalise(mut self) -> FactReadSetFinalise {
-        // Sort canonically so two tracers that observed the same set
-        // of facts in different orders produce byte-identical
-        // signatures. The `FactVersionRef` `Ord` impl is derived via
-        // its enum discriminant first, then per-variant field order;
-        // we rely on `PartialOrd + Ord` being available below.
-        self.observations.sort_by(compare_fact_refs);
-        self.observations.dedup();
+        // Canonicalise so two tracers that observed the same set of facts
+        // in different orders produce byte-identical signatures: sort +
+        // dedup the local observations under the derived total order, then
+        // merge every absorbed canonical run in.
+        {
+            crate::probe_scope!(FINISH_SORT);
+            crate::probe_tally!(
+                ABSORBED_RUN_FACTS,
+                self.canonical_runs
+                    .iter()
+                    .map(|run| run.len())
+                    .sum::<usize>()
+            );
+            self.canonicalise();
+        }
+        crate::probe_tally!(OBS_POST_DEDUP, self.observations.len());
         if self.observations.len() > FACT_SIGNATURE_CAP {
             return FactReadSetFinalise::Overflow;
         }
-        let arc: Arc<[FactVersionRef]> = Arc::from(self.observations.into_vec());
+        let arc: Arc<[FactVersionRef]> = {
+            crate::probe_scope!(FINISH_ARC);
+            Arc::from(self.observations.into_vec())
+        };
         if self.non_cacheable_propagation.is_some() {
             FactReadSetFinalise::NonCacheable(arc)
         } else {
@@ -349,6 +432,13 @@ impl FactReadSetCell {
         self.0.borrow_mut().observe_borrowed_signature(sig);
     }
 
+    /// Absorb an already-canonical signature through `&self`. See
+    /// [`FactReadSet::absorb_canonical_signature`].
+    #[inline]
+    pub fn absorb_canonical_signature(&self, signature: &Arc<[FactVersionRef]>) {
+        self.0.borrow_mut().absorb_canonical_signature(signature);
+    }
+
     /// Record a non-cacheable read consumption through `&self`.
     #[inline]
     pub fn note_non_cacheable_read(&self, propagation: NonCacheablePropagation) {
@@ -395,121 +485,79 @@ impl FactReadSetCell {
     }
 }
 
-/// Stable ordering for [`FactVersionRef`] values. Used by
+/// Canonical ordering for [`FactVersionRef`] values. Used by
 /// [`FactReadSet::finalise`] to produce byte-identical signatures
 /// across permutations of the same observed set.
 ///
-/// Order: enum discriminant first, then per-variant field order.
+/// The order is the DERIVED [`Ord`] on [`FactVersionRef`]: enum
+/// discriminant in declaration order first, then per-variant field order.
 /// `FileWholeHash` < `DerivedFactHash` < `Parse` < `ResolveImports` <
 /// `RouteSurface` < `FileSourceEnv` < `ProjectGeneration`.
-fn compare_fact_refs(a: &FactVersionRef, b: &FactVersionRef) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    let da = discriminant_rank(a);
-    let db = discriminant_rank(b);
-    match da.cmp(&db) {
-        Ordering::Equal => {}
-        non_eq => return non_eq,
-    }
-    match (a, b) {
-        (
-            FactVersionRef::FileWholeHash {
-                canonical_id: ca,
-                hash: ha,
-            },
-            FactVersionRef::FileWholeHash {
-                canonical_id: cb,
-                hash: hb,
-            },
-        ) => ca.cmp(cb).then_with(|| ha.cmp(hb)),
-        (
-            FactVersionRef::DerivedFactHash {
-                canonical_id: ca,
-                kind: ka,
-                hash: ha,
-            },
-            FactVersionRef::DerivedFactHash {
-                canonical_id: cb,
-                kind: kb,
-                hash: hb,
-            },
-        ) => ca
-            .cmp(cb)
-            .then_with(|| (*ka as u8).cmp(&(*kb as u8)))
-            .then_with(|| ha.cmp(hb)),
-        (FactVersionRef::Parse(a), FactVersionRef::Parse(b)) => compare_parse_fact(a, b),
-        (FactVersionRef::ResolveImports(a), FactVersionRef::ResolveImports(b)) => {
-            compare_resolve_imports_fact(a, b)
-        }
-        (FactVersionRef::RouteSurface(a), FactVersionRef::RouteSurface(b)) => {
-            compare_route_surface_fact(a, b)
-        }
-        (
-            FactVersionRef::FileSourceEnv {
-                canonical_id: ca,
-                parse_env_hash: pa,
-                parser_version: va,
-                file_language_id: la,
-            },
-            FactVersionRef::FileSourceEnv {
-                canonical_id: cb,
-                parse_env_hash: pb,
-                parser_version: vb,
-                file_language_id: lb,
-            },
-        ) => ca
-            .cmp(cb)
-            .then_with(|| pa.cmp(pb))
-            .then_with(|| va.cmp(vb))
-            // `FileLanguage` carries open-set ids without a total
-            // order; compare the stable Debug form (same convention as
-            // the per-domain `FactKey` comparisons below).
-            .then_with(|| format!("{la:?}").cmp(&format!("{lb:?}"))),
-        (
-            FactVersionRef::ProjectGeneration { generation: ga },
-            FactVersionRef::ProjectGeneration { generation: gb },
-        ) => ga.cmp(gb),
-        // Cross-variant ordering already handled by discriminant_rank.
-        _ => Ordering::Equal,
-    }
-}
-
+///
+/// Three properties the derive buys structurally, and that a hand-written
+/// comparator does not:
+///
+/// * **Totality over every variant, present and future.** The derive is
+///   generated from the type's own definition, so a new variant, a new
+///   field, or a new nested key kind is ordered by construction. A new
+///   nested type that is NOT `Ord` is a COMPILE ERROR at the derive site
+///   — never a silent tie that collapses two distinct facts into one
+///   comparison-equal pair and makes the sort order input-dependent.
+/// * **Consistency with [`Eq`].** `a.cmp(b) == Equal` exactly when
+///   `a == b`, so `sort_unstable` + `dedup` is exact set semantics: no
+///   distinct fact is ever dropped, and no duplicate ever survives.
+/// * **Run-to-run stability.** Every leaf is a `str`/byte/integer
+///   comparison. Interned ids (`InternedName`, `InternedSpecifier`,
+///   `FrameworkAdapterId`, …) wrap `Arc<str>`, whose `Ord` delegates to
+///   `str` CONTENT — never the pointer, never intern-table insertion
+///   order, never a randomly-seeded hash. Two processes that observe the
+///   same fact set emit byte-identical signatures.
 #[inline]
-fn discriminant_rank(fact: &FactVersionRef) -> u8 {
-    match fact {
-        FactVersionRef::FileWholeHash { .. } => 0,
-        FactVersionRef::DerivedFactHash { .. } => 1,
-        FactVersionRef::Parse(_) => 2,
-        FactVersionRef::ResolveImports(_) => 3,
-        FactVersionRef::RouteSurface(_) => 4,
-        FactVersionRef::FileSourceEnv { .. } => 5,
-        FactVersionRef::ProjectGeneration { .. } => 6,
+fn compare_fact_refs(a: &FactVersionRef, b: &FactVersionRef) -> std::cmp::Ordering {
+    a.cmp(b)
+}
+
+/// TRUE when `run` is strictly increasing under [`compare_fact_refs`] —
+/// i.e. it is already sorted AND carries no duplicate.
+///
+/// A linear `n`-comparison check with no allocation. It is what lets
+/// [`FactReadSet::absorb_canonical_signature`] merge an already-finalised
+/// signature in `O(n + m)` without TRUSTING the caller: an
+/// `Arc<[FactVersionRef]>` carries no proof of canonicality, so the fast
+/// lane verifies the precondition it depends on and a non-canonical input
+/// falls back to the ordinary observation path, which sorts it.
+fn is_canonical_run(run: &[FactVersionRef]) -> bool {
+    run.windows(2)
+        .all(|pair| compare_fact_refs(&pair[0], &pair[1]) == std::cmp::Ordering::Less)
+}
+
+/// Merge two strictly-increasing runs into one strictly-increasing run,
+/// dropping cross-run duplicates. `O(left.len() + right.len())`
+/// comparisons, one allocation for the output.
+fn merge_canonical_runs(left: &[FactVersionRef], right: &[FactVersionRef]) -> Vec<FactVersionRef> {
+    use std::cmp::Ordering;
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < left.len() && j < right.len() {
+        match compare_fact_refs(&left[i], &right[j]) {
+            Ordering::Less => {
+                out.push(left[i].clone());
+                i += 1;
+            }
+            Ordering::Greater => {
+                out.push(right[j].clone());
+                j += 1;
+            }
+            Ordering::Equal => {
+                out.push(left[i].clone());
+                i += 1;
+                j += 1;
+            }
+        }
     }
-}
-
-fn compare_parse_fact(a: &ParseFactRef, b: &ParseFactRef) -> std::cmp::Ordering {
-    a.canonical_id
-        .cmp(&b.canonical_id)
-        .then_with(|| format!("{:?}", a.key).cmp(&format!("{:?}", b.key)))
-        .then_with(|| (a.lane as u8).cmp(&(b.lane as u8)))
-        .then_with(|| a.expected_hash.cmp(&b.expected_hash))
-}
-
-fn compare_resolve_imports_fact(
-    a: &ResolveImportsFactRef,
-    b: &ResolveImportsFactRef,
-) -> std::cmp::Ordering {
-    format!("{a:?}").cmp(&format!("{b:?}"))
-}
-
-fn compare_route_surface_fact(
-    a: &RouteSurfaceFactRef,
-    b: &RouteSurfaceFactRef,
-) -> std::cmp::Ordering {
-    a.canonical_id
-        .cmp(&b.canonical_id)
-        .then_with(|| format!("{:?}", a.key).cmp(&format!("{:?}", b.key)))
-        .then_with(|| (a.lane as u8).cmp(&(b.lane as u8)))
-        .then_with(|| a.expected_hash.cmp(&b.expected_hash))
+    out.extend_from_slice(&left[i..]);
+    out.extend_from_slice(&right[j..]);
+    out
 }
 
 #[cfg(test)]
@@ -548,3 +596,7 @@ mod finalise_tests {
         assert!(matches!(read_set.finalise(), FactReadSetFinalise::Overflow));
     }
 }
+
+#[cfg(test)]
+#[path = "fact_read_set_tests.rs"]
+mod fact_read_set_tests;

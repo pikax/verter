@@ -86,7 +86,10 @@ impl UpsertBatchTxn {
         let UpsertBatchTxn { prepared, batch } = self;
         // ONE input-order wait. `wait_batch` returns `state[i]` for the
         // i-th submitted request regardless of completion order.
-        let states = host.scheduler.wait_batch(&batch);
+        let states = {
+            verter_workspace::probe_scope!(UPSERT_WAIT);
+            host.scheduler.wait_batch(&batch)
+        };
         debug_assert_eq!(
             states.len(),
             prepared.len(),
@@ -279,6 +282,7 @@ impl VerterHost {
         if requests.is_empty() {
             return Vec::new();
         }
+        verter_workspace::probe_scope!(UPSERT_MANY);
         // 2–5: build the transaction (resolve + uniqueness-check canonicals
         //      first, capture context once, prepare each request, ONE
         //      `submit_batch_atomic`).
@@ -385,7 +389,10 @@ impl VerterHost {
         // accounts once itself — do NOT call `account_batch_submission` on
         // top of it. The returned `BatchHandle`'s handles are in input
         // order, index-aligned with `prepared`.
-        let batch = self.scheduler.submit_batch_atomic(scheduler_requests);
+        let batch = {
+            verter_workspace::probe_scope!(UPSERT_SUBMIT);
+            self.scheduler.submit_batch_atomic(scheduler_requests)
+        };
         UpsertBatchTxn { prepared, batch }
     }
 
@@ -495,6 +502,7 @@ impl VerterHost {
     ) -> Result<HostUpdateResult, HostError> {
         use crate::host_executor::HostSourceData;
         use verter_scheduler::job::RequestResult;
+        verter_workspace::probe_scope!(UPSERT_POST_COMMIT);
 
         let PreparedUpsertCommit {
             canonical_id,

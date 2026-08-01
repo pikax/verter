@@ -726,6 +726,7 @@ impl VerterHost {
     /// the authoritative content-change pipeline (`host.upsert`) runs —
     /// `notify_upsert` is the overlay-signal hook only.
     pub fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
+        verter_workspace::probe_scope!(NOTIFY_UPSERT);
         self.ws().notify_upsert(canonical_id, source);
         self.evict_artifact_only_canonical(canonical_id);
     }

@@ -547,6 +547,7 @@ impl FilesystemWorkspace {
         edges: &[crate::types::ParsedEdge],
         publish: impl Fn(&dyn crate::traits::WorkspaceRead) -> T,
     ) -> Option<T> {
+        crate::probe_scope!(RECORD_EDGES_FROZEN);
         const MAX_SNAPSHOT_ATTEMPTS: usize = 4;
         let published = self.load_published()?;
 

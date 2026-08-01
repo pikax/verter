@@ -576,6 +576,24 @@ The fact-signature bound is `FACT_SIGNATURE_CAP = 1_024`. Empty means
 dependency-free and cacheable. Overflow means the computed result is valid but
 non-cacheable; it is not represented as an empty signature.
 
+`FactReadSet::finalise` is the single canonicaliser: it sorts + dedups the
+observed set under the derived `Ord` on `FactVersionRef`, so an identical
+observation set yields a byte-identical signature regardless of observation
+order. The order is total by construction (a new variant or a non-`Ord` nested
+type is a compile error at the derive site, never a silent tie) and stable
+across processes (every leaf is a `str`/byte/integer comparison; interned ids
+order by `Arc<str>` content, never by address or intern-table insertion order).
+
+A warm-reuse attempt does not rebuild the signature. `ResolutionTransaction::absorb`
+retains the reused candidate's already-canonical witness by `Arc` as a run;
+finalisation sorts only the small attempt-local observation set and merges each
+run in linearly. The finalised witness is exactly the union of the absorbed runs
+and the attempt-local observations — the attempt's own observations, which make
+the witness path-precise for THIS demand, always survive the merge. Because an
+`Arc<[FactVersionRef]>` carries no proof of canonicality, absorption verifies the
+run is strictly increasing and routes a non-canonical input through the ordinary
+sort; there is no second canonicalisation path.
+
 `SignatureAdmission` is:
 
 ```text

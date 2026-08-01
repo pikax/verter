@@ -580,6 +580,7 @@ impl VerterHost {
         template_inputs: Option<crate::types::VueTemplateInputs>,
         analysis_started: Option<Instant>,
     ) -> FileAnalysisSnapshot {
+        verter_workspace::probe_scope!(FINALIZE_SNAPSHOT);
         self.resolve_snapshot_imports(canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
         if needs_template_analysis {

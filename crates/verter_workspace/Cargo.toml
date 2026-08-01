@@ -11,6 +11,10 @@ publish = false
 
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# Measurement-only: enables the `currency_probe` wall-clock/call-count rail
+# (`src/currency_probe.rs`). Absent from `default`; requested ONLY by the
+# `verter_bench` measurement harness, never by a production edge.
+currency_probe = []
 # Tests that require third-party repository checkouts beside this repo
 # (Testing-Hermeticity): excluded from the default canonical run; enable
 # explicitly with `--features external-corpus`.

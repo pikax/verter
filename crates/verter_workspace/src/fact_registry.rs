@@ -47,7 +47,9 @@ pub type FactHash = [u8; 16];
 ///
 /// This type lives below semantic/session cache owners so every fact rail uses
 /// the same key identity without a back-edge.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct InternedSpecifier(pub Arc<str>);
 
@@ -70,7 +72,9 @@ impl AsRef<str> for InternedSpecifier {
 }
 
 /// An interned symbol name (export name, member name, etc.).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct InternedName(pub Arc<str>);
 
@@ -93,7 +97,9 @@ impl AsRef<str> for InternedName {
 }
 
 /// An interned wildcard pattern (e.g. `"*.css"`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct InternedGlobPattern(pub Arc<str>);
 
@@ -128,7 +134,9 @@ impl AsRef<str> for InternedGlobPattern {
 /// `verter_session::resolver_core::route_demand::SymbolSpace` covers
 /// resolve-only call paths that have not yet migrated; mixing the two
 /// is an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum SymbolSpace {
     Type,
     Value,
@@ -228,7 +236,9 @@ pub enum FactDomain {
 /// A `<script setup>` block can host multiple macro invocations.
 /// The combination of `MacroKind` + `MacroTargetKey` discriminates
 /// distinct invocations.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct MacroTargetKey {
     /// Stable index within the file's macro instance list, in lexical
     /// order. Restart at 0 per `(MacroKind, file)`.
@@ -244,7 +254,9 @@ pub struct MacroTargetKey {
 /// a binding adds a new `FactKey`; removing one drops an existing
 /// `FactKey`; editing one keeps the `FactKey` but bumps
 /// `Fact::semantic_hash` and/or `Fact::display_hash`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum FactKey {
     // ────────────────────────────────────────────────────────────────
     // Parse-domain (FileFacts; parse_env_hash keyed)
@@ -370,7 +382,9 @@ pub enum FactKey {
 /// `FactKey::ModuleAugmentationIndexShape` — keeping the discriminant
 /// here keeps `FactKey` `Hash + Eq` without dragging in a
 /// `Vec<(...)>` per variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum AugmentationTargetKindTag {
     ExternalSpecifier,
     ResolvedRelativeCanonical,
@@ -384,7 +398,9 @@ pub enum AugmentationTargetKindTag {
 /// Inlined from `verter_semantic::analysis::template::MacroKind` to
 /// avoid leaking that domain's serialisation contract into the fact
 /// registry. The variants must remain in lock-step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum MacroKind {
     DefineProps,
     DefineEmits,
@@ -456,7 +472,9 @@ pub struct Fact {
 /// under. Recorded in `fact_dep_signature` per-observation so the
 /// validator knows whether a cosmetic-only edit invalidates the
 /// consumer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum FactLane {
     Semantic,
     Display,

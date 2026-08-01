@@ -500,7 +500,7 @@ impl ResolutionFactKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResolutionFactRef {
     pub(crate) key: ResolutionFactKey,
     pub(crate) version: ResolutionFactVersion,
@@ -1499,7 +1499,13 @@ pub fn manifest_fingerprint_of(manifest: &crate::types::PackageManifest) -> [u8;
 /// Private capability which records and finalises one attempt exactly once.
 pub(crate) struct ResolutionTransaction {
     root: Arc<CapturedResolutionWorld>,
+    /// Facts this attempt observed itself, in observation order.
     observations: Vec<FactVersionRef>,
+    /// Witnesses absorbed wholesale from reused warm candidates. Each is
+    /// an already-canonical signature minted by a previous [`Self::finish`],
+    /// so finalisation MERGES them rather than re-sorting them (see
+    /// [`FactReadSet::absorb_canonical_signature`]).
+    absorbed: Vec<Arc<[FactVersionRef]>>,
     observed_values: ObservedResolutionValues,
     non_admission: Option<verter_audit::NonAdmissionReason>,
     query: Option<ResolutionQueryKey>,
@@ -1850,6 +1856,7 @@ impl ResolutionTransaction {
         Self {
             root,
             observations: Vec::new(),
+            absorbed: Vec::new(),
             observed_values: ObservedResolutionValues::default(),
             non_admission: None,
             query: None,
@@ -1966,8 +1973,21 @@ impl ResolutionTransaction {
         self.query.as_ref()
     }
 
+    /// Inherit a reused warm candidate's whole witness.
+    ///
+    /// The candidate's signature is retained BY REFERENCE as a canonical
+    /// run instead of being cloned element-wise into `observations`: it was
+    /// already sorted and deduped when the candidate was minted, and
+    /// finalisation merges it with this attempt's own (small) observation
+    /// set in linear time. The finalised witness is exactly the union of
+    /// the two — every attempt-local observation this attempt made is still
+    /// in it, so the reused candidate's witness stays path-precise for THIS
+    /// demand.
     pub(crate) fn absorb(&mut self, signature: &crate::ReadSetSignature) {
-        self.observations.extend(signature.facts.iter().cloned());
+        if signature.facts.is_empty() {
+            return;
+        }
+        self.absorbed.push(Arc::clone(&signature.facts));
     }
 
     pub(crate) fn finish(self) -> SignatureAdmission {
@@ -1979,8 +1999,18 @@ impl ResolutionTransaction {
         if let Some(reason) = self.non_admission {
             return SignatureAdmission::NonCacheable(reason);
         }
+        crate::probe_tally!(
+            OBS_PRE_DEDUP,
+            self.observations.len() + self.absorbed.iter().map(|run| run.len()).sum::<usize>()
+        );
         let mut facts = FactReadSet::new();
-        facts.observe_borrowed_signature(&self.observations);
+        {
+            crate::probe_scope!(FINISH_COLLECT);
+            facts.observe_borrowed_signature(&self.observations);
+            for run in &self.absorbed {
+                facts.absorb_canonical_signature(run);
+            }
+        }
         SignatureAdmission::from_finalise(facts.finalise())
     }
 }
@@ -2068,5 +2098,98 @@ mod transaction_contract_tests {
         // Mutation recipe: add a resolution-specific cap/fallback or convert
         // overflow into ReadSetSignature::empty(). This assertion then becomes
         // cacheable instead of using the one shared overflow convention.
+    }
+
+    fn path_probe(name: &str) -> ResolutionFactKey {
+        ResolutionFactKey::PathProbe {
+            canonical: CanonicalResolutionId::new(name.to_string()),
+            population: ResolutionPopulation::Base,
+        }
+    }
+
+    fn finished_signature(transaction: ResolutionTransaction) -> crate::ReadSetSignature {
+        match transaction.finish() {
+            SignatureAdmission::Cacheable(signature) => signature,
+            other => panic!("expected a cacheable witness, got {other:?}"),
+        }
+    }
+
+    /// The warm-reuse witness is the UNION of the reused candidate's
+    /// signature and this attempt's own observations — never one or the
+    /// other. Absorbing retains the candidate's signature as an
+    /// already-canonical run instead of re-sorting it; the attempt-local
+    /// observations that make the witness path-precise for THIS demand must
+    /// survive that merge intact.
+    #[test]
+    fn absorbing_a_reused_witness_keeps_every_attempt_local_observation() {
+        // The witness a previously admitted candidate retained.
+        let mut producer = ResolutionTransaction::new(captured_world());
+        producer.set_query(query());
+        for name in ["/p/b.ts", "/p/d.ts", "/p/f.ts"] {
+            producer.observe(path_probe(name));
+        }
+        let reused = finished_signature(producer);
+        assert_eq!(reused.facts.len(), 3);
+
+        // A fresh attempt that reuses it: observations that sort BEFORE,
+        // BETWEEN and AFTER the absorbed run, plus one that duplicates it.
+        let mut attempt = ResolutionTransaction::new(captured_world());
+        attempt.set_query(query());
+        attempt.observe(path_probe("/p/a.ts"));
+        attempt.observe(path_probe("/p/e.ts"));
+        attempt.absorb(&reused);
+        attempt.observe(path_probe("/p/d.ts"));
+        attempt.observe(path_probe("/p/z.ts"));
+        let merged = finished_signature(attempt);
+
+        let observed: Vec<String> = merged
+            .facts
+            .iter()
+            .map(|fact| {
+                fact.canonical_id()
+                    .expect("every fact in this witness names a canonical")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            vec!["/p/a.ts", "/p/b.ts", "/p/d.ts", "/p/e.ts", "/p/f.ts", "/p/z.ts"],
+            "the merged witness must be the canonical union of the absorbed run and the \
+             attempt-local observations, with the cross-seam duplicate appearing once"
+        );
+
+        // Mutation recipe: make `absorb` replace `observations` instead of
+        // recording a separate run, or make `finish` feed only the absorbed
+        // runs into the tracer. The attempt-local `/p/a.ts` / `/p/e.ts` /
+        // `/p/z.ts` observations then vanish and this assertion fails.
+    }
+
+    /// Absorption order must not change the witness: the merge is a set
+    /// union under one canonical order, not an append.
+    #[test]
+    fn absorbed_witness_is_independent_of_absorption_order() {
+        let mut producer = ResolutionTransaction::new(captured_world());
+        producer.set_query(query());
+        for name in ["/p/b.ts", "/p/d.ts"] {
+            producer.observe(path_probe(name));
+        }
+        let reused = finished_signature(producer);
+
+        let mut absorb_first = ResolutionTransaction::new(captured_world());
+        absorb_first.set_query(query());
+        absorb_first.absorb(&reused);
+        absorb_first.observe(path_probe("/p/c.ts"));
+        absorb_first.observe(path_probe("/p/a.ts"));
+
+        let mut absorb_last = ResolutionTransaction::new(captured_world());
+        absorb_last.set_query(query());
+        absorb_last.observe(path_probe("/p/a.ts"));
+        absorb_last.observe(path_probe("/p/c.ts"));
+        absorb_last.absorb(&reused);
+
+        assert_eq!(
+            finished_signature(absorb_first).facts.as_ref(),
+            finished_signature(absorb_last).facts.as_ref()
+        );
     }
 }

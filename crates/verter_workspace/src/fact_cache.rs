@@ -41,13 +41,13 @@ impl ParseEnvHash {
 /// captured immutable resolution world. Expressing it as a derived hash
 /// forced the store-view build to re-resolve every published owner's
 /// known-miss specifiers just to compose the digest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DerivedFactKind {
     Route,
     DirectSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseFactRef {
     pub canonical_id: String,
     pub key: FactKey,
@@ -60,7 +60,7 @@ pub struct ParseFactRef {
 /// Semantic resolved-import facts and workspace resolution-currency facts are
 /// alternatives under the same `FactVersionRef::ResolveImports` discriminant;
 /// neither domain has a sibling witness or admission rail.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResolveImportsFactRef {
     Semantic {
         canonical_id: String,
@@ -89,7 +89,7 @@ impl ResolveImportsFactRef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RouteSurfaceFactRef {
     pub canonical_id: String,
     pub key: FactKey,
@@ -97,7 +97,7 @@ pub struct RouteSurfaceFactRef {
     pub expected_hash: FactHash16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FactVersionRef {
     FileWholeHash {
         canonical_id: String,

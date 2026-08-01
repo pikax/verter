@@ -12,6 +12,11 @@ publish = false
 [features]
 default = []
 session_metrics = []
+# Measurement-only: forwards `verter_workspace/currency_probe` and enables the
+# `probe_scope!` timers on this crate's currency chokepoints. Absent from
+# `default`; requested ONLY by the `verter_bench` measurement harness, never by
+# a production edge (`verter_napi`, `verter_lsp`, `verter_wasm`, `verter_tsc`).
+currency_probe = ["verter_workspace/currency_probe"]
 # Opt-in test-support seam for items the SEPARATE integration-test binary
 # (`tests/cases/**`) must see but a normal `cargo build` / `pnpm run build:lsp`
 # / `pnpm dev-extension` (debug or release) must NOT compile. The integration
