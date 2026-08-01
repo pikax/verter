@@ -1414,19 +1414,6 @@ impl VerterHost {
                             cursor,
                         );
                     }
-                    if let Some(operands) = surface.open_spread_operands() {
-                        for operand in operands.as_slice() {
-                            collect_one_filtered_node(
-                                ctx,
-                                *operand,
-                                published_names,
-                                queued_names,
-                                output,
-                                producer_scope,
-                                cursor,
-                            );
-                        }
-                    }
                 }
                 _ => {
                     collect_one_filtered_node(

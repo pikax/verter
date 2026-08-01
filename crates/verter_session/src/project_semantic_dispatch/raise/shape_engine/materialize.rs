@@ -82,6 +82,8 @@ pub(crate) enum MaterializePathSegment {
 /// Which slot of an object member carries the degraded leaf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ObjectMemberSlot {
+    /// Computed property / method key expression.
+    Key,
     /// Property / method / call / construct signature value.
     Value,
     /// Index-signature key type.
@@ -701,7 +703,10 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
 
     fn member_property(
         &mut self,
-        name: String,
+        key: verter_type_expr::AuthoredPropertyKey<
+            MaterializedTypeExpr,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         ty: MaterializedTypeExpr,
         optional: bool,
         readonly: bool,
@@ -709,7 +714,7 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
         excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> MaterializedObjectMember {
-        let degraded_leaves = ty
+        let mut degraded_leaves: Vec<_> = ty
             .degraded_leaves
             .into_iter()
             .map(|leaf| PendingMemberDegradation {
@@ -717,10 +722,22 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
                 leaf,
             })
             .collect();
+        let key = key.map(
+            |computed| {
+                degraded_leaves.extend(computed.degraded_leaves.into_iter().map(|leaf| {
+                    PendingMemberDegradation {
+                        slot: ObjectMemberSlot::Key,
+                        leaf,
+                    }
+                }));
+                computed.expr
+            },
+            |identity| identity,
+        );
         MaterializedObjectMember {
             member: verter_type_expr::ObjectMember::Property(
-                verter_type_expr::ObjectProperty::with_visibility(
-                    name, ty.expr, optional, readonly, visibility, spans,
+                verter_type_expr::ObjectProperty::with_key_visibility(
+                    key, ty.expr, optional, readonly, visibility, spans,
                 )
                 // Verbatim thread-through of the recorded provenance
                 // (lossless raise round-trip).
@@ -731,14 +748,19 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
     }
     fn member_method(
         &mut self,
-        name: String,
+        key: verter_type_expr::AuthoredPropertyKey<
+            MaterializedTypeExpr,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         function: MaterializedFunction,
         optional: bool,
+        method_kind: verter_type_expr::ObjectMethodKind,
+        has_implementation_body: bool,
         visibility: MemberVisibility,
         excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> MaterializedObjectMember {
-        let degraded_leaves = function
+        let mut degraded_leaves: Vec<_> = function
             .degraded_leaves
             .into_iter()
             .map(|leaf| PendingMemberDegradation {
@@ -746,16 +768,30 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
                 leaf,
             })
             .collect();
+        let key = key.map(
+            |computed| {
+                degraded_leaves.extend(computed.degraded_leaves.into_iter().map(|leaf| {
+                    PendingMemberDegradation {
+                        slot: ObjectMemberSlot::Key,
+                        leaf,
+                    }
+                }));
+                computed.expr
+            },
+            |identity| identity,
+        );
+        let mut signature = verter_type_expr::MethodSignature::with_key_visibility(
+            key,
+            (*function.function).clone(),
+            optional,
+            visibility,
+            spans,
+        );
+        signature.method_kind = method_kind;
+        signature.has_implementation_body = has_implementation_body;
         MaterializedObjectMember {
             member: verter_type_expr::ObjectMember::Method(
-                verter_type_expr::MethodSignature::with_visibility(
-                    name,
-                    (*function.function).clone(),
-                    optional,
-                    visibility,
-                    spans,
-                )
-                .with_excess_origin(excess_origin),
+                signature.with_excess_origin(excess_origin),
             ),
             degraded_leaves,
         }
@@ -1126,7 +1162,7 @@ mod tests {
         let mut alg = MaterializeTypeExprAlg;
         let kept_value = alg.primitive(verter_type_expr::PrimitiveName::Number);
         let kept = alg.member_property(
-            "kept".to_string(),
+            "kept".to_string().into(),
             kept_value,
             false,
             false,
@@ -1136,7 +1172,7 @@ mod tests {
         );
         let degraded_value = alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember);
         let broken = alg.member_property(
-            "broken".to_string(),
+            "broken".to_string().into(),
             degraded_value,
             false,
             false,
@@ -1155,7 +1191,7 @@ mod tests {
         let verter_type_expr::ObjectMember::Property(kept) = &object.properties[0] else {
             panic!("member 0 must stay a property");
         };
-        assert_eq!(kept.name, "kept");
+        assert_eq!(kept.string_name().expect("string-key fixture"), "kept");
         assert_eq!(
             kept.ty,
             TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)

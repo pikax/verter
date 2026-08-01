@@ -21,7 +21,8 @@
 //!    variant identifiers scanned from the live `pub enum SemanticQueryKey`
 //!    source (fails when a variant is added/removed without regenerating).
 //! 3. **Per-row sanity** — every row is `Live`; every row carries the
-//!    `TypeNode` value domain EXCEPT `Relate` (`Relation`),
+//!    `TypeNode` value domain EXCEPT `ProjectObjectSpread`
+//!    (`ObjectProjection`), `Relate` (`Relation`),
 //!    `ResolveOverloadSet` (`OverloadSet`), `ClassifyBroadRuntime`
 //!    (`BroadRuntime`), and `FlowNarrowingAt` /
 //!    `ContextualTypeAt` (`ProgramAnalysis`), which is the current-tree truth,
@@ -32,11 +33,18 @@
 //! # Current-tree honesty
 //!
 //! - Every live variant resolves to
-//!   [`SemanticQueryValueTag::TypeNode`] EXCEPT `Relate`,
+//!   [`SemanticQueryValueTag::TypeNode`] EXCEPT `ProjectObjectSpread`, `Relate`,
 //!   `ResolveOverloadSet`, `ClassifyBroadRuntime`, `FlowNarrowingAt`, and
 //!   `ContextualTypeAt`:
 //!   `ProjectSemanticDispatch::execute` wraps the
 //!   `TypeNode` keys' results as `SemanticQueryValue::TypeNode(node)`.
+//!   `ProjectObjectSpread` records the dedicated
+//!   [`SemanticQueryValueTag::ObjectProjection`] domain; its ordered-effect
+//!   evaluator is LIVE (`build_project_object_spread`): it returns the
+//!   correlated formula (open alternatives carry their residual evidence in
+//!   the value, so open is honest, not a Miss), and only operational
+//!   failures (recursion / budget / miss) surface `Miss` as
+//!   `result_is_partial` + `cache_suppress`, never warm.
 //!   `Relate` records its value domain as
 //!   [`SemanticQueryValueTag::Relation`] — the public relation outcome
 //!   (`Assignable` / `NotAssignable` / `BudgetExceeded`, no public `Unknown`).
@@ -51,12 +59,11 @@
 //!   [`SemanticQueryValueTag::ProgramAnalysis`] as a FORWARD-DECLARED
 //!   value domain: each `execute` arm is non-producing (returns `Miss`,
 //!   admission [`NonProducingPendingReducer`](AdmissionSpec::NonProducingPendingReducer))
-//!   until the flow-narrowing / contextual-type reducers land in U6. No
-//!   other value domain appears.
+//!   until the flow-narrowing / contextual-type reducers land in U6.
 //! - `allowed_demand` is a [`DemandAxis`]-vocabulary mask and does NOT capture
 //!   the `ReductionDemand` slot-selection dimension. A key carrying a
 //!   `ProjectionReductionContext` (`Instantiate` / `KeyOf` / `MappedType` /
-//!   `TypeOf` / `ProjectPath`) also branches on `ReductionDemand`
+//!   `TypeOf` / `ProjectObjectSpread` / `ProjectPath`) also branches on `ReductionDemand`
 //!   (`Published` / `StructuralTransit` / `MacroObjectSurface` /
 //!   `VueRuntimeObjectSurface`), but that is a four-way MEMO-SLOT-SELECTION
 //!   dimension resolved by `context_to_slot`
@@ -671,6 +678,22 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
         },
+        // ProjectObjectSpread { program, selector, context } — selector-aware
+        // projection over an already-lowered authored-effect program. The
+        // context carries R/T/L/J, substitution, exact optionality, and the
+        // full reduction context; only mode/demand select the memo slot.
+        // Ordered effect evaluation is a live correlated formula producer.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ProjectObjectSpread,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "ObjectSpreadProjectionContext",
+            value_domain: SemanticQueryValueTag::ObjectProjection,
+            env_dims: EnvDimSpec::Static(env_resolve()),
+            allowed_demand: reduction_axes,
+            cross_context_guard:
+                "project_object_spread_selector_and_context_do_not_warm_hit",
+            admission: AdmissionSpec::Singleflight,
+        },
         // ProjectPath { base, path, context } — path-precise projection over an
         // already-resolved base; branches on the reduction context plus the
         // Path axis it carries.
@@ -960,6 +983,7 @@ fn render_axis_mask(mask: AxisMask) -> String {
 fn render_value_domain(tag: SemanticQueryValueTag) -> &'static str {
     match tag {
         SemanticQueryValueTag::TypeNode => "TypeNode",
+        SemanticQueryValueTag::ObjectProjection => "ObjectProjection",
         SemanticQueryValueTag::ProgramAnalysis => "ProgramAnalysis",
         SemanticQueryValueTag::DeclarationAnalysis => "DeclarationAnalysis",
         SemanticQueryValueTag::OverloadSet => "OverloadSet",

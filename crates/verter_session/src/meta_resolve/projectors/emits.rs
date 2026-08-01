@@ -81,10 +81,12 @@ pub(crate) fn project_emits(
         read_surface_member_candidates(ctx, &surface)
             .into_iter()
             .filter_map(|candidate| {
-                let analyzed = mac
-                    .emit_fields
-                    .iter()
-                    .find(|e| e.name == candidate.member().name.as_ref());
+                let analyzed = mac.emit_fields.iter().find(|e| {
+                    candidate
+                        .member()
+                        .string_name()
+                        .is_some_and(|name| e.name == name)
+                });
                 let raw_type = analyzed.and_then(|e| e.payload_type.clone());
                 let shallow_payload = analyzed.and_then(|e| e.payload.clone());
                 let admitted = admit_published_member(candidate, &cursor, &dispatch)?;

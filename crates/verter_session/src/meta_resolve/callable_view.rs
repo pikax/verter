@@ -120,6 +120,7 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
         // open-generic `Snippet<Params>`, an `Array`, a scalar / object /
         // function).
         SemanticNodeData::Object(_)
+        | SemanticNodeData::ObjectSpreadProgram(_)
         | SemanticNodeData::Union(_)
         | SemanticNodeData::Intersection(_)
         | SemanticNodeData::Primitive(_)

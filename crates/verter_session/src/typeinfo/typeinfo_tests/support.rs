@@ -276,13 +276,21 @@ fn collect_object_props(expr: &TypeExpr, props: &mut BTreeMap<String, ObjectProp
             for member in &object.properties {
                 match member {
                     ObjectMember::Property(prop) => {
-                        props.insert(prop.name.clone(), prop.clone());
+                        props.insert(
+                            prop.string_name()
+                                .expect("object_props only accepts string-key fixtures")
+                                .to_owned(),
+                            prop.clone(),
+                        );
                     }
                     ObjectMember::Method(method) => {
                         props.insert(
-                            method.name.clone(),
-                            ObjectProperty::synthetic_public(
-                                method.name.clone(),
+                            method
+                                .string_name()
+                                .expect("object_props only accepts string-key fixtures")
+                                .to_owned(),
+                            ObjectProperty::synthetic_public_key(
+                                method.key.clone(),
                                 TypeExpr::Function(Arc::new(method.function.clone())),
                                 method.optional,
                                 false,

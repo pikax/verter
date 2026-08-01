@@ -22,7 +22,7 @@ use crate::facts::*;
 use crate::intrinsics::*;
 use crate::locators::*;
 use crate::span_origins::*;
-use crate::{MemberSpans, MemberVisibility, PrimitiveName};
+use crate::{MemberSpans, MemberVisibility, ObjectMethodKind, PrimitiveName};
 
 /// Assert every listed type is a fully-witnessed closed fact carrier.
 macro_rules! assert_fact_carriers {
@@ -289,7 +289,7 @@ fn member_origin(ordinal: u32) -> MemberSpansOrigin {
 
 fn prop(name: &str, optional: bool, visibility: MemberVisibility) -> ObjectPropertyFact {
     ObjectPropertyFact {
-        name: name.to_string(),
+        key: FactAuthoredPropertyKey::string(name),
         optional,
         readonly: false,
         visibility,
@@ -317,8 +317,9 @@ fn empty_fn() -> FunctionSignatureFact {
 
 fn method(name: &str, optional: bool) -> ObjectMethodFact {
     ObjectMethodFact {
-        name: name.to_string(),
+        key: FactAuthoredPropertyKey::string(name),
         optional,
+        method_kind: ObjectMethodKind::Method,
         visibility: MemberVisibility::Public,
         function: empty_fn(),
         span_origin: member_origin(0),
@@ -1062,13 +1063,20 @@ fn route_demand_pick_omit_eq_and_hash_agree_order_insensitively() {
 fn route_key_set_normalizes_at_serde_decode() {
     // A hand-crafted unnormalized payload re-normalizes at decode: the decoded
     // value equals the smart-constructed one by BOTH Eq and Hash.
-    let decoded: RouteKeySet = serde_json::from_str(r#"["b","a","b"]"#).expect("decode");
+    let decoded: RouteKeySet =
+        serde_json::from_str(r#"[{"String":"b"},{"String":"a"},{"String":"b"}]"#).expect("decode");
     assert_eq!(decoded, RouteKeySet::new(["a", "b"]));
-    assert_eq!(decoded.as_slice(), &["a".to_string(), "b".to_string()]);
+    assert_eq!(
+        decoded.as_slice(),
+        &[
+            FactPropertyKey::identifier("a"),
+            FactPropertyKey::identifier("b")
+        ]
+    );
 
     // Round-trip: normalized encode → identical decode.
     let encoded = serde_json::to_string(&RouteKeySet::new(["b", "a"])).expect("encode");
-    assert_eq!(encoded, r#"["a","b"]"#);
+    assert_eq!(encoded, r#"[{"String":"a"},{"String":"b"}]"#);
 }
 
 #[test]
@@ -1082,8 +1090,8 @@ fn route_demand_member_path_preserves_full_depth() {
     match &path {
         RouteDemand::MemberPath(segments) => {
             assert_eq!(segments.len(), 2);
-            assert_eq!(segments[0], "variants");
-            assert_eq!(segments[1], "color");
+            assert_eq!(segments[0], FactPropertyKey::identifier("variants"));
+            assert_eq!(segments[1], FactPropertyKey::identifier("color"));
         }
         _ => panic!("expected MemberPath"),
     }
@@ -1153,10 +1161,11 @@ fn fact_carriers_round_trip_through_serde() {
     // four-source `SemanticTypeSource` nesting locators, span origins, and
     // closed facts — must round-trip byte-faithfully.
     let deep = SemanticTypeSource::Projected(ProjectedTypeFact::Member(ProjectedMemberFact {
-        name: "value".to_string(),
+        key: FactAuthoredPropertyKey::string("value"),
         optional: true,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         visibility: MemberVisibility::Public,
         declared_in_macro_type_arg: true,
         declaration_origin: DeclarationOrigin::Declared(std::sync::Arc::from("/ws/types.ts")),
@@ -1207,7 +1216,7 @@ fn fact_carriers_round_trip_through_serde() {
 fn shallow_route_facts_preserve_route_in_identity_not_bare_strings() {
     let ext = sample_external_route_ref();
     let edge = MemberDependencyEdge {
-        member: "m".to_string(),
+        member: FactPropertyKey::identifier("m"),
         depends_on: std::sync::Arc::from(
             vec![RouteDependencyRefFact::Local {
                 name: "n".to_string(),
@@ -1220,7 +1229,9 @@ fn shallow_route_facts_preserve_route_in_identity_not_bare_strings() {
         member_names: MemberNamesRoute::OpenKeyDomain,
         member_path_seed_edges: std::sync::Arc::from(
             vec![MemberPathSeedEdge {
-                path: std::sync::Arc::from(vec!["a".to_string()].into_boxed_slice()),
+                path: std::sync::Arc::from(
+                    vec![FactPropertyKey::identifier("a")].into_boxed_slice(),
+                ),
                 depends_on: MemberPathSeedTarget::ForwardBoundary(
                     RouteDependencyRefFact::External(ext.clone()),
                 ),
@@ -1294,13 +1305,13 @@ fn shallow_route_facts_preserve_route_in_identity_not_bare_strings() {
     // dep list and a forward boundary over the SAME ref are different facts
     // (the union-terminal MISS depends on it).
     let terminal = MemberPathSeedEdge {
-        path: std::sync::Arc::from(vec!["a".to_string()].into_boxed_slice()),
+        path: std::sync::Arc::from(vec![FactPropertyKey::identifier("a")].into_boxed_slice()),
         depends_on: MemberPathSeedTarget::TerminalDeps(std::sync::Arc::from(
             vec![RouteDependencyRefFact::External(ext.clone())].into_boxed_slice(),
         )),
     };
     let forward = MemberPathSeedEdge {
-        path: std::sync::Arc::from(vec!["a".to_string()].into_boxed_slice()),
+        path: std::sync::Arc::from(vec![FactPropertyKey::identifier("a")].into_boxed_slice()),
         depends_on: MemberPathSeedTarget::ForwardBoundary(RouteDependencyRefFact::External(
             ext.clone(),
         )),
@@ -1315,8 +1326,9 @@ fn member_header_fact_carries_the_flags_from_eval_env_reconstructs() {
     // must carry each flag so a narrowed `TypeDeclInfo.direct_member_headers`
     // replaces the `merged_body().merged_member_names()` body walk.
     let base = MemberHeaderFact {
-        name: "value".to_string(),
-        is_method: false,
+        key: FactPropertyKey::identifier("value"),
+        method_kind: None,
+        has_implementation_body: false,
         optional: false,
         readonly: false,
         visibility: MemberVisibility::Public,
@@ -1324,7 +1336,7 @@ fn member_header_fact_carries_the_flags_from_eval_env_reconstructs() {
     assert_ne!(
         base,
         MemberHeaderFact {
-            name: "other".to_string(),
+            key: FactPropertyKey::identifier("other"),
             ..base.clone()
         },
         "name must discriminate"
@@ -1332,7 +1344,7 @@ fn member_header_fact_carries_the_flags_from_eval_env_reconstructs() {
     assert_ne!(
         base,
         MemberHeaderFact {
-            is_method: true,
+            method_kind: Some(ObjectMethodKind::Method),
             ..base.clone()
         },
         "is_method must discriminate"
@@ -1385,6 +1397,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
     // `annotation` field carries it as a `SemanticTypeSource::Closed` closed fact
     // instead — never a fabricated authored locator.
     let inferred = ValueTypeAnnotationFact {
+        is_unique_symbol: false,
         typeof_alias_target: None,
         classification: ValueAnnotationClass::Direct,
         annotation: Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
@@ -1396,6 +1409,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
     // facts. A closed inferred source is a DISTINCT annotation from an authored
     // one.
     let authored = ValueTypeAnnotationFact {
+        is_unique_symbol: false,
         typeof_alias_target: None,
         classification: ValueAnnotationClass::Direct,
         annotation: Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
@@ -1410,6 +1424,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
     // `typeof_alias_target` still participates (the `typeof x[.y]` peel-target
     // replacement) and is orthogonal to the annotation source.
     let typeof_target = ValueTypeAnnotationFact {
+        is_unique_symbol: false,
         typeof_alias_target: Some(ValueDeclIdentityPart {
             canonical_id: std::sync::Arc::from("/ws/a.ts"),
             owner: crate::TopLevelOwnerId::ordinary_file(),
@@ -1421,4 +1436,33 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
     };
     assert_ne!(typeof_target, inferred);
     assert_eq!(inferred, inferred.clone());
+}
+
+#[test]
+fn object_shape_fact_preserves_accessor_kinds_and_duplicate_order() {
+    let mut getter = method("value", false);
+    getter.method_kind = ObjectMethodKind::Get;
+    let mut setter = method("value", false);
+    setter.method_kind = ObjectMethodKind::Set;
+    let ordinary = method("value", false);
+    let shape = ObjectShapeFact {
+        members: std::sync::Arc::from([
+            ObjectMemberFact::Method(getter),
+            ObjectMemberFact::Method(setter),
+            ObjectMemberFact::Method(ordinary),
+        ]),
+    };
+
+    assert!(matches!(
+        &shape.members[0],
+        ObjectMemberFact::Method(method) if method.method_kind == ObjectMethodKind::Get
+    ));
+    assert!(matches!(
+        &shape.members[1],
+        ObjectMemberFact::Method(method) if method.method_kind == ObjectMethodKind::Set
+    ));
+    assert!(matches!(
+        &shape.members[2],
+        ObjectMemberFact::Method(method) if method.method_kind == ObjectMethodKind::Method
+    ));
 }

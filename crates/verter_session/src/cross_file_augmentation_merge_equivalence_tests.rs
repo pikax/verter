@@ -74,7 +74,10 @@ fn object_member_surface(ty: &TypeExpr) -> Vec<(String, String)> {
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(prop) => Some((prop.name.clone(), format!("{:?}", prop.ty))),
+            ObjectMember::Property(prop) => Some((
+                prop.string_name().expect("string-key fixture").to_owned(),
+                format!("{:?}", prop.ty),
+            )),
             _ => None,
         })
         .collect();
@@ -284,7 +287,7 @@ fn oracle_augmented_foo_member_names(host: &VerterHost) -> Vec<String> {
             .primary()
             .direct_member_headers
             .iter()
-            .map(|header| header.name.clone()),
+            .map(|header| header.string_name().expect("string-key fixture").to_owned()),
     );
 
     // Augmenter contributor: the RETAINED ambient headers in `/aug.ts`, kept in
@@ -308,7 +311,7 @@ fn oracle_augmented_foo_member_names(host: &VerterHost) -> Vec<String> {
             .primary()
             .direct_member_headers
             .iter()
-            .map(|header| header.name.clone()),
+            .map(|header| header.string_name().expect("string-key fixture").to_owned()),
     );
 
     names.sort();
@@ -457,7 +460,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
         .primary()
         .direct_member_headers
         .iter()
-        .map(|header| header.name.clone())
+        .map(|header| header.string_name().expect("string-key fixture").to_owned())
         .collect();
     assert_eq!(
         base_only,

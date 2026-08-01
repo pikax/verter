@@ -106,9 +106,20 @@ pub use wire::GraphMapped as MappedNode;
 pub use wire::GraphMergedDeclaration as MergedDeclarationNode;
 pub use wire::GraphModuleAugmentation as ModuleAugmentationNode;
 pub use wire::GraphObject as ObjectNode;
+pub use wire::GraphObjectConstructionEffect as ObjectConstructionEffect;
+pub use wire::GraphObjectExcessOrigin as ObjectExcessOrigin;
+pub use wire::GraphObjectIndexEffect as ObjectIndexEffect;
+pub use wire::GraphObjectIndexSpans as ObjectIndexSpans;
 pub use wire::GraphObjectMember as ObjectMember;
+pub use wire::GraphObjectMemberSpans as ObjectMemberSpans;
+pub use wire::GraphObjectMergeRole as ObjectMergeRole;
+pub use wire::GraphObjectNamedEffect as ObjectNamedEffect;
+pub use wire::GraphObjectSignatureEffect as ObjectSignatureEffect;
+pub use wire::GraphObjectSpreadEffect as ObjectSpreadEffect;
+pub use wire::GraphObjectSpreadProgram as ObjectSpreadProgramNode;
 pub use wire::GraphOpaque as OpaqueNode;
 pub use wire::GraphPrimitive as PrimitiveNode;
+pub use wire::GraphPropertyKey as PropertyKey;
 pub use wire::GraphReference as ReferenceNode;
 pub use wire::GraphRelationBudgetCap as RelationBudgetCapProof;
 pub use wire::GraphRelationCycleKeys as RelationCycleKeysProof;
@@ -182,7 +193,7 @@ pub use wire::GraphHeritageKind as HeritageKind;
 pub use wire::GraphIndexKeyKind as IndexKeyKind;
 pub use wire::GraphInferencePolicy as InferencePolicy;
 pub use wire::GraphMappedModifier as MappedModifier;
-pub use wire::GraphMemberNameKind as MemberNameKind;
+pub use wire::GraphObjectMemberKind as ObjectMemberKind;
 pub use wire::GraphOperation as Operation;
 pub use wire::GraphOriginEdgeKind as OriginEdgeKind;
 pub use wire::GraphPrimitiveKind as PrimitiveKind;
@@ -244,9 +255,11 @@ pub use wire::MappedTypeParamExpr;
 pub use wire::ObjectMemberExpr;
 pub use wire::PredicateSubjectName;
 pub use wire::PredicateSubjectThis;
+pub use wire::PropertyKeyExpr;
 pub use wire::TupleElementExpr;
 pub use wire::TypeParameterExpr;
 pub use wire::TypePredicateExpr;
+pub use wire::UniqueSymbolKeyExpr;
 
 // -------------------------------------------------------------------------
 // Schema-version constants.
@@ -292,7 +305,16 @@ pub use wire::TypePredicateExpr;
 /// encoder ever emitted the tag-28 arm, so a v4 payload carries no
 /// relation proof to lose; v4 stays accepted (the v5 table is add-only,
 /// absent on a v4 payload).
-pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 5;
+///
+/// v6 replaces string-plus-name-kind object member keys with property-key
+/// oneofs carrying canonical numbers, nominal unique-symbol ids, and computed
+/// node references. It also makes property/method/get/set kind explicit.
+///
+/// v7 adds the canonical `GraphObjectSpreadProgram` node at tag 33. Its
+/// ordered effect oneof preserves typed keys, property/method/accessor kind,
+/// direct indices/signatures, raw spread operands, source spans, provenance,
+/// and freshness without fabricating a derived closed object.
+pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 7;
 
 // -------------------------------------------------------------------------
 // Typed constructor helpers for the request-error variants. The

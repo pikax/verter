@@ -360,7 +360,7 @@ interface Merged { b: number }
     let member_names: Vec<&str> = header
         .member_headers
         .iter()
-        .map(|m| m.name.as_str())
+        .map(|m| m.string_name().expect("string-key fixture"))
         .collect();
     assert_eq!(
         member_names,
@@ -634,12 +634,9 @@ fn member_header_facts_match_production_index_across_body_shapes() {
             .merged_member_header_facts()
             .into_iter()
             .map(|fact| MemberHeader {
-                name: fact.name,
-                kind: if fact.is_method {
-                    MemberHeaderKind::Method
-                } else {
-                    MemberHeaderKind::Property
-                },
+                key: verter_type_expr::TypeAuthoredPropertyKey::from_known(fact.key),
+                method_kind: fact.method_kind,
+                has_implementation_body: fact.has_implementation_body,
                 optional: fact.optional,
                 readonly: fact.readonly,
             })
@@ -681,23 +678,26 @@ fn seeded_member_headers_carry_fact_flags_and_match_production_index() {
     let by_name = |name: &str| {
         seeded_headers
             .iter()
-            .find(|h| h.name == name)
+            .find(|h| h.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("member {name}"))
     };
     assert!(by_name("p").optional, "`p?` must be optional");
-    assert_eq!(by_name("p").kind, MemberHeaderKind::Property);
+    assert!(by_name("p").method_kind.is_none());
     assert!(!by_name("p").readonly);
     assert!(by_name("c").readonly, "`readonly c` must be readonly");
     assert!(!by_name("c").optional);
     assert_eq!(
-        by_name("m").kind,
-        MemberHeaderKind::Method,
+        by_name("m").method_kind,
+        Some(verter_type_expr::ObjectMethodKind::Method),
         "`m()` must be a Method header"
     );
     assert!(!by_name("m").optional);
 
     // Negative: exactly the three declared members — nothing fabricated.
-    let mut names: Vec<&str> = seeded_headers.iter().map(|h| h.name.as_str()).collect();
+    let mut names: Vec<&str> = seeded_headers
+        .iter()
+        .map(|h| h.string_name().expect("string-key fixture"))
+        .collect();
     names.sort_unstable();
     assert_eq!(names, ["c", "m", "p"]);
 }
@@ -713,7 +713,11 @@ fn seeded_member_headers_keep_own_members_under_heritage_and_skip_base_names() {
     let seeded = DeclHeaderIndex::from_eval_env(&env);
 
     let x = seeded.type_header("X").expect("X header");
-    let names: Vec<&str> = x.member_headers.iter().map(|h| h.name.as_str()).collect();
+    let names: Vec<&str> = x
+        .member_headers
+        .iter()
+        .map(|h| h.string_name().expect("string-key fixture"))
+        .collect();
     assert_eq!(
         names,
         ["a", "m"],
@@ -985,7 +989,7 @@ fn object_literal_value_headers_record_last_wins_keys() {
     let names: Vec<&str> = index.value_headers["obj"]
         .object_member_headers
         .iter()
-        .map(|m| m.name.as_str())
+        .map(|m| m.string_name().expect("string-key fixture"))
         .collect();
     assert_eq!(
         names,

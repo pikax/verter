@@ -473,7 +473,19 @@ fn write_type_expr(buf: &mut String, expr: &TypeExpr) {
                         other.push(format!("...({})", render_type_signature(&spread.ty)));
                     }
                     ObjectMember::Property(prop) => {
-                        let key = prop.name.clone();
+                        let key = match &prop.key {
+                            verter_type_expr::AuthoredPropertyKey::String(key) => key.to_string(),
+                            verter_type_expr::AuthoredPropertyKey::Number(key) => key.to_string(),
+                            verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) => {
+                                format!(
+                                    "[unique symbol {}::{}]",
+                                    identity.canonical_id, identity.symbol
+                                )
+                            }
+                            verter_type_expr::AuthoredPropertyKey::Computed(key) => {
+                                format!("[{}]", render_type_signature(key))
+                            }
+                        };
                         let value = render_type_signature(&prop.ty);
                         named.push((key, value, prop.optional, prop.readonly));
                     }
@@ -499,7 +511,21 @@ fn write_type_expr(buf: &mut String, expr: &TypeExpr) {
                     }
                     ObjectMember::Method(method) => {
                         let mut s = String::new();
-                        s.push_str(&method.name);
+                        match &method.key {
+                            verter_type_expr::AuthoredPropertyKey::String(key) => s.push_str(key),
+                            verter_type_expr::AuthoredPropertyKey::Number(key) => {
+                                s.push_str(&key.to_string())
+                            }
+                            verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) => {
+                                s.push_str(&format!(
+                                    "[unique symbol {}::{}]",
+                                    identity.canonical_id, identity.symbol
+                                ));
+                            }
+                            verter_type_expr::AuthoredPropertyKey::Computed(key) => {
+                                s.push_str(&format!("[{}]", render_type_signature(key)));
+                            }
+                        }
                         if method.optional {
                             s.push('?');
                         }
@@ -861,8 +887,8 @@ mod self_tests {
             properties: props
                 .into_iter()
                 .map(|(name, ty, optional)| {
-                    ObjectMember::Property(ObjectProperty::synthetic_public(
-                        name.to_string(),
+                    ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                        name.to_string().into(),
                         ty,
                         optional,
                         false,

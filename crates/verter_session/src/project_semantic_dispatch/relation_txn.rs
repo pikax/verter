@@ -90,6 +90,11 @@ pub(crate) struct StrictFamilyConfig {
     /// strictly contravariantly; when OFF they relate bivariantly (the
     /// non-strict function rule — either direction suffices).
     pub(crate) strict_function_types: bool,
+    /// `exactOptionalPropertyTypes`: when ON, an authored optional write
+    /// keeps its explicit `undefined` in the present value (Disabled drops
+    /// it). Not part of the `strict` family — threaded along the same host
+    /// knob so every consumer reads one configuration.
+    pub(crate) exact_optional_property_types: bool,
 }
 
 impl StrictFamilyConfig {
@@ -98,6 +103,7 @@ impl StrictFamilyConfig {
     pub(crate) const TS_STRICT: Self = Self {
         strict_null_checks: true,
         strict_function_types: true,
+        exact_optional_property_types: false,
     };
 
     /// The parameter-variance regime this configuration selects — folded

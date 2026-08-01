@@ -24,7 +24,16 @@ use crate::locators::{
 use crate::span_origins::{
     FunctionParamSpanOrigin, FunctionSpansOrigin, IndexSignatureSpansOrigin, MemberSpansOrigin,
 };
-use crate::{MemberVisibility, PrimitiveName, TypeExprScope};
+use crate::{
+    AuthoredPropertyKey, MemberVisibility, ObjectMethodKind, PrimitiveName, PropertyKey,
+    TypeExprScope,
+};
+
+/// Known property-key identity stored by shallow header facts.
+pub type FactPropertyKey = PropertyKey<ValueDeclIdentityPart>;
+
+/// Authored fact key. Computed syntax owns its body-slot locator.
+pub type FactAuthoredPropertyKey = AuthoredPropertyKey<TypeBodySlot, ValueDeclIdentityPart>;
 
 // ===========================================================================
 // Supporting typed replacements introduced with the fact substrate
@@ -383,6 +392,8 @@ impl TypeDependencyPathFact {
     Clone,
     PartialEq,
     Eq,
+    PartialOrd,
+    Ord,
     Hash,
     serde::Serialize,
     serde::Deserialize,
@@ -405,6 +416,8 @@ pub enum DeclarationOrigin {
     Clone,
     PartialEq,
     Eq,
+    PartialOrd,
+    Ord,
     Hash,
     serde::Serialize,
     serde::Deserialize,
@@ -777,9 +790,9 @@ pub enum KeySourceFact {
     /// unresolved alias-ref arms (either may be empty; non-conforming union
     /// arms contribute nothing, exactly like the legacy enumeration).
     LiteralAliasUnion {
-        /// Flattened string-literal arms, in source order (unsorted — the
+        /// Flattened literal-key arms, in source order (unsorted — the
         /// engine sorts/dedups only a COMPLETED enumeration).
-        literals: Arc<[String]>,
+        literals: Arc<[FactPropertyKey]>,
         /// Unresolved zero-argument alias-ref arms, in source order.
         aliases: Arc<[KeySourceRefFact]>,
     },
@@ -832,7 +845,7 @@ pub enum NarrowFrontierBody {
 )]
 pub enum MemberNamesRoute {
     /// A closed enumeration of object member names.
-    Closed(Arc<[String]>),
+    Closed(Arc<[FactPropertyKey]>),
     /// Open / undecidable key domain — the L1 carrier-stop class.
     OpenKeyDomain,
 }
@@ -845,28 +858,28 @@ pub enum MemberNamesRoute {
 /// sort-before-hash `Hash` — two values could hash equal while comparing
 /// unequal). Membership semantics only — Pick/Omit key ORDER is not semantic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan)]
-pub struct RouteKeySet(Arc<[String]>);
+pub struct RouteKeySet(Arc<[FactPropertyKey]>);
 
 impl RouteKeySet {
     /// Build a normalized key set (sorted + deduped).
-    pub fn new<I, S>(keys: I) -> Self
+    pub fn new<I, K>(keys: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = K>,
+        K: Into<FactPropertyKey>,
     {
-        let mut keys: Vec<String> = keys.into_iter().map(Into::into).collect();
+        let mut keys: Vec<FactPropertyKey> = keys.into_iter().map(Into::into).collect();
         keys.sort();
         keys.dedup();
         Self(keys.into())
     }
 
     /// The normalized (sorted, deduped) keys.
-    pub fn as_slice(&self) -> &[String] {
+    pub fn as_slice(&self) -> &[FactPropertyKey] {
         &self.0
     }
 
     /// Iterate the normalized keys.
-    pub fn iter(&self) -> std::slice::Iter<'_, String> {
+    pub fn iter(&self) -> std::slice::Iter<'_, FactPropertyKey> {
         self.0.iter()
     }
 
@@ -881,16 +894,14 @@ impl RouteKeySet {
     }
 
     /// Membership test (binary search over the normalized inner).
-    pub fn contains(&self, key: &str) -> bool {
-        self.0
-            .binary_search_by(|probe| probe.as_str().cmp(key))
-            .is_ok()
+    pub fn contains(&self, key: &FactPropertyKey) -> bool {
+        self.0.binary_search(key).is_ok()
     }
 }
 
 impl<'a> IntoIterator for &'a RouteKeySet {
-    type Item = &'a String;
-    type IntoIter = std::slice::Iter<'a, String>;
+    type Item = &'a FactPropertyKey;
+    type IntoIter = std::slice::Iter<'a, FactPropertyKey>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }
@@ -903,7 +914,7 @@ impl<'de> serde::Deserialize<'de> for RouteKeySet {
     where
         D: serde::Deserializer<'de>,
     {
-        let keys = Vec::<String>::deserialize(deserializer)?;
+        let keys = Vec::<FactPropertyKey>::deserialize(deserializer)?;
         Ok(Self::new(keys))
     }
 }
@@ -933,7 +944,7 @@ pub enum RouteDemand {
     Whole,
     /// Indexed member path: `Type['a']['b']` (each element is one segment; never
     /// collapsed to a shorter prefix).
-    MemberPath(Arc<[String]>),
+    MemberPath(Arc<[FactPropertyKey]>),
     /// `Pick<Type, 'a' | 'b'>` subset (normalized key set).
     Pick(RouteKeySet),
     /// `Omit<Type, 'a' | 'b'>` subset (normalized key set).
@@ -942,34 +953,34 @@ pub enum RouteDemand {
 
 impl RouteDemand {
     /// Build a `Pick` demand from any key iterator (normalized).
-    pub fn pick<I, S>(keys: I) -> Self
+    pub fn pick<I, K>(keys: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = K>,
+        K: Into<FactPropertyKey>,
     {
         Self::Pick(RouteKeySet::new(keys))
     }
 
     /// Build an `Omit` demand from any key iterator (normalized).
-    pub fn omit<I, S>(keys: I) -> Self
+    pub fn omit<I, K>(keys: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = K>,
+        K: Into<FactPropertyKey>,
     {
         Self::Omit(RouteKeySet::new(keys))
     }
 
     /// Build a `MemberPath` demand from ordered segments (order preserved).
-    pub fn member_path<I, S>(segments: I) -> Self
+    pub fn member_path<I, K>(segments: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = K>,
+        K: Into<FactPropertyKey>,
     {
         Self::MemberPath(
             segments
                 .into_iter()
                 .map(Into::into)
-                .collect::<Vec<String>>()
+                .collect::<Vec<FactPropertyKey>>()
                 .into(),
         )
     }
@@ -983,7 +994,7 @@ impl RouteDemand {
     }
 
     /// The ordered segments of a `MemberPath` demand.
-    pub fn segments(&self) -> Option<&[String]> {
+    pub fn segments(&self) -> Option<&[FactPropertyKey]> {
         match self {
             Self::MemberPath(segments) => Some(segments),
             Self::Whole | Self::Pick(_) | Self::Omit(_) => None,
@@ -1027,7 +1038,7 @@ pub fn merge_route_demands(a: &RouteDemand, b: &RouteDemand) -> RouteDemand {
         }
         (RouteDemand::MemberPath(p), RouteDemand::Pick(ps))
         | (RouteDemand::Pick(ps), RouteDemand::MemberPath(p)) => {
-            let mut merged: Vec<String> = ps.as_slice().to_vec();
+            let mut merged: Vec<FactPropertyKey> = ps.as_slice().to_vec();
             if let Some(first) = p.first() {
                 merged.push(first.clone());
             }
@@ -1038,7 +1049,7 @@ pub fn merge_route_demands(a: &RouteDemand, b: &RouteDemand) -> RouteDemand {
             }
         }
         (RouteDemand::Pick(a), RouteDemand::Pick(b)) => {
-            let mut merged: Vec<String> = a.as_slice().to_vec();
+            let mut merged: Vec<FactPropertyKey> = a.as_slice().to_vec();
             merged.extend(b.iter().cloned());
             RouteDemand::pick(merged)
         }
@@ -1140,7 +1151,7 @@ pub enum RouteDependencyRefFact {
 )]
 pub struct MemberDependencyEdge {
     /// The member whose dependencies these are.
-    pub member: String,
+    pub member: FactPropertyKey,
     /// The typed route refs this member depends on — each a local name or an
     /// external route ref carrying its route demand (never a bare name string,
     /// which would drop Pick / Omit / canonical / route transitivity).
@@ -1238,7 +1249,7 @@ pub struct DeferredKeyUtilityEdge {
     pub base: Option<RouteDependencyRefFact>,
     /// The literal inner index path for [`DeferredKeyUtilityKind::IndexedAccess`]
     /// (`Imported['a'][K]` carries `["a"]`); empty for `Pick`/`Omit`.
-    pub base_path: Arc<[String]>,
+    pub base_path: Arc<[FactPropertyKey]>,
     /// The deferred key-source recipe (the bare local alias, as a
     /// [`KeyDomainFact::FollowSlot`] symbol locator).
     pub key_source: KeyDomainFact,
@@ -1350,7 +1361,7 @@ pub enum MemberPathSeedTarget {
 pub struct MemberPathSeedEdge {
     /// The property path within the owning decl (empty = the decl's own body
     /// root, for the whole-body-is-a-bare-ref forward case).
-    pub path: Arc<[String]>,
+    pub path: Arc<[FactPropertyKey]>,
     /// What the path resolves to.
     pub depends_on: MemberPathSeedTarget,
 }
@@ -1421,18 +1432,27 @@ impl ShallowRouteFacts {
     NoStoredSpan,
 )]
 pub struct MemberHeaderFact {
-    /// The member name.
-    pub name: String,
-    /// Whether the member is a method (`true`) vs a property (`false`) — the
-    /// lower-neutral analogue of the shallow `MemberHeaderKind::{Method,
-    /// Property}`.
-    pub is_method: bool,
+    /// The statically known member key. Computed keys remain on the full object
+    /// member fact where their body locator is representable.
+    pub key: FactPropertyKey,
+    /// `None` for a property; otherwise the authored method/getter/setter kind.
+    pub method_kind: Option<ObjectMethodKind>,
+    /// Whether the authored method contributor carries an implementation body.
+    pub has_implementation_body: bool,
     /// Whether the member is optional (`?`).
     pub optional: bool,
     /// Whether the member is readonly.
     pub readonly: bool,
     /// Member visibility (publication-filtered at the boundary; part of identity).
     pub visibility: MemberVisibility,
+}
+
+impl MemberHeaderFact {
+    /// Borrow the ordinary string spelling when this header has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
 }
 
 /// The narrowed enum-member-NAME inventory fact — the full statically-named
@@ -1516,6 +1536,13 @@ pub enum InferenceUnavailableReason {
     NoStoredSpan,
 )]
 pub struct ValueTypeAnnotationFact {
+    /// Whether the declaration carries the nominal `unique symbol` type.
+    ///
+    /// The lowered [`TypeExpr`](crate::TypeExpr) representation deliberately
+    /// models both `symbol` and `unique symbol` as the same primitive type, so
+    /// this declaration fact preserves the authored nominal distinction for
+    /// computed-property identity resolution.
+    pub is_unique_symbol: bool,
     /// The precomputed graph-free `typeof x[.y]` target, when the annotation is a
     /// value peel.
     pub typeof_alias_target: Option<ValueDeclIdentityPart>,
@@ -1785,8 +1812,8 @@ pub struct FunctionSignatureFact {
     NoStoredSpan,
 )]
 pub struct ObjectPropertyFact {
-    /// The member name.
-    pub name: String,
+    /// The authored property key.
+    pub key: FactAuthoredPropertyKey,
     /// Whether the member is optional.
     pub optional: bool,
     /// Whether the member is readonly.
@@ -1797,6 +1824,14 @@ pub struct ObjectPropertyFact {
     pub ty: TypeBodySlot,
     /// Origin locator recovering the member's `MemberSpans`.
     pub span_origin: MemberSpansOrigin,
+}
+
+impl ObjectPropertyFact {
+    /// Borrow the ordinary string spelling when this property has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
 }
 
 /// A narrowed object method member.
@@ -1812,16 +1847,27 @@ pub struct ObjectPropertyFact {
     NoStoredSpan,
 )]
 pub struct ObjectMethodFact {
-    /// The member name.
-    pub name: String,
+    /// The authored method or accessor key.
+    pub key: FactAuthoredPropertyKey,
     /// Whether the method is optional.
     pub optional: bool,
+    /// Authored method, getter, or setter kind.
+    #[serde(default)]
+    pub method_kind: ObjectMethodKind,
     /// Member visibility (identity-participating, publication-filtered).
     pub visibility: MemberVisibility,
     /// The method's function signature.
     pub function: FunctionSignatureFact,
     /// Origin locator recovering the member's `MemberSpans`.
     pub span_origin: MemberSpansOrigin,
+}
+
+impl ObjectMethodFact {
+    /// Borrow the ordinary string spelling when this method has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
 }
 
 /// The declared SHAPE of an index-signature key (so `[k: string] ≠ [k: number]`).
@@ -2058,8 +2104,10 @@ pub struct PreparedMemberFact {
     pub optional: bool,
     /// Whether the member is readonly.
     pub readonly: bool,
-    /// Whether the member is a method.
-    pub is_method: bool,
+    /// `None` for a property; otherwise the authored method/getter/setter kind.
+    pub method_kind: Option<ObjectMethodKind>,
+    /// Whether the authored method contributor carries an implementation body.
+    pub has_implementation_body: bool,
     /// Member visibility.
     pub visibility: MemberVisibility,
     /// Typed declaration origin (defining file / synthetic).
@@ -2787,14 +2835,16 @@ pub struct ResolvedLocalTypeFact {
     NoStoredSpan,
 )]
 pub struct ProjectedMemberFact {
-    /// The member name.
-    pub name: String,
+    /// Exact authored key, including a retained computed-key locator.
+    pub key: FactAuthoredPropertyKey,
     /// Whether the member is optional.
     pub optional: bool,
     /// Whether the member is readonly.
     pub readonly: bool,
-    /// Whether the member is a method.
-    pub is_method: bool,
+    /// `None` for a property; otherwise the authored method/getter/setter kind.
+    pub method_kind: Option<ObjectMethodKind>,
+    /// Whether the authored method contributor carries an implementation body.
+    pub has_implementation_body: bool,
     /// Member visibility.
     pub visibility: MemberVisibility,
     /// Whether the member was author-declared in the macro type argument.
@@ -3026,7 +3076,7 @@ pub enum ProjectedTypeFact {
         /// The authored base body the projection starts from.
         base: AuthoredBodyLocator,
         /// The ordered member-name path off the base.
-        path: Arc<[String]>,
+        path: Arc<[FactPropertyKey]>,
     },
     /// A projected CALLABLE-PARAMS route: the content-free replay address
     /// for a realized call-signature payload tuple the publication surface

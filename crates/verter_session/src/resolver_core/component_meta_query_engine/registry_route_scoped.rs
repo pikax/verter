@@ -24,7 +24,10 @@ impl ComponentMetaQueryEngine<'_> {
         scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
         route: &crate::resolver_core::RouteDemand,
-        member_use_sites: &[(String, verter_type_expr::locators::TypeBodySlot)],
+        member_use_sites: &[(
+            verter_type_expr::facts::FactPropertyKey,
+            verter_type_expr::locators::TypeBodySlot,
+        )],
         authored_fallback: Option<&verter_type_expr::facts::SemanticTypeSource>,
         substituted_whole: bool,
     ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
@@ -86,7 +89,10 @@ impl ComponentMetaQueryEngine<'_> {
         scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
         route: &crate::resolver_core::RouteDemand,
-        member_use_sites: &[(String, verter_type_expr::locators::TypeBodySlot)],
+        member_use_sites: &[(
+            verter_type_expr::facts::FactPropertyKey,
+            verter_type_expr::locators::TypeBodySlot,
+        )],
     ) -> Option<verter_type_expr::facts::ProjectedSurfaceFact> {
         use verter_type_expr::facts::{ProjectedMemberFact, ProjectedSurfaceFact};
 
@@ -94,8 +100,8 @@ impl ComponentMetaQueryEngine<'_> {
             return None;
         }
         enum Selection {
-            Named(std::collections::BTreeSet<String>),
-            Complement(std::collections::BTreeSet<String>),
+            Named(std::collections::BTreeSet<verter_type_expr::facts::FactPropertyKey>),
+            Complement(std::collections::BTreeSet<verter_type_expr::facts::FactPropertyKey>),
         }
         let selection = match route {
             crate::resolver_core::RouteDemand::Whole => return None,
@@ -106,10 +112,10 @@ impl ComponentMetaQueryEngine<'_> {
                 Selection::Named(std::collections::BTreeSet::from([path[0].clone()]))
             }
             crate::resolver_core::RouteDemand::Pick(keys) => {
-                Selection::Named(keys.iter().map(|key| key.to_string()).collect())
+                Selection::Named(keys.iter().cloned().collect())
             }
             crate::resolver_core::RouteDemand::Omit(keys) => {
-                Selection::Complement(keys.iter().map(|key| key.to_string()).collect())
+                Selection::Complement(keys.iter().cloned().collect())
             }
         };
         // The declaration's resolved root identity + raised body root — the
@@ -149,7 +155,7 @@ impl ComponentMetaQueryEngine<'_> {
         // The one-level view through the shared empty-path Shallow surface
         // walker (member values stay shallow nodes).
         let (view, _surface_node) = compound_root_surface_view_via_dispatch(self.ctx, body_root)?;
-        let closed = view.closed()?;
+        let closed = view.closed();
         if !view.call_signatures.is_empty()
             || !view.construct_signatures.is_empty()
             || !view.index_signatures.is_empty()
@@ -157,22 +163,23 @@ impl ComponentMetaQueryEngine<'_> {
         {
             return None;
         }
-        let selected = |member_name: &str| -> bool {
+        let selected = |member_key: &verter_type_expr::facts::FactPropertyKey| -> bool {
             match &selection {
-                Selection::Named(names) => names.contains(member_name),
-                Selection::Complement(names) => !names.contains(member_name),
+                Selection::Named(keys) => keys.contains(member_key),
+                Selection::Complement(keys) => !keys.contains(member_key),
             }
         };
         let mut members: Vec<ProjectedMemberFact> = Vec::new();
         for member in closed.complete_members() {
-            if !selected(member.name.as_ref()) {
+            let member_key = member.key.cloned_known()?;
+            if !selected(&member_key) {
                 continue;
             }
             let (fact, crossed_substitution) = self.route_scoped_member_fact(
                 own_root.canonical_id.as_ref(),
                 own_root.owner,
                 own_root.symbol_name.as_ref(),
-                member.name.as_ref(),
+                &member_key,
             )?;
             // A member reached through a generic SUBSTITUTION retains the
             // authored use-site slot when the discovery recorded one — the
@@ -180,17 +187,18 @@ impl ComponentMetaQueryEngine<'_> {
             let ty = if crossed_substitution {
                 member_use_sites
                     .iter()
-                    .find(|(name, _)| name == member.name.as_ref())
+                    .find(|(key, _)| key == &member_key)
                     .map(|(_, slot)| slot.clone())
                     .unwrap_or_else(|| fact.ty.clone())
             } else {
                 fact.ty.clone()
             };
             members.push(ProjectedMemberFact {
-                name: member.name.as_ref().to_string(),
+                key: verter_type_expr::facts::FactAuthoredPropertyKey::from_known(member_key),
                 optional: fact.optional,
                 readonly: fact.readonly,
-                is_method: fact.is_method,
+                method_kind: fact.method_kind,
+                has_implementation_body: fact.has_implementation_body,
                 visibility: fact.visibility,
                 declared_in_macro_type_arg: false,
                 declaration_origin: fact.declaration_origin.clone(),
@@ -221,7 +229,7 @@ impl ComponentMetaQueryEngine<'_> {
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
-        member_name: &str,
+        member_key: &verter_type_expr::facts::FactPropertyKey,
     ) -> Option<(verter_type_expr::facts::PreparedMemberFact, bool)> {
         use crate::project_semantic_dispatch::node_data_for;
         use crate::semantic_query::SemanticNodeData;
@@ -247,7 +255,7 @@ impl ComponentMetaQueryEngine<'_> {
                 ) else {
                     continue;
                 };
-                if let Some(fact) = prepared.member_index.get(member_name) {
+                if let Some(fact) = prepared.member_index.get(member_key) {
                     return Some((fact.clone(), crossed));
                 }
                 let Some(root) =

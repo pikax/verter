@@ -12,8 +12,9 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 
 use crate::{
-    FunctionExpr, FunctionParam, LiteralValue, MappedModifier, ObjectMember, PrimitiveName,
-    TupleElement, TypeExpr, TypeParam,
+    AuthoredPropertyKey, CanonicalIndexInt, FunctionExpr, FunctionParam, LiteralValue,
+    MappedModifier, ObjectMember, PrimitiveName, TupleElement, TypeAuthoredPropertyKey, TypeExpr,
+    TypeParam,
 };
 
 /// A complete TypeScript display projection and the named type references
@@ -158,7 +159,9 @@ enum Frame<'a> {
     Text(&'static str),
     Borrowed(&'a str),
     MemberName(&'a str),
+    PropertyKey(&'a TypeAuthoredPropertyKey),
     SingleQuoted(&'a str),
+    CanonicalIndex(CanonicalIndexInt),
     Number(f64),
     BigInt(&'a str),
 }
@@ -186,7 +189,28 @@ pub fn render_type_expr_display(
                 write!(&mut text, "_arg{index}").expect("writing to String cannot fail");
             }
             Frame::MemberName(name) => push_member_name(&mut text, name),
+            Frame::PropertyKey(key) => match key {
+                AuthoredPropertyKey::String(name) => {
+                    work.push(Frame::MemberName(name));
+                }
+                AuthoredPropertyKey::Number(index) => {
+                    work.push(Frame::CanonicalIndex(*index));
+                }
+                AuthoredPropertyKey::UniqueSymbol(identity) => {
+                    work.push(Frame::Text("]"));
+                    work.push(Frame::Borrowed(&identity.symbol));
+                    work.push(Frame::Text("["));
+                }
+                AuthoredPropertyKey::Computed(expr) => {
+                    work.push(Frame::Text("]"));
+                    work.push(Frame::Expr(expr, Precedence::Lowest));
+                    work.push(Frame::Text("["));
+                }
+            },
             Frame::SingleQuoted(value) => push_single_quoted(&mut text, value),
+            Frame::CanonicalIndex(value) => {
+                write!(&mut text, "{value}").expect("writing to String cannot fail");
+            }
             Frame::Number(value) => {
                 if !value.is_finite() {
                     return Err(TypeExprDisplayError::NonFiniteNumberLiteral);
@@ -436,7 +460,7 @@ pub fn render_type_expr_display(
                     if property.optional {
                         work.push(Frame::Text("?"));
                     }
-                    work.push(Frame::MemberName(&property.name));
+                    work.push(Frame::PropertyKey(&property.key));
                     if property.readonly {
                         work.push(Frame::Text("readonly "));
                     }
@@ -467,7 +491,7 @@ pub fn render_type_expr_display(
                     if method.optional {
                         work.push(Frame::Text("?"));
                     }
-                    work.push(Frame::MemberName(&method.name));
+                    work.push(Frame::PropertyKey(&method.key));
                 }
                 ObjectMember::Spread(spread) => {
                     // Diagnostic-only spelling: TS type syntax has no spread

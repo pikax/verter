@@ -358,10 +358,10 @@ fn extracts_interface() {
     assert_eq!(headers.len(), 3);
     let email = headers
         .iter()
-        .find(|h| h.name == "email")
+        .find(|h| h.string_name().expect("string-key fixture") == "email")
         .expect("email header fact");
     assert!(email.optional);
-    assert!(!email.is_method);
+    assert!(email.method_kind.is_none());
 
     // TRANSIENT lowering: the object body the header facts derive from.
     let parts = lowered(source);
@@ -370,7 +370,11 @@ fn extracts_interface() {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 3);
             let email = obj.properties.iter().find_map(|m| match m {
-                ObjectMember::Property(p) if p.name == "email" => Some(p),
+                ObjectMember::Property(p)
+                    if p.string_name().expect("string-key fixture") == "email" =>
+                {
+                    Some(p)
+                }
                 _ => None,
             });
             assert!(email.is_some());
@@ -421,7 +425,7 @@ fn extracts_interface_with_methods() {
     let env = parse_and_build_env(source);
     let headers = &env.type_symbols["Logger"].primary().direct_member_headers;
     assert_eq!(headers.len(), 2);
-    assert!(headers.iter().all(|h| h.is_method));
+    assert!(headers.iter().all(|h| h.method_kind.is_some()));
 }
 
 // =============================================================================
@@ -511,7 +515,9 @@ fn class_property<'a>(body: &'a TypeExpr, name: &str) -> Option<&'a ObjectProper
         return None;
     };
     obj.properties.iter().find_map(|m| match m {
-        ObjectMember::Property(p) if p.name == name => Some(p),
+        ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == name => {
+            Some(p)
+        }
         _ => None,
     })
 }
@@ -522,7 +528,9 @@ fn class_method<'a>(body: &'a TypeExpr, name: &str) -> Option<&'a MethodSignatur
         return None;
     };
     obj.properties.iter().find_map(|m| match m {
-        ObjectMember::Method(mm) if mm.name == name => Some(mm),
+        ObjectMember::Method(mm) if mm.string_name().expect("string-key fixture") == name => {
+            Some(mm)
+        }
         _ => None,
     })
 }
@@ -572,13 +580,15 @@ fn extract_class_records_non_public_members_with_visibility() {
     let header = |name: &str| {
         headers
             .iter()
-            .find(|h| h.name == name)
+            .find(|h| h.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("{name} header"))
     };
     assert_eq!(header("a").visibility, MemberVisibility::Public);
     assert_eq!(header("b").visibility, MemberVisibility::Protected);
     assert_eq!(header("c").visibility, MemberVisibility::Private);
-    assert!(!headers.iter().any(|h| h.name == "s"));
+    assert!(!headers
+        .iter()
+        .any(|h| h.string_name().expect("string-key fixture") == "s"));
 }
 
 #[test]
@@ -693,7 +703,9 @@ fn extract_class_with_heritage_records_non_public_own_members() {
 /// Find a property member by name in an `ObjectExpr`.
 fn shape_property<'a>(shape: &'a ObjectExpr, name: &str) -> Option<&'a ObjectProperty> {
     shape.properties.iter().find_map(|m| match m {
-        ObjectMember::Property(p) if p.name == name => Some(p),
+        ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == name => {
+            Some(p)
+        }
         _ => None,
     })
 }
@@ -701,7 +713,9 @@ fn shape_property<'a>(shape: &'a ObjectExpr, name: &str) -> Option<&'a ObjectPro
 /// Find a method member by name in an `ObjectExpr`.
 fn shape_method<'a>(shape: &'a ObjectExpr, name: &str) -> Option<&'a MethodSignature> {
     shape.properties.iter().find_map(|m| match m {
-        ObjectMember::Method(mm) if mm.name == name => Some(mm),
+        ObjectMember::Method(mm) if mm.string_name().expect("string-key fixture") == name => {
+            Some(mm)
+        }
         _ => None,
     })
 }
@@ -799,7 +813,9 @@ fn extract_class_folds_static_members_into_constructor_shape() {
         .members
         .iter()
         .find_map(|m| match m {
-            verter_type_expr::facts::ObjectMemberFact::Property(p) if p.name == "initial" => {
+            verter_type_expr::facts::ObjectMemberFact::Property(p)
+                if p.string_name().expect("string-key fixture") == "initial" =>
+            {
                 Some(p)
             }
             _ => None,
@@ -1033,7 +1049,7 @@ fn extracts_declare_global_namespace_jsx_into_global_augmentation_scope() {
         .primary()
         .direct_member_headers
         .iter()
-        .map(|h| h.name.as_str())
+        .map(|h| h.string_name().expect("string-key fixture"))
         .collect();
     assert!(
         header_names.contains(&"div"),
@@ -1055,7 +1071,7 @@ fn extracts_declare_global_namespace_jsx_into_global_augmentation_scope() {
                 .properties
                 .iter()
                 .filter_map(|m| match m {
-                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
                     _ => None,
                 })
                 .collect();
@@ -1120,7 +1136,7 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
         .flat_map(|decl| {
             decl.direct_member_headers
                 .iter()
-                .map(|h| h.name.as_str())
+                .map(|h| h.string_name().expect("string-key fixture"))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -1147,7 +1163,7 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
                 .properties
                 .iter()
                 .filter_map(|m| match m {
-                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
@@ -1617,7 +1633,9 @@ fn static_class_method_fact<'a>(
         .members
         .iter()
         .find_map(|member| match member {
-            ObjectMemberFact::Method(method) if method.name == method_name => {
+            ObjectMemberFact::Method(method)
+                if method.string_name().expect("string-key fixture") == method_name =>
+            {
                 Some(&method.function)
             }
             _ => None,
@@ -1735,7 +1753,7 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
     let ObjectMemberFact::Method(method) = Arc::make_mut(&mut changed.members)
         .iter_mut()
         .find(
-            |member| matches!(member, ObjectMemberFact::Method(method) if method.name == "collide"),
+            |member| matches!(member, ObjectMemberFact::Method(method) if method.string_name().expect("string-key fixture") == "collide"),
         )
         .expect("static collision method")
     else {
@@ -2078,7 +2096,7 @@ fn extracts_const_object_literal() {
         verter_type_expr::facts::ObjectMemberFact::Property(p) => p,
         other => panic!("expected property fact, got {other:?}"),
     };
-    assert_eq!(theme.name, "theme");
+    assert_eq!(theme.string_name().expect("string-key fixture"), "theme");
     assert_eq!(&*theme.ty.anchor.symbol, "defaults");
     assert_eq!(
         &*theme.ty.path,
@@ -2383,7 +2401,11 @@ fn let_widens_constructor_type_return_literal_members() {
         );
     };
     let kind_ty = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(prop) if prop.name == "kind" => Some(&prop.ty),
+        ObjectMember::Property(prop)
+            if prop.string_name().expect("string-key fixture") == "kind" =>
+        {
+            Some(&prop.ty)
+        }
         _ => None,
     });
     assert_eq!(
@@ -2420,7 +2442,11 @@ fn let_widens_function_type_return_literal_members_parity() {
         panic!("function return type must remain an object, got {return_type:?}");
     };
     let kind_ty = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(prop) if prop.name == "kind" => Some(&prop.ty),
+        ObjectMember::Property(prop)
+            if prop.string_name().expect("string-key fixture") == "kind" =>
+        {
+            Some(&prop.ty)
+        }
         _ => None,
     });
     assert_eq!(
@@ -2442,20 +2468,32 @@ fn let_widens_nested_object_literal_properties() {
     };
 
     let mode_ty = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(prop) if prop.name == "mode" => Some(&prop.ty),
+        ObjectMember::Property(prop)
+            if prop.string_name().expect("string-key fixture") == "mode" =>
+        {
+            Some(&prop.ty)
+        }
         _ => None,
     });
     assert_eq!(mode_ty, Some(&TypeExpr::Primitive(PrimitiveName::String)));
 
     let nested_ty = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(prop) if prop.name == "nested" => Some(&prop.ty),
+        ObjectMember::Property(prop)
+            if prop.string_name().expect("string-key fixture") == "nested" =>
+        {
+            Some(&prop.ty)
+        }
         _ => None,
     });
     let Some(TypeExpr::Object(nested)) = nested_ty else {
         panic!("expected nested object property, got {nested_ty:?}");
     };
     let count_ty = nested.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(prop) if prop.name == "count" => Some(&prop.ty),
+        ObjectMember::Property(prop)
+            if prop.string_name().expect("string-key fixture") == "count" =>
+        {
+            Some(&prop.ty)
+        }
         _ => None,
     });
     assert_eq!(count_ty, Some(&TypeExpr::Primitive(PrimitiveName::Number)));
@@ -2497,7 +2535,9 @@ fn satisfies_preserves_underlying_value_type() {
     // The value type should have literal/inferred properties from the expression,
     // not abstract types from the satisfies annotation
     let x_prop = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(p) if p.name == "x" => Some(&p.ty),
+        ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "x" => {
+            Some(&p.ty)
+        }
         _ => None,
     });
     assert!(
@@ -2556,7 +2596,7 @@ fn object_spread_identifier_keeps_operand_as_ordered_entry() {
         obj.properties[0]
     );
     assert!(
-        matches!(&obj.properties[1], ObjectMember::Property(p) if p.name == "extra"),
+        matches!(&obj.properties[1], ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "extra"),
         "entry 1 must be the direct member `extra`, got {:?}",
         obj.properties[1]
     );
@@ -2590,7 +2630,7 @@ fn object_spread_inline_literal_stays_a_pre_fold_entry() {
         .properties
         .iter()
         .filter_map(|m| match m {
-            ObjectMember::Property(p) => Some(p.name.as_str()),
+            ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -2600,7 +2640,7 @@ fn object_spread_inline_literal_stays_a_pre_fold_entry() {
         "operand members preserved on the operand"
     );
     assert!(
-        matches!(&obj.properties[1], ObjectMember::Property(p) if p.name == "c"),
+        matches!(&obj.properties[1], ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "c"),
         "the direct member `c` follows the spread in source order"
     );
 }
@@ -2621,7 +2661,11 @@ fn object_spread_later_property_overrides_spread_property() {
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(prop) if prop.name == "a" => Some(&prop.ty),
+            ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "a" =>
+            {
+                Some(&prop.ty)
+            }
             _ => None,
         })
         .collect();
@@ -2655,7 +2699,7 @@ fn object_spread_later_spread_override_is_the_folds_decision() {
     };
     assert_eq!(obj.properties.len(), 2);
     assert!(
-        matches!(&obj.properties[0], ObjectMember::Property(p) if p.name == "a"
+        matches!(&obj.properties[0], ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "a"
             && p.ty == TypeExpr::Primitive(PrimitiveName::Number)),
         "entry 0 is the direct `a: number`, got {:?}",
         obj.properties[0]
@@ -2670,7 +2714,7 @@ fn object_spread_later_spread_override_is_the_folds_decision() {
         panic!("operand keeps its own object type, got {:?}", spread.ty);
     };
     assert!(
-        matches!(&operand.properties[0], ObjectMember::Property(p) if p.name == "a"
+        matches!(&operand.properties[0], ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "a"
             && p.ty == TypeExpr::Primitive(PrimitiveName::String)),
         "the operand's `a: string` is preserved for the fold to apply"
     );
@@ -2828,7 +2872,11 @@ fn svelte_runes_explicit_state_type_argument_is_authoritative() {
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "id" => Some(property),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "id" =>
+            {
+                Some(property)
+            }
             _ => None,
         })
         .expect("id property");
@@ -2918,7 +2966,11 @@ fn extracts_class_as_type_and_value() {
             // id, name, render (constructor is not a member)
             assert_eq!(obj.properties.len(), 3);
             let id_prop = obj.properties.iter().find_map(|m| match m {
-                ObjectMember::Property(p) if p.name == "id" => Some(p),
+                ObjectMember::Property(p)
+                    if p.string_name().expect("string-key fixture") == "id" =>
+                {
+                    Some(p)
+                }
                 _ => None,
             });
             assert!(id_prop.unwrap().readonly);
@@ -2981,7 +3033,7 @@ fn extracts_export_default_object_expression_as_default_value() {
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            ObjectMember::Property(prop) => Some(prop.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -3044,7 +3096,7 @@ export { RouteLocationRaw as Lt, St, vt }
                 || matches!(
                     ty,
                     TypeExpr::Object(shape)
-                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path"))
+                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "path"))
                 )
         }),
         "RouteLocationRaw should preserve its path-like branch, got {:?}",
@@ -3056,7 +3108,7 @@ export { RouteLocationRaw as Lt, St, vt }
                 || matches!(
                     ty,
                     TypeExpr::Object(shape)
-                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "name"))
+                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "name"))
                 )
         }),
         "RouteLocationRaw should preserve its name-like branch, got {:?}",
@@ -4145,7 +4197,7 @@ fn object_literal_producer_emits_ordered_spread_ir_with_fresh_own_members() {
     );
     match &obj.properties[0] {
         ObjectMember::Property(p) => {
-            assert_eq!(p.name, "a");
+            assert_eq!(p.string_name().expect("string-key fixture"), "a");
             assert_eq!(
                 p.excess_origin,
                 ExcessPropertyOrigin::FreshOwn,
@@ -4164,7 +4216,7 @@ fn object_literal_producer_emits_ordered_spread_ir_with_fresh_own_members() {
     }
     match &obj.properties[2] {
         ObjectMember::Property(p) => {
-            assert_eq!(p.name, "b");
+            assert_eq!(p.string_name().expect("string-key fixture"), "b");
             assert_eq!(p.excess_origin, ExcessPropertyOrigin::FreshOwn);
         }
         other => panic!("entry 2 must be the direct member `b` AFTER the spread, got {other:?}"),
@@ -4209,7 +4261,7 @@ fn object_literal_producer_keeps_inline_spread_operands_and_nested_freshness() {
     }
     match &obj.properties[1] {
         ObjectMember::Property(p) => {
-            assert_eq!(p.name, "c");
+            assert_eq!(p.string_name().expect("string-key fixture"), "c");
             assert_eq!(p.excess_origin, ExcessPropertyOrigin::FreshOwn);
             let TypeExpr::Object(nested) = &p.ty else {
                 panic!("nested literal value stays an object, got {:?}", p.ty);
@@ -4241,7 +4293,7 @@ fn object_shape_preserves_spread_entries_in_order() {
         shape.properties[0]
     );
     assert!(
-        matches!(&shape.properties[1], ObjectMember::Property(p) if p.name == "extra"),
+        matches!(&shape.properties[1], ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "extra"),
         "shape entry 1 must be `extra`, got {:?}",
         shape.properties[1]
     );
@@ -4267,18 +4319,18 @@ fn object_literal_accessor_method_and_shorthand_members_are_fresh_own() {
                     p.excess_origin,
                     ExcessPropertyOrigin::FreshOwn,
                     "member `{}` must be FreshOwn",
-                    p.name
+                    p.string_name().expect("string-key fixture")
                 );
-                names.push(p.name.as_str());
+                names.push(p.string_name().expect("string-key fixture"));
             }
             ObjectMember::Method(m) => {
                 assert_eq!(
                     m.excess_origin,
                     ExcessPropertyOrigin::FreshOwn,
                     "method `{}` must be FreshOwn",
-                    m.name
+                    m.string_name().expect("string-key fixture")
                 );
-                names.push(m.name.as_str());
+                names.push(m.string_name().expect("string-key fixture"));
             }
             other => panic!("unexpected member form {other:?}"),
         }
@@ -4289,4 +4341,68 @@ fn object_literal_accessor_method_and_shorthand_members_are_fresh_own() {
         ["g", "m", "s", "short"],
         "method, getter, setter, and shorthand members all survive as direct members"
     );
+}
+
+#[test]
+fn object_literal_preserves_accessor_kind_duplicates_and_spread_order() {
+    let source = r#"const o = {
+            get value() { return 1 },
+            ...base,
+            set value(next: number) {},
+            value() { return 2 },
+            value: 3
+        }"#;
+    let parts = lowered(source);
+    let decl = parts.value_decl("o").expect("lowered o");
+    let Some(TypeExpr::Object(object)) = decl.type_annotation.as_ref() else {
+        panic!("expected object IR, got {:?}", decl.type_annotation);
+    };
+
+    assert_eq!(object.properties.len(), 5);
+    assert!(matches!(
+        &object.properties[0],
+        ObjectMember::Method(method)
+            if method.string_name().expect("string-key fixture") == "value" && method.method_kind == ObjectMethodKind::Get
+    ));
+    assert!(matches!(&object.properties[1], ObjectMember::Spread(_)));
+    assert!(matches!(
+        &object.properties[2],
+        ObjectMember::Method(method)
+            if method.string_name().expect("string-key fixture") == "value" && method.method_kind == ObjectMethodKind::Set
+    ));
+    assert!(matches!(
+        &object.properties[3],
+        ObjectMember::Method(method)
+            if method.string_name().expect("string-key fixture") == "value" && method.method_kind == ObjectMethodKind::Method
+    ));
+    assert!(matches!(
+        &object.properties[4],
+        ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "value"
+    ));
+
+    let env = parse_and_build_env(source);
+    let facts = env.value_symbols["o"]
+        .primary()
+        .object_shape
+        .as_ref()
+        .expect("stored object-shape fact");
+    assert!(matches!(
+        &facts.members[0],
+        ObjectMemberFact::Method(method)
+            if method.method_kind == ObjectMethodKind::Get
+                && method.function.has_implementation_body
+    ));
+    assert!(matches!(&facts.members[1], ObjectMemberFact::Spread(_)));
+    assert!(matches!(
+        &facts.members[2],
+        ObjectMemberFact::Method(method)
+            if method.method_kind == ObjectMethodKind::Set
+                && method.function.has_implementation_body
+    ));
+    assert!(matches!(
+        &facts.members[3],
+        ObjectMemberFact::Method(method)
+            if method.method_kind == ObjectMethodKind::Method
+                && method.function.has_implementation_body
+    ));
 }

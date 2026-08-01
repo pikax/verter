@@ -14,7 +14,7 @@ pub(super) fn collect_snippet_candidate_members(
         let TSSignature::TSPropertySignature(sig) = member else {
             continue;
         };
-        let Some(member_name) = property_key_name(&sig.key) else {
+        let Some(member_name) = static_string_property_key(&sig.key) else {
             continue;
         };
         let Some(annotation) = &sig.type_annotation else {
@@ -63,10 +63,13 @@ pub(super) fn collect_snippet_candidate_members_from_lowered(
         else {
             continue;
         };
+        let Some(member_name) = property.key.as_string() else {
+            continue;
+        };
         out.snippet_candidates.push(SvelteSnippetImportCandidate {
             local_binding: name.as_ref().to_string(),
             import_source: source.clone(),
-            member_name: property.name.clone(),
+            member_name: member_name.to_string(),
         });
     }
 }
@@ -218,7 +221,7 @@ pub(super) fn binding_name(pattern: &BindingPattern<'_>) -> Option<String> {
 
 /// The static name of a property/binding key, when it is a plain identifier or
 /// string literal.
-pub(super) fn property_key_name<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
+pub(super) fn static_string_property_key<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
     match key {
         PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
         PropertyKey::StringLiteral(s) => Some(s.value.as_str()),

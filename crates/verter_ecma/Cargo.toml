@@ -1,0 +1,10 @@
+[package]
+name = "verter_ecma"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Shared ECMAScript scalar semantics for Verter"
+publish = false

@@ -128,6 +128,11 @@ fn cancelled_joiner_detaches_without_aborting_live_winner() {
     assert!(matches!(winner.value, QueryResult::Value(_)));
     assert_eq!(builds.load(Ordering::SeqCst), 1);
     assert_eq!(store.memo_entry_count(), 1);
+    assert_eq!(
+        store.wait_graph_counts_for_tests(),
+        (0, 0),
+        "cancelled joiner cleanup must retire its owner and wait edge"
+    );
 }
 
 #[test]

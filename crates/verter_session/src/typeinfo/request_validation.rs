@@ -31,8 +31,6 @@
 
 #![deny(missing_docs)]
 
-use std::collections::HashSet;
-
 use verter_protocol::typeinfo::graph::{
     self as wire, ClosurePolicy, ContextualTypeRequest, DisplayPolicy,
     EvaluateTypeExpressionGraphRequest, ExpandGraphAroundRequest, FlowNarrowingRequest,
@@ -42,7 +40,7 @@ use verter_protocol::typeinfo::graph::{
     TYPEINFO_GRAPH_SCHEMA_VERSION,
 };
 use verter_protocol::verter::v1::{
-    graph_closure_policy, structured_type_expression as wire_expr,
+    graph_closure_policy, property_key_expr, structured_type_expression as wire_expr,
     type_info_graph_request as wire_request, type_info_request_error,
 };
 
@@ -103,6 +101,12 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
     // retired tag-28 arm was never emitted by any encoder, so no v4
     // payload carries a relation proof to lose).
     4,
+    // Schema 5 remains accepted for request compatibility; responses carrying
+    // typed property keys advertise schema 6 and cannot be decoded as v5.
+    5,
+    // Schema 6 remains accepted for requests that do not require the canonical
+    // object-spread-program node introduced by schema 7.
+    6,
     TYPEINFO_GRAPH_SCHEMA_VERSION,
 ];
 
@@ -633,11 +637,39 @@ fn validate_object_literal_expr(
     expr: &wire::ExprObject,
     depth: u32,
 ) -> Result<(), TypeInfoRequestError> {
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: Vec<&wire::PropertyKeyExpr> = Vec::new();
     for member in &expr.members {
-        if !seen.insert(member.name.as_str()) {
+        let property_key = member.property_key.as_ref().ok_or_else(
+            malformed_structured_expression_error_with_detail("object member missing property key"),
+        )?;
+        let key = property_key.key.as_ref().ok_or_else(
+            malformed_structured_expression_error_with_detail(
+                "object member property key missing variant",
+            ),
+        )?;
+        if seen.contains(&property_key) {
             return Err(malformed_structured_expression_error_with_detail(
-                "duplicate object member name",
+                "duplicate object member property key",
+            )());
+        }
+        seen.push(property_key);
+        match key {
+            property_key_expr::Key::StringValue(_) | property_key_expr::Key::CanonicalNumber(_) => {
+            }
+            property_key_expr::Key::UniqueSymbol(unique) => {
+                if unique.canonical_id.is_empty() || unique.symbol.is_empty() {
+                    return Err(malformed_structured_expression_error_with_detail(
+                        "object member unique-symbol key missing identity",
+                    )());
+                }
+            }
+            property_key_expr::Key::Computed(computed) => {
+                validate_structured_expression(computed, depth + 1)?;
+            }
+        }
+        if wire::ObjectMemberKind::try_from(member.member_kind).is_err() {
+            return Err(malformed_structured_expression_error_with_detail(
+                "object member has invalid member kind",
             )());
         }
         let v =

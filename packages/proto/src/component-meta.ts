@@ -27,7 +27,7 @@ export type ProtoOriginGraph = ProtoRecord<"verter.v1.OriginGraph"> & RawOriginG
 export type ProtoOriginNode = ProtoRecord<"verter.v1.OriginNode"> & RawOriginNode;
 export type ProtoOriginEdge = ProtoRecord<"verter.v1.OriginEdge"> & RawOriginEdge;
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const PRIMITIVE_STRING = 1;
 const PRIMITIVE_UNDEFINED = 11;
 const OBJECT_MEMBER_PROPERTY = 1;
@@ -77,7 +77,7 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
           members: [
             {
               kind: OBJECT_MEMBER_PROPERTY,
-              nameId: 6,
+              propertyKey: { key: { case: "stringId", value: 6 } },
               typeNodeId: 1,
               optional: false,
               readonly: false,
@@ -85,10 +85,12 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
               keyTypeNodeId: 0,
               valueTypeNodeId: 0,
               functionNodeId: 0,
+              methodKind: 0,
+              hasImplementationBody: false,
             },
             {
               kind: OBJECT_MEMBER_PROPERTY,
-              nameId: 7,
+              propertyKey: { key: { case: "stringId", value: 7 } },
               typeNodeId: 4,
               optional: true,
               readonly: false,
@@ -96,6 +98,8 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
               keyTypeNodeId: 0,
               valueTypeNodeId: 0,
               functionNodeId: 0,
+              methodKind: 0,
+              hasImplementationBody: false,
             },
           ],
         }),

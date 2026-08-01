@@ -13,7 +13,7 @@ use rustc_hash::FxHashSet;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    HashValue, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId,
+    HashValue, LiteralValue, PrimitiveKind, PropertyKey, SemanticNodeData, SemanticNodeId,
 };
 use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
 
@@ -26,20 +26,26 @@ use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
 /// `"1"` (pinned tsgo, probe12: `{ [K in 1]: K }` = `{ 1: 1 }`).
 #[derive(Clone)]
 pub(super) struct KeyDomainKey {
-    pub(super) name: Arc<str>,
-    pub(super) literal: LiteralValue,
+    pub(super) key: PropertyKey,
+    /// Literal binder value for string/numeric keys. A unique-symbol key has
+    /// no primitive literal representation; consumers must resolve its nominal
+    /// value identity or explicitly defer.
+    pub(super) literal: Option<LiteralValue>,
 }
 
 impl KeyDomainKey {
-    /// Lift a name-only enumeration (surface member names, `keyof`
-    /// results) into key-domain entries. Member names are strings, so
-    /// every lifted entry carries the STRING substitution kind.
-    pub(super) fn from_names(names: Vec<Arc<str>>) -> Vec<KeyDomainKey> {
-        names
-            .into_iter()
-            .map(|name| KeyDomainKey {
-                literal: LiteralValue::String(name.as_ref().to_string()),
-                name,
+    /// Lift exact known surface keys into mapper key-domain entries.
+    pub(super) fn from_keys(keys: Vec<PropertyKey>) -> Vec<KeyDomainKey> {
+        keys.into_iter()
+            .map(|key| KeyDomainKey {
+                literal: match &key {
+                    PropertyKey::String(name) => {
+                        Some(LiteralValue::String(name.as_ref().to_string()))
+                    }
+                    PropertyKey::Number(number) => Some(LiteralValue::Number(number.get() as f64)),
+                    PropertyKey::UniqueSymbol(_) => None,
+                },
+                key,
             })
             .collect()
     }
@@ -52,6 +58,26 @@ enum KeyNamesFrame {
     Expand(SemanticNodeId),
     CombineIntersection { arm_count: usize },
     CombineUnion { arm_count: usize },
+}
+
+/// One arm's key-name enumeration outcome inside
+/// [`ProjectSemanticDispatch::key_names_from_base_node`]. Distinguishes
+/// an open construction program from other unresolvable shapes so the
+/// intersection combine can poison on the former (tsc keeps the key
+/// domain of an intersection with an unresolved constituent open) while
+/// keeping the pre-existing drop-and-accumulate rule for the latter.
+enum KeyNamesArm {
+    Names(Vec<PropertyKey>),
+    /// Unresolvable for a reason OTHER than an open construction program
+    /// (deferred shells, primitives, literals, TypeParams, projection
+    /// failures): dropped from an intersection combine, poisons a union
+    /// combine.
+    Unresolvable,
+    /// An open / multi-alternative construction program: its key domain
+    /// is not closed, so an intersection containing it has no exact
+    /// keyof — the arm poisons the intersection combine (and propagates
+    /// upward as the poisoned verdict).
+    OpenConstruction,
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -72,9 +98,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// already hold; this enumerator owns the declaration-placeholder
     /// unwrap + Intersection/Union accumulation so they do not
     /// re-implement either.
-    pub(crate) fn key_names_from_base_node(&self, base: SemanticNodeId) -> Option<Vec<Arc<str>>> {
+    pub(crate) fn key_names_from_base_node(
+        &self,
+        base: SemanticNodeId,
+    ) -> Option<Vec<PropertyKey>> {
         let mut work: Vec<KeyNamesFrame> = Vec::new();
-        let mut results: Vec<Option<Vec<Arc<str>>>> = Vec::new();
+        let mut results: Vec<KeyNamesArm> = Vec::new();
         work.push(KeyNamesFrame::Expand(base));
 
         while let Some(frame) = work.pop() {
@@ -84,33 +113,56 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 KeyNamesFrame::CombineIntersection { arm_count } => {
                     // Accumulate enumerable arms; ignore unresolvable ones.
-                    // Only return None when EVERY arm is unresolvable.
+                    // Only return None when EVERY arm is unresolvable —
+                    // EXCEPT an open construction program arm, which
+                    // poisons the whole intersection: `keyof (A & B)`
+                    // stays open with an unresolved constituent (tsc), so
+                    // the enumerable subset is never exact.
                     let start = results.len().saturating_sub(arm_count);
                     let arm_results: Vec<_> = results.drain(start..).collect();
-                    let mut names: Vec<Arc<str>> = Vec::new();
-                    let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
+                    let mut names: Vec<PropertyKey> = Vec::new();
+                    let mut seen: FxHashSet<PropertyKey> = FxHashSet::default();
                     let mut any_enumerable = false;
-                    for arm_names in arm_results.into_iter().flatten() {
-                        any_enumerable = true;
-                        for name in arm_names {
-                            if seen.insert(Arc::clone(&name)) {
-                                names.push(name);
+                    let mut open_construction = false;
+                    for arm in arm_results {
+                        match arm {
+                            KeyNamesArm::Names(arm_names) => {
+                                any_enumerable = true;
+                                for name in arm_names {
+                                    if seen.insert(name.clone()) {
+                                        names.push(name);
+                                    }
+                                }
                             }
+                            KeyNamesArm::Unresolvable => {}
+                            KeyNamesArm::OpenConstruction => open_construction = true,
                         }
                     }
-                    results.push(if any_enumerable { Some(names) } else { None });
+                    results.push(if open_construction {
+                        KeyNamesArm::OpenConstruction
+                    } else if any_enumerable {
+                        KeyNamesArm::Names(names)
+                    } else {
+                        KeyNamesArm::Unresolvable
+                    });
                 }
                 KeyNamesFrame::CombineUnion { arm_count } => {
                     // Keyof (A | B) = common keys across ALL arms (intersection
                     // of enumerated sets). Unresolvable arm → whole union None.
+                    // An OPEN CONSTRUCTION arm propagates its poison verdict:
+                    // collapsing it to a plain unresolvable arm would let an
+                    // enclosing intersection combine drop it and publish a
+                    // false-exact key domain.
                     let start = results.len().saturating_sub(arm_count);
                     let arm_results: Vec<_> = results.drain(start..).collect();
-                    let mut common: Option<FxHashSet<Arc<str>>> = None;
+                    let mut common: Option<FxHashSet<PropertyKey>> = None;
                     let mut unresolvable = false;
+                    let mut open_construction = false;
                     for arm in arm_results {
                         match arm {
-                            Some(arm_names) => {
-                                let arm_set: FxHashSet<Arc<str>> = arm_names.into_iter().collect();
+                            KeyNamesArm::Names(arm_names) => {
+                                let arm_set: FxHashSet<PropertyKey> =
+                                    arm_names.into_iter().collect();
                                 common = Some(match common {
                                     Some(current) => current
                                         .intersection(&arm_set)
@@ -119,28 +171,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     None => arm_set,
                                 });
                             }
-                            None => {
+                            KeyNamesArm::Unresolvable => {
                                 unresolvable = true;
                                 // Cannot early-break — must drain remaining
                                 // results from the stack to keep `results`
                                 // aligned for the next combine.
                             }
+                            KeyNamesArm::OpenConstruction => {
+                                open_construction = true;
+                            }
                         }
                     }
-                    let combined = if unresolvable {
-                        None
+                    let combined = if open_construction {
+                        KeyNamesArm::OpenConstruction
+                    } else if unresolvable {
+                        KeyNamesArm::Unresolvable
                     } else {
-                        let mut names: Vec<Arc<str>> =
+                        let mut names: Vec<PropertyKey> =
                             common.unwrap_or_default().into_iter().collect();
-                        names.sort_unstable_by(|left, right| left.as_ref().cmp(right.as_ref()));
-                        Some(names)
+                        names.sort_unstable();
+                        KeyNamesArm::Names(names)
                     };
                     results.push(combined);
                 }
             }
         }
 
-        results.pop().unwrap_or(None)
+        match results.pop() {
+            Some(KeyNamesArm::Names(names)) => Some(names),
+            _ => None,
+        }
     }
 
     /// Expand one node worth of key-name enumeration. Pushes either a
@@ -150,22 +210,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         base: SemanticNodeId,
         work: &mut Vec<KeyNamesFrame>,
-        results: &mut Vec<Option<Vec<Arc<str>>>>,
+        results: &mut Vec<KeyNamesArm>,
     ) {
         let resolved = self.evaluate_deferred_semantic_node(base);
         let data = match self.graph().node_data(resolved) {
             Some(d) => d,
             None => {
-                results.push(None);
+                results.push(KeyNamesArm::Unresolvable);
                 return;
             }
         };
         match data.as_ref() {
+            SemanticNodeData::ObjectSpreadProgram(_) => {
+                drop(data);
+                let keys = match self.project_object_spread_for_consumer(
+                    resolved,
+                    crate::semantic_query::ObjectProjectionSelector::Surface,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Expanded,
+                    ),
+                ) {
+                    crate::semantic_query::QueryResult::Value(formula) => {
+                        match formula.closed().and_then(|closed| closed.keyof()) {
+                            Some(keyof) => KeyNamesArm::Names(keyof.to_vec()),
+                            // An open / multi-alternative construction
+                            // program has no exact key domain — poison
+                            // the enclosing intersection combine.
+                            None => KeyNamesArm::OpenConstruction,
+                        }
+                    }
+                    crate::semantic_query::QueryResult::Recursive(_)
+                    | crate::semantic_query::QueryResult::Error(_) => KeyNamesArm::Unresolvable,
+                };
+                results.push(keys);
+            }
             SemanticNodeData::Object(surface) => {
-                if surface.is_open_spread() {
-                    results.push(None);
-                    return;
-                }
                 // `keyof ClassType` yields only public keys (TS semantics):
                 // private/protected members are not part of the keyspace, so
                 // mapped types (`{ [K in keyof T]: V }`, `Partial<T>`) and
@@ -176,16 +255,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .positive_members()
                     .iter()
                     .filter(|member| member.visibility.is_public())
-                    .map(|member| Arc::clone(&member.name))
+                    .filter_map(|member| member.key.cloned_known())
                     .collect();
-                results.push(Some(names));
+                results.push(KeyNamesArm::Names(names));
             }
             SemanticNodeData::Intersection(arms) => {
                 let arms = Arc::clone(arms);
                 drop(data);
                 let n = arms.len();
                 if n == 0 {
-                    results.push(Some(Vec::new()));
+                    results.push(KeyNamesArm::Names(Vec::new()));
                     return;
                 }
                 work.push(KeyNamesFrame::CombineIntersection { arm_count: n });
@@ -198,7 +277,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 drop(data);
                 let n = arms.len();
                 if n == 0 {
-                    results.push(Some(Vec::new()));
+                    results.push(KeyNamesArm::Names(Vec::new()));
                     return;
                 }
                 work.push(KeyNamesFrame::CombineUnion { arm_count: n });
@@ -214,7 +293,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 drop(data);
                 let n = contributors.len();
                 if n == 0 {
-                    results.push(Some(Vec::new()));
+                    results.push(KeyNamesArm::Names(Vec::new()));
                     return;
                 }
                 work.push(KeyNamesFrame::CombineIntersection { arm_count: n });
@@ -223,7 +302,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             SemanticNodeData::Primitive(PrimitiveKind::Never) => {
-                results.push(Some(Vec::new()));
+                results.push(KeyNamesArm::Names(Vec::new()));
             }
             // DeclPlaceholder — expand via Instantiate before
             // enumerating keys. The placeholder's `whole_hash` is
@@ -271,7 +350,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         work.push(KeyNamesFrame::Expand(instantiated));
                     }
                     _ => {
-                        results.push(None);
+                        results.push(KeyNamesArm::Unresolvable);
                     }
                 }
             }
@@ -279,7 +358,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // matches deferred shells, primitives other than Never,
             // Literals, TypeParams, etc.
             _ => {
-                results.push(None);
+                results.push(KeyNamesArm::Unresolvable);
             }
         }
     }
@@ -344,6 +423,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             });
         // A2 signal-split: fold a genuinely-incomplete terminal projection.
         crate::request_context::observe_component_meta_read_suppress(&terminal_read);
+        // A partial terminal read never hands out a `SurfaceView`: its
+        // total `closed()` witness would claim completeness the read does
+        // not have (open-spread evidence, budget, cycles). Callers degrade
+        // on `None` instead of consuming a completeness-claiming Object.
+        if terminal_read.result_is_partial {
+            return None;
+        }
         let terminal = match terminal_read.value {
             crate::semantic_query::QueryResult::Value(node) => node,
             crate::semantic_query::QueryResult::Recursive(node) => node,
@@ -367,13 +453,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(crate) fn key_names_from_keyspace_node(
         &self,
         node: SemanticNodeId,
-    ) -> Option<Vec<Arc<str>>> {
+    ) -> Option<Vec<PropertyKey>> {
         let keys = self.key_literals_from_keyspace_node(node)?;
-        let mut names: Vec<Arc<str>> = Vec::with_capacity(keys.len());
+        let mut names: Vec<PropertyKey> = Vec::with_capacity(keys.len());
         let mut seen = FxHashSet::default();
         for key in keys {
-            if seen.insert(Arc::clone(&key.name)) {
-                names.push(key.name);
+            if seen.insert(key.key.clone()) {
+                names.push(key.key);
             }
         }
         Some(names)
@@ -417,8 +503,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let data = self.graph().node_data(resolved)?;
         match data.as_ref() {
             SemanticNodeData::Literal(LiteralValue::String(name)) => Some(vec![KeyDomainKey {
-                name: Arc::from(name.as_str()),
-                literal: LiteralValue::String(name.clone()),
+                key: PropertyKey::string_literal(name.as_str()),
+                literal: Some(LiteralValue::String(name.clone())),
             }]),
             // Numeric-literal keys are legal keyspace members; they publish
             // as the canonical JS numeric string (pinned tsgo, probe10:
@@ -429,8 +515,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Boolean / bigint literals are NOT valid property keys
             // (tsgo TS2344) — they stay non-enumerable via the catch-all.
             SemanticNodeData::Literal(LiteralValue::Number(number)) => Some(vec![KeyDomainKey {
-                name: Arc::from(super::build::js_number_to_string(*number).as_str()),
-                literal: LiteralValue::Number(*number),
+                key: PropertyKey::from_js_number(*number),
+                literal: Some(LiteralValue::Number(*number)),
             }]),
             SemanticNodeData::Union(members) => {
                 let mut keys: Vec<KeyDomainKey> = Vec::new();
@@ -438,7 +524,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     for key in self.key_literals_from_keyspace_node(*member)? {
                         let duplicate = keys
                             .iter()
-                            .any(|k| k.name == key.name && k.literal == key.literal);
+                            .any(|k| k.key == key.key && k.literal == key.literal);
                         if !duplicate {
                             keys.push(key);
                         }
@@ -464,7 +550,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `keyof Foo<T>` over a fixed-key body then enumerates its keys.
             SemanticNodeData::KeyOf { base } => {
                 if let Some(names) = self.key_names_from_base_node(*base) {
-                    return Some(KeyDomainKey::from_names(names));
+                    return Some(KeyDomainKey::from_keys(names));
                 }
                 // Key-domain enumeration needs the literal KEY UNION of `keyof
                 // base`, NOT the member VALUES of `base`. Resolve the `keyof`
@@ -553,13 +639,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     _ => {
                         return self
                             .key_names_from_base_node(resolved)
-                            .map(KeyDomainKey::from_names);
+                            .map(KeyDomainKey::from_keys);
                     }
                 };
                 if instantiated == resolved {
                     return self
                         .key_names_from_base_node(resolved)
-                        .map(KeyDomainKey::from_names);
+                        .map(KeyDomainKey::from_keys);
                 }
                 self.key_literals_from_keyspace_node(instantiated)
             }
@@ -591,19 +677,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     _ => {
                         return self
                             .key_names_from_base_node(resolved)
-                            .map(KeyDomainKey::from_names);
+                            .map(KeyDomainKey::from_keys);
                     }
                 };
                 if instantiated == resolved {
                     return self
                         .key_names_from_base_node(resolved)
-                        .map(KeyDomainKey::from_names);
+                        .map(KeyDomainKey::from_keys);
                 }
                 self.key_literals_from_keyspace_node(instantiated)
             }
             _ => self
                 .key_names_from_base_node(resolved)
-                .map(KeyDomainKey::from_names),
+                .map(KeyDomainKey::from_keys),
         }
     }
 
@@ -658,16 +744,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn keyspace_admits_literal_non_emitting(
         &self,
         node: SemanticNodeId,
-        needle: &str,
+        needle: &PropertyKey,
     ) -> Option<bool> {
         let data = self.graph().node_data(node)?;
         match data.as_ref() {
             // A single literal: admits iff it matches.
-            SemanticNodeData::Literal(LiteralValue::String(name)) => Some(name.as_str() == needle),
+            SemanticNodeData::Literal(LiteralValue::String(name)) => {
+                Some(&PropertyKey::string_literal(name.as_str()) == needle)
+            }
             // Same canonical JS numeric string the key-domain enumeration
             // publishes — the two key-membership surfaces must agree.
             SemanticNodeData::Literal(LiteralValue::Number(n)) => {
-                Some(super::build::js_number_to_string(*n) == needle)
+                Some(&PropertyKey::from_js_number(*n) == needle)
             }
             // Never admits nothing.
             SemanticNodeData::Primitive(PrimitiveKind::Never) => Some(false),
@@ -742,10 +830,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn base_member_admission_non_emitting(
         &self,
         base: SemanticNodeId,
-        needle: &str,
+        needle: &PropertyKey,
     ) -> Option<bool> {
         let data = self.graph().node_data(base)?;
         match data.as_ref() {
+            SemanticNodeData::ObjectSpreadProgram(_) => {
+                drop(data);
+                let formula = match self.project_object_spread_for_consumer(
+                    base,
+                    crate::semantic_query::ObjectProjectionSelector::Key(needle.clone()),
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                ) {
+                    crate::semantic_query::QueryResult::Value(formula) => formula,
+                    crate::semantic_query::QueryResult::Recursive(_)
+                    | crate::semantic_query::QueryResult::Error(_) => return None,
+                };
+                let mut present = true;
+                for alternative in formula.alternatives() {
+                    let closed = alternative.closed()?;
+                    // The formula was projected under `Key(needle)`, so
+                    // the lookup is inside the selector's declared set —
+                    // a `None` (ungated) verdict is unreachable, and any
+                    // absence-proof here is selector-local sound.
+                    match closed.lookup(needle) {
+                        Some(crate::semantic_query::ClosedKeyLookup::Present(fact))
+                            if matches!(
+                                fact.facets(),
+                                crate::semantic_query::ProjectionEvidence::Proven(facets)
+                                    if facets.visibility().is_public()
+                            ) => {}
+                        Some(crate::semantic_query::ClosedKeyLookup::Present(_))
+                        | Some(crate::semantic_query::ClosedKeyLookup::AbsentProven)
+                        | None => {
+                            present = false;
+                        }
+                    }
+                }
+                Some(present)
+            }
             // Public-keyspace admission: this predicate backs `keyof` / mapped /
             // indexed-access membership over `base`'s already-resolved surface.
             // A protected/private class member is NOT part of `keyof`, so it is
@@ -756,7 +880,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     Some(member.visibility.is_public())
                 }
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => Some(false),
-                crate::semantic_query::SurfaceKeyProjection::UnknownOnOpenSurface(_) => None,
             },
             // Consult the parse-fact `MemberPresence` substrate for
             // `DeclRef` / `InstantiationRef` bases.
@@ -1030,7 +1153,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         canonical: &str,
         observed_hash: HashValue,
         type_name: &str,
-        needle: &str,
+        needle: &PropertyKey,
     ) -> Option<bool> {
         // Empty identity (a synthesised carrier with no real
         // declaration) cannot resolve to a parse fact — fall through.
@@ -1048,7 +1171,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .get_artifacts_for_content(analysis_canonical.as_ref(), observed_hash)?;
         let presence_key = FactKey::MemberPresence {
             exporter: InternedName::from(type_name),
-            name: InternedName::from(needle),
+            name: needle.clone(),
             space: SymbolSpace::Type,
         };
         // Visibility-aware admission (inconclusive-and-

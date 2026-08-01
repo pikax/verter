@@ -318,7 +318,7 @@ fn ref_hash_object_member<H: Hasher>(member: &ObjectMember, h: &mut H) {
     match member {
         ObjectMember::Property(p) => {
             0isize.hash(h);
-            p.name.hash(h);
+            p.key.hash(h);
             ref_hash(&p.ty, h);
             p.optional.hash(h);
             p.readonly.hash(h);
@@ -365,9 +365,11 @@ fn ref_hash_object_member<H: Hasher>(member: &ObjectMember, h: &mut H) {
 }
 
 fn ref_hash_method<H: Hasher>(m: &MethodSignature, h: &mut H) {
-    m.name.hash(h);
+    m.key.hash(h);
     ref_hash_function(&m.function, h);
     m.optional.hash(h);
+    m.method_kind.hash(h);
+    m.has_implementation_body.hash(h);
     // Marker-only-for-non-public (see `ref_hash_object_member`).
     if !m.visibility.is_public() {
         m.visibility.hash(h);
@@ -549,7 +551,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
         "object-all-members",
         TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::with_spans_public(
+                ObjectMember::Property(ObjectProperty::with_key_spans_public(
                     "p".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     true,
@@ -560,7 +562,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
                         type_annotation: Some(span(4, 9)),
                     },
                 )),
-                ObjectMember::Property(ObjectProperty::synthetic_public(
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
                     "q".into(),
                     TypeExpr::named("Q"),
                     false,
@@ -579,7 +581,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
                 )),
                 ObjectMember::CallSignature(sample_function(false)),
                 ObjectMember::ConstructSignature(sample_function(true)),
-                ObjectMember::Method(MethodSignature::with_spans_public(
+                ObjectMember::Method(MethodSignature::with_key_spans_public(
                     "m".into(),
                     sample_function(false),
                     true,
@@ -598,7 +600,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
         "object-nonpublic-members",
         TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::with_visibility(
+                ObjectMember::Property(ObjectProperty::with_key_visibility(
                     "prot".into(),
                     TypeExpr::Primitive(PrimitiveName::Number),
                     false,
@@ -606,7 +608,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
                     MemberVisibility::Protected,
                     MemberSpans::default(),
                 )),
-                ObjectMember::Method(MethodSignature::with_visibility(
+                ObjectMember::Method(MethodSignature::with_key_visibility(
                     "priv".into(),
                     sample_function(false),
                     false,
@@ -1087,7 +1089,7 @@ fn pre_visibility_ref_object_member<H: Hasher>(member: &ObjectMember, h: &mut H)
     match member {
         ObjectMember::Property(p) => {
             0isize.hash(h);
-            p.name.hash(h);
+            p.key.hash(h);
             pre_visibility_ref_hash(&p.ty, h);
             p.optional.hash(h);
             p.readonly.hash(h);
@@ -1096,9 +1098,11 @@ fn pre_visibility_ref_object_member<H: Hasher>(member: &ObjectMember, h: &mut H)
         }
         ObjectMember::Method(m) => {
             4isize.hash(h);
-            m.name.hash(h);
+            m.key.hash(h);
             ref_hash_function(&m.function, h);
             m.optional.hash(h);
+            m.method_kind.hash(h);
+            m.has_implementation_body.hash(h);
             // NO visibility fold — the pre-B4.5 stream.
             m.spans.hash(h);
         }
@@ -1120,7 +1124,7 @@ fn pre_visibility_ref_object_member<H: Hasher>(member: &ObjectMember, h: &mut H)
 fn all_public_object_hash_stream_is_unchanged_from_pre_visibility() {
     let public_object = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::with_spans_public(
+            ObjectMember::Property(ObjectProperty::with_key_spans_public(
                 "p".into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 true,
@@ -1131,13 +1135,13 @@ fn all_public_object_hash_stream_is_unchanged_from_pre_visibility() {
                     type_annotation: Some(span(4, 9)),
                 },
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "q".into(),
                 TypeExpr::named("Q"),
                 false,
                 false,
             )),
-            ObjectMember::Method(MethodSignature::with_spans_public(
+            ObjectMember::Method(MethodSignature::with_key_spans_public(
                 "m".into(),
                 sample_function(false),
                 true,
@@ -1168,7 +1172,7 @@ fn all_public_object_hash_stream_is_unchanged_from_pre_visibility() {
 fn non_public_member_changes_hash_stream_from_pre_visibility() {
     let make = |vis: MemberVisibility| {
         TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
+            properties: vec![ObjectMember::Property(ObjectProperty::with_key_visibility(
                 "x".into(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,

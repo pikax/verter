@@ -43,7 +43,7 @@ fn object_of(members: Vec<ObjectMember>) -> TypeExpr {
 }
 
 fn prop_with(origin: ExcessPropertyOrigin) -> ObjectProperty {
-    ObjectProperty::synthetic_public("a".into(), string_ty(), false, false)
+    ObjectProperty::synthetic_public_key("a".into(), string_ty(), false, false)
         .with_excess_origin(origin)
 }
 
@@ -55,9 +55,9 @@ fn excess_origin_default_is_non_literal() {
     );
     // Every constructor is NonLiteral by construction (annotation / synthetic
     // origins have no literal syntax).
-    let p = ObjectProperty::synthetic_public("a".into(), string_ty(), false, false);
+    let p = ObjectProperty::synthetic_public_key("a".into(), string_ty(), false, false);
     assert_eq!(p.excess_origin, ExcessPropertyOrigin::NonLiteral);
-    let m = MethodSignature::synthetic_public(
+    let m = MethodSignature::synthetic_public_key(
         "m".into(),
         FunctionExpr::synthetic(Vec::new(), None, Vec::new()),
         false,
@@ -111,7 +111,7 @@ fn object_property_excess_origin_participates_in_identity() {
 #[test]
 fn method_signature_excess_origin_participates_in_identity() {
     let base = || {
-        MethodSignature::synthetic_public(
+        MethodSignature::synthetic_public_key(
             "m".into(),
             FunctionExpr::synthetic(Vec::new(), None, Vec::new()),
             false,
@@ -133,7 +133,7 @@ fn ordered_ir_preserves_direct_members_and_spreads_in_source_order() {
             type_arguments: Arc::from(Vec::new().into_boxed_slice()),
         })),
         ObjectMember::Property(
-            ObjectProperty::synthetic_public("b".into(), string_ty(), false, false)
+            ObjectProperty::synthetic_public_key("b".into(), string_ty(), false, false)
                 .with_excess_origin(ExcessPropertyOrigin::FreshOwn),
         ),
     ];
@@ -143,7 +143,7 @@ fn ordered_ir_preserves_direct_members_and_spreads_in_source_order() {
     };
     assert_eq!(obj.properties.len(), 3);
     assert!(
-        matches!(&obj.properties[0], ObjectMember::Property(p) if p.name == "a"),
+        matches!(&obj.properties[0], ObjectMember::Property(p) if p.key.as_known().and_then(|key| key.as_string().map(str::to_owned)).as_deref() == Some("a")),
         "entry 0 must be the direct member `a`"
     );
     assert!(
@@ -154,7 +154,7 @@ fn ordered_ir_preserves_direct_members_and_spreads_in_source_order() {
         "entry 1 must be the spread of `S` BETWEEN the direct members"
     );
     assert!(
-        matches!(&obj.properties[2], ObjectMember::Property(p) if p.name == "b"),
+        matches!(&obj.properties[2], ObjectMember::Property(p) if p.key.as_known().and_then(|key| key.as_string().map(str::to_owned)).as_deref() == Some("b")),
         "entry 2 must be the direct member `b` AFTER the spread"
     );
 
@@ -163,7 +163,7 @@ fn ordered_ir_preserves_direct_members_and_spreads_in_source_order() {
     let no_spread = object_of(vec![
         ObjectMember::Property(prop_with(ExcessPropertyOrigin::FreshOwn)),
         ObjectMember::Property(
-            ObjectProperty::synthetic_public("b".into(), string_ty(), false, false)
+            ObjectProperty::synthetic_public_key("b".into(), string_ty(), false, false)
                 .with_excess_origin(ExcessPropertyOrigin::FreshOwn),
         ),
     ]);
@@ -174,7 +174,7 @@ fn ordered_ir_preserves_direct_members_and_spreads_in_source_order() {
         })),
         ObjectMember::Property(prop_with(ExcessPropertyOrigin::FreshOwn)),
         ObjectMember::Property(
-            ObjectProperty::synthetic_public("b".into(), string_ty(), false, false)
+            ObjectProperty::synthetic_public_key("b".into(), string_ty(), false, false)
                 .with_excess_origin(ExcessPropertyOrigin::FreshOwn),
         ),
     ]);
@@ -185,7 +185,7 @@ fn ordered_ir_preserves_direct_members_and_spreads_in_source_order() {
             type_arguments: Arc::from(Vec::new().into_boxed_slice()),
         })),
         ObjectMember::Property(
-            ObjectProperty::synthetic_public("b".into(), string_ty(), false, false)
+            ObjectProperty::synthetic_public_key("b".into(), string_ty(), false, false)
                 .with_excess_origin(ExcessPropertyOrigin::FreshOwn),
         ),
     ]);
@@ -201,11 +201,11 @@ fn json_round_trips_excess_origin_and_spread_entries() {
         ObjectMember::Property(prop_with(ExcessPropertyOrigin::FreshOwn)),
         ObjectMember::Spread(SpreadMember::new(string_ty())),
         ObjectMember::Property(
-            ObjectProperty::synthetic_public("b".into(), string_ty(), false, false)
+            ObjectProperty::synthetic_public_key("b".into(), string_ty(), false, false)
                 .with_excess_origin(ExcessPropertyOrigin::SpreadTainted),
         ),
         // A NonLiteral member serializes WITHOUT the field (wire-stable).
-        ObjectMember::Property(ObjectProperty::synthetic_public(
+        ObjectMember::Property(ObjectProperty::synthetic_public_key(
             "c".into(),
             string_ty(),
             false,

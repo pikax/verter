@@ -123,10 +123,10 @@ use super::infer_binder_names::{
 };
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
-    DeclIdentity, FunctionParam, HotTypeRef, IndexKey, IndexSignature, MacroOwnBodyStamp,
-    MapperKey, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError, ReadonlyMod,
-    ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind, SurfaceMember, SyntheticBindingId,
-    TupleElement, TypeParamDecl, ValueRootKey,
+    AuthoredPropertyKey, DeclIdentity, FunctionParam, HotTypeRef, IndexKey, IndexSignature,
+    MacroOwnBodyStamp, MapperKey, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
+    QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind,
+    SurfaceMember, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -282,10 +282,10 @@ fn lower_node(
                 TypeExpr::Literal(LiteralValue::Number(n)) => {
                     match crate::semantic_query::index_key::integer_convention_index_key(*n) {
                         Some(i) => IndexKey::Number(i),
-                        None => IndexKey::TypeNode(lower_node(graph, index, scope, ctx)?),
+                        None => IndexKey::Computed(lower_node(graph, index, scope, ctx)?),
                     }
                 }
-                _ => IndexKey::TypeNode(lower_node(graph, index, scope, ctx)?),
+                _ => IndexKey::Computed(lower_node(graph, index, scope, ctx)?),
             };
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::IndexedAccess { object, index },
@@ -576,11 +576,12 @@ fn lower_node(
             for member in &obj.properties {
                 match member {
                     ObjectMember::Property(prop) => members.push(SurfaceMember {
-                        name: Arc::from(prop.name.as_str()),
+                        key: lower_authored_property_key(graph, &prop.key, scope, &value_ctx)?,
                         value: lower_node(graph, &prop.ty, scope, &value_ctx)?,
                         optional: prop.optional,
                         readonly: prop.readonly,
-                        is_method: false,
+                        method_kind: None,
+                        has_implementation_body: false,
                         visibility: prop.visibility,
                         excess_origin: prop.excess_origin,
                         spans: prop.spans,
@@ -597,11 +598,17 @@ fn lower_node(
                             &method.function,
                         );
                         members.push(SurfaceMember {
-                            name: Arc::from(method.name.as_str()),
+                            key: lower_authored_property_key(
+                                graph,
+                                &method.key,
+                                scope,
+                                &value_ctx,
+                            )?,
                             value: lower_node(graph, &function_expr, scope, &value_ctx)?,
                             optional: method.optional,
                             readonly: false,
-                            is_method: true,
+                            method_kind: Some(method.method_kind),
+                            has_implementation_body: method.has_implementation_body,
                             visibility: method.visibility,
                             excess_origin: method.excess_origin,
                             spans: method.spans,
@@ -656,7 +663,6 @@ fn lower_node(
                     index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                     keyspace: None,
                     has_index_signature,
-                    completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                 },
             );
             Ok(graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone()))
@@ -766,6 +772,26 @@ fn lower_node(
             ))
         }
     }
+}
+
+fn lower_authored_property_key(
+    graph: &SemanticGraphStore,
+    key: &verter_type_expr::TypeAuthoredPropertyKey,
+    scope: &NodeScopeId,
+    ctx: &StructuralLowerContext<'_>,
+) -> Result<AuthoredPropertyKey, StructuralLowerError> {
+    Ok(match key {
+        verter_type_expr::AuthoredPropertyKey::String(value) => {
+            AuthoredPropertyKey::String(Arc::clone(value))
+        }
+        verter_type_expr::AuthoredPropertyKey::Number(value) => AuthoredPropertyKey::Number(*value),
+        verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) => {
+            AuthoredPropertyKey::UniqueSymbol(identity.clone())
+        }
+        verter_type_expr::AuthoredPropertyKey::Computed(expression) => {
+            AuthoredPropertyKey::Computed(lower_node(graph, expression, scope, ctx)?)
+        }
+    })
 }
 /// The value-root [`ScopeId`] for a `typeof` carrier — the owner file scope
 /// with no inner local scope (mirroring the eager value-root construction).

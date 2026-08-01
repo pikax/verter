@@ -36,6 +36,10 @@ pub(crate) type RelationPublishedCarrier = PublishedMemoCandidate;
 pub(crate) struct InlineRelationFlight {
     prepared: PreparedKeyHandle,
     inflight: Arc<InflightEntry>,
+    /// Present only when an inline flight starts outside an existing
+    /// semantic execution stack. Production nested relations reuse the
+    /// active owner; direct callers hold this detached RAII lease.
+    _owner_registration: Option<wait_cycle::ExecutionOwnerRegistration>,
 }
 
 impl std::fmt::Debug for InlineRelationFlight {
@@ -67,13 +71,28 @@ impl SemanticGraphStore {
         );
         let prepared = PreparedKeyHandle::prepare(key.to_query_key());
         let inflight = Arc::new(InflightEntry::new());
-        inflight.state.lock().claimed = true;
+        let (owner, owner_registration) =
+            if let Some(owner) = wait_cycle::ExecutionOwnerScope::current(&self.wait_for_graph) {
+                (owner, None)
+            } else {
+                let registration = self.wait_for_graph.register_owner();
+                (registration.owner(), Some(registration))
+            };
+        {
+            let mut state = inflight.state.lock();
+            state.claimed = true;
+            state.owner = Some(owner);
+        }
         let mut table = self.inflight.lock();
         if table.contains_key(&prepared) {
             return None;
         }
         table.insert(prepared.clone(), Arc::clone(&inflight));
-        Some(InlineRelationFlight { prepared, inflight })
+        Some(InlineRelationFlight {
+            prepared,
+            inflight,
+            _owner_registration: owner_registration,
+        })
     }
 
     /// Release an inline flight that cannot publish a decided member. Waiting

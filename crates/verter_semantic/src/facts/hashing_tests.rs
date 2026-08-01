@@ -1,6 +1,6 @@
 use super::*;
 use verter_type_expr::{
-    ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, UnknownValue,
+    ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, PropertyKey, TypeExpr, UnknownValue,
 };
 
 fn prim(p: PrimitiveName) -> TypeExpr {
@@ -18,8 +18,8 @@ fn make_object(members: Vec<(&str, TypeExpr)>) -> TypeExpr {
     let properties: Vec<ObjectMember> = members
         .into_iter()
         .map(|(name, ty)| {
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                name.to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                name.into(),
                 ty,
                 false,
                 false,
@@ -202,15 +202,40 @@ fn member_presence_hash_independent_of_siblings() {
         readonly: false,
         optional: false,
     };
-    let h1 = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
-    let h2 = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
+    let h1 = compute_member_presence_hash(
+        "Foo",
+        &PropertyKey::identifier("a"),
+        kind,
+        SymbolSpace::Type,
+    );
+    let h2 = compute_member_presence_hash(
+        "Foo",
+        &PropertyKey::identifier("a"),
+        kind,
+        SymbolSpace::Type,
+    );
     assert_eq!(h1, h2, "presence hash MUST be deterministic");
-    let h3 = compute_member_presence_hash("Foo", "b", kind, SymbolSpace::Type);
+    let h3 = compute_member_presence_hash(
+        "Foo",
+        &PropertyKey::identifier("b"),
+        kind,
+        SymbolSpace::Type,
+    );
     assert_ne!(h1, h3, "different member name MUST hash distinctly");
     // Exporter salt distinguishes same-named members across
     // exporters in the same file.
-    let h_foo_a = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
-    let h_bar_a = compute_member_presence_hash("Bar", "a", kind, SymbolSpace::Type);
+    let h_foo_a = compute_member_presence_hash(
+        "Foo",
+        &PropertyKey::identifier("a"),
+        kind,
+        SymbolSpace::Type,
+    );
+    let h_bar_a = compute_member_presence_hash(
+        "Bar",
+        &PropertyKey::identifier("a"),
+        kind,
+        SymbolSpace::Type,
+    );
     assert_ne!(
         h_foo_a, h_bar_a,
         "exporter qualifier salt MUST disambiguate same-named members"
@@ -229,8 +254,18 @@ fn member_presence_hash_changes_under_modifier_flip() {
         readonly: false,
         optional: true,
     };
-    let h_r = compute_member_presence_hash("Foo", "a", required, SymbolSpace::Type);
-    let h_o = compute_member_presence_hash("Foo", "a", optional, SymbolSpace::Type);
+    let h_r = compute_member_presence_hash(
+        "Foo",
+        &PropertyKey::identifier("a"),
+        required,
+        SymbolSpace::Type,
+    );
+    let h_o = compute_member_presence_hash(
+        "Foo",
+        &PropertyKey::identifier("a"),
+        optional,
+        SymbolSpace::Type,
+    );
     assert_ne!(h_r, h_o);
 }
 
@@ -242,10 +277,14 @@ fn member_shape_hash_invariant_under_member_reorder() {
         readonly: false,
         optional: false,
     };
-    let members_ab: Vec<(Arc<str>, MemberKind)> =
-        vec![(Arc::from("a"), kind), (Arc::from("b"), kind)];
-    let members_ba: Vec<(Arc<str>, MemberKind)> =
-        vec![(Arc::from("b"), kind), (Arc::from("a"), kind)];
+    let members_ab = vec![
+        (PropertyKey::identifier("a"), kind),
+        (PropertyKey::identifier("b"), kind),
+    ];
+    let members_ba = vec![
+        (PropertyKey::identifier("b"), kind),
+        (PropertyKey::identifier("a"), kind),
+    ];
     let h_ab = compute_member_shape_hash("Foo", &members_ab, SymbolSpace::Type);
     let h_ba = compute_member_shape_hash("Foo", &members_ba, SymbolSpace::Type);
     assert_eq!(h_ab, h_ba, "member_shape MUST be order-insensitive");
@@ -259,14 +298,27 @@ fn member_shape_hash_changes_when_member_added() {
         readonly: false,
         optional: false,
     };
-    let just_a: Vec<(Arc<str>, MemberKind)> = vec![(Arc::from("a"), kind)];
-    let a_and_b: Vec<(Arc<str>, MemberKind)> = vec![(Arc::from("a"), kind), (Arc::from("b"), kind)];
+    let just_a = vec![(PropertyKey::identifier("a"), kind)];
+    let a_and_b = vec![
+        (PropertyKey::identifier("a"), kind),
+        (PropertyKey::identifier("b"), kind),
+    ];
     let h_a = compute_member_shape_hash("Foo", &just_a, SymbolSpace::Type);
     let h_ab = compute_member_shape_hash("Foo", &a_and_b, SymbolSpace::Type);
     assert_ne!(h_a, h_ab, "adding a member MUST change MemberShape");
     // And each MemberPresence is unchanged.
-    let p_a_before = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
-    let p_a_after = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
+    let p_a_before = compute_member_presence_hash(
+        "Foo",
+        &PropertyKey::identifier("a"),
+        kind,
+        SymbolSpace::Type,
+    );
+    let p_a_after = compute_member_presence_hash(
+        "Foo",
+        &PropertyKey::identifier("a"),
+        kind,
+        SymbolSpace::Type,
+    );
     assert_eq!(
         p_a_before, p_a_after,
         "MemberPresence(a) MUST be unchanged when sibling added"
@@ -326,8 +378,8 @@ fn synthetic_carrier_fact_hash_value_node_discriminates() {
 
 fn object_with_property_visibility(vis: verter_type_expr::MemberVisibility) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
-            "x".to_string(),
+        properties: vec![ObjectMember::Property(ObjectProperty::with_key_visibility(
+            "x".into(),
             prim(PrimitiveName::Number),
             false,
             false,
@@ -339,8 +391,8 @@ fn object_with_property_visibility(vis: verter_type_expr::MemberVisibility) -> T
 
 fn object_with_method_visibility(vis: verter_type_expr::MemberVisibility) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Method(MethodSignature::with_visibility(
-            "m".to_string(),
+        properties: vec![ObjectMember::Method(MethodSignature::with_key_visibility(
+            "m".into(),
             FunctionExpr::synthetic(vec![], None, vec![]),
             false,
             vis,
@@ -742,32 +794,32 @@ fn value_body_fingerprint_enum_folds_members_and_discriminates() {
     // member's stored literal, readonly + non-optional + public).
     let expected_obj = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "Red".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "Red".into(),
                 num(0.0),
                 false,
                 true,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "Green".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "Green".into(),
                 num(1.0),
                 false,
                 true,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "Half".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "Half".into(),
                 num(1.5),
                 false,
                 true,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "Hundred".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "Hundred".into(),
                 num(100.0),
                 false,
                 true,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "Name".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "Name".into(),
                 TypeExpr::string_literal("red"),
                 false,
                 true,
@@ -889,12 +941,14 @@ fn value_body_fingerprint_object_shape_fallback_matches_legacy_and_discriminates
     // (hand-built `Unknown` node through `compute_semantic_hash`), so a
     // divergence in the producer's kind/object-shape fallback bytes fails here.
     let shape = ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "x".to_string(),
-            prim(PrimitiveName::Number),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "x".into(),
+                prim(PrimitiveName::Number),
+                false,
+                false,
+            ),
+        )],
     };
     let input = ValueBodyFingerprintInput::new(None, &[], ValueDeclKind::Const, Some(&shape), None);
     let via_producer = value_body_fingerprint(&input, SymbolSpace::Value, &UnresolvedLens);
@@ -913,12 +967,14 @@ fn value_body_fingerprint_object_shape_fallback_matches_legacy_and_discriminates
 
     // Discrimination 1: an object-shape member edit moves the fingerprint.
     let edited_shape = ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "x".to_string(),
-            prim(PrimitiveName::String),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "x".into(),
+                prim(PrimitiveName::String),
+                false,
+                false,
+            ),
+        )],
     };
     let edited_input =
         ValueBodyFingerprintInput::new(None, &[], ValueDeclKind::Const, Some(&edited_shape), None);
@@ -960,14 +1016,14 @@ fn value_body_fingerprint_mixed_enum_folds_only_foldable_members_and_discriminat
 
     let expected_obj = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "Red".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "Red".into(),
                 num(0.0),
                 false,
                 true,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "Green".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "Green".into(),
                 num(1.0),
                 false,
                 true,
@@ -1046,12 +1102,9 @@ fn value_body_fingerprint_enum_members_take_precedence_over_annotation() {
     let via_producer = value_body_fingerprint(&input, SymbolSpace::Value, &UnresolvedLens);
 
     let expected_obj = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "Red".to_string(),
-            num(0.0),
-            false,
-            true,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key("Red".into(), num(0.0), false, true),
+        )],
     }));
     let legacy_folded = compute_semantic_hash(&expected_obj, SymbolSpace::Value, &UnresolvedLens);
     assert_eq!(

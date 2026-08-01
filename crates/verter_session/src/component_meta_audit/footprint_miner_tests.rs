@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::component_meta_audit::accumulator::{DerivationEdgeRaw, RequestFootprintAccumulator};
-use crate::semantic_query::OriginEdge;
+use crate::semantic_query::{NodeScopeId, OriginEdge};
 
 fn make_ctx(id: u64) -> Arc<RequestContext> {
     let acc = Arc::new(RequestFootprintAccumulator::new());
@@ -110,7 +110,7 @@ fn mine_footprint_identical_inputs_produce_byte_identical_outputs() {
             &[i + 100],
             CoreOriginEdgeKind::ProjectMember,
             OriginMeta::ProjectedMember {
-                name: Arc::from(format!("m{i}")),
+                key: crate::semantic_query::PropertyKey::identifier(format!("m{i}")),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
         ));
@@ -119,7 +119,7 @@ fn mine_footprint_identical_inputs_produce_byte_identical_outputs() {
             &[i + 100],
             CoreOriginEdgeKind::ProjectMember,
             OriginMeta::ProjectedMember {
-                name: Arc::from(format!("m{i}")),
+                key: crate::semantic_query::PropertyKey::identifier(format!("m{i}")),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
         ));
@@ -191,7 +191,7 @@ fn mine_footprint_path_segments_preserve_member_index_distinction() {
     let ctx = make_ctx(6);
     let mut state = AccumulatorState::default();
     let path = [
-        PathSegment::Member(Arc::from("a")),
+        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
         PathSegment::Index(IndexKey::String(Arc::from("b"))),
         PathSegment::Index(IndexKey::Number(
             crate::semantic_query::CanonicalIndexInt::from_canonical_i64(7).expect("canonical"),
@@ -206,7 +206,9 @@ fn mine_footprint_path_segments_preserve_member_index_distinction() {
     let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
     assert_eq!(fp.projections.len(), 1);
     let segs = &fp.projections[0].path;
-    assert!(matches!(&segs[0], ProjectPathSegment::Member { name } if name.as_ref() == "a"));
+    assert!(
+        matches!(&segs[0], ProjectPathSegment::Member { key: verter_audit::AuditPropertyKey::String { value } } if value.as_ref() == "a")
+    );
     assert!(matches!(&segs[1], ProjectPathSegment::Index { key } if key.as_ref() == "b"));
     assert!(matches!(&segs[2], ProjectPathSegment::Index { key } if key.as_ref() == "7"));
 }
@@ -365,21 +367,19 @@ fn structural_hash_discriminates_exact_infer_binder_identity() {
 }
 
 #[test]
-fn structural_hash_discriminates_open_operand_identity() {
-    use crate::semantic_query::{
-        MacroOwnBodyStamp, MemberSurfaceCompleteness, MergeRoleStamp, OpenSpreadOperands,
-        SurfaceMember,
-    };
+fn structural_hash_discriminates_spread_operand_identity() {
+    use crate::semantic_query::{MacroOwnBodyStamp, MergeRoleStamp, SurfaceMember};
 
     let graph = empty_graph();
     let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let operand = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
     let member = SurfaceMember {
-        name: Arc::from("a"),
+        key: crate::semantic_query::AuthoredPropertyKey::string("a"),
         value,
         optional: true,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         visibility: verter_type_expr::MemberVisibility::Public,
         spans: verter_type_expr::MemberSpans::default(),
         declaration_origin: None,
@@ -389,22 +389,30 @@ fn structural_hash_discriminates_open_operand_identity() {
     };
     let other_operand = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let data = |operand| {
-        SemanticNodeData::Object(crate::semantic_query::surface_view! {
-            members: Arc::from([member.clone()]),
-            call_signatures: Arc::from([]),
-            construct_signatures: Arc::from([]),
-            index_signatures: Arc::from([]),
-            keyspace: None,
-            has_index_signature: false,
-            completeness: MemberSurfaceCompleteness::OpenSpread(
-                OpenSpreadOperands::new(Arc::from([operand])),
-            ),
+        SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+            effects: Arc::from([
+                crate::semantic_query::ObjectConstructionEffect::DirectProperty(
+                    crate::semantic_query::AuthoredPropertyEffect {
+                        key: member.key.clone(),
+                        value: member.value,
+                        optional: member.optional,
+                        readonly: member.readonly,
+                        visibility: member.visibility,
+                        spans: member.spans,
+                        declaration_origin: None,
+                        declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: MergeRoleStamp::NEUTRAL,
+                        excess_origin: member.excess_origin,
+                    },
+                ),
+                crate::semantic_query::ObjectConstructionEffect::Spread(operand),
+            ]),
         })
     };
     assert_ne!(
         structural_hash_of(&graph, &data(operand)),
         structural_hash_of(&graph, &data(other_operand)),
-        "open operand identity is part of the footprint structural fingerprint"
+        "spread operand identity is part of the footprint structural fingerprint"
     );
 }
 

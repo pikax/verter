@@ -26,6 +26,69 @@ pub struct NodeId(
     pub u32,
 );
 
+/// Lossless audit-side property-key identity.
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "audit.generated.ts")]
+pub enum AuditPropertyKey {
+    /// Ordinary identifier or string-literal key.
+    String {
+        /// Property string value.
+        value: Arc<str>,
+    },
+    /// Canonical integer numeric key.
+    Number {
+        /// Canonical integer value.
+        #[ts(type = "number")]
+        value: i64,
+    },
+    /// Nominal unique-symbol key.
+    UniqueSymbol {
+        /// Full declaration identity of the unique symbol.
+        identity: AuditUniqueSymbolIdentity,
+    },
+}
+
+impl AuditPropertyKey {
+    /// Borrow the value when this is an ordinary string key.
+    #[must_use]
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Self::String { value } => Some(value),
+            Self::Number { .. } | Self::UniqueSymbol { .. } => None,
+        }
+    }
+}
+
+/// Audit-side mirror of a unique-symbol declaration identity.
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "audit.generated.ts")]
+pub struct AuditUniqueSymbolIdentity {
+    /// Canonical file declaring the value symbol.
+    pub canonical_id: Arc<str>,
+    /// Top-level owner kind.
+    pub owner_kind: AuditTopLevelOwnerKind,
+    /// Top-level owner ordinal.
+    pub owner_ordinal: u32,
+    /// Declared value symbol.
+    pub symbol: Arc<str>,
+    /// Nested member path below the value symbol.
+    pub member_path: Vec<Arc<str>>,
+}
+
+/// Audit-side top-level lexical owner kind.
+#[derive(
+    Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS,
+)]
+#[ts(export_to = "audit.generated.ts")]
+pub enum AuditTopLevelOwnerKind {
+    /// Module owner.
+    Module,
+    /// Component instance owner.
+    Instance,
+    /// Component frontmatter owner.
+    Frontmatter,
+}
+
 /// In-audit opaque edge id. Assigned by the miner from the sorted
 /// canonicalisation of edges so identical requests produce identical
 /// serialised footprints.
@@ -246,8 +309,8 @@ pub enum OriginEdgeMetaDto {
     },
     /// Single-segment member projection.
     ProjectMember {
-        /// Member name that was projected out.
-        member_name: Arc<str>,
+        /// Exact member key that was projected out.
+        member_key: AuditPropertyKey,
         /// Typed discriminator naming WHY this edge was emitted. See
         /// [`MemberEdgeProvenance`]. Always populated at the producer
         /// (no default); the audit-validator's Rule-5 check inspects
@@ -309,8 +372,8 @@ pub enum ConditionalBranch {
 pub enum ProjectPathSegment {
     /// `.<name>` member access.
     Member {
-        /// Member name.
-        name: Arc<str>,
+        /// Exact member key.
+        key: AuditPropertyKey,
     },
     /// `[<key>]` indexed access.
     Index {

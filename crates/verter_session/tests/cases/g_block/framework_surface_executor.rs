@@ -127,7 +127,7 @@ fn entries_by_kind(
 
 /// Resolve a payload entry's member NAMES (interned through the graph string
 /// table).
-fn member_names(
+fn member_keys(
     payload: &wire::FrameworkSurfacePayload,
     entry: &wire::FrameworkSurfaceKindEntry,
 ) -> Vec<String> {
@@ -266,7 +266,7 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
     let props_entry = by_kind
         .get(&(FrameworkSurfaceKind::Props as i32))
         .expect("props entry");
-    let mut wire_prop_names = member_names(payload, props_entry);
+    let mut wire_prop_names = member_keys(payload, props_entry);
     wire_prop_names.sort();
     assert_eq!(
         wire_prop_names, live_prop_names,
@@ -300,7 +300,7 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
     let emits_entry = by_kind
         .get(&(FrameworkSurfaceKind::Emits as i32))
         .expect("emits entry");
-    let mut wire_emit_names = member_names(payload, emits_entry);
+    let mut wire_emit_names = member_keys(payload, emits_entry);
     wire_emit_names.sort();
     assert_eq!(
         wire_emit_names, live_emit_names,
@@ -333,7 +333,7 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
     let slots_entry = by_kind
         .get(&(FrameworkSurfaceKind::Slots as i32))
         .expect("slots entry");
-    let mut wire_slot_names = member_names(payload, slots_entry);
+    let mut wire_slot_names = member_keys(payload, slots_entry);
     wire_slot_names.sort();
     assert_eq!(
         wire_slot_names, live_slot_names,
@@ -415,10 +415,10 @@ fn define_model_surface_carries_the_model_binding() {
     assert!(
         !model.members.is_empty(),
         "a defineModel component must surface a non-empty MODEL binding, got {:?}",
-        member_names(payload, model)
+        member_keys(payload, model)
     );
     // The default model binding is named `modelValue`.
-    let names = member_names(payload, model);
+    let names = member_keys(payload, model);
     assert!(
         names.contains(&"modelValue".to_string()),
         "the default defineModel binding is `modelValue`, got {names:?}"
@@ -444,7 +444,7 @@ fn define_model_only_component_surfaces_modelvalue_in_props() {
     let props = by_kind
         .get(&(FrameworkSurfaceKind::Props as i32))
         .expect("props entry present");
-    let names = member_names(payload, props);
+    let names = member_keys(payload, props);
     assert!(
         names.contains(&"modelValue".to_string()),
         "a defineModel-only component must surface `modelValue` in PROPS, got {names:?}"
@@ -476,7 +476,7 @@ fn multiple_define_model_calls_surface_every_binding() {
     let model = by_kind
         .get(&(FrameworkSurfaceKind::Model as i32))
         .expect("model entry present");
-    let names = member_names(payload, model);
+    let names = member_keys(payload, model);
     assert!(
         names.contains(&"title".to_string()) && names.contains(&"count".to_string()),
         "both defineModel bindings must surface in MODEL, got {names:?}"
@@ -485,7 +485,7 @@ fn multiple_define_model_calls_surface_every_binding() {
     let props = by_kind
         .get(&(FrameworkSurfaceKind::Props as i32))
         .expect("props entry present");
-    let prop_names = member_names(payload, props);
+    let prop_names = member_keys(payload, props);
     assert!(
         prop_names.contains(&"title".to_string()) && prop_names.contains(&"count".to_string()),
         "both model bindings must surface in PROPS, got {prop_names:?}"
@@ -533,7 +533,7 @@ fn define_options_present_resolves_supported_with_members() {
         "a present defineOptions<T> resolves SUPPORTED with its declared members, \
          not UNSUPPORTED-because-present"
     );
-    let names = member_names(payload, options);
+    let names = member_keys(payload, options);
     assert!(
         names.contains(&"name".to_string()) && names.contains(&"inheritAttrs".to_string()),
         "both defineOptions members must surface, got {names:?}"
@@ -593,7 +593,7 @@ fn define_expose_present_resolves_supported_with_members() {
         FrameworkSurfaceKindSupport::Supported as i32,
         "a present defineExpose<T> resolves SUPPORTED with its declared members"
     );
-    let names = member_names(payload, expose);
+    let names = member_keys(payload, expose);
     assert!(
         names.contains(&"focus".to_string()) && names.contains(&"count".to_string()),
         "both defineExpose members must surface, got {names:?}"

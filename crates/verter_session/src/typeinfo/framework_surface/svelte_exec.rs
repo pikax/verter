@@ -404,12 +404,15 @@ fn prop_origins_from_surface(
         if !member.visibility.is_public() {
             continue;
         }
+        let Some(prop_name) = member.string_name() else {
+            continue;
+        };
         let Some(origin) = member_declaration_origin(owner, member) else {
             continue;
         };
         origins.push(
             crate::typeinfo::framework_surface::results::PropOriginEntry {
-                prop_name: member.name.as_ref().to_string(),
+                prop_name: prop_name.to_string(),
                 origin,
             },
         );
@@ -433,7 +436,7 @@ fn member_declaration_origin(
 
     let canonical_file = member.origin.canonical_file.as_ref()?;
     let canonical_source = canonical_file.as_ref().to_string();
-    let member_name = member.name.as_ref().to_string();
+    let member_name = member.string_name()?.to_string();
     let span = member
         .origin
         .declaration_span
@@ -676,6 +679,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
         .iter()
         .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
+            let name = member.string_name()?.to_string();
             // The validated-snippet positional binding NODES, decided ENTIRELY in
             // the node domain through the shared `CallableNodeView` (which
             // carrier-preserving-peels the `Snippet<Params>` carrier and reads its
@@ -695,7 +699,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
             // normalizer makes NO decision on any materialized value.
             let bindings = materialize_snippet_slot_bindings(ctx, &member_scope, &params);
             Some(AnalyzedSlotField {
-                name: member.name.as_ref().to_string(),
+                name,
                 is_required: !member.optional,
                 span: verter_span::Span::default(),
                 bindings,
@@ -771,7 +775,10 @@ fn retain_members(surface: &TypeInfoSurface, keep: &[String]) -> TypeInfoSurface
     let members: Vec<_> = surface
         .members
         .iter()
-        .filter(|m| keep.iter().any(|k| k.as_str() == m.name.as_ref()))
+        .filter(|m| {
+            m.string_name()
+                .is_some_and(|name| keep.iter().any(|candidate| candidate == name))
+        })
         .cloned()
         .collect();
     TypeInfoSurface {
@@ -1084,7 +1091,10 @@ fn callback_events_from_props_surface(
     for member in surface.members.iter().filter(|m| m.visibility.is_public()) {
         // Structural `on${E}` callback convention: `on` prefix + a NON-EMPTY
         // suffix. The suffix is the event name (NO strip applied to the payload).
-        let Some(event_name) = member.name.as_ref().strip_prefix("on") else {
+        let Some(event_name) = member
+            .string_name()
+            .and_then(|name| name.strip_prefix("on"))
+        else {
             continue;
         };
         if event_name.is_empty() {
@@ -1237,8 +1247,7 @@ fn instance_export_display_node(
 ) -> SemanticNodeId {
     let resolved = follow_alias_chain(store, node);
     if let Some(SemanticNodeData::Object(surface)) = store.node_data(resolved).as_deref() {
-        if surface.closed().is_some()
-            && surface.positive_members().is_empty()
+        if surface.positive_members().is_empty()
             && surface.construct_signatures.is_empty()
             && surface.index_signatures.is_empty()
             && !surface.has_known_index_signature()

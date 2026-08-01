@@ -216,7 +216,8 @@ fn jsdoc_typedef_resolves_through_shared_resolver_identically_to_ts_type_alias()
     let jsdoc_a = &jsdoc_props["a"];
     let ts_a = &ts_props["a"];
     assert_eq!(
-        jsdoc_a.name, ts_a.name,
+        jsdoc_a.string_name().expect("string-key fixture"),
+        ts_a.string_name().expect("string-key fixture"),
         "JSDoc typedef + TS alias must share the member name"
     );
     assert_eq!(

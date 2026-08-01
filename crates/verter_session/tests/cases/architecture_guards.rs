@@ -8921,9 +8921,9 @@ mod foundations_guards {
     //
     // B4.5 makes silent-Public member construction IMPOSSIBLE in production:
     // the implicit-Public `ObjectProperty`/`MethodSignature` constructors were
-    // split into intent-explicit names (`synthetic_public` / `with_spans_public`
-    // for genuinely source-less public origins; `synthetic_with_visibility` /
-    // `with_visibility` for source-derived reconstruction that threads the
+    // split into intent-explicit names (`synthetic_public_key` / `with_key_spans_public`
+    // for genuinely source-less public origins; `synthetic_key_with_visibility` /
+    // `with_key_visibility` for source-derived reconstruction that threads the
     // member's declared accessibility). This guard pins that split: a bare
     // `ObjectProperty::synthetic(` / `MethodSignature::synthetic(` /
     // `ObjectProperty::with_spans(` / `MethodSignature::with_spans(` in any
@@ -8934,10 +8934,10 @@ mod foundations_guards {
 
     /// Predicate: returns `true` when `line` references one of the four banned
     /// implicit-Public member constructors. The explicit `_public` /
-    /// `_with_visibility` suffixed forms are allowed (the needle `synthetic(`
-    /// does not substring-match `synthetic_public(`, because the byte after
+    /// `_with_key_visibility` suffixed forms are allowed (the needle `synthetic(`
+    /// does not substring-match `synthetic_public_key(`, because the byte after
     /// `synthetic` is `_`, not `(`; likewise `with_spans(` vs
-    /// `with_spans_public(`). `with_visibility(` shares no banned needle.
+    /// `with_key_spans_public(`). `with_key_visibility(` shares no banned needle.
     pub fn line_has_banned_visibility_constructor(line: &str) -> bool {
         const BANNED: &[&str] = &[
             "ObjectProperty::synthetic(",
@@ -8995,11 +8995,11 @@ mod foundations_guards {
              which is the recurring non-public-member leak class. Use the\n\
              intent-explicit constructors instead:\n\
              - source-LESS public origin (interface / type-literal /\n\
-               object-literal / enum / framework member): `synthetic_public` /\n\
-               `with_spans_public`.\n\
+               object-literal / enum / framework member): `synthetic_public_key` /\n\
+               `with_key_spans_public`.\n\
              - source-DERIVED reconstruction (member already carries a\n\
                visibility — member-path / Pick / indexed-access):\n\
-               `synthetic_with_visibility` / `with_visibility`.\n\n\
+               `synthetic_key_with_visibility` / `with_key_visibility`.\n\n\
              Violations:\n  {}",
             violations
                 .iter()
@@ -9030,17 +9030,17 @@ mod foundations_guards {
         // ALLOWED — the explicit replacements, `IndexSignature` (no
         // accessibility concept), and prose that merely names the methods.
         let allowed = [
-            "ObjectProperty::synthetic_public(\"a\".into(), ty, false, false)",
-            "MethodSignature::synthetic_public(\"m\".into(), f, false)",
-            "ObjectProperty::with_spans_public(name, ty, false, false, spans)",
-            "MethodSignature::with_spans_public(n, f, false, spans)",
-            "ObjectProperty::synthetic_with_visibility(name, ty, false, false, vis)",
-            "MethodSignature::synthetic_with_visibility(n, f, false, vis)",
-            "ObjectProperty::with_visibility(name, ty, false, false, vis, spans)",
-            "MethodSignature::with_visibility(n, f, false, vis, spans)",
+            "ObjectProperty::synthetic_public_key(\"a\".into(), ty, false, false)",
+            "MethodSignature::synthetic_public_key(\"m\".into(), f, false)",
+            "ObjectProperty::with_key_spans_public(name, ty, false, false, spans)",
+            "MethodSignature::with_key_spans_public(n, f, false, spans)",
+            "ObjectProperty::synthetic_key_with_visibility(name, ty, false, false, vis)",
+            "MethodSignature::synthetic_key_with_visibility(n, f, false, vis)",
+            "ObjectProperty::with_key_visibility(name, ty, false, false, vis, spans)",
+            "MethodSignature::with_key_visibility(n, f, false, vis, spans)",
             "IndexSignature::synthetic(key, kty, vty, false)",
             "IndexSignature::with_spans(key, kty, vty, false, spans)",
-            "/// Source-DERIVED reconstructions MUST use `Self::with_visibility`.",
+            "/// Source-DERIVED reconstructions MUST use `Self::with_key_visibility`.",
         ];
         for line in allowed {
             assert!(
@@ -9055,8 +9055,8 @@ mod foundations_guards {
     // `ObjectProperty` / `MethodSignature` are `#[non_exhaustive]` and carry a
     // mandatory `visibility` field with no `Default`, so DOWNSTREAM crates
     // cannot construct them with a struct literal (they must route through the
-    // visibility-threading constructors `synthetic_public` /
-    // `synthetic_with_visibility` / `with_spans_public` / `with_visibility`).
+    // visibility-threading constructors `synthetic_public_key` /
+    // `synthetic_key_with_visibility` / `with_key_spans_public` / `with_key_visibility`).
     // `#[non_exhaustive]` does NOT apply WITHIN the defining crate, so a future
     // SAME-CRATE site in `verter_type_expr` could still write
     // `ObjectProperty { .. }` / `MethodSignature { .. }` directly and silently
@@ -9140,9 +9140,9 @@ mod foundations_guards {
              does not block same-crate struct literals, so this would let a\n\
              member be minted with an unconsidered `visibility` — the recurring\n\
              non-public-member leak class. Construct through the\n\
-             visibility-threading constructors instead (`synthetic_public` /\n\
-             `synthetic_with_visibility` / `with_spans_public` /\n\
-             `with_visibility`), whose bodies use `Self {{ .. }}`.\n\n\
+             visibility-threading constructors instead (`synthetic_public_key` /\n\
+             `synthetic_key_with_visibility` / `with_key_spans_public` /\n\
+             `with_key_visibility`), whose bodies use `Self {{ .. }}`.\n\n\
              Violations:\n  {}",
             violations
                 .iter()
@@ -9177,8 +9177,8 @@ mod foundations_guards {
             "impl ObjectProperty {",
             "impl MethodSignature {",
             "        Self {",
-            "        ObjectProperty::synthetic_public(name, ty, false, false)",
-            "        MethodSignature::with_visibility(n, f, false, vis, spans)",
+            "        ObjectProperty::synthetic_public_key(name, ty, false, false)",
+            "        MethodSignature::with_key_visibility(n, f, false, vis, spans)",
             "    pub visibility: MemberVisibility,",
             "/// Construct an `ObjectProperty` carrying its declared visibility.",
             "let names: Vec<ObjectProperty> = members.clone();",

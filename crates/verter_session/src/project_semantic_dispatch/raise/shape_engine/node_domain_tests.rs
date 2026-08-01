@@ -158,7 +158,6 @@ fn root_only_projection_root_kind_matches_full_fold() {
             index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         }
     };
 
@@ -328,7 +327,6 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
             index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         }
     };
 
@@ -643,7 +641,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             "indexed.index_typenode",
             graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: present,
-                index: IndexKey::TypeNode(dangling),
+                index: IndexKey::Computed(dangling),
             }),
         ),
         (
@@ -876,11 +874,12 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                 vec![SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: MemberVisibility::Public,
-                    name: StdArc::from("a"),
-                    value: dangling,
+            key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+            value: dangling,
                     optional: false,
                     readonly: false,
-                    is_method: false,
+                    method_kind: None,
+                    has_implementation_body: false,
                     declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                     merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
@@ -893,7 +892,6 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
     let full_obj = {

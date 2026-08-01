@@ -235,7 +235,7 @@ defineEmits<ImportedEmits>()
     assert!(
         object.properties.iter().any(|member| matches!(
             member,
-            verter_type_expr::ObjectMember::Property(property) if property.name == "id"
+            verter_type_expr::ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "id"
         )),
         "the object payload's members materialize; got {object:?}"
     );
@@ -267,7 +267,9 @@ defineEmits<{ save: [id: number] }>()
             macro_index: 7,
             payload: verter_type_expr::locators::MacroPayloadPosition::TypeArgument,
         }),
-        path: std::sync::Arc::from(vec!["save".to_string()].into_boxed_slice()),
+        path: std::sync::Arc::from(
+            vec![crate::semantic_query::PropertyKey::identifier("save")].into_boxed_slice(),
+        ),
     });
     assert_eq!(
         demand_source(&project, &source),
@@ -327,7 +329,12 @@ defineEmits<{ save: [id: number] }>()
             macro_index: 0,
             payload: verter_type_expr::locators::MacroPayloadPosition::TypeArgument,
         }),
-        path: std::sync::Arc::from(vec!["not_a_member".to_string()].into_boxed_slice()),
+        path: std::sync::Arc::from(
+            vec![crate::semantic_query::PropertyKey::identifier(
+                "not_a_member",
+            )]
+            .into_boxed_slice(),
+        ),
     });
     let mut tampered = analysis.clone();
     tampered.events[0].payload =

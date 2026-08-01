@@ -75,6 +75,7 @@ import {
   type GraphFunctionParamRecord,
   type GraphNodeRecord,
   type GraphObjectMemberRecord,
+  type GraphPropertyKeyRecord,
   type GraphTupleElementRecord,
   UNRESOLVED_BRANCH_CHILD_RESOLUTION_FAILED,
   UNRESOLVED_BRANCH_CYCLE,
@@ -89,6 +90,58 @@ import {
   UNRESOLVED_ROOT_TARGET_UNRESOLVED_IMPORT,
   UNRESOLVED_ROOT_TARGET_UNSUPPORTED_BUILTIN,
 } from "./type-graph-core.js";
+
+/// Decode one wire `ComponentPropertyKey` into the typed key record. A
+/// missing key (index / call / construct signature members carry none) maps
+/// to a computed placeholder with node id 0 — the record is only consulted
+/// for property/method members, which always carry a key.
+function decodePropertyKey(value: ProtoRecord | undefined): GraphPropertyKeyRecord {
+  const key = value?.key as ProtoRecord | undefined;
+  switch (key?.case) {
+    case "stringId":
+      return { kind: "string", nameId: Number(key.value ?? 0) };
+    case "canonicalNumber":
+      return { kind: "number", value: Number(key.value ?? 0) };
+    case "uniqueSymbol": {
+      const symbol = key.value as ProtoRecord;
+      return {
+        kind: "uniqueSymbol",
+        nameId: Number(symbol.symbol ?? 0),
+        canonicalNameId: Number(symbol.canonicalId ?? 0),
+        ownerKind: Number(symbol.ownerKind ?? 0),
+        ownerOrdinal: Number(symbol.ownerOrdinal ?? 0),
+        memberPathNameIds: ((symbol.memberPath as number[] | undefined) ?? []).map(Number),
+      };
+    }
+    case "computedNodeId":
+      return { kind: "computed", nodeId: Number(key.value ?? 0) };
+    default:
+      return { kind: "computed", nodeId: 0 };
+  }
+}
+
+/// Visit every reference a typed key carries through the graph facade:
+/// string-table ids for string keys and unique-symbol identities, a node
+/// reference for computed keys.
+function touchPropertyKeyStrings(graph: DecodedTypeGraph, key: GraphPropertyKeyRecord): void {
+  switch (key.kind) {
+    case "string":
+      graph.getString(key.nameId);
+      break;
+    case "number":
+      break;
+    case "uniqueSymbol":
+      graph.getString(key.nameId);
+      graph.getString(key.canonicalNameId);
+      key.memberPathNameIds.forEach((id) => graph.getString(id));
+      break;
+    case "computed":
+      if (key.nodeId) {
+        graph.getNode(key.nodeId);
+      }
+      break;
+  }
+}
 
 const EXPANSION_EXACTNESS_EXACT_CONCRETE = 1;
 const EXPANSION_EXACTNESS_EXACT_SYMBOLIC = 2;
@@ -263,7 +316,7 @@ function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {
         kind: NODE_OBJECT,
         members: ((value?.members as ProtoRecord[] | undefined) ?? []).map((member) => ({
           kind: Number(member.kind ?? 0),
-          nameId: Number(member.nameId ?? 0),
+          key: decodePropertyKey(member.propertyKey as ProtoRecord | undefined),
           typeNodeId: Number(member.typeNodeId ?? 0),
           optional: Boolean(member.optional),
           readonly: Boolean(member.readonly),
@@ -271,6 +324,8 @@ function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {
           keyTypeNodeId: Number(member.keyTypeNodeId ?? 0),
           valueTypeNodeId: Number(member.valueTypeNodeId ?? 0),
           functionNodeId: Number(member.functionNodeId ?? 0),
+          methodKind: Number(member.methodKind ?? 0),
+          hasImplementationBody: Boolean(member.hasImplementationBody),
         })) as GraphObjectMemberRecord[],
       };
     case "function":
@@ -395,9 +450,7 @@ function validateNodeTable(graph: DecodedTypeGraph): void {
         node.members.forEach((member) => {
           switch (member.kind) {
             case MEMBER_PROPERTY:
-              if (member.nameId) {
-                graph.getString(member.nameId);
-              }
+              touchPropertyKeyStrings(graph, member.key);
               graph.getNode(member.typeNodeId);
               break;
             case MEMBER_INDEX_SIGNATURE:
@@ -410,9 +463,7 @@ function validateNodeTable(graph: DecodedTypeGraph): void {
             case MEMBER_CALL_SIGNATURE:
             case MEMBER_CONSTRUCT_SIGNATURE:
             case MEMBER_METHOD:
-              if (member.nameId) {
-                graph.getString(member.nameId);
-              }
+              touchPropertyKeyStrings(graph, member.key);
               graph.getNode(member.functionNodeId);
               break;
             case MEMBER_SPREAD:

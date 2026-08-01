@@ -546,6 +546,7 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
         | None => false,
         Some(
             SemanticNodeData::Object(_)
+            | SemanticNodeData::ObjectSpreadProgram(_)
             | SemanticNodeData::Union(_)
             | SemanticNodeData::Intersection(_)
             | SemanticNodeData::Primitive(_)

@@ -61,6 +61,7 @@ pub(crate) fn slots_from_typeinfo_surface(
         // NOT leak as a published slot.
         .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
+            let member_name = member.string_name()?.to_string();
             // Merged-contributor fail-close: a slot member value that does
             // NOT demand-validate through the shared structural-fact
             // primitive (an unresolvable contributor — alone, or merged
@@ -132,7 +133,7 @@ pub(crate) fn slots_from_typeinfo_surface(
                 });
             let (description, tags) = member_jsdoc_from_spans(host, member);
             Some(AnalyzedSlotField {
-                name: member.name.as_ref().to_string(),
+                name: member_name,
                 is_required: !member.optional,
                 span: verter_span::Span::default(),
                 bindings,
@@ -240,7 +241,11 @@ fn binding_fields_from_param_node(
         .iter()
         // Public-only publication.
         .filter(|member| member.visibility.is_public())
-        .map(|member| slot_binding_field(ctx, member, pick_root))
+        .filter_map(|member| {
+            member
+                .string_name()
+                .map(|name| slot_binding_field(ctx, member, name, pick_root))
+        })
         .collect()
 }
 
@@ -349,6 +354,7 @@ fn pick_source_root_node(
 fn slot_binding_field(
     ctx: &dyn crate::resolver_core::ResolverContext,
     member: &TypeInfoSurfaceMember,
+    member_name: &str,
     pick_root: Option<SemanticNodeId>,
 ) -> AnalyzedSlotFieldBinding {
     let Some(root_node) = pick_root else {
@@ -364,7 +370,7 @@ fn slot_binding_field(
         // unraisable value fabricates no display text.
         let type_annotation = raised.as_ref().and_then(render_type_expr_display);
         return AnalyzedSlotFieldBinding {
-            name: member.name.as_ref().to_string(),
+            name: member_name.to_string(),
             type_annotation,
             payload: None,
             binding_expr_scope: None,
@@ -382,12 +388,12 @@ fn slot_binding_field(
     let symbolic = TypeExpr::IndexedAccess {
         object: Arc::new(named_root),
         index: Arc::new(TypeExpr::Literal(LiteralValue::String(
-            member.name.as_ref().to_string(),
+            member_name.to_string(),
         ))),
     };
     let type_annotation = render_type_expr_display(&symbolic);
     AnalyzedSlotFieldBinding {
-        name: member.name.as_ref().to_string(),
+        name: member_name.to_string(),
         type_annotation,
         payload: None,
         binding_expr_scope: None,
@@ -417,13 +423,14 @@ mod raise_miss_normalization_tests {
     /// (`materialize_output_type_expr` returns `None` for an absent node).
     fn raise_miss_member() -> TypeInfoSurfaceMember {
         TypeInfoSurfaceMember {
-            name: Arc::from("item"),
+            key: crate::semantic_query::AuthoredPropertyKey::string("item"),
             name_span: None,
             value: SemanticNodeId(u64::MAX),
             type_annotation_span: None,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             visibility: MemberVisibility::Public,
             declared_in_macro_type_arg: false,
             jsdoc_description_span: None,
@@ -448,7 +455,8 @@ mod raise_miss_normalization_tests {
         let host = make_host();
         let member = raise_miss_member();
 
-        let (binding, facts) = host.with_fact_tracer(|| slot_binding_field(&*host, &member, None));
+        let (binding, facts) =
+            host.with_fact_tracer(|| slot_binding_field(&*host, &member, "item", None));
 
         assert!(
             binding.type_annotation.is_none(),

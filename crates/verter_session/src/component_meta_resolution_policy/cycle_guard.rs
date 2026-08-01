@@ -21,7 +21,9 @@ use std::hash::{Hash, Hasher};
 use smallvec::SmallVec;
 use verter_type_expr::LiteralValue;
 
-use crate::semantic_query::{DeclIdentity, IndexKey, SemanticNodeData, SemanticNodeId};
+use crate::semantic_query::{
+    AuthoredPropertyKey, DeclIdentity, IndexKey, SemanticNodeData, SemanticNodeId,
+};
 
 use super::core::{DeclLookup, PolicyCtx};
 
@@ -328,10 +330,27 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write_u8(7);
             hasher.write_u64(surface.positive_members().len() as u64);
             for member in surface.positive_members().iter() {
-                hasher.write(member.name.as_bytes());
+                match &member.key {
+                    AuthoredPropertyKey::String(value) => {
+                        hasher.write_u8(0);
+                        hasher.write(value.as_bytes());
+                    }
+                    AuthoredPropertyKey::Number(value) => {
+                        hasher.write_u8(1);
+                        value.hash(hasher);
+                    }
+                    AuthoredPropertyKey::UniqueSymbol(identity) => {
+                        hasher.write_u8(2);
+                        identity.hash(hasher);
+                    }
+                    AuthoredPropertyKey::Computed(node) => {
+                        hasher.write_u8(3);
+                        hash_node_rec(ctx, *node, hasher, seen, depth + 1);
+                    }
+                }
                 hasher.write_u8(u8::from(member.optional));
                 hasher.write_u8(u8::from(member.readonly));
-                hasher.write_u8(u8::from(member.is_method));
+                member.method_kind.hash(hasher);
                 hash_node_rec(ctx, member.value, hasher, seen, depth + 1);
             }
             hasher.write_u64(surface.call_signatures.len() as u64);
@@ -347,15 +366,12 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 hash_node_rec(ctx, signature.key_type, hasher, seen, depth + 1);
                 hash_node_rec(ctx, signature.value_type, hasher, seen, depth + 1);
             }
-            match surface.open_spread_operands() {
-                None => hasher.write_u8(0),
-                Some(operands) => {
-                    hasher.write_u8(1);
-                    hasher.write_u64(operands.len() as u64);
-                    for operand in operands.as_slice() {
-                        hash_node_rec(ctx, *operand, hasher, seen, depth + 1);
-                    }
-                }
+        }
+        SemanticNodeData::ObjectSpreadProgram(program) => {
+            hasher.write_u8(30);
+            program.hash(hasher);
+            for child in program.child_nodes() {
+                hash_node_rec(ctx, child, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Union(arms) => {
@@ -423,8 +439,12 @@ fn hash_node_rec<H: std::hash::Hasher>(
                     hasher.write_u8(2);
                     number.hash(hasher);
                 }
-                IndexKey::TypeNode(index_node) => {
+                IndexKey::UniqueSymbol(identity) => {
                     hasher.write_u8(3);
+                    identity.hash(hasher);
+                }
+                IndexKey::Computed(index_node) => {
+                    hasher.write_u8(4);
                     hash_node_rec(ctx, *index_node, hasher, seen, depth + 1);
                 }
             }
@@ -708,10 +728,9 @@ mod tests {
     }
 
     #[test]
-    fn node_structural_hash_discriminates_open_operand_identity() {
+    fn node_structural_hash_discriminates_spread_operand_identity() {
         use crate::semantic_query::{
-            MacroOwnBodyStamp, MemberSurfaceCompleteness, MergeRoleStamp, OpenSpreadOperands,
-            SemanticNodeData, SurfaceMember,
+            MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SurfaceMember,
         };
 
         let host = VerterHost::new_standalone(HostConfig::default());
@@ -727,11 +746,12 @@ mod tests {
             display_name: Arc::from("T"),
         });
         let member = SurfaceMember {
-            name: Arc::from("a"),
+            key: crate::semantic_query::AuthoredPropertyKey::string("a"),
             value,
             optional: true,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             visibility: verter_type_expr::MemberVisibility::Public,
             spans: verter_type_expr::MemberSpans::default(),
             declaration_origin: None,
@@ -747,24 +767,32 @@ mod tests {
             display_name: Arc::from("U"),
         });
         let object = |operand| {
-            graph.intern_node(SemanticNodeData::Object(
-                crate::semantic_query::surface_view! {
-                    members: Arc::from([member.clone()]),
-                    call_signatures: Arc::from([]),
-                    construct_signatures: Arc::from([]),
-                    index_signatures: Arc::from([]),
-                    keyspace: None,
-                    has_index_signature: false,
-                    completeness: MemberSurfaceCompleteness::OpenSpread(
-                        OpenSpreadOperands::new(Arc::from([operand])),
-                    ),
+            graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
+                crate::semantic_query::ObjectSpreadProgram {
+                    effects: Arc::from([
+                        crate::semantic_query::ObjectConstructionEffect::DirectProperty(
+                            crate::semantic_query::AuthoredPropertyEffect {
+                                key: member.key.clone(),
+                                value: member.value,
+                                optional: member.optional,
+                                readonly: member.readonly,
+                                visibility: member.visibility,
+                                spans: member.spans,
+                                declaration_origin: None,
+                                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                                merge_role: MergeRoleStamp::NEUTRAL,
+                                excess_origin: member.excess_origin,
+                            },
+                        ),
+                        crate::semantic_query::ObjectConstructionEffect::Spread(operand),
+                    ]),
                 },
             ))
         };
         assert_ne!(
             digest(&host, object(operand)),
             digest(&host, object(other_operand)),
-            "open operand identity is part of the cycle-guard structural fingerprint"
+            "spread operand identity is part of the cycle-guard structural fingerprint"
         );
     }
 
@@ -790,11 +818,12 @@ mod tests {
         );
         let member = |name: &str| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            name: Arc::from(name),
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
             value: leaf,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             visibility: verter_type_expr::MemberVisibility::Public,
             spans: verter_type_expr::MemberSpans::default(),
             declaration_origin: None,
@@ -809,7 +838,6 @@ mod tests {
                 index_signatures: Arc::from([]),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             }),
             scope(),
         );

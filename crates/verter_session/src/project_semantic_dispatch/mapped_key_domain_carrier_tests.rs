@@ -122,7 +122,7 @@ fn shallow_member_names(
             let mut names: Vec<String> = view
                 .positive_members()
                 .iter()
-                .map(|m| m.name.as_ref().to_string())
+                .map(|m| m.string_name().expect("string-key fixture").to_string())
                 .collect();
             names.sort();
             names
@@ -826,11 +826,12 @@ fn object_one_member(
     let member = SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        name: Arc::from(name),
+        key: crate::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional: false,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
         merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
@@ -844,7 +845,6 @@ fn object_one_member(
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ))
 }
@@ -998,11 +998,12 @@ fn closed_builtin_source_still_enumerates_under_role_split() {
         let member = |name: &str, value: SemanticNodeId| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            name: Arc::from(name),
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
             value,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
@@ -1018,7 +1019,6 @@ fn closed_builtin_source_still_enumerates_under_role_split() {
                 index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             },
         ))
     };

@@ -66,7 +66,7 @@ pub(crate) struct RouteExtraction {
 /// - `Foo['a']['b']…` — chained `IndexedAccess` whose innermost
 ///   `object` is a bare `DeclRef` OR `InstantiationRef`, with every
 ///   `IndexKey` a `String` literal (rejects `IndexKey::Number` /
-///   `IndexKey::TypeNode`).
+///   `IndexKey::Computed`).
 ///
 /// Plain `DeclRef` and userland (non-builtin) `InstantiationRef`
 /// return `None` — they are NOT route shapes; they fall through to the
@@ -183,23 +183,33 @@ pub(crate) fn extract_pick_omit_route(
 /// (no file scope) since the keys are workspace-shared sentinels.
 pub(crate) fn build_keys_union_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
-    keys: &[String],
-) -> crate::semantic_query::SemanticNodeId {
+    keys: &[verter_type_expr::facts::FactPropertyKey],
+) -> Option<crate::semantic_query::SemanticNodeId> {
     use crate::semantic_query::SemanticNodeData;
     use verter_type_expr::LiteralValue;
+    use verter_type_expr::PropertyKey;
 
-    if keys.len() == 1 {
-        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
-            keys[0].clone(),
-        )))
+    let key_ids: Option<Vec<crate::semantic_query::SemanticNodeId>> = keys
+        .iter()
+        .map(|key| match key {
+            PropertyKey::String(value) => Some(graph.intern_node(SemanticNodeData::Literal(
+                LiteralValue::String(value.to_string()),
+            ))),
+            PropertyKey::Number(value) => Some(graph.intern_node(SemanticNodeData::Literal(
+                LiteralValue::Number(value.get() as f64),
+            ))),
+            // The semantic node vocabulary has no nominal unique-symbol leaf.
+            // Reject the conversion instead of fabricating a string literal.
+            PropertyKey::UniqueSymbol(_) => None,
+        })
+        .collect();
+    let key_ids = key_ids?;
+    if let [only] = key_ids.as_slice() {
+        Some(*only)
     } else {
-        let key_ids: Vec<crate::semantic_query::SemanticNodeId> = keys
-            .iter()
-            .map(|k| graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(k.clone()))))
-            .collect();
-        graph.intern_node(SemanticNodeData::Union(Arc::from(
+        Some(graph.intern_node(SemanticNodeData::Union(Arc::from(
             key_ids.into_boxed_slice(),
-        )))
+        ))))
     }
 }
 
@@ -231,7 +241,9 @@ pub(crate) fn extract_indexed_access_route(
                     // Numeric / type indices are not legal route
                     // hops (parity with TypeScript: `Foo[0]` and
                     // `Foo[K]` are not declared registry routes).
-                    IndexKey::Number(_) | IndexKey::TypeNode(_) => return None,
+                    IndexKey::Number(_) | IndexKey::UniqueSymbol(_) | IndexKey::Computed(_) => {
+                        return None;
+                    }
                 };
                 hops_reverse.push(hop);
                 current = *object;
@@ -726,9 +738,6 @@ pub(crate) fn body_contains_recursive_ref_to_name(
                 for &cons in surface.construct_signatures.iter() {
                     stack.push(cons);
                 }
-                if let Some(operands) = surface.open_spread_operands() {
-                    stack.extend(operands.as_slice().iter().copied());
-                }
             }
             SemanticNodeData::Array { element, .. } => stack.push(*element),
             SemanticNodeData::Tuple { elements, .. } => {
@@ -738,7 +747,7 @@ pub(crate) fn body_contains_recursive_ref_to_name(
             }
             SemanticNodeData::IndexedAccess { object, index } => {
                 stack.push(*object);
-                if let crate::semantic_query::IndexKey::TypeNode(idx_node) = index {
+                if let crate::semantic_query::IndexKey::Computed(idx_node) = index {
                     stack.push(*idx_node);
                 }
             }
@@ -917,9 +926,6 @@ pub(crate) fn collect_ref_identities_node(
                 for &cons in surface.construct_signatures.iter() {
                     stack.push(cons);
                 }
-                if let Some(operands) = surface.open_spread_operands() {
-                    stack.extend(operands.as_slice().iter().copied());
-                }
             }
             SemanticNodeData::Array { element, .. } => stack.push(*element),
             SemanticNodeData::Tuple { elements, .. } => {
@@ -929,7 +935,7 @@ pub(crate) fn collect_ref_identities_node(
             }
             SemanticNodeData::IndexedAccess { object, index } => {
                 stack.push(*object);
-                if let crate::semantic_query::IndexKey::TypeNode(idx_node) = index {
+                if let crate::semantic_query::IndexKey::Computed(idx_node) = index {
                     stack.push(*idx_node);
                 }
             }

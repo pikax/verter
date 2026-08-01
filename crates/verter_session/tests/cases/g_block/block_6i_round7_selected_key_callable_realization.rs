@@ -151,13 +151,13 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
     let badge = view
         .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == "badge")
+        .find(|m| m.string_name() == Some("badge"))
         .unwrap_or_else(|| {
             panic!(
                 "synthesised surface MUST contain `badge`. Got: {:?}",
                 view.positive_members()
                     .iter()
-                    .map(|m| m.name.as_ref())
+                    .filter_map(|m| m.string_name())
                     .collect::<Vec<_>>(),
             )
         });
@@ -187,7 +187,7 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
     let title = view
         .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == "title")
+        .find(|m| m.string_name() == Some("title"))
         .expect("synthesised surface must contain `title`");
     let title_value_data = graph
         .node_data(title.value)

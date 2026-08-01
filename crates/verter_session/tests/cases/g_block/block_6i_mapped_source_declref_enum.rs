@@ -119,7 +119,7 @@ fn shallow_walker_enumerates_declref_source_via_source_surface_helper() {
     let names: Vec<&str> = view
         .positive_members()
         .iter()
-        .map(|m| m.name.as_ref())
+        .filter_map(|m| m.string_name())
         .collect();
     assert!(
         names.contains(&"msg"),

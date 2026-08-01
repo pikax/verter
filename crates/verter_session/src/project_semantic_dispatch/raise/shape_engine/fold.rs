@@ -10,14 +10,17 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 use verter_span::Span;
-use verter_type_expr::{LiteralValue, PrimitiveName};
+use verter_type_expr::{LiteralValue, ObjectMethodKind, PrimitiveName};
 
 use super::super::ProjectSemanticDispatch;
 use super::conversions::{mapped_modifier_for_optionality, mapped_modifier_for_readonly};
 use super::semantic_primitive_to_primitive_name;
 use super::RaisedShapeAlgebra;
 use crate::project_semantic_dispatch::{node_data_for, walk};
-use crate::semantic_query::{IndexKey, QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
+use crate::semantic_query::{
+    IndexKey, ObjectConstructionEffect, ObjectProjectionSelector, ObjectSpreadProgram, QueryError,
+    QueryResult, SemanticNodeData, SemanticNodeId, SurfaceView,
+};
 
 /// A folded tuple element awaiting algebra construction.
 pub(super) struct FoldedTupleElement<O> {
@@ -149,12 +152,15 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             alg.tuple(folded, *readonly)
         }
         SemanticNodeData::Object(surface) => {
-            if surface.closed().is_some_and(|closed| closed.is_empty()) {
+            if surface.closed().is_empty() {
                 alg.empty_object()
             } else {
                 fold_surface_view(alg, dispatch, surface)
                     .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::UnrepresentableSurface))
             }
+        }
+        SemanticNodeData::ObjectSpreadProgram(program) => {
+            fold_object_spread_program(alg, dispatch, node, program)
         }
         SemanticNodeData::MergedDecl { contributors } => {
             let merged = walk::reduce_merged_decl_with_graph(dispatch.graph(), contributors);
@@ -366,7 +372,10 @@ fn fold_index_key<A: RaisedShapeAlgebra>(
     Some(match index {
         IndexKey::String(text) => alg.literal(LiteralValue::String(text.as_ref().to_string())),
         IndexKey::Number(number) => alg.literal(LiteralValue::Number(number.get() as f64)),
-        IndexKey::TypeNode(node) => fold_node(alg, dispatch, *node, active)?,
+        // The legacy raised algebra has no nominal unique-symbol leaf. Reject
+        // explicitly rather than lowering the identity to display text.
+        IndexKey::UniqueSymbol(_) => return None,
+        IndexKey::Computed(node) => fold_node(alg, dispatch, *node, active)?,
     })
 }
 
@@ -439,14 +448,23 @@ fn push_surface_member<A: RaisedShapeAlgebra>(
     member: &crate::semantic_query::SurfaceMember,
 ) {
     let mut active = FxHashSet::default();
+    let key = member.key.clone().map(
+        |computed| {
+            fold_node(alg, dispatch, computed, &mut active)
+                .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember))
+        },
+        |identity| identity,
+    );
     let ty = fold_node(alg, dispatch, member.value, &mut active)
         .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember));
-    if member.is_method {
+    if let Some(method_kind) = member.method_kind {
         if let Some(function) = alg.out_as_function(&ty) {
             members.push(alg.member_method(
-                member.name.as_ref().to_string(),
+                key,
                 function,
                 member.optional,
+                method_kind,
+                member.has_implementation_body,
                 member.visibility,
                 member.excess_origin,
                 member.spans,
@@ -455,7 +473,7 @@ fn push_surface_member<A: RaisedShapeAlgebra>(
         }
     }
     members.push(alg.member_property(
-        member.name.as_ref().to_string(),
+        key,
         ty,
         member.optional,
         member.readonly,
@@ -463,6 +481,187 @@ fn push_surface_member<A: RaisedShapeAlgebra>(
         member.excess_origin,
         member.spans,
     ));
+}
+
+fn fold_object_spread_program<A: RaisedShapeAlgebra>(
+    alg: &mut A,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    program: &ObjectSpreadProgram,
+) -> A::Out {
+    let projection = dispatch.project_object_spread_for_consumer(
+        node,
+        ObjectProjectionSelector::Surface,
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    );
+    match projection {
+        QueryResult::Value(formula) => {
+            if let Some(closed) = formula.closed() {
+                let mut alternatives = Vec::new();
+                for surface in closed.to_closed_surface_views() {
+                    let Some(surface) = surface else {
+                        return alg.opaque_sentinel(&QueryError::UnrepresentableSurface);
+                    };
+                    let branch = if surface.closed().is_empty() {
+                        alg.empty_object()
+                    } else {
+                        fold_surface_view(alg, dispatch, &surface).unwrap_or_else(|| {
+                            alg.opaque_sentinel(&QueryError::UnrepresentableSurface)
+                        })
+                    };
+                    alternatives.push(branch);
+                }
+                return match alternatives.len() {
+                    0 => alg.empty_object(),
+                    1 => alternatives.pop().expect("one closed alternative"),
+                    _ => alg.union(alternatives),
+                };
+            }
+            fold_open_object_spread_program(alg, dispatch, program)
+        }
+        QueryResult::Recursive(_) => alg.opaque_sentinel(&QueryError::RecursiveRef {
+            name: Arc::from("object-spread-projection"),
+        }),
+        QueryResult::Error(error) => alg.opaque_sentinel(&error),
+    }
+}
+
+fn fold_open_object_spread_program<A: RaisedShapeAlgebra>(
+    alg: &mut A,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    program: &ObjectSpreadProgram,
+) -> A::Out {
+    fn fold_child<A: RaisedShapeAlgebra>(
+        alg: &mut A,
+        dispatch: &ProjectSemanticDispatch<'_>,
+        node: SemanticNodeId,
+    ) -> A::Out {
+        let mut active = FxHashSet::default();
+        fold_node(alg, dispatch, node, &mut active)
+            .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember))
+    }
+
+    fn fold_key<A: RaisedShapeAlgebra>(
+        alg: &mut A,
+        dispatch: &ProjectSemanticDispatch<'_>,
+        key: &crate::semantic_query::AuthoredPropertyKey,
+    ) -> verter_type_expr::AuthoredPropertyKey<A::Out, verter_type_expr::facts::ValueDeclIdentityPart>
+    {
+        key.clone()
+            .map(|node| fold_child(alg, dispatch, node), |identity| identity)
+    }
+
+    let mut members = Vec::new();
+    let mut dropped = Vec::new();
+    for effect in program.effects.iter() {
+        match effect {
+            ObjectConstructionEffect::DirectProperty(effect) => {
+                let key = fold_key(alg, dispatch, &effect.key);
+                let value = fold_child(alg, dispatch, effect.value);
+                members.push(alg.member_property(
+                    key,
+                    value,
+                    effect.optional,
+                    effect.readonly,
+                    effect.visibility,
+                    effect.excess_origin,
+                    effect.spans,
+                ));
+            }
+            ObjectConstructionEffect::DirectMethod(effect) => {
+                let key = fold_key(alg, dispatch, &effect.key);
+                let signature = fold_child(alg, dispatch, effect.signature);
+                if let Some(function) = alg.out_as_function(&signature) {
+                    members.push(alg.member_method(
+                        key,
+                        function,
+                        effect.optional,
+                        ObjectMethodKind::Method,
+                        effect.has_implementation_body,
+                        effect.visibility,
+                        effect.excess_origin,
+                        effect.spans,
+                    ));
+                } else {
+                    dropped.push(signature);
+                }
+            }
+            ObjectConstructionEffect::DirectGet(effect) => {
+                let key = fold_key(alg, dispatch, &effect.key);
+                let signature = fold_child(alg, dispatch, effect.signature);
+                if let Some(function) = alg.out_as_function(&signature) {
+                    members.push(alg.member_method(
+                        key,
+                        function,
+                        effect.optional,
+                        ObjectMethodKind::Get,
+                        effect.has_implementation_body,
+                        effect.visibility,
+                        effect.excess_origin,
+                        effect.spans,
+                    ));
+                } else {
+                    dropped.push(signature);
+                }
+            }
+            ObjectConstructionEffect::DirectSet(effect) => {
+                let key = fold_key(alg, dispatch, &effect.key);
+                let signature = fold_child(alg, dispatch, effect.signature);
+                if let Some(function) = alg.out_as_function(&signature) {
+                    members.push(alg.member_method(
+                        key,
+                        function,
+                        effect.optional,
+                        ObjectMethodKind::Set,
+                        effect.has_implementation_body,
+                        effect.visibility,
+                        effect.excess_origin,
+                        effect.spans,
+                    ));
+                } else {
+                    dropped.push(signature);
+                }
+            }
+            ObjectConstructionEffect::DirectIndex(effect) => {
+                let key_type = fold_child(alg, dispatch, effect.key_type);
+                let value_type = fold_child(alg, dispatch, effect.value_type);
+                members.push(alg.member_index_signature(
+                    "key".to_string(),
+                    key_type,
+                    value_type,
+                    effect.readonly,
+                    effect.spans,
+                ));
+            }
+            ObjectConstructionEffect::DirectCall(node) => {
+                let signature = fold_child(alg, dispatch, *node);
+                if let Some(function) = alg.out_as_function(&signature) {
+                    members.push(alg.member_call_signature(function));
+                } else {
+                    dropped.push(signature);
+                }
+            }
+            ObjectConstructionEffect::DirectConstruct(node) => {
+                let signature = fold_child(alg, dispatch, *node);
+                if let Some(function) = alg
+                    .out_as_constructor(&signature)
+                    .or_else(|| alg.out_as_function(&signature))
+                {
+                    members.push(alg.member_construct_signature(function));
+                } else {
+                    dropped.push(signature);
+                }
+            }
+            ObjectConstructionEffect::Spread(node) => {
+                let value = fold_child(alg, dispatch, *node);
+                members.push(alg.member_spread(value));
+            }
+        }
+    }
+    let result = alg.object_from_members(members);
+    alg.absorb_dropped(result, dropped)
 }
 
 /// Reconstruct an Object from a [`SurfaceView`] — the non-empty `Object` arm.
@@ -491,8 +690,7 @@ fn fold_surface_view<A: RaisedShapeAlgebra>(
     // Single-call-signature fast path: a surface with no members, no construct
     // signatures, no index signature, and exactly one call signature IS that
     // call signature's value (not wrapped in an object).
-    if surface.closed().is_some()
-        && surface.positive_members().is_empty()
+    if surface.positive_members().is_empty()
         && surface.construct_signatures.is_empty()
         && !surface.has_known_index_signature()
         && surface.call_signatures.len() == 1
@@ -501,16 +699,6 @@ fn fold_surface_view<A: RaisedShapeAlgebra>(
     }
 
     let mut members: Vec<A::Member> = Vec::new();
-    // The operand-only marker retains encounter order, while the positive
-    // map is the authoritative final state. Emit operands first and the final
-    // positive evidence last: exact later writes retain their override, and
-    // members tainted by a later open operand remain conservative.
-    if let Some(operands) = surface.open_spread_operands() {
-        for operand in operands.as_slice() {
-            let ty = fold_member(alg, dispatch, *operand);
-            members.push(alg.member_spread(ty));
-        }
-    }
     for member in surface.positive_members().iter() {
         push_surface_member(alg, dispatch, &mut members, member);
     }

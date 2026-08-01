@@ -1,6 +1,6 @@
 import type { TypeDescriptor } from "@verter/type-ir";
 
-export const GRAPH_FORMAT_VERSION = 4;
+export const GRAPH_FORMAT_VERSION = 5;
 
 export const NODE_PRIMITIVE = 1;
 export const NODE_LITERAL = 2;
@@ -105,9 +105,44 @@ export interface GraphTupleElementRecord {
   rest: boolean;
 }
 
+/// Typed member-key identity decoded from the wire `property_key` oneof.
+/// String keys reference the graph string table; canonical numbers carry the
+/// exact integer; unique symbols keep their nominal declaration identity
+/// (never just a spelling); computed keys reference a graph node.
+export type GraphPropertyKeyRecord =
+  | { kind: "string"; nameId: number }
+  | { kind: "number"; value: number }
+  | {
+      kind: "uniqueSymbol";
+      nameId: number;
+      canonicalNameId: number;
+      ownerKind: number;
+      ownerOrdinal: number;
+      memberPathNameIds: number[];
+    }
+  | { kind: "computed"; nodeId: number };
+
+/// Resolve the display name of a typed member key through the graph string
+/// table. Computed keys have no static name.
+export function graphPropertyKeyName(
+  getString: (id: number) => string,
+  key: GraphPropertyKeyRecord,
+): string | null {
+  switch (key.kind) {
+    case "string":
+      return getString(key.nameId);
+    case "number":
+      return String(key.value);
+    case "uniqueSymbol":
+      return getString(key.nameId);
+    case "computed":
+      return null;
+  }
+}
+
 export interface GraphObjectMemberRecord {
   kind: number;
-  nameId: number;
+  key: GraphPropertyKeyRecord;
   typeNodeId: number;
   optional: boolean;
   readonly: boolean;
@@ -115,6 +150,8 @@ export interface GraphObjectMemberRecord {
   keyTypeNodeId: number;
   valueTypeNodeId: number;
   functionNodeId: number;
+  methodKind: number;
+  hasImplementationBody: boolean;
 }
 
 export interface GraphFunctionParamRecord {

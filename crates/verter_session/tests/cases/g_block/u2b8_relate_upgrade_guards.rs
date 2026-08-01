@@ -985,7 +985,7 @@ fn relate_maps_to_dedicated_relate_family_not_indexed_access() {
     );
     let indexed = SemanticQueryKey::IndexedAccess {
         base: s,
-        index: IndexKey::TypeNode(t),
+        index: IndexKey::Computed(t),
         mode: ProjectionMode::Shallow,
     };
 

@@ -36,7 +36,7 @@ pub struct MemberSemanticFactKey {
     pub parse_stable_hash: Hash16,
     pub parse_env_hash: Hash16,
     pub exporter: InternedName,
-    pub member_name: InternedName,
+    pub member_name: verter_type_expr::facts::FactPropertyKey,
     pub symbol_space: SymbolSpace,
 }
 
@@ -148,7 +148,7 @@ mod tests {
             parse_stable_hash: psh_arr,
             parse_env_hash: env_arr,
             exporter: InternedName::from(exporter),
-            member_name: InternedName::from(name),
+            member_name: verter_type_expr::facts::FactPropertyKey::identifier(name),
             symbol_space: SymbolSpace::Type,
         }
     }
@@ -251,7 +251,7 @@ mod tests {
                 space,
             } => {
                 assert_eq!(exporter.as_ref(), "Foo");
-                assert_eq!(name.as_ref(), "a");
+                assert_eq!(name.as_string(), Some("a"));
                 assert_eq!(space, SymbolSpace::Type);
             }
             other => panic!("expected Member, got {other:?}"),

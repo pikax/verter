@@ -140,9 +140,15 @@ fn path_a_c_full_bar_navigates_intermediates_and_expands_terminal() {
         base: a_node,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("c")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("c"),
+                )),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("full"),
+                )),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("bar"),
+                )),
             ]
             .into_boxed_slice(),
         ),

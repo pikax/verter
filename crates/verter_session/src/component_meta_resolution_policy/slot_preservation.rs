@@ -69,12 +69,9 @@ fn raw_indexed_access_root_is_imported(node: SemanticNodeId, ctx: &mut PolicyCtx
         return false;
     };
     let property_value = match ctx.node_data(body_hot.node()).as_deref() {
-        Some(SemanticNodeData::Object(surface)) => match surface.project_known_key(&member) {
+        Some(SemanticNodeData::Object(surface)) => match surface.project_string_key(&member) {
             crate::semantic_query::SurfaceKeyProjection::Exact(candidate) => Some(candidate.value),
             crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
-            // Preserving the indexed root is the conservative policy when an
-            // open operand may supply the selected property.
-            crate::semantic_query::SurfaceKeyProjection::UnknownOnOpenSurface(_) => return true,
         },
         _ => None,
     };
@@ -127,7 +124,7 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
             }
             SemanticNodeData::IndexedAccess { object, index } => {
                 worklist.push(*object);
-                if let IndexKey::TypeNode(index_node) = index {
+                if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);
                 }
             }
@@ -138,9 +135,6 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
                 for signature in surface.index_signatures.iter() {
                     worklist.push(signature.key_type);
                     worklist.push(signature.value_type);
-                }
-                if let Some(operands) = surface.open_spread_operands() {
-                    worklist.extend(operands.as_slice().iter().copied());
                 }
             }
             SemanticNodeData::Signature {

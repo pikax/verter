@@ -937,7 +937,7 @@ fn collect_surface_member_names(
     match store.node_data(node).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
             for m in view.positive_members().iter() {
-                out.push(m.name.to_string());
+                out.push(m.string_name().expect("string-key fixture").to_string());
             }
         }
         Some(SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms)) => {

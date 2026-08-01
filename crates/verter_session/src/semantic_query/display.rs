@@ -98,6 +98,9 @@ pub fn display(
         SemanticQueryValue::TypeNode(id) => {
             display_type_node(store, *id, needs, MAX_DISPLAY_DEPTH, &mut Vec::new())
         }
+        SemanticQueryValue::ObjectProjection(_) => unreachable!(
+            "display: ObjectProjection has no producer until witness-gated projection consumers land"
+        ),
         SemanticQueryValue::OverloadSet(sigs) => {
             let rendered: Vec<String> = sigs
                 .iter()
@@ -162,24 +165,30 @@ pub(crate) fn display_type_node(
         }
         SemanticNodeData::Object(surface) => {
             let mut parts: Vec<String> = Vec::new();
-            if let Some(operands) = surface.open_spread_operands() {
-                for operand in operands.as_slice() {
-                    parts.push(format!(
-                        "...{}",
-                        display_type_node(store, *operand, needs, child_depth, visited).0
-                    ));
-                }
-            }
             for member in surface.members.iter() {
                 let mut s = String::new();
                 if member.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
                     s.push_str("readonly ");
                 }
-                s.push_str(&member_name_token(&member.name));
+                s.push_str(&match &member.key {
+                    crate::semantic_query::AuthoredPropertyKey::String(name) => {
+                        member_name_token(name)
+                    }
+                    crate::semantic_query::AuthoredPropertyKey::Number(number) => {
+                        number.to_string()
+                    }
+                    crate::semantic_query::AuthoredPropertyKey::UniqueSymbol(identity) => {
+                        format!("[unique symbol {}]", identity.symbol)
+                    }
+                    crate::semantic_query::AuthoredPropertyKey::Computed(node) => format!(
+                        "[{}]",
+                        display_type_node(store, *node, needs, child_depth, visited).0
+                    ),
+                });
                 if member.optional {
                     s.push('?');
                 }
-                if member.is_method && resolves_to_function(store, member.value) {
+                if member.method_kind.is_some() && resolves_to_function(store, member.value) {
                     s.push_str(&render_signature_colon(
                         store,
                         member.value,
@@ -233,6 +242,63 @@ pub(crate) fn display_type_node(
             } else {
                 format!("{{ {} }}", parts.join("; "))
             }
+        }
+        SemanticNodeData::ObjectSpreadProgram(program) => {
+            use crate::semantic_query::{AuthoredPropertyKey, ObjectConstructionEffect};
+            let render_key =
+                |key: &AuthoredPropertyKey, visited: &mut Vec<SemanticNodeId>| match key {
+                    AuthoredPropertyKey::String(name) => member_name_token(name),
+                    AuthoredPropertyKey::Number(number) => number.to_string(),
+                    AuthoredPropertyKey::UniqueSymbol(identity) => {
+                        format!("[unique symbol {}]", identity.symbol)
+                    }
+                    AuthoredPropertyKey::Computed(node) => format!(
+                        "[{}]",
+                        display_type_node(store, *node, needs, child_depth, visited).0
+                    ),
+                };
+            let mut parts = Vec::with_capacity(program.effects.len());
+            for effect in program.effects.iter() {
+                let part = match effect {
+                    ObjectConstructionEffect::DirectProperty(effect) => format!(
+                        "{}{}: {}",
+                        render_key(&effect.key, visited),
+                        if effect.optional { "?" } else { "" },
+                        display_type_node(store, effect.value, needs, child_depth, visited).0
+                    ),
+                    ObjectConstructionEffect::DirectMethod(effect) => format!(
+                        "{}{}: {}",
+                        render_key(&effect.key, visited),
+                        if effect.optional { "?" } else { "" },
+                        display_type_node(store, effect.signature, needs, child_depth, visited).0
+                    ),
+                    ObjectConstructionEffect::DirectGet(effect) => format!(
+                        "get {}: {}",
+                        render_key(&effect.key, visited),
+                        display_type_node(store, effect.signature, needs, child_depth, visited).0
+                    ),
+                    ObjectConstructionEffect::DirectSet(effect) => format!(
+                        "set {}: {}",
+                        render_key(&effect.key, visited),
+                        display_type_node(store, effect.signature, needs, child_depth, visited).0
+                    ),
+                    ObjectConstructionEffect::DirectIndex(effect) => format!(
+                        "[key: {}]: {}",
+                        display_type_node(store, effect.key_type, needs, child_depth, visited).0,
+                        display_type_node(store, effect.value_type, needs, child_depth, visited).0
+                    ),
+                    ObjectConstructionEffect::DirectCall(node)
+                    | ObjectConstructionEffect::DirectConstruct(node) => {
+                        display_type_node(store, *node, needs, child_depth, visited).0
+                    }
+                    ObjectConstructionEffect::Spread(node) => format!(
+                        "...{}",
+                        display_type_node(store, *node, needs, child_depth, visited).0
+                    ),
+                };
+                parts.push(part);
+            }
+            format!("{{ {} }}", parts.join("; "))
         }
         SemanticNodeData::Union(arms) => {
             // A union arm only parenthesises a LOOSER binder (Conditional /
@@ -345,7 +411,10 @@ pub(crate) fn display_type_node(
             let key = match index {
                 IndexKey::String(s) => single_quoted(s),
                 IndexKey::Number(n) => n.to_string(),
-                IndexKey::TypeNode(node) => {
+                IndexKey::UniqueSymbol(identity) => {
+                    format!("unique symbol {}", identity.symbol)
+                }
+                IndexKey::Computed(node) => {
                     display_type_node(store, *node, needs, child_depth, visited).0
                 }
             };
@@ -597,9 +666,9 @@ fn render_merged_decl_member(
     visited: &mut Vec<SemanticNodeId>,
 ) -> String {
     let member = &merged.member;
-    let mut s = member_prefix(member, needs);
+    let mut s = member_prefix(store, member, needs, depth, visited);
     match merged.values.as_slice() {
-        [value] if member.is_method && resolves_to_function(store, *value) => {
+        [value] if member.method_kind.is_some() && resolves_to_function(store, *value) => {
             s.push_str(&render_signature_colon(
                 store, *value, "", needs, depth, visited,
             ));
@@ -626,12 +695,28 @@ fn render_merged_decl_member(
     s
 }
 
-fn member_prefix(member: &ShallowSurfaceMember, needs: DisplayNeeds) -> String {
+fn member_prefix(
+    store: &SemanticGraphStore,
+    member: &ShallowSurfaceMember,
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut Vec<SemanticNodeId>,
+) -> String {
     let mut s = String::new();
     if member.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
         s.push_str("readonly ");
     }
-    s.push_str(&member_name_token(&member.name));
+    s.push_str(&match &member.key {
+        crate::semantic_query::AuthoredPropertyKey::String(name) => member_name_token(name),
+        crate::semantic_query::AuthoredPropertyKey::Number(number) => number.to_string(),
+        crate::semantic_query::AuthoredPropertyKey::UniqueSymbol(identity) => {
+            format!("[unique symbol {}]", identity.symbol)
+        }
+        crate::semantic_query::AuthoredPropertyKey::Computed(node) => format!(
+            "[{}]",
+            display_type_node(store, *node, needs, depth.saturating_sub(1), visited).0
+        ),
+    });
     if member.optional {
         s.push('?');
     }
@@ -952,6 +1037,7 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         // which is atomic — see the `display_type_node` MergedDecl arm.
         SemanticNodeData::Alias(_)
         | SemanticNodeData::Object(_)
+        | SemanticNodeData::ObjectSpreadProgram(_)
         | SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
         | SemanticNodeData::Opaque(_)

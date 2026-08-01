@@ -497,6 +497,11 @@ fn same_path_recursion_returns_sentinel_not_deadlock() {
             );
             match inner.value {
                 QueryResult::Recursive(_) => {
+                    assert!(
+                        !inner.cache_suppress,
+                        "same-thread recursion keeps its established sentinel rail; \
+                         only a cross-thread wait cycle is forced ReturnOnly"
+                    );
                     let id =
                         store_ref.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
                     (QueryResult::Value(id), empty_signature())
@@ -506,6 +511,7 @@ fn same_path_recursion_returns_sentinel_not_deadlock() {
         },
     );
     assert!(matches!(result.value, QueryResult::Value(_)));
+    assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
 }
 
 #[test]
@@ -630,6 +636,11 @@ fn panic_in_cold_build_does_not_deadlock_future_callers() {
         "post-panic call must run a fresh cold build, not wait on the retired entry"
     );
     assert!(matches!(second.value, QueryResult::Value(_)));
+    assert_eq!(
+        store.wait_graph_counts_for_tests(),
+        (0, 0),
+        "panic cleanup must retire its execution owner and every wait edge"
+    );
 }
 
 /// `invalidate_canonical` sweeps every slot whose recorded
@@ -1319,8 +1330,8 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path: Arc<[PathSegment]> = Arc::from(
         vec![
-            PathSegment::Member(Arc::from("a")),
-            PathSegment::Member(Arc::from("foo")),
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo")),
         ]
         .into_boxed_slice(),
     );
@@ -1396,9 +1407,15 @@ fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
-    let proj_path = ProjectionPath::from_segments([PathSegment::Member(Arc::from("foo"))]);
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
+    let proj_path = ProjectionPath::from_segments([PathSegment::Member(
+        crate::semantic_query::PropertyKey::identifier("foo"),
+    )]);
 
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
@@ -1492,11 +1509,13 @@ fn cache_satisfaction_requires_path_exact_not_prefix() {
     };
 
     let deep = ProjectionPath::from_segments([
-        PathSegment::Member(Arc::from("c")),
-        PathSegment::Member(Arc::from("full")),
-        PathSegment::Member(Arc::from("bar")),
+        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("c")),
+        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
     ]);
-    let shallow_prefix = ProjectionPath::from_segments([PathSegment::Member(Arc::from("c"))]);
+    let shallow_prefix = ProjectionPath::from_segments([PathSegment::Member(
+        crate::semantic_query::PropertyKey::identifier("c"),
+    )]);
 
     let expanded_at = |path: ProjectionPath| {
         let mut d = Demand::from(ProjectionMode::Expanded);
@@ -1563,9 +1582,15 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
-    let proj_path = ProjectionPath::from_segments([PathSegment::Member(Arc::from("foo"))]);
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
+    let proj_path = ProjectionPath::from_segments([PathSegment::Member(
+        crate::semantic_query::PropertyKey::identifier("foo"),
+    )]);
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
         path,
@@ -1619,8 +1644,12 @@ fn cold_build_default_records_slot_mode_terminal_not_sub_slot() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
         path,
@@ -1674,8 +1703,12 @@ fn navigate_compute_does_not_serve_or_backfill_shallow_request() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
     let mk = |mode| SemanticQueryKey::ProjectPath {
         base,
         path: Arc::clone(&path),
@@ -1742,9 +1775,15 @@ fn backfill_writes_only_recorded_materialized_points() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
-    let proj_path = ProjectionPath::from_segments([PathSegment::Member(Arc::from("foo"))]);
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
+    let proj_path = ProjectionPath::from_segments([PathSegment::Member(
+        crate::semantic_query::PropertyKey::identifier("foo"),
+    )]);
 
     let mk = |mode| SemanticQueryKey::ProjectPath {
         base,
@@ -1813,8 +1852,12 @@ fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
 
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
@@ -1903,8 +1946,12 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
 
     // Expanded build reads both /w/wide.ts and /w/narrow.ts —
     // its dep-sig spans both canonicals.
@@ -2043,8 +2090,12 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
     use std::thread;
     let store = Arc::new(SemanticGraphStore::new());
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
 
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
@@ -2519,6 +2570,11 @@ fn inline_nonbinding_relation_flight_wakes_concurrent_top_level_joiner() {
         QueryResult::Value(SemanticQueryValue::Relation(payload))
             if payload.outcome == crate::semantic_query::RelationOutcome::NotAssignable
     ));
+    assert_eq!(
+        store.wait_graph_counts_for_tests(),
+        (0, 0),
+        "publishing the detached inline flight must retire its owner lease"
+    );
 }
 
 #[test]
@@ -3035,8 +3091,12 @@ fn invalidate_canonical_inflight_abort_loop_releases_table_lock_before_state() {
 
     let store = Arc::new(SemanticGraphStore::new());
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    );
 
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
@@ -4225,7 +4285,12 @@ fn cross_thread_joiner_waits_on_winner_publish() {
 // ──────────────────────────────────────────────────────────────────
 
 fn family_test_path() -> Arc<[PathSegment]> {
-    Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice())
+    Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        )]
+        .into_boxed_slice(),
+    )
 }
 
 fn family_test_key(base: SemanticNodeId, mode: ProjectionMode) -> SemanticQueryKey {
@@ -6156,8 +6221,8 @@ fn prefix_backfill_carries_traced_facts() {
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path: Arc<[PathSegment]> = Arc::from(
         vec![
-            PathSegment::Member(Arc::from("outer")),
-            PathSegment::Member(Arc::from("inner")),
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("outer")),
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("inner")),
         ]
         .into_boxed_slice(),
     );
@@ -6172,8 +6237,12 @@ fn prefix_backfill_carries_traced_facts() {
     // The PREFIX key the backfill will publish — `path[..1]` =
     // [Member("outer")]. This is the entry whose carrier we'll
     // inspect for the discriminating signal.
-    let prefix_path: Arc<[PathSegment]> =
-        Arc::from(vec![PathSegment::Member(Arc::from("outer"))].into_boxed_slice());
+    let prefix_path: Arc<[PathSegment]> = Arc::from(
+        vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("outer"),
+        )]
+        .into_boxed_slice(),
+    );
     let prefix_key = SemanticQueryKey::ProjectPath {
         base,
         path: prefix_path,
@@ -8509,10 +8578,11 @@ fn memo_admission_or_gate_refuses_benign_cache_suppress() {
 mod env_scoped_key_identity_guards {
     use super::super::family::{family_and_slot, FamilyKey};
     use crate::semantic_query::{
-        HashValue, InstantiateContext, MacroPayloadContext, MapperKey, MapperKind, MemberMergeRole,
-        OptionalityMod, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult,
-        ReadonlyMod, ResolvedDeclSlotIdentity, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-        SurfaceProvenanceContext,
+        ExactOptionalPropertyPolicy, HashValue, InstantiateContext, MacroPayloadContext, MapperKey,
+        MapperKind, MemberMergeRole, ObjectProjectionSelector, OptionalityMod, PrimitiveKind,
+        ProjectionMode, ProjectionReductionContext, QueryResult, ReadonlyMod,
+        ResolvedDeclSlotIdentity, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+        SubstitutionCanonicalHash, SurfaceProvenanceContext,
     };
     use std::sync::Arc;
     use verter_type_expr::TopLevelOwnerId;
@@ -9039,6 +9109,19 @@ mod env_scoped_key_identity_guards {
         };
         let value_slot = value_root_slot(&canonical, &symbol, 0, [0; 16], [0; 16]);
         let type_of = |context| typeof_key(value_slot.clone(), [0; 16], context);
+        let project_object_spread = |projection_reduction| SemanticQueryKey::ProjectObjectSpread {
+            program: base,
+            selector: ObjectProjectionSelector::Surface,
+            context: crate::semantic_query::object_spread_projection::test_support::context(
+                projection_reduction,
+                [0; 16],
+                [0; 16],
+                [0; 16],
+                [0; 16],
+                SubstitutionCanonicalHash::distinct_for_test(0),
+                ExactOptionalPropertyPolicy::Enabled,
+            ),
+        };
         let project_path = |context| SemanticQueryKey::ProjectPath {
             base,
             path: super::family_test_path(),
@@ -9050,6 +9133,10 @@ mod env_scoped_key_identity_guards {
             (keyof(retained), keyof(suppressed)),
             (mapped(retained), mapped(suppressed)),
             (type_of(retained), type_of(suppressed)),
+            (
+                project_object_spread(retained),
+                project_object_spread(suppressed),
+            ),
             (project_path(retained), project_path(suppressed)),
         ];
         for (unfiltered, filtered) in &pairs {
@@ -9825,12 +9912,13 @@ mod prepared_identity_bijection {
     use crate::project_semantic_dispatch::BodySourceWitness;
     use crate::semantic_query::{
         ApparentTypeContext, BroadRuntimeContext, ClassSurfaceContext, ClassSurfaceSide,
-        ContextualTypingKey, EnumContext, FlowNarrowingKey, FreshnessKey, HashValue, IndexKey,
-        InstantiateContext, InstantiateKey, MacroPayloadContext, MapperKey, MapperKind,
-        OptionalityMod, OverloadSetContext, PathSegment, ProgramAnalysisContext, ProgramPointId,
-        ProjectionMode, ProjectionReductionContext, ReadonlyMod, RelationContext, RelationKind,
-        RelationPolicy, ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId, SemanticNodeId,
-        SemanticQueryKey, SemanticQueryKeyTag, SemanticSymbolSpace, SubstitutionCanonicalHash,
+        ContextualTypingKey, EnumContext, ExactOptionalPropertyPolicy, FlowNarrowingKey,
+        FreshnessKey, HashValue, IndexKey, InstantiateContext, InstantiateKey, MacroPayloadContext,
+        MapperKey, MapperKind, ObjectProjectionSelector, OptionalityMod, OverloadSetContext,
+        PathSegment, ProgramAnalysisContext, ProgramPointId, ProjectionMode,
+        ProjectionReductionContext, ReadonlyMod, RelationContext, RelationKind, RelationPolicy,
+        ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId, SemanticNodeId, SemanticQueryKey,
+        SemanticQueryKeyTag, SemanticSymbolSpace, SubstitutionCanonicalHash,
         SurfaceProvenanceContext, TemplateLiteralReduceContext, TypeOfContext, ValueRootKey,
         ValueRootSlotIdentity,
     };
@@ -10055,15 +10143,45 @@ mod prepared_identity_bijection {
                     members: nodes(&[1, 3]),
                 },
             ),
+            SemanticQueryKeyTag::ProjectObjectSpread => {
+                let context =
+                    crate::semantic_query::object_spread_projection::test_support::context(
+                        ProjectionReductionContext::published(ProjectionMode::Shallow),
+                        h16(1),
+                        h16(2),
+                        h16(3),
+                        h16(4),
+                        SubstitutionCanonicalHash::distinct_for_test(1),
+                        ExactOptionalPropertyPolicy::Enabled,
+                    );
+                (
+                    SemanticQueryKey::ProjectObjectSpread {
+                        program: node(1),
+                        selector: ObjectProjectionSelector::Surface,
+                        context,
+                    },
+                    SemanticQueryKey::ProjectObjectSpread {
+                        program: node(1),
+                        selector: ObjectProjectionSelector::Key(
+                            crate::semantic_query::PropertyKey::identifier("x"),
+                        ),
+                        context,
+                    },
+                )
+            }
             SemanticQueryKeyTag::ProjectPath => (
                 SemanticQueryKey::ProjectPath {
                     base: node(1),
-                    path: Arc::from([PathSegment::Member(Arc::from("p"))]),
+                    path: Arc::from([PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier("p"),
+                    )]),
                     context: ProjectionReductionContext::published(ProjectionMode::Navigate),
                 },
                 SemanticQueryKey::ProjectPath {
                     base: node(1),
-                    path: Arc::from([PathSegment::Member(Arc::from("q"))]),
+                    path: Arc::from([PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier("q"),
+                    )]),
                     context: ProjectionReductionContext::published(ProjectionMode::Navigate),
                 },
             ),

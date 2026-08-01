@@ -577,7 +577,7 @@ pub(crate) fn decompose_indexed_access_chain_node(
                 }
                 // A type-node index is not a path-precise string/number hop —
                 // stop and let the dispatch resolve the whole indexed-access.
-                IndexKey::TypeNode(_) => break,
+                IndexKey::UniqueSymbol(_) | IndexKey::Computed(_) => break,
             },
             _ => break,
         }
@@ -687,7 +687,7 @@ pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
 ///   slot).
 pub(crate) fn arg_preserving_member_use_site_slot(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-    member_name: &str,
+    member_key: &crate::semantic_query::PropertyKey,
     declaration_origin: Option<&str>,
     value_node: crate::semantic_query::SemanticNodeId,
 ) -> Option<verter_type_expr::locators::TypeBodySlot> {
@@ -709,7 +709,7 @@ pub(crate) fn arg_preserving_member_use_site_slot(
         let declares_member = dispatch
             .ctx
             .prepared_type_decl_return_only(origin, declaring_owner, name)
-            .is_some_and(|prepared| prepared.member_index.contains_key(member_name));
+            .is_some_and(|prepared| prepared.member_index.contains_key(member_key));
         if !declares_member {
             continue;
         }
@@ -730,7 +730,7 @@ pub(crate) fn arg_preserving_member_use_site_slot(
     if !prepared.type_parameters.is_empty() {
         return None;
     }
-    let slot = prepared.member_index.get(member_name)?.ty.clone();
+    let slot = prepared.member_index.get(member_key)?.ty.clone();
 
     // Honesty verification: the candidate slot must raise to the SAME
     // resolved instantiation as the observed value — equal base identity,

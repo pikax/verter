@@ -447,6 +447,7 @@ pub(crate) fn admit_published_member<'a>(
     if !candidate.member.visibility.is_public() {
         return None;
     }
+    let member_name: Arc<str> = Arc::from(candidate.member.string_name()?);
     // (2) Derived-kind / cursor match: the descending cursor must address the
     // SAME published surface the candidate was enumerated from. The cursor
     // carries `surface: &PublishedSurfaceKind`; compare it against the
@@ -457,7 +458,8 @@ pub(crate) fn admit_published_member<'a>(
     }
     // (3) Descend into the published member. `None` ⇒ the member is out of the
     // demanded surface (a narrowed projection that does not admit this name).
-    let member_cursor = cursor.descend_published_member(candidate.member.name.as_ref())?;
+    let member_key = crate::semantic_query::PropertyKey::identifier(Arc::clone(&member_name));
+    let member_cursor = cursor.descend_published_member(&member_key)?;
     // (4) Record the published-field origin edge BEFORE the mint. This is the
     // semantic-provenance rail (`MemberEdgeProvenance::PublishedField`) the
     // Rule-5 compliance validator reads; recording it here covers every macro
@@ -466,7 +468,7 @@ pub(crate) fn admit_published_member<'a>(
         &candidate.owner,
         candidate.surface_node,
         candidate.member.value,
-        &candidate.member.name,
+        &member_name,
     );
     Some(AdmittedPublishedMember {
         owner: candidate.owner,
@@ -503,11 +505,12 @@ mod tests {
     fn member_with_visibility(visibility: MemberVisibility) -> SurfaceMember {
         SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            name: Arc::from("foo"),
+            key: crate::semantic_query::AuthoredPropertyKey::string("foo"),
             value: SemanticNodeId(0),
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             visibility,
             spans: Default::default(),
             declaration_origin: None,

@@ -689,7 +689,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // The one-level MERGED view through the shared empty-path Shallow
         // surface walker (arm roots only; member values stay shallow nodes).
         let (view, _surface_node) = compound_root_surface_view_via_dispatch(self.ctx, body_root)?;
-        let closed = view.closed()?;
+        let closed = view.closed();
         if !view.call_signatures.is_empty()
             || !view.construct_signatures.is_empty()
             || !view.index_signatures.is_empty()
@@ -717,19 +717,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let mut members: Vec<ProjectedMemberFact> =
             Vec::with_capacity(closed.complete_members().len());
         for member in closed.complete_members() {
+            let key = member.key.cloned_known()?;
             let fact = own_prepared
                 .as_ref()
-                .and_then(|prepared| prepared.member_index.get(member.name.as_ref()))
+                .and_then(|prepared| prepared.member_index.get(&key))
                 .or_else(|| {
                     heritage_prepared
                         .iter()
-                        .find_map(|prepared| prepared.member_index.get(member.name.as_ref()))
+                        .find_map(|prepared| prepared.member_index.get(&key))
                 })?;
             members.push(ProjectedMemberFact {
-                name: member.name.as_ref().to_string(),
+                key: verter_type_expr::facts::FactAuthoredPropertyKey::from_known(key),
                 optional: fact.optional,
                 readonly: fact.readonly,
-                is_method: fact.is_method,
+                method_kind: fact.method_kind,
+                has_implementation_body: fact.has_implementation_body,
                 visibility: fact.visibility,
                 declared_in_macro_type_arg: false,
                 declaration_origin: fact.declaration_origin.clone(),
@@ -770,7 +772,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
                 let query_path: std::sync::Arc<[PathSegment]> = std::sync::Arc::from(
                     path.iter()
-                        .map(|segment| PathSegment::Member(std::sync::Arc::from(segment.as_str())))
+                        .cloned()
+                        .map(PathSegment::Member)
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
                 );
@@ -839,7 +842,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_owner: verter_type_expr::TopLevelOwnerId,
         root_symbol: &str,
         builtin_name: &str,
-        keys: &[String],
+        keys: &[verter_type_expr::facts::FactPropertyKey],
     ) -> Option<AdmittedRouteProjectionNode> {
         // Step A: instantiate the route root to a projectable body. Navigate
         // keeps generic carriers intact (the builtin engine re-projects in the
@@ -847,7 +850,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let body_id =
             self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
         let dispatch = self.semantic_dispatch();
-        let keys_node = crate::meta_resolve::build_keys_union_node(dispatch.graph(), keys);
+        let keys_node = crate::meta_resolve::build_keys_union_node(dispatch.graph(), keys)?;
         // Step B: instantiate the shared builtin Pick/Omit carrier on
         // `[body, keys]` in the publication Navigate mode — the same path as
         // a userland `Pick<…>` / `Omit<…>`, so fix-#1's public gate applies

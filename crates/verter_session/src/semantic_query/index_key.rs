@@ -21,45 +21,7 @@
 //! needles with `to_string()` and when the walker's `Index(Number)`
 //! recovery raises the value back to an `f64` literal.
 
-use std::fmt;
-
-/// An `i64` index key admitted under the integer convention: its
-/// `Display` is the canonical JS spelling of the number it was folded
-/// from. Construction is gated by this module (private field); see the
-/// module docs for the two blessed constructors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CanonicalIndexInt(i64);
-
-impl CanonicalIndexInt {
-    /// `Display`-checked constructor for genuinely-integer producers
-    /// (fixture builders, tests). Admits `value` iff its base-10
-    /// digits ARE the canonical JS spelling of its numeric value —
-    /// the same admission condition as the f64 fold, entered from the
-    /// integer side: `value as f64` must round-trip to `value` AND
-    /// spell identically. Every `|value| <= 2^53` passes; the sparse
-    /// admissible band above passes exactly when sound.
-    pub fn from_canonical_i64(value: i64) -> Option<Self> {
-        integer_convention_index_key(value as f64).filter(|key| key.0 == value)
-    }
-
-    /// The admitted integer. Consumers needing the raw value
-    /// (tuple-position folds, `f64` recovery casts) read it here;
-    /// there is no way back into a `CanonicalIndexInt` without
-    /// re-entering a blessed constructor.
-    pub fn get(self) -> i64 {
-        self.0
-    }
-}
-
-/// Sound by construction: the admitted invariant is precisely that the
-/// inner `i64`'s base-10 digits ARE the canonical `js_number_to_string`
-/// spelling, so delegating to the integer `Display` renders the
-/// canonical member-name needle.
-impl fmt::Display for CanonicalIndexInt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+pub use verter_type_expr::CanonicalIndexInt;
 
 /// Producer bound for the [`crate::semantic_query::IndexKey::Number`]
 /// integer convention — the SINGLE admission predicate every
@@ -78,7 +40,7 @@ impl fmt::Display for CanonicalIndexInt {
 /// the f64 `4611686018427387904` (2^62) spells `"4611686018427388000"`,
 /// and `9223372036854775808` (2^63) both spells `"9223372036854776000"`
 /// AND saturates the f64→i64 cast to a DIFFERENT integer) stays
-/// `IndexKey::TypeNode`, where the walker's G4.5 recovery re-derives the
+/// `IndexKey::Computed`, where the walker's G4.5 recovery re-derives the
 /// canonical needle from the literal node. Every integral `|v| <= 2^53`
 /// passes (the f64 is the exact integer and its shortest round-trip is
 /// that integer), so the fast path keeps covering the entire safe
@@ -98,11 +60,7 @@ impl fmt::Display for CanonicalIndexInt {
 /// canonical name `"0"`, which is exactly the identity consumers rely
 /// on.
 pub(crate) fn integer_convention_index_key(number: f64) -> Option<CanonicalIndexInt> {
-    // Saturating cast: out-of-range and NaN candidates produce an i64
-    // whose Display cannot equal the literal's canonical spelling, so
-    // the equality check below rejects them without a range pre-filter.
-    let candidate = number as i64;
-    (js_number_to_string(number) == candidate.to_string()).then_some(CanonicalIndexInt(candidate))
+    CanonicalIndexInt::from_js_number(number)
 }
 
 /// JS `Number`→string for a finite-or-special `f64` literal — the canonical

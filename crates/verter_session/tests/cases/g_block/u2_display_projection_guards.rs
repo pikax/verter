@@ -44,9 +44,9 @@ use verter_session::semantic_query::demand::{
 };
 use verter_session::semantic_query::{
     DeclIdentity, DeclarationAnalysisValue, FunctionParam, IndexKey, LiteralValue, MapperKey,
-    MapperKind, MemberMergeRole, MemberSurfaceCompleteness, NodeScopeId, OptionalityMod,
-    PrimitiveKind, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryValue,
-    SurfaceMember, SurfaceView, TypeParamDecl, ValueRootKey,
+    MapperKind, MemberMergeRole, NodeScopeId, OptionalityMod, PrimitiveKind, ReadonlyMod, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryValue, SurfaceMember, SurfaceView,
+    TypeParamDecl, ValueRootKey,
 };
 
 /// A `Demand` that is `Expanded` on every semantic axis and carries `dn` as its
@@ -274,17 +274,17 @@ fn func_node(
     })
 }
 
-/// A public, non-method object member `name: value` (or `name(): …` when
-/// `is_method`).
+/// A public object member `name: value` (or `name(): …` when `is_method`).
 fn member(name: &str, value: SemanticNodeId, is_method: bool) -> SurfaceMember {
     SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        name: Arc::from(name),
+        key: verter_session::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional: false,
         readonly: false,
-        is_method,
+        method_kind: is_method.then_some(verter_type_expr::ObjectMethodKind::Method),
+        has_implementation_body: false,
         declared_in_macro_type_arg: verter_session::semantic_query::MacroOwnBodyStamp::NEUTRAL,
         merge_role: verter_session::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
@@ -321,7 +321,6 @@ fn object(
         Arc::from(Vec::new().into_boxed_slice()),
         None,
         false,
-        MemberSurfaceCompleteness::Closed,
     )))
 }
 
@@ -750,7 +749,7 @@ fn bigint_literal_renders_with_n_suffix() {
 // ----------------------------------------------------------------------
 
 #[test]
-fn non_identifier_member_names_are_quoted() {
+fn non_identifier_member_keys_are_quoted() {
     let store = SemanticGraphStore::new();
     let t = declref(&store, "T");
 

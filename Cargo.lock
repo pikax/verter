@@ -3921,6 +3921,7 @@ dependencies = [
  "syn 2.0.117",
  "tempfile",
  "verter_audit",
+ "verter_ecma",
  "verter_language",
  "verter_macro_dto",
  "verter_parser",
@@ -3964,6 +3965,10 @@ dependencies = [
  "verter_type_runtime",
  "verter_workspace",
 ]
+
+[[package]]
+name = "verter_ecma"
+version = "0.0.1-beta.2"
 
 [[package]]
 name = "verter_ffi"
@@ -4416,6 +4421,7 @@ dependencies = [
  "serde",
  "serde_json",
  "static_assertions",
+ "verter_ecma",
  "verter_no_storedspan",
  "verter_no_typeexpr",
  "verter_span",
@@ -4430,6 +4436,7 @@ dependencies = [
  "oxc_parser",
  "oxc_span",
  "serde",
+ "verter_ecma",
  "verter_span",
  "verter_type_expr",
 ]

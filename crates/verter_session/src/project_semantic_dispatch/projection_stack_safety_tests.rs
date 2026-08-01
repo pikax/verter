@@ -349,11 +349,12 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
         readonly: false,
     });
     let member = |value| crate::semantic_query::SurfaceMember {
-        name: Arc::from("a"),
+        key: crate::semantic_query::AuthoredPropertyKey::string("a"),
         value,
         optional: false,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         visibility: verter_type_expr::MemberVisibility::Public,
         spans: Default::default(),
         declaration_origin: None,
@@ -361,19 +362,29 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
         merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
     };
-    let root = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::SurfaceView::new(
-            Arc::from([member(number)]),
-            Arc::from([]),
-            Arc::from([]),
-            Arc::from([]),
-            None,
-            false,
-            crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(
-                crate::semantic_query::OpenSpreadOperands::new(Arc::from([array])),
-            ),
-        ),
+    let root = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
+        crate::semantic_query::ObjectSpreadProgram {
+            effects: Arc::from([
+                crate::semantic_query::ObjectConstructionEffect::DirectProperty(
+                    crate::semantic_query::AuthoredPropertyEffect {
+                        key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+                        value: number,
+                        optional: false,
+                        readonly: false,
+                        visibility: verter_type_expr::MemberVisibility::Public,
+                        spans: Default::default(),
+                        declaration_origin: None,
+                        declared_in_macro_type_arg:
+                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
+                    },
+                ),
+                crate::semantic_query::ObjectConstructionEffect::Spread(array),
+            ]),
+        },
     ));
+    let _ = member;
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
     let env = rustc_hash::FxHashMap::default();
     let names = rustc_hash::FxHashMap::default();
@@ -386,10 +397,13 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
     let outcome =
         dispatch.project_view_node_worklist(root, context, &inputs, &mut substitutions, &mut memo);
     assert_eq!(outcome.completeness, ResultCompleteness::Complete);
-    assert!(matches!(
-        graph.node_data(outcome.node).as_deref(),
-        Some(SemanticNodeData::Object(view)) if view.is_open_spread()
-    ));
+    assert!(
+        matches!(
+            graph.node_data(outcome.node).as_deref(),
+            Some(SemanticNodeData::ObjectSpreadProgram(_))
+        ),
+        "the program carrier survives the locator projection"
+    );
 }
 
 #[test]
@@ -776,7 +790,9 @@ fn legitimate_recursive_type_uses_recursive_carrier_without_limit_diagnostic() {
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(property) if property.name == "children" => {
+            verter_type_expr::ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "children" =>
+            {
                 Some(&property.ty)
             }
             _ => None,

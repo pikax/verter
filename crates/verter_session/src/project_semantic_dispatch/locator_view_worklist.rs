@@ -229,7 +229,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let segments: Arc<[PathSegment]> = Arc::from(
                         path[consumed_rest..]
                             .iter()
-                            .map(|segment| PathSegment::Member(Arc::clone(segment)))
+                            .map(|segment| {
+                                PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+                                    Arc::clone(segment),
+                                ))
+                            })
                             .collect::<Vec<_>>()
                             .into_boxed_slice(),
                     );
@@ -1203,42 +1207,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::TemplateLiteral { expressions, .. } => expressions
                 .get(index)
                 .map(|expression| (*expression, context)),
-            SemanticNodeData::Object(view) => {
-                let mut remaining = index;
-                if let Some(member) = view.positive_members().get(remaining) {
-                    return Some((member.value, context.into_structural_provenance()));
-                }
-                remaining = remaining.saturating_sub(view.positive_members().len());
-                if let Some(signature) = view.call_signatures.get(remaining) {
-                    return Some((*signature, context));
-                }
-                remaining = remaining.saturating_sub(view.call_signatures.len());
-                if let Some(signature) = view.construct_signatures.get(remaining) {
-                    return Some((*signature, context));
-                }
-                remaining = remaining.saturating_sub(view.construct_signatures.len());
-                let index_signature = remaining / 2;
-                if let Some(signature) = view.index_signatures.get(index_signature) {
-                    return Some(if remaining.is_multiple_of(2) {
-                        (signature.key_type, context)
-                    } else {
-                        (signature.value_type, context)
-                    });
-                }
-                remaining = remaining.saturating_sub(view.index_signatures.len() * 2);
-                if let Some(keyspace) = view.keyspace {
-                    if remaining == 0 {
-                        return Some((keyspace, context));
-                    }
-                    remaining -= 1;
-                }
-                view.open_spread_operands().and_then(|operands| {
-                    operands
-                        .as_slice()
-                        .get(remaining)
-                        .map(|operand| (*operand, context.into_structural_provenance()))
-                })
-            }
+            SemanticNodeData::Object(view) => object_projection_child(view, context, index),
+            SemanticNodeData::ObjectSpreadProgram(program) => program
+                .child_nodes()
+                .nth(index)
+                .map(|child| (child, context)),
             SemanticNodeData::Signature {
                 params,
                 return_type,
@@ -1285,7 +1258,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 match (index, index_key) {
                     (0, _) => Some((*object, object_context)),
-                    (1, IndexKey::TypeNode(index)) => Some((*index, context)),
+                    (1, IndexKey::Computed(index)) => Some((*index, context)),
                     _ => None,
                 }
             }
@@ -1358,40 +1331,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 children.get(index).map(|child| (*child, *context))
             }
             ProjectionChildPlan::Object { view, context } => {
-                let mut remaining = index;
-                if let Some(member) = view.positive_members().get(remaining) {
-                    return Some((member.value, context.into_structural_provenance()));
-                }
-                remaining = remaining.saturating_sub(view.positive_members().len());
-                if let Some(signature) = view.call_signatures.get(remaining) {
-                    return Some((*signature, *context));
-                }
-                remaining = remaining.saturating_sub(view.call_signatures.len());
-                if let Some(signature) = view.construct_signatures.get(remaining) {
-                    return Some((*signature, *context));
-                }
-                remaining = remaining.saturating_sub(view.construct_signatures.len());
-                let index_signature = remaining / 2;
-                if let Some(signature) = view.index_signatures.get(index_signature) {
-                    return Some(if remaining.is_multiple_of(2) {
-                        (signature.key_type, *context)
-                    } else {
-                        (signature.value_type, *context)
-                    });
-                }
-                remaining = remaining.saturating_sub(view.index_signatures.len() * 2);
-                if let Some(keyspace) = view.keyspace {
-                    if remaining == 0 {
-                        return Some((keyspace, *context));
-                    }
-                    remaining -= 1;
-                }
-                view.open_spread_operands().and_then(|operands| {
-                    operands
-                        .as_slice()
-                        .get(remaining)
-                        .map(|operand| (*operand, context.into_structural_provenance()))
-                })
+                object_projection_child(view, *context, index)
             }
             ProjectionChildPlan::Function {
                 params,
@@ -1453,6 +1393,52 @@ fn projected(
     *memo
         .get(&(node, context))
         .unwrap_or_else(|| panic!("projection child {node:?} was not completed before its parent"))
+}
+
+#[inline(always)]
+fn object_projection_child(
+    view: &SurfaceView,
+    context: ProjectionReductionContext,
+    index: usize,
+) -> Option<(SemanticNodeId, ProjectionReductionContext)> {
+    let member_context = context.into_structural_provenance();
+    let mut remaining = index;
+    for member in view.positive_members() {
+        if let verter_type_expr::AuthoredPropertyKey::Computed(key) = &member.key {
+            if remaining == 0 {
+                return Some((*key, member_context));
+            }
+            remaining -= 1;
+        }
+        if remaining == 0 {
+            return Some((member.value, member_context));
+        }
+        remaining -= 1;
+    }
+    if let Some(signature) = view.call_signatures.get(remaining) {
+        return Some((*signature, context));
+    }
+    remaining = remaining.saturating_sub(view.call_signatures.len());
+    if let Some(signature) = view.construct_signatures.get(remaining) {
+        return Some((*signature, context));
+    }
+    remaining = remaining.saturating_sub(view.construct_signatures.len());
+    let index_signature = remaining / 2;
+    if let Some(signature) = view.index_signatures.get(index_signature) {
+        return Some(if remaining.is_multiple_of(2) {
+            (signature.key_type, context)
+        } else {
+            (signature.value_type, context)
+        });
+    }
+    remaining = remaining.saturating_sub(view.index_signatures.len() * 2);
+    if let Some(keyspace) = view.keyspace {
+        if remaining == 0 {
+            return Some((keyspace, context));
+        }
+    }
+    let _ = remaining;
+    None
 }
 
 #[cfg(test)]

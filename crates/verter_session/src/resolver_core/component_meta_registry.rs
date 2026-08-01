@@ -113,7 +113,10 @@ pub(crate) struct PendingComponentMetaRegistryRef {
     /// navigation + substitution (never a serialized post-substitution graph
     /// node). Unsubstituted members keep their declaring contributor's
     /// prepared member slot instead.
-    pub(crate) member_use_sites: Vec<(String, verter_type_expr::locators::TypeBodySlot)>,
+    pub(crate) member_use_sites: Vec<(
+        verter_type_expr::facts::FactPropertyKey,
+        verter_type_expr::locators::TypeBodySlot,
+    )>,
 }
 
 /// Attach a single-member route USE-SITE slot to every pending queue entry
@@ -124,7 +127,7 @@ pub(crate) fn attach_component_meta_registry_member_use_site(
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
     producer_scope: &RegistryProducerScope,
     name: &str,
-    member: &str,
+    member: &verter_type_expr::facts::FactPropertyKey,
     slot: &verter_type_expr::locators::TypeBodySlot,
 ) {
     for pending in referenced_names
@@ -138,7 +141,7 @@ pub(crate) fn attach_component_meta_registry_member_use_site(
         {
             pending
                 .member_use_sites
-                .push((member.to_string(), slot.clone()));
+                .push((member.clone(), slot.clone()));
         }
     }
 }
@@ -256,7 +259,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
                 ) => {
                     let mut members = current.members.to_vec();
                     for member in candidate.members.iter() {
-                        if !members.iter().any(|existing| existing.name == member.name) {
+                        if !members.iter().any(|existing| existing.key == member.key) {
                             members.push(member.clone());
                         }
                     }
@@ -934,7 +937,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                     output,
                     producer_scope,
                     root_name.as_str(),
-                    member.as_str(),
+                    &member,
                     &slot,
                 );
             }
@@ -979,7 +982,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 output,
                 producer_scope,
                 local_name.as_str(),
-                member.as_str(),
+                &member,
                 &slot,
             );
         }
@@ -1624,7 +1627,10 @@ fn collect_registry_refs_node_inner(
         // cursor gates as the `TypeExpr` sibling.
         SemanticNodeData::Object(surface) => {
             for member in surface.positive_members().iter() {
-                if !cursor.admits_key(member.name.as_ref()) {
+                let Some(key) = member.key.cloned_known() else {
+                    continue;
+                };
+                if !cursor.admits_key(&key) {
                     continue;
                 }
                 collect_registry_member_surface_refs_node(
@@ -1677,20 +1683,6 @@ fn collect_registry_refs_node_inner(
                         visited,
                     );
                 }
-                if let Some(operands) = surface.open_spread_operands() {
-                    for operand in operands.as_slice() {
-                        collect_registry_member_surface_refs_node(
-                            ctx,
-                            *operand,
-                            published_names,
-                            queued_names,
-                            output,
-                            producer_scope,
-                            member_ref_policy,
-                            visited,
-                        );
-                    }
-                }
             }
         }
         SemanticNodeData::Signature {
@@ -1733,7 +1725,7 @@ fn collect_registry_refs_node_inner(
                 cursor,
                 visited,
             );
-            if let IndexKey::TypeNode(index_node) = index {
+            if let IndexKey::Computed(index_node) = index {
                 collect_registry_refs_node_inner(
                     ctx,
                     *index_node,
@@ -1863,7 +1855,7 @@ fn collect_registry_member_surface_refs_node(
                 RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                 visited,
             );
-            if let IndexKey::TypeNode(index_node) = index {
+            if let IndexKey::Computed(index_node) = index {
                 recurse(
                     ctx,
                     *index_node,
@@ -2023,18 +2015,6 @@ fn collect_registry_member_surface_refs_node(
                     visited,
                 );
             }
-            if let Some(operands) = surface.open_spread_operands() {
-                for operand in operands.as_slice() {
-                    recurse(
-                        ctx,
-                        *operand,
-                        queued_names,
-                        output,
-                        member_ref_policy,
-                        visited,
-                    );
-                }
-            }
         }
         _ => {}
     }
@@ -2084,9 +2064,6 @@ pub(crate) fn collect_node_ref_names(
                     worklist.push(signature.key_type);
                     worklist.push(signature.value_type);
                 }
-                if let Some(operands) = surface.open_spread_operands() {
-                    worklist.extend(operands.as_slice().iter().copied());
-                }
             }
             SemanticNodeData::Signature {
                 params,
@@ -2098,7 +2075,7 @@ pub(crate) fn collect_node_ref_names(
             }
             SemanticNodeData::IndexedAccess { object, index } => {
                 worklist.push(*object);
-                if let IndexKey::TypeNode(index_node) = index {
+                if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);
                 }
             }

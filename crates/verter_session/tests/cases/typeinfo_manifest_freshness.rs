@@ -286,7 +286,7 @@ fn manifest_block_counts_reflect_lifts() {
          lifting block as U2.CLASS_SURFACES",
     );
 
-    // Total ignored (status: Ignored) rows after 46 lifts. (355 table rows:
+    // Total ignored (status: Ignored) rows after 46 lifts. (351 table rows:
     // the 6 guard-backed footprint-attach / cache-invalidation edit-cycle
     // rows left the partition when their `#[ignore]`s were removed — a
     // guard-backed row lands as an always-running test rather than an
@@ -295,7 +295,7 @@ fn manifest_block_counts_reflect_lifts() {
     // parity-enforced `relation_optional_to_required` oracle row.)
     assert_eq!(
         count("status: IgnoreStatus::Ignored"),
-        309,
-        "exactly 309 IgnoredTestRows must remain `Ignored` (355 total − 46 lifted)",
+        305,
+        "exactly 305 IgnoredTestRows must remain `Ignored` (351 total − 46 lifted)",
     );
 }

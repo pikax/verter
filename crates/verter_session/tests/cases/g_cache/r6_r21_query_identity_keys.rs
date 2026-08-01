@@ -953,7 +953,7 @@ fn materialization_cache_key_is_content_free_and_env_discriminating() {
 // SemanticNodeId ban would be UNSOUND (it would catch legitimate
 // intra-graph operands like `SemanticQueryKey::Instantiate.args`,
 // `ProjectMember.base`, `ProjectPath.base`, `ResolveOverloadSet.callee`,
-// or `IndexKey::TypeNode`), so the scope is the shape/materialize keys
+// or `IndexKey::Computed`), so the scope is the shape/materialize keys
 // ONLY.
 
 /// Content/version field markers forbidden in a shape/materialize
@@ -1710,7 +1710,7 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
 /// SCOPE: shape/materialize keys ONLY. A blanket `SemanticNodeId` ban
 /// would be unsound — it would flag the legitimate intra-graph operands
 /// (`SemanticQueryKey::Instantiate.args` / `ProjectMember.base` /
-/// `ProjectPath.base` / `ResolveOverloadSet.callee` / `IndexKey::TypeNode`),
+/// `ProjectPath.base` / `ResolveOverloadSet.callee` / `IndexKey::Computed`),
 /// which are NOT shape/materialize keys and stay allowed.
 /// The sanctioned `ShapeSubject` variant inventory. The scanner extracts
 /// the `MemberValueNode` / `SyntheticBinding` arms by name, so a NEW arm

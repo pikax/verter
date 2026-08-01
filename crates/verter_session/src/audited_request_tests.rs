@@ -214,7 +214,12 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         ));
         let path_key = SemanticQueryKey::ProjectPath {
             base: primitive_base,
-            path: Arc::from(vec![PathSegment::Member(Arc::from("nonexistent"))].into_boxed_slice()),
+            path: Arc::from(
+                vec![PathSegment::Member(
+                    crate::semantic_query::PropertyKey::identifier("nonexistent"),
+                )]
+                .into_boxed_slice(),
+            ),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Identity,
             ),

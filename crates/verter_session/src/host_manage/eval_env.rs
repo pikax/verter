@@ -1436,7 +1436,9 @@ impl VerterHost {
                                                         .map(|seg| match seg {
                                                             MacroPathSegment::Member(name) => {
                                                                 SemanticPathSegment::Member(
-                                                                    std::sync::Arc::clone(name),
+                                                                    verter_type_expr::PropertyKey::String(
+                                                                        std::sync::Arc::clone(name),
+                                                                    ),
                                                                 )
                                                             }
                                                         })

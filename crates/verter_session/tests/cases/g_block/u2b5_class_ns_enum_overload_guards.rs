@@ -676,14 +676,14 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
             assert!(
                 view.positive_members()
                     .iter()
-                    .any(|m| m.name.as_ref() == "y"),
+                    .any(|m| m.string_name() == Some("y")),
                 "static surface must carry the own static member `y`"
             );
             assert!(
                 !view
                     .positive_members()
                     .iter()
-                    .any(|m| m.name.as_ref() == "x"),
+                    .any(|m| m.string_name() == Some("x")),
                 "instance member `x` must NOT leak onto the static surface"
             );
         }

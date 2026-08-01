@@ -203,7 +203,10 @@ struct RaisedRecursiveFrame {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RaisedObjectMember {
     Property {
-        name: Arc<str>,
+        key: verter_type_expr::AuthoredPropertyKey<
+            RaisedShapeKey,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         ty: RaisedShapeKey,
         optional: bool,
         readonly: bool,
@@ -212,9 +215,14 @@ enum RaisedObjectMember {
         spans: verter_type_expr::MemberSpans,
     },
     Method {
-        name: Arc<str>,
+        key: verter_type_expr::AuthoredPropertyKey<
+            RaisedShapeKey,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         function: RaisedFunction,
         optional: bool,
+        method_kind: verter_type_expr::ObjectMethodKind,
+        has_implementation_body: bool,
         visibility: MemberVisibility,
         excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
@@ -758,7 +766,10 @@ trait RaisedShapeAlgebra {
     #[allow(clippy::too_many_arguments)]
     fn member_property(
         &mut self,
-        name: String,
+        key: verter_type_expr::AuthoredPropertyKey<
+            Self::Out,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         ty: Self::Out,
         optional: bool,
         readonly: bool,
@@ -768,9 +779,14 @@ trait RaisedShapeAlgebra {
     ) -> Self::Member;
     fn member_method(
         &mut self,
-        name: String,
+        key: verter_type_expr::AuthoredPropertyKey<
+            Self::Out,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         function: Self::Fn,
         optional: bool,
+        method_kind: verter_type_expr::ObjectMethodKind,
+        has_implementation_body: bool,
         visibility: MemberVisibility,
         excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,

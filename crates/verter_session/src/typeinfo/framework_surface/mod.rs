@@ -14,6 +14,7 @@ pub mod plan;
 pub(crate) mod resolved_surface_access;
 pub mod results;
 pub(crate) mod scope;
+mod spread_program_export;
 pub(crate) mod svelte_exec;
 pub mod vue_exec;
 

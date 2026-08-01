@@ -170,7 +170,7 @@ impl TypeDeclGroup {
         let mut out: Vec<MemberHeaderFact> = Vec::new();
         for decl in &self.contributors {
             for fact in decl.direct_member_headers.iter() {
-                if !out.iter().any(|existing| existing.name == fact.name) {
+                if !out.iter().any(|existing| existing.key == fact.key) {
                     out.push(fact.clone());
                 }
             }

@@ -82,9 +82,11 @@ fn object_surface(shape: &ObjectExpr) -> Vec<(String, String, bool)> {
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(prop) => {
-                Some((prop.name.clone(), format!("{:?}", prop.ty), prop.optional))
-            }
+            ObjectMember::Property(prop) => Some((
+                prop.string_name().expect("string-key fixture").to_owned(),
+                format!("{:?}", prop.ty),
+                prop.optional,
+            )),
             _ => None,
         })
         .collect();
@@ -148,7 +150,12 @@ defineProps<Props>()
         .direct_member_headers;
     let oracle_surface: Vec<(String, bool)> = item_headers
         .iter()
-        .map(|header| (header.name.clone(), header.optional))
+        .map(|header| {
+            (
+                header.string_name().expect("string-key fixture").to_owned(),
+                header.optional,
+            )
+        })
         .collect();
     assert_eq!(
         oracle_surface,

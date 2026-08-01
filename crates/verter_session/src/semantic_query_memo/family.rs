@@ -17,7 +17,7 @@ use crate::semantic_query::demand::{
 };
 use crate::semantic_query::{
     DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
-    QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId, SemanticQueryKey,
+    PropertyKey, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId, SemanticQueryKey,
     SemanticQueryValue, VueHeritagePolicy,
 };
 
@@ -257,6 +257,13 @@ pub(super) enum FamilyKey {
     NormalizeIntersection {
         members: Arc<[SemanticNodeId]>,
     },
+    /// Selector-aware object-spread projection family. The payload is boxed to
+    /// keep the hot `FamilyKey` enum below its size rail. Only the established
+    /// projection mode/demand dimensions are erased into `ModeSlot`; every
+    /// other context dimension remains exact family identity.
+    ProjectObjectSpread {
+        identity: Box<ObjectSpreadProjectionFamilyIdentity>,
+    },
     ProjectPath {
         base: SemanticNodeId,
         path: Arc<[PathSegment]>,
@@ -488,6 +495,55 @@ pub(super) enum FamilyKey {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct ObjectSpreadProjectionFamilyIdentity {
+    program: SemanticNodeId,
+    selector: crate::semantic_query::ObjectProjectionSelector,
+    resolve_env_hash: crate::semantic_query::HashValue,
+    type_env_hash: crate::semantic_query::HashValue,
+    lib_env_hash: crate::semantic_query::HashValue,
+    project_identity: crate::semantic_query::HashValue,
+    substitution: crate::semantic_query::SubstitutionCanonicalHash,
+    optional_property_policy: crate::semantic_query::ExactOptionalPropertyPolicy,
+    provenance: crate::semantic_query::SurfaceProvenanceContext,
+    merge_role: crate::semantic_query::MemberMergeRole,
+    vue_heritage_policy: VueHeritagePolicy,
+}
+
+// Family-side R6 witness. `program`/`selector` are already-lowered semantic
+// identities; the four raw hashes are named env dimensions. No content/version
+// hash or parse-env dimension can be added without updating this exhaustive
+// no-`..` destructure.
+const _: fn(&ObjectSpreadProjectionFamilyIdentity) = w_object_spread_projection_family_identity;
+
+#[allow(dead_code)]
+fn w_object_spread_projection_family_identity(identity: &ObjectSpreadProjectionFamilyIdentity) {
+    let ObjectSpreadProjectionFamilyIdentity {
+        program,
+        selector,
+        resolve_env_hash,
+        type_env_hash,
+        lib_env_hash,
+        project_identity,
+        substitution,
+        optional_property_policy,
+        provenance,
+        merge_role,
+        vue_heritage_policy,
+    } = identity;
+    let _: &SemanticNodeId = program;
+    let _: &crate::semantic_query::ObjectProjectionSelector = selector;
+    let _: &crate::semantic_query::HashValue = resolve_env_hash;
+    let _: &crate::semantic_query::HashValue = type_env_hash;
+    let _: &crate::semantic_query::HashValue = lib_env_hash;
+    let _: &crate::semantic_query::HashValue = project_identity;
+    let _: &crate::semantic_query::SubstitutionCanonicalHash = substitution;
+    let _: &crate::semantic_query::ExactOptionalPropertyPolicy = optional_property_policy;
+    let _: &crate::semantic_query::SurfaceProvenanceContext = provenance;
+    let _: &crate::semantic_query::MemberMergeRole = merge_role;
+    let _: &VueHeritagePolicy = vue_heritage_policy;
+}
+
 impl FamilyKey {
     /// The stable variant label of this family identity. Used by the family-
     /// mapping guards (via the `for_tests` probe) to assert the domain a
@@ -507,6 +563,7 @@ impl FamilyKey {
             FamilyKey::TypeOf { .. } => "TypeOf",
             FamilyKey::NormalizeUnion { .. } => "NormalizeUnion",
             FamilyKey::NormalizeIntersection { .. } => "NormalizeIntersection",
+            FamilyKey::ProjectObjectSpread { .. } => "ProjectObjectSpread",
             FamilyKey::ProjectPath { .. } => "ProjectPath",
             FamilyKey::ResolveMacroPayload { .. } => "ResolveMacroPayload",
             FamilyKey::ResolveClassSurface { .. } => "ResolveClassSurface",
@@ -551,7 +608,8 @@ impl FamilyKey {
             FamilyKey::Instantiate { .. }
             | FamilyKey::TypeOf { .. }
             | FamilyKey::Conditional { .. }
-            | FamilyKey::MappedType { .. } => 8,
+            | FamilyKey::MappedType { .. }
+            | FamilyKey::ProjectObjectSpread { .. } => 8,
             FamilyKey::ResolveDecl(_) => 4,
             FamilyKey::ProjectMember { .. } => 4,
             FamilyKey::IndexedAccess { .. } => 4,
@@ -1483,6 +1541,31 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
+        SemanticQueryKey::ProjectObjectSpread {
+            program,
+            selector,
+            context,
+        } => {
+            let projection = context.projection_reduction();
+            (
+                FamilyKey::ProjectObjectSpread {
+                    identity: Box::new(ObjectSpreadProjectionFamilyIdentity {
+                        program: *program,
+                        selector: selector.clone(),
+                        resolve_env_hash: context.resolve_env_hash(),
+                        type_env_hash: context.type_env_hash(),
+                        lib_env_hash: context.lib_env_hash(),
+                        project_identity: context.project_identity(),
+                        substitution: context.substitution(),
+                        optional_property_policy: context.optional_property_policy(),
+                        provenance: projection.provenance,
+                        merge_role: projection.merge_role,
+                        vue_heritage_policy: projection.vue_heritage_policy,
+                    }),
+                },
+                context_to_slot(projection),
+            )
+        }
         SemanticQueryKey::ProjectPath {
             base,
             path,
@@ -1725,7 +1808,9 @@ pub(super) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
     match key {
         SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(Arc::clone(path)),
         SemanticQueryKey::ProjectMember { member, .. } => {
-            ProjectionPath::from_segments([PathSegment::Member(Arc::clone(member))])
+            ProjectionPath::from_segments([PathSegment::Member(PropertyKey::identifier(
+                Arc::clone(member),
+            ))])
         }
         SemanticQueryKey::IndexedAccess { index, .. } => {
             ProjectionPath::from_segments([PathSegment::Index(index.clone())])

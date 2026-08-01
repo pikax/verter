@@ -275,7 +275,7 @@ fn inline_props_macro_arg_mirrors_to_object_with_macro_own_body_provenance() {
             let names: Vec<&str> = view
                 .positive_members()
                 .iter()
-                .map(|m| m.name.as_ref())
+                .map(|m| m.string_name().expect("string-key fixture"))
                 .collect();
             assert!(
                 names.contains(&"a") && names.contains(&"b"),

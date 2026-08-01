@@ -170,7 +170,7 @@ fn chain_v_generic_carrier_does_not_leak_inherited_library_members_through_per_p
             continue;
         }
         if let OriginEdgeMetaDto::ProjectMember {
-            member_name,
+            member_key,
             provenance,
         } = &edge.meta
         {
@@ -180,9 +180,17 @@ fn chain_v_generic_carrier_does_not_leak_inherited_library_members_through_per_p
             ) {
                 continue;
             }
-            if LEAK_MEMBERS.contains(&member_name.as_ref()) {
+            if member_key
+                .as_string()
+                .is_some_and(|name| LEAK_MEMBERS.contains(&name))
+            {
                 leak_edge_count += 1;
-                leak_edge_names.push(member_name.to_string());
+                leak_edge_names.push(
+                    member_key
+                        .as_string()
+                        .expect("leak member is a string key")
+                        .to_string(),
+                );
             }
         }
     }
@@ -190,8 +198,11 @@ fn chain_v_generic_carrier_does_not_leak_inherited_library_members_through_per_p
     let mut leak_path_count = 0usize;
     for projection in footprint.projections.iter() {
         for seg in projection.path.iter() {
-            if let verter_audit::origin_graph::ProjectPathSegment::Member { name } = seg {
-                if LEAK_MEMBERS.contains(&name.as_ref()) {
+            if let verter_audit::origin_graph::ProjectPathSegment::Member { key } = seg {
+                if key
+                    .as_string()
+                    .is_some_and(|name| LEAK_MEMBERS.contains(&name))
+                {
                     leak_path_count += 1;
                 }
             }

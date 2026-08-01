@@ -57,9 +57,6 @@ fn object_is_closed_node(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticN
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return false;
     };
-    if view.is_open_spread() {
-        return false;
-    }
     view.positive_members().iter().all(|member| {
         crate::project_semantic_dispatch::node_data_for(dispatch.ctx, member.value).is_some_and(
             |data| {

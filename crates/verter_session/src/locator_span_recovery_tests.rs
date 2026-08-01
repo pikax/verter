@@ -112,8 +112,8 @@ fn recovers_property_member_spans_and_discriminates_default() {
         "authored member spans are non-trivial"
     );
 
-    let reconstructed = ObjectProperty::with_spans_public(
-        authored.name.clone(),
+    let reconstructed = ObjectProperty::with_key_spans_public(
+        authored.key.clone(),
         authored.ty.clone(),
         authored.optional,
         authored.readonly,
@@ -123,8 +123,8 @@ fn recovers_property_member_spans_and_discriminates_default() {
         reconstructed, authored,
         "recovered spans -> equal node identity"
     );
-    let with_default = ObjectProperty::with_spans_public(
-        authored.name.clone(),
+    let with_default = ObjectProperty::with_key_spans_public(
+        authored.key.clone(),
         authored.ty.clone(),
         authored.optional,
         authored.readonly,
@@ -369,8 +369,8 @@ fn recovers_method_member_and_function_spans_and_exercises_optional() {
         authored.function.type_parameters.clone(),
         recovered_fn,
     );
-    let reconstructed = MethodSignature::with_spans_public(
-        authored.name.clone(),
+    let reconstructed = MethodSignature::with_key_spans_public(
+        authored.key.clone(),
         recon_fn,
         authored.optional,
         recovered_member,
@@ -386,8 +386,8 @@ fn recovers_method_member_and_function_spans_and_exercises_optional() {
         authored.function.type_parameters.clone(),
         FunctionSpans::default(),
     );
-    let with_default = MethodSignature::with_spans_public(
-        authored.name.clone(),
+    let with_default = MethodSignature::with_key_spans_public(
+        authored.key.clone(),
         recon_fn_default,
         authored.optional,
         MemberSpans::default(),

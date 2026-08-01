@@ -1219,11 +1219,11 @@ mod partial_admission_tests {
                 vec![SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    name: Arc::from("broken"),
-                    value,
+                    key: crate::semantic_query::AuthoredPropertyKey::string("broken"),                    value,
                     optional: false,
                     readonly: false,
-                    is_method: false,
+                    method_kind: None,
+                    has_implementation_body: false,
                     declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                     merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
@@ -1236,7 +1236,6 @@ mod partial_admission_tests {
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         }
     }
 

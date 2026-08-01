@@ -72,6 +72,7 @@ pub(crate) fn build_resolved_local_type_fact(src: &ResolvedLocalType) -> Resolve
 /// producer-legal; the produced fact carries none.
 pub(crate) fn value_type_annotation_fact(
     annotation: Option<&TypeExpr>,
+    is_unique_symbol: bool,
     own_decl_name: &str,
     declaring_canonical: &Arc<str>,
     owner: TopLevelOwnerId,
@@ -82,6 +83,7 @@ pub(crate) fn value_type_annotation_fact(
         debug_assert!(annotation.is_none());
         debug_assert!(annotation_source.is_none());
         return ValueTypeAnnotationFact {
+            is_unique_symbol: false,
             typeof_alias_target: None,
             classification: ValueAnnotationClass::InferenceUnavailable(reason),
             annotation: None,
@@ -93,6 +95,7 @@ pub(crate) fn value_type_annotation_fact(
             "annotation/source pairing: an absent annotation carries no source"
         );
         return ValueTypeAnnotationFact {
+            is_unique_symbol: false,
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Absent,
             annotation: None,
@@ -118,6 +121,7 @@ pub(crate) fn value_type_annotation_fact(
         ValueAnnotationClass::Direct
     };
     ValueTypeAnnotationFact {
+        is_unique_symbol,
         typeof_alias_target,
         classification,
         annotation: annotation_source,
@@ -196,6 +200,7 @@ mod tests {
         let canonical: Arc<str> = Arc::from("/ws/a.ts");
         let fact = value_type_annotation_fact(
             Some(&typeof_annotation(&["source"])),
+            false,
             "alias",
             &canonical,
             TopLevelOwnerId::ordinary_file(),
@@ -217,6 +222,7 @@ mod tests {
         let canonical: Arc<str> = Arc::from("/ws/a.ts");
         let fact = value_type_annotation_fact(
             Some(&typeof_annotation(&["obj", "member"])),
+            false,
             "alias",
             &canonical,
             TopLevelOwnerId::ordinary_file(),
@@ -237,6 +243,7 @@ mod tests {
         let canonical: Arc<str> = Arc::from("/ws/a.ts");
         let fact = value_type_annotation_fact(
             Some(&typeof_annotation(&["own"])),
+            false,
             "own",
             &canonical,
             TopLevelOwnerId::ordinary_file(),
@@ -252,6 +259,7 @@ mod tests {
         let canonical: Arc<str> = Arc::from("/ws/a.ts");
         let absent = value_type_annotation_fact(
             None,
+            false,
             "x",
             &canonical,
             TopLevelOwnerId::ordinary_file(),
@@ -264,6 +272,7 @@ mod tests {
 
         let direct = value_type_annotation_fact(
             Some(&TypeExpr::Primitive(PrimitiveName::String)),
+            false,
             "x",
             &canonical,
             TopLevelOwnerId::ordinary_file(),

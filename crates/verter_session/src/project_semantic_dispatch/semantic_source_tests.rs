@@ -484,7 +484,7 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
     let flag = surface
         .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == "flag")
+        .find(|m| m.string_name().expect("string-key fixture") == "flag")
         .expect("the leaf member must be present");
     assert!(
         matches!(
@@ -498,7 +498,7 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
     let base = surface
         .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == "base")
+        .find(|m| m.string_name().expect("string-key fixture") == "base")
         .expect("the locator member must be present");
     assert!(base.optional, "the locator member carries its optionality");
     assert!(

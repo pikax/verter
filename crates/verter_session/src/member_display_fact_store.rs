@@ -39,7 +39,7 @@ pub struct MemberDisplayFactKey {
     pub content_hash: Hash16,
     pub parse_env_hash: Hash16,
     pub exporter: InternedName,
-    pub member_name: InternedName,
+    pub member_name: verter_type_expr::facts::FactPropertyKey,
     pub symbol_space: SymbolSpace,
 }
 
@@ -144,7 +144,7 @@ mod tests {
             content_hash: content_arr,
             parse_env_hash: env_arr,
             exporter: InternedName::from(exporter),
-            member_name: InternedName::from(name),
+            member_name: verter_type_expr::facts::FactPropertyKey::identifier(name),
             symbol_space: SymbolSpace::Type,
         }
     }

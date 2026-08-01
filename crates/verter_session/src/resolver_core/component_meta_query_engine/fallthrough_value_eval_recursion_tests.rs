@@ -41,7 +41,6 @@ fn empty_surface() -> SurfaceView {
         index_signatures: Arc::from(Vec::new()),
         keyspace: None,
         has_index_signature: false,
-        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     }
 }
 

@@ -434,7 +434,10 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
 
     fn member_property(
         &mut self,
-        name: String,
+        key: verter_type_expr::AuthoredPropertyKey<
+            RaisedShapeResult,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         ty: RaisedShapeResult,
         optional: bool,
         readonly: bool,
@@ -442,10 +445,18 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
         excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> RaisedMember {
+        let mut materialized = ty.summary.facts.materialized;
+        let key = key.map(
+            |computed| {
+                materialized &= computed.summary.facts.materialized;
+                computed.key
+            },
+            |identity| identity,
+        );
         RaisedMember {
-            materialized: ty.summary.facts.materialized,
+            materialized,
             member: RaisedObjectMember::Property {
-                name: Arc::from(name),
+                key,
                 ty: ty.key,
                 optional,
                 readonly,
@@ -457,20 +468,34 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
     }
     fn member_method(
         &mut self,
-        name: String,
+        key: verter_type_expr::AuthoredPropertyKey<
+            RaisedShapeResult,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         function: (RaisedFunction, bool),
         optional: bool,
+        method_kind: verter_type_expr::ObjectMethodKind,
+        has_implementation_body: bool,
         visibility: MemberVisibility,
         excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> RaisedMember {
-        let (function, materialized) = function;
+        let (function, mut materialized) = function;
+        let key = key.map(
+            |computed| {
+                materialized &= computed.summary.facts.materialized;
+                computed.key
+            },
+            |identity| identity,
+        );
         RaisedMember {
             materialized,
             member: RaisedObjectMember::Method {
-                name: Arc::from(name),
+                key,
                 function,
                 optional,
+                method_kind,
+                has_implementation_body,
                 visibility,
                 excess_origin,
                 spans,
@@ -734,7 +759,10 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
 
     fn member_property(
         &mut self,
-        _name: String,
+        _key: verter_type_expr::AuthoredPropertyKey<
+            RaisedShapeSummary,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         ty: RaisedShapeSummary,
         _optional: bool,
         _readonly: bool,
@@ -748,9 +776,14 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     }
     fn member_method(
         &mut self,
-        _name: String,
+        _key: verter_type_expr::AuthoredPropertyKey<
+            RaisedShapeSummary,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         function: FactsFunction,
         _optional: bool,
+        _method_kind: verter_type_expr::ObjectMethodKind,
+        _has_implementation_body: bool,
         _visibility: MemberVisibility,
         _excess_origin: verter_type_expr::ExcessPropertyOrigin,
         _spans: verter_type_expr::MemberSpans,
@@ -983,7 +1016,10 @@ fn object_member_to_raised(
     use verter_type_expr::ObjectMember;
     match member {
         ObjectMember::Property(property) => RaisedObjectMember::Property {
-            name: Arc::from(property.name.as_str()),
+            key: property.key.clone().map(
+                |computed| type_expr_to_key(interner, &computed),
+                |identity| identity,
+            ),
             ty: type_expr_to_key(interner, &property.ty),
             optional: property.optional,
             readonly: property.readonly,
@@ -992,9 +1028,14 @@ fn object_member_to_raised(
             spans: property.spans,
         },
         ObjectMember::Method(method) => RaisedObjectMember::Method {
-            name: Arc::from(method.name.as_str()),
+            key: method.key.clone().map(
+                |computed| type_expr_to_key(interner, &computed),
+                |identity| identity,
+            ),
             function: function_expr_to_raised(interner, &method.function),
             optional: method.optional,
+            method_kind: method.method_kind,
+            has_implementation_body: method.has_implementation_body,
             visibility: method.visibility,
             excess_origin: method.excess_origin,
             spans: method.spans,
@@ -1185,7 +1226,7 @@ pub(super) fn project_root_summary(
         }
         SemanticNodeData::IndexedAccess { object, index } => {
             project_root_summary(dispatch, *object, active)?;
-            if let IndexKey::TypeNode(index_node) = index {
+            if let IndexKey::Computed(index_node) = index {
                 project_root_summary(dispatch, *index_node, active)?;
             }
             RootOnlySummary::from_summary(summary::indexed_access(
@@ -1299,10 +1340,9 @@ pub(super) fn project_root_summary(
             ))
         }
         SemanticNodeData::Object(surface) => {
-            if surface.closed().is_some_and(|closed| closed.is_empty()) {
+            if surface.closed().is_empty() {
                 RootOnlySummary::from_summary(summary::empty_object())
-            } else if surface.closed().is_some()
-                && surface.positive_members().is_empty()
+            } else if surface.positive_members().is_empty()
                 && surface.construct_signatures.is_empty()
                 && !surface.has_known_index_signature()
                 && surface.call_signatures.len() == 1
@@ -1331,7 +1371,6 @@ pub(super) fn project_root_summary(
                 let has_member = !surface.positive_members().is_empty()
                     || !surface.index_signatures.is_empty()
                     || surface.has_known_index_signature()
-                    || surface.is_open_spread()
                     || surface
                         .call_signatures
                         .iter()
@@ -1352,6 +1391,9 @@ pub(super) fn project_root_summary(
                 }
             }
         }
+        SemanticNodeData::ObjectSpreadProgram(_) => RootOnlySummary::from_summary(
+            summary::opaque_sentinel(&QueryError::UnrepresentableSurface),
+        ),
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { .. } => {
                 RootOnlySummary::from_summary(summary::materialized_expanded_leaf())

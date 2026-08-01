@@ -365,7 +365,7 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
     let sources: Arc<[crate::semantic_query::SemanticNodeId]> =
         Arc::from(vec![source].into_boxed_slice());
     let meta = OriginMeta::ProjectedMember {
-        name: Arc::<str>::from("initial"),
+        key: crate::semantic_query::PropertyKey::identifier("initial"),
         provenance: verter_audit::MemberEdgeProvenance::PathProjection,
     };
 
@@ -441,7 +441,7 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
             OriginMeta::ProjectedMember {
-                name: Arc::<str>::from("a"),
+                key: crate::semantic_query::PropertyKey::identifier("a"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
             Arc::clone(&fence),
@@ -451,7 +451,7 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
             OriginMeta::ProjectedMember {
-                name: Arc::<str>::from("b"),
+                key: crate::semantic_query::PropertyKey::identifier("b"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
             Arc::clone(&fence),
@@ -539,7 +539,7 @@ fn audit_mining_traces_dropped_prefix_edges() {
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
             OriginMeta::ProjectedMember {
-                name: Arc::<str>::from("initial"),
+                key: crate::semantic_query::PropertyKey::identifier("initial"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
             Arc::clone(&fence),
@@ -549,7 +549,7 @@ fn audit_mining_traces_dropped_prefix_edges() {
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
             OriginMeta::ProjectedMember {
-                name: Arc::<str>::from("initial"),
+                key: crate::semantic_query::PropertyKey::identifier("initial"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
             Arc::clone(&fence),
@@ -613,7 +613,7 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
                 OriginEdgeKind::ProjectMember,
                 Arc::clone(&sources),
                 OriginMeta::ProjectedMember {
-                    name: Arc::<str>::from("initial"),
+                    key: crate::semantic_query::PropertyKey::identifier("initial"),
                     provenance: verter_audit::MemberEdgeProvenance::PathProjection,
                 },
                 Arc::clone(&fence),
@@ -628,7 +628,7 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
                 OriginEdgeKind::ProjectMember,
                 Arc::clone(&sources),
                 OriginMeta::ProjectedMember {
-                    name: Arc::<str>::from(format!("decoy_{i}")),
+                    key: crate::semantic_query::PropertyKey::identifier(format!("decoy_{i}")),
                     provenance: verter_audit::MemberEdgeProvenance::PathProjection,
                 },
                 Arc::clone(&fence),

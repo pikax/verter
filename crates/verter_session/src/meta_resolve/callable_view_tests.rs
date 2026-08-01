@@ -106,11 +106,12 @@ fn object_surface(
         .iter()
         .map(|(name, value)| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            name: Arc::from(*name),
+            key: crate::semantic_query::AuthoredPropertyKey::string(*name),
             value: *value,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             visibility: MemberVisibility::Public,
             spans: Default::default(),
             declaration_origin: None,
@@ -125,7 +126,6 @@ fn object_surface(
         index_signatures: Arc::from(Vec::new().into_boxed_slice()),
         keyspace: None,
         has_index_signature: false,
-        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     };
     graph.intern_node(SemanticNodeData::Object(view))
 }
@@ -1155,7 +1155,11 @@ fn first_param_object_surface_projects_param_members() {
     let surface = view
         .first_param_object_surface(&host, shallow())
         .expect("the first-param object projects a one-level surface");
-    let mut names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+    let mut names: Vec<&str> = surface
+        .members
+        .iter()
+        .map(|m| m.string_name().expect("string-key fixture"))
+        .collect();
     names.sort_unstable();
     assert_eq!(
         names,
@@ -1247,7 +1251,9 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
         .expect("the instance owner has a prepared `Props` declaration");
     assert_eq!(prepared.root_identity.owner, owner);
     assert!(
-        prepared.member_index.contains_key("row"),
+        prepared
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("row")),
         "the exact-owner prepared declaration indexes `row`"
     );
     assert!(
@@ -1343,7 +1349,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
         instantiated_surface
             .positive_members()
             .iter()
-            .any(|member| member.name.as_ref() == "row"),
+            .any(|member| member.string_name().expect("string-key fixture") == "row"),
         "ResolveDecl → Instantiate preserves the exact-owner `row` member"
     );
 
@@ -1362,7 +1368,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
         surface
             .positive_members()
             .iter()
-            .any(|member| member.name.as_ref() == "row"),
+            .any(|member| member.string_name().expect("string-key fixture") == "row"),
         "the exact-owner body locator preserves the `row` member"
     );
 }
@@ -1424,7 +1430,9 @@ fn direct_import_preparation_has_cold_warm_exact_owner_parity() {
             "cold and warm direct targets preserve the defining owner"
         );
         assert_eq!(external.symbol_name, "Snippet");
-        assert!(prepared.member_index.contains_key("row"));
+        assert!(prepared
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("row")));
     }
 }
 
@@ -1608,7 +1616,7 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -1732,7 +1740,7 @@ fn event_names_resolves_declref_and_instantiationref_event_unions() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -1824,7 +1832,7 @@ fn positional_params_expands_declref_and_instantiationref_rest_tuples() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -1928,7 +1936,7 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -2029,7 +2037,7 @@ fn slot_param_and_return_resolves_aliased_and_nullable_slot_arms() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -2141,7 +2149,7 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
     let onprops = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "onprops")
+        .find(|m| m.string_name().expect("string-key fixture") == "onprops")
         .expect("the `onprops` member is present")
         .value;
 
@@ -2168,7 +2176,7 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
             .expect("the first-param object projects a one-level surface")
             .members
             .iter()
-            .map(|m| m.name.to_string())
+            .map(|m| m.string_name().expect("string-key fixture").to_string())
             .collect();
         n.sort();
         n
@@ -2261,7 +2269,7 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -2320,7 +2328,7 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -2471,7 +2479,7 @@ fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() 
     let toowide = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "toowide")
+        .find(|m| m.string_name().expect("string-key fixture") == "toowide")
         .expect("the `toowide` member is present")
         .value;
 
@@ -2528,7 +2536,7 @@ fn positional_params_partial_rest_demand_fails_whole_read() {
     let mut_ref = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "mutual")
+        .find(|m| m.string_name().expect("string-key fixture") == "mutual")
         .expect("the `mutual` member is present")
         .value;
     // Precondition: the rest param type is the mutual-cycle `DeclRef` carrier.
@@ -2580,7 +2588,7 @@ fn demand_validated_structural_node_partial_yields_none() {
     let mut_ref = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "mutual")
+        .find(|m| m.string_name().expect("string-key fixture") == "mutual")
         .expect("the `mutual` member is present")
         .value;
 
@@ -2639,7 +2647,7 @@ fn event_names_direct_self_reference_terminates_complete() {
     let onself = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "onself")
+        .find(|m| m.string_name().expect("string-key fixture") == "onself")
         .expect("the `onself` member is present")
         .value;
 
@@ -2708,7 +2716,7 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
         surface
             .members
             .iter()
-            .find(|m| m.name.as_ref() == name)
+            .find(|m| m.string_name().expect("string-key fixture") == name)
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
@@ -3064,14 +3072,14 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
     let row = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "row")
+        .find(|m| m.string_name().expect("string-key fixture") == "row")
         .unwrap_or_else(|| {
             panic!(
                 "the `row` member is present; observed members: {:?}",
                 surface
                     .members
                     .iter()
-                    .map(|member| member.name.as_ref())
+                    .map(|member| member.string_name().expect("string-key fixture"))
                     .collect::<Vec<_>>()
             )
         })
@@ -3169,14 +3177,14 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
     let mutual = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "mutual")
+        .find(|m| m.string_name().expect("string-key fixture") == "mutual")
         .unwrap_or_else(|| {
             panic!(
                 "the `mutual` member is present; observed members: {:?}",
                 surface
                     .members
                     .iter()
-                    .map(|member| member.name.as_ref())
+                    .map(|member| member.string_name().expect("string-key fixture"))
                     .collect::<Vec<_>>()
             )
         })
@@ -3319,7 +3327,7 @@ fn validated_snippet_params_partial_arg_fails_closed_not_bindingless() {
     let toowide = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "toowide")
+        .find(|m| m.string_name().expect("string-key fixture") == "toowide")
         .expect("the `toowide` member is present")
         .value;
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -3487,7 +3495,7 @@ fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
     let x = surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "x")
+        .find(|m| m.string_name().expect("string-key fixture") == "x")
         .expect("the `x` member is present")
         .value;
     // PRECONDITION: the `Args` arg is a `DeclRef` carrier (NOT a literal tuple).

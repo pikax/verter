@@ -5401,7 +5401,9 @@ defineSlots<Slots<T>>()
         .properties
         .iter()
         .find_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(property) if property.name == "features" => {
+            verter_type_expr::ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "features" =>
+            {
                 Some(property)
             }
             _ => None,
@@ -6448,7 +6450,9 @@ defineProps<Props<T>>()
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
-        path: StdArc::from(vec![PathSegment::Member(StdArc::from("items"))]),
+        path: StdArc::from(vec![PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("items"),
+        )]),
         context: crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
@@ -6825,16 +6829,16 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
         properties: vec![
             verter_type_expr::ObjectMember::Property(
-                verter_type_expr::ObjectProperty::synthetic_public(
-                    "id".to_string(),
+                verter_type_expr::ObjectProperty::synthetic_public_key(
+                    "id".to_string().into(),
                     TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
                     false,
                     false,
                 ),
             ),
             verter_type_expr::ObjectMember::Property(
-                verter_type_expr::ObjectProperty::synthetic_public(
-                    "tier".to_string(),
+                verter_type_expr::ObjectProperty::synthetic_public_key(
+                    "tier".to_string().into(),
                     TypeExpr::string_literal("pro"),
                     false,
                     false,
@@ -6859,8 +6863,9 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     // Project ["badge"] off the lowered shell. After Step 1.5 dispatch
     // can navigate the Mapped+Conditional pair to extract the badge slot.
-    let badge_path: StdArc<[PathSegment]> =
-        StdArc::from(vec![PathSegment::Member(StdArc::from("badge"))]);
+    let badge_path: StdArc<[PathSegment]> = StdArc::from(vec![PathSegment::Member(
+        crate::semantic_query::PropertyKey::identifier("badge"),
+    )]);
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
         path: badge_path,
@@ -6919,10 +6924,10 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
                 for member in &obj.properties {
                     match member {
                         verter_type_expr::ObjectMember::Property(p) => {
-                            names.insert(p.name.clone());
+                            names.insert(p.string_name().expect("string-key fixture").to_owned());
                         }
                         verter_type_expr::ObjectMember::Method(m) => {
-                            names.insert(m.name.clone());
+                            names.insert(m.string_name().expect("string-key fixture").to_owned());
                         }
                         _ => {}
                     }
@@ -7034,16 +7039,16 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
         properties: vec![
             verter_type_expr::ObjectMember::Property(
-                verter_type_expr::ObjectProperty::synthetic_public(
-                    "id".to_string(),
+                verter_type_expr::ObjectProperty::synthetic_public_key(
+                    "id".to_string().into(),
                     TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
                     false,
                     false,
                 ),
             ),
             verter_type_expr::ObjectMember::Property(
-                verter_type_expr::ObjectProperty::synthetic_public(
-                    "tier".to_string(),
+                verter_type_expr::ObjectProperty::synthetic_public_key(
+                    "tier".to_string().into(),
                     TypeExpr::string_literal("pro"),
                     false,
                     false,
@@ -7087,10 +7092,10 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
                 for member in &obj.properties {
                     match member {
                         verter_type_expr::ObjectMember::Property(p) => {
-                            out.insert(p.name.clone());
+                            out.insert(p.string_name().expect("string-key fixture").to_owned());
                         }
                         verter_type_expr::ObjectMember::Method(m) => {
-                            out.insert(m.name.clone());
+                            out.insert(m.string_name().expect("string-key fixture").to_owned());
                         }
                         _ => {}
                     }
@@ -7128,7 +7133,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
             TypeExpr::Object(obj) => {
                 for member in &obj.properties {
                     if let verter_type_expr::ObjectMember::Property(p) = member {
-                        if p.name == name {
+                        if p.string_name().expect("string-key fixture") == name {
                             return Some(&p.ty);
                         }
                     }
@@ -7168,10 +7173,10 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
                 for member in &obj.properties {
                     match member {
                         verter_type_expr::ObjectMember::Property(p) => {
-                            names.insert(p.name.clone());
+                            names.insert(p.string_name().expect("string-key fixture").to_owned());
                         }
                         verter_type_expr::ObjectMember::Method(m) => {
-                            names.insert(m.name.clone());
+                            names.insert(m.string_name().expect("string-key fixture").to_owned());
                         }
                         _ => {}
                     }
@@ -7900,7 +7905,10 @@ defineEmits<ConditionalEmits>()
          payload surface by following the DeclRef carrier to the Conditional root",
     );
     let members = crate::meta_resolve::projectors::read_positive_surface_members(host, surface);
-    let event_names: Vec<String> = members.iter().map(|m| m.name.to_string()).collect();
+    let event_names: Vec<String> = members
+        .iter()
+        .map(|m| m.string_name().expect("string-key fixture").to_string())
+        .collect();
 
     for required in ["itemEdited", "itemViewed"] {
         assert!(
@@ -7912,6 +7920,213 @@ defineEmits<ConditionalEmits>()
              Conditional root. Got events: {event_names:?}"
         );
     }
+}
+
+/// The emit branch merge dedups under JS property identity: `Number(1)`
+/// and `String("1")` are one property, so the true-branch row wins the
+/// value and the false-branch contributor folds visibility — never two
+/// rows for one property.
+#[test]
+fn emit_branch_merge_merges_colliding_js_property_spellings() {
+    use crate::meta_resolve::projectors::macro_payload_substrate::merge_emit_branch_members;
+    use crate::semantic_query::{
+        AuthoredPropertyKey, MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SemanticNodeId,
+        SurfaceMember,
+    };
+
+    let host = VerterHost::new_standalone(crate::HostConfig::default());
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+    let number = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+    let member = |key: AuthoredPropertyKey, value: SemanticNodeId, visibility| SurfaceMember {
+        key,
+        value,
+        optional: false,
+        readonly: false,
+        method_kind: None,
+        has_implementation_body: false,
+        visibility,
+        spans: Default::default(),
+        declaration_origin: None,
+        declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+        merge_role: MergeRoleStamp::NEUTRAL,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+    };
+    let numeric_1 = AuthoredPropertyKey::Number(
+        crate::semantic_query::CanonicalIndexInt::from_canonical_i64(1).unwrap(),
+    );
+    let true_members = vec![member(
+        numeric_1,
+        string,
+        verter_type_expr::MemberVisibility::Public,
+    )];
+    let false_members = vec![
+        member(
+            AuthoredPropertyKey::string("1"),
+            number,
+            verter_type_expr::MemberVisibility::Private,
+        ),
+        member(
+            AuthoredPropertyKey::string("b"),
+            number,
+            verter_type_expr::MemberVisibility::Public,
+        ),
+    ];
+
+    let merged = merge_emit_branch_members(&true_members, &false_members);
+    assert_eq!(
+        merged.len(),
+        2,
+        "colliding spellings merge into one row; observed {}",
+        merged.len()
+    );
+    assert_eq!(
+        merged[0].value, string,
+        "the true-branch row wins the value on collision"
+    );
+    assert_eq!(
+        merged[0].visibility,
+        verter_type_expr::MemberVisibility::Private,
+        "visibility folds to the most restrictive across branches"
+    );
+    assert_eq!(merged[1].string_name(), Some("b"));
+}
+
+/// An open spread-program branch in an emit conditional keeps the
+/// CONDITIONAL CARRIER as the payload surface — the merge must not
+/// intern a closed `Object` from presence-only branch evidence (its
+/// total `closed()` witness would prove absence of every omitted key).
+#[test]
+fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
+    use crate::meta_resolve::projectors::{
+        resolve_payload_surface_with_scope, PayloadSurfaceScope,
+    };
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+    use std::sync::Arc;
+
+    let host = VerterHost::new_standalone(crate::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+    let number = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+    let event = |name: &str, value: SemanticNodeId| crate::semantic_query::SurfaceMember {
+        key: crate::semantic_query::AuthoredPropertyKey::string(name),
+        value,
+        optional: false,
+        readonly: false,
+        method_kind: None,
+        has_implementation_body: false,
+        visibility: verter_type_expr::MemberVisibility::Public,
+        spans: Default::default(),
+        declaration_origin: None,
+        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+    };
+    let closed_branch = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(vec![event("saved", string)].into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
+    let type_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let open_branch = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
+        crate::semantic_query::ObjectSpreadProgram {
+            effects: Arc::from(
+                vec![
+                    crate::semantic_query::ObjectConstructionEffect::DirectProperty(
+                        crate::semantic_query::AuthoredPropertyEffect {
+                            key: crate::semantic_query::AuthoredPropertyKey::string("loaded"),
+                            value: number,
+                            optional: false,
+                            readonly: false,
+                            visibility: verter_type_expr::MemberVisibility::Public,
+                            spans: Default::default(),
+                            declaration_origin: None,
+                            declared_in_macro_type_arg:
+                                crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                            excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
+                        },
+                    ),
+                    crate::semantic_query::ObjectConstructionEffect::Spread(type_param),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
+    ));
+    let conditional = graph.intern_node(SemanticNodeData::Conditional {
+        check: string,
+        extends: number,
+        true_branch_ref: closed_branch,
+        false_branch_ref: open_branch,
+        distributive: false,
+    });
+
+    let mut diag_sink = Vec::new();
+    let surface = resolve_payload_surface_with_scope(
+        &dispatch,
+        conditional,
+        0,
+        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+        PayloadSurfaceScope::EmitClassMacroObject,
+        &mut diag_sink,
+    )
+    .expect("the open-branch merge still returns a surface");
+    assert_eq!(
+        surface,
+        conditional,
+        "an open branch keeps the conditional carrier — no closed Object is interned from \
+         presence-only evidence; observed {:?}",
+        graph.node_data(surface)
+    );
+
+    // The emit READ is presence-complete over the carrier: both branches'
+    // positive events publish (`saved` from the closed branch, `loaded`
+    // from the open program branch), and the open signal is retained in
+    // the diagnostic envelope.
+    let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, surface);
+    let mut names: Vec<String> = members
+        .iter()
+        .map(|member| {
+            member
+                .string_name()
+                .expect("string-key fixture")
+                .to_string()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["loaded".to_string(), "saved".to_string()],
+        "the conditional carrier presence-merges both branches' events; observed {names:?}"
+    );
+    assert!(
+        diag_sink.iter().any(|diag| matches!(
+            diag.exactness,
+            verter_semantic::analysis::type_expand::ExpansionExactness::Incomplete
+        )),
+        "the open branch's incompleteness rides the diagnostic envelope"
+    );
 }
 
 // Carrier walk terminates by visited-node IDENTITY, not by a depth cap:
@@ -8028,7 +8243,10 @@ defineEmits<EmitChain0>()
          retired depth-8 cap returned None before hop 12 and lost the merge",
     );
     let members = crate::meta_resolve::projectors::read_positive_surface_members(host, surface);
-    let event_names: Vec<String> = members.iter().map(|m| m.name.to_string()).collect();
+    let event_names: Vec<String> = members
+        .iter()
+        .map(|m| m.string_name().expect("string-key fixture").to_string())
+        .collect();
 
     for required in ["itemEdited", "itemViewed"] {
         assert!(
@@ -8169,7 +8387,6 @@ mod node_predicates_tests {
             index_signatures: StdArc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         }
     }
 
@@ -8426,7 +8643,13 @@ mod node_predicates_tests {
         assert_eq!(extraction.root_identity, foo_identity);
         match extraction.route {
             RouteDemand::MemberPath(segments) => {
-                assert_eq!(segments.to_vec(), vec!["c".to_string(), "full".to_string()]);
+                assert_eq!(
+                    segments.to_vec(),
+                    vec![
+                        crate::semantic_query::PropertyKey::identifier("c"),
+                        crate::semantic_query::PropertyKey::identifier("full"),
+                    ]
+                );
             }
             other => panic!("expected RouteDemand::MemberPath, got {other:?}"),
         }

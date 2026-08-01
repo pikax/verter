@@ -101,7 +101,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let [MacroPathSegment::Member(field_name)] = output_path else {
             return true;
         };
-        let Some(member) = prepared.member_index.get(field_name.as_ref()) else {
+        let field_key = verter_type_expr::facts::FactPropertyKey::identifier(field_name.as_ref());
+        let Some(member) = prepared.member_index.get(&field_key) else {
             return true;
         };
         let param_names: FxHashSet<&str> = prepared
@@ -244,7 +245,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         root_identity.owner,
                         &root_identity.symbol_name,
                     )?;
-                    let member = prepared.member_index.get(member_name.as_ref())?.clone();
+                    let member_key =
+                        verter_type_expr::facts::FactPropertyKey::identifier(member_name.as_ref());
+                    let member = prepared.member_index.get(&member_key)?.clone();
                     let param_names: FxHashSet<&str> = prepared
                         .type_parameters
                         .iter()
@@ -400,12 +403,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .top_level_owner()?;
         let data = crate::project_semantic_dispatch::node_data_for(self.ctx, mirror.node())?;
         if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
-            return match surface.project_known_key(field_name.as_ref()) {
+            return match surface.project_string_key(field_name.as_ref()) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
                     Some(crate::semantic_query::HotTypeRef::new(member.value))
                 }
-                crate::semantic_query::SurfaceKeyProjection::AbsentProven
-                | crate::semantic_query::SurfaceKeyProjection::UnknownOnOpenSurface(_) => None,
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
             };
         }
         let (name, _) = data.bare_ref_head()?;
@@ -423,7 +425,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             root_identity.owner,
             &root_identity.symbol_name,
         )?;
-        let member = prepared.member_index.get(field_name.as_ref())?;
+        let field_key = verter_type_expr::facts::FactPropertyKey::identifier(field_name.as_ref());
+        let member = prepared.member_index.get(&field_key)?;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
         dispatch.raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
@@ -561,15 +564,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         signature,
                         depth + 1,
                     )
-                }) || surface.open_spread_operands().is_some_and(|operands| {
-                    operands.as_slice().iter().any(|operand| {
-                        self.node_contains_imported_utility_route(
-                            scope_canonical_id,
-                            scope_owner,
-                            *operand,
-                            depth + 1,
-                        )
-                    })
                 })
             }
             SemanticNodeData::Signature {
@@ -946,7 +940,7 @@ fn node_references_type_param_names(
         SemanticNodeData::KeyOf { base } => recur(*base),
         SemanticNodeData::IndexedAccess { object, index } => {
             recur(*object)
-                || matches!(index, crate::semantic_query::IndexKey::TypeNode(inner) if recur(*inner))
+                || matches!(index, crate::semantic_query::IndexKey::Computed(inner) if recur(*inner))
         }
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
         SemanticNodeData::Union(members)
@@ -962,9 +956,6 @@ fn node_references_type_param_names(
                     .any(|sig| recur(sig.key_type) || recur(sig.value_type))
                 || surface.call_signatures.iter().any(|&c| recur(c))
                 || surface.construct_signatures.iter().any(|&c| recur(c))
-                || surface.open_spread_operands().is_some_and(|operands| {
-                    operands.as_slice().iter().any(|operand| recur(*operand))
-                })
         }
         SemanticNodeData::Signature {
             params,

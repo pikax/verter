@@ -128,7 +128,7 @@ fn closed_object_property_slot_absolutizes_deeply() {
     let source = SemanticTypeSource::Closed(ClosedTypeFact::Object(ObjectShapeFact {
         members: Arc::from(
             vec![ObjectMemberFact::Property(ObjectPropertyFact {
-                name: "x".to_string(),
+                key: "x".into(),
                 optional: false,
                 readonly: false,
                 visibility: MemberVisibility::Public,
@@ -151,10 +151,11 @@ fn closed_object_property_slot_absolutizes_deeply() {
 #[test]
 fn projected_member_and_function_positions_absolutize_deeply() {
     let member = SemanticTypeSource::Projected(ProjectedTypeFact::Member(ProjectedMemberFact {
-        name: "onSelect".to_string(),
+        key: "onSelect".into(),
         optional: true,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         visibility: MemberVisibility::Public,
         declared_in_macro_type_arg: false,
         declaration_origin: DeclarationOrigin::Synthetic,

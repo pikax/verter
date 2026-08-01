@@ -801,8 +801,10 @@ fn chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier() {
         match expr {
             TypeExpr::Object(object) => object.properties.iter().any(|m| match m {
                 ObjectMember::Property(p) => {
-                    matches!(p.name.as_str(), "id" | "role" | "parts" | "metadata")
-                        || surface_mentions_uimessage_internals(&p.ty)
+                    matches!(
+                        p.string_name().expect("string-key fixture"),
+                        "id" | "role" | "parts" | "metadata"
+                    ) || surface_mentions_uimessage_internals(&p.ty)
                 }
                 _ => false,
             }),
@@ -1069,7 +1071,7 @@ fn closed_pick_sources_still_materialize_path_precisely() {
                 .properties
                 .iter()
                 .filter_map(|m| match m {
-                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
                     _ => None,
                 })
                 .collect();
@@ -1117,7 +1119,7 @@ fn closed_pick_sources_still_materialize_path_precisely() {
                 .properties
                 .iter()
                 .filter_map(|m| match m {
-                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
                     _ => None,
                 })
                 .collect();

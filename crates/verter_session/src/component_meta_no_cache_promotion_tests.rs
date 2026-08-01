@@ -55,7 +55,6 @@ fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
     // Build nested: leaf, then { deep_2: leaf }, then { deep_1: prev },
@@ -64,11 +63,12 @@ fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
         let member = SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            name: Arc::from(name),
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
             value: leaf,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
@@ -82,7 +82,6 @@ fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             },
         ));
     }
@@ -99,17 +98,17 @@ fn intern_single_member_object(host: &VerterHost, name: &'static str) -> Semanti
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
     let member = SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        name: Arc::from(name),
+        key: crate::semantic_query::AuthoredPropertyKey::string(name),
         value: leaf,
         optional: false,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
         merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
@@ -123,7 +122,6 @@ fn intern_single_member_object(host: &VerterHost, name: &'static str) -> Semanti
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ))
 }
@@ -507,9 +505,9 @@ fn no_cache_promotion_for_budget_exceeded_resolve_macro_payload() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -560,9 +558,9 @@ fn no_cache_promotion_for_budget_exceeded_route_target_pick_omit() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -607,9 +605,9 @@ fn no_cache_promotion_for_budget_exceeded_fallthrough_inheritance() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -663,9 +661,9 @@ fn no_cache_promotion_for_budget_exceeded_userland_shadowing_pick() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -723,9 +721,9 @@ fn no_cache_promotion_for_budget_exceeded_exclude_extract_reduction() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -783,9 +781,9 @@ fn no_cache_promotion_for_budget_exceeded_slot_binding_lowering() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -843,9 +841,9 @@ fn no_cache_promotion_for_budget_exceeded_typeof_substitution() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -908,9 +906,9 @@ fn no_cache_promotion_for_budget_exceeded_engine_state_promotion() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("deep_0")),
-                PathSegment::Member(Arc::from("deep_1")),
-                PathSegment::Member(Arc::from("deep_2")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_0")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_1")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("deep_2")),
             ]
             .into_boxed_slice(),
         ),
@@ -1273,7 +1271,6 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
 
@@ -1526,7 +1523,12 @@ fn projectpath_over_instantiationref_budget_trip_surfaces_value_partial_and_does
     // output by `build_project_path`.
     let projectpath_key = SemanticQueryKey::ProjectPath {
         base: instref,
-        path: Arc::from(vec![PathSegment::Member(Arc::from("x"))].into_boxed_slice()),
+        path: Arc::from(
+            vec![PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("x"),
+            )]
+            .into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     };
     let read = dispatch.execute_read(projectpath_key.clone());

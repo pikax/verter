@@ -950,6 +950,9 @@ impl VerterHost {
                     .iter()
                     .filter(|member| member.visibility.is_public())
                 {
+                    let Some(member_name) = member.string_name() else {
+                        continue;
+                    };
                     let type_text = if let Some(import_form) = cross_file_namespace_import_type(
                         ctx,
                         dispatch,
@@ -965,10 +968,10 @@ impl VerterHost {
                         }
                     };
                     testing_rows.push(TscPropRow {
-                        name: member.name.as_ref().to_owned(),
+                        name: member_name.to_owned(),
                         optional: member.optional,
                         type_text,
-                        anchor: member_anchor(mac, payload_index, member.name.as_ref()),
+                        anchor: member_anchor(mac, payload_index, member_name),
                     });
                 }
                 let scope = match tsc_scope_requirements(mac, scope_inventory) {
@@ -1139,6 +1142,9 @@ impl VerterHost {
             .iter()
             .filter(|member| member.visibility.is_public())
         {
+            let Some(member_name) = member.string_name() else {
+                continue;
+            };
             // A demand that never renders the runtime `props` option object
             // asks nothing about the member's type: the whole per-member
             // classification chain — and the cross-file type resolution it
@@ -1157,7 +1163,7 @@ impl VerterHost {
             } else {
                 match classify_runtime(
                     dispatch,
-                    runtime_subject.member(Arc::clone(&member.name)),
+                    runtime_subject.member(Arc::from(member_name)),
                     counters,
                 ) {
                     Ok(classification) => RuntimePropType::Resolved {
@@ -1170,10 +1176,10 @@ impl VerterHost {
                 }
             };
             props.push(RuntimeProp {
-                name: member.name.as_ref().to_owned(),
+                name: member_name.to_owned(),
                 optional: member.optional,
                 type_shape,
-                anchor: member_anchor(mac, payload_index, member.name.as_ref()),
+                anchor: member_anchor(mac, payload_index, member_name),
             });
         }
 

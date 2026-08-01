@@ -715,6 +715,9 @@ pub(crate) fn surface_member_to_expanded_field(
     // public visibility, the derived-kind/cursor match, `descend_published_member`
     // success, and the recorded published-field edge.
     let member: &SurfaceMember = admitted.member();
+    let member_name = member
+        .string_name()
+        .expect("publication authority admits only ordinary string keys");
     let ctx: &dyn ResolverContext = query_engine.ctx;
     // The publication mode comes from the admitted token's descended member
     // cursor. `Navigate` (carrier) mode means the member's type body is
@@ -776,7 +779,10 @@ pub(crate) fn surface_member_to_expanded_field(
                 .and_then(|node| {
                     crate::meta_resolve::arg_preserving_member_use_site_slot(
                         &dispatch,
-                        member.name.as_ref(),
+                        &member
+                            .key
+                            .cloned_known()
+                            .expect("publication authority admits only known string keys"),
                         member.declaration_origin.as_deref(),
                         node,
                     )
@@ -846,7 +852,10 @@ pub(crate) fn surface_member_to_expanded_field(
                         let structural = structural_member_value_source(
                             &dispatch,
                             member.value,
-                            member.name.as_ref(),
+                            &member
+                                .key
+                                .cloned_known()
+                                .expect("publication authority admits only known string keys"),
                             type_arg_base,
                         );
                         match structural {
@@ -879,7 +888,7 @@ pub(crate) fn surface_member_to_expanded_field(
     let declared_in_macro_type_arg = member.declared_in_macro_type_arg.get()
         && member.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
     ExpandedField {
-        name: member.name.as_ref().to_string(),
+        name: member_name.to_string(),
         r#type,
         raw_type,
         optional: member.optional,
@@ -1011,7 +1020,8 @@ pub(crate) fn project_model(
     // terminal carrier cursor. `project_model` raises a single payload
     // (no surface walk) so the carrier mode does not gate a per-member
     // breadth loop here — the descend gate IS the load-bearing use.
-    let _member_cursor = cursor.descend_published_member(&model_name)?;
+    let model_key = crate::semantic_query::PropertyKey::identifier(model_name.as_str());
+    let _member_cursor = cursor.descend_published_member(&model_key)?;
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
     let (payload_node, presence_outcome, exactness, contains_reducible) = {

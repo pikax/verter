@@ -328,7 +328,7 @@ mod canary_absolutize_already_absolute_zero_alloc {
 
     fn absolute_member(index: usize) -> ObjectMemberFact {
         ObjectMemberFact::Property(ObjectPropertyFact {
-            name: format!("member{index}"),
+            key: verter_type_expr::facts::FactAuthoredPropertyKey::string(format!("member{index}")),
             optional: false,
             readonly: false,
             visibility: MemberVisibility::Public,

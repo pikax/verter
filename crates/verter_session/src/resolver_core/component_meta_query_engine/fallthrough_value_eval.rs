@@ -398,17 +398,16 @@ fn known_spread_keys_from_surface(surface: &crate::semantic_query::SurfaceView) 
         ..KnownSpreadKeys::default()
     };
     for member in surface.positive_members().iter() {
-        normalize_public_spread_key(
-            member.name.as_ref(),
-            &mut result.attrs,
-            &mut result.listeners,
-        );
+        if let Some(name) = member.string_name() {
+            normalize_public_spread_key(name, &mut result.attrs, &mut result.listeners);
+        } else {
+            result.exact = false;
+        }
     }
     if surface.has_known_index_signature()
         || !surface.index_signatures.is_empty()
         || !surface.call_signatures.is_empty()
         || !surface.construct_signatures.is_empty()
-        || surface.is_open_spread()
     {
         result.exact = false;
     }

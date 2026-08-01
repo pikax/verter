@@ -32,14 +32,14 @@ fn member<'a>(surface: &'a TypeInfoSurface, name: &str) -> &'a TypeInfoSurfaceMe
     surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == name)
+        .find(|m| m.string_name().expect("string-key fixture") == name)
         .unwrap_or_else(|| {
             panic!(
                 "member `{name}` must be on the surface; got {:?}",
                 surface
                     .members
                     .iter()
-                    .map(|m| m.name.as_ref())
+                    .map(|m| m.string_name().expect("string-key fixture"))
                     .collect::<Vec<_>>()
             )
         })
@@ -344,7 +344,11 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
         .resolve_shallow_surface(FILE, "HeritageDerived")
         .expect("HeritageDerived must resolve");
 
-    let names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+    let names: Vec<&str> = surface
+        .members
+        .iter()
+        .map(|m| m.string_name().expect("string-key fixture"))
+        .collect();
     // Own + inherited members present; a never-declared name absent.
     assert!(
         names.contains(&"dup"),
@@ -411,7 +415,8 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
             !is_object,
             "Shallow projection must not eagerly expand member `{}` into an object surface \
              (would indicate an Expanded Instantiate); value node = {:?}",
-            m.name, m.value
+            m.string_name().expect("string-key fixture"),
+            m.value
         );
     }
 }
@@ -629,7 +634,6 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
         index_signatures: std::sync::Arc::from(vec![sig].into_boxed_slice()),
         keyspace: None,
         has_index_signature: true,
-        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     };
 
     let surface = TypeInfoSurface::build(graph, &view);
@@ -710,11 +714,12 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
     let built_member = SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        name: std::sync::Arc::from("present"),
+        key: crate::semantic_query::AuthoredPropertyKey::string("present"),
         value: value_node,
         optional: false,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         spans: verter_type_expr::MemberSpans {
             declaration: Some(Span::new(0, 20)),
             name: Some(Span::new(0, 7)),
@@ -736,7 +741,6 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
         index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         keyspace: None,
         has_index_signature: false,
-        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     };
 
     let surface = TypeInfoSurface::build(graph, &view);
@@ -960,7 +964,11 @@ export class C {
     );
 
     // Static member + constructor are NOT instance surface members.
-    let names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+    let names: Vec<&str> = surface
+        .members
+        .iter()
+        .map(|m| m.string_name().expect("string-key fixture"))
+        .collect();
     assert!(
         !names.contains(&"s"),
         "static field `s` must not be a surface member: {names:?}"

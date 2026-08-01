@@ -90,10 +90,12 @@ pub(crate) fn project_props(
         read_surface_member_candidates(ctx, &surface)
             .into_iter()
             .filter_map(|candidate| {
-                let analyzed = mac
-                    .prop_fields
-                    .iter()
-                    .find(|p| p.name == candidate.member().name.as_ref());
+                let analyzed = mac.prop_fields.iter().find(|p| {
+                    candidate
+                        .member()
+                        .string_name()
+                        .is_some_and(|name| p.name == name)
+                });
                 let raw_type = analyzed.and_then(|p| p.type_annotation.clone());
                 let shallow_payload = analyzed.and_then(|p| p.payload.clone());
                 let admitted = admit_published_member(candidate, &cursor, &dispatch)?;

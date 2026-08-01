@@ -782,18 +782,6 @@
       "capability": "ApparentTypes"
     },
     {
-      "file": "branded_types.rs",
-      "function": "branded_symbol_key_access_projects_wrapped_value_type",
-      "block": "U2.CLASS_SURFACES",
-      "capability": "ApparentTypes"
-    },
-    {
-      "file": "branded_types.rs",
-      "function": "branded_unique_symbol_wrapper_publishes_branded_surface",
-      "block": "U2.CLASS_SURFACES",
-      "capability": "ApparentTypes"
-    },
-    {
       "file": "call_resolution.rs",
       "function": "call_resolution_abstract_constructor_instance_type_projects_class_shape",
       "block": "U2.CLASS_SURFACES",
@@ -900,18 +888,6 @@
       "function": "typescript_rules_typeof_const_preserves_readonly_literals",
       "block": "U2.CLASS_SURFACES",
       "capability": "TypeScriptRules"
-    },
-    {
-      "file": "unique_symbol.rs",
-      "function": "unique_symbol_indexed_access_via_typeof_returns_literal_value",
-      "block": "U2.CLASS_SURFACES",
-      "capability": "UniqueSymbol"
-    },
-    {
-      "file": "unique_symbol.rs",
-      "function": "unique_symbol_string_key_access_returns_sibling_value",
-      "block": "U2.CLASS_SURFACES",
-      "capability": "UniqueSymbol"
     },
     {
       "file": "enums.rs",

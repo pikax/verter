@@ -261,7 +261,7 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
             let names: Vec<&str> = view
                 .positive_members()
                 .iter()
-                .map(|m| m.name.as_ref())
+                .map(|m| m.string_name().expect("string-key fixture"))
                 .collect();
             assert!(
                 names.contains(&"default") && names.contains(&"prepend"),

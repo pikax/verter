@@ -411,7 +411,8 @@ fn w_type_body_path_step(step: &TypeBodyPathStep) {
         | TypeBodyPathStep::ValueSignature { ordinal }
         | TypeBodyPathStep::UnionArm { ordinal }
         | TypeBodyPathStep::TupleElement { ordinal } => key_safe(ordinal),
-        TypeBodyPathStep::MemberValue
+        TypeBodyPathStep::MemberKey
+        | TypeBodyPathStep::MemberValue
         | TypeBodyPathStep::FunctionReturn
         | TypeBodyPathStep::MappedSource
         | TypeBodyPathStep::MappedValue

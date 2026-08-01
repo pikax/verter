@@ -86,11 +86,11 @@ pub use memory::{current_process_rss, RequestMemoryAudit};
 pub use noop::{install_noop_observer, NoOpObserver, NoOpObserverGuard};
 pub use observer::{clear_observer, current_observer, AuditEvent, AuditObserver};
 pub use origin_graph::{
-    ConditionalBranch, DerivationEdgeRaw, DerivationEdgeRecord, DerivationSubgraph,
-    DispatchKeyKind, EdgeId, MaterializationScopeAudit, MaterializationSubject,
-    MaterializeSkipReason, MemberEdgeProvenance, NamedIdentity, NodeId, NodeRecord, NormalizeKind,
-    OriginEdgeKind, OriginEdgeMetaDto, ProjectPathSegment, ProjectionModeAudit, SemanticNodeKind,
-    VfsLayer,
+    AuditPropertyKey, AuditTopLevelOwnerKind, AuditUniqueSymbolIdentity, ConditionalBranch,
+    DerivationEdgeRaw, DerivationEdgeRecord, DerivationSubgraph, DispatchKeyKind, EdgeId,
+    MaterializationScopeAudit, MaterializationSubject, MaterializeSkipReason, MemberEdgeProvenance,
+    NamedIdentity, NodeId, NodeRecord, NormalizeKind, OriginEdgeKind, OriginEdgeMetaDto,
+    ProjectPathSegment, ProjectionModeAudit, SemanticNodeKind, VfsLayer,
 };
 pub use published_surface::{
     event_name_to_on_prop_name, names_for_policy, AnalyzedSurface, AnalyzedSurfaceItem,

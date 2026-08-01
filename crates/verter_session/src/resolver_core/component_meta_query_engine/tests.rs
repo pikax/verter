@@ -463,8 +463,10 @@ export interface LinkProps extends NuxtLinkProps {
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            ObjectMember::Method(method) => Some(method.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
+            ObjectMember::Method(method) => Some(method.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -530,8 +532,12 @@ export class MixedClass {
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(p) => Some(p.name.clone()),
-                    ObjectMember::Method(m) => Some(m.name.clone()),
+                    ObjectMember::Property(p) => {
+                        Some(p.string_name().expect("string-key fixture").to_owned())
+                    }
+                    ObjectMember::Method(m) => {
+                        Some(m.string_name().expect("string-key fixture").to_owned())
+                    }
                     _ => None,
                 })
                 .collect(),
@@ -662,7 +668,11 @@ export interface LinkProps extends NuxtLinkProps {
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "to" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "to" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("`to` member should be present");
@@ -767,8 +777,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            ObjectMember::Method(method) => Some(method.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
+            ObjectMember::Method(method) => Some(method.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -781,7 +793,11 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "to" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "to" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("`to` member should be present");
@@ -896,8 +912,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            ObjectMember::Method(method) => Some(method.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
+            ObjectMember::Method(method) => Some(method.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -1028,8 +1046,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            ObjectMember::Method(method) => Some(method.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
+            ObjectMember::Method(method) => Some(method.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();

@@ -44,8 +44,8 @@ fn obj(members: Vec<ObjectMember>) -> TypeExpr {
     }))
 }
 fn prop(name: &str, ty: TypeExpr, optional: bool, readonly: bool) -> ObjectMember {
-    ObjectMember::Property(ObjectProperty::synthetic_public(
-        name.to_string(),
+    ObjectMember::Property(ObjectProperty::synthetic_public_key(
+        name.to_string().into(),
         ty,
         optional,
         readonly,
@@ -266,8 +266,8 @@ fn oracle_normalization_discriminates() {
     // overload ORDER is semantic — must NOT be sorted away (the two orders
     // diverge, proving order is preserved).
     let sig = |ret: PrimitiveName| {
-        ObjectMember::Method(MethodSignature::synthetic_public(
-            "f".to_string(),
+        ObjectMember::Method(MethodSignature::synthetic_public_key(
+            "f".to_string().into(),
             FunctionExpr::synthetic(vec![], Some(Arc::new(prim(ret))), vec![]),
             false,
         ))

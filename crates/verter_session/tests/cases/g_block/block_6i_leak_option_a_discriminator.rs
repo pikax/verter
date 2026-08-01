@@ -95,14 +95,14 @@ export type LiteralKeyedSlots<TPlan extends PricingPlan = PricingPlan> = {
 fn literal_keyed_slots_with_concrete_plan() -> TypeExpr {
     let plan_object = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "id".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "id".to_string().into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "tier".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "tier".to_string().into(),
                 TypeExpr::Literal(LiteralValue::String("pro".to_string())),
                 false,
                 false,
@@ -256,14 +256,14 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     let badge_member = view
         .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == "badge")
+        .find(|m| m.string_name() == Some("badge"))
         .unwrap_or_else(|| {
             panic!(
                 "synthesised surface MUST publish `badge` member after Mapped enumeration; \
                  got member names: {:?}",
                 view.positive_members()
                     .iter()
-                    .map(|m| m.name.as_ref())
+                    .filter_map(|m| m.string_name())
                     .collect::<Vec<_>>()
             )
         });
@@ -322,7 +322,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     let title_member = view
         .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == "title")
+        .find(|m| m.string_name() == Some("title"))
         .expect("synthesised surface MUST publish `title` member alongside `badge`");
     let title_value = title_member.value;
     let title_data = graph

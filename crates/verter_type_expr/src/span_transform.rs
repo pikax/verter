@@ -19,8 +19,8 @@
 use std::sync::Arc;
 
 use crate::{
-    FunctionExpr, FunctionSpans, IndexSignatureSpans, MemberSpans, ObjectExpr, ObjectMember,
-    RecursiveConditionalFrame, TypeExpr,
+    AuthoredPropertyKey, FunctionExpr, FunctionSpans, IndexSignatureSpans, MemberSpans, ObjectExpr,
+    ObjectMember, RecursiveConditionalFrame, TypeExpr,
 };
 
 /// Recursively [`TypeExpr::shift_spans`] every element of a shared
@@ -132,6 +132,9 @@ impl ObjectExpr {
             match member {
                 ObjectMember::Property(prop) => {
                     prop.spans.shift(delta);
+                    if let AuthoredPropertyKey::Computed(key) = &mut prop.key {
+                        key.shift_spans(delta);
+                    }
                     prop.ty.shift_spans(delta);
                 }
                 ObjectMember::IndexSignature(idx) => {
@@ -144,6 +147,9 @@ impl ObjectExpr {
                 }
                 ObjectMember::Method(method) => {
                     method.spans.shift(delta);
+                    if let AuthoredPropertyKey::Computed(key) = &mut method.key {
+                        key.shift_spans(delta);
+                    }
                     method.function.shift_spans(delta);
                 }
                 ObjectMember::Spread(spread) => {
@@ -159,6 +165,9 @@ impl ObjectExpr {
             match member {
                 ObjectMember::Property(prop) => {
                     prop.spans.clear();
+                    if let AuthoredPropertyKey::Computed(key) = &mut prop.key {
+                        key.clear_spans();
+                    }
                     prop.ty.clear_spans();
                 }
                 ObjectMember::IndexSignature(idx) => {
@@ -171,6 +180,9 @@ impl ObjectExpr {
                 }
                 ObjectMember::Method(method) => {
                     method.spans.clear();
+                    if let AuthoredPropertyKey::Computed(key) = &mut method.key {
+                        key.clear_spans();
+                    }
                     method.function.clear_spans();
                 }
                 ObjectMember::Spread(spread) => {
@@ -457,17 +469,19 @@ mod tests {
         ty_span: Span,
     ) -> TypeExpr {
         TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::with_spans_public(
-                name.to_string(),
-                TypeExpr::Primitive(PrimitiveName::Number),
-                false,
-                false,
-                crate::MemberSpans {
-                    declaration: Some(decl),
-                    name: Some(name_span),
-                    type_annotation: Some(ty_span),
-                },
-            ))],
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::with_key_spans_public(
+                    crate::TypeAuthoredPropertyKey::string(name),
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    false,
+                    false,
+                    crate::MemberSpans {
+                        declaration: Some(decl),
+                        name: Some(name_span),
+                        type_annotation: Some(ty_span),
+                    },
+                ),
+            )],
         }))
     }
 

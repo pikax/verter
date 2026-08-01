@@ -27,7 +27,7 @@ use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::Hash16;
 use verter_span::Span;
 use verter_type_expr::facts::TypeDependencyPathFact;
-use verter_type_expr::{DeclBindingKey, TopLevelOwnerId, TypeExpr};
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId, TypeAuthoredPropertyKey, TypeExpr};
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -223,9 +223,9 @@ pub struct ShallowTypeSymbol {
     /// first-seen order. (The full `TypeParam` carriers — constraints /
     /// defaults — are body data, read through `type_decl`.)
     pub type_param_names: Vec<String>,
-    /// Direct syntactic member NAMES (own members only, heritage
+    /// Direct syntactic member KEYS (own members only, heritage
     /// excluded) — a shallow shape fact.
-    pub member_names: Vec<String>,
+    pub member_names: Vec<TypeAuthoredPropertyKey>,
     /// Number of same-name contributing declarations that merged into
     /// this symbol.
     pub contributor_count: usize,
@@ -241,7 +241,7 @@ impl ShallowTypeSymbol {
             member_names: header
                 .member_headers
                 .iter()
-                .map(|m| m.name.clone())
+                .map(|m| m.key.clone())
                 .collect(),
             contributor_count: header.contributors.len(),
         }
@@ -309,10 +309,10 @@ pub(crate) enum LexicalValueBinding<'a> {
 pub struct ShallowValueSymbol {
     /// Declaration kind (header fact).
     pub kind: ValueDeclKind,
-    /// Direct member NAMES of an object-literal initializer
+    /// Direct member KEYS of an object-literal initializer
     /// (`const x = { a, b }`) — a shallow shape fact; empty for
     /// non-object-literal values.
-    pub object_member_headers: Vec<String>,
+    pub object_member_headers: Vec<TypeAuthoredPropertyKey>,
     /// Structural PROVENANCE fact: `true` only for the synthesized `default`
     /// VALUE symbol that [`super::vue_default_synth::synthesise_vue_default_value_symbol`]
     /// fabricates for a `.vue` SFC's implicit public instance (the construct
@@ -341,7 +341,7 @@ impl ShallowValueSymbol {
             object_member_headers: header
                 .object_member_headers
                 .iter()
-                .map(|m| m.name.clone())
+                .map(|m| m.key.clone())
                 .collect(),
             is_synthesised_component_default: false,
         }
@@ -1892,7 +1892,7 @@ impl ShallowFileState {
                 let route = if member_path.is_empty() {
                     RouteDemand::Whole
                 } else {
-                    RouteDemand::MemberPath(Arc::from(member_path.to_vec().into_boxed_slice()))
+                    RouteDemand::member_path(member_path.iter().map(String::as_str))
                 };
                 external.insert(ExternalSymbolRef {
                     local_name: root.to_string(),
@@ -1918,11 +1918,12 @@ impl ShallowFileState {
                 .then_with(|| left.source_specifier.cmp(&right.source_specifier))
                 .then_with(|| left.imported_name.cmp(&right.imported_name))
                 .then_with(|| {
-                    let left_path: &[String] = match &left.route {
+                    let left_path: &[verter_type_expr::facts::FactPropertyKey] = match &left.route {
                         RouteDemand::MemberPath(path) => path,
                         _ => &[],
                     };
-                    let right_path: &[String] = match &right.route {
+                    let right_path: &[verter_type_expr::facts::FactPropertyKey] = match &right.route
+                    {
                         RouteDemand::MemberPath(path) => path,
                         _ => &[],
                     };
@@ -1972,7 +1973,7 @@ impl ShallowFileState {
                     let route = if member_path.is_empty() {
                         RouteDemand::Whole
                     } else {
-                        RouteDemand::MemberPath(Arc::from(member_path.to_vec().into_boxed_slice()))
+                        RouteDemand::member_path(member_path.iter().map(String::as_str))
                     };
                     external.insert(ExternalSymbolRef {
                         local_name: root.to_string(),
@@ -2003,11 +2004,12 @@ impl ShallowFileState {
                 .then_with(|| left.source_specifier.cmp(&right.source_specifier))
                 .then_with(|| left.imported_name.cmp(&right.imported_name))
                 .then_with(|| {
-                    let left_path: &[String] = match &left.route {
+                    let left_path: &[verter_type_expr::facts::FactPropertyKey] = match &left.route {
                         RouteDemand::MemberPath(path) => path,
                         _ => &[],
                     };
-                    let right_path: &[String] = match &right.route {
+                    let right_path: &[verter_type_expr::facts::FactPropertyKey] = match &right.route
+                    {
                         RouteDemand::MemberPath(path) => path,
                         _ => &[],
                     };
@@ -2552,7 +2554,7 @@ impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
         let route_lens = route_fact_lens.for_owner(self.owner);
         let own_canonical = verter_semantic::facts::RouteFactLens::own_canonical_id(&route_lens);
         let mut visited = FxHashSet::default();
-        let mut keys: Vec<String> = Vec::new();
+        let mut keys: Vec<verter_type_expr::facts::FactPropertyKey> = Vec::new();
         let mut pending = vec![name.to_string()];
         visited.insert(name.to_string());
         while let Some(current) = pending.pop() {
@@ -3345,7 +3347,9 @@ export interface Props { value: NS.Value.Inner; named: F.Bar }
         assert_eq!(namespace.imported_name, "Value");
         assert_eq!(
             namespace.route,
-            RouteDemand::MemberPath(Arc::from(["Inner".to_string()])),
+            RouteDemand::MemberPath(Arc::from([crate::semantic_query::PropertyKey::identifier(
+                "Inner"
+            ),])),
         );
         assert_ne!(namespace.imported_name, "*.Value.Inner");
 
@@ -3357,7 +3361,9 @@ export interface Props { value: NS.Value.Inner; named: F.Bar }
         assert_eq!(named.imported_name, "Foo");
         assert_eq!(
             named.route,
-            RouteDemand::MemberPath(Arc::from(["Bar".to_string()])),
+            RouteDemand::MemberPath(Arc::from([crate::semantic_query::PropertyKey::identifier(
+                "Bar"
+            ),])),
         );
     }
 
@@ -3621,11 +3627,11 @@ export interface Props { y: number }
         );
         let members = &symbol.member_names;
         assert!(
-            members.contains(&"x".to_string()),
+            members.contains(&verter_type_expr::TypeAuthoredPropertyKey::string("x")),
             "merged Props must expose `x`; got {members:?}"
         );
         assert!(
-            members.contains(&"y".to_string()),
+            members.contains(&verter_type_expr::TypeAuthoredPropertyKey::string("y")),
             "merged Props must expose `y`; got {members:?}"
         );
     }
@@ -3714,7 +3720,7 @@ type AppConfig = { theme: string }
             sym.route_facts
                 .member_dependency_edges
                 .iter()
-                .find(|edge| edge.member == member)
+                .find(|edge| edge.member == crate::semantic_query::PropertyKey::identifier(member))
         };
         assert!(
             member_edge("ui").is_some(),

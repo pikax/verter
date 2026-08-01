@@ -402,7 +402,7 @@ fn barrel_imported_alias_materializes_at_the_final_defining_canonical() {
     let label = surface
         .positive_members()
         .iter()
-        .find(|member| member.name.as_ref() == "label")
+        .find(|member| member.string_name().expect("string-key fixture") == "label")
         .expect("Node's `label` member must materialise");
     assert_eq!(
         label.declaration_origin.as_deref(),
@@ -442,7 +442,7 @@ fn namespace_sibling_type_reference_resolves_through_dispatch() {
             assert!(
                 shape.properties.iter().any(|member| matches!(
                     member,
-                    verter_type_expr::ObjectMember::Property(prop) if prop.name == "a"
+                    verter_type_expr::ObjectMember::Property(prop) if prop.string_name().expect("string-key fixture") == "a"
                 )),
                 "the namespace sibling M.Outer must materialise Inner's member `a`, got {:?}",
                 shape.properties
@@ -568,7 +568,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
         matches!(&annotation, verter_type_expr::TypeExpr::Object(shape)
         if shape.properties.iter().any(|member| matches!(
             member,
-            verter_type_expr::ObjectMember::Property(prop) if prop.name == "mine"
+            verter_type_expr::ObjectMember::Property(prop) if prop.string_name().expect("string-key fixture") == "mine"
         ))),
         "the user `$derived` declaration must WIN over the rune prelude through \
          the graph-native reader (keep the user's `{{ mine: 1 }}` annotation), \

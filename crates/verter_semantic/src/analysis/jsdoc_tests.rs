@@ -33,7 +33,7 @@ fn collect_jsdoc_typedefs_lowers_braced_typedef_to_alias_body() {
     assert_eq!(object.properties.len(), 1);
     match &object.properties[0] {
         ObjectMember::Property(prop) => {
-            assert_eq!(prop.name, "a");
+            assert_eq!(prop.string_name().expect("string-key fixture"), "a");
             assert_eq!(prop.ty, TypeExpr::Primitive(PrimitiveName::Number));
         }
         other => panic!("expected `a` property, got {other:?}"),
@@ -100,7 +100,7 @@ fn collect_jsdoc_typedefs_member_spans_are_file_coordinates() {
     let ObjectMember::Property(prop) = &object.properties[0] else {
         panic!("expected `a` property, got {:?}", object.properties[0]);
     };
-    assert_eq!(prop.name, "a");
+    assert_eq!(prop.string_name().expect("string-key fixture"), "a");
 
     let name_span = prop
         .spans
@@ -162,7 +162,7 @@ fn extract_jsdoc_type_at_offset_member_spans_are_file_coordinates() {
     let ObjectMember::Property(prop) = &object.properties[0] else {
         panic!("expected `a` property, got {:?}", object.properties[0]);
     };
-    assert_eq!(prop.name, "a");
+    assert_eq!(prop.string_name().expect("string-key fixture"), "a");
 
     let name_span = prop
         .spans
@@ -235,7 +235,7 @@ fn extract_jsdoc_type_multiline_payload_preserves_structure_and_clears_spans() {
         .properties
         .iter()
         .map(|m| match m {
-            ObjectMember::Property(prop) => prop.name.as_str(),
+            ObjectMember::Property(prop) => prop.string_name().expect("string-key fixture"),
             other => panic!("expected named properties, got {other:?}"),
         })
         .collect();
@@ -249,15 +249,16 @@ fn extract_jsdoc_type_multiline_payload_preserves_structure_and_clears_spans() {
         let ObjectMember::Property(prop) = prop else {
             unreachable!()
         };
-        let expected = match prop.name.as_str() {
+        let expected = match prop.string_name().expect("string-key fixture") {
             "a" => TypeExpr::Primitive(PrimitiveName::Number),
             "b" => TypeExpr::Primitive(PrimitiveName::String),
             other => panic!("unexpected member {other}"),
         };
         assert_eq!(
-            prop.ty, expected,
+            prop.ty,
+            expected,
             "member `{}` must keep its lowered type",
-            prop.name
+            prop.string_name().expect("string-key fixture")
         );
     }
 
@@ -269,20 +270,23 @@ fn extract_jsdoc_type_multiline_payload_preserves_structure_and_clears_spans() {
             unreachable!()
         };
         assert_eq!(
-            prop.spans.name, None,
+            prop.spans.name,
+            None,
             "member `{}` NAME span must be cleared for a multi-line payload; a `Some` proves \
              the `None`/`clear_spans` path regressed",
-            prop.name
+            prop.string_name().expect("string-key fixture")
         );
         assert_eq!(
-            prop.spans.type_annotation, None,
+            prop.spans.type_annotation,
+            None,
             "member `{}` TYPE span must be cleared for a multi-line payload",
-            prop.name
+            prop.string_name().expect("string-key fixture")
         );
         assert_eq!(
-            prop.spans.declaration, None,
+            prop.spans.declaration,
+            None,
             "member `{}` DECLARATION span must be cleared for a multi-line payload",
-            prop.name
+            prop.string_name().expect("string-key fixture")
         );
     }
 }
@@ -323,7 +327,7 @@ fn extract_jsdoc_param_types_member_spans_are_file_coordinates() {
     let ObjectMember::Property(prop) = &object.properties[0] else {
         panic!("expected `a` property, got {:?}", object.properties[0]);
     };
-    assert_eq!(prop.name, "a");
+    assert_eq!(prop.string_name().expect("string-key fixture"), "a");
 
     let name_span = prop
         .spans
@@ -368,7 +372,7 @@ fn extract_jsdoc_return_type_member_spans_are_file_coordinates() {
     let ObjectMember::Property(prop) = &object.properties[0] else {
         panic!("expected `b` property, got {:?}", object.properties[0]);
     };
-    assert_eq!(prop.name, "b");
+    assert_eq!(prop.string_name().expect("string-key fixture"), "b");
 
     let name_span = prop
         .spans

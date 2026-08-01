@@ -152,14 +152,14 @@ fn define_props_normalizer_produces_fields_with_surface_readonly_and_jsdoc() {
         .surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "id")
+        .find(|m| m.string_name().expect("string-key fixture") == "id")
         .expect("id member on surface");
     assert!(id_member.readonly, "id is readonly on the typeinfo surface");
     let count_member = surface
         .surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "count")
+        .find(|m| m.string_name().expect("string-key fixture") == "count")
         .expect("count member on surface");
     assert!(
         !count_member.readonly,
@@ -951,7 +951,7 @@ fn cross_file_heritage_props_surface_with_own_body_vs_heritage_provenance() {
         .surface
         .members
         .iter()
-        .find(|m| m.name.as_ref() == "baseFlag")
+        .find(|m| m.string_name().expect("string-key fixture") == "baseFlag")
         .expect("baseFlag on surface");
     assert_eq!(
         base_member
@@ -1045,7 +1045,11 @@ fn generic_inherited_member_type_expr_scope_is_deriving_file() {
     let resolved = host
         .resolve_shallow_surface(FILE, "Local")
         .expect("Local resolves in the deriving SFC scope");
-    let resolved_members: Vec<&str> = resolved.members.iter().map(|m| m.name.as_ref()).collect();
+    let resolved_members: Vec<&str> = resolved
+        .members
+        .iter()
+        .map(|m| m.string_name().expect("string-key fixture"))
+        .collect();
     assert_eq!(
         resolved_members,
         vec!["tag"],

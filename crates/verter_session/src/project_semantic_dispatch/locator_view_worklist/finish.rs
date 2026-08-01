@@ -234,25 +234,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Object(view) => {
                 let member_context = context.into_structural_provenance();
-                let members: Vec<_> = view
-                    .positive_members()
-                    .iter()
-                    .map(|member| SurfaceMember {
-                        name: Arc::clone(&member.name),
-                        value: projected(memo, member.value, member_context),
-                        optional: member.optional,
-                        readonly: member.readonly,
-                        is_method: member.is_method,
-                        visibility: member.visibility,
-                        // Projection preserves the member's excess-property
-                        // provenance verbatim (structure-preserving rewrite).
-                        excess_origin: member.excess_origin,
-                        spans: member.spans,
-                        declaration_origin: member.declaration_origin.clone(),
-                        declared_in_macro_type_arg: context.own_body_stamp(),
-                        merge_role: context.role_stamp(),
-                    })
-                    .collect();
+                let members: Vec<_> =
+                    view.positive_members()
+                        .iter()
+                        .map(|member| SurfaceMember {
+                            key: match &member.key {
+                                verter_type_expr::AuthoredPropertyKey::Computed(computed) => {
+                                    self.unique_symbol_identity_for_typeof_node(*computed)
+                                        .map(verter_type_expr::AuthoredPropertyKey::UniqueSymbol)
+                                        .unwrap_or_else(|| {
+                                            verter_type_expr::AuthoredPropertyKey::Computed(
+                                                projected(memo, *computed, member_context),
+                                            )
+                                        })
+                                }
+                                verter_type_expr::AuthoredPropertyKey::String(value) => {
+                                    verter_type_expr::AuthoredPropertyKey::String(Arc::clone(value))
+                                }
+                                verter_type_expr::AuthoredPropertyKey::Number(value) => {
+                                    verter_type_expr::AuthoredPropertyKey::Number(*value)
+                                }
+                                verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) => {
+                                    verter_type_expr::AuthoredPropertyKey::UniqueSymbol(
+                                        identity.clone(),
+                                    )
+                                }
+                            },
+                            value: projected(memo, member.value, member_context),
+                            optional: member.optional,
+                            readonly: member.readonly,
+                            method_kind: member.method_kind,
+                            has_implementation_body: member.has_implementation_body,
+                            visibility: member.visibility,
+                            // Projection preserves the member's excess-property
+                            // provenance verbatim (structure-preserving rewrite).
+                            excess_origin: member.excess_origin,
+                            spans: member.spans,
+                            declaration_origin: member.declaration_origin.clone(),
+                            declared_in_macro_type_arg: context.own_body_stamp(),
+                            merge_role: context.role_stamp(),
+                        })
+                        .collect();
                 let call_signatures: Vec<_> = view
                     .call_signatures
                     .iter()
@@ -283,11 +305,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .keyspace
                         .map(|keyspace| projected(memo, keyspace, context)),
                     has_index_signature: view.has_known_index_signature(),
-                    completeness: view.completeness_with_mapped_operands(|operand| {
-                        projected(memo, operand, member_context)
-                    }),
                 };
                 graph.intern_preserving_scope(node, SemanticNodeData::Object(projected_view))
+            }
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                let projected = program.map_child_nodes(|child| projected(memo, child, context));
+                if projected == *program {
+                    node
+                } else {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ObjectSpreadProgram(projected),
+                    )
+                }
             }
             SemanticNodeData::Signature {
                 kind,
@@ -365,11 +395,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let index = match index {
                     IndexKey::String(value) => IndexKey::String(Arc::clone(value)),
                     IndexKey::Number(value) => IndexKey::Number(*value),
-                    IndexKey::TypeNode(value) => {
-                        self.normalized_index_key_node(projected(memo, *value, context))
-                    }
+                    IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
+                    IndexKey::Computed(value) => self
+                        .unique_symbol_identity_for_typeof_node(*value)
+                        .map(IndexKey::UniqueSymbol)
+                        .unwrap_or_else(|| {
+                            self.normalized_index_key_node(projected(memo, *value, context))
+                        }),
                 };
-                let should_defer = matches!(index, IndexKey::TypeNode(_))
+                let should_defer = matches!(index, IndexKey::Computed(_))
                     || !matches!(
                         graph.node_data(object_id).as_deref(),
                         Some(SemanticNodeData::Object(_))

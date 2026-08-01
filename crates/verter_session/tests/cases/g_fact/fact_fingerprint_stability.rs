@@ -106,7 +106,7 @@ fn adding_member_adds_new_presence_keeps_existing_unchanged() {
 
     let presence_a_key = FactKey::MemberPresence {
         exporter: InternedName::from("Foo"),
-        name: InternedName::from("a"),
+        name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
         space: SymbolSpace::Type,
     };
     let presence_a_before = reg_a
@@ -122,7 +122,7 @@ fn adding_member_adds_new_presence_keeps_existing_unchanged() {
 
     let presence_b_key = FactKey::MemberPresence {
         exporter: InternedName::from("Foo"),
-        name: InternedName::from("b"),
+        name: verter_type_expr::facts::FactPropertyKey::identifier("b"),
         space: SymbolSpace::Type,
     };
     assert!(

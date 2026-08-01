@@ -465,7 +465,10 @@ impl ProjectSemanticDispatch<'_> {
             canonical,
             payload.macro_index as usize,
         )?;
-        let path: Arc<[PathSegment]> = std::iter::once(PathSegment::Member(member_name)).collect();
+        let path: Arc<[PathSegment]> = std::iter::once(PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier(member_name),
+        ))
+        .collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
             base: base.node(),
             path,
@@ -528,7 +531,7 @@ impl ProjectSemanticDispatch<'_> {
     fn raise_projected_member_path(
         &self,
         base: &AuthoredBodyLocator,
-        path: &Arc<[String]>,
+        path: &Arc<[verter_type_expr::facts::FactPropertyKey]>,
         ctx: &SourceRaiseContext<'_>,
     ) -> Option<HotTypeRef> {
         let locator = absolutize_locator(base, ctx.scope_canonical_id);
@@ -539,7 +542,7 @@ impl ProjectSemanticDispatch<'_> {
                     .surface
                     .members
                     .iter()
-                    .find(|member| member.name.as_ref() == path[0].as_str())?;
+                    .find(|member| member.key.cloned_known().as_ref() == Some(&path[0]))?;
                 return self.raise_projected_path_from_node(member.value, &path[1..], ctx);
             }
         }
@@ -558,7 +561,7 @@ impl ProjectSemanticDispatch<'_> {
     fn raise_projected_path_from_node(
         &self,
         base: SemanticNodeId,
-        path: &[String],
+        path: &[verter_type_expr::facts::FactPropertyKey],
         ctx: &SourceRaiseContext<'_>,
     ) -> Option<HotTypeRef> {
         if path.is_empty() {
@@ -569,10 +572,7 @@ impl ProjectSemanticDispatch<'_> {
             ctx.check_raised_unknown_materializing(self, Some(&hot));
             return Some(hot);
         }
-        let segments: Arc<[PathSegment]> = path
-            .iter()
-            .map(|segment| PathSegment::Member(Arc::from(segment.as_str())))
-            .collect();
+        let segments: Arc<[PathSegment]> = path.iter().cloned().map(PathSegment::Member).collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
             base,
             path: segments,
@@ -1037,7 +1037,11 @@ impl ProjectSemanticDispatch<'_> {
                 let path: Arc<[PathSegment]> = demand
                     .member_role_path
                     .iter()
-                    .map(|segment| PathSegment::Member(Arc::from(segment.as_str())))
+                    .map(|segment| {
+                        PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+                            Arc::from(segment.as_str()),
+                        ))
+                    })
                     .collect();
                 if path.is_empty() {
                     return Some(base);

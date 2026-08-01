@@ -376,8 +376,8 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
         type_registry_entries: vec![
             verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                 properties: vec![verter_type_expr::ObjectMember::Property(
-                    verter_type_expr::ObjectProperty::synthetic_public(
-                        "variants".to_string(),
+                    verter_type_expr::ObjectProperty::synthetic_public_key(
+                        "variants".to_string().into(),
                         verter_type_expr::TypeExpr::Object(Arc::new(
                             verter_type_expr::ObjectExpr { properties: vec![] },
                         )),

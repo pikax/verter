@@ -3423,7 +3423,9 @@ defineProps<Props>()
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -3484,7 +3486,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -3549,7 +3553,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -3633,7 +3639,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -3689,7 +3697,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -4603,7 +4613,7 @@ defineProps<Props>()
         shape
             .properties
             .iter()
-            .any(|member| matches!(member, ObjectMember::Property(prop) if prop.name == "id")),
+            .any(|member| matches!(member, ObjectMember::Property(prop) if prop.string_name().expect("string-key fixture") == "id")),
         "expected instantiated Item shape to expose id, got {:?}",
         shape.properties
     );
@@ -4681,7 +4691,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -4756,7 +4768,9 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
+                    ObjectMember::Property(prop) => {
+                        Some(prop.string_name().expect("string-key fixture"))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -5088,7 +5102,7 @@ defineProps<{
                 .properties
                 .iter()
                 .filter_map(|m| match m {
-                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
                     _ => None,
                 })
                 .collect();
@@ -10363,7 +10377,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "current" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "current" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("ImportedHelper should keep a current member");
@@ -10601,7 +10619,7 @@ defineProps<LinkProps>()
                 || matches!(
                     variant,
                     TypeExpr::Object(shape)
-                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path")),
+                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "path")),
                 )
         }),
         "owner-local route helper should preserve its object branch, got {route_ty:?}"
@@ -10634,7 +10652,9 @@ defineProps<LinkProps>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -10700,7 +10720,9 @@ defineProps<ModuleProps>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -10787,7 +10809,9 @@ defineProps<Props>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -11146,7 +11170,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "variants" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a variants member");
@@ -11160,7 +11188,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "slots" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "slots" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a slots member");
@@ -11174,7 +11206,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "ui" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a ui member");
@@ -11279,7 +11315,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "variants" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a variants member");
@@ -11342,7 +11382,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "ui" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a ui member");
@@ -11355,7 +11399,11 @@ defineProps<{
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "gap" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "gap" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button.ui should keep a gap member");
@@ -11413,7 +11461,9 @@ defineProps<{
     // `variants → color → {primary, secondary}`.
     let find_prop = |members: &[ObjectMember], prop_name: &str| -> Option<TypeExpr> {
         members.iter().find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == prop_name => {
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == prop_name =>
+            {
                 Some(property.ty.clone())
             }
             _ => None,
@@ -11441,7 +11491,9 @@ defineProps<{
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -11493,7 +11545,9 @@ defineProps<{
 fn assert_concrete_theme_surface(ty: &TypeExpr, label: &str) {
     let find_prop = |members: &[ObjectMember], prop_name: &str| -> Option<TypeExpr> {
         members.iter().find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == prop_name => {
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == prop_name =>
+            {
                 Some(property.ty.clone())
             }
             _ => None,
@@ -11518,7 +11572,9 @@ fn assert_concrete_theme_surface(ty: &TypeExpr, label: &str) {
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -11614,7 +11670,9 @@ defineProps<{
             .properties
             .iter()
             .find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == name => {
+                ObjectMember::Property(property)
+                    if property.string_name().expect("string-key fixture") == name =>
+                {
                     Some(property.ty.clone())
                 }
                 _ => None,
@@ -11737,7 +11795,9 @@ defineProps<{
             .properties
             .iter()
             .find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == name => {
+                ObjectMember::Property(property)
+                    if property.string_name().expect("string-key fixture") == name =>
+                {
                     Some(property.ty.clone())
                 }
                 _ => None,
@@ -11955,7 +12015,11 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "variants" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a variants member");
@@ -11969,7 +12033,11 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "color" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "color" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button.variants should keep a color member");
@@ -11996,7 +12064,11 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "slots" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "slots" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a slots member");
@@ -12008,14 +12080,14 @@ defineSlots<ButtonSlots>()
     };
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "Button.slots should expose base, got {:?}",
         slots_member
     );
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "Button.slots should expose label, got {:?}",
         slots_member
@@ -12093,7 +12165,9 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -12106,7 +12180,11 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "ui" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a ui member");
@@ -12118,14 +12196,14 @@ defineSlots<ButtonSlots>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "Button.ui should expose base, got {:?}",
         ui_member
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "Button.ui should expose label, got {:?}",
         ui_member
@@ -12198,7 +12276,9 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
+            ObjectMember::Property(property) => {
+                Some(property.string_name().expect("string-key fixture"))
+            }
             _ => None,
         })
         .collect();
@@ -12213,7 +12293,11 @@ defineSlots<ButtonSlots>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "ui" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a ui member");
@@ -12225,14 +12309,14 @@ defineSlots<ButtonSlots>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "Button.ui should expose base, got {:?}",
         ui_member
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "Button.ui should expose label, got {:?}",
         ui_member
@@ -12840,7 +12924,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "variants" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a variants member");
@@ -12852,7 +12940,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         variants_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "color"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "color"),
         ),
         "Button.variants should expose color, got {:?}",
         variants_member
@@ -12862,7 +12950,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "slots" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "slots" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button helper should keep a slots member");
@@ -12874,14 +12966,14 @@ defineProps<ButtonProps>()
     };
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "Button.slots should expose base, got {:?}",
         slots_member
     );
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "Button.slots should expose label, got {:?}",
         slots_member
@@ -13087,7 +13179,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         local_config_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "slot"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "slot"),
         ),
         "LocalConfig should keep its slot member, got {local_config_ty:?}"
     );
@@ -13292,7 +13384,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "ui" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("ComponentConfig should keep a ui member");
@@ -13307,7 +13403,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "node" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "node" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("ComponentConfig.ui should keep a node member");
@@ -13322,7 +13422,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "node" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "node" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Level2 should have a node member");
@@ -13334,7 +13438,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         level3_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "leaf"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "leaf"),
         ),
         "Level3 should expose leaf, got {:?}",
         inner_node
@@ -14082,13 +14186,13 @@ defineEmits<Emits>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "root"),
         ),
         "ui helper should keep root, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "list"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "list"),
         ),
         "ui helper should keep list, got {ui_ty:?}"
     );
@@ -14338,13 +14442,13 @@ defineSlots<TabsSlots<T>>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "root"),
         ),
         "ui helper should keep root, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "list"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "list"),
         ),
         "ui helper should keep list, got {ui_ty:?}"
     );
@@ -14780,7 +14884,7 @@ defineSlots<TabsSlots<T>>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "root"),
         ),
         "ui helper should keep root, got {ui_ty:?}"
     );
@@ -19785,13 +19889,13 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "ui helper should expose base, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "ui helper should expose label, got {ui_ty:?}"
     );
@@ -19828,13 +19932,13 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "slot ui binding should expose base, got {ui_binding_ty:?}"
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "slot ui binding should expose label, got {ui_binding_ty:?}"
     );
@@ -20030,13 +20134,13 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "ui helper should expose base, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "ui helper should expose label, got {ui_ty:?}"
     );
@@ -20073,13 +20177,13 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "base"),
         ),
         "slot ui binding should expose base, got {ui_binding_ty:?}"
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "label"),
         ),
         "slot ui binding should expose label, got {ui_binding_ty:?}"
     );
@@ -20795,7 +20899,7 @@ fn payload_ty_references(ty: &TypeExpr, event_name: &str) -> bool {
             matches!(
                 member,
                 ObjectMember::Property(property)
-                    if property.name == "source"
+                    if property.string_name().expect("string-key fixture") == "source"
                         && matches!(
                             &property.ty,
                             TypeExpr::Literal(verter_type_expr::LiteralValue::String(value))
@@ -23736,7 +23840,7 @@ defineProps<{
         .properties
         .iter()
         .filter_map(|m| match m {
-            ObjectMember::Property(p) => Some(p.name.as_str()),
+            ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -23810,7 +23914,7 @@ defineProps<{
         .properties
         .iter()
         .filter_map(|m| match m {
-            ObjectMember::Property(p) => Some(p.name.as_str()),
+            ObjectMember::Property(p) => Some(p.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -24008,7 +24112,9 @@ defineProps<{
         .properties
         .iter()
         .filter_map(|m| match m {
-            ObjectMember::Property(p) => Some((p.name.as_str(), &p.ty)),
+            ObjectMember::Property(p) => {
+                Some((p.string_name().expect("string-key fixture"), &p.ty))
+            }
             _ => None,
         })
         .collect();
@@ -25695,7 +25801,11 @@ defineExpose<PanelApi>()
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["open".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("open")],
+                "one member hop"
+            );
         }
         other => panic!("the open member publishes the MemberPath replay source, got {other:?}"),
     }
@@ -25778,7 +25888,11 @@ defineExpose<LocalApi>()
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["focus".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("focus")],
+                "one member hop"
+            );
         }
         other => panic!("the focus member publishes the MemberPath replay source, got {other:?}"),
     }
@@ -25951,7 +26065,11 @@ defineExpose<LocalApi>({
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["selectAll".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("selectAll")],
+                "one member hop"
+            );
         }
         other => {
             panic!("the selectAll member publishes the MemberPath replay source, got {other:?}")
@@ -26092,7 +26210,11 @@ defineExpose<ImportedApi>({
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["selectAll".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("selectAll")],
+                "one member hop"
+            );
         }
         other => {
             panic!("the selectAll member publishes the MemberPath replay source, got {other:?}")
@@ -27019,7 +27141,7 @@ const cond = true
             assert_eq!(object.properties.len(), 1, "Named = {{ x: number }}");
             match &object.properties[0] {
                 verter_type_expr::ObjectMember::Property(prop) => {
-                    assert_eq!(prop.name, "x");
+                    assert_eq!(prop.string_name().expect("string-key fixture"), "x");
                     assert_eq!(
                         prop.ty,
                         TypeExpr::Primitive(PrimitiveName::Number),
@@ -27787,7 +27909,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Object(tf::ObjectShapeFact {
             members: Arc::from(
                 vec![tf::ObjectMemberFact::Property(tf::ObjectPropertyFact {
-                    name: "member".to_string(),
+                    key: "member".into(),
                     optional: false,
                     readonly: false,
                     visibility: verter_type_expr::MemberVisibility::Public,
@@ -27806,9 +27928,9 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
             assert_eq!(
                 path.as_ref(),
-                &[crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                    "member"
-                ))],
+                &[crate::meta_resolve::InteriorSourceStep::Member(
+                    "member".into(),
+                )],
                 "the typed failure names the exact nested member position"
             );
         }
@@ -28356,7 +28478,9 @@ fn warm_output_materializes_under_the_validated_capture_not_a_fresh_view() {
                 .properties
                 .iter()
                 .find_map(|member| match member {
-                    verter_type_expr::ObjectMember::Property(prop) if prop.name == "x" => {
+                    verter_type_expr::ObjectMember::Property(prop)
+                        if prop.string_name().expect("string-key fixture") == "x" =>
+                    {
                         Some(prop.ty.clone())
                     }
                     _ => None,
@@ -28644,7 +28768,11 @@ defineProps<{ own: SharedAlias }>()
             .properties
             .iter()
             .find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == "tag" => Some(&property.ty),
+                ObjectMember::Property(property)
+                    if property.string_name().expect("string-key fixture") == "tag" =>
+                {
+                    Some(&property.ty)
+                }
                 _ => None,
             })
             .expect("the nested member survives materialization");
@@ -29151,7 +29279,7 @@ defineEmits<Events>()
         TypeExpr::Object(shape) => assert!(
             shape.properties.iter().any(|member| matches!(
                 member,
-                ObjectMember::Property(property) if property.name == "id"
+                ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "id"
             )),
             "the demanded Row payload expands to its declared members, got {demanded:?}"
         ),
@@ -29466,7 +29594,11 @@ defineEmits<Events>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "nested" => Some(property),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "nested" =>
+            {
+                Some(property)
+            }
             _ => None,
         })
         .expect("the object carrier keeps its nested member");
@@ -29500,7 +29632,11 @@ defineEmits<Events>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "nested" => Some(property),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "nested" =>
+            {
+                Some(property)
+            }
             _ => None,
         })
         .expect("the demanded object keeps its nested member");
@@ -29508,7 +29644,7 @@ defineEmits<Events>()
         TypeExpr::Object(row_shape) => assert!(
             row_shape.properties.iter().any(|member| matches!(
                 member,
-                ObjectMember::Property(property) if property.name == "id"
+                ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "id"
             )),
             "the walked nested Row reaches its id leaf, got {demanded:?}"
         ),
@@ -29977,7 +30113,11 @@ defineProps<Props>()
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["onClick".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("onClick")],
+                "one member hop"
+            );
         }
         other => panic!(
             "the imported function member publishes the MemberPath replay \
@@ -30651,7 +30791,11 @@ defineProps<Props>()
         Some(verter_type_expr::facts::SemanticTypeSource::Projected(
             verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
         )) => {
-            assert_eq!(path.as_ref(), ["onClick".to_string()], "one member hop");
+            assert_eq!(
+                path.as_ref(),
+                [crate::semantic_query::PropertyKey::identifier("onClick")],
+                "one member hop"
+            );
             lane_prop.ty.clone()
         }
         other => panic!(
@@ -30904,7 +31048,9 @@ defineProps<{ [key: string]: { nested: number } }>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "nested" => {
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "nested" =>
+            {
                 Some(property.ty.clone())
             }
             _ => None,
@@ -31230,7 +31376,7 @@ defineSlots<SeparatorSlots>()
             matches!(
                 property,
                 verter_type_expr::ObjectMember::Property(property)
-                    if property.name == "root"
+                    if property.string_name().expect("string-key fixture") == "root"
                         && matches!(property.ty, TypeExpr::Primitive(PrimitiveName::String))
             )
         }),
@@ -31370,7 +31516,7 @@ defineProps<Props>()
             TypeExpr::Object(object)
                 if object.properties.iter().any(|property| matches!(
                     property,
-                    ObjectMember::Property(property) if property.name == "path"
+                    ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "path"
                 ))
         )),
         "the union keeps its `{{ path: string }}` arm; got {arms:?}"

@@ -69,6 +69,22 @@ pub mod display;
 /// generator-is-sole-writer contract.
 pub mod query_key_spec;
 
+/// Selector-aware projection facts for authored object-spread programs.
+///
+/// The result is an opaque correlated formula. Exact absence, emptiness,
+/// `keyof`, exhaustive iteration, and closed materialisation are available
+/// only through the module's sealed complete-domain witnesses.
+pub mod object_spread_projection;
+pub use object_spread_projection::{
+    ClosedKeyLookup, ClosedObjectProjectionAlternative, ClosedObjectProjectionFormula,
+    ClosedObjectProjectionSurface, CompleteObjectDomain, ExactOptionalPropertyPolicy,
+    ExcessEligibility, IndexDomain, MemberFacets, ObjectProjectionAlternative,
+    ObjectProjectionFormula, ObjectProjectionIndex, ObjectProjectionSelector,
+    ObjectProjectionSignature, ObjectSignatureKind, ObjectSpreadProjectionContext,
+    OpenSafeKeyEvidence, PositiveAlternativeEvidence, PositiveKeyFact, PositiveKeyPresence,
+    ProjectionEvidence,
+};
+
 /// The [`IndexKey::Number`] payload domain: the proof-carrying
 /// [`CanonicalIndexInt`] newtype (private field; construction only via
 /// the module's two blessed constructors) plus the canonical ECMA-262
@@ -146,6 +162,171 @@ enum InferBinderIdentity {
     #[cfg(test)]
     Synthetic(u64),
 }
+
+#[cfg(test)]
+mod object_spread_program_contract_tests {
+    use super::{
+        AuthoredAccessorEffect, AuthoredIndexEffect, AuthoredMethodEffect, AuthoredPropertyEffect,
+        AuthoredPropertyKey, CanonicalIndexInt, DeclIdentity, MacroOwnBodyStamp, MergeRoleStamp,
+        ObjectConstructionEffect, ObjectSpreadProgram, SemanticNodeData, SemanticNodeId,
+    };
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::sync::Arc;
+
+    fn hash_of(value: &SemanticNodeData) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn semantic_node_object_spread_program_preserves_order_and_identity() {
+        let call = SemanticNodeId(11);
+        let spread = SemanticNodeId(22);
+        let construct = SemanticNodeId(33);
+        let program = ObjectSpreadProgram {
+            effects: Arc::from([
+                ObjectConstructionEffect::DirectCall(call),
+                ObjectConstructionEffect::Spread(spread),
+                ObjectConstructionEffect::DirectConstruct(construct),
+            ]),
+        };
+        let node = SemanticNodeData::ObjectSpreadProgram(program.clone());
+        let reordered = SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+            effects: Arc::from([
+                ObjectConstructionEffect::Spread(spread),
+                ObjectConstructionEffect::DirectCall(call),
+                ObjectConstructionEffect::DirectConstruct(construct),
+            ]),
+        });
+
+        assert_ne!(node, reordered);
+        assert_ne!(hash_of(&node), hash_of(&reordered));
+        assert_eq!(
+            program.child_nodes().collect::<Vec<_>>(),
+            vec![call, spread, construct],
+        );
+    }
+
+    #[test]
+    fn object_spread_program_maps_every_typed_effect_child_without_losing_facets() {
+        let metadata = || {
+            (
+                verter_type_expr::MemberVisibility::Private,
+                verter_type_expr::MemberSpans::default(),
+                Some(Arc::<str>::from("/src/object.ts")),
+                MacroOwnBodyStamp::NEUTRAL,
+                MergeRoleStamp::NEUTRAL,
+                verter_type_expr::ExcessPropertyOrigin::FreshOwn,
+            )
+        };
+        let (visibility, spans, declaration_origin, own_body, merge_role, excess_origin) =
+            metadata();
+        let property = AuthoredPropertyEffect {
+            key: AuthoredPropertyKey::Computed(SemanticNodeId(1)),
+            value: SemanticNodeId(2),
+            optional: true,
+            readonly: true,
+            visibility,
+            spans,
+            declaration_origin: declaration_origin.clone(),
+            declared_in_macro_type_arg: own_body,
+            merge_role,
+            excess_origin,
+        };
+        let method = AuthoredMethodEffect {
+            key: AuthoredPropertyKey::string("method"),
+            signature: SemanticNodeId(3),
+            optional: true,
+            has_implementation_body: true,
+            visibility,
+            spans,
+            declaration_origin: declaration_origin.clone(),
+            declared_in_macro_type_arg: own_body,
+            merge_role,
+            excess_origin,
+        };
+        let accessor = |key, signature| AuthoredAccessorEffect {
+            key,
+            signature,
+            optional: false,
+            has_implementation_body: true,
+            visibility,
+            spans,
+            declaration_origin: declaration_origin.clone(),
+            declared_in_macro_type_arg: own_body,
+            merge_role,
+            excess_origin,
+        };
+        let unique_symbol = DeclIdentity::synthetic("symbol");
+        let unique_symbol_identity = verter_type_expr::facts::ValueDeclIdentityPart {
+            canonical_id: Arc::clone(&unique_symbol.canonical_id),
+            owner: unique_symbol.owner,
+            symbol: Arc::clone(&unique_symbol.decl_name),
+            member_path: Arc::from([]),
+        };
+        let program = ObjectSpreadProgram {
+            effects: Arc::from([
+                ObjectConstructionEffect::DirectProperty(property),
+                ObjectConstructionEffect::DirectMethod(method),
+                ObjectConstructionEffect::DirectGet(accessor(
+                    AuthoredPropertyKey::UniqueSymbol(unique_symbol_identity),
+                    SemanticNodeId(4),
+                )),
+                ObjectConstructionEffect::DirectSet(accessor(
+                    AuthoredPropertyKey::Number(CanonicalIndexInt::from_canonical_i64(5).unwrap()),
+                    SemanticNodeId(5),
+                )),
+                ObjectConstructionEffect::DirectIndex(AuthoredIndexEffect {
+                    key_type: SemanticNodeId(6),
+                    value_type: SemanticNodeId(7),
+                    readonly: true,
+                    spans: verter_type_expr::IndexSignatureSpans::default(),
+                    declaration_origin,
+                }),
+                ObjectConstructionEffect::DirectCall(SemanticNodeId(8)),
+                ObjectConstructionEffect::DirectConstruct(SemanticNodeId(9)),
+                ObjectConstructionEffect::Spread(SemanticNodeId(10)),
+            ]),
+        };
+
+        assert_eq!(
+            program.child_nodes().collect::<Vec<_>>(),
+            (1..=10).map(SemanticNodeId).collect::<Vec<_>>()
+        );
+        let mapped = program.map_child_nodes(|node| SemanticNodeId(node.0 + 100));
+        assert_eq!(
+            mapped.child_nodes().collect::<Vec<_>>(),
+            (101..=110).map(SemanticNodeId).collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            &mapped.effects[0],
+            ObjectConstructionEffect::DirectProperty(effect)
+                if effect.optional
+                    && effect.readonly
+                    && effect.visibility == verter_type_expr::MemberVisibility::Private
+                    && effect.excess_origin == verter_type_expr::ExcessPropertyOrigin::FreshOwn
+        ));
+        assert!(matches!(
+            &mapped.effects[2],
+            ObjectConstructionEffect::DirectGet(effect)
+                if effect.has_implementation_body
+        ));
+        assert!(matches!(
+            &mapped.effects[3],
+            ObjectConstructionEffect::DirectSet(effect)
+                if effect.has_implementation_body
+        ));
+        assert_ne!(
+            hash_of(&SemanticNodeData::ObjectSpreadProgram(program)),
+            hash_of(&SemanticNodeData::ObjectSpreadProgram(mapped)),
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "semantic_query/object_spread_projection_tests.rs"]
+mod object_spread_projection_tests;
 
 /// Per-root authority for authored conditional-`infer` identities.
 ///
@@ -1465,7 +1646,7 @@ impl MapperKind {
             return MapperKind::Computed;
         }
         let mut index_id = match index {
-            IndexKey::TypeNode(id) => id,
+            IndexKey::Computed(id) => id,
             _ => return MapperKind::Computed,
         };
         if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(index_id).as_deref() {
@@ -1507,19 +1688,9 @@ pub struct MapperKey {
 /// Indexed-access key operand. Mirrors the three TypeScript forms:
 /// `T[K]` where `K` is a literal string, a literal number, or another type.
 ///
-/// The `Number` payload is the proof-carrying [`CanonicalIndexInt`]:
-/// construction routes through the [`index_key`] module's two blessed
-/// constructors (the f64-checked
-/// [`index_key::integer_convention_index_key`] fold or the
-/// `Display`-checked [`CanonicalIndexInt::from_canonical_i64`]), so an
-/// unbounded `IndexKey::Number(n as i64)` cannot compile. Numbers the
-/// convention rejects stay [`IndexKey::TypeNode`] (G4.5 recovery).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum IndexKey {
-    String(Arc<str>),
-    Number(CanonicalIndexInt),
-    TypeNode(SemanticNodeId),
-}
+/// Indexed-access key using the same authored property-key carrier as object
+/// members. Unresolved key expressions remain semantic children.
+pub type IndexKey = AuthoredPropertyKey;
 
 /// Projection mode for member projection and indexed access.
 ///
@@ -2702,7 +2873,7 @@ pub const fn may_reduce_operator(ctx: ProjectionReductionContext) -> bool {
 /// and as the segment list in [`SemanticQueryKey::ProjectPath`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathSegment {
-    Member(Arc<str>),
+    Member(PropertyKey),
     Index(IndexKey),
 }
 
@@ -2730,11 +2901,14 @@ pub enum HopDecision {
 /// rooted at `value`; the family memo dedups across distinct entry paths.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SurfaceMember {
-    pub name: Arc<str>,
+    pub key: AuthoredPropertyKey,
     pub value: SemanticNodeId,
     pub optional: bool,
     pub readonly: bool,
-    pub is_method: bool,
+    pub method_kind: Option<verter_type_expr::ObjectMethodKind>,
+    /// Whether an authored method contributor carries an implementation body.
+    /// Always `false` for properties and synthetic method signatures.
+    pub has_implementation_body: bool,
     /// Declared accessibility of the member, carried verbatim from the IR
     /// ([`verter_type_expr::MemberVisibility`]). `Public` for every non-class
     /// origin (interface / type-literal / object-literal / mapped); a class
@@ -2813,6 +2987,16 @@ pub struct SurfaceMember {
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
 }
 
+impl SurfaceMember {
+    /// Ordinary string key for publication surfaces whose external schema is
+    /// string-only. Other key classes remain on the semantic member and must
+    /// be rejected or handled by the caller.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
+}
+
 /// One index signature (`{ [K: K_T]: V_T }` or `{ readonly [K: K_T]: V_T }`)
 /// on a surface. Carried as structured metadata rather than an opaque
 /// [`SemanticNodeId`] so consumers downstream of dispatch can read the
@@ -2853,10 +3037,6 @@ pub struct SurfaceView {
     pub index_signatures: Arc<[IndexSignature]>,
     pub keyspace: Option<SemanticNodeId>,
     has_index_signature: bool,
-    /// Whether the visible surface is complete. Object-literal spreads whose
-    /// operand surface is not yet enumerable retain that operand here, inside
-    /// the Object node's structural identity.
-    completeness: MemberSurfaceCompleteness,
 }
 
 /// Construction-only carrier for [`SurfaceView`]. Semantic consumers receive
@@ -2869,7 +3049,6 @@ pub(crate) struct SurfaceViewInit {
     pub index_signatures: Arc<[IndexSignature]>,
     pub keyspace: Option<SemanticNodeId>,
     pub has_index_signature: bool,
-    pub completeness: MemberSurfaceCompleteness,
 }
 
 macro_rules! surface_view {
@@ -2883,43 +3062,10 @@ macro_rules! surface_view {
 }
 pub(crate) use surface_view;
 
-/// Completeness of the known members carried by a [`SurfaceView`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub enum MemberSurfaceCompleteness {
-    /// Every member-producing operand was folded into the visible surface.
-    #[default]
-    Closed,
-    /// One or more spread operands could not be enumerated.
-    OpenSpread(OpenSpreadOperands),
-}
-
-/// Ordered identities of the non-enumerable operands in an open object spread.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct OpenSpreadOperands(Arc<[SemanticNodeId]>);
-
-impl OpenSpreadOperands {
-    #[must_use]
-    pub fn new(operands: Arc<[SemanticNodeId]>) -> Self {
-        Self(operands)
-    }
-
-    #[must_use]
-    pub fn as_slice(&self) -> &[SemanticNodeId] {
-        &self.0
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-/// Proof that a surface is a complete key domain.
+/// A surface's named members are its complete domain: spread-bearing objects
+/// are construction programs, never surfaces, so every [`SurfaceView`] is
+/// closed by construction. `ClosedSurfaceView` is the total witness form kept
+/// for symmetry with the projection-formula witnesses.
 #[derive(Clone, Copy)]
 pub struct ClosedSurfaceView<'a> {
     surface: &'a SurfaceView,
@@ -2947,7 +3093,6 @@ impl<'a> ClosedSurfaceView<'a> {
 pub enum SurfaceKeyProjection<'a> {
     Exact(&'a SurfaceMember),
     AbsentProven,
-    UnknownOnOpenSurface(&'a OpenSpreadOperands),
 }
 
 impl SurfaceView {
@@ -2959,7 +3104,6 @@ impl SurfaceView {
         index_signatures: Arc<[IndexSignature]>,
         keyspace: Option<SemanticNodeId>,
         has_index_signature: bool,
-        completeness: MemberSurfaceCompleteness,
     ) -> Self {
         Self {
             members,
@@ -2968,7 +3112,6 @@ impl SurfaceView {
             index_signatures,
             keyspace,
             has_index_signature,
-            completeness,
         }
     }
 
@@ -2980,7 +3123,6 @@ impl SurfaceView {
             init.index_signatures,
             init.keyspace,
             init.has_index_signature,
-            init.completeness,
         )
     }
 
@@ -2990,39 +3132,43 @@ impl SurfaceView {
         &self.members
     }
 
-    pub fn closed(&self) -> Option<ClosedSurfaceView<'_>> {
-        matches!(self.completeness, MemberSurfaceCompleteness::Closed)
-            .then_some(ClosedSurfaceView { surface: self })
+    /// The complete-domain witness. Total: every surface is closed by
+    /// construction, so the witness never fails.
+    pub fn closed(&self) -> ClosedSurfaceView<'_> {
+        ClosedSurfaceView { surface: self }
     }
 
-    pub fn project_known_key(&self, name: &str) -> SurfaceKeyProjection<'_> {
-        if let Some(known) = self
-            .members
-            .iter()
-            .find(|member| member.name.as_ref() == name)
-        {
+    pub fn project_known_key(&self, key: &PropertyKey) -> SurfaceKeyProjection<'_> {
+        // JS property identity: `{ 1: x }` and `{ "1": x }` are the same
+        // property — a numeric member answers the string-spelling needle
+        // (and vice versa), so element-access collision is the match rule.
+        if let Some(known) = self.members.iter().find(|member| {
+            member
+                .key
+                .as_known()
+                .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+        }) {
             return SurfaceKeyProjection::Exact(known);
         }
-        match &self.completeness {
-            MemberSurfaceCompleteness::Closed => SurfaceKeyProjection::AbsentProven,
-            MemberSurfaceCompleteness::OpenSpread(operands) => {
-                SurfaceKeyProjection::UnknownOnOpenSurface(operands)
-            }
-        }
+        SurfaceKeyProjection::AbsentProven
     }
 
-    /// Positive evidence that some index/open-domain fact exists. A `false`
-    /// result is not proof that an open spread has no additional keys.
+    /// Project an ordinary string key supplied by a string-only external
+    /// surface without coercing numeric, symbol, or computed members.
+    pub fn project_string_key(&self, name: &str) -> SurfaceKeyProjection<'_> {
+        if let Some(known) = self.members.iter().find(|member| {
+            matches!(&member.key, AuthoredPropertyKey::String(value) if value.as_ref() == name)
+        }) {
+            return SurfaceKeyProjection::Exact(known);
+        }
+        SurfaceKeyProjection::AbsentProven
+    }
+
+    /// Positive evidence that some index signature exists. A `false` result
+    /// is not proof that an open construction program has no additional
+    /// index facts.
     pub fn has_known_index_signature(&self) -> bool {
         self.has_index_signature
-    }
-
-    pub fn completeness(&self) -> &MemberSurfaceCompleteness {
-        &self.completeness
-    }
-
-    pub(crate) fn replace_completeness(&mut self, completeness: MemberSurfaceCompleteness) {
-        self.completeness = completeness;
     }
 
     pub(crate) fn with_positive_members(mut self, members: Arc<[SurfaceMember]>) -> Self {
@@ -3041,41 +3187,6 @@ impl SurfaceView {
         self.call_signatures = call_signatures;
         self
     }
-
-    pub fn open_spread_operands(&self) -> Option<&OpenSpreadOperands> {
-        match &self.completeness {
-            MemberSurfaceCompleteness::Closed => None,
-            MemberSurfaceCompleteness::OpenSpread(operands) => Some(operands),
-        }
-    }
-
-    pub fn is_open_spread(&self) -> bool {
-        self.open_spread_operands().is_some()
-    }
-
-    pub fn completeness_for_members(
-        &self,
-        _members: &[SurfaceMember],
-    ) -> MemberSurfaceCompleteness {
-        self.completeness.clone()
-    }
-
-    pub fn completeness_with_mapped_operands(
-        &self,
-        mut map: impl FnMut(SemanticNodeId) -> SemanticNodeId,
-    ) -> MemberSurfaceCompleteness {
-        let Some(open) = self.open_spread_operands() else {
-            return MemberSurfaceCompleteness::Closed;
-        };
-        let operands = open
-            .as_slice()
-            .iter()
-            .map(|operand| map(*operand))
-            .collect::<Vec<_>>();
-        MemberSurfaceCompleteness::OpenSpread(OpenSpreadOperands::new(Arc::from(
-            operands.into_boxed_slice(),
-        )))
-    }
 }
 
 impl std::hash::Hash for SurfaceView {
@@ -3088,7 +3199,6 @@ impl std::hash::Hash for SurfaceView {
         self.index_signatures.hash(state);
         self.keyspace.hash(state);
         self.has_index_signature.hash(state);
-        self.completeness.hash(state);
     }
 }
 
@@ -3417,8 +3527,8 @@ pub enum OriginMeta {
     /// every production emit site and consumed by the audit-validator's
     /// Rule-5 compliance check.
     ProjectedMember {
-        /// Projected member name.
-        name: Arc<str>,
+        /// Exact projected member key.
+        key: PropertyKey,
         /// Structural provenance for this single-hop ProjectMember edge.
         provenance: verter_audit::MemberEdgeProvenance,
     },
@@ -3891,9 +4001,12 @@ pub enum QueryResult<T> {
 ///
 /// Every live [`SemanticQueryKey`] that PRODUCES a value produces
 /// [`TypeNode`](Self::TypeNode) — the interned graph node id for the
-/// resolved type — EXCEPT [`SemanticQueryKey::ResolveOverloadSet`] and
-/// [`SemanticQueryKey::ClassifyBroadRuntime`], whose live producers fill
-/// [`OverloadSet`](Self::OverloadSet) and
+/// resolved type — EXCEPT [`SemanticQueryKey::ProjectObjectSpread`],
+/// [`SemanticQueryKey::ResolveOverloadSet`], and
+/// [`SemanticQueryKey::ClassifyBroadRuntime`]. The projection family has the
+/// dedicated [`ObjectProjection`](Self::ObjectProjection) domain and remains
+/// non-producing until its ordered-effect evaluator lands; the other two live
+/// producers fill [`OverloadSet`](Self::OverloadSet) and
 /// [`BroadRuntime`](Self::BroadRuntime), respectively. The
 /// non-producing keys (`Relate`, plus the `NonProducingPendingReducer`
 /// variants `ResolveAmbientNamespace`, `ResolveEnum`, `ApparentType`,
@@ -3908,6 +4021,10 @@ pub enum SemanticQueryValue {
     /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`]
     /// and [`SemanticQueryKey::ClassifyBroadRuntime`].
     TypeNode(SemanticNodeId),
+    /// Selector-aware correlated projection facts for one authored object
+    /// construction program. This is intentionally not disguised as a graph
+    /// type node: closed-domain operations remain witness-gated on the formula.
+    ObjectProjection(ObjectProjectionFormula),
     /// Narrowed / contextual type produced by flow or contextual program
     /// analysis. No live producer.
     ProgramAnalysis(ProgramAnalysisValue),
@@ -3950,6 +4067,7 @@ pub enum SemanticQueryValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SemanticQueryValueTag {
     TypeNode,
+    ObjectProjection,
     ProgramAnalysis,
     DeclarationAnalysis,
     OverloadSet,
@@ -3964,6 +4082,7 @@ impl SemanticQueryValue {
     pub fn tag(&self) -> SemanticQueryValueTag {
         match self {
             Self::TypeNode(_) => SemanticQueryValueTag::TypeNode,
+            Self::ObjectProjection(_) => SemanticQueryValueTag::ObjectProjection,
             Self::ProgramAnalysis(_) => SemanticQueryValueTag::ProgramAnalysis,
             Self::DeclarationAnalysis(_) => SemanticQueryValueTag::DeclarationAnalysis,
             Self::OverloadSet(_) => SemanticQueryValueTag::OverloadSet,
@@ -5457,6 +5576,17 @@ pub enum SemanticQueryKey {
     NormalizeIntersection {
         members: Arc<[SemanticNodeId]>,
     },
+    /// Selector-aware projection of one authored object-construction program.
+    ///
+    /// The complete identity is exactly `(program, selector, context)`.
+    /// `context` retains `R/T/L/J`, substitution/prepared-family identity,
+    /// exact-optional policy, and the reduction context. Version facts stay on
+    /// the cached value's read set, never on this content-free key.
+    ProjectObjectSpread {
+        program: SemanticNodeId,
+        selector: ObjectProjectionSelector,
+        context: ObjectSpreadProjectionContext,
+    },
     /// Path-precise projection rooted at `base` and walking each
     /// [`PathSegment`] in `path`. The empty-path form (`path: Arc::from([])`)
     /// is the canonical shape of "expand the whole surface" — the retired
@@ -5864,6 +5994,7 @@ pub enum SemanticQueryKeyTag {
     TypeOf,
     NormalizeUnion,
     NormalizeIntersection,
+    ProjectObjectSpread,
     ProjectPath,
     Relate,
     ResolveMacroPayload,
@@ -5894,6 +6025,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::TypeOf,
         SemanticQueryKeyTag::NormalizeUnion,
         SemanticQueryKeyTag::NormalizeIntersection,
+        SemanticQueryKeyTag::ProjectObjectSpread,
         SemanticQueryKeyTag::ProjectPath,
         SemanticQueryKeyTag::Relate,
         SemanticQueryKeyTag::ResolveMacroPayload,
@@ -5926,6 +6058,7 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::TypeOf => "TypeOf",
             SemanticQueryKeyTag::NormalizeUnion => "NormalizeUnion",
             SemanticQueryKeyTag::NormalizeIntersection => "NormalizeIntersection",
+            SemanticQueryKeyTag::ProjectObjectSpread => "ProjectObjectSpread",
             SemanticQueryKeyTag::ProjectPath => "ProjectPath",
             SemanticQueryKeyTag::Relate => "Relate",
             SemanticQueryKeyTag::ResolveMacroPayload => "ResolveMacroPayload",
@@ -5950,7 +6083,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 23 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 24 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -5998,6 +6131,9 @@ impl SemanticQueryKey {
             SemanticQueryKey::NormalizeUnion { .. } => SemanticQueryKeyTag::NormalizeUnion,
             SemanticQueryKey::NormalizeIntersection { .. } => {
                 SemanticQueryKeyTag::NormalizeIntersection
+            }
+            SemanticQueryKey::ProjectObjectSpread { .. } => {
+                SemanticQueryKeyTag::ProjectObjectSpread
             }
             SemanticQueryKey::ProjectPath { .. } => SemanticQueryKeyTag::ProjectPath,
             SemanticQueryKey::Relate { .. } => SemanticQueryKeyTag::Relate,
@@ -6233,10 +6369,203 @@ pub struct TupleElement {
 /// text as a typed node so the structural graph can be lowered without any
 /// name/import/type reduction. They are resolved at demand time through the
 /// shared dispatch; until a producer emits them they carry no behaviour.
+/// Canonical semantic identity of a property key.
+pub type PropertyKey =
+    verter_type_expr::PropertyKey<verter_type_expr::facts::ValueDeclIdentityPart>;
+
+/// An authored property key, retaining unresolved computed expressions as
+/// semantic children.
+pub type AuthoredPropertyKey = verter_type_expr::AuthoredPropertyKey<
+    SemanticNodeId,
+    verter_type_expr::facts::ValueDeclIdentityPart,
+>;
+
+fn authored_property_key_child(key: &AuthoredPropertyKey) -> Option<SemanticNodeId> {
+    match key {
+        AuthoredPropertyKey::String(_)
+        | AuthoredPropertyKey::Number(_)
+        | AuthoredPropertyKey::UniqueSymbol(_) => None,
+        AuthoredPropertyKey::Computed(node) => Some(*node),
+    }
+}
+
+/// Lossless authored property write in an object construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthoredPropertyEffect {
+    pub key: AuthoredPropertyKey,
+    pub value: SemanticNodeId,
+    pub optional: bool,
+    pub readonly: bool,
+    pub visibility: verter_type_expr::MemberVisibility,
+    pub spans: verter_type_expr::MemberSpans,
+    pub declaration_origin: Option<Arc<str>>,
+    pub declared_in_macro_type_arg: MacroOwnBodyStamp,
+    pub merge_role: MergeRoleStamp,
+    pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
+}
+
+/// Lossless authored method write in an object construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthoredMethodEffect {
+    pub key: AuthoredPropertyKey,
+    pub signature: SemanticNodeId,
+    pub optional: bool,
+    pub has_implementation_body: bool,
+    pub visibility: verter_type_expr::MemberVisibility,
+    pub spans: verter_type_expr::MemberSpans,
+    pub declaration_origin: Option<Arc<str>>,
+    pub declared_in_macro_type_arg: MacroOwnBodyStamp,
+    pub merge_role: MergeRoleStamp,
+    pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
+}
+
+/// Lossless authored getter or setter write in an object construction. The
+/// enclosing effect variant carries the accessor kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthoredAccessorEffect {
+    pub key: AuthoredPropertyKey,
+    pub signature: SemanticNodeId,
+    pub optional: bool,
+    pub has_implementation_body: bool,
+    pub visibility: verter_type_expr::MemberVisibility,
+    pub spans: verter_type_expr::MemberSpans,
+    pub declaration_origin: Option<Arc<str>>,
+    pub declared_in_macro_type_arg: MacroOwnBodyStamp,
+    pub merge_role: MergeRoleStamp,
+    pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
+}
+
+/// Lossless authored index signature in an object construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthoredIndexEffect {
+    pub key_type: SemanticNodeId,
+    pub value_type: SemanticNodeId,
+    pub readonly: bool,
+    pub spans: verter_type_expr::IndexSignatureSpans,
+    pub declaration_origin: Option<Arc<str>>,
+}
+
+/// One source-ordered effect in a spread-bearing object construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ObjectConstructionEffect {
+    DirectProperty(AuthoredPropertyEffect),
+    DirectMethod(AuthoredMethodEffect),
+    DirectGet(AuthoredAccessorEffect),
+    DirectSet(AuthoredAccessorEffect),
+    DirectIndex(AuthoredIndexEffect),
+    DirectCall(SemanticNodeId),
+    DirectConstruct(SemanticNodeId),
+    Spread(SemanticNodeId),
+}
+
+impl ObjectConstructionEffect {
+    fn push_child_nodes(&self, children: &mut Vec<SemanticNodeId>) {
+        match self {
+            Self::DirectProperty(effect) => {
+                children.extend(authored_property_key_child(&effect.key));
+                children.push(effect.value);
+            }
+            Self::DirectMethod(effect) => {
+                children.extend(authored_property_key_child(&effect.key));
+                children.push(effect.signature);
+            }
+            Self::DirectGet(effect) | Self::DirectSet(effect) => {
+                children.extend(authored_property_key_child(&effect.key));
+                children.push(effect.signature);
+            }
+            Self::DirectIndex(effect) => {
+                children.push(effect.key_type);
+                children.push(effect.value_type);
+            }
+            Self::DirectCall(node) | Self::DirectConstruct(node) | Self::Spread(node) => {
+                children.push(*node);
+            }
+        }
+    }
+}
+
+/// Immutable source-ordered authority for a spread-bearing object.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ObjectSpreadProgram {
+    pub effects: Arc<[ObjectConstructionEffect]>,
+}
+
+impl ObjectSpreadProgram {
+    /// Iterate every semantic child in effect order.
+    pub fn child_nodes(&self) -> impl Iterator<Item = SemanticNodeId> + '_ {
+        let mut children = Vec::new();
+        for effect in self.effects.iter() {
+            effect.push_child_nodes(&mut children);
+        }
+        children.into_iter()
+    }
+
+    /// Rebuild the program after applying `map` to every semantic child.
+    pub fn map_child_nodes(&self, mut map: impl FnMut(SemanticNodeId) -> SemanticNodeId) -> Self {
+        let effects = self
+            .effects
+            .iter()
+            .map(|effect| match effect {
+                ObjectConstructionEffect::DirectProperty(effect) => {
+                    let mut effect = effect.clone();
+                    if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
+                        *node = map(*node);
+                    }
+                    effect.value = map(effect.value);
+                    ObjectConstructionEffect::DirectProperty(effect)
+                }
+                ObjectConstructionEffect::DirectMethod(effect) => {
+                    let mut effect = effect.clone();
+                    if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
+                        *node = map(*node);
+                    }
+                    effect.signature = map(effect.signature);
+                    ObjectConstructionEffect::DirectMethod(effect)
+                }
+                ObjectConstructionEffect::DirectGet(effect) => {
+                    let mut effect = effect.clone();
+                    if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
+                        *node = map(*node);
+                    }
+                    effect.signature = map(effect.signature);
+                    ObjectConstructionEffect::DirectGet(effect)
+                }
+                ObjectConstructionEffect::DirectSet(effect) => {
+                    let mut effect = effect.clone();
+                    if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
+                        *node = map(*node);
+                    }
+                    effect.signature = map(effect.signature);
+                    ObjectConstructionEffect::DirectSet(effect)
+                }
+                ObjectConstructionEffect::DirectIndex(effect) => {
+                    let mut effect = effect.clone();
+                    effect.key_type = map(effect.key_type);
+                    effect.value_type = map(effect.value_type);
+                    ObjectConstructionEffect::DirectIndex(effect)
+                }
+                ObjectConstructionEffect::DirectCall(node) => {
+                    ObjectConstructionEffect::DirectCall(map(*node))
+                }
+                ObjectConstructionEffect::DirectConstruct(node) => {
+                    ObjectConstructionEffect::DirectConstruct(map(*node))
+                }
+                ObjectConstructionEffect::Spread(node) => {
+                    ObjectConstructionEffect::Spread(map(*node))
+                }
+            })
+            .collect::<Vec<_>>();
+        Self {
+            effects: Arc::from(effects.into_boxed_slice()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum SemanticNodeData {
     Alias(SemanticNodeId),
     Object(SurfaceView),
+    ObjectSpreadProgram(ObjectSpreadProgram),
     Union(Arc<[SemanticNodeId]>),
     Intersection(Arc<[SemanticNodeId]>),
     Primitive(PrimitiveKind),
@@ -6576,6 +6905,7 @@ impl SemanticNodeData {
         match self {
             Self::Alias(_) => 0,
             Self::Object(_) => 1,
+            Self::ObjectSpreadProgram(_) => 30,
             Self::Union(_) => 2,
             Self::Intersection(_) => 3,
             Self::Primitive(_) => 4,
@@ -6624,6 +6954,7 @@ impl SemanticNodeData {
             }
             Self::Alias(_)
             | Self::Object(_)
+            | Self::ObjectSpreadProgram(_)
             | Self::Union(_)
             | Self::Intersection(_)
             | Self::Primitive(_)
@@ -6670,6 +7001,7 @@ impl PartialEq for SemanticNodeData {
         match (self, other) {
             (Self::Alias(a), Self::Alias(b)) => a == b,
             (Self::Object(a), Self::Object(b)) => a == b,
+            (Self::ObjectSpreadProgram(a), Self::ObjectSpreadProgram(b)) => a == b,
             (Self::Union(a), Self::Union(b)) => a == b,
             (Self::Intersection(a), Self::Intersection(b)) => a == b,
             (Self::Primitive(a), Self::Primitive(b)) => a == b,
@@ -6841,6 +7173,9 @@ impl std::hash::Hash for SemanticNodeData {
             }
             Self::Object(surface) => {
                 surface.hash(state);
+            }
+            Self::ObjectSpreadProgram(program) => {
+                program.hash(state);
             }
             Self::Union(members) => {
                 members.hash(state);
@@ -7059,8 +7394,9 @@ pub trait SemanticQueryApi {
     /// Canonical entry point. Returns the domain-agnostic
     /// [`SemanticQueryValue`] wrapped with the provenance of the producing
     /// work. Every live key that produces a value resolves to
-    /// [`SemanticQueryValue::TypeNode`] except `ResolveOverloadSet`
-    /// ([`SemanticQueryValue::OverloadSet`]) and `ClassifyBroadRuntime`
+    /// [`SemanticQueryValue::TypeNode`] except `ProjectObjectSpread`
+    /// ([`SemanticQueryValue::ObjectProjection`]), `ResolveOverloadSet`
+    /// ([`SemanticQueryValue::OverloadSet`]), and `ClassifyBroadRuntime`
     /// ([`SemanticQueryValue::BroadRuntime`]); the non-producing keys
     /// (e.g. `Relate`) return `Miss`. Callers that want the node narrow
     /// with [`execute_type_node`].
@@ -7576,6 +7912,14 @@ mod tests {
                 SemanticQueryValueTag::TypeNode,
             ),
             (
+                SemanticQueryValue::ObjectProjection(
+                    object_spread_projection::test_support::closed_formula([
+                        object_spread_projection::test_support::closed_alternative([]),
+                    ]),
+                ),
+                SemanticQueryValueTag::ObjectProjection,
+            ),
+            (
                 SemanticQueryValue::ProgramAnalysis(ProgramAnalysisValue { node }),
                 SemanticQueryValueTag::ProgramAnalysis,
             ),
@@ -7613,13 +7957,13 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: seven cases, seven unique tags. Sort before dedup so
+        // Distinctness: eight cases, eight unique tags. Sort before dedup so
         // non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
         tags.sort_by_key(|t| *t as u8);
         tags.dedup();
-        assert_eq!(tags.len(), 7, "every value domain must have a distinct tag");
+        assert_eq!(tags.len(), 8, "every value domain must have a distinct tag");
     }
 
     /// Taint shape: every `ResultTaint` / `BrokenInputClass` variant is

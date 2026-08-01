@@ -3,7 +3,8 @@ pub mod schema;
 pub mod snapshot;
 
 pub use builder::{
-    GraphBuilder, GraphFunctionParam, GraphNode, GraphObjectMember, GraphTupleElement,
+    GraphBuilder, GraphFunctionParam, GraphNode, GraphObjectMember, GraphPropertyKey,
+    GraphTupleElement,
 };
 pub use schema::*;
 pub use snapshot::{ResolvedJsdocTypeOutput, ResolvedTypeGraphSnapshot, SnapshotCaptureError};

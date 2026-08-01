@@ -32,6 +32,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use verter_type_expr::facts::FactPropertyKey;
 use verter_type_expr::TopLevelOwnerId;
 
 /// Truncated SHA-256 hash used everywhere as a content / structural
@@ -276,7 +277,7 @@ pub enum FactKey {
     /// `(canonical, parse_stable_hash, exporter, name, space)`.
     Member {
         exporter: InternedName,
-        name: InternedName,
+        name: FactPropertyKey,
         space: SymbolSpace,
     },
     /// Member header (name + kind + exporter salt). Eager parse-time.
@@ -284,7 +285,7 @@ pub enum FactKey {
     /// `b` does not force re-walking `a`'s body.
     MemberPresence {
         exporter: InternedName,
-        name: InternedName,
+        name: FactPropertyKey,
         space: SymbolSpace,
     },
     /// Ordered fingerprint over the exporter's full member name +
@@ -760,12 +761,12 @@ mod registry_tests {
             },
             FactKey::Member {
                 exporter: InternedName::from("X"),
-                name: InternedName::from("a"),
+                name: FactPropertyKey::identifier("a"),
                 space: SymbolSpace::Type,
             },
             FactKey::MemberPresence {
                 exporter: InternedName::from("X"),
-                name: InternedName::from("a"),
+                name: FactPropertyKey::identifier("a"),
                 space: SymbolSpace::Type,
             },
             FactKey::MemberShape {

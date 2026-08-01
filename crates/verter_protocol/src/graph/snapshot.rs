@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use crate::graph::builder::{
     GraphBuilder, GraphConditionalFrame, GraphFunctionParam, GraphNode, GraphObjectMember,
-    GraphTupleElement,
+    GraphPropertyKey, GraphTupleElement,
 };
 
 /// Content-derived stable identity of one captured snapshot — a structural
@@ -485,7 +485,23 @@ fn validate_node_refs(
             nid(element.ty)
         }),
         PersistedGraphNode::Object { members } => members.iter().try_for_each(|member| {
-            sid(member.name)?;
+            if let Some(key) = &member.key {
+                match key {
+                    GraphPropertyKey::String { value } => sid(*value)?,
+                    GraphPropertyKey::Number { .. } => {}
+                    GraphPropertyKey::UniqueSymbol {
+                        canonical_id,
+                        symbol,
+                        member_path,
+                        ..
+                    } => {
+                        sid(*canonical_id)?;
+                        sid(*symbol)?;
+                        member_path.iter().try_for_each(|id| sid(*id))?;
+                    }
+                    GraphPropertyKey::Computed { node } => nid(*node)?,
+                }
+            }
             nid(member.ty)?;
             sid(member.key_name)?;
             nid(member.key_type)?;
@@ -688,7 +704,7 @@ mod tests {
         };
         let object_member = GraphObjectMember {
             kind: 1,
-            name: 2,
+            key: Some(GraphPropertyKey::String { value: 2 }),
             ty: 3,
             optional: false,
             readonly: true,
@@ -696,6 +712,8 @@ mod tests {
             key_type: 5,
             value_type: 6,
             function: 7,
+            method_kind: 1,
+            has_implementation_body: true,
         };
         let function_param = GraphFunctionParam {
             name: 1,

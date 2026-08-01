@@ -56,6 +56,7 @@ mod reverse_index;
 pub(crate) use relation_memo::InlineRelationFlight;
 
 mod stats;
+mod wait_cycle;
 // `SemanticGraphStore`'s `#[doc(hidden)]` `*_for_tests` publish / probe
 // helpers live in a sibling continuation-impl file so the hot-path memo
 // logic here stays under the Tier-2 module-size budget.
@@ -86,6 +87,9 @@ use interner::SWEEP_INTERVAL;
 #[cfg(test)]
 pub use member_index::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX;
 
+#[cfg(test)]
+mod object_spread_projection_tests;
+
 use crate::semantic_query::demand::{
     cached_satisfies, MaterializedPoint, MaterializedSet, ProjectionPath,
 };
@@ -108,6 +112,7 @@ use inflight::{
 };
 use prepared::PreparedKeyHandle;
 use stats::{AtomicSemanticGraphStats, EntriesLockGuard, InFlightStatsGuard};
+use wait_cycle::{ExecutionOwnerScope, WaitForGraph};
 
 #[cfg(any(test, feature = "test-support"))]
 use test_gates::validate_running_probe;
@@ -277,6 +282,10 @@ pub struct SemanticGraphStore {
     /// the prepared `(family, slot)` projection, so invalidation sweeps
     /// read it instead of re-running `family_and_slot` per entry.
     inflight: Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>,
+    /// Generation-qualified execution owners plus the cooperative wait-for
+    /// graph. Nested semantic queries on one synchronous dispatch stack share
+    /// an owner; cross-thread joiners add a temporary edge before parking.
+    wait_for_graph: WaitForGraph,
     /// Independently-owned binding relation flights. Binding roots carry
     /// transaction-local inference candidates, so concurrent callers must
     /// never join one another's cold work. They still register here while
@@ -2479,6 +2488,8 @@ impl SemanticGraphStore {
         O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
         R: FnOnce() -> SemanticNodeId,
     {
+        let execution_owner_scope = ExecutionOwnerScope::enter(&self.wait_for_graph);
+        let execution_owner = execution_owner_scope.owner();
         let mut miss_recorded = false;
         let mut retries = 0usize;
 
@@ -2572,7 +2583,11 @@ impl SemanticGraphStore {
             //    full `SemanticQueryKey` clone.
             if independent_owner {
                 let inflight = Arc::new(InflightEntry::new());
-                inflight.state.lock().claimed = true;
+                {
+                    let mut state = inflight.state.lock();
+                    state.claimed = true;
+                    state.owner = Some(execution_owner);
+                }
                 self.independent_inflight
                     .lock()
                     .entry(prepared.clone())
@@ -2591,6 +2606,27 @@ impl SemanticGraphStore {
             // Claim ownership or wait for the winner to publish.
             let mut state = inflight.state.lock();
             if state.claimed {
+                let wait_registration =
+                    if state.completed.is_none() && !state.aborted && !ctx.is_cancelled() {
+                        let winner = state.owner.unwrap_or(execution_owner);
+                        match self.wait_for_graph.register_wait(execution_owner, winner) {
+                            Ok(registration) => Some(registration),
+                            Err(wait_cycle::WaitCycle) => {
+                                drop(state);
+                                return CacheRead {
+                                    value: QueryResult::Recursive(recursion_sentinel()),
+                                    dep_signature: empty_signature(),
+                                    walker_diagnostics: Arc::from([]),
+                                    // A cross-thread wait-cycle carrier is an
+                                    // operational escape, never a warm fact.
+                                    cache_suppress: true,
+                                    result_is_partial: true,
+                                };
+                            }
+                        }
+                    } else {
+                        None
+                    };
                 // Cooperative wait — block on the per-entry condvar until
                 // `completed` is set OR the entry is aborted by a
                 // canonical-invalidation sweep. Joiners never busy-spin.
@@ -2616,6 +2652,7 @@ impl SemanticGraphStore {
                         .ready
                         .wait_for(&mut state, std::time::Duration::from_millis(2));
                 }
+                drop(wait_registration);
                 self.stats
                     .waits_ms
                     .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -2747,26 +2784,33 @@ impl SemanticGraphStore {
                 // (`get_validated`, validated under the follower's
                 // `ctx`) also misses the winner's published entry, so
                 // the follower runs its own cold build.
-                if let Some(ref carrier) = graph_carrier {
-                    let carrier_view_validates =
-                        carrier.validate_with_self_roots(ctx, &winner_self_roots);
-                    let lacks_view_discriminating_self_root =
-                        !carrier.has_view_discriminating_self_root(&winner_self_roots);
-                    if !carrier_view_validates || lacks_view_discriminating_self_root {
-                        self.stats
-                            .joiner_view_mismatch_forks
-                            .fetch_add(1, Ordering::Relaxed);
-                        {
-                            let mut table = self.inflight.lock();
-                            if table
-                                .get(&prepared)
-                                .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))
+                // A recursion carrier is an operational ReturnOnly escape,
+                // not a view-specific semantic value. Propagate it around a
+                // broken wait cycle without forcing the follower to fork and
+                // re-enter the just-retired flight. Value and error payloads
+                // retain the existing strict follower-view validation.
+                if !matches!(result, QueryResult::Recursive(_)) {
+                    if let Some(ref carrier) = graph_carrier {
+                        let carrier_view_validates =
+                            carrier.validate_with_self_roots(ctx, &winner_self_roots);
+                        let lacks_view_discriminating_self_root =
+                            !carrier.has_view_discriminating_self_root(&winner_self_roots);
+                        if !carrier_view_validates || lacks_view_discriminating_self_root {
+                            self.stats
+                                .joiner_view_mismatch_forks
+                                .fetch_add(1, Ordering::Relaxed);
                             {
-                                table.remove(&prepared);
+                                let mut table = self.inflight.lock();
+                                if table
+                                    .get(&prepared)
+                                    .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))
+                                {
+                                    table.remove(&prepared);
+                                }
                             }
+                            drop(inflight);
+                            continue;
                         }
-                        drop(inflight);
-                        continue;
                     }
                 }
 
@@ -2800,6 +2844,7 @@ impl SemanticGraphStore {
                 };
             }
             state.claimed = true;
+            state.owner = Some(execution_owner);
             drop(state);
             break inflight;
         };
@@ -2847,6 +2892,7 @@ impl SemanticGraphStore {
             pending_prefix_backfills,
             satisfied_projection,
         } = build_output;
+        let result = prepared::enforce_projection_value_shape(prepared.key(), result);
         // §3.4 default: a non-path build (`Instantiate`, `KeyOf`,
         // `TypeOf`, …) leaves `satisfied_projection` EMPTY (it has no
         // path-walk hops to record). Default it to the single terminal
@@ -3890,24 +3936,10 @@ fn empty_signature() -> DepSignature {
 // Counter helpers (Decision #5: single helper, dual-target write)
 // ──────────────────────────────────────────────────────────────────────────
 //
-// `inflight_aborted_retries` and `cold_aborts_swept` need both
-// host-owned global aggregates AND per-request attribution. Bumping
-// only the global leaves the audit miner's `CacheOutcomeTally` blind;
-// bumping only the per-request breaks every existing telemetry
-// consumer that reads `stats_snapshot()`. The helpers below collapse
-// both writes into one call site so the two halves cannot diverge.
-//
-// The helpers consult `current_request_context()` directly (the
-// session-side TLS slot installed by `RequestContextGuard::install`).
-// This matches the existing per-request helpers in `host_manage`
-// (`record_materialize_structure_call`, `record_dep_signature_merge`,
-// etc.) and keeps the audit-mining flow homogeneous: every counter
-// the miner reads from `RequestContext` is written through a helper
-// that consulted `current_request_context()`.
-//
-// Architecture guard `audit_counter_single_helper` (in
-// `crates/verter_session/tests/cases/architecture_guards.rs`) rejects any
-// direct `self.stats.<counter>.fetch_add` for these two counters
+// `inflight_aborted_retries` and `cold_aborts_swept` write both the global
+// aggregate AND the per-request mirror through one helper so the two halves
+// cannot diverge. Architecture guard `audit_counter_single_helper` rejects
+// any direct `self.stats.<counter>.fetch_add` for these two counters
 // outside the helper bodies in this module.
 
 /// Bump `inflight_aborted_retries` on both the global
@@ -3954,3 +3986,5 @@ fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
 mod cancellation_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wait_cycle_tests;

@@ -23,14 +23,15 @@
 use std::sync::Arc;
 
 use verter_type_expr::facts::{
-    DeferredKeyUtilityEdge, DeferredKeyUtilityKind, ExternalRouteRefFact, KeyDomainFact,
-    KeySourceFact, KeySourceRefFact, MemberDependencyEdge, MemberNamesRoute, MemberPathSeedEdge,
-    MemberPathSeedTarget, RouteDependencyRefFact, ShallowRouteFacts, WholeRouteContextFact,
-    WholeRouteEdgeFact,
+    DeferredKeyUtilityEdge, DeferredKeyUtilityKind, ExternalRouteRefFact, FactPropertyKey,
+    KeyDomainFact, KeySourceFact, KeySourceRefFact, MemberDependencyEdge, MemberNamesRoute,
+    MemberPathSeedEdge, MemberPathSeedTarget, RouteDependencyRefFact, ShallowRouteFacts,
+    WholeRouteContextFact, WholeRouteEdgeFact,
 };
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace, SymbolBodyLocator};
 use verter_type_expr::{
-    LiteralValue, ObjectMember, ObjectProperty, RouteDemand, TopLevelOwnerId, TypeExpr,
+    AuthoredPropertyKey, LiteralValue, ObjectMember, ObjectProperty, PropertyKey, RouteDemand,
+    TopLevelOwnerId, TypeExpr, TypePropertyKey,
 };
 
 use super::SymbolSpace;
@@ -123,13 +124,17 @@ pub fn produce_shallow_route_facts(
     // reserved for the genuine L1 open/undecidable class, which this
     // syntactic producer never claims.
     let direct_props = direct_object_properties(dep_bodies);
-    let member_names = MemberNamesRoute::Closed(
-        direct_props
-            .iter()
-            .map(|prop| prop.name.clone())
-            .collect::<Vec<_>>()
-            .into(),
-    );
+    let member_names = if direct_object_has_computed_properties(dep_bodies) {
+        MemberNamesRoute::OpenKeyDomain
+    } else {
+        MemberNamesRoute::Closed(
+            direct_props
+                .iter()
+                .filter_map(|prop| prop.key.cloned_known())
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    };
 
     // member_dependency_edges: per direct property, the type refs of its value
     // annotation (collect order), classified local-first (the BFS pops
@@ -146,8 +151,11 @@ pub fn produce_shallow_route_facts(
             .into_iter()
             .map(|name| producer.classify_dep_local_first(name))
             .collect();
+        let Some(key) = prop.key.cloned_known() else {
+            continue;
+        };
         member_dependency_edges.push(MemberDependencyEdge {
-            member: prop.name.clone(),
+            member: key,
             depends_on: depends_on.into(),
         });
     }
@@ -168,7 +176,10 @@ pub fn produce_shallow_route_facts(
         }
     }
     for prop in &direct_props {
-        producer.enumerate_seed_edges(prop, vec![prop.name.clone()], &mut member_path_seed_edges);
+        let Some(key) = prop.key.cloned_known() else {
+            continue;
+        };
+        producer.enumerate_seed_edges(prop, vec![key], &mut member_path_seed_edges);
     }
 
     // whole_route_edges: the decl's own body walked once from `Root`. A merged
@@ -242,12 +253,16 @@ pub fn produce_key_source_fact(bodies: &[TypeExpr], lens: &dyn RouteFactLens) ->
 fn collect_key_source_arms(
     expr: &TypeExpr,
     lens: &dyn RouteFactLens,
-    literals: &mut Vec<String>,
+    literals: &mut Vec<FactPropertyKey>,
     aliases: &mut Vec<KeySourceRefFact>,
 ) -> bool {
     match expr {
         TypeExpr::Literal(LiteralValue::String(value)) => {
-            literals.push(value.clone());
+            literals.push(PropertyKey::String(Arc::from(value.as_str())));
+            true
+        }
+        TypeExpr::Literal(LiteralValue::Number(value)) => {
+            literals.push(number_property_key(*value));
             true
         }
         TypeExpr::Union(types) => {
@@ -283,7 +298,7 @@ fn collect_key_source_arms(
 enum KeyExtraction {
     /// Fully-literal keys, sorted + deduped (possibly empty — empty keeps the
     /// legacy `utility → None` fall-through).
-    Literal(Vec<String>),
+    Literal(Vec<FactPropertyKey>),
     /// The whole key expression is a bare LOCAL-symbol alias — the
     /// deferred class (recipe recorded; enumerated downstream).
     DeferredAlias(String),
@@ -291,6 +306,10 @@ enum KeyExtraction {
     /// single-symbol recipe cannot carry it; fail closed (the utility
     /// contributes nothing — never a wrong route).
     Poisoned,
+}
+
+fn number_property_key(value: f64) -> FactPropertyKey {
+    PropertyKey::from_js_number(value)
 }
 
 struct RouteFactProducer<'l> {
@@ -325,7 +344,7 @@ impl RouteFactProducer<'_> {
     fn enumerate_seed_edges(
         &self,
         prop: &ObjectProperty,
-        path: Vec<String>,
+        path: Vec<TypePropertyKey>,
         out: &mut Vec<MemberPathSeedEdge>,
     ) {
         // Terminal edge: the exact-path seed refs (the legacy
@@ -363,8 +382,11 @@ impl RouteFactProducer<'_> {
         // dedup), one segment deeper. Complex values enumerate nothing —
         // the fail-closed MISS.
         for child in direct_object_properties(std::slice::from_ref(&prop.ty)) {
+            let Some(key) = child.key.cloned_known() else {
+                continue;
+            };
             let mut child_path = path.clone();
-            child_path.push(child.name.clone());
+            child_path.push(key);
             self.enumerate_seed_edges(child, child_path, out);
         }
     }
@@ -826,10 +848,13 @@ impl RouteFactProducer<'_> {
 
     /// Literal-only extraction below the top level: `None` = poisoned (a
     /// local-symbol ref inside a composite).
-    fn extract_literal_keys_inner(&self, expr: &TypeExpr) -> Option<Vec<String>> {
+    fn extract_literal_keys_inner(&self, expr: &TypeExpr) -> Option<Vec<FactPropertyKey>> {
         match expr {
             TypeExpr::Literal(verter_type_expr::LiteralValue::String(value)) => {
-                Some(vec![value.clone()])
+                Some(vec![PropertyKey::String(Arc::from(value.as_str()))])
+            }
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Number(value)) => {
+                Some(vec![number_property_key(*value)])
             }
             TypeExpr::Union(types) => {
                 let mut keys = Vec::new();
@@ -861,7 +886,7 @@ impl RouteFactProducer<'_> {
     fn extract_indexed_access_base<'e>(
         &self,
         expr: &'e TypeExpr,
-    ) -> Option<(&'e TypeExpr, Vec<String>)> {
+    ) -> Option<(&'e TypeExpr, Vec<FactPropertyKey>)> {
         match expr {
             TypeExpr::Parenthesized(inner) => self.extract_indexed_access_base(inner),
             TypeExpr::IndexedAccess { object, index } => {
@@ -930,14 +955,16 @@ fn direct_object_properties(bodies: &[TypeExpr]) -> Vec<&ObjectProperty> {
 fn collect_direct_object_properties<'a>(
     body: &'a TypeExpr,
     out: &mut Vec<&'a ObjectProperty>,
-    seen: &mut rustc_hash::FxHashSet<String>,
+    seen: &mut rustc_hash::FxHashSet<TypePropertyKey>,
 ) {
     match body {
         TypeExpr::Object(obj) => {
             for member in &obj.properties {
                 if let ObjectMember::Property(prop) = member {
-                    if seen.insert(prop.name.clone()) {
-                        out.push(prop);
+                    if let Some(key) = prop.key.cloned_known() {
+                        if seen.insert(key) {
+                            out.push(prop);
+                        }
                     }
                 }
             }
@@ -952,6 +979,25 @@ fn collect_direct_object_properties<'a>(
         }
         _ => {}
     }
+}
+
+fn direct_object_has_computed_properties(bodies: &[TypeExpr]) -> bool {
+    bodies.iter().any(|body| match body {
+        TypeExpr::Object(object) => object.properties.iter().any(|member| {
+            matches!(
+                member,
+                ObjectMember::Property(ObjectProperty {
+                    key: AuthoredPropertyKey::Computed(_),
+                    ..
+                })
+            )
+        }),
+        TypeExpr::Intersection(parts) => direct_object_has_computed_properties(parts),
+        TypeExpr::Parenthesized(inner) => {
+            direct_object_has_computed_properties(std::slice::from_ref(inner.as_ref()))
+        }
+        _ => false,
+    })
 }
 
 /// Direct object MEMBERS (all five member kinds, duplicates preserved, FORWARD

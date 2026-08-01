@@ -239,7 +239,8 @@ fn clone_index_key(index: &IndexKey) -> IndexKey {
     match index {
         IndexKey::String(text) => IndexKey::String(Arc::clone(text)),
         IndexKey::Number(number) => IndexKey::Number(*number),
-        IndexKey::TypeNode(node) => IndexKey::TypeNode(*node),
+        IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
+        IndexKey::Computed(node) => IndexKey::Computed(*node),
     }
 }
 
@@ -356,10 +357,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // canonical-needle recovery.
                 match super::build::integer_convention_index_key(*number) {
                     Some(integer) => IndexKey::Number(integer),
-                    None => IndexKey::TypeNode(resolved),
+                    None => IndexKey::Computed(resolved),
                 }
             }
-            _ => IndexKey::TypeNode(resolved),
+            _ => IndexKey::Computed(resolved),
         }
     }
 
@@ -864,7 +865,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.deferred_read_action(frame, read, fallback)
                     }
                     DeferredEvaluationStage::AwaitIndexedObject { index } => match index {
-                        IndexKey::TypeNode(index_node) => {
+                        IndexKey::Computed(index_node) => {
                             frame.stage =
                                 DeferredEvaluationStage::AwaitIndexedIndex { object: child.node };
                             DeferredEvaluationAction::Push {
@@ -974,7 +975,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                             let projection_path: Arc<[PathSegment]> = Arc::from(
                                                 path.iter()
                                                     .map(|segment| {
-                                                        PathSegment::Member(Arc::clone(segment))
+                                                        PathSegment::Member(
+                                                            crate::semantic_query::PropertyKey::identifier(
+                                                                Arc::clone(segment),
+                                                            ),
+                                                        )
                                                     })
                                                     .collect::<Vec<_>>()
                                                     .into_boxed_slice(),

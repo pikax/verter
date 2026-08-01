@@ -1357,27 +1357,29 @@ defineProps<{ user: Extended }>();
         let ObjectMember::Property(property) = member else {
             panic!("unexpected non-property member: {member:?}");
         };
-        keys.push(property.name.as_str());
+        keys.push(property.string_name().expect("string-key fixture"));
         // One-level surface, member values SHALLOW: every value here is a
         // primitive — none may have been replaced by a nested expansion,
         // an intersection arm, or an unresolved sentinel.
-        let (expected_primitive, expected_optional) = match property.name.as_str() {
-            "id" => (verter_type_expr::PrimitiveName::Number, false),
-            "name" => (verter_type_expr::PrimitiveName::String, false),
-            "email" => (verter_type_expr::PrimitiveName::String, false),
-            "active" => (verter_type_expr::PrimitiveName::Boolean, true),
-            other => panic!("unexpected merged member `{other}`"),
-        };
+        let (expected_primitive, expected_optional) =
+            match property.string_name().expect("string-key fixture") {
+                "id" => (verter_type_expr::PrimitiveName::Number, false),
+                "name" => (verter_type_expr::PrimitiveName::String, false),
+                "email" => (verter_type_expr::PrimitiveName::String, false),
+                "active" => (verter_type_expr::PrimitiveName::Boolean, true),
+                other => panic!("unexpected merged member `{other}`"),
+            };
         assert!(
             matches!(&property.ty, TypeExpr::Primitive(p) if *p == expected_primitive),
             "member `{}` keeps its shallow primitive value; got {:?}",
-            property.name,
+            property.string_name().expect("string-key fixture"),
             property.ty
         );
         assert_eq!(
-            property.optional, expected_optional,
+            property.optional,
+            expected_optional,
             "member `{}` optionality must survive the heritage merge",
-            property.name
+            property.string_name().expect("string-key fixture")
         );
     }
     keys.sort_unstable();

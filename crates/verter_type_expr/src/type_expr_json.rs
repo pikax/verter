@@ -341,12 +341,47 @@ fn excess_origin_from_json(v: &serde_json::Value) -> ExcessPropertyOrigin {
     }
 }
 
+fn authored_property_key_from_json(v: &serde_json::Value) -> Option<TypeAuthoredPropertyKey> {
+    match v.get("kind")?.as_str()? {
+        "string" => Some(AuthoredPropertyKey::String(Arc::from(
+            v.get("value")?.as_str()?,
+        ))),
+        "number" => Some(AuthoredPropertyKey::Number(
+            CanonicalIndexInt::from_canonical_i64(v.get("value")?.as_i64()?)?,
+        )),
+        "uniqueSymbol" => Some(AuthoredPropertyKey::UniqueSymbol(
+            serde_json::from_value(v.get("identity")?.clone()).ok()?,
+        )),
+        "computed" => Some(AuthoredPropertyKey::Computed(type_expr_from_json(
+            v.get("expression")?,
+        )?)),
+        _ => None,
+    }
+}
+
+fn authored_property_key_to_json(key: &TypeAuthoredPropertyKey) -> serde_json::Value {
+    match key {
+        AuthoredPropertyKey::String(value) => {
+            serde_json::json!({ "kind": "string", "value": value })
+        }
+        AuthoredPropertyKey::Number(value) => {
+            serde_json::json!({ "kind": "number", "value": value.get() })
+        }
+        AuthoredPropertyKey::UniqueSymbol(identity) => {
+            serde_json::json!({ "kind": "uniqueSymbol", "identity": identity })
+        }
+        AuthoredPropertyKey::Computed(expression) => {
+            serde_json::json!({ "kind": "computed", "expression": expression.to_json_value() })
+        }
+    }
+}
+
 fn json_to_object_member(v: &serde_json::Value) -> Option<ObjectMember> {
     let mk = v.get("memberKind")?.as_str()?;
     match mk {
         "property" => Some(ObjectMember::Property(
-            ObjectProperty::with_visibility(
-                v.get("name")?.as_str()?.to_string(),
+            ObjectProperty::with_key_visibility(
+                authored_property_key_from_json(v.get("key")?)?,
                 type_expr_from_json(v.get("ty")?)?,
                 v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
                 v.get("readonly").and_then(|o| o.as_bool()).unwrap_or(false),
@@ -368,8 +403,8 @@ fn json_to_object_member(v: &serde_json::Value) -> Option<ObjectMember> {
             v.get("function")?,
         )?)),
         "method" => Some(ObjectMember::Method(
-            MethodSignature::with_visibility(
-                v.get("name")?.as_str()?.to_string(),
+            MethodSignature::with_key_visibility(
+                authored_property_key_from_json(v.get("key")?)?,
                 json_to_function_expr(v.get("function")?)?,
                 v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
                 member_visibility_from_json(v),
@@ -520,7 +555,7 @@ impl TypeExpr {
                     ObjectMember::Property(p) => {
                         let mut member = json!({
                             "memberKind": "property",
-                            "name": p.name,
+                            "key": authored_property_key_to_json(&p.key),
                             "ty": p.ty.to_json_value(),
                             "optional": p.optional,
                             "readonly": p.readonly
@@ -558,7 +593,7 @@ impl TypeExpr {
                     ObjectMember::Method(m) => {
                         let mut member = json!({
                             "memberKind": "method",
-                            "name": m.name,
+                            "key": authored_property_key_to_json(&m.key),
                             "function": Self::function_to_json(&m.function),
                             "optional": m.optional
                         });

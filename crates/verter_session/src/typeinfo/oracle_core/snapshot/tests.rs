@@ -33,12 +33,14 @@ const SYMBOL: &str = "ComposedProps";
 /// codec so it is byte-for-byte what `to_json_value` emits (the on-disk form).
 fn oracle_value() -> Value {
     let obj = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "id".to_string(),
-            TypeExpr::Primitive(PrimitiveName::Number),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "id".to_string().into(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            ),
+        )],
     }));
     obj.to_json_value()
 }

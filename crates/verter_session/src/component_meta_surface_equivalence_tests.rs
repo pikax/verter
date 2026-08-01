@@ -721,7 +721,7 @@ defineProps<Props>()
         .properties
         .iter()
         .filter_map(|member| match member {
-            ObjectMember::Property(prop) => Some(prop.name.as_str()),
+            ObjectMember::Property(prop) => Some(prop.string_name().expect("string-key fixture")),
             _ => None,
         })
         .collect();
@@ -737,7 +737,11 @@ defineProps<Props>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(prop) if prop.name == "id" => Some(prop),
+            ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == "id" =>
+            {
+                Some(prop)
+            }
             _ => None,
         })
         .expect("the instantiated `Item` must carry `id`");

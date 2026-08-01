@@ -31,6 +31,14 @@ export {
   // with the component-meta TypeNode under the same package).
   StructuredTypeExpressionSchema,
   GraphTypeNodeSchema,
+  GraphObjectSpreadProgramSchema,
+  GraphObjectConstructionEffectSchema,
+  GraphObjectNamedEffectSchema,
+  GraphObjectIndexEffectSchema,
+  GraphObjectSignatureEffectSchema,
+  GraphObjectSpreadEffectSchema,
+  GraphObjectMemberSpansSchema,
+  GraphObjectIndexSpansSchema,
   GraphQueryIdentitySchema,
   GraphSignatureSchema,
   GraphSymbolNodeSchema,
@@ -63,7 +71,9 @@ export {
   GraphIndexKeyKind,
   GraphInferencePolicy,
   GraphMappedModifier,
-  GraphMemberNameKind,
+  GraphObjectExcessOrigin,
+  GraphObjectMergeRole,
+  GraphObjectMemberKind,
   GraphOperation,
   GraphOriginEdgeKind,
   GraphPrimitiveKind,
@@ -107,6 +117,14 @@ export type {
   ComponentSelector,
   StructuredTypeExpression,
   GraphTypeNode,
+  GraphObjectSpreadProgram,
+  GraphObjectConstructionEffect,
+  GraphObjectNamedEffect,
+  GraphObjectIndexEffect,
+  GraphObjectSignatureEffect,
+  GraphObjectSpreadEffect,
+  GraphObjectMemberSpans,
+  GraphObjectIndexSpans,
   GraphQueryIdentity,
   GraphSignature,
   GraphSymbolNode,
@@ -139,7 +157,10 @@ export type {
  * `GraphTypeNode.relation_proof = 28` oneof arm (tag + name reserved)
  * and relocates the proof witness to the payload-side
  * `SemanticTypeGraph.relation_proofs` table (field 13, add-only).
+ * Schema 6 adds typed property-key oneofs and explicit member kinds.
+ * Schema 7 adds the tag-33 canonical ordered object-spread program with
+ * lossless direct effects and raw spread operands.
  * Schema 2 stays accepted for the legacy
  * operations; the framework-surface operation requires 3.
  */
-export const TYPEINFO_GRAPH_SCHEMA_VERSION = 5;
+export const TYPEINFO_GRAPH_SCHEMA_VERSION = 7;

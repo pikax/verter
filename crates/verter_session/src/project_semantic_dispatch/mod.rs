@@ -64,9 +64,9 @@ use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext}
 use crate::semantic_query::{
     BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, LiteralValue,
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
-    QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-    SemanticQueryValueTag, SignatureRef, SurfaceView,
+    PropertyKey, QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    SemanticQueryValue, SemanticQueryValueTag, SignatureRef, SurfaceView,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::PrimitiveName;
@@ -100,6 +100,8 @@ pub(crate) mod output_materialization;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
+mod object_spread_program_lowering;
+mod object_spread_projection_eval;
 mod output_materialization_guards;
 pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
@@ -110,9 +112,11 @@ pub(crate) mod relation_txn;
 pub(crate) mod semantic_source;
 mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
-pub(crate) mod spread_materializer;
 pub(crate) mod substitute;
 pub(crate) mod walk;
+
+#[cfg(test)]
+mod object_spread_projection_eval_tests;
 
 // Private leaf module sealing the `InstantiateBodySource` construction
 // witness: the unit field is private to THIS module, so the witness is
@@ -161,6 +165,20 @@ mod body_source_witness {
     }
 }
 pub(crate) use body_source_witness::BodySourceWitness;
+
+// Private leaf module sealing object-spread projection context construction.
+// The witness is mintable only inside the dispatch module tree; the semantic
+// query context requires it but cannot construct it.
+mod object_spread_projection_context_witness {
+    pub(crate) struct ObjectSpreadProjectionContextWitness(());
+
+    impl ObjectSpreadProjectionContextWitness {
+        pub(super) const fn mint_for_dispatch_factory() -> Self {
+            Self(())
+        }
+    }
+}
+pub(crate) use object_spread_projection_context_witness::ObjectSpreadProjectionContextWitness;
 // Module-level alias for the demand primitives' typed outcome (returned by the
 // `pub(crate)` structural-fact demand methods). Production callers consume it
 // through `StructuralFactDemandOutcome::into_complete_node` without naming the
@@ -819,6 +837,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ctx.bump_type_resolution_hop(context.mode);
                 ctx.bump_type_resolution_projection_op();
             }
+            SemanticQueryKey::ProjectObjectSpread { context, .. } => {
+                ctx.bump_type_resolution_hop(context.projection_reduction().mode);
+                ctx.bump_type_resolution_projection_op();
+            }
             SemanticQueryKey::ProjectMember { mode, .. }
             | SemanticQueryKey::IndexedAccess { mode, .. } => {
                 ctx.bump_type_resolution_hop(*mode);
@@ -935,6 +957,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .host_for_fact_tracer_install()
             .host_view_env_hashes_for(canonical)
             .resolve_env_hash
+    }
+
+    /// Construct the complete sealed context for an authored object-spread
+    /// projection. This is the sole production mint: all `R/T/L/J` dimensions
+    /// are sourced from the program owner's canonical, while the caller's
+    /// reduction, canonical substitution, and exact-optional policy remain
+    /// explicit value-affecting identity.
+    #[must_use]
+    pub(crate) fn object_spread_projection_context_for(
+        &self,
+        canonical: &str,
+        projection_reduction: crate::semantic_query::ProjectionReductionContext,
+        substitution: crate::semantic_query::SubstitutionCanonicalHash,
+        optional_property_policy: crate::semantic_query::ExactOptionalPropertyPolicy,
+    ) -> crate::semantic_query::ObjectSpreadProjectionContext {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env = host.host_view_env_hashes_for(canonical);
+        crate::semantic_query::ObjectSpreadProjectionContext::new(
+            projection_reduction,
+            env.resolve_env_hash,
+            env.type_env_hash,
+            env.lib_env_hash,
+            host.host_view_project_identity_for(canonical).0,
+            substitution,
+            optional_property_policy,
+            ObjectSpreadProjectionContextWitness::mint_for_dispatch_factory(),
+        )
     }
 
     /// Derive the exact modeless `{R,T,L,J}` identity for a broad-runtime
@@ -1297,7 +1346,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             OriginEdgeKind::ProjectMember,
             Arc::from(vec![parent_surface].into_boxed_slice()),
             OriginMeta::ProjectedMember {
-                name: Arc::clone(name),
+                key: PropertyKey::identifier(Arc::clone(name)),
                 provenance: verter_audit::MemberEdgeProvenance::PublishedField,
             },
             fence,
@@ -1916,7 +1965,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticQueryKey::ProjectMember { base, member, mode } => {
                 SemanticQueryKey::ProjectPath {
                     base,
-                    path: Arc::from(vec![PathSegment::Member(member)].into_boxed_slice()),
+                    path: Arc::from(
+                        vec![PathSegment::Member(PropertyKey::identifier(member))]
+                            .into_boxed_slice(),
+                    ),
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
@@ -2119,6 +2171,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &key_for_build,
                 ));
             }
+            if let SemanticQueryKey::ProjectObjectSpread {
+                program,
+                selector,
+                context,
+            } = &key_for_build
+            {
+                return self.build_project_object_spread(*program, selector, *context);
+            }
             let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             if matches!(&key_for_build, SemanticQueryKey::Instantiate(_)) {
                 if let Err(reasons) = self.charge_connected_work() {
@@ -2171,8 +2231,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // these variants on the rewritten key; the arms below
                 // are pure exhaustiveness.
                 SemanticQueryKey::ProjectMember { base, member, mode } => {
-                    let path: Arc<[PathSegment]> =
-                        Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
+                    let path: Arc<[PathSegment]> = Arc::from(
+                        vec![PathSegment::Member(PropertyKey::identifier(Arc::clone(
+                            member,
+                        )))]
+                        .into_boxed_slice(),
+                    );
                     let ctx = crate::semantic_query::ProjectionReductionContext::published(*mode);
                     self.build_project_path(*base, &path, ctx)
                 }
@@ -2209,6 +2273,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
                 SemanticQueryKey::NormalizeIntersection { members } => {
                     self.build_normalize_intersection(members)
+                }
+                SemanticQueryKey::ProjectObjectSpread { .. } => {
+                    unreachable!(
+                        "ProjectObjectSpread returns its typed projection value before node-domain build"
+                    )
                 }
                 // The relation authority is handled BEFORE this match
                 // (the `build_relate` branch in `raw_build` above) — this
@@ -2810,6 +2879,7 @@ fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> boo
             | SemanticQueryKey::Conditional { .. }
             | SemanticQueryKey::TemplateLiteralReduce { .. }
             | SemanticQueryKey::TypeOf { .. }
+            | SemanticQueryKey::ProjectObjectSpread { .. }
     )
 }
 
@@ -3126,8 +3196,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mode: ProjectionMode,
     ) -> CacheRead<QueryResult<SemanticNodeId>> {
         // Hop 1: Navigate to the slot member off the macro payload base.
-        let slot_path: Arc<[PathSegment]> =
-            Arc::from(vec![PathSegment::Member(Arc::from(slot_name))].into_boxed_slice());
+        let slot_path: Arc<[PathSegment]> = Arc::from(
+            vec![PathSegment::Member(PropertyKey::identifier(slot_name))].into_boxed_slice(),
+        );
         let slot_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base,
             path: slot_path,
@@ -3189,8 +3260,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Hop 3: project the binding member off the param Object at the
         // caller's terminal mode (path-precise rule — only the terminal
         // runs in the requested mode).
-        let binding_path: Arc<[PathSegment]> =
-            Arc::from(vec![PathSegment::Member(Arc::from(binding_name))].into_boxed_slice());
+        let binding_path: Arc<[PathSegment]> = Arc::from(
+            vec![PathSegment::Member(PropertyKey::identifier(binding_name))].into_boxed_slice(),
+        );
         let binding_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base: param0_ty,
             path: binding_path,
@@ -3235,14 +3307,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Trivial helper: lower a `[String]` member-name
     /// list to an `Arc<[PathSegment]>` for `ProjectPath` queries.
     ///
-    /// Each member name becomes a `PathSegment::Member(Arc<str>)`. The
+    /// Each member name becomes a typed string property-key segment. The
     /// result has the same length and order as the input.
     #[must_use]
     #[allow(dead_code)]
     pub fn lower_path_segments(p: &[String]) -> Arc<[PathSegment]> {
         let segs: Vec<PathSegment> = p
             .iter()
-            .map(|s| PathSegment::Member(Arc::from(s.as_str())))
+            .map(|s| PathSegment::Member(PropertyKey::identifier(s.as_str())))
             .collect();
         Arc::from(segs.into_boxed_slice())
     }

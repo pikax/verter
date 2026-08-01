@@ -414,7 +414,11 @@ defineProps<ButtonProps>()
         .properties
         .iter()
         .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            ObjectMember::Property(property)
+                if property.string_name().expect("string-key fixture") == "variants" =>
+            {
+                Some(&property.ty)
+            }
             _ => None,
         })
         .expect("Button registry entry should keep variants");
@@ -426,7 +430,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         variants_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "color"),
+            |member| matches!(member, ObjectMember::Property(property) if property.string_name().expect("string-key fixture") == "color"),
         ),
         "expected Button.variants to expose color, got {:?}",
         variants_member

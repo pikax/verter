@@ -274,9 +274,11 @@ fn proto_enum_values(source: &str, enum_name: &str) -> Vec<(String, i32)> {
 
 #[test]
 fn type_node_taxonomy_proto_ts_parity() {
-    // 31 arms: the tag-28 `relation_proof` arm is retired + reserved (the
-    // proof witness rides the payload-side `relation_proofs` table).
-    assert_proto_ts_parity("GraphTypeNode", "GraphTypeNode", "kind", 31);
+    // 32 arms: the tag-28 `relation_proof` arm is retired + reserved (the
+    // proof witness rides the payload-side `relation_proofs` table), and the
+    // tag-33 `object_spread_program` arm carries the canonical ordered
+    // spread-program node (34-100 stays reserved).
+    assert_proto_ts_parity("GraphTypeNode", "GraphTypeNode", "kind", 32);
 }
 
 #[test]

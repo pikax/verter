@@ -35,7 +35,7 @@ use crate::project_semantic_dispatch::locator_shape::{LocatorBinderFrame, Locato
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
-    DeclIdentity, MemberMergeRole, MemberSurfaceCompleteness, NodeScopeId, ProjectionMode,
+    DeclIdentity, MemberMergeRole, NodeScopeId, ObjectConstructionEffect, ProjectionMode,
     ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKeyTag,
 };
 use crate::types::{HostConfig, UpsertRequest};
@@ -151,11 +151,11 @@ fn lower_locator_distinguishes_same_named_module_and_instance_declarations() {
     assert!(module_surface
         .positive_members()
         .iter()
-        .any(|member| member.name.as_ref() == "moduleOnly"));
+        .any(|member| member.string_name().expect("string-key fixture") == "moduleOnly"));
     assert!(instance_surface
         .positive_members()
         .iter()
-        .any(|member| member.name.as_ref() == "instanceOnly"));
+        .any(|member| member.string_name().expect("string-key fixture") == "instanceOnly"));
     assert_eq!(
         host.project_type_store()
             .semantic_graph()
@@ -219,7 +219,7 @@ fn member_value(surface: &crate::semantic_query::SurfaceView, name: &str) -> Sem
     surface
         .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == name)
+        .find(|m| m.string_name().expect("string-key fixture") == name)
         .unwrap_or_else(|| panic!("member `{name}` must be present"))
         .value
 }
@@ -362,12 +362,14 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
 
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "a".to_string(),
-            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "a".to_string().into(),
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                false,
+                false,
+            ),
+        )],
     }));
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(OWNER_ID),
@@ -657,8 +659,8 @@ fn spread_fragments_keep_the_authored_root_and_member_path() {
     };
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "left".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "left".to_string().into(),
                 conditional("SpreadLeft"),
                 false,
                 false,
@@ -666,8 +668,8 @@ fn spread_fragments_keep_the_authored_root_and_member_path() {
             ObjectMember::Spread(SpreadMember::new(TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: Vec::new(),
             })))),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "right".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "right".to_string().into(),
                 conditional("SpreadRight"),
                 false,
                 false,
@@ -754,8 +756,8 @@ fn locator_predeclares_carrier_template_and_signature_bound_infers() {
     )));
     let true_type = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "carrier".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "carrier".to_string().into(),
                 TypeExpr::Ref {
                     name: Arc::from("CarrierP"),
                     type_arguments: verter_type_expr::empty_type_args(),
@@ -763,8 +765,8 @@ fn locator_predeclares_carrier_template_and_signature_bound_infers() {
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "template".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "template".to_string().into(),
                 TypeExpr::Ref {
                     name: Arc::from("TemplateP"),
                     type_arguments: verter_type_expr::empty_type_args(),
@@ -882,7 +884,7 @@ fn locator_shape_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
 }
 
 #[test]
-fn locator_spread_shape_is_one_open_object_with_ordered_operands() {
+fn locator_spread_shape_is_one_ordered_program() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let indexed = host
@@ -896,8 +898,8 @@ fn locator_spread_shape_is_one_open_object_with_ordered_operands() {
         local_scope: None,
     };
     let property = |name: &str| {
-        ObjectMember::Property(ObjectProperty::synthetic_public(
-            name.to_string(),
+        ObjectMember::Property(ObjectProperty::synthetic_public_key(
+            name.to_string().into(),
             TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
             false,
             false,
@@ -916,26 +918,22 @@ fn locator_spread_shape_is_one_open_object_with_ordered_operands() {
     let binders = Vec::<LocatorBinderFrame>::new();
     let context = LocatorShapeCtx::new(&scope, &binders, None, None);
     let node = dispatch.lower_type_expr_for_locator_shape(&expr, &context);
-    let surface = object_surface(&host, node);
-    let MemberSurfaceCompleteness::OpenSpread(operands) = &surface.completeness() else {
-        panic!("locator spread must be one open Object");
+    let graph = host.project_type_store().semantic_graph();
+    let data = graph.node_data(node).expect("locator spread program");
+    let SemanticNodeData::ObjectSpreadProgram(program) = data.as_ref() else {
+        panic!("locator spread must lower to ObjectSpreadProgram, got {data:?}");
     };
-    assert_eq!(operands.len(), 1);
+    let [ObjectConstructionEffect::DirectProperty(a), ObjectConstructionEffect::Spread(operand), ObjectConstructionEffect::DirectProperty(x)] =
+        program.effects.as_ref()
+    else {
+        panic!("locator spread must retain exact source-ordered effects: {program:?}");
+    };
+    assert_eq!(a.key.as_string(), Some("a"));
+    assert_eq!(x.key.as_string(), Some("x"));
     assert!(matches!(
-        host.project_type_store()
-            .semantic_graph()
-            .node_data(operands.as_slice()[0])
-            .as_deref(),
+        graph.node_data(*operand).as_deref(),
         Some(SemanticNodeData::BareRef(_))
     ));
-    assert_eq!(
-        surface
-            .positive_members()
-            .iter()
-            .map(|member| member.name.as_ref())
-            .collect::<Vec<_>>(),
-        ["a", "x"]
-    );
 }
 
 /// Declared type parameters stay `TypeParam` SHELLS: the generic decl's own
@@ -1086,7 +1084,7 @@ fn annotation_carried_macro_payload_deref_hydrates_from_snapshot() {
     assert!(
         obj.properties
             .iter()
-            .any(|m| matches!(m, ObjectMember::Property(p) if p.name == "row")),
+            .any(|m| matches!(m, ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "row")),
         "the hydrated body is the authored `{{ row: string }}` annotation"
     );
     assert!(
@@ -1225,7 +1223,7 @@ fn jsdoc_typedef_body_locator_lowers_through_the_shape_query() {
     let mut names: Vec<&str> = surface
         .positive_members()
         .iter()
-        .map(|m| m.name.as_ref())
+        .map(|m| m.string_name().expect("string-key fixture"))
         .collect();
     names.sort_unstable();
     assert_eq!(
@@ -1590,7 +1588,7 @@ fn lower_locator_constraint_binds_full_sibling_frame() {
         let member = view
             .positive_members()
             .iter()
-            .find(|member| member.name.as_ref() == member_name)
+            .find(|member| member.string_name().expect("string-key fixture") == member_name)
             .unwrap_or_else(|| panic!("member `{member_name}` must exist on Bar's body"));
         match graph.node_data(member.value).as_deref() {
             Some(SemanticNodeData::TypeParam {

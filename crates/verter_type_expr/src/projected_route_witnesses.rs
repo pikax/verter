@@ -46,7 +46,7 @@ fn projected_member_path_fact_discriminates_base_and_path() {
         base: base(canonical, macro_index),
         path: std::sync::Arc::from(
             path.iter()
-                .map(|segment| segment.to_string())
+                .map(|segment| FactPropertyKey::identifier(*segment))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         ),
@@ -125,7 +125,7 @@ fn projected_callable_params_fact_discriminates_base_ordinal_and_first_param() {
         save,
         ProjectedTypeFact::MemberPath {
             base: base("/App.vue", 0),
-            path: std::sync::Arc::from(Vec::<String>::new().into_boxed_slice()),
+            path: std::sync::Arc::from(Vec::<FactPropertyKey>::new().into_boxed_slice()),
         },
         "callable-params vs member-path over the same base"
     );
@@ -219,7 +219,7 @@ fn projected_index_position_fact_discriminates_base_ordinal_and_position() {
         value,
         ProjectedTypeFact::MemberPath {
             base: base("/App.vue", 0),
-            path: std::sync::Arc::from(Vec::<String>::new().into_boxed_slice()),
+            path: std::sync::Arc::from(Vec::<FactPropertyKey>::new().into_boxed_slice()),
         },
         "index-position vs member-path over the same base"
     );

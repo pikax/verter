@@ -150,3 +150,24 @@ impl std::fmt::Debug for PreparedKeyHandle {
             .finish_non_exhaustive()
     }
 }
+
+/// Value-shape gate for the non-node object projection family. A buggy
+/// evaluator (or a poisoned synthetic publish) must not disguise its result
+/// as `TypeNode` or admit that payload into the projection slot.
+pub(crate) fn enforce_projection_value_shape(
+    key: &SemanticQueryKey,
+    result: crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
+) -> crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue> {
+    use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValueTag};
+    match (key, result) {
+        (SemanticQueryKey::ProjectObjectSpread { .. }, QueryResult::Value(value))
+            if value.tag() != SemanticQueryValueTag::ObjectProjection =>
+        {
+            QueryResult::Error(QueryError::ValueDomainMismatch {
+                expected: SemanticQueryValueTag::ObjectProjection,
+                actual: value.tag(),
+            })
+        }
+        (_, result) => result,
+    }
+}

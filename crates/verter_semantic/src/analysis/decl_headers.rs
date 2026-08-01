@@ -20,7 +20,7 @@
 
 use oxc_ast::ast::{
     Class, ClassElement, Comment, Declaration, ExportDefaultDeclarationKind, Expression,
-    MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, Statement,
+    MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
     TSEnumDeclaration, TSInterfaceDeclaration, TSModuleBlock, TSModuleDeclaration,
     TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature, TSType, TSTypeAliasDeclaration,
     TSTypeParameterDeclaration, VariableDeclarationKind, VariableDeclarator,
@@ -30,8 +30,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
 use verter_type_expr::facts::VueIgnoredHeritageFact;
 use verter_type_expr::span_origins::DeclContributorAnchor;
-use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
-use verter_type_expr_oxc::property_key_name;
+use verter_type_expr::{
+    AuthoredPropertyKey, DeclBindingKey, ObjectMethodKind, TopLevelOwnerId, TypeAuthoredPropertyKey,
+};
+use verter_type_expr_oxc::lower_property_key;
 
 use crate::analysis::top_level_owners::{DeclMap, TopLevelOwnerTable, TopLevelStatementOwner};
 use crate::analysis::type_eval::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
@@ -44,6 +46,7 @@ use augmentation::index_augmentation_block;
 struct HeaderStatementContext<'a> {
     anchor: DeclContributorAnchor,
     vue_ignore_attachment_starts: &'a FxHashSet<u32>,
+    source: &'a str,
 }
 
 impl<'a> HeaderStatementContext<'a> {
@@ -51,6 +54,7 @@ impl<'a> HeaderStatementContext<'a> {
         statement_index: usize,
         owner: TopLevelStatementOwner,
         vue_ignore_attachment_starts: &'a FxHashSet<u32>,
+        source: &'a str,
     ) -> Option<Self> {
         Some(Self {
             anchor: DeclContributorAnchor {
@@ -59,6 +63,7 @@ impl<'a> HeaderStatementContext<'a> {
                 owner_local_ordinal: owner.owner_local_ordinal,
             },
             vue_ignore_attachment_starts,
+            source,
         })
     }
 
@@ -110,22 +115,24 @@ pub struct JsdocTypedefHeader {
     pub owner_local_ordinal: Option<u32>,
 }
 
-/// Direct syntactic member-header kind (a shallow shape fact, not a body).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemberHeaderKind {
-    Property,
-    Method,
-}
-
 /// One direct syntactic member header: the member's name plus the
 /// header-level flags the declaration states syntactically. No member
 /// VALUE type is recorded — that is body data, lowered on demand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberHeader {
-    pub name: String,
-    pub kind: MemberHeaderKind,
+    pub key: TypeAuthoredPropertyKey,
+    pub method_kind: Option<ObjectMethodKind>,
+    pub has_implementation_body: bool,
     pub optional: bool,
     pub readonly: bool,
+}
+
+impl MemberHeader {
+    /// Borrow the ordinary string spelling when this header has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
 }
 
 /// One type-parameter header: the parameter name plus the source locators
@@ -319,12 +326,9 @@ impl DeclHeaderIndex {
                 .merged_member_header_facts()
                 .into_iter()
                 .map(|fact| MemberHeader {
-                    name: fact.name,
-                    kind: if fact.is_method {
-                        MemberHeaderKind::Method
-                    } else {
-                        MemberHeaderKind::Property
-                    },
+                    key: AuthoredPropertyKey::from_known(fact.key),
+                    method_kind: fact.method_kind,
+                    has_implementation_body: fact.has_implementation_body,
                     optional: fact.optional,
                     readonly: fact.readonly,
                 })
@@ -352,18 +356,21 @@ impl DeclHeaderIndex {
                         .members
                         .iter()
                         .filter_map(|member| {
-                            let name = match member {
+                            let (key, method_kind, has_implementation_body) = match member {
                                 verter_type_expr::facts::ObjectMemberFact::Property(p) => {
-                                    Some(p.name.clone())
+                                    (p.key.cloned_known()?, None, false)
                                 }
-                                verter_type_expr::facts::ObjectMemberFact::Method(m) => {
-                                    Some(m.name.clone())
-                                }
-                                _ => None,
-                            }?;
+                                verter_type_expr::facts::ObjectMemberFact::Method(m) => (
+                                    m.key.cloned_known()?,
+                                    Some(m.method_kind),
+                                    m.function.has_implementation_body,
+                                ),
+                                _ => return None,
+                            };
                             Some(MemberHeader {
-                                name,
-                                kind: MemberHeaderKind::Property,
+                                key: AuthoredPropertyKey::from_known(key),
+                                method_kind,
+                                has_implementation_body,
                                 optional: false,
                                 readonly: false,
                             })
@@ -468,6 +475,7 @@ pub fn build_decl_header_index_with_owners(
             stmt_index,
             owners.statement(stmt_index),
             &vue_ignore_attachment_starts,
+            source,
         ) else {
             break;
         };
@@ -619,7 +627,7 @@ fn index_top_level_statement(
                             kind: ValueDeclKind::Const,
                             span: export.span.into(),
                             name_span: export.span.into(),
-                            object_member_headers: object_literal_member_headers(expr),
+                            object_member_headers: object_literal_member_headers(expr, ctx.source),
                             contributors: Vec::new(),
                         });
                     push_contributor(
@@ -905,7 +913,7 @@ fn index_type_alias(
     table: &mut DeclMap<TypeDeclHeader>,
 ) {
     let params = type_param_headers(decl.type_parameters.as_deref());
-    let members = alias_body_member_headers(&decl.type_annotation);
+    let members = alias_body_member_headers(&decl.type_annotation, ctx.source);
     upsert_type_header(
         table,
         name,
@@ -928,7 +936,7 @@ fn index_interface(
     let params = type_param_headers(decl.type_parameters.as_deref());
     let mut members = Vec::new();
     for sig in &decl.body.body {
-        if let Some(header) = interface_member_header(sig) {
+        if let Some(header) = interface_member_header(sig, ctx.source) {
             members.push(header);
         }
     }
@@ -1015,36 +1023,47 @@ fn index_named_class(
     for element in &decl.body.body {
         match element {
             ClassElement::PropertyDefinition(prop) => {
-                if let Some(prop_name) = property_key_name(&prop.key) {
-                    let header = MemberHeader {
-                        name: prop_name,
-                        kind: MemberHeaderKind::Property,
-                        optional: prop.optional,
-                        readonly: prop.readonly,
-                    };
-                    if prop.r#static {
-                        static_members.push(header);
-                    } else {
-                        instance_members.push(header);
-                    }
+                // A `#private` brand is not a type-level member: it never
+                // lands on the instance or static surface.
+                if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
+                    continue;
+                }
+                let header = MemberHeader {
+                    key: lower_property_key(&prop.key, ctx.source),
+                    method_kind: None,
+                    has_implementation_body: false,
+                    optional: prop.optional,
+                    readonly: prop.readonly,
+                };
+                if prop.r#static {
+                    static_members.push(header);
+                } else {
+                    instance_members.push(header);
                 }
             }
             ClassElement::MethodDefinition(method) => {
                 if method.kind == MethodDefinitionKind::Constructor {
                     continue;
                 }
-                if let Some(method_name) = property_key_name(&method.key) {
-                    let header = MemberHeader {
-                        name: method_name,
-                        kind: MemberHeaderKind::Method,
-                        optional: method.optional,
-                        readonly: false,
-                    };
-                    if method.r#static {
-                        static_members.push(header);
-                    } else {
-                        instance_members.push(header);
-                    }
+                if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
+                    continue;
+                }
+                let header = MemberHeader {
+                    key: lower_property_key(&method.key, ctx.source),
+                    method_kind: Some(match method.kind {
+                        MethodDefinitionKind::Get => ObjectMethodKind::Get,
+                        MethodDefinitionKind::Set => ObjectMethodKind::Set,
+                        MethodDefinitionKind::Method => ObjectMethodKind::Method,
+                        MethodDefinitionKind::Constructor => unreachable!(),
+                    }),
+                    has_implementation_body: method.value.body.is_some(),
+                    optional: method.optional,
+                    readonly: false,
+                };
+                if method.r#static {
+                    static_members.push(header);
+                } else {
+                    instance_members.push(header);
                 }
             }
             _ => {}
@@ -1080,7 +1099,7 @@ fn index_named_class(
         if !entry
             .object_member_headers
             .iter()
-            .any(|existing| existing.name == header.name)
+            .any(|existing| existing.key == header.key)
         {
             entry.object_member_headers.push(header);
         }
@@ -1148,7 +1167,7 @@ fn index_variable(
     let members = decl
         .init
         .as_ref()
-        .map(|init| object_literal_member_headers(init))
+        .map(|init| object_literal_member_headers(init, ctx.source))
         .unwrap_or_default();
     // A namespaced value member (`namespace NS { export const M = … }`) is
     // indexed under its QUALIFIED name `NS.M`, mirroring the qualified TYPE
@@ -1173,7 +1192,7 @@ fn index_variable(
         if !entry
             .object_member_headers
             .iter()
-            .any(|existing| existing.name == header.name)
+            .any(|existing| existing.key == header.key)
         {
             entry.object_member_headers.push(header);
         }
@@ -1252,7 +1271,7 @@ fn upsert_type_header(
         if !entry
             .member_headers
             .iter()
-            .any(|existing| existing.name == member.name)
+            .any(|existing| existing.key == member.key)
         {
             entry.member_headers.push(member);
         }
@@ -1321,18 +1340,18 @@ fn type_param_headers(decl: Option<&TSTypeParameterDeclaration<'_>>) -> Vec<Type
 /// contributes its named members; intersection / parenthesized arms are
 /// descended (mirroring the lowered inventory's own-member header facts).
 /// Every other body shape has no direct syntactic members.
-fn alias_body_member_headers(ty: &TSType<'_>) -> Vec<MemberHeader> {
+fn alias_body_member_headers(ty: &TSType<'_>, source: &str) -> Vec<MemberHeader> {
     let mut out = Vec::new();
-    collect_alias_member_headers(ty, &mut out);
+    collect_alias_member_headers(ty, source, &mut out);
     out
 }
 
-fn collect_alias_member_headers(ty: &TSType<'_>, out: &mut Vec<MemberHeader>) {
+fn collect_alias_member_headers(ty: &TSType<'_>, source: &str, out: &mut Vec<MemberHeader>) {
     match ty {
         TSType::TSTypeLiteral(literal) => {
             for sig in &literal.members {
-                if let Some(header) = interface_member_header(sig) {
-                    if !out.iter().any(|existing| existing.name == header.name) {
+                if let Some(header) = interface_member_header(sig, source) {
+                    if !out.iter().any(|existing| existing.key == header.key) {
                         out.push(header);
                     }
                 }
@@ -1340,27 +1359,29 @@ fn collect_alias_member_headers(ty: &TSType<'_>, out: &mut Vec<MemberHeader>) {
         }
         TSType::TSIntersectionType(intersection) => {
             for part in &intersection.types {
-                collect_alias_member_headers(part, out);
+                collect_alias_member_headers(part, source, out);
             }
         }
         TSType::TSParenthesizedType(paren) => {
-            collect_alias_member_headers(&paren.type_annotation, out);
+            collect_alias_member_headers(&paren.type_annotation, source, out);
         }
         _ => {}
     }
 }
 
-fn interface_member_header(sig: &TSSignature<'_>) -> Option<MemberHeader> {
+fn interface_member_header(sig: &TSSignature<'_>, source: &str) -> Option<MemberHeader> {
     match sig {
         TSSignature::TSPropertySignature(prop) => Some(MemberHeader {
-            name: property_key_name(&prop.key)?,
-            kind: MemberHeaderKind::Property,
+            key: lower_property_key(&prop.key, source),
+            method_kind: None,
+            has_implementation_body: false,
             optional: prop.optional,
             readonly: prop.readonly,
         }),
         TSSignature::TSMethodSignature(method) => Some(MemberHeader {
-            name: property_key_name(&method.key)?,
-            kind: MemberHeaderKind::Method,
+            key: lower_property_key(&method.key, source),
+            method_kind: Some(ObjectMethodKind::Method),
+            has_implementation_body: false,
             optional: method.optional,
             readonly: false,
         }),
@@ -1371,33 +1392,46 @@ fn interface_member_header(sig: &TSSignature<'_>) -> Option<MemberHeader> {
 /// Direct member headers of an object-literal initializer, seen through
 /// `as` / `satisfies` / parenthesized wrappers (mirroring
 /// `extract_initializer_object_shape`).
-fn object_literal_member_headers(expr: &Expression<'_>) -> Vec<MemberHeader> {
+fn object_literal_member_headers(expr: &Expression<'_>, source: &str) -> Vec<MemberHeader> {
     match expr {
-        Expression::ObjectExpression(obj) => object_expression_member_headers(obj),
-        Expression::TSAsExpression(ts_as) => object_literal_member_headers(&ts_as.expression),
-        Expression::TSSatisfiesExpression(sat) => object_literal_member_headers(&sat.expression),
+        Expression::ObjectExpression(obj) => object_expression_member_headers(obj, source),
+        Expression::TSAsExpression(ts_as) => {
+            object_literal_member_headers(&ts_as.expression, source)
+        }
+        Expression::TSSatisfiesExpression(sat) => {
+            object_literal_member_headers(&sat.expression, source)
+        }
         Expression::ParenthesizedExpression(paren) => {
-            object_literal_member_headers(&paren.expression)
+            object_literal_member_headers(&paren.expression, source)
         }
         _ => Vec::new(),
     }
 }
 
-fn object_expression_member_headers(obj: &ObjectExpression<'_>) -> Vec<MemberHeader> {
+fn object_expression_member_headers(obj: &ObjectExpression<'_>, source: &str) -> Vec<MemberHeader> {
     let mut out: Vec<MemberHeader> = Vec::new();
     for prop in &obj.properties {
         if let ObjectPropertyKind::ObjectProperty(p) = prop {
-            if let Some(name) = property_key_name(&p.key) {
-                // Mirror `push_object_property_with_override`: a duplicate
-                // key's LAST occurrence wins.
-                out.retain(|existing| existing.name != name);
-                out.push(MemberHeader {
-                    name,
-                    kind: MemberHeaderKind::Property,
-                    optional: false,
-                    readonly: false,
-                });
-            }
+            let key = lower_property_key(&p.key, source);
+            // Mirror `push_object_property_with_override`: a duplicate
+            // key's LAST occurrence wins.
+            out.retain(|existing| existing.key != key);
+            out.push(MemberHeader {
+                key,
+                method_kind: if p.method || !matches!(p.kind, oxc_ast::ast::PropertyKind::Init) {
+                    Some(match p.kind {
+                        oxc_ast::ast::PropertyKind::Get => ObjectMethodKind::Get,
+                        oxc_ast::ast::PropertyKind::Set => ObjectMethodKind::Set,
+                        oxc_ast::ast::PropertyKind::Init => ObjectMethodKind::Method,
+                    })
+                } else {
+                    None
+                },
+                has_implementation_body: p.method
+                    || !matches!(p.kind, oxc_ast::ast::PropertyKind::Init),
+                optional: false,
+                readonly: false,
+            });
         }
     }
     out

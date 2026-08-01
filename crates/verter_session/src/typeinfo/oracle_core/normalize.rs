@@ -449,8 +449,8 @@ fn normalize_object(
         match m {
             ObjectMember::Property(p) => {
                 unordered.push(ObjectMember::Property(
-                    ObjectProperty::synthetic_with_visibility(
-                        p.name.clone(),
+                    ObjectProperty::synthetic_key_with_visibility(
+                        p.key.clone(),
                         normalize_node(&p.ty, mode, scope)?,
                         p.optional,
                         p.readonly,
@@ -487,8 +487,8 @@ fn normalize_object(
             }
             ObjectMember::Method(msig) => {
                 ordered.push(ObjectMember::Method(
-                    MethodSignature::synthetic_with_visibility(
-                        msig.name.clone(),
+                    MethodSignature::synthetic_key_with_visibility(
+                        msig.key.clone(),
                         normalize_function(&msig.function, mode, scope)?,
                         msig.optional,
                         msig.visibility,

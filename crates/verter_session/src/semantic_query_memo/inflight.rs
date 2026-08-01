@@ -95,6 +95,10 @@ pub(super) struct InflightState {
     /// warm gate suppresses the outer result. `false` for the abort/retry
     /// path. Distinct from [`Self::cache_suppress`] (memo admission only).
     pub(super) result_is_partial: bool,
+    /// The generation-qualified execution owner that claimed this flight.
+    /// Joiners register a temporary wait-for edge to this owner before
+    /// parking, allowing cross-thread cycles to escape through ReturnOnly.
+    pub(super) owner: Option<super::wait_cycle::ExecutionOwner>,
     /// `true` once some thread owns the build. Subsequent threads wait on
     /// `ready` rather than trying to own it themselves.
     pub(super) claimed: bool,

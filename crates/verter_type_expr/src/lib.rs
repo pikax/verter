@@ -22,6 +22,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
 use verter_span::Span;
 
+mod property_key;
+pub use property_key::{AuthoredPropertyKey, CanonicalIndexInt, PropertyKey};
+
 /// In-place declaration-site span transforms over [`TypeExpr`]
 /// ([`TypeExpr::shift_spans`] / [`TypeExpr::clear_spans`]).
 mod span_transform;
@@ -63,8 +66,14 @@ pub mod span_origins;
 pub mod facts;
 pub use facts::{
     merge_route_demands, DeclBindingKey, RouteDemand, RouteKeySet, TopLevelOwnerId,
-    TopLevelOwnerKind,
+    TopLevelOwnerKind, ValueDeclIdentityPart,
 };
+
+/// Property-key identity stored by authored type IR.
+pub type TypePropertyKey = PropertyKey<ValueDeclIdentityPart>;
+
+/// Authored type-IR key. Computed syntax owns its typed expression child.
+pub type TypeAuthoredPropertyKey = AuthoredPropertyKey<TypeExpr, ValueDeclIdentityPart>;
 
 /// Generated static-intrinsic catalog substrate — the interned-id + member-fact
 /// replacement for raw-`TypeExpr` HTML intrinsic member shapes.
@@ -752,7 +761,7 @@ impl MemberVisibility {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct ObjectProperty {
-    pub name: String,
+    pub key: TypeAuthoredPropertyKey,
     pub ty: TypeExpr,
     pub optional: bool,
     pub readonly: bool,
@@ -778,6 +787,12 @@ pub struct ObjectProperty {
 }
 
 impl ObjectProperty {
+    /// Borrow the ordinary string spelling when this property has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
+
     /// Construct a genuinely SOURCE-LESS, semantically-public property: no
     /// single declaration site and no accessibility origin (a synthesized
     /// framework member, an interface / type-literal / object-literal / enum
@@ -788,9 +803,14 @@ impl ObjectProperty {
     /// [`Self::synthetic_with_visibility`] or [`Self::with_visibility`] so a
     /// non-public member can never be silently minted as `Public`.
     #[must_use]
-    pub fn synthetic_public(name: String, ty: TypeExpr, optional: bool, readonly: bool) -> Self {
+    pub fn synthetic_public_key(
+        key: TypeAuthoredPropertyKey,
+        ty: TypeExpr,
+        optional: bool,
+        readonly: bool,
+    ) -> Self {
         Self {
-            name,
+            key,
             ty,
             optional,
             readonly,
@@ -806,15 +826,15 @@ impl ObjectProperty {
     /// a visibility that must be preserved (so a non-public member is never
     /// re-minted as `Public`), but the reconstruction has no single span.
     #[must_use]
-    pub fn synthetic_with_visibility(
-        name: String,
+    pub fn synthetic_key_with_visibility(
+        key: TypeAuthoredPropertyKey,
         ty: TypeExpr,
         optional: bool,
         readonly: bool,
         visibility: MemberVisibility,
     ) -> Self {
         Self {
-            name,
+            key,
             ty,
             optional,
             readonly,
@@ -830,15 +850,15 @@ impl ObjectProperty {
     /// correct by construction. Source-DERIVED reconstructions MUST use
     /// [`Self::with_visibility`].
     #[must_use]
-    pub fn with_spans_public(
-        name: String,
+    pub fn with_key_spans_public(
+        key: TypeAuthoredPropertyKey,
         ty: TypeExpr,
         optional: bool,
         readonly: bool,
         spans: MemberSpans,
     ) -> Self {
         Self {
-            name,
+            key,
             ty,
             optional,
             readonly,
@@ -852,8 +872,8 @@ impl ObjectProperty {
     /// OXC declaration-site spans. Used by the analyzer's class lowerer to mint
     /// non-public class members onto the shared surface.
     #[must_use]
-    pub fn with_visibility(
-        name: String,
+    pub fn with_key_visibility(
+        key: TypeAuthoredPropertyKey,
         ty: TypeExpr,
         optional: bool,
         readonly: bool,
@@ -861,7 +881,7 @@ impl ObjectProperty {
         spans: MemberSpans,
     ) -> Self {
         Self {
-            name,
+            key,
             ty,
             optional,
             readonly,
@@ -943,7 +963,7 @@ impl IndexSignature {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct MethodSignature {
-    pub name: String,
+    pub key: TypeAuthoredPropertyKey,
     pub function: FunctionExpr,
     pub optional: bool,
     /// Syntax-owned class method kind. Non-class object methods use `Method`.
@@ -972,7 +992,17 @@ pub struct MethodSignature {
 }
 
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_no_storedspan::NoStoredSpan,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ObjectMethodKind {
@@ -983,6 +1013,12 @@ pub enum ObjectMethodKind {
 }
 
 impl MethodSignature {
+    /// Borrow the ordinary string spelling when this method has a string key.
+    #[must_use]
+    pub fn string_name(&self) -> Option<&str> {
+        self.key.as_string()
+    }
+
     /// Construct a genuinely SOURCE-LESS, semantically-public method signature:
     /// no single declaration site and no accessibility origin (a synthesized
     /// framework member, an interface / type-literal method, a test fixture).
@@ -990,9 +1026,13 @@ impl MethodSignature {
     /// accessibility. Source-DERIVED reconstructions MUST use
     /// [`Self::synthetic_with_visibility`] or [`Self::with_visibility`].
     #[must_use]
-    pub fn synthetic_public(name: String, function: FunctionExpr, optional: bool) -> Self {
+    pub fn synthetic_public_key(
+        key: TypeAuthoredPropertyKey,
+        function: FunctionExpr,
+        optional: bool,
+    ) -> Self {
         Self {
-            name,
+            key,
             function,
             optional,
             method_kind: ObjectMethodKind::Method,
@@ -1008,14 +1048,14 @@ impl MethodSignature {
     /// / Pick reconstruction where the navigated method already carries a
     /// visibility that must be preserved.
     #[must_use]
-    pub fn synthetic_with_visibility(
-        name: String,
+    pub fn synthetic_key_with_visibility(
+        key: TypeAuthoredPropertyKey,
         function: FunctionExpr,
         optional: bool,
         visibility: MemberVisibility,
     ) -> Self {
         Self {
-            name,
+            key,
             function,
             optional,
             method_kind: ObjectMethodKind::Method,
@@ -1032,14 +1072,14 @@ impl MethodSignature {
     /// by construction. Source-DERIVED reconstructions MUST use
     /// [`Self::with_visibility`].
     #[must_use]
-    pub fn with_spans_public(
-        name: String,
+    pub fn with_key_spans_public(
+        key: TypeAuthoredPropertyKey,
         function: FunctionExpr,
         optional: bool,
         spans: MemberSpans,
     ) -> Self {
         Self {
-            name,
+            key,
             function,
             optional,
             method_kind: ObjectMethodKind::Method,
@@ -1054,15 +1094,15 @@ impl MethodSignature {
     /// and its OXC declaration-site spans. Used by the analyzer's class lowerer
     /// to mint non-public class methods onto the shared surface.
     #[must_use]
-    pub fn with_visibility(
-        name: String,
+    pub fn with_key_visibility(
+        key: TypeAuthoredPropertyKey,
         function: FunctionExpr,
         optional: bool,
         visibility: MemberVisibility,
         spans: MemberSpans,
     ) -> Self {
         Self {
-            name,
+            key,
             function,
             optional,
             method_kind: ObjectMethodKind::Method,

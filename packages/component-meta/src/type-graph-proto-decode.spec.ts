@@ -108,3 +108,149 @@ describe("object-literal spread member wire decode", () => {
     expect(result.props).toHaveLength(1);
   });
 });
+
+describe("schema-5 typed property keys", () => {
+  const MEMBER_PROPERTY = 1;
+
+  function payloadWithMembers(members: unknown[]) {
+    return {
+      schemaVersion: 5,
+      typeGraph: {
+        strings: ["/x.ts", "alpha", "tag", "Obj"],
+        nodes: [
+          { kind: { case: "primitive", value: { primitive: 1 } } },
+          { kind: { case: "primitive", value: { primitive: 6 } } },
+          { kind: { case: "ref", value: { nameId: 4, typeArgumentNodeIds: [] } } },
+          {
+            kind: {
+              case: "object",
+              value: { members },
+            },
+          },
+        ],
+      },
+      typeRegistry: [{ nameId: 4, typeNodeId: 4, rawTypeId: 4 }],
+      body: {
+        filePathId: 1,
+        optionsApi: false,
+        props: [],
+        events: [],
+        slots: [],
+        acceptedProps: [],
+        acceptedEvents: [],
+        acceptedSurfaceCompleteness: 1,
+        rootReachability: { kind: 1, reason: 5, branches: [] },
+        fallthroughSurface: { kind: 1, reason: 5, branches: [] },
+        models: [],
+        exposed: [],
+        components: [],
+        templateRefs: [],
+        imports: [],
+        bindings: [],
+        vueApiCalls: [],
+        styles: [],
+        flags: {},
+      },
+    };
+  }
+
+  function member(key: unknown, typeNodeId: number) {
+    return {
+      kind: MEMBER_PROPERTY,
+      propertyKey: key,
+      typeNodeId,
+      optional: false,
+      readonly: false,
+      keyNameId: 0,
+      keyTypeNodeId: 0,
+      valueTypeNodeId: 0,
+      functionNodeId: 0,
+      methodKind: 0,
+      hasImplementationBody: false,
+    };
+  }
+
+  it("decodes every property-key kind from a schema-5 payload", async () => {
+    const { create, toBinary } = await import("@bufbuild/protobuf");
+    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
+    const payload = create(
+      ComponentMetaPayloadSchema,
+      payloadWithMembers([
+        member({ key: { case: "stringId", value: 2 } }, 1),
+        member({ key: { case: "canonicalNumber", value: 7n } }, 2),
+        member(
+          {
+            key: {
+              case: "uniqueSymbol",
+              value: { canonicalId: 1, ownerKind: 0, ownerOrdinal: 0, symbol: 3, memberPath: [] },
+            },
+          },
+          1,
+        ),
+        member({ key: { case: "computedNodeId", value: 3 } }, 2),
+      ]),
+    );
+    const bytes = toBinary(ComponentMetaPayloadSchema, payload);
+    const result = decodeTypedComponentMetaPayload(bytes);
+
+    const entry = (result.typeRegistry as { name: string; type: unknown }[])[0];
+    expect(entry.name).toBe("Obj");
+    const ref = entry.type as { graph: { getNode(id: number): any }; nodeId: number };
+    const node = ref.graph.getNode(ref.nodeId);
+    const [stringKey, numberKey, symbolKey, computedKey] = node.members.map(
+      (m: { key: unknown }) => m.key,
+    );
+    expect(stringKey).toEqual({ kind: "string", nameId: 2 });
+    expect(numberKey).toEqual({ kind: "number", value: 7 });
+    expect(symbolKey).toEqual({
+      kind: "uniqueSymbol",
+      nameId: 3,
+      canonicalNameId: 1,
+      ownerKind: 0,
+      ownerOrdinal: 0,
+      memberPathNameIds: [],
+    });
+    expect(computedKey).toEqual({ kind: "computed", nodeId: 3 });
+  });
+
+  it("resolves display names for string, number, and symbol keys through the bridge", async () => {
+    const { create, toBinary } = await import("@bufbuild/protobuf");
+    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
+    const { nativeTypeRegistryToMap } = await import("./native-component-meta.js");
+    const { decodeComponentMetaPayload } = await import("./type-graph.js");
+    const payload = create(
+      ComponentMetaPayloadSchema,
+      payloadWithMembers([
+        member({ key: { case: "stringId", value: 2 } }, 1),
+        member({ key: { case: "canonicalNumber", value: 7n } }, 2),
+        member(
+          {
+            key: {
+              case: "uniqueSymbol",
+              value: { canonicalId: 1, ownerKind: 0, ownerOrdinal: 0, symbol: 3, memberPath: [] },
+            },
+          },
+          1,
+        ),
+        member({ key: { case: "computedNodeId", value: 3 } }, 2),
+      ]),
+    );
+    const bytes = toBinary(ComponentMetaPayloadSchema, payload);
+    const native = decodeComponentMetaPayload(bytes);
+    const obj = nativeTypeRegistryToMap(native)?.get("Obj");
+    expect(obj).toBeDefined();
+    const names = (obj as { properties: { name: string }[] }).properties.map((p) => p.name);
+    expect(names).toEqual(["alpha", "7", "tag", ""]);
+  });
+
+  it("rejects a schema-4 payload with the typed version error", async () => {
+    const { create, toBinary } = await import("@bufbuild/protobuf");
+    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
+    const payload = create(ComponentMetaPayloadSchema, {
+      ...payloadWithMembers([]),
+      schemaVersion: 4,
+    });
+    const bytes = toBinary(ComponentMetaPayloadSchema, payload);
+    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 5, found 4/);
+  });
+});

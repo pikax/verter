@@ -76,8 +76,18 @@ fn bullet_4_single_body_edit_changes_member_keeps_presence_unchanged() {
 
     // `MemberPresence` is header-only and identical across
     // body edits with the same `(name, kind, exporter)`.
-    let presence_v1 = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
-    let presence_v2 = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
+    let presence_v1 = compute_member_presence_hash(
+        "Foo",
+        &verter_type_expr::facts::FactPropertyKey::identifier("a"),
+        kind,
+        SymbolSpace::Type,
+    );
+    let presence_v2 = compute_member_presence_hash(
+        "Foo",
+        &verter_type_expr::facts::FactPropertyKey::identifier("a"),
+        kind,
+        SymbolSpace::Type,
+    );
     assert_eq!(
         presence_v1, presence_v2,
         "R28: body edits MUST NOT change MemberPresence header"
@@ -100,14 +110,14 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
     // gets edited.
     let body_a = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "id".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "id".to_string().into(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "name".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "name".to_string().into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
@@ -115,29 +125,35 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
         ],
     }));
     let body_b_v1 = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "other".to_string(),
-            TypeExpr::Primitive(PrimitiveName::String),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "other".to_string().into(),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            ),
+        )],
     }));
     let body_b_v2 = TypeExpr::Object(Arc::new(ObjectExpr {
         // Edit: `string` → `number`.
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "other".to_string(),
-            TypeExpr::Primitive(PrimitiveName::Number),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "other".to_string().into(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            ),
+        )],
     }));
     let body_c = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "extra".to_string(),
-            TypeExpr::Primitive(PrimitiveName::Boolean),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "extra".to_string().into(),
+                TypeExpr::Primitive(PrimitiveName::Boolean),
+                false,
+                false,
+            ),
+        )],
     }));
 
     // Member.semantic_hash per member body (admitted
@@ -166,8 +182,18 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
     );
 
     // `MemberPresence(Foo, "a")` UNCHANGED (header invariant).
-    let presence_a_v1 = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
-    let presence_a_v2 = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
+    let presence_a_v1 = compute_member_presence_hash(
+        "Foo",
+        &verter_type_expr::facts::FactPropertyKey::identifier("a"),
+        kind,
+        SymbolSpace::Type,
+    );
+    let presence_a_v2 = compute_member_presence_hash(
+        "Foo",
+        &verter_type_expr::facts::FactPropertyKey::identifier("a"),
+        kind,
+        SymbolSpace::Type,
+    );
     assert_eq!(
         presence_a_v1, presence_a_v2,
         "R28: editing Foo.b MUST NOT shift MemberPresence(Foo, a) — the consumer is `Pick<Foo, a>` and observes ONLY `(a)`"
@@ -175,8 +201,18 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
 
     // `MemberPresence(Foo, "b")` UNCHANGED (the header — name +
     // kind + exporter — is invariant; only the body changed).
-    let presence_b_v1 = compute_member_presence_hash("Foo", "b", kind, SymbolSpace::Type);
-    let presence_b_v2 = compute_member_presence_hash("Foo", "b", kind, SymbolSpace::Type);
+    let presence_b_v1 = compute_member_presence_hash(
+        "Foo",
+        &verter_type_expr::facts::FactPropertyKey::identifier("b"),
+        kind,
+        SymbolSpace::Type,
+    );
+    let presence_b_v2 = compute_member_presence_hash(
+        "Foo",
+        &verter_type_expr::facts::FactPropertyKey::identifier("b"),
+        kind,
+        SymbolSpace::Type,
+    );
     assert_eq!(
         presence_b_v1, presence_b_v2,
         "R28: body edit MUST NOT shift MemberPresence(b) — only body changes shift MEMBER, not PRESENCE"
@@ -193,7 +229,7 @@ fn phase1_emission_produces_member_presence_for_every_member() {
     for name in &["a", "b", "c"] {
         let key = FactKey::MemberPresence {
             exporter: InternedName::from("Foo"),
-            name: InternedName::from(*name),
+            name: verter_type_expr::facts::FactPropertyKey::identifier(*name),
             space: SymbolSpace::Type,
         };
         assert!(

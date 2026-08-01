@@ -1260,7 +1260,7 @@ fn collect_bindable_and_defaults(
         return;
     };
     for prop in &obj.properties {
-        let key = property_key_name(&prop.key).map(|n| n.to_string());
+        let key = static_string_property_key(&prop.key).map(str::to_string);
         if let BindingPattern::AssignmentPattern(assign) = &prop.value {
             if is_rune_call(&assign.right, "$bindable") {
                 if let Some(name) = &key {

@@ -295,17 +295,38 @@ fn walk(expr: &TypeExpr, path: &str, out: &mut Vec<String>) {
             for (i, m) in obj.properties.iter().enumerate() {
                 match m {
                     ObjectMember::Property(prop) => {
-                        walk(&prop.ty, &format!("{path}.{}", prop.name), out);
+                        walk(
+                            &prop.ty,
+                            &format!(
+                                "{path}.{}",
+                                prop.string_name().unwrap_or("<non-string-key>")
+                            ),
+                            out,
+                        );
                     }
                     ObjectMember::Spread(spread) => {
                         walk(&spread.ty, &format!("{path}[spread{i}]"), out);
                     }
                     ObjectMember::Method(method) => {
                         for (j, p) in method.function.parameters.iter().enumerate() {
-                            walk(&p.ty, &format!("{path}.{}.param{j}", method.name), out);
+                            walk(
+                                &p.ty,
+                                &format!(
+                                    "{path}.{}.param{j}",
+                                    method.string_name().unwrap_or("<non-string-key>")
+                                ),
+                                out,
+                            );
                         }
                         if let Some(ret) = method.function.return_type.as_deref() {
-                            walk(ret, &format!("{path}.{}.return", method.name), out);
+                            walk(
+                                ret,
+                                &format!(
+                                    "{path}.{}.return",
+                                    method.string_name().unwrap_or("<non-string-key>")
+                                ),
+                                out,
+                            );
                         }
                     }
                     ObjectMember::CallSignature(f) | ObjectMember::ConstructSignature(f) => {

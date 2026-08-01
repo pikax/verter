@@ -239,7 +239,10 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
 /// Steal the inline `TypeExpr` children of an owned `ObjectMember`.
 fn drain_object_member(member: ObjectMember, worklist: &mut Vec<TypeExpr>) {
     match member {
-        ObjectMember::Property(mut p) => worklist.push(std::mem::replace(&mut p.ty, drop_leaf())),
+        ObjectMember::Property(mut p) => {
+            drain_authored_property_key(&mut p.key, worklist);
+            worklist.push(std::mem::replace(&mut p.ty, drop_leaf()));
+        }
         ObjectMember::IndexSignature(mut s) => {
             worklist.push(std::mem::replace(&mut s.key_type, drop_leaf()));
             worklist.push(std::mem::replace(&mut s.value_type, drop_leaf()));
@@ -247,8 +250,18 @@ fn drain_object_member(member: ObjectMember, worklist: &mut Vec<TypeExpr>) {
         ObjectMember::CallSignature(f) | ObjectMember::ConstructSignature(f) => {
             drain_function_expr(f, worklist);
         }
-        ObjectMember::Method(m) => drain_function_expr(m.function, worklist),
+        ObjectMember::Method(mut m) => {
+            drain_authored_property_key(&mut m.key, worklist);
+            drain_function_expr(m.function, worklist);
+        }
         ObjectMember::Spread(mut s) => worklist.push(std::mem::replace(&mut s.ty, drop_leaf())),
+    }
+}
+
+fn drain_authored_property_key(key: &mut TypeAuthoredPropertyKey, worklist: &mut Vec<TypeExpr>) {
+    let replacement = AuthoredPropertyKey::string(Arc::<str>::from(""));
+    if let AuthoredPropertyKey::Computed(child) = std::mem::replace(key, replacement) {
+        worklist.push(child);
     }
 }
 
@@ -316,6 +329,11 @@ enum HashStep<'a> {
     Usize(usize),
     /// Emit a trailing `bool` field.
     Bool(bool),
+    /// Emit an authored object-member key, walking a computed expression
+    /// through the same depth-safe node stack.
+    AuthoredKey(&'a TypeAuthoredPropertyKey),
+    /// Emit a method/accessor kind.
+    MethodKind(ObjectMethodKind),
     /// Emit a trailing non-public `MemberVisibility` marker (a class member's
     /// declared `protected` / `private` accessibility, emitted in declaration
     /// order between `readonly` and `spans` for a property / between `optional`
@@ -371,6 +389,8 @@ impl Hash for TypeExpr {
                 },
                 HashStep::Usize(n) => n.hash(state),
                 HashStep::Bool(b) => b.hash(state),
+                HashStep::AuthoredKey(key) => hash_authored_property_key(key, state, &mut stack),
+                HashStep::MethodKind(kind) => kind.hash(state),
                 HashStep::Visibility(v) => v.hash(state),
                 HashStep::ExcessOrigin(o) => o.hash(state),
                 HashStep::Modifier(m) => m.hash(state),
@@ -612,7 +632,7 @@ fn hash_object_member_step<'a, H: Hasher>(
     match member {
         ObjectMember::Property(p) => {
             0isize.hash(state);
-            p.name.hash(state);
+            stack.push(HashStep::MemberSpans(p.spans));
             // ty, optional, readonly, [visibility marker ONLY if non-public],
             // [excess-origin marker ONLY if non-NonLiteral], spans. Push
             // reverse. A `Public` member emits NO visibility bytes and a
@@ -620,7 +640,6 @@ fn hash_object_member_step<'a, H: Hasher>(
             // surface hashes byte-identically to the pre-visibility /
             // pre-freshness stream (zero cache-identity churn); a non-default
             // value folds a distinguishing marker.
-            stack.push(HashStep::MemberSpans(p.spans));
             if p.excess_origin != ExcessPropertyOrigin::NonLiteral {
                 stack.push(HashStep::ExcessOrigin(p.excess_origin));
             }
@@ -630,6 +649,7 @@ fn hash_object_member_step<'a, H: Hasher>(
             stack.push(HashStep::Bool(p.readonly));
             stack.push(HashStep::Bool(p.optional));
             stack.push(HashStep::Node(&p.ty));
+            stack.push(HashStep::AuthoredKey(&p.key));
         }
         ObjectMember::IndexSignature(s) => {
             1isize.hash(state);
@@ -650,7 +670,6 @@ fn hash_object_member_step<'a, H: Hasher>(
         }
         ObjectMember::Method(m) => {
             4isize.hash(state);
-            m.name.hash(state);
             // function, optional, [visibility marker ONLY if non-public],
             // [excess-origin marker ONLY if non-NonLiteral], spans. Push
             // reverse. `Public` emits no visibility bytes and `NonLiteral` no
@@ -663,14 +682,42 @@ fn hash_object_member_step<'a, H: Hasher>(
             if !m.visibility.is_public() {
                 stack.push(HashStep::Visibility(m.visibility));
             }
+            stack.push(HashStep::Bool(m.has_implementation_body));
+            stack.push(HashStep::MethodKind(m.method_kind));
             stack.push(HashStep::Bool(m.optional));
             stack.push(HashStep::Func(&m.function));
+            stack.push(HashStep::AuthoredKey(&m.key));
         }
         ObjectMember::Spread(s) => {
             // New member variant: takes the next free discriminant (5) so the
             // existing member streams 0..=4 stay frozen.
             5isize.hash(state);
             stack.push(HashStep::Node(&s.ty));
+        }
+    }
+}
+
+fn hash_authored_property_key<'a, H: Hasher>(
+    key: &'a TypeAuthoredPropertyKey,
+    state: &mut H,
+    stack: &mut Vec<HashStep<'a>>,
+) {
+    match key {
+        AuthoredPropertyKey::String(value) => {
+            0isize.hash(state);
+            value.hash(state);
+        }
+        AuthoredPropertyKey::Number(value) => {
+            1isize.hash(state);
+            value.hash(state);
+        }
+        AuthoredPropertyKey::UniqueSymbol(identity) => {
+            2isize.hash(state);
+            identity.hash(state);
+        }
+        AuthoredPropertyKey::Computed(child) => {
+            3isize.hash(state);
+            stack.push(HashStep::Node(child));
         }
     }
 }

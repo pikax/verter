@@ -13,7 +13,6 @@ fn upsert(host: &crate::VerterHost) {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not bridge a `unique symbol` value identity into computed-key projection; keep as the future unique-symbol indexed-access contract"]
 fn unique_symbol_indexed_access_via_typeof_returns_literal_value() {
     // TS7 contract: `Branded[typeof brandTag]` reduces to the literal string
     // `"branded"`. The unique-symbol value identity participates in object
@@ -34,7 +33,6 @@ fn unique_symbol_indexed_access_via_typeof_returns_literal_value() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not project the non-symbol sibling member of an object that also has a unique-symbol-keyed member; keep as the future unique-symbol sibling-member contract"]
 fn unique_symbol_string_key_access_returns_sibling_value() {
     // TS7 contract: `Branded["payload"]` = `string`. The presence of a
     // unique-symbol-keyed member next to it does NOT shadow ordinary

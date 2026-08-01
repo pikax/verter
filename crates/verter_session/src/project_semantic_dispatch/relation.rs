@@ -258,6 +258,28 @@ enum RootClose {
     Undecided,
 }
 
+#[derive(Clone)]
+struct ProjectedRelationMember {
+    key: crate::semantic_query::PropertyKey,
+    presence: crate::semantic_query::PositiveKeyPresence,
+    value: crate::semantic_query::ProjectionEvidence<SemanticNodeId>,
+}
+
+#[derive(Clone)]
+struct ProjectedRelationIndex {
+    key_type: SemanticNodeId,
+    value: crate::semantic_query::ProjectionEvidence<SemanticNodeId>,
+}
+
+#[derive(Clone)]
+struct ProjectedRelationBranch {
+    members: Vec<ProjectedRelationMember>,
+    indices: Vec<ProjectedRelationIndex>,
+    call_signatures: Vec<SemanticNodeId>,
+    construct_signatures: Vec<SemanticNodeId>,
+    open: bool,
+}
+
 type DischargedMember = (
     RelateMemoKey,
     InferenceOccurrence,
@@ -456,11 +478,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let member = |value, readonly| crate::semantic_query::SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            name: Arc::from("value"),
+            key: crate::semantic_query::AuthoredPropertyKey::string("value"),
             value,
             optional: false,
             readonly,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
@@ -474,7 +497,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 index_signatures: Arc::from(Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             },
         ));
         let target = graph.intern_node(SemanticNodeData::Object(
@@ -485,7 +507,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 index_signatures: Arc::from(Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             },
         ));
         let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
@@ -586,6 +607,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         StrictFamilyConfig {
             strict_null_checks: bits & 0b01 == 0,
             strict_function_types: bits & 0b10 == 0,
+            exact_optional_property_types: bits & 0b100 != 0,
         }
     }
 
@@ -618,12 +640,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> RelationStep {
         let graph = self.graph();
         graph.record_relation_check();
-        // Open object roots are deliberately undecidable. This guard runs
-        // after transparent root normalization and before inference setup,
-        // memo reads, frame creation, or any structural shortcut.
-        if self.relation_root_is_open(key.source) || self.relation_root_is_open(key.target) {
-            return RelationStep::Unknown;
-        }
         // Binding-producing upgrade: an in-scope `infer` pattern on the
         // target opens this judgement under the pattern's immutable
         // session-setup fingerprint. Reverse-projection sub-relations retain
@@ -1814,9 +1830,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         bound: SemanticNodeId,
         occurrence: InferenceOccurrence,
     ) -> bool {
-        if self.relation_root_is_open(param_node) || self.relation_root_is_open(bound) {
-            return false;
-        }
         let mut txn = self.relation_txn.borrow_mut();
         let active_id = txn.active_session().map(|session| session.id);
         let accepted = txn.active_session_mut().is_some_and(|session| {
@@ -1870,9 +1883,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             IdentityCarrierUnwrap::Concrete(bound) => bound,
             IdentityCarrierUnwrap::Unresolvable => return false,
         };
-        if self.relation_root_is_open(projection) || self.relation_root_is_open(bound) {
-            return false;
-        }
         if self.relation_subtree_contains_semantically_unresolved(bound)
             || super::raise::node_is_unknown_materializing_failure(self, bound)
             || super::raise::node_contains_semantic_miss_with_dispatch(self, bound) != Some(false)
@@ -1986,9 +1996,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if let Some(keyspace) = surface.keyspace {
                         stack.push(keyspace);
                     }
-                    if let Some(operands) = surface.open_spread_operands() {
-                        stack.extend(operands.as_slice().iter().copied());
-                    }
+                }
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    stack.extend(program.child_nodes());
                 }
                 SemanticNodeData::Signature {
                     params,
@@ -2009,7 +2019,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
                 SemanticNodeData::IndexedAccess { object, index } => {
                     stack.push(*object);
-                    if let IndexKey::TypeNode(index) = index {
+                    if let IndexKey::Computed(index) = index {
                         stack.push(*index);
                     }
                 }
@@ -2205,9 +2215,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             IdentityCarrierUnwrap::Concrete(source) => source,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
-        if self.relation_root_is_open(source) {
-            return RelationResult::Unknown;
-        }
         if !self.relation_reverse_source_inputs_are_semantically_resolved(source) {
             return RelationResult::Unknown;
         }
@@ -2218,7 +2225,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let bindings_len = bindings.len();
         let graph = self.graph();
         let source_shape = match graph.node_data(source).as_deref() {
-            Some(SemanticNodeData::Object(view)) if !view.is_open_spread() => {
+            Some(SemanticNodeData::Object(view)) => {
                 if view.has_known_index_signature() && view.index_signatures.is_empty() {
                     self.relation_session_rollback(&overall_checkpoint);
                     return RelationResult::Unknown;
@@ -2254,9 +2261,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         verdict = RelationResult::NotAssignable;
                         break;
                     };
-                    let key = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                        member.name.to_string(),
-                    )));
+                    let Some(known_key) = member.key.cloned_known() else {
+                        verdict = RelationResult::Unknown;
+                        break;
+                    };
+                    let key = match known_key {
+                        crate::semantic_query::PropertyKey::String(name) => graph.intern_node(
+                            SemanticNodeData::Literal(LiteralValue::String(name.to_string())),
+                        ),
+                        crate::semantic_query::PropertyKey::Number(number) => graph.intern_node(
+                            SemanticNodeData::Literal(LiteralValue::Number(number.get() as f64)),
+                        ),
+                        crate::semantic_query::PropertyKey::UniqueSymbol(_) => {
+                            verdict = RelationResult::Unknown;
+                            break;
+                        }
+                    };
                     verdict = self.recover_reverse_projection(
                         member.value,
                         key,
@@ -2451,7 +2471,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.substitute_semantic_type_param(spec.template, spec.mapper_parameter, key);
         let projection_probe = self.graph().intern_node(SemanticNodeData::IndexedAccess {
             object: spec.base_infer,
-            index: IndexKey::TypeNode(spec.mapper_parameter),
+            index: IndexKey::Computed(spec.mapper_parameter),
         });
         let projection_probe =
             self.substitute_semantic_type_param(projection_probe, spec.mapper_parameter, key);
@@ -2538,7 +2558,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                         keyspace: None,
                         has_index_signature,
-                        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                     },
                 )))
             }
@@ -2611,7 +2630,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         targets.push(node);
                     }
                     stack.push((*object, shadowed));
-                    if let IndexKey::TypeNode(index) = index {
+                    if let IndexKey::Computed(index) = index {
                         stack.push((*index, shadowed));
                     }
                 }
@@ -2696,9 +2715,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     if let Some(keyspace) = surface.keyspace {
                         stack.push((keyspace, shadowed));
-                    }
-                    if let Some(operands) = surface.open_spread_operands() {
-                        stack.extend(operands.as_slice().iter().map(|node| (*node, shadowed)));
                     }
                 }
                 SemanticNodeData::MergedDecl { contributors } => {
@@ -2921,9 +2937,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: &RelateMemoKey,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        if self.relation_root_is_open(key.source) || self.relation_root_is_open(key.target) {
-            return RelationResult::Unknown;
-        }
         // Axis refusal: the reducer implements the ASSIGNABILITY relation
         // (regular AND fresh sources; the excess-property policy runs the
         // fresh prepass below). A key on any not-yet-implemented axis
@@ -3030,12 +3043,504 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 super::relation_excess::ExcessPrepassOutcome::Pass => {}
             }
         }
+        // Object-spread programs are formulas, not ordinary graph-node
+        // surfaces. Relate them before the identity fast path and before any
+        // legacy Object handling so an unresolved program is never accepted
+        // merely because both sides carry the same node id.
+        if let Some(result) =
+            self.try_object_spread_program_relation(key.source, key.target, bindings)
+        {
+            return result;
+        }
         match self.shallow_relation_check(key.source, key.target) {
             ShallowRelation::Assignable => return assignable(bindings),
             ShallowRelation::NotAssignable => return RelationResult::NotAssignable,
             ShallowRelation::Unknown => {}
         }
         self.decide_relation_with_dispatch(key.source, key.target, bindings)
+    }
+
+    fn try_object_spread_program_relation(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        // Transparent aliases are followed before program recognition so an
+        // aliased program is still a program side.
+        let source = self.follow_relation_aliases(source);
+        let target = self.follow_relation_aliases(target);
+        let source_is_program = matches!(
+            self.graph().node_data(source).as_deref(),
+            Some(SemanticNodeData::ObjectSpreadProgram(_))
+        );
+        let target_is_program = matches!(
+            self.graph().node_data(target).as_deref(),
+            Some(SemanticNodeData::ObjectSpreadProgram(_))
+        );
+        if !source_is_program && !target_is_program {
+            return None;
+        }
+
+        // One side is a program: resolve identity carriers on both sides so a
+        // `DeclRef` / `InstantiationRef` counterpart reaches its Object surface
+        // instead of collapsing to Unknown.
+        let source = match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(id) => id,
+            IdentityCarrierUnwrap::Unresolvable => return Some(RelationResult::Unknown),
+        };
+        let target = match self.unwrap_identity_carrier_for_relation(target) {
+            IdentityCarrierUnwrap::Concrete(id) => id,
+            IdentityCarrierUnwrap::Unresolvable => return Some(RelationResult::Unknown),
+        };
+        // Top/bottom rules apply before projection: `any` / `unknown` accept
+        // from either side, `never` is bottom, an error type swallows, and the
+        // `object` nonprimitive accepts every program (a construction program
+        // always produces an object). These mirror `expand_pair`'s wildcard
+        // and `object` arms so root and worklist agree.
+        let source_data = self.graph().node_data(source);
+        let target_data = self.graph().node_data(target);
+        let error_swallows = |data: &SemanticNodeData| matches!(data, SemanticNodeData::Opaque(err) if err.is_error_type());
+        match (source_data.as_deref(), target_data.as_deref()) {
+            (Some(data), _) | (_, Some(data)) if error_swallows(data) => {
+                return Some(assignable(bindings));
+            }
+            (Some(SemanticNodeData::Primitive(PrimitiveKind::Never)), _)
+            | (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown)))
+            | (Some(SemanticNodeData::Primitive(PrimitiveKind::Any)), _) => {
+                return Some(assignable(bindings));
+            }
+            (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Never))) => {
+                return Some(RelationResult::NotAssignable);
+            }
+            (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Object))) => {
+                return Some(assignable(bindings));
+            }
+            _ => {}
+        }
+        let Some(source_branches) = self.projected_relation_branches(source) else {
+            return Some(RelationResult::Unknown);
+        };
+        let Some(target_branches) = self.projected_relation_branches(target) else {
+            return Some(RelationResult::Unknown);
+        };
+        let overall_checkpoint = self.relation_session_checkpoint();
+        let overall_bindings_len = bindings.len();
+        let mut universal_unknown = false;
+
+        for source_branch in &source_branches {
+            let source_checkpoint = self.relation_session_checkpoint();
+            let source_bindings_len = bindings.len();
+            let mut existential_unknown = false;
+            let mut accepted = false;
+            for target_branch in &target_branches {
+                let alternative_checkpoint = self.relation_session_checkpoint();
+                let alternative_bindings_len = bindings.len();
+                match self.relate_projected_object_branch(source_branch, target_branch, bindings) {
+                    RelationResult::Assignable { .. } => {
+                        accepted = true;
+                        break;
+                    }
+                    RelationResult::Unknown => {
+                        self.relation_session_rollback(&alternative_checkpoint);
+                        bindings.truncate(alternative_bindings_len);
+                        existential_unknown = true;
+                    }
+                    RelationResult::NotAssignable => {
+                        self.relation_session_rollback(&alternative_checkpoint);
+                        bindings.truncate(alternative_bindings_len);
+                    }
+                }
+            }
+            if accepted {
+                continue;
+            }
+            self.relation_session_rollback(&source_checkpoint);
+            bindings.truncate(source_bindings_len);
+            if existential_unknown {
+                universal_unknown = true;
+                continue;
+            }
+            self.relation_session_rollback(&overall_checkpoint);
+            bindings.truncate(overall_bindings_len);
+            return Some(RelationResult::NotAssignable);
+        }
+        if universal_unknown {
+            self.relation_session_rollback(&overall_checkpoint);
+            bindings.truncate(overall_bindings_len);
+            Some(RelationResult::Unknown)
+        } else {
+            Some(assignable(bindings))
+        }
+    }
+
+    /// Follow transparent `Alias` indirection (with a cycle guard) without
+    /// touching declaration carriers — the cheap half of relation
+    /// normalization.
+    fn follow_relation_aliases(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        let mut current = node;
+        let mut seen = FxHashSet::default();
+        while seen.insert(current) {
+            match graph.node_data(current).as_deref() {
+                Some(SemanticNodeData::Alias(inner)) => current = *inner,
+                _ => return current,
+            }
+        }
+        current
+    }
+
+    /// When `node == node` unwraps (alias follow + identity-carrier unwrap) to
+    /// an object-spread program, the identical pair answers through the
+    /// program protocol: node identity is not a completeness proof, so an
+    /// open program stays non-publishing `Unknown` while a closed one
+    /// decides. `None` when the node is not (or does not unwrap to) a
+    /// program — the ordinary identity shortcut applies.
+    fn try_identical_open_program_result(
+        &self,
+        node: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        let followed = self.follow_relation_aliases(node);
+        let normalized = match self.unwrap_identity_carrier_for_relation(followed) {
+            IdentityCarrierUnwrap::Concrete(id) => id,
+            IdentityCarrierUnwrap::Unresolvable => return None,
+        };
+        let normalized = match self.graph().node_data(normalized).as_deref() {
+            Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {
+                let transit = ProjectionReductionContext::structural_transit();
+                let (resolved, _) =
+                    self.resolve_carrier_subject_node_capturing_suppress(normalized, transit);
+                resolved
+            }
+            _ => normalized,
+        };
+        if !matches!(
+            self.graph().node_data(normalized).as_deref(),
+            Some(SemanticNodeData::ObjectSpreadProgram(_))
+        ) {
+            return None;
+        }
+        self.try_object_spread_program_relation(normalized, normalized, bindings)
+    }
+
+    fn projected_relation_branches(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<Vec<ProjectedRelationBranch>> {
+        let node = self.follow_relation_aliases(node);
+        let data = self.graph().node_data(node)?;
+        match data.as_ref() {
+            SemanticNodeData::Union(arms) => {
+                // Target disjunction: each arm is one accepting alternative.
+                let arms = Arc::clone(arms);
+                drop(data);
+                let mut branches = Vec::with_capacity(arms.len());
+                for arm in arms.iter() {
+                    let arm = match self.unwrap_identity_carrier_for_relation(*arm) {
+                        IdentityCarrierUnwrap::Concrete(id) => id,
+                        IdentityCarrierUnwrap::Unresolvable => return None,
+                    };
+                    branches.extend(self.projected_relation_branches(arm)?);
+                }
+                Some(branches)
+            }
+            SemanticNodeData::ObjectSpreadProgram(_) => {
+                drop(data);
+                let formula = match self.project_object_spread_for_consumer(
+                    node,
+                    crate::semantic_query::ObjectProjectionSelector::Surface,
+                    ProjectionReductionContext::structural_transit(),
+                ) {
+                    QueryResult::Value(formula) => formula,
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+                };
+                Some(
+                    formula
+                        .alternatives()
+                        .iter()
+                        .map(|alternative| {
+                            let mut members = Vec::new();
+                            alternative.positive().visit(|fact| {
+                                members.push(ProjectedRelationMember {
+                                    key: fact.key().clone(),
+                                    presence: fact.presence(),
+                                    value: fact.value().clone(),
+                                });
+                            });
+                            let mut call_signatures = Vec::new();
+                            let mut construct_signatures = Vec::new();
+                            for signature in alternative.signatures() {
+                                match signature.kind() {
+                                    crate::semantic_query::ObjectSignatureKind::Call => {
+                                        call_signatures.push(signature.node());
+                                    }
+                                    crate::semantic_query::ObjectSignatureKind::Construct => {
+                                        construct_signatures.push(signature.node());
+                                    }
+                                }
+                            }
+                            ProjectedRelationBranch {
+                                members,
+                                indices: alternative
+                                    .indices()
+                                    .iter()
+                                    .map(|index| ProjectedRelationIndex {
+                                        key_type: index.key_type(),
+                                        value: index.value().clone(),
+                                    })
+                                    .collect(),
+                                call_signatures,
+                                construct_signatures,
+                                open: alternative.closed().is_none(),
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            SemanticNodeData::Object(surface) => {
+                let branch = ProjectedRelationBranch {
+                    members: surface
+                        .positive_members()
+                        .iter()
+                        .filter_map(|member| {
+                            Some(ProjectedRelationMember {
+                                key: member.key.cloned_known()?,
+                                presence: if member.optional {
+                                    crate::semantic_query::PositiveKeyPresence::Optional
+                                } else {
+                                    crate::semantic_query::PositiveKeyPresence::Required
+                                },
+                                value: crate::semantic_query::ProjectionEvidence::Proven(
+                                    member.value,
+                                ),
+                            })
+                        })
+                        .collect(),
+                    indices: surface
+                        .index_signatures
+                        .iter()
+                        .map(|index| ProjectedRelationIndex {
+                            key_type: index.key_type,
+                            value: crate::semantic_query::ProjectionEvidence::Proven(
+                                index.value_type,
+                            ),
+                        })
+                        .collect(),
+                    call_signatures: surface.call_signatures.to_vec(),
+                    construct_signatures: surface.construct_signatures.to_vec(),
+                    open: false,
+                };
+                Some(vec![branch])
+            }
+            _ => None,
+        }
+    }
+
+    fn relate_projected_object_branch(
+        &self,
+        source: &ProjectedRelationBranch,
+        target: &ProjectedRelationBranch,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        let mut acc = assignable(bindings);
+        for target_member in &target.members {
+            // Element-access identity: a numeric key and its canonical
+            // string spelling address the same property.
+            let source_member = source
+                .members
+                .iter()
+                .find(|member| member.key.element_access_collides(&target_member.key));
+            let pair = match source_member {
+                Some(source_member)
+                    if target_member.presence
+                        == crate::semantic_query::PositiveKeyPresence::Required
+                        && source_member.presence
+                            == crate::semantic_query::PositiveKeyPresence::Optional =>
+                {
+                    // Optional-to-required: under `strictNullChecks` the
+                    // implied `undefined` cannot relate to the required value;
+                    // with null checks relaxed the pair relates on the value
+                    // types alone (mirrors `relate_property_pair`).
+                    let strict = self
+                        .relation_txn
+                        .borrow()
+                        .strict
+                        .unwrap_or(StrictFamilyConfig::TS_STRICT);
+                    if strict.strict_null_checks {
+                        RelationResult::NotAssignable
+                    } else {
+                        self.relate_projected_values(
+                            &source_member.value,
+                            &target_member.value,
+                            bindings,
+                        )
+                    }
+                }
+                Some(source_member) => self.relate_projected_values(
+                    &source_member.value,
+                    &target_member.value,
+                    bindings,
+                ),
+                None => {
+                    // An index signature constrains the value a key would
+                    // carry; it never manufactures named presence. Required
+                    // named target keys therefore need a named source fact.
+                    if target_member.presence
+                        == crate::semantic_query::PositiveKeyPresence::Required
+                    {
+                        if source.open {
+                            RelationResult::Unknown
+                        } else {
+                            RelationResult::NotAssignable
+                        }
+                    } else {
+                        // Optional target member satisfied by source index
+                        // evidence: EVERY applicable source index relates
+                        // (mirroring the legacy
+                        // `relate_property_via_source_index` loop) — the
+                        // first match alone would let an `any` index
+                        // swallow a refuting narrower index.
+                        let mut matched = false;
+                        let mut pair = assignable(bindings);
+                        for index in source.indices.iter().filter(|index| {
+                            index_signature_applies_to_property(
+                                self.graph(),
+                                index.key_type,
+                                &target_member.key,
+                            )
+                        }) {
+                            matched = true;
+                            pair = result_and(
+                                pair,
+                                self.relate_projected_values(
+                                    &index.value,
+                                    &target_member.value,
+                                    bindings,
+                                ),
+                            );
+                            if matches!(pair, RelationResult::NotAssignable) {
+                                break;
+                            }
+                        }
+                        if matched {
+                            pair
+                        } else if source.open {
+                            RelationResult::Unknown
+                        } else {
+                            assignable(bindings)
+                        }
+                    }
+                }
+            };
+            acc = result_and(acc, pair);
+            if matches!(acc, RelationResult::NotAssignable) {
+                return acc;
+            }
+        }
+
+        for target_index in &target.indices {
+            // Broad index obligations are universal conditional value
+            // obligations: relate EVERY source index fact whose domain
+            // overlaps the target's (a number index satisfies a string
+            // obligation; a string index covers the number domain for
+            // value relating — numeric keys are strings at runtime) and
+            // every known named contribution the target's key type covers.
+            // The legacy authority (`relate_target_index_signature`)
+            // relates all overlaps; relating only the first would let an
+            // `any` index swallow a refuting narrower index (order-
+            // dependent false Accept). A closed branch with only
+            // compatible known contributions satisfies the obligation
+            // without owning an index signature itself. A source index
+            // whose domain does not overlap is SKIPPED — domain
+            // non-overlap alone never rejects (the legacy rule; tsc
+            // agrees for string-to-number). The payload relation still
+            // rejects value-mismatched overlapping indices.
+            for source_index in source.indices.iter().filter(|index| {
+                index_domains_overlap(self.graph(), index.key_type, target_index.key_type)
+            }) {
+                acc = result_and(
+                    acc,
+                    self.relate_projected_values(
+                        &source_index.value,
+                        &target_index.value,
+                        bindings,
+                    ),
+                );
+                if matches!(acc, RelationResult::NotAssignable) {
+                    return acc;
+                }
+            }
+            for source_member in source.members.iter().filter(|member| {
+                index_signature_applies_to_property(
+                    self.graph(),
+                    target_index.key_type,
+                    &member.key,
+                )
+            }) {
+                acc = result_and(
+                    acc,
+                    self.relate_projected_values(
+                        &source_member.value,
+                        &target_index.value,
+                        bindings,
+                    ),
+                );
+            }
+            if source.open {
+                // A live residual needs an exact enumerable-value envelope;
+                // without one the universal obligation cannot close.
+                acc = result_and(acc, RelationResult::Unknown);
+            }
+            if matches!(acc, RelationResult::NotAssignable) {
+                return acc;
+            }
+        }
+
+        for target_signature in &target.call_signatures {
+            let pair = if source.call_signatures.is_empty() && source.open {
+                RelationResult::Unknown
+            } else {
+                self.relate_signature_alternatives(
+                    &source.call_signatures,
+                    *target_signature,
+                    bindings,
+                )
+            };
+            acc = result_and(acc, pair);
+        }
+        for target_signature in &target.construct_signatures {
+            let pair = if source.construct_signatures.is_empty() && source.open {
+                RelationResult::Unknown
+            } else {
+                self.relate_signature_alternatives(
+                    &source.construct_signatures,
+                    *target_signature,
+                    bindings,
+                )
+            };
+            acc = result_and(acc, pair);
+        }
+
+        if target.open {
+            acc = result_and(acc, RelationResult::Unknown);
+        }
+        acc
+    }
+
+    fn relate_projected_values(
+        &self,
+        source: &crate::semantic_query::ProjectionEvidence<SemanticNodeId>,
+        target: &crate::semantic_query::ProjectionEvidence<SemanticNodeId>,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        match (source, target) {
+            (
+                crate::semantic_query::ProjectionEvidence::Proven(source),
+                crate::semantic_query::ProjectionEvidence::Proven(target),
+            ) => self.relate_member(*source, *target, bindings, InferPosition::Covariant),
+            _ => RelationResult::Unknown,
+        }
     }
 
     /// Reduce one conditional shell through the canonical conditional query.
@@ -3076,10 +3581,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> ShallowRelation {
-        if self.relation_root_is_open(source) || self.relation_root_is_open(target) {
-            return ShallowRelation::Unknown;
-        }
         if source == target {
+            let mut no_bindings = Vec::new();
+            if let Some(result) = self.try_identical_open_program_result(source, &mut no_bindings) {
+                return match result {
+                    RelationResult::Assignable { .. } => ShallowRelation::Assignable,
+                    RelationResult::NotAssignable => ShallowRelation::NotAssignable,
+                    RelationResult::Unknown => ShallowRelation::Unknown,
+                };
+            }
             return ShallowRelation::Assignable;
         }
         let graph = self.graph();
@@ -3156,9 +3666,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        if self.relation_root_is_open(source) || self.relation_root_is_open(target) {
-            return RelationResult::Unknown;
-        }
         if let Some(r) = self.try_object_vs_record_relation(source, target, bindings) {
             return r;
         }
@@ -3248,14 +3755,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        if self.relation_root_is_open(source) || self.relation_root_is_open(target) {
-            return RelationResult::Unknown;
+        // Program recognition precedes the identity shortcut here exactly as
+        // at the root and in `expand_pair`: an open program is never accepted
+        // on node identity.
+        if let Some(result) = self.try_object_spread_program_relation(source, target, bindings) {
+            return result;
         }
         let occurrence = self.relation_current_occurrence();
         if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
             return result;
         }
         if source == target {
+            if let Some(result) = self.try_identical_open_program_result(source, bindings) {
+                return result;
+            }
             return assignable(bindings);
         }
         let graph = self.graph();
@@ -3322,19 +3835,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         work: &mut Vec<RelateWork>,
         results: &mut Vec<RelationResult>,
     ) {
-        if self.relation_root_is_open(source) || self.relation_root_is_open(target) {
-            results.push(RelationResult::Unknown);
-            return;
-        }
-        let occurrence = self.relation_current_occurrence();
-        if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
-            results.push(result);
-            return;
-        }
-        if source == target {
-            results.push(assignable(bindings));
-            return;
-        }
+        // Program recognition precedes the identity shortcut, structural
+        // shortcuts, inference deposits, and distribution — identical to the
+        // root protocol. An open program is never accepted on node identity.
         let graph = self.graph();
         let source_data = match graph.node_data(source) {
             Some(d) => d,
@@ -3364,6 +3867,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
             drop(source_data);
             drop(target_data);
             work.push(RelateWork::Eval(source, inner));
+            return;
+        }
+
+        // ── Object-spread programs are formulas: distributed and aliased
+        //    program operands relate through the SAME protocol as the root
+        //    (there is no second matcher). ───────────────────────────────
+        if let Some(result) = self.try_object_spread_program_relation(source, target, bindings) {
+            results.push(result);
+            return;
+        }
+
+        let occurrence = self.relation_current_occurrence();
+        if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
+            results.push(result);
+            return;
+        }
+        if source == target {
+            if let Some(result) = self.try_identical_open_program_result(source, bindings) {
+                results.push(result);
+                return;
+            }
+            results.push(assignable(bindings));
             return;
         }
 
@@ -3925,36 +4450,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     // shapes; recursion re-enters the authority)
     // ──────────────────────────────────────────────────────────────────
 
-    fn relation_root_is_open(&self, id: SemanticNodeId) -> bool {
-        let graph = self.graph();
-        let mut current = id;
-        let mut seen = FxHashSet::default();
-        loop {
-            if !seen.insert(current) {
-                return false;
-            }
-            match graph.node_data(current).as_deref() {
-                Some(SemanticNodeData::Alias(target)) => {
-                    current = *target;
-                }
-                Some(
-                    SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
-                    | SemanticNodeData::DeclRef { .. }
-                    | SemanticNodeData::InstantiationRef { .. },
-                ) => match self.unwrap_identity_carrier_for_relation(current) {
-                    IdentityCarrierUnwrap::Concrete(normalized) if normalized != current => {
-                        current = normalized;
-                    }
-                    IdentityCarrierUnwrap::Concrete(_) | IdentityCarrierUnwrap::Unresolvable => {
-                        return false;
-                    }
-                },
-                Some(SemanticNodeData::Object(surface)) => return surface.is_open_spread(),
-                _ => return false,
-            }
-        }
-    }
-
     /// Instantiate a decl identity carrier into its concrete shape for
     /// relation dispatch through `execute(Instantiate{…})` — the shared
     /// dispatch, never a private instantiation path.
@@ -4226,7 +4721,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Object(view)
                 if view.call_signatures.is_empty() && view.construct_signatures.is_empty() =>
             {
-                let closed = view.closed()?;
+                let closed = view.closed();
                 let members = closed.complete_members();
                 if members.is_empty() && view.index_signatures.len() == 1 {
                     let ix = &view.index_signatures[0];
@@ -4296,9 +4791,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return RelationResult::NotAssignable;
                     }
                 }
-                if source_view.is_open_spread() {
-                    return RelationResult::Unknown;
-                }
                 return acc;
             }
             _ => return RelationResult::Unknown,
@@ -4308,13 +4800,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
         for key in required_keys {
-            let member = match source_view.project_known_key(key.as_ref()) {
+            let member = match source_view.project_string_key(key.as_ref()) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(member) => member,
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
                     return RelationResult::NotAssignable;
-                }
-                crate::semantic_query::SurfaceKeyProjection::UnknownOnOpenSurface(_) => {
-                    return RelationResult::Unknown;
                 }
             };
             let r =
@@ -4342,23 +4831,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: &SurfaceView,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        if source.is_open_spread() || target.is_open_spread() {
-            return RelationResult::Unknown;
-        }
-        let closed_target = target
-            .closed()
-            .expect("open object roots return before structural relation");
+        let closed_target = target.closed();
 
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
         for t_prop in closed_target.complete_members() {
-            let prop_result = match source.project_known_key(t_prop.name.as_ref()) {
+            let Some(target_key) = t_prop.key.cloned_known() else {
+                return RelationResult::Unknown;
+            };
+            let prop_result = match source.project_known_key(&target_key) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(source_member) => {
                     self.relate_property_pair(source_member, t_prop, bindings)
-                }
-                crate::semantic_query::SurfaceKeyProjection::UnknownOnOpenSurface(_) => {
-                    RelationResult::Unknown
                 }
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
                     if let Some(index_result) =
@@ -4507,11 +4991,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
         for s_index in source.index_signatures.iter() {
-            if !index_signature_applies_to_property(
-                graph,
-                s_index.key_type,
-                target_prop.name.as_ref(),
-            ) {
+            let target_key = target_prop.key.cloned_known()?;
+            if !index_signature_applies_to_property(graph, s_index.key_type, &target_key) {
                 continue;
             }
             matched = true;
@@ -4555,11 +5036,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         for prop in source.positive_members().iter() {
-            if !index_signature_applies_to_property(
-                graph,
-                target_index.key_type,
-                prop.name.as_ref(),
-            ) {
+            let Some(property_key) = prop.key.cloned_known() else {
+                return RelationResult::Unknown;
+            };
+            if !index_signature_applies_to_property(graph, target_index.key_type, &property_key) {
                 continue;
             }
             let r = self.relate_member(
@@ -4573,9 +5053,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return RelationResult::NotAssignable;
             }
         }
-        if source.is_open_spread()
-            || (source.has_known_index_signature() && source.index_signatures.is_empty())
-        {
+        if source.has_known_index_signature() && source.index_signatures.is_empty() {
             RelationResult::Unknown
         } else {
             acc
@@ -4697,11 +5175,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        if target.is_open_spread() {
-            RelationResult::Unknown
-        } else {
-            acc
-        }
+        acc
     }
 
     /// An Object source against a DIRECT signature target: some signature

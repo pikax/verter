@@ -1081,7 +1081,10 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
     let key = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(
-            vec![crate::semantic_query::PathSegment::Member(Arc::from("a"))].into_boxed_slice(),
+            vec![crate::semantic_query::PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("a"),
+            )]
+            .into_boxed_slice(),
         ),
         context: crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Navigate,

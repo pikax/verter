@@ -148,7 +148,6 @@ impl ProjectSemanticDispatch<'_> {
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
             keyspace: None,
             has_index_signature: true,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         };
         self.graph().intern_node(SemanticNodeData::Object(surface))
     }
@@ -337,7 +336,10 @@ impl ProjectSemanticDispatch<'_> {
         matches!(
             path,
             [PathSegment::Index(
-                IndexKey::String(_) | IndexKey::Number(_) | IndexKey::TypeNode(_)
+                IndexKey::String(_)
+                    | IndexKey::Number(_)
+                    | IndexKey::UniqueSymbol(_)
+                    | IndexKey::Computed(_)
             )]
         )
     }
@@ -565,9 +567,9 @@ impl ProjectSemanticDispatch<'_> {
                         stack.push(sig.value_type);
                     }
                     stack.extend(surface.keyspace);
-                    if let Some(operands) = surface.open_spread_operands() {
-                        stack.extend(operands.as_slice().iter().copied());
-                    }
+                }
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    stack.extend(program.child_nodes());
                 }
                 SemanticNodeData::Array { element, .. } => stack.push(*element),
                 SemanticNodeData::Tuple { elements, .. } => {
@@ -579,7 +581,7 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
                 SemanticNodeData::IndexedAccess { object, index } => {
                     stack.push(*object);
-                    if let IndexKey::TypeNode(idx) = index {
+                    if let IndexKey::Computed(idx) = index {
                         stack.push(*idx);
                     }
                 }

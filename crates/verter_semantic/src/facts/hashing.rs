@@ -43,9 +43,9 @@ use std::sync::Arc;
 
 use verter_type_expr::facts::{EnumPrimitiveDomain, EnumScalar};
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier, MethodSignature,
-    ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TupleElement, TypeExpr, TypeParam,
-    ValueRef,
+    AuthoredPropertyKey, FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier,
+    MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TupleElement,
+    TypeAuthoredPropertyKey, TypeExpr, TypeParam, ValueRef,
 };
 
 use crate::analysis::type_eval::{EnumMemberValue, FunctionSignature, ValueDeclKind};
@@ -391,14 +391,14 @@ pub fn value_body_fingerprint(
 #[must_use]
 pub fn compute_member_presence_hash(
     exporter: &str,
-    name: &str,
+    name: &verter_type_expr::facts::FactPropertyKey,
     kind: MemberKind,
     space: SymbolSpace,
 ) -> FactHash {
     let mut buf: Vec<u8> = Vec::with_capacity(64);
     buf.extend_from_slice(b"member-presence:");
     buf.push(space.tag());
-    buf.extend_from_slice(name.as_bytes());
+    write_fact_property_key(&mut buf, name);
     buf.push(0xFF);
     buf.extend_from_slice(&kind.tag());
     buf.extend_from_slice(&exporter_qualifier_salt(exporter));
@@ -413,23 +413,56 @@ pub fn compute_member_presence_hash(
 #[must_use]
 pub fn compute_member_shape_hash(
     exporter: &str,
-    members: &[(Arc<str>, MemberKind)],
+    members: &[(verter_type_expr::facts::FactPropertyKey, MemberKind)],
     space: SymbolSpace,
 ) -> FactHash {
-    let mut sorted: Vec<&(Arc<str>, MemberKind)> = members.iter().collect();
-    sorted.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+    let mut sorted: Vec<&(verter_type_expr::facts::FactPropertyKey, MemberKind)> =
+        members.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
     let mut buf: Vec<u8> = Vec::with_capacity(64 + 16 * sorted.len());
     buf.extend_from_slice(b"member-shape:");
     buf.push(space.tag());
     buf.extend_from_slice(exporter.as_bytes());
     buf.push(0xFE);
     for (name, kind) in &sorted {
-        buf.extend_from_slice(name.as_bytes());
+        write_fact_property_key(&mut buf, name);
         buf.push(0xFD);
         buf.extend_from_slice(&kind.tag());
         buf.push(0xFC);
     }
     hash_16(&buf)
+}
+
+fn write_fact_property_key(buf: &mut Vec<u8>, key: &verter_type_expr::facts::FactPropertyKey) {
+    use verter_type_expr::PropertyKey;
+    match key {
+        PropertyKey::String(value) => {
+            buf.push(0);
+            buf.extend_from_slice(value.as_bytes());
+            buf.push(0xFB);
+        }
+        PropertyKey::Number(value) => {
+            buf.push(1);
+            buf.extend_from_slice(&value.get().to_le_bytes());
+        }
+        PropertyKey::UniqueSymbol(identity) => {
+            buf.push(2);
+            buf.extend_from_slice(identity.canonical_id.as_bytes());
+            buf.push(0xFA);
+            buf.push(match identity.owner.kind() {
+                verter_type_expr::TopLevelOwnerKind::Module => 0,
+                verter_type_expr::TopLevelOwnerKind::Instance => 1,
+                verter_type_expr::TopLevelOwnerKind::Frontmatter => 2,
+            });
+            buf.extend_from_slice(&identity.owner.ordinal().to_le_bytes());
+            buf.extend_from_slice(identity.symbol.as_bytes());
+            buf.push(0xF9);
+            for segment in identity.member_path.iter() {
+                buf.extend_from_slice(segment.as_bytes());
+                buf.push(0xF8);
+            }
+        }
+    }
 }
 
 /// Stable per-exporter salt for `MemberPresence.semantic_hash`. Keeps
@@ -807,10 +840,11 @@ impl<'a> Walker<'a> {
         if !self.enter_frame(SYNTHETIC_ENUM_OBJECT_IDENTITY.to_vec()) {
             return;
         }
-        // Foldable members only, in `walk_object`'s member-sort order. For an
-        // all-property object `member_sort_key` is `"prop:{name}"`, which sorts
-        // byte-identically to `name` (shared `"prop:"` prefix), so sorting the
-        // borrowed `(name, scalar)` pairs by name reproduces the exact order.
+        // Foldable members only, in `walk_object`'s member-sort order. An
+        // all-string-key object sorts by its canonical key bytes
+        // (`0x00 + name`), which is byte-identical to sorting by name, so
+        // sorting the borrowed `(name, scalar)` pairs by name reproduces the
+        // exact order.
         let mut folded: Vec<(&str, &EnumScalar)> = members
             .iter()
             .filter_map(|(name, value)| value.folded_literal().map(|lit| (name.as_str(), lit)))
@@ -915,28 +949,24 @@ impl<'a> Walker<'a> {
             }
             return;
         }
-        // Members sorted lexicographically by name (alpha-
-        // normalisation R16 — declaration order does not affect the
-        // hash).
-        let mut sorted: Vec<&ObjectMember> = obj.properties.iter().collect();
-        sorted.sort_by(|a, b| Self::member_sort_key(a).cmp(&Self::member_sort_key(b)));
         self.buf
-            .extend_from_slice(&(sorted.len() as u32).to_le_bytes());
-        for member in sorted {
+            .extend_from_slice(&(obj.properties.len() as u32).to_le_bytes());
+        // Alpha-normalisation (R16 — declaration order does not affect the
+        // hash) under typed keys: sort members by their canonical fact-byte
+        // encoding, which totally orders string, numeric, unique-symbol, and
+        // computed keys without stringifying any of them.
+        let mut encoded: Vec<(Vec<u8>, &ObjectMember)> = obj
+            .properties
+            .iter()
+            .map(|member| {
+                let mut scratch = Self::new(self.lens, self.default_space);
+                scratch.write_object_member(member);
+                (std::mem::take(&mut scratch.buf), member)
+            })
+            .collect();
+        encoded.sort_by(|a, b| a.0.cmp(&b.0));
+        for (_, member) in encoded {
             self.write_object_member(member);
-        }
-    }
-
-    fn member_sort_key(m: &ObjectMember) -> String {
-        match m {
-            ObjectMember::Property(p) => format!("prop:{}", p.name),
-            ObjectMember::Method(m) => format!("method:{}", m.name),
-            ObjectMember::IndexSignature(_) => "index".to_string(),
-            ObjectMember::CallSignature(_) => "call".to_string(),
-            ObjectMember::ConstructSignature(_) => "construct".to_string(),
-            // Unreachable through `walk_object` (spread-bearing objects hash in
-            // declaration order); a lone key keeps the match total.
-            ObjectMember::Spread(_) => "spread".to_string(),
         }
     }
 
@@ -974,13 +1004,13 @@ impl<'a> Walker<'a> {
     // this hasher, so the marker would re-key existing fact signatures —
     // adopt it only with a deliberate fact-identity migration.
     fn write_property(&mut self, prop: &ObjectProperty) {
-        self.emit_property(
-            &prop.name,
-            prop.optional,
-            prop.readonly,
-            prop.visibility,
-            &prop.ty,
-        );
+        self.buf.push(0x60);
+        self.write_authored_property_key(&prop.key);
+        self.buf.push(u8::from(prop.optional));
+        self.buf.push(u8::from(prop.readonly));
+        self.write_member_visibility(prop.visibility);
+        self.walk_node(&prop.ty);
+        self.buf.push(0xFD);
     }
 
     /// Emit one object-property's fact bytes. Shared by the object-member walk
@@ -996,8 +1026,7 @@ impl<'a> Walker<'a> {
         ty: &TypeExpr,
     ) {
         self.buf.push(0x60);
-        self.buf.extend_from_slice(name.as_bytes());
-        self.buf.push(0xFF);
+        self.write_authored_property_key(&AuthoredPropertyKey::String(Arc::from(name)));
         self.buf.push(u8::from(optional));
         self.buf.push(u8::from(readonly));
         self.write_member_visibility(visibility);
@@ -1007,12 +1036,55 @@ impl<'a> Walker<'a> {
 
     fn write_method(&mut self, method: &MethodSignature) {
         self.buf.push(0x61);
-        self.buf.extend_from_slice(method.name.as_bytes());
-        self.buf.push(0xFF);
+        self.write_authored_property_key(&method.key);
         self.buf.push(u8::from(method.optional));
+        self.buf.push(match method.method_kind {
+            verter_type_expr::ObjectMethodKind::Method => 0,
+            verter_type_expr::ObjectMethodKind::Get => 1,
+            verter_type_expr::ObjectMethodKind::Set => 2,
+        });
+        self.buf.push(u8::from(method.has_implementation_body));
         self.write_member_visibility(method.visibility);
         self.walk_function(&method.function);
         self.buf.push(0xFD);
+    }
+
+    fn write_authored_property_key(&mut self, key: &TypeAuthoredPropertyKey) {
+        match key {
+            AuthoredPropertyKey::String(value) => {
+                self.buf.push(0);
+                self.buf.extend_from_slice(value.as_bytes());
+                self.buf.push(0xFF);
+            }
+            AuthoredPropertyKey::Number(value) => {
+                self.buf.push(1);
+                self.buf.extend_from_slice(&value.get().to_le_bytes());
+            }
+            AuthoredPropertyKey::UniqueSymbol(identity) => {
+                self.buf.push(2);
+                self.buf.extend_from_slice(identity.canonical_id.as_bytes());
+                self.buf.push(0xFF);
+                self.buf.push(match identity.owner.kind() {
+                    verter_type_expr::TopLevelOwnerKind::Module => 0,
+                    verter_type_expr::TopLevelOwnerKind::Instance => 1,
+                    verter_type_expr::TopLevelOwnerKind::Frontmatter => 2,
+                });
+                self.buf
+                    .extend_from_slice(&identity.owner.ordinal().to_le_bytes());
+                self.buf.extend_from_slice(identity.symbol.as_bytes());
+                self.buf.push(0xFF);
+                self.buf
+                    .extend_from_slice(&(identity.member_path.len() as u32).to_le_bytes());
+                for segment in identity.member_path.iter() {
+                    self.buf.extend_from_slice(segment.as_bytes());
+                    self.buf.push(0xFF);
+                }
+            }
+            AuthoredPropertyKey::Computed(expression) => {
+                self.buf.push(3);
+                self.walk_node(expression);
+            }
+        }
     }
 
     /// Fold a member-visibility marker into the fact byte stream, emitting bytes

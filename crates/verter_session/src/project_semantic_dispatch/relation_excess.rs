@@ -80,8 +80,8 @@ use super::relation::InferPosition;
 use super::relation_predicates::index_signature_applies_to_property;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    ClosedSurfaceView, InferBinding, PrimitiveKind, RelateMemoKey, RelationResult,
-    SemanticNodeData, SemanticNodeId, SurfaceMember,
+    InferBinding, PrimitiveKind, RelateMemoKey, RelationResult, SemanticNodeData, SemanticNodeId,
+    SurfaceMember,
 };
 
 /// Three-valued prepass outcome. `Pass` continues into the ordinary
@@ -128,7 +128,8 @@ enum ArmDiscriminant {
 
 /// Tri-state known-name verdict for one arm (see
 /// [`ProjectSemanticDispatch::arm_knows_property`]).
-enum ArmKnows {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArmKnows {
     Yes,
     No,
     /// The arm cannot be classified (unresolved carrier / open surface
@@ -146,21 +147,110 @@ impl<'a> ProjectSemanticDispatch<'a> {
         bindings: &mut Vec<InferBinding>,
     ) -> ExcessPrepassOutcome {
         let graph = self.graph();
-        // Candidates live only on a direct Object-surface source (a fresh
-        // literal IS a surface; every other shape has no FreshOwn members).
-        let source_view = match graph.node_data(key.source).as_deref() {
-            Some(SemanticNodeData::Object(view)) => view.clone(),
-            _ => return ExcessPrepassOutcome::Pass,
-        };
-        let Some(source_closed) = source_view.closed() else {
-            return ExcessPrepassOutcome::Undecided;
-        };
-        let candidates: Vec<SurfaceMember> = source_closed
-            .complete_members()
-            .iter()
-            .filter(|m| m.excess_origin == ExcessPropertyOrigin::FreshOwn)
-            .cloned()
-            .collect();
+        let (source_members, candidates): (Vec<SurfaceMember>, Vec<SurfaceMember>) =
+            match graph.node_data(key.source).as_deref() {
+                Some(SemanticNodeData::Object(view)) => {
+                    let source_closed = view.closed();
+                    let source_members = source_closed.complete_members().to_vec();
+                    let candidates = source_members
+                        .iter()
+                        .filter(|member| member.excess_origin == ExcessPropertyOrigin::FreshOwn)
+                        .cloned()
+                        .collect();
+                    (source_members, candidates)
+                }
+                Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
+                    let formula = match self.project_object_spread_for_consumer(
+                        key.source,
+                        crate::semantic_query::ObjectProjectionSelector::Surface,
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    ) {
+                        crate::semantic_query::QueryResult::Value(formula) => formula,
+                        crate::semantic_query::QueryResult::Recursive(_)
+                        | crate::semantic_query::QueryResult::Error(_) => {
+                            return ExcessPrepassOutcome::Undecided;
+                        }
+                    };
+                    if formula.alternatives().iter().any(|alternative| {
+                        matches!(
+                            alternative.excess(),
+                            crate::semantic_query::ExcessEligibility::SuppressedByGenericSpread
+                        )
+                    }) {
+                        return ExcessPrepassOutcome::Pass;
+                    }
+                    let mut source_members = Vec::new();
+                    let mut candidates = Vec::new();
+                    for alternative in formula.alternatives() {
+                        if alternative.closed().is_none() {
+                            return ExcessPrepassOutcome::Undecided;
+                        }
+                        let direct = match alternative.excess() {
+                            crate::semantic_query::ExcessEligibility::Eligible {
+                                direct_candidates,
+                            } => direct_candidates,
+                            crate::semantic_query::ExcessEligibility::Indeterminate => {
+                                return ExcessPrepassOutcome::Undecided;
+                            }
+                            crate::semantic_query::ExcessEligibility::SuppressedByGenericSpread => {
+                                unreachable!("generic suppression returned above")
+                            }
+                        };
+                        let mut facts = Vec::new();
+                        alternative.positive().visit(|fact| facts.push(fact));
+                        for fact in facts {
+                            let crate::semantic_query::ProjectionEvidence::Proven(value) =
+                                fact.value()
+                            else {
+                                return ExcessPrepassOutcome::Undecided;
+                            };
+                            let crate::semantic_query::ProjectionEvidence::Proven(facets) =
+                                fact.facets()
+                            else {
+                                return ExcessPrepassOutcome::Undecided;
+                            };
+                            let member = SurfaceMember {
+                                key: crate::semantic_query::AuthoredPropertyKey::from_known(
+                                    fact.key().clone(),
+                                ),
+                                value: *value,
+                                optional: fact.presence()
+                                    == crate::semantic_query::PositiveKeyPresence::Optional,
+                                readonly: facets.readonly(),
+                                method_kind: facets.method_kind(),
+                                has_implementation_body: facets.has_implementation_body(),
+                                visibility: facets.visibility(),
+                                spans: facets.spans(),
+                                declaration_origin: facets.declaration_origin().cloned(),
+                                declared_in_macro_type_arg: facets.declared_in_macro_type_arg(),
+                                merge_role: facets.merge_role(),
+                                excess_origin: if direct
+                                    .iter()
+                                    .any(|candidate| candidate.element_access_collides(fact.key()))
+                                {
+                                    ExcessPropertyOrigin::FreshOwn
+                                } else {
+                                    ExcessPropertyOrigin::SpreadTainted
+                                },
+                            };
+                            if !source_members.iter().any(|existing: &SurfaceMember| {
+                                existing.key == member.key && existing.value == member.value
+                            }) {
+                                source_members.push(member.clone());
+                            }
+                            if member.excess_origin == ExcessPropertyOrigin::FreshOwn
+                                && !candidates.iter().any(|existing: &SurfaceMember| {
+                                    existing.key == member.key && existing.value == member.value
+                                })
+                            {
+                                candidates.push(member);
+                            }
+                        }
+                    }
+                    (source_members, candidates)
+                }
+                _ => return ExcessPrepassOutcome::Pass,
+            };
         if candidates.is_empty() {
             return ExcessPrepassOutcome::Pass;
         }
@@ -226,7 +316,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     let reduced = self
                         .find_matching_discriminant_arms(
-                            source_closed,
+                            &source_members,
                             &resolved_arms,
                             &mut reduction_contaminated,
                         )
@@ -239,13 +329,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
 
         for candidate in &candidates {
+            let Some(candidate_key) = candidate.key.cloned_known() else {
+                return ExcessPrepassOutcome::Undecided;
+            };
             // Known-name check over the remaining arms: any arm that knows
             // the name admits it; all-No rejects; a No/Undecidable mix
             // cannot decide the rejection — propagate Unknown.
             let mut any_undecidable = false;
             let mut known = false;
             for arm in &check_arms {
-                match self.arm_knows_property(*arm, candidate.name.as_ref(), 0) {
+                match self.arm_knows_property(*arm, &candidate_key, 0) {
                     ArmKnows::Yes => {
                         known = true;
                         break;
@@ -266,9 +359,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if target_was_union {
                 let mut expected: Vec<SemanticNodeId> = Vec::with_capacity(check_arms.len());
                 for arm in &check_arms {
-                    let Some(value) =
-                        self.arm_property_or_index_value(*arm, candidate.name.as_ref())
-                    else {
+                    let Some(value) = self.arm_property_or_index_value(*arm, &candidate_key) else {
                         return ExcessPrepassOutcome::Undecided;
                     };
                     expected.push(value);
@@ -438,7 +529,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let graph = self.graph();
         match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Object(view)) => view.closed().map(|closed| closed.is_empty()),
+            Some(SemanticNodeData::Object(view)) => Some(view.closed().is_empty()),
             Some(SemanticNodeData::Primitive(PrimitiveKind::Object)) => Some(true),
             Some(SemanticNodeData::Alias(inner)) => {
                 self.is_empty_object_like_type(*inner, depth + 1)
@@ -517,7 +608,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// depended on the undecided membership.
     fn find_matching_discriminant_arms(
         &self,
-        source: ClosedSurfaceView<'_>,
+        source_members: &[SurfaceMember],
         arms: &[SemanticNodeId],
         contaminated: &mut bool,
     ) -> Option<Vec<SemanticNodeId>> {
@@ -534,10 +625,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .collect();
 
-        let discriminators: Vec<&SurfaceMember> = source
-            .complete_members()
+        let discriminators: Vec<&SurfaceMember> = source_members
             .iter()
-            .filter(|m| self.is_unit_type(m.value) && self.is_union_discriminant(arms, &m.name))
+            .filter(|m| {
+                self.is_unit_type(m.value)
+                    && m.key
+                        .cloned_known()
+                        .is_some_and(|key| self.is_union_discriminant(arms, &key))
+            })
             .collect();
         if discriminators.is_empty() {
             return None;
@@ -545,6 +640,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let mut bindings: Vec<InferBinding> = Vec::new();
         for discriminator in discriminators {
+            let Some(discriminator_key) = discriminator.key.cloned_known() else {
+                *contaminated = true;
+                continue;
+            };
             let mut matched = false;
             // `Maybe` marks arms whose discriminant DECIDEDLY did not match
             // this discriminator; they drop only when SOME arm matched. An
@@ -555,7 +654,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !include[index] {
                     continue;
                 }
-                match self.arm_declared_property_value(*arm, discriminator.name.as_ref()) {
+                match self.arm_declared_property_value(*arm, &discriminator_key) {
                     ArmDiscriminant::Value(value) => match self.relate_member(
                         discriminator.value,
                         value,
@@ -596,10 +695,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Whether `name` is a DISCRIMINANT of the union: at least one declaring
     /// arm carries a literal-typed value for it and the declared values are
     /// not uniform across the declaring arms.
-    fn is_union_discriminant(&self, arms: &[SemanticNodeId], name: &str) -> bool {
+    fn is_union_discriminant(
+        &self,
+        arms: &[SemanticNodeId],
+        key: &crate::semantic_query::PropertyKey,
+    ) -> bool {
         let mut declared: Vec<SemanticNodeId> = Vec::new();
         for arm in arms {
-            if let ArmDiscriminant::Value(value) = self.arm_declared_property_value(*arm, name) {
+            if let ArmDiscriminant::Value(value) = self.arm_declared_property_value(*arm, key) {
                 declared.push(value);
             }
         }
@@ -628,7 +731,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// shape whose members are unknowable) is `Undecidable` — never a
     /// silent no. Index signatures do not contribute here — discriminants
     /// are declared properties.
-    fn arm_declared_property_value(&self, arm: SemanticNodeId, name: &str) -> ArmDiscriminant {
+    fn arm_declared_property_value(
+        &self,
+        arm: SemanticNodeId,
+        key: &crate::semantic_query::PropertyKey,
+    ) -> ArmDiscriminant {
         let arm = match self.resolve_excess_node(arm) {
             ResolvedExcessNode::Node(node) => node,
             ResolvedExcessNode::GlobalObject
@@ -638,19 +745,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
         match self.graph().node_data(arm).as_deref() {
-            Some(SemanticNodeData::Object(view)) => {
-                let Some(closed) = view.closed() else {
-                    return ArmDiscriminant::Undecidable;
-                };
-                match closed
-                    .complete_members()
-                    .iter()
-                    .find(|member| member.name.as_ref() == name)
-                {
-                    Some(member) => ArmDiscriminant::Value(member.value),
-                    None => ArmDiscriminant::Absent,
+            Some(SemanticNodeData::Object(view)) => match view.project_known_key(key) {
+                crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                    ArmDiscriminant::Value(member.value)
                 }
-            }
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
+                    ArmDiscriminant::Absent
+                }
+            },
             Some(SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_)) => {
                 ArmDiscriminant::Absent
             }
@@ -663,7 +765,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// never the blanket `has_index_signature` bit); unions/intersections
     /// recurse. An open-surface marker without structured infos, or an
     /// unresolved carrier, is undecidable.
-    fn arm_knows_property(&self, arm: SemanticNodeId, name: &str, depth: usize) -> ArmKnows {
+    pub(super) fn arm_knows_property(
+        &self,
+        arm: SemanticNodeId,
+        key: &crate::semantic_query::PropertyKey,
+        depth: usize,
+    ) -> ArmKnows {
         if depth > 8 {
             return ArmKnows::Undecidable;
         }
@@ -681,18 +788,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let graph = self.graph();
         match graph.node_data(arm).as_deref() {
             Some(SemanticNodeData::Object(view)) => {
-                let Some(closed) = view.closed() else {
-                    return ArmKnows::Undecidable;
-                };
-                if closed
-                    .complete_members()
-                    .iter()
-                    .any(|m| m.name.as_ref() == name)
-                {
+                // `project_known_key` matches under JS property identity
+                // (`{1: x}` and `{"1": x}` are one property).
+                if matches!(
+                    view.project_known_key(key),
+                    crate::semantic_query::SurfaceKeyProjection::Exact(_)
+                ) {
                     return ArmKnows::Yes;
                 }
                 for info in view.index_signatures.iter() {
-                    if index_signature_applies_to_property(graph, info.key_type, name) {
+                    if index_signature_applies_to_property(graph, info.key_type, key) {
                         return ArmKnows::Yes;
                     }
                 }
@@ -707,7 +812,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let arms = arms.clone();
                 let mut any_undecidable = false;
                 for inner in arms.iter() {
-                    match self.arm_knows_property(*inner, name, depth + 1) {
+                    match self.arm_knows_property(*inner, key, depth + 1) {
                         ArmKnows::Yes => return ArmKnows::Yes,
                         ArmKnows::No => {}
                         ArmKnows::Undecidable => any_undecidable = true,
@@ -719,8 +824,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ArmKnows::No
                 }
             }
-            Some(SemanticNodeData::Alias(inner)) => {
-                self.arm_knows_property(*inner, name, depth + 1)
+            Some(SemanticNodeData::Alias(inner)) => self.arm_knows_property(*inner, key, depth + 1),
+            // A construction program answers through the correlated
+            // `Key(key)` projection: any alternative's positive evidence
+            // admits; a CLOSED alternative proves absence within the
+            // selector's declared key set (selector-local sound); open
+            // evidence is undecidable, never a fabricated rejection.
+            Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
+                let formula = match self.project_object_spread_for_consumer(
+                    arm,
+                    crate::semantic_query::ObjectProjectionSelector::Key(key.clone()),
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                ) {
+                    crate::semantic_query::QueryResult::Value(formula) => formula,
+                    crate::semantic_query::QueryResult::Recursive(_)
+                    | crate::semantic_query::QueryResult::Error(_) => {
+                        return ArmKnows::Undecidable;
+                    }
+                };
+                let mut any_undecidable = false;
+                for alternative in formula.alternatives() {
+                    match alternative.selected_key(key) {
+                        crate::semantic_query::OpenSafeKeyEvidence::Positive(_) => {
+                            return ArmKnows::Yes;
+                        }
+                        crate::semantic_query::OpenSafeKeyEvidence::IndeterminatePossibleWrite => {
+                            any_undecidable = true;
+                        }
+                        crate::semantic_query::OpenSafeKeyEvidence::UnknownOnOpenDomain {
+                            ..
+                        } => {
+                            if alternative.closed().is_none() {
+                                any_undecidable = true;
+                            }
+                        }
+                    }
+                }
+                if any_undecidable {
+                    ArmKnows::Undecidable
+                } else {
+                    ArmKnows::No
+                }
             }
             // A primitive arm knows nothing (TS pre-excludes primitives).
             Some(SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_)) => ArmKnows::No,
@@ -737,7 +881,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn arm_property_or_index_value(
         &self,
         arm: SemanticNodeId,
-        name: &str,
+        key: &crate::semantic_query::PropertyKey,
     ) -> Option<SemanticNodeId> {
         // Resolve reference carriers before looking up a value slot.
         // Exhaustion is not evidence of absence and therefore cannot enter
@@ -750,16 +894,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let graph = self.graph();
         match graph.node_data(arm).as_deref() {
             Some(SemanticNodeData::Object(view)) => {
-                let closed = view.closed()?;
-                if let Some(member) = closed
-                    .complete_members()
-                    .iter()
-                    .find(|member| member.name.as_ref() == name)
+                if let crate::semantic_query::SurfaceKeyProjection::Exact(member) =
+                    view.project_known_key(key)
                 {
                     return Some(member.value);
                 }
                 for info in view.index_signatures.iter() {
-                    if index_signature_applies_to_property(graph, info.key_type, name) {
+                    if index_signature_applies_to_property(graph, info.key_type, key) {
                         return Some(info.value_type);
                     }
                 }
@@ -772,7 +913,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let arms = arms.clone();
                 let mut values: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
                 for inner in arms.iter() {
-                    values.push(self.arm_property_or_index_value(*inner, name)?);
+                    values.push(self.arm_property_or_index_value(*inner, key)?);
                 }
                 values.dedup();
                 Some(match values.as_slice() {
@@ -787,7 +928,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // merged intersection property).
                 let arms = arms.clone();
                 for inner in arms.iter() {
-                    let value = self.arm_property_or_index_value(*inner, name)?;
+                    let value = self.arm_property_or_index_value(*inner, key)?;
                     if !matches!(
                         graph.node_data(value).as_deref(),
                         Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
@@ -797,7 +938,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)))
             }
-            Some(SemanticNodeData::Alias(inner)) => self.arm_property_or_index_value(*inner, name),
+            Some(SemanticNodeData::Alias(inner)) => self.arm_property_or_index_value(*inner, key),
             _ => Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined))),
         }
     }
@@ -808,11 +949,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         arm: SemanticNodeId,
         name: &str,
     ) -> (Option<bool>, bool, bool) {
+        let key = crate::semantic_query::PropertyKey::identifier(name);
         (
             self.is_empty_object_like_type(arm, 0),
-            matches!(self.arm_knows_property(arm, name, 0), ArmKnows::Undecidable),
+            matches!(self.arm_knows_property(arm, &key, 0), ArmKnows::Undecidable),
             matches!(
-                self.arm_declared_property_value(arm, name),
+                self.arm_declared_property_value(arm, &key),
                 ArmDiscriminant::Undecidable
             ),
         )

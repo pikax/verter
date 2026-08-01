@@ -60,7 +60,7 @@ fn cached_meta_payload_signature_carries_member_presence() {
         canonical_id: "/src/types.ts".to_owned(),
         key: FactKey::MemberPresence {
             exporter: InternedName::from("Foo"),
-            name: InternedName::from("a"),
+            name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
             space: SymbolSpace::Type,
         },
         lane: FactLane::Semantic,

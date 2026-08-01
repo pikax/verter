@@ -507,19 +507,20 @@ fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
                     surface
                         .positive_members()
                         .iter()
-                        .filter(|member| !member.is_method)
+                        .filter(|member| member.method_kind.is_none())
                         .map(|member| member.value),
                 );
-                if let Some(operands) = surface.open_spread_operands() {
-                    worklist.extend(operands.as_slice().iter().copied());
-                }
             }
             // IndexedAccess is a value-extraction operation, not a
             // role-bearing reference — even the chain ROOT is not
             // harvested. `IndexKey` deliberately unused.
             SemanticNodeData::IndexedAccess {
                 object: _,
-                index: IndexKey::String(_) | IndexKey::Number(_) | IndexKey::TypeNode(_),
+                index:
+                    IndexKey::String(_)
+                    | IndexKey::Number(_)
+                    | IndexKey::UniqueSymbol(_)
+                    | IndexKey::Computed(_),
             } => {}
             // STOP — no other construct surfaces role-bearing composition
             // references (function parameter/return types, mapped /

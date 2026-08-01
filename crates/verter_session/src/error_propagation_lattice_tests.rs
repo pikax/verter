@@ -307,7 +307,7 @@ fn error_any_never_propagation_lattice() {
         PathSegment::Index(IndexKey::String(Arc::from("k")))
     ]));
     assert!(!ProjectSemanticDispatch::project_path_is_indexed_access(&[
-        PathSegment::Member(Arc::from("foo"))
+        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo"))
     ]));
 
     // mapped over never = {} (empty object); a DIRECT mapping over unknown is
@@ -472,11 +472,12 @@ fn conditional_any_check_detects_nested_infer_patterns() {
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                name: Arc::from("x"),
+                key: crate::semantic_query::AuthoredPropertyKey::string("x"),
                 value: infer_u,
                 optional: false,
                 readonly: false,
-                is_method: false,
+                method_kind: None,
+                has_implementation_body: false,
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                 merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
@@ -489,7 +490,6 @@ fn conditional_any_check_detects_nested_infer_patterns() {
         index_signatures: Arc::from(Vec::new().into_boxed_slice()),
         keyspace: None,
         has_index_signature: false,
-        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     };
     let obj = graph.intern_node(SemanticNodeData::Object(obj_surface));
     assert!(

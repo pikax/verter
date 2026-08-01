@@ -268,6 +268,7 @@ impl SemanticNodeData {
             // variant forces a compile error at this accessor (see docstring).
             Self::Alias(_)
             | Self::Object(_)
+            | Self::ObjectSpreadProgram(_)
             | Self::Union(_)
             | Self::Intersection(_)
             | Self::Primitive(_)
@@ -389,6 +390,7 @@ impl SemanticNodeData {
             // docstring); mirrors `carrier_type_args`.
             Self::Alias(_)
             | Self::Object(_)
+            | Self::ObjectSpreadProgram(_)
             | Self::Union(_)
             | Self::Intersection(_)
             | Self::Primitive(_)

@@ -118,20 +118,21 @@ pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0
 ///   7 = TypeOf
 ///   8 = NormalizeUnion
 ///   9 = NormalizeIntersection
-///  10 = ProjectPath
-///  11 = Relate
-///  12 = ResolveMacroPayload
-///  13 = ResolveClassSurface
-///  14 = ResolveAmbientNamespace
-///  15 = ResolveEnum
-///  16 = ResolveOverloadSet
-///  17 = ClassifyBroadRuntime
-///  18 = ApparentType
-///  19 = TemplateLiteralReduce
-///  20 = FlowNarrowingAt
-///  21 = ContextualTypeAt
-///  22 = LowerLocator
-pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 23;
+///  10 = ProjectObjectSpread
+///  11 = ProjectPath
+///  12 = Relate
+///  13 = ResolveMacroPayload
+///  14 = ResolveClassSurface
+///  15 = ResolveAmbientNamespace
+///  16 = ResolveEnum
+///  17 = ResolveOverloadSet
+///  18 = ClassifyBroadRuntime
+///  19 = ApparentType
+///  20 = TemplateLiteralReduce
+///  21 = FlowNarrowingAt
+///  22 = ContextualTypeAt
+///  23 = LowerLocator
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 24;
 
 /// Human-readable labels for each operator-kind index. Kept in sync
 /// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
@@ -147,6 +148,7 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "TypeOf",
     "NormalizeUnion",
     "NormalizeIntersection",
+    "ProjectObjectSpread",
     "ProjectPath",
     "Relate",
     "ResolveMacroPayload",
@@ -191,6 +193,7 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Per-kind nanoseconds spent inside `dispatch_operator_with_recurse`
@@ -201,6 +204,7 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
 pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
     // All zero-initialised; order within the array is immaterial —
     // `kind_index_for_key` keys it.
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -354,19 +358,20 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::TypeOf { .. } => 7,
         SemanticQueryKey::NormalizeUnion { .. } => 8,
         SemanticQueryKey::NormalizeIntersection { .. } => 9,
-        SemanticQueryKey::ProjectPath { .. } => 10,
-        SemanticQueryKey::Relate { .. } => 11,
-        SemanticQueryKey::ResolveMacroPayload { .. } => 12,
-        SemanticQueryKey::ResolveClassSurface { .. } => 13,
-        SemanticQueryKey::ResolveAmbientNamespace { .. } => 14,
-        SemanticQueryKey::ResolveEnum { .. } => 15,
-        SemanticQueryKey::ResolveOverloadSet { .. } => 16,
-        SemanticQueryKey::ClassifyBroadRuntime { .. } => 17,
-        SemanticQueryKey::ApparentType { .. } => 18,
-        SemanticQueryKey::TemplateLiteralReduce { .. } => 19,
-        SemanticQueryKey::FlowNarrowingAt { .. } => 20,
-        SemanticQueryKey::ContextualTypeAt { .. } => 21,
-        SemanticQueryKey::LowerLocator { .. } => 22,
+        SemanticQueryKey::ProjectObjectSpread { .. } => 10,
+        SemanticQueryKey::ProjectPath { .. } => 11,
+        SemanticQueryKey::Relate { .. } => 12,
+        SemanticQueryKey::ResolveMacroPayload { .. } => 13,
+        SemanticQueryKey::ResolveClassSurface { .. } => 14,
+        SemanticQueryKey::ResolveAmbientNamespace { .. } => 15,
+        SemanticQueryKey::ResolveEnum { .. } => 16,
+        SemanticQueryKey::ResolveOverloadSet { .. } => 17,
+        SemanticQueryKey::ClassifyBroadRuntime { .. } => 18,
+        SemanticQueryKey::ApparentType { .. } => 19,
+        SemanticQueryKey::TemplateLiteralReduce { .. } => 20,
+        SemanticQueryKey::FlowNarrowingAt { .. } => 21,
+        SemanticQueryKey::ContextualTypeAt { .. } => 22,
+        SemanticQueryKey::LowerLocator { .. } => 23,
     }
 }
 
@@ -854,6 +859,21 @@ mod tests {
         let normalize_intersection = SemanticQueryKey::NormalizeIntersection {
             members: Arc::from(Vec::new().into_boxed_slice()),
         };
+        let project_object_spread = SemanticQueryKey::ProjectObjectSpread {
+            program: dummy_node,
+            selector: crate::semantic_query::ObjectProjectionSelector::Surface,
+            context: crate::semantic_query::object_spread_projection::test_support::context(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Navigate,
+                ),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                crate::semantic_query::ExactOptionalPropertyPolicy::Enabled,
+            ),
+        };
         let project_path = SemanticQueryKey::ProjectPath {
             base: dummy_node,
             path: Arc::from(Vec::new().into_boxed_slice()),
@@ -980,6 +1000,7 @@ mod tests {
             kind_index_for_key(&conditional),
             kind_index_for_key(&normalize_union),
             kind_index_for_key(&normalize_intersection),
+            kind_index_for_key(&project_object_spread),
             kind_index_for_key(&project_path),
             kind_index_for_key(&relate),
             kind_index_for_key(&class_surface),
@@ -993,7 +1014,7 @@ mod tests {
             kind_index_for_key(&contextual_type_at),
         ];
         let expected = [
-            0usize, 1, 2, 3, 4, 6, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+            0usize, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22,
         ];
         assert_eq!(observed, expected);
         // No off-by-one in the static label table:

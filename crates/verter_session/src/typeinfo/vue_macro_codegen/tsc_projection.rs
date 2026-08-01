@@ -378,6 +378,17 @@ struct InferredClassProjection {
     value_dependencies: BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
 }
 
+fn inferred_class_static_key_name(
+    key: &verter_type_expr::TypeAuthoredPropertyKey,
+) -> Option<String> {
+    match key {
+        verter_type_expr::AuthoredPropertyKey::String(name) => Some(name.to_string()),
+        verter_type_expr::AuthoredPropertyKey::Number(number) => Some(number.to_string()),
+        verter_type_expr::AuthoredPropertyKey::UniqueSymbol(_)
+        | verter_type_expr::AuthoredPropertyKey::Computed(_) => None,
+    }
+}
+
 fn inferred_class_members(
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
@@ -407,7 +418,10 @@ fn inferred_class_members(
                     for member in &object.properties {
                         if let verter_type_expr::ObjectMember::Method(method) = member {
                             if !method.has_implementation_body {
-                                groups.insert((method.name.clone(), is_static));
+                                let Some(name) = inferred_class_static_key_name(&method.key) else {
+                                    continue;
+                                };
+                                groups.insert((name, is_static));
                             }
                         }
                     }
@@ -457,7 +471,7 @@ fn inferred_class_members(
 
     struct Candidate<'a> {
         start: u32,
-        name: &'a str,
+        name: String,
         is_static: bool,
         position: TscInferredClassTypePosition,
         ty: Option<&'a verter_type_expr::TypeExpr>,
@@ -482,9 +496,16 @@ fn inferred_class_members(
                                 span.start >= declaration_span.start
                                     && span.end <= declaration_span.end
                             }) {
+                                let Some(member_name) =
+                                    inferred_class_static_key_name(&property.key)
+                                else {
+                                    return Err(ClassInferenceFailure::Unsupported(
+                                        UnsupportedReason::SemanticConstruct,
+                                    ));
+                                };
                                 candidates.push(Candidate {
                                     start: span.start,
-                                    name: &property.name,
+                                    name: member_name,
                                     is_static: false,
                                     position: TscInferredClassTypePosition::Property,
                                     ty: Some(&property.ty),
@@ -507,7 +528,7 @@ fn inferred_class_members(
                                 ) {
                                     candidates.push(Candidate {
                                         start: span.start,
-                                        name,
+                                        name: name.to_owned(),
                                         is_static: false,
                                         position: TscInferredClassTypePosition::Parameter,
                                         ty: Some(&parameter.ty),
@@ -523,9 +544,16 @@ fn inferred_class_members(
                                     span.start >= declaration_span.start
                                         && span.end <= declaration_span.end
                                 }) {
+                                    let Some(member_name) =
+                                        inferred_class_static_key_name(&method.key)
+                                    else {
+                                        return Err(ClassInferenceFailure::Unsupported(
+                                            UnsupportedReason::SemanticConstruct,
+                                        ));
+                                    };
                                     candidates.push(Candidate {
                                         start: span.start,
-                                        name: &method.name,
+                                        name: member_name,
                                         is_static: false,
                                         position: TscInferredClassTypePosition::Return,
                                         ty: method.function.return_type.as_deref(),
@@ -608,9 +636,15 @@ fn inferred_class_members(
                     if let Some(span) = property.spans.declaration.filter(|span| {
                         span.start >= declaration_span.start && span.end <= declaration_span.end
                     }) {
+                        let Some(member_name) = inferred_class_static_key_name(&property.key)
+                        else {
+                            return Err(ClassInferenceFailure::Unsupported(
+                                UnsupportedReason::SemanticConstruct,
+                            ));
+                        };
                         candidates.push(Candidate {
                             start: span.start,
-                            name: &property.name,
+                            name: member_name,
                             is_static: true,
                             position: TscInferredClassTypePosition::Property,
                             ty: Some(&property.ty),
@@ -633,7 +667,7 @@ fn inferred_class_members(
                         ) {
                             candidates.push(Candidate {
                                 start: span.start,
-                                name,
+                                name: name.to_owned(),
                                 is_static: true,
                                 position: TscInferredClassTypePosition::Parameter,
                                 ty: Some(&parameter.ty),
@@ -648,9 +682,15 @@ fn inferred_class_members(
                         if let Some(span) = method.spans.declaration.filter(|span| {
                             span.start >= declaration_span.start && span.end <= declaration_span.end
                         }) {
+                            let Some(member_name) = inferred_class_static_key_name(&method.key)
+                            else {
+                                return Err(ClassInferenceFailure::Unsupported(
+                                    UnsupportedReason::SemanticConstruct,
+                                ));
+                            };
                             candidates.push(Candidate {
                                 start: span.start,
-                                name: &method.name,
+                                name: member_name,
                                 is_static: true,
                                 position: TscInferredClassTypePosition::Return,
                                 ty: method.function.return_type.as_deref(),
@@ -681,7 +721,7 @@ fn inferred_class_members(
                         ) {
                             candidates.push(Candidate {
                                 start: span.start,
-                                name,
+                                name: name.to_owned(),
                                 is_static: false,
                                 position: TscInferredClassTypePosition::Parameter,
                                 ty: Some(&parameter.ty),
@@ -697,7 +737,7 @@ fn inferred_class_members(
     }
     candidates.retain(|candidate| {
         !(candidate.has_implementation_body
-            && overload_groups.contains(&(candidate.name.to_owned(), candidate.is_static)))
+            && overload_groups.contains(&(candidate.name.clone(), candidate.is_static)))
     });
     candidates.sort_by_key(|candidate| candidate.start);
 
@@ -741,7 +781,11 @@ fn inferred_class_members(
             Err(reason) => return Err(ClassInferenceFailure::InferenceUnavailable(reason)),
         }
         let occurrence = occurrences
-            .entry((candidate.name, candidate.is_static, candidate.position))
+            .entry((
+                candidate.name.clone(),
+                candidate.is_static,
+                candidate.position,
+            ))
             .or_insert(0_u32);
         let type_text = verter_type_expr::render_type_expr_display(candidate_type)
             .map_err(|_| ClassInferenceFailure::Unsupported(UnsupportedReason::SemanticConstruct))?
@@ -752,7 +796,7 @@ fn inferred_class_members(
         )
         .map_err(ClassInferenceFailure::InferenceUnavailable)?;
         inferred.push(TscInferredClassMember {
-            name: candidate.name.to_owned(),
+            name: candidate.name,
             occurrence: *occurrence,
             is_static: candidate.is_static,
             position: candidate.position,
@@ -1059,12 +1103,15 @@ pub(super) fn tsc_emit_rows(
         .iter()
         .filter(|member| member.visibility.is_public())
     {
+        let Some(name) = member.string_name() else {
+            continue;
+        };
         let parameters = render_emit_payload_parameters(ctx, dispatch, member.value, counters)?;
         push_tsc_emit(
             &mut rows,
-            member.name.as_ref(),
+            name,
             parameters,
-            authored_emit_anchor(mac, payload_index, effective_index, member.name.as_ref()),
+            authored_emit_anchor(mac, payload_index, effective_index, name),
         );
     }
 

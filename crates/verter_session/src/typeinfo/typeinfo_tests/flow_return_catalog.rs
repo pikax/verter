@@ -1189,18 +1189,16 @@ catalog_contract!(
         let TypeExpr::Object(object) = expr else {
             panic!("OB02 must materialize as an object, got {expr:?}");
         };
-        let [ObjectMember::Spread(base), ObjectMember::Property(override_b)] =
-            object.properties.as_slice()
-        else {
-            panic!(
-                "OB02 must retain the open spread before the authoritative override, got {expr:?}"
-            );
-        };
-        let base_props = assert_object_has_props(&base.ty, &["a", "b"]);
-        assert_number_literal(&base_props["a"].ty, 1.0);
-        assert_string_literal(&base_props["b"].ty, "x");
-        assert_eq!(override_b.name, "b");
-        assert_string_literal(&override_b.ty, "y");
+        let props = assert_object_has_props(expr, &["a", "b"]);
+        assert_number_literal(&props["a"].ty, 1.0);
+        assert_string_literal(&props["b"].ty, "y");
+        assert!(
+            object
+                .properties
+                .iter()
+                .all(|member| !matches!(member, ObjectMember::Spread(_))),
+            "closed projection must materialize through its closed witness"
+        );
     }
 );
 
@@ -1286,14 +1284,23 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_ob12_keeps_unique_symbol_computed_key_shape,
     "OB12",
-    "typeinfo currently does not bridge unique-symbol value identity into computed object keys or emit an explicit computed-key fallback; keep as the future OB12 unique-symbol-key contract",
     |expr| {
-        let TypeExpr::Object(_) = expr else {
+        let TypeExpr::Object(object) = expr else {
             panic!("expected computed-key object shape, got {expr:?}");
         };
+        let [ObjectMember::Property(property)] = object.properties.as_slice() else {
+            panic!(
+                "expected one unique-symbol property, got {:?}",
+                object.properties
+            );
+        };
+        let verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) = &property.key else {
+            panic!("expected nominal unique-symbol key, got {:?}", property.key);
+        };
+        assert_eq!(identity.symbol.as_ref(), "ob12Key");
     }
 );
 

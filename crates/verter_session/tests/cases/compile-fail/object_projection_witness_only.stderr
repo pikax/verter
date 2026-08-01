@@ -1,0 +1,11 @@
+error[E0599]: no method named `exact_keyof` found for struct `PositiveAlternativeEvidence<'a>` in the current scope
+ --> tests/cases/compile-fail/object_projection_witness_only.rs:6:22
+  |
+6 |     let _ = evidence.exact_keyof();
+  |                      ^^^^^^^^^^^ method not found in `PositiveAlternativeEvidence<'_>`
+
+error[E0599]: no method named `lookup` found for reference `&ObjectProjectionAlternative` in the current scope
+  --> tests/cases/compile-fail/object_projection_witness_only.rs:10:25
+   |
+10 |     let _ = alternative.lookup(
+   |             ------------^^^^^^ method not found in `&ObjectProjectionAlternative`

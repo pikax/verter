@@ -386,12 +386,7 @@ const BLOCK_PREREQS = new Map([
   ["U3AdaptiveFamilyRetention", ["U2QueryValueDomain"]],
   [
     "U3CacheFactModel",
-    [
-      "U8WireSurfaceClosure",
-      "U2JsxFoundations",
-      "U6LoopClosure",
-      "U3AdaptiveFamilyRetention",
-    ],
+    ["U8WireSurfaceClosure", "U2JsxFoundations", "U6LoopClosure", "U3AdaptiveFamilyRetention"],
   ],
   [
     "U10ResultDb",
@@ -3019,8 +3014,8 @@ function main(checkOnly = false) {
     });
   }
 
-  if (rows.length !== 355) {
-    process.stderr.write(`error: expected 355 IgnoredTestRows, built ${rows.length}\n`);
+  if (rows.length !== 351) {
+    process.stderr.write(`error: expected 351 IgnoredTestRows, built ${rows.length}\n`);
     return 5;
   }
 

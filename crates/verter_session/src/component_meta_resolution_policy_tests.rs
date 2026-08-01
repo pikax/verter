@@ -269,7 +269,12 @@ fn object_member_names(host: &VerterHost, node: SemanticNodeId) -> Vec<String> {
         Some(SemanticNodeData::Object(surface)) => surface
             .positive_members()
             .iter()
-            .map(|member| member.name.to_string())
+            .map(|member| {
+                member
+                    .string_name()
+                    .expect("string-key fixture")
+                    .to_string()
+            })
             .collect(),
         _ => Vec::new(),
     }
@@ -465,7 +470,7 @@ fn rule3_publishes_nested_refs_shallow() {
                 surface
                     .positive_members()
                     .iter()
-                    .map(|m| m.name.to_string())
+                    .map(|m| m.string_name().expect("string-key fixture").to_string())
                     .collect::<Vec<_>>(),
                 vec!["first".to_string()],
                 "Container's body must surface the `first` member",

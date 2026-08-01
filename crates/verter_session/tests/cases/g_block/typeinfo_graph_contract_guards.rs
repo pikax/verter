@@ -165,11 +165,13 @@ fn proto_enum_variants(source: &str, name: &str) -> BTreeSet<String> {
 
 // ───────────────────────────── node taxonomy ─────────────────────────────
 
-/// The closed `GraphTypeNode.kind` oneof — exactly these 31 arms. The
+/// The closed `GraphTypeNode.kind` oneof — exactly these 32 arms. The
 /// tag-28 `relation_proof` arm is RETIRED (schema 5): the relation-proof
 /// witness moved OFF the type-values surface to the payload-side
 /// `SemanticTypeGraph.relation_proofs` table, and the tag + name are
-/// reserved at `GraphTypeNode` scope.
+/// reserved at `GraphTypeNode` scope. The tag-33 `object_spread_program`
+/// arm carries the canonical ordered construction program for every
+/// spread-bearing object.
 const NODE_TAXONOMY_ARMS: &[&str] = &[
     "primitive",
     "literal",
@@ -177,6 +179,7 @@ const NODE_TAXONOMY_ARMS: &[&str] = &[
     "union",
     "intersection",
     "object",
+    "object_spread_program",
     "array",
     "tuple",
     "reference",
@@ -207,7 +210,7 @@ const NODE_TAXONOMY_ARMS: &[&str] = &[
 #[test]
 fn node_taxonomy_complete() {
     // The `GraphTypeNode.kind` oneof is the closed node taxonomy. This
-    // guard pins the EXACT arm set (31 arms) plus the `reserved 33 to 100`
+    // guard pins the EXACT arm set (32 arms) plus the `reserved 34 to 100`
     // additive window. Discriminating: add, drop, or rename any arm and
     // the set comparison fails.
     let proto = read_proto();
@@ -218,8 +221,8 @@ fn node_taxonomy_complete() {
         .collect();
     assert_eq!(
         arms.len(),
-        31,
-        "GraphTypeNode.kind must have exactly 31 oneof arms; found {}",
+        32,
+        "GraphTypeNode.kind must have exactly 32 oneof arms; found {}",
         arms.len(),
     );
     assert_eq!(
@@ -233,9 +236,9 @@ fn node_taxonomy_complete() {
     // is a deliberate schema_version bump, not a silent tag grab.
     let body = proto_block_body(&proto, "message", "GraphTypeNode");
     assert!(
-        body.contains("reserved 33 to 100;"),
+        body.contains("reserved 34 to 100;"),
         "GraphTypeNode must reserve the additive `oneof kind` tag window \
-         (`reserved 33 to 100;`) at the enclosing message level",
+         (`reserved 34 to 100;`) at the enclosing message level",
     );
 }
 
@@ -245,7 +248,7 @@ fn node_taxonomy_complete() {
 /// node taxonomy carries NO relation-proof arm, and tag 28 + the
 /// `relation_proof` name are RESERVED at `GraphTypeNode` scope so neither
 /// is ever reused (proto3 forbids `reserved` inside the `oneof`, so the
-/// directives sit beside `reserved 33 to 100;` at message level).
+/// directives sit beside `reserved 34 to 100;` at message level).
 ///
 /// Discriminating: reintroducing a relation-proof arm (at ANY tag) grows
 /// the oneof arm set and fails the arm-name check; reoccupying tag 28 or

@@ -573,17 +573,10 @@ fn node_contains_free_type_param(
         SemanticNodeData::Tuple { elements, .. } => elements
             .iter()
             .any(|e| node_contains_free_type_param(dispatch, e.value, depth + 1)),
-        SemanticNodeData::Object(view) => {
-            view.positive_members()
-                .iter()
-                .any(|m| node_contains_free_type_param(dispatch, m.value, depth + 1))
-                || view.open_spread_operands().is_some_and(|operands| {
-                    operands
-                        .as_slice()
-                        .iter()
-                        .any(|operand| node_contains_free_type_param(dispatch, *operand, depth + 1))
-                })
-        }
+        SemanticNodeData::Object(view) => view
+            .positive_members()
+            .iter()
+            .any(|m| node_contains_free_type_param(dispatch, m.value, depth + 1)),
         SemanticNodeData::KeyOf { base } => {
             node_contains_free_type_param(dispatch, *base, depth + 1)
         }
@@ -1003,6 +996,9 @@ pub(crate) fn compute_bindings_via_graph(
         if !slot_member.visibility.is_public() {
             continue;
         }
+        let Some(slot_name) = slot_member.string_name() else {
+            continue;
+        };
         // Realize the slot member value through the callable-
         // realization substrate before the `Function`-arm match.
         // Under transit-shallow macro publication the slot value may
@@ -1053,7 +1049,7 @@ pub(crate) fn compute_bindings_via_graph(
         if slot_param_root_is_symbolic_only(dispatch, param0_ty, 0) {
             tracing::trace!(
                 target: "verter::meta_resolve::slot_binding",
-                slot = %slot_member.name,
+                slot = %slot_name,
                 "graph_native_skip_symbolic_param_root",
             );
             continue;
@@ -1067,7 +1063,7 @@ pub(crate) fn compute_bindings_via_graph(
                 MacroExpansionKind::DefineSlots,
                 format!(
                     "synthesis-step-budget-exceeded@param-surface::slot={}::steps={}::cap={:?}",
-                    slot_member.name, *synthesis_steps_executed, synthesis_step_budget,
+                    slot_name, *synthesis_steps_executed, synthesis_step_budget,
                 ),
             ));
             return out;
@@ -1100,7 +1096,7 @@ pub(crate) fn compute_bindings_via_graph(
                 diag_sink.push(macro_expansion_for_cycle(
                     owner_macro.macro_index,
                     MacroExpansionKind::DefineSlots,
-                    format!("cyclic-slot-param@{}", slot_member.name),
+                    format!("cyclic-slot-param@{slot_name}"),
                 ));
                 continue;
             }
@@ -1111,7 +1107,7 @@ pub(crate) fn compute_bindings_via_graph(
                 diag_sink.push(macro_expansion_for_query_error(
                     owner_macro.macro_index,
                     MacroExpansionKind::DefineSlots,
-                    format!("slot-param-error::{}::{:?}", slot_member.name, e),
+                    format!("slot-param-error::{slot_name}::{e:?}"),
                 ));
                 continue;
             }
@@ -1124,6 +1120,9 @@ pub(crate) fn compute_bindings_via_graph(
             if !binding.visibility.is_public() {
                 continue;
             }
+            let Some(binding_name) = binding.string_name() else {
+                continue;
+            };
             // Dep-observation: an unresolved-reference binding VALUE carrier
             // (`BareRef` / `ImportType`) head-resolves HERE, at the
             // publication walk, so the cross-file declaration dependency is
@@ -1169,14 +1168,17 @@ pub(crate) fn compute_bindings_via_graph(
             // value shape (one bounded node peek, no dispatch).
             let value_use_site = crate::meta_resolve::arg_preserving_member_use_site_slot(
                 dispatch,
-                binding.name.as_ref(),
+                &binding
+                    .key
+                    .cloned_known()
+                    .expect("string-name slot binding has a known key"),
                 binding.declaration_origin.as_deref(),
                 value_node,
             );
             out.push(ResolvedSlotBinding {
                 owner_macro: owner_macro.clone(),
-                slot_name: slot_member.name.clone(),
-                binding_name: binding.name.clone(),
+                slot_name: Arc::from(slot_name),
+                binding_name: Arc::from(binding_name),
                 value_node,
                 value_use_site,
                 optional: binding.optional,
@@ -1331,7 +1333,9 @@ fn closed_member_path_route_source(
                     IndexKey::String(key) => rev_keys.push(key.as_ref().to_string()),
                     // Numeric / type-node keys require evaluation to
                     // enumerate — fail closed.
-                    IndexKey::Number(_) | IndexKey::TypeNode(_) => return None,
+                    IndexKey::Number(_) | IndexKey::UniqueSymbol(_) | IndexKey::Computed(_) => {
+                        return None;
+                    }
                 }
                 current = *object;
             }
@@ -1418,7 +1422,10 @@ fn owner_local_member_reaches_non_owner_ref(
     ) else {
         return false;
     };
-    let Some(member) = prepared.member_index.get(member_name) else {
+    let Some(member) = prepared
+        .member_index
+        .get(&verter_type_expr::PropertyKey::identifier(member_name))
+    else {
         return false;
     };
     let Some(member_node) = dispatch.raise_authored_locator_to_hot(
@@ -1478,7 +1485,7 @@ fn node_reaches_non_owner_ref(
         SemanticNodeData::KeyOf { base } => recur(*base),
         SemanticNodeData::IndexedAccess { object, index } => {
             recur(*object)
-                || matches!(index, crate::semantic_query::IndexKey::TypeNode(inner) if recur(*inner))
+                || matches!(index, crate::semantic_query::IndexKey::Computed(inner) if recur(*inner))
         }
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
         SemanticNodeData::Union(members)
@@ -1494,9 +1501,6 @@ fn node_reaches_non_owner_ref(
                     .any(|sig| recur(sig.key_type) || recur(sig.value_type))
                 || surface.call_signatures.iter().copied().any(recur)
                 || surface.construct_signatures.iter().copied().any(recur)
-                || surface.open_spread_operands().is_some_and(|operands| {
-                    operands.as_slice().iter().any(|operand| recur(*operand))
-                })
         }
         SemanticNodeData::Signature {
             params,

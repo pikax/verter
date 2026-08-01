@@ -149,11 +149,12 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
     let explosive_members: Vec<_> = (0_u64..4_096)
         .map(|index| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            name: Arc::from(format!("nested{index}")),
+            key: crate::semantic_query::AuthoredPropertyKey::string(format!("nested{index}")),
             value: crate::semantic_query::SemanticNodeId(u64::MAX - index),
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             visibility: verter_type_expr::MemberVisibility::Public,
             spans: Default::default(),
             declaration_origin: None,
@@ -169,7 +170,6 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
             index_signatures: Arc::from([]),
             keyspace: Some(array),
             has_index_signature: true,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
     assert_eq!(

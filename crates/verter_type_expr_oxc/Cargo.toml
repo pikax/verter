@@ -10,6 +10,7 @@ description = "OXC-bound lowering for Verter — TSType<'_> → verter_type_expr
 publish = false
 
 [dependencies]
+verter_ecma = { workspace = true }
 verter_type_expr = { path = "../verter_type_expr" }
 verter_span = { path = "../verter_span" }
 oxc_allocator = { workspace = true }

@@ -91,7 +91,6 @@ fn branded_number_intersection_carries_brand_tag_property() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not publish `unique symbol` computed-key members on a branded intersection generic; keep as the future unique-symbol brand contract"]
 fn branded_unique_symbol_wrapper_publishes_branded_surface() {
     // TS7 contract: `AccountId` = `IdBranded<string>` = `string & { readonly
     // [idBrand]: string }`. The unique-symbol-keyed member becomes a computed
@@ -136,40 +135,31 @@ fn branded_unique_symbol_wrapper_publishes_branded_surface() {
          computed-key brand slot); got {:?}",
         object.properties
     );
-    // The single member is either an IndexSignature (symbol-key) or a regular
-    // Property with the brand value type. Both shapes are TS-equivalent
-    // depending on how Verter lowers the `[uniqueSym]: T` form; assert the
-    // semantic invariants that apply in both cases.
-    use verter_type_expr::ObjectMember;
-    match &object.properties[0] {
-        ObjectMember::Property(prop) => {
-            assert!(
-                prop.readonly,
-                "brand-slot property must publish readonly=true; got {prop:?}"
-            );
-            assert_eq!(
-                prop.ty,
-                TypeExpr::Primitive(PrimitiveName::String),
-                "brand-slot value must be `string` (T=string substitution); got {:?}",
-                prop.ty
-            );
-        }
-        ObjectMember::IndexSignature(sig) => {
-            assert_eq!(
-                sig.key_type,
-                TypeExpr::Primitive(PrimitiveName::Symbol),
-                "brand-slot index signature must key on `symbol`; got {:?}",
-                sig.key_type
-            );
-            assert_eq!(
-                sig.value_type,
-                TypeExpr::Primitive(PrimitiveName::String),
-                "brand-slot index signature must value `string`; got {:?}",
-                sig.value_type
-            );
-        }
-        other => panic!("brand slot must be Property or IndexSignature, got {other:?}"),
-    }
+    let verter_type_expr::ObjectMember::Property(prop) = &object.properties[0] else {
+        panic!(
+            "brand slot must remain an exact property, got {:?}",
+            object.properties[0]
+        )
+    };
+    let verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) = &prop.key else {
+        panic!(
+            "brand slot must carry unique-symbol identity, got {:?}",
+            prop.key
+        )
+    };
+    assert_eq!(identity.canonical_id.as_ref(), "/fixtures/branded_types.ts");
+    assert_eq!(identity.symbol.as_ref(), "idBrand");
+    assert!(identity.member_path.is_empty());
+    assert!(
+        prop.readonly,
+        "brand-slot property must publish readonly=true; got {prop:?}"
+    );
+    assert_eq!(
+        prop.ty,
+        TypeExpr::Primitive(PrimitiveName::String),
+        "brand-slot value must be `string` (T=string substitution); got {:?}",
+        prop.ty
+    );
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
@@ -306,7 +296,6 @@ fn branded_guard_narrowing_publishes_union_of_branded_and_undefined() {
 fn branded_key_access_projects_boolean_literal_brand_tag() {}
 
 #[test]
-#[ignore = "typeinfo currently does not project `AccountId[typeof idBrand]` to the wrapped value type; keep as the future symbol-key value-projection contract"]
 fn branded_symbol_key_access_projects_wrapped_value_type() {
     // TS7 contract: `AccountId` = `IdBranded<string>` = `string &
     // { readonly [idBrand]: string }`. Indexing the intersection at the

@@ -25,6 +25,7 @@ import {
 import {
   createGraphTypeExprRef,
   DecodedTypeGraph,
+  graphPropertyKeyName,
   isGraphTypeExprRef,
   LITERAL_BIG_INT,
   LITERAL_BOOLEAN,
@@ -1115,8 +1116,8 @@ function resolveObjectProperty(
         const member = node.members.find(
           (candidate) =>
             candidate.kind === MEMBER_PROPERTY &&
-            candidate.nameId !== 0 &&
-            expr.graph.getString(candidate.nameId) === propertyName,
+            graphPropertyKeyName(expr.graph.getString.bind(expr.graph), candidate.key) ===
+              propertyName,
         );
         if (!member) {
           return undefined;
@@ -1695,9 +1696,13 @@ function resolveFiniteObjectEntries(
     switch (node.kind) {
       case NODE_OBJECT:
         return node.members
-          .filter((member) => member.kind === MEMBER_PROPERTY && member.nameId !== 0)
+          .filter(
+            (member) =>
+              member.kind === MEMBER_PROPERTY &&
+              graphPropertyKeyName(expr.graph.getString.bind(expr.graph), member.key) !== null,
+          )
           .map((member) => ({
-            name: expr.graph.getString(member.nameId),
+            name: graphPropertyKeyName(expr.graph.getString.bind(expr.graph), member.key)!,
             optional: member.optional,
           }));
       case NODE_INTERSECTION: {
@@ -2304,7 +2309,7 @@ function graphNodeToDescriptor(
       const props = node.members
         .filter((member) => member.kind === MEMBER_PROPERTY || member.kind === MEMBER_METHOD)
         .map((member) => ({
-          name: member.nameId ? expr.graph.getString(member.nameId) : "",
+          name: graphPropertyKeyName(expr.graph.getString.bind(expr.graph), member.key) ?? "",
           type:
             member.kind === MEMBER_METHOD && member.functionNodeId
               ? typeExprToDescriptor(

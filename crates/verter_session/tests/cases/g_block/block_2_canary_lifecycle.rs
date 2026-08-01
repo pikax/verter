@@ -143,7 +143,7 @@ fn negative_result_recovers_when_missing_dependency_appears() {
                 .properties
                 .iter()
                 .filter_map(|m| match m {
-                    verter_type_expr::ObjectMember::Property(p) => Some(p.name.as_str()),
+                    verter_type_expr::ObjectMember::Property(p) => p.string_name(),
                     _ => None,
                 })
                 .collect();

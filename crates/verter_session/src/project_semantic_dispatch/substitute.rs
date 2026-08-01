@@ -335,15 +335,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let mut any_changed = false;
                 let mut new_members = Vec::with_capacity(surface.positive_members().len());
                 for member in surface.positive_members().iter() {
+                    let key = member.key.clone().map(
+                        |computed| {
+                            let (sub_key, changed) =
+                                self.substitute_with_change_tracking(computed, parameter_node, arg);
+                            any_changed |= changed;
+                            sub_key
+                        },
+                        |identity| identity,
+                    );
                     let (sub_value, c) =
                         self.substitute_with_change_tracking(member.value, parameter_node, arg);
                     any_changed |= c;
                     new_members.push(SurfaceMember {
-                        name: Arc::clone(&member.name),
+                        key,
                         value: sub_value,
                         optional: member.optional,
                         readonly: member.readonly,
-                        is_method: member.is_method,
+                        method_kind: member.method_kind,
+                        has_implementation_body: member.has_implementation_body,
                         // Type-parameter substitution preserves the source
                         // member's declared accessibility and excess-property
                         // provenance (substitution changes only the value's
@@ -409,12 +419,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     None => None,
                 };
-                let new_completeness = surface.completeness_with_mapped_operands(|operand| {
-                    let (operand, changed) =
-                        self.substitute_with_change_tracking(operand, parameter_node, arg);
-                    any_changed |= changed;
-                    operand
-                });
                 if !any_changed {
                     return (node, false);
                 }
@@ -430,8 +434,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             index_signatures: Arc::from(new_index_signatures.into_boxed_slice()),
                             keyspace: new_keyspace,
                             has_index_signature: surface.has_known_index_signature(),
-                            completeness: new_completeness,
                         }),
+                    ),
+                    true,
+                )
+            }
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                let mut any_changed = false;
+                let rebuilt = program.map_child_nodes(|child| {
+                    let (substituted, changed) =
+                        self.substitute_with_change_tracking(child, parameter_node, arg);
+                    any_changed |= changed;
+                    substituted
+                });
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ObjectSpreadProgram(rebuilt),
                     ),
                     true,
                 )
@@ -886,6 +908,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         stack.push(remap);
                     }
                 }
+                // A construction program is not an infer-binding boundary:
+                // an `infer` inside a program effect declares for the
+                // ENCLOSING conditional (same rule as an `infer` inside an
+                // `Object` member value above). Mirrors the substitute
+                // engine's `map_child_nodes` descent and `absorb`'s
+                // `child_nodes` stack push.
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    stack.extend(program.child_nodes());
+                }
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
                 SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
                     for member in members.iter() {
@@ -914,9 +945,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     if let Some(k) = surface.keyspace {
                         stack.push(k);
-                    }
-                    if let Some(operands) = surface.open_spread_operands() {
-                        stack.extend(operands.as_slice().iter().copied());
                     }
                 }
                 SemanticNodeData::Signature {
@@ -951,7 +979,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
                 SemanticNodeData::IndexedAccess { object, index } => {
                     stack.push(*object);
-                    if let crate::semantic_query::IndexKey::TypeNode(idx_node) = index {
+                    if let crate::semantic_query::IndexKey::Computed(idx_node) = index {
                         stack.push(*idx_node);
                     }
                 }
@@ -1067,9 +1095,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if let Some(k) = surface.keyspace {
                         stack.push(k);
                     }
-                    if let Some(operands) = surface.open_spread_operands() {
-                        stack.extend(operands.as_slice().iter().copied());
-                    }
                 }
                 SemanticNodeData::TemplateLiteral { expressions, .. } => {
                     for expr in expressions.iter() {
@@ -1081,7 +1106,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 SemanticNodeData::IndexedAccess { object, index } => {
                     stack.push(*object);
-                    if let IndexKey::TypeNode(idx_node) = index {
+                    if let IndexKey::Computed(idx_node) = index {
                         stack.push(*idx_node);
                     }
                 }
@@ -1112,6 +1137,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     for arg in args.iter() {
                         stack.push(*arg);
                     }
+                }
+                // Substitute descends program effects via `map_child_nodes`;
+                // the scanner must descend the same children or it reports a
+                // program value holding the binder as K-independent (the
+                // `build_mapped_type` hoist) / binder-free (the
+                // `record_target_shape` generic-key gate).
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    stack.extend(program.child_nodes());
                 }
                 SemanticNodeData::MergedDecl { contributors } => {
                     for contributor in contributors.iter() {
@@ -1176,11 +1209,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match index {
             IndexKey::String(text) => (IndexKey::String(Arc::clone(text)), false),
             IndexKey::Number(number) => (IndexKey::Number(*number), false),
-            IndexKey::TypeNode(node) => {
+            IndexKey::UniqueSymbol(identity) => (IndexKey::UniqueSymbol(identity.clone()), false),
+            IndexKey::Computed(node) => {
                 let (sub, changed) =
                     self.substitute_with_change_tracking(*node, parameter_node, arg);
                 if !changed {
-                    return (IndexKey::TypeNode(*node), false);
+                    return (IndexKey::Computed(*node), false);
                 }
                 let normalised = self.normalized_index_key_node(sub);
                 (normalised, true)

@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use crate::graph::{
-    GraphBuilder, GraphFunctionParam, GraphNode, GraphObjectMember, GraphTupleElement,
+    GraphBuilder, GraphFunctionParam, GraphNode, GraphObjectMember, GraphPropertyKey,
+    GraphTupleElement,
 };
 use crate::types::*;
 use prost::Message;
 use verter_type_expr::{
-    empty_type_args, ObjectExpr, ObjectMember as TypeObjectMember, ObjectProperty, PrimitiveName,
-    TypeExpr,
+    empty_type_args, AuthoredPropertyKey, ObjectExpr, ObjectMember as TypeObjectMember,
+    ObjectProperty, PrimitiveName, TypeExpr,
 };
 
 use crate::verter::v1::{
@@ -31,7 +32,7 @@ use crate::verter::v1::{
     VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 4;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 5;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -1255,7 +1256,6 @@ fn tuple_element_to_proto(element: &GraphTupleElement) -> TupleElement {
 fn object_member_to_proto(member: &GraphObjectMember) -> ProtoObjectMember {
     ProtoObjectMember {
         kind: member.kind as i32,
-        name_id: member.name,
         type_node_id: member.ty,
         optional: member.optional,
         readonly: member.readonly,
@@ -1263,7 +1263,34 @@ fn object_member_to_proto(member: &GraphObjectMember) -> ProtoObjectMember {
         key_type_node_id: member.key_type,
         value_type_node_id: member.value_type,
         function_node_id: member.function,
+        property_key: member.key.as_ref().map(graph_property_key_to_proto),
+        method_kind: member.method_kind as i32,
+        has_implementation_body: member.has_implementation_body,
     }
+}
+
+fn graph_property_key_to_proto(key: &GraphPropertyKey) -> proto::ComponentPropertyKey {
+    use proto::component_property_key::Key;
+
+    let key = match key {
+        GraphPropertyKey::String { value } => Key::StringId(*value),
+        GraphPropertyKey::Number { value } => Key::CanonicalNumber(*value),
+        GraphPropertyKey::UniqueSymbol {
+            canonical_id,
+            owner_kind,
+            owner_ordinal,
+            symbol,
+            member_path,
+        } => Key::UniqueSymbol(proto::GraphUniqueSymbolKey {
+            canonical_id: *canonical_id,
+            owner_kind: *owner_kind,
+            owner_ordinal: *owner_ordinal,
+            symbol: *symbol,
+            member_path: member_path.clone(),
+        }),
+        GraphPropertyKey::Computed { node } => Key::ComputedNodeId(*node),
+    };
+    proto::ComponentPropertyKey { key: Some(key) }
 }
 
 fn function_parameter_to_proto(parameter: &GraphFunctionParam) -> FunctionParameter {
@@ -1440,14 +1467,14 @@ fn build_test_meta() -> FfiComponentMeta {
     };
     let tree_node = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            TypeObjectMember::Property(ObjectProperty::synthetic_public(
-                "label".to_string(),
+            TypeObjectMember::Property(ObjectProperty::synthetic_public_key(
+                AuthoredPropertyKey::string("label"),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
             )),
-            TypeObjectMember::Property(ObjectProperty::synthetic_public(
-                "next".to_string(),
+            TypeObjectMember::Property(ObjectProperty::synthetic_public_key(
+                AuthoredPropertyKey::string("next"),
                 TypeExpr::union(vec![
                     tree_ref.clone(),
                     TypeExpr::Primitive(PrimitiveName::Undefined),
@@ -1667,8 +1694,11 @@ mod tests {
         assert!(!proto.events[0].is_inline);
         assert!(proto.events[0].modifier_ids.is_empty());
 
-        // SCHEMA bump landed (2 → 3).
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 4);
+        // SCHEMA bump landed (4 → 5): typed property keys replaced the
+        // string-only `ObjectMember.name_id` (field 2, now reserved) with the
+        // `property_key` oneof (string / canonical number / unique symbol /
+        // computed node), plus authored method-kind and body facts.
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 5);
     }
 
     #[test]

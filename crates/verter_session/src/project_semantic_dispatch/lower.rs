@@ -127,6 +127,153 @@ pub(crate) fn leaf_type_fact_expr(leaf: &LeafTypeFact) -> TypeExpr {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
+    fn unique_symbol_identity_for_resolved_root(
+        &self,
+        root: &ResolvedRootIdentity,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        let (canonical_id, owner, symbol, prepared) = self.effective_prepared_value_decl(
+            root.canonical_id.as_ref(),
+            root.owner,
+            root.symbol_name.as_ref(),
+        )?;
+        prepared.type_annotation.is_unique_symbol.then(|| {
+            verter_type_expr::facts::ValueDeclIdentityPart {
+                canonical_id,
+                owner,
+                symbol,
+                member_path: Arc::from([]),
+            }
+        })
+    }
+
+    pub(super) fn unique_symbol_identity_for_value_root(
+        &self,
+        value_root: &ValueRootKey,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        let payload = self
+            .ctx
+            .prepared_decl_bundle(value_root.scope.canonical_id.as_ref())
+            .map(|bundle| DeclarationScopePayload::from_bundle(&bundle, value_root.scope.owner));
+        let root = resolve_bare_name_in_scope(
+            self.ctx,
+            value_root.scope.canonical_id.as_ref(),
+            value_root.scope.owner,
+            payload.as_ref(),
+            value_root.name.as_ref(),
+        )?;
+        self.unique_symbol_identity_for_resolved_root(&root)
+    }
+
+    pub(super) fn unique_symbol_identity_for_typeof_node(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        let data = self.graph().node_data(node)?;
+        let (value_root, path) = data.typeof_head()?;
+        if !path.is_empty() || !data.carrier_type_args().is_empty() {
+            return None;
+        }
+        self.unique_symbol_identity_for_value_root(value_root)
+    }
+
+    /// Resolve an authored `typeof value` property-key expression to the
+    /// declaration's nominal `unique symbol` identity.
+    ///
+    /// Resolution follows the same bare-name and effective value-declaration
+    /// chase as [`Self::build_typeof`], so imports and re-exports mint the
+    /// declaring identity rather than the consumer's local alias.
+    fn unique_symbol_identity_for_typeof(
+        &self,
+        value_ref: &verter_type_expr::ValueRef,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<Arc<str>, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+    ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        if value_ref.path.len() != 1 || !value_ref.type_args.is_empty() {
+            return None;
+        }
+        let (scope_canonical, scope_owner) = match scope {
+            NodeScopeId::File {
+                canonical_id,
+                owner,
+                ..
+            } => (canonical_id.as_ref(), *owner),
+            NodeScopeId::Global => return None,
+        };
+        let root_name = value_ref.path[0].as_str();
+        let root = name_resolution.get(root_name).cloned().or_else(|| {
+            resolve_bare_name_in_scope(
+                self.ctx,
+                scope_canonical,
+                scope_owner,
+                scope_payload,
+                root_name,
+            )
+        })?;
+        self.unique_symbol_identity_for_resolved_root(&root)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn lower_authored_property_key(
+        &self,
+        key: &verter_type_expr::TypeAuthoredPropertyKey,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<Arc<str>, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        reduction_context: ProjectionReductionContext,
+    ) -> crate::semantic_query::AuthoredPropertyKey {
+        match key {
+            verter_type_expr::AuthoredPropertyKey::String(value) => {
+                verter_type_expr::AuthoredPropertyKey::String(Arc::clone(value))
+            }
+            verter_type_expr::AuthoredPropertyKey::Number(value) => {
+                verter_type_expr::AuthoredPropertyKey::Number(*value)
+            }
+            verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) => {
+                verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity.clone())
+            }
+            verter_type_expr::AuthoredPropertyKey::Computed(
+                computed @ TypeExpr::TypeOf(value_ref),
+            ) => self
+                .unique_symbol_identity_for_typeof(value_ref, scope, name_resolution, scope_payload)
+                .map(verter_type_expr::AuthoredPropertyKey::UniqueSymbol)
+                .unwrap_or_else(|| {
+                    verter_type_expr::AuthoredPropertyKey::Computed(
+                        self.lower_type_expr_with_infer_factory(
+                            infer_binders,
+                            computed,
+                            env,
+                            scope,
+                            name_resolution,
+                            scope_payload,
+                            shadowing,
+                            substitutions,
+                            reduction_context,
+                        ),
+                    )
+                }),
+            verter_type_expr::AuthoredPropertyKey::Computed(computed) => {
+                verter_type_expr::AuthoredPropertyKey::Computed(
+                    self.lower_type_expr_with_infer_factory(
+                        infer_binders,
+                        computed,
+                        env,
+                        scope,
+                        name_resolution,
+                        scope_payload,
+                        shadowing,
+                        substitutions,
+                        reduction_context,
+                    ),
+                )
+            }
+        }
+    }
+
     /// Project a dotted type-position reference `Enum.Member` to the named
     /// member's projected type (a folded literal for a foldable member, the
     /// degraded sound primitive for a deferred one), GATED strictly on the typed
@@ -804,11 +951,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // macro-root provenance bit consumed by terminal
                             // projections.
                             members.push(SurfaceMember {
-                                name: Arc::from(prop.name.as_str()),
+                                key: self.lower_authored_property_key(
+                                    &prop.key,
+                                    infer_binders,
+                                    env,
+                                    scope,
+                                    name_resolution,
+                                    scope_payload,
+                                    shadowing,
+                                    substitutions,
+                                    reduction_context.into_structural_provenance(),
+                                ),
                                 value,
                                 optional: prop.optional,
                                 readonly: prop.readonly,
-                                is_method: false,
+                                method_kind: None,
+                                has_implementation_body: false,
                                 // Carry the IR member's declared accessibility
                                 // verbatim onto the graph payload (Public for
                                 // every non-class origin).
@@ -877,11 +1035,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // literally written in the macro type
                             // argument's own body is author-declared.
                             members.push(SurfaceMember {
-                                name: Arc::from(method.name.as_str()),
+                                key: self.lower_authored_property_key(
+                                    &method.key,
+                                    infer_binders,
+                                    env,
+                                    scope,
+                                    name_resolution,
+                                    scope_payload,
+                                    shadowing,
+                                    substitutions,
+                                    reduction_context.into_structural_provenance(),
+                                ),
                                 value,
                                 optional: method.optional,
                                 readonly: false,
-                                is_method: true,
+                                method_kind: Some(method.method_kind),
+                                has_implementation_body: method.has_implementation_body,
                                 // Carry the IR method's declared accessibility
                                 // (Public for every non-class origin).
                                 visibility: method.visibility,
@@ -991,7 +1160,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                     keyspace: None,
                     has_index_signature,
-                    completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                 };
                 graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
             }
@@ -1575,6 +1743,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::project_semantic_dispatch::build::integer_convention_index_key(*n)
                             .map(IndexKey::Number)
                     }
+                    TypeExpr::TypeOf(value_ref) => self
+                        .unique_symbol_identity_for_typeof(
+                            value_ref,
+                            scope,
+                            name_resolution,
+                            scope_payload,
+                        )
+                        .map(IndexKey::UniqueSymbol),
                     _ => None,
                 };
                 let index_key = match folded_key {
@@ -1591,10 +1767,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             substitutions,
                             reduction_context,
                         );
-                        IndexKey::TypeNode(idx_id)
+                        IndexKey::Computed(idx_id)
                     }
                 };
-                let should_defer = matches!(index_key, IndexKey::TypeNode(_))
+                let should_defer = matches!(index_key, IndexKey::Computed(_))
                     || !matches!(
                         graph.node_data(obj_id).as_deref(),
                         Some(SemanticNodeData::Object(_))
@@ -1875,7 +2051,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let path: Arc<[PathSegment]> = Arc::from(
                         value_ref.path[consumed_segments..]
                             .iter()
-                            .map(|segment| PathSegment::Member(Arc::from(segment.as_str())))
+                            .map(|segment| {
+                                PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+                                    Arc::from(segment.as_str()),
+                                ))
+                            })
                             .collect::<Vec<_>>()
                             .into_boxed_slice(),
                     );

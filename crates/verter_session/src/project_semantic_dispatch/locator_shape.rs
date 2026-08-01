@@ -523,10 +523,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     TypeExpr::Literal(LiteralValue::Number(n)) => {
                         match crate::semantic_query::index_key::integer_convention_index_key(*n) {
                             Some(i) => IndexKey::Number(i),
-                            None => IndexKey::TypeNode(self.lower_locator_shape_node(index, ctx)),
+                            None => IndexKey::Computed(self.lower_locator_shape_node(index, ctx)),
                         }
                     }
-                    _ => IndexKey::TypeNode(self.lower_locator_shape_node(index, ctx)),
+                    _ => IndexKey::Computed(self.lower_locator_shape_node(index, ctx)),
                 };
                 graph.intern_node_with_scope(
                     SemanticNodeData::IndexedAccess { object, index },
@@ -867,24 +867,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
             // -- Object surface: ROLE-FREE member stamps --
             TypeExpr::Object(obj) => {
-                // Spread-bearing locator shapes use the same ordered fold as
-                // ordinary lowering. Non-enumerable operands remain typed
-                // residuals inside one open Object.
+                // Spread-bearing locator shapes preserve source ordering in
+                // the same canonical program as every other producer.
                 if obj
                     .properties
                     .iter()
                     .any(|m| matches!(m, ObjectMember::Spread(_)))
                 {
-                    let mut parts: Vec<(
-                        crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind,
-                        SemanticNodeId,
-                    )> = Vec::new();
+                    let mut effects = Vec::new();
                     let mut run: Vec<&ObjectMember> = Vec::new();
                     let flush = |run: &mut Vec<&ObjectMember>,
-                                 parts: &mut Vec<(
-                        crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind,
-                        SemanticNodeId,
-                    )>| {
+                                 effects: &mut Vec<
+                        crate::semantic_query::ObjectConstructionEffect,
+                    >| {
                         if run.is_empty() {
                             return;
                         }
@@ -901,27 +896,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 );
                             }
                         }
-                        parts.push((
-                            crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind::DirectRun,
-                            self.lower_locator_shape_node(&run_obj, ctx),
-                        ));
+                        let node = self.lower_locator_shape_node(&run_obj, ctx);
+                        let Some(SemanticNodeData::Object(surface)) =
+                            self.graph().node_data(node).as_deref().cloned()
+                        else {
+                            return;
+                        };
+                        effects.extend(
+                            super::object_spread_program_lowering::direct_effects_from_surface(
+                                &surface,
+                            ),
+                        );
                         run.clear();
                     };
                     for member in &obj.properties {
                         match member {
                             ObjectMember::Spread(spread) => {
-                                flush(&mut run, &mut parts);
+                                flush(&mut run, &mut effects);
                                 let operand = self.lower_locator_shape_node(&spread.ty, ctx);
-                                parts.push((
-                                    crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind::SpreadOperand,
-                                    self.taint_spread_node(operand),
-                                ));
+                                effects.push(
+                                    crate::semantic_query::ObjectConstructionEffect::Spread(
+                                        operand,
+                                    ),
+                                );
                             }
                             other => run.push(other),
                         }
                     }
-                    flush(&mut run, &mut parts);
-                    return self.fold_spread_segments(parts, scope);
+                    flush(&mut run, &mut effects);
+                    return graph.intern_node_with_scope(
+                        SemanticNodeData::ObjectSpreadProgram(
+                            crate::semantic_query::ObjectSpreadProgram {
+                                effects: Arc::from(effects),
+                            },
+                        ),
+                        scope.clone(),
+                    );
                 }
                 let declaration_origin = scope.canonical_file();
                 let mut members: Vec<SurfaceMember> = Vec::new();
@@ -930,34 +940,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let mut index_signatures: Vec<IndexSignature> = Vec::new();
                 for member in &obj.properties {
                     match member {
-                        ObjectMember::Property(prop) => members.push(SurfaceMember {
-                            name: Arc::from(prop.name.as_str()),
-                            value: self.lower_locator_shape_node(&prop.ty, ctx),
-                            optional: prop.optional,
-                            readonly: prop.readonly,
-                            is_method: false,
-                            visibility: prop.visibility,
-                            // The locator path materializes DECLARATION
-                            // bodies: a member reached through a
-                            // variable/declaration deref is `NonLiteral`
-                            // regardless of the origin the producer recorded
-                            // on the authored literal — freshness never
-                            // survives declaration materialization.
-                            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                            spans: prop.spans,
-                            declaration_origin: declaration_origin.clone(),
-                            // ROLE-FREE shape identity: the locator shape
-                            // never carries a caller-relative provenance or
-                            // merge role — those are projection-time stamps
-                            // applied to the fetched shape, never node
-                            // identity. NEUTRAL is the ONLY stamp this path
-                            // can construct: the non-neutral producers
-                            // require a `ProjectionReductionContext`
-                            // witness, and the sealed `LocatorShapeCtx`
-                            // neither contains nor converts to one.
-                            declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                            merge_role: MergeRoleStamp::NEUTRAL,
-                        }),
+                        ObjectMember::Property(prop) => {
+                            members.push(SurfaceMember {
+                                key: prop.key.clone().map(
+                                    |computed| self.lower_locator_shape_node(&computed, ctx),
+                                    |identity| identity,
+                                ),
+                                value: self.lower_locator_shape_node(&prop.ty, ctx),
+                                optional: prop.optional,
+                                readonly: prop.readonly,
+                                method_kind: None,
+                                has_implementation_body: false,
+                                visibility: prop.visibility,
+                                // The locator path materializes DECLARATION
+                                // bodies: a member reached through a
+                                // variable/declaration deref is `NonLiteral`
+                                // regardless of the origin the producer recorded
+                                // on the authored literal — freshness never
+                                // survives declaration materialization.
+                                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                                spans: prop.spans,
+                                declaration_origin: declaration_origin.clone(),
+                                // ROLE-FREE shape identity: the locator shape
+                                // never carries a caller-relative provenance or
+                                // merge role — those are projection-time stamps
+                                // applied to the fetched shape, never node
+                                // identity. NEUTRAL is the ONLY stamp this path
+                                // can construct: the non-neutral producers
+                                // require a `ProjectionReductionContext`
+                                // witness, and the sealed `LocatorShapeCtx`
+                                // neither contains nor converts to one.
+                                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                                merge_role: MergeRoleStamp::NEUTRAL,
+                            });
+                        }
                         ObjectMember::Method(method) => {
                             let function_expr =
                                 TypeExpr::Function(Arc::new(method.function.clone()));
@@ -967,11 +983,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 &method.function,
                             );
                             members.push(SurfaceMember {
-                                name: Arc::from(method.name.as_str()),
+                                key: method.key.clone().map(
+                                    |computed| self.lower_locator_shape_node(&computed, ctx),
+                                    |identity| identity,
+                                ),
                                 value: self.lower_locator_shape_node(&function_expr, ctx),
                                 optional: method.optional,
                                 readonly: false,
-                                is_method: true,
+                                method_kind: Some(method.method_kind),
+                                has_implementation_body: method.has_implementation_body,
                                 visibility: method.visibility,
                                 // Declaration materialization is never a
                                 // literal origin (see the Property arm).
@@ -1025,7 +1045,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                     keyspace: None,
                     has_index_signature,
-                    completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                 };
                 graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
             }

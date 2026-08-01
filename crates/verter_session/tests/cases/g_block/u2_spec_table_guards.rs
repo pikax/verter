@@ -16,7 +16,8 @@
 //!    the live `pub enum SemanticQueryKey { … }` source. Fails when a variant
 //!    is added/removed without regenerating.
 //! 3. **Per-row sanity** — every row is `Live`; the value domain is `TypeNode`
-//!    for every variant EXCEPT `Relate` (`Relation` — its execute arm is
+//!    for every variant EXCEPT `ProjectObjectSpread` (`ObjectProjection`),
+//!    `Relate` (`Relation` — its execute arm is
 //!    non-producing and its judgement lives in the family memo's `Relate`
 //!    family, the rehomed relation memo),
 //!    `ResolveOverloadSet` (`OverloadSet` — the LIVE ordered visible
@@ -137,6 +138,8 @@ fn semantic_query_key_spec_table_equals_enum() {
     //                            non-producing execute arm returns `Miss` until
     //                            the contextual-type reducer lands in U6).
     //   - `ClassifyBroadRuntime` → `BroadRuntime`.
+    //   - `ProjectObjectSpread`  → `ObjectProjection` (forward-declared
+    //                              ordered-effect evaluator).
     //   - everything else     → `TypeNode`.
     // This three-way assertion is discriminating: it FAILS if `Relate` is
     // mislabeled back to `TypeNode`, if `ResolveOverloadSet` is mislabeled
@@ -155,6 +158,7 @@ fn semantic_query_key_spec_table_equals_enum() {
             SemanticQueryKeyTag::Relate => SemanticQueryValueTag::Relation,
             SemanticQueryKeyTag::ResolveOverloadSet => SemanticQueryValueTag::OverloadSet,
             SemanticQueryKeyTag::ClassifyBroadRuntime => SemanticQueryValueTag::BroadRuntime,
+            SemanticQueryKeyTag::ProjectObjectSpread => SemanticQueryValueTag::ObjectProjection,
             // Flow narrowing + contextual typing carry the program-analysis
             // value domain (the narrowed / contextual node), NOT `TypeNode`.
             SemanticQueryKeyTag::FlowNarrowingAt | SemanticQueryKeyTag::ContextualTypeAt => {
@@ -168,7 +172,8 @@ fn semantic_query_key_spec_table_equals_enum() {
             "value-domain mismatch for `{}`: `Relate` must be `Relation`, \
              `ResolveOverloadSet` must be `OverloadSet`, `FlowNarrowingAt` / \
              `ContextualTypeAt` must be `ProgramAnalysis`, `ClassifyBroadRuntime` \
-             must be `BroadRuntime`, and every other \
+             must be `BroadRuntime`, `ProjectObjectSpread` must be \
+             `ObjectProjection`, and every other \
              live key must be `TypeNode`",
             spec.variant.name()
         );

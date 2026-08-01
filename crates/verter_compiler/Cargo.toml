@@ -38,6 +38,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
 [dependencies]
+verter_ecma = { workspace = true }
 verter_audit = { path = "../verter_audit" }
 verter_language = { path = "../verter_language" }
 verter_macro_dto = { workspace = true }

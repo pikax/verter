@@ -221,7 +221,12 @@ fn walk_typeof_carrier_applies_instantiation_args() {
     let resolved = crate::project_semantic_dispatch::walk::probe_walk_typeof_resolved(
         &dispatch,
         carrier,
-        Arc::from(vec![PathSegment::Member(Arc::from("__probe__"))].into_boxed_slice()),
+        Arc::from(
+            vec![PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("__probe__"),
+            )]
+            .into_boxed_slice(),
+        ),
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     )
     .expect("the PathWalker's TypeOf arm must fire for a carrier reached mid-walk");
@@ -303,7 +308,12 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
         crate::project_semantic_dispatch::walk::probe_walk_typeof_internal_path_mode(
             &dispatch,
             carrier,
-            Arc::from(vec![PathSegment::Member(Arc::from("__probe__"))].into_boxed_slice()),
+            Arc::from(
+                vec![PathSegment::Member(
+                    crate::semantic_query::PropertyKey::identifier("__probe__"),
+                )]
+                .into_boxed_slice(),
+            ),
             ProjectionReductionContext::published(ProjectionMode::Expanded),
         )
         .expect("the PathWalker's TypeOf arm must fire and project a non-empty internal path");

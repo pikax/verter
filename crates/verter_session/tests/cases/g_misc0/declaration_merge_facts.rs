@@ -68,7 +68,7 @@ fn two_interface_parts_emit_one_merged_export_fact() {
     for name in &["a", "b"] {
         let pk = FactKey::MemberPresence {
             exporter: InternedName::from("Foo"),
-            name: InternedName::from(*name),
+            name: verter_type_expr::facts::FactPropertyKey::identifier(*name),
             space: SymbolSpace::Type,
         };
         assert!(

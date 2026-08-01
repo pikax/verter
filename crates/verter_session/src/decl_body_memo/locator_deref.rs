@@ -892,6 +892,9 @@ fn navigate_expr(
             (NavigatePosition::Member(member), TypeBodyPathStep::MemberValue) => {
                 NavigatePosition::Expr(member_value_expr(member)?)
             }
+            (NavigatePosition::Member(member), TypeBodyPathStep::MemberKey) => {
+                NavigatePosition::Expr(member_key_expr(member)?)
+            }
             // A selected FUNCTION-LIKE member's authored parameter / return
             // positions (`[Member { k }, FunctionParam { i }]` /
             // `[Member { k }, FunctionReturn]` — the member-signature fact
@@ -999,6 +1002,22 @@ fn member_value_expr(member: ObjectMember) -> Result<TypeExpr, LocatorBodyDerefE
         ObjectMember::Spread(spread) => Ok(spread.ty),
         ObjectMember::IndexSignature(_) => Err(LocatorBodyDerefError::PathUnresolved),
     }
+}
+
+/// The retained semantic child of a computed member key. Statically known
+/// string, numeric, and unique-symbol keys have no child position.
+fn member_key_expr(member: ObjectMember) -> Result<TypeExpr, LocatorBodyDerefError> {
+    let key = match member {
+        ObjectMember::Property(prop) => prop.key,
+        ObjectMember::Method(method) => method.key,
+        ObjectMember::CallSignature(_)
+        | ObjectMember::ConstructSignature(_)
+        | ObjectMember::IndexSignature(_)
+        | ObjectMember::Spread(_) => return Err(LocatorBodyDerefError::PathUnresolved),
+    };
+    key.into_known()
+        .err()
+        .ok_or(LocatorBodyDerefError::PathUnresolved)
 }
 
 /// The function IR of a selected FUNCTION-LIKE object member (a method /

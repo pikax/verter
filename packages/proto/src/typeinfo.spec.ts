@@ -17,12 +17,14 @@ import {
   GraphReductionDemand,
   GraphSignatureKind,
   GraphTypeNodeSchema,
-  GraphMemberNameKind,
+  GraphObjectMemberKind,
   GraphIndexKeyKind,
   GraphAccessibility,
   GraphVariance,
   GraphOperation,
   GraphMappedModifier,
+  GraphObjectExcessOrigin,
+  GraphObjectMergeRole,
   GraphSymbolNamespace,
   GraphDeclarationPartKind,
   GraphRelationFailureCode,
@@ -87,11 +89,11 @@ describe("typeinfo proto TS bindings", () => {
           value: {
             members: [
               {
-                name: "x",
-                nameKind: GraphMemberNameKind.IDENTIFIER,
                 value: primStringExpr(),
                 optionalMember: false,
                 readonly: false,
+                propertyKey: { key: { case: "stringValue", value: "x" } },
+                memberKind: GraphObjectMemberKind.PROPERTY,
               },
             ],
           },
@@ -206,14 +208,15 @@ describe("typeinfo proto TS bindings", () => {
           value: {
             members: [
               {
-                nameId: 1,
-                nameKind: GraphMemberNameKind.IDENTIFIER,
                 valueNodeId: 0,
                 optional: false,
                 readonly: true,
                 accessibility: GraphAccessibility.PUBLIC,
                 staticSide: false,
                 declarationSymbolId: 2,
+                propertyKey: { key: { case: "stringId", value: 1 } },
+                memberKind: GraphObjectMemberKind.PROPERTY,
+                hasImplementationBody: false,
               },
             ],
             indexSignatures: [
@@ -388,9 +391,86 @@ describe("typeinfo proto TS bindings", () => {
         },
       },
       { kind: { case: "cycle", value: { cycleRootNodeId: 0, participants: [22] } } },
+      {
+        kind: {
+          case: "objectSpreadProgram",
+          value: {
+            effects: [
+              {
+                kind: {
+                  case: "directProperty",
+                  value: {
+                    propertyKey: { key: { case: "computedNodeId", value: 4 } },
+                    valueNodeId: 5,
+                    optional: true,
+                    readonly: true,
+                    accessibility: GraphAccessibility.PROTECTED,
+                    spans: {
+                      declaration: { canonicalId: "/a.ts", start: 1, end: 9 },
+                      name: { canonicalId: "/a.ts", start: 1, end: 2 },
+                    },
+                    declarationOriginNameId: 3,
+                    hasDeclarationOrigin: true,
+                    declaredInMacroTypeArg: true,
+                    mergeRole: GraphObjectMergeRole.OWN_BODY,
+                    excessOrigin: GraphObjectExcessOrigin.FRESH_OWN,
+                  },
+                },
+              },
+              {
+                kind: {
+                  case: "directMethod",
+                  value: {
+                    propertyKey: { key: { case: "uniqueSymbolDeclId", value: 6 } },
+                    valueNodeId: 7,
+                    hasImplementationBody: true,
+                  },
+                },
+              },
+              {
+                kind: {
+                  case: "directGet",
+                  value: {
+                    propertyKey: { key: { case: "stringId", value: 8 } },
+                    valueNodeId: 9,
+                  },
+                },
+              },
+              {
+                kind: {
+                  case: "directSet",
+                  value: {
+                    propertyKey: { key: { case: "canonicalNumber", value: 10n } },
+                    valueNodeId: 11,
+                  },
+                },
+              },
+              {
+                kind: {
+                  case: "directIndex",
+                  value: { keyTypeNodeId: 12, valueTypeNodeId: 13, readonly: true },
+                },
+              },
+              {
+                kind: {
+                  case: "directCall",
+                  value: { signatureNodeId: 14 },
+                },
+              },
+              {
+                kind: {
+                  case: "directConstruct",
+                  value: { signatureNodeId: 15 },
+                },
+              },
+              { kind: { case: "spread", value: { operandNodeId: 16 } } },
+            ],
+          },
+        },
+      },
     ];
 
-    expect(cases.length).toBe(31);
+    expect(cases.length).toBe(32);
 
     const seen = new Set<string>();
     for (const init of cases) {
@@ -403,7 +483,7 @@ describe("typeinfo proto TS bindings", () => {
       expect(decoded).toEqual(node);
       seen.add(decoded.kind.case as string);
     }
-    expect(seen.size).toBe(31);
+    expect(seen.size).toBe(32);
   });
 
   it("TypeInfoGraphRequest roundtrips every payload arm", () => {
@@ -717,14 +797,16 @@ describe("typeinfo proto TS bindings", () => {
     expect(decodedUnsupported.status?.diagnostics.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("wire schema version is 5 with the payload-side relation_proofs table", () => {
+  it("wire schema version is 7 with canonical object-spread programs", () => {
     // Schema 4→5: the `GraphTypeNode.relation_proof = 28` oneof arm is
     // retired (tag + name reserved at message scope) and the relation-proof
     // witness relocated OFF the type-values surface to the payload-side
     // `SemanticTypeGraph.relation_proofs` table (field 13, add-only). The TS
     // facade constant tracks the Rust `TYPEINFO_GRAPH_SCHEMA_VERSION` in
     // lock-step.
-    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(5);
+    // Schema 6 added typed member keys; schema 7 reserves tag 33 for the
+    // canonical source-ordered object-spread program.
+    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(7);
   });
 
   it("SemanticTypeGraph roundtrips the payload-side relation_proofs table (field 13)", () => {

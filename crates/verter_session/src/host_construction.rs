@@ -39,10 +39,12 @@ use crate::{host_executor, VerterHost};
 ///   warm memo entry, no fact signature, no reverse-index registration).
 /// - `strict_family_relax_bits` (RI-10): bit 0 relaxes `strictNullChecks`
 ///   (null/undefined assignable to any non-`never` target); bit 1 relaxes
-///   `strictFunctionTypes` (bivariant function parameters). Zero — the
-///   production default — is the TS-strict regime. The relaxed
-///   configuration folds into the relation key's `type_env_hash`, so a
-///   relaxed judgement never warm-hits a strict request.
+///   `strictFunctionTypes` (bivariant function parameters); bit 2 enables
+///   `exactOptionalPropertyTypes` (authored `undefined` preserved in
+///   optional writes). Zero — the production default — is the TS-strict
+///   regime with exact optionality disabled. The relaxed configuration
+///   folds into the relation key's `type_env_hash`, so a relaxed judgement
+///   never warm-hits a strict request.
 #[derive(Debug, Default)]
 pub(crate) struct RelationHostKnobs {
     pub(crate) force_overflow_observations: std::sync::atomic::AtomicUsize,

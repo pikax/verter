@@ -139,7 +139,7 @@ pub struct LoweredTypeDecl {
     /// locators carry their `MergedContributor` path step. The session
     /// prepared-decl builder COPIES these facts; it never re-classifies or
     /// derefs a locator at prepare time.
-    pub member_index: FxHashMap<String, PreparedMemberFact>,
+    pub member_index: FxHashMap<verter_type_expr::facts::FactPropertyKey, PreparedMemberFact>,
     /// The prepared structural-wrapper classification FACT, classified at
     /// this lazy lowering from the primary transient body
     /// ([`PreparedTypeDecl::classify_wrapper_shape`]).
@@ -2561,7 +2561,10 @@ fn lowered_type_decl_from_group(
             // sub-positions through a contributor step first). Duplicate names
             // fold with FIRST-contributor precedence — the MergedDecl peer-merge
             // property rule the legacy eager fold applied.
-            let mut merged_index: FxHashMap<String, PreparedMemberFact> = FxHashMap::default();
+            let mut merged_index: FxHashMap<
+                verter_type_expr::facts::FactPropertyKey,
+                PreparedMemberFact,
+            > = FxHashMap::default();
             for (ordinal, contributor_body) in retained.bodies.iter().enumerate() {
                 let mut per_contributor =
                     PreparedTypeDecl::new(root_identity.clone(), primary.kind);
@@ -2824,6 +2827,7 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
     fold_lowered_value_decl(
         ValueDeclKind::Class,
         verter_type_expr::facts::ValueTypeAnnotationFact {
+            is_unique_symbol: false,
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Direct,
             annotation: Some(instance),

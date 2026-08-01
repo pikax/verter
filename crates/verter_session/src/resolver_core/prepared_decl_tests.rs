@@ -52,7 +52,9 @@ fn prepares_local_exported_type_decl_from_shallow_file_state() {
 
     // Member index should be auto-populated for interface with properties
     assert!(
-        prepared.member_index.contains_key("label"),
+        prepared
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("label")),
         "member index should contain 'label' property"
     );
 }
@@ -331,11 +333,15 @@ export interface Props { child: Inner; data: Local }
 
     // Should have a member index for 'child' and 'data'
     assert!(
-        prepared.member_index.contains_key("child"),
+        prepared
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("child")),
         "member index should contain 'child'"
     );
     assert!(
-        prepared.member_index.contains_key("data"),
+        prepared
+            .member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier("data")),
         "member index should contain 'data'"
     );
 }
@@ -904,7 +910,9 @@ fn unrelated_unresolved_import_does_not_block_strict_type_preparation() {
         .get("SideMenuProps")
         .expect("an unrelated unresolved import must not fail strict preparation")
         .expect("SideMenuProps is an authored declaration");
-    assert!(prepared.member_index.contains_key("visible"));
+    assert!(prepared
+        .member_index
+        .contains_key(&crate::semantic_query::PropertyKey::identifier("visible")));
     assert!(
         cache.slot_committed_for_test("SideMenuProps"),
         "a complete exact declaration must be admitted to its write-once slot"
@@ -914,7 +922,9 @@ fn unrelated_unresolved_import_does_not_block_strict_type_preparation() {
         .get("Menu.NamespacedProps")
         .expect("the private namespace table must omit the same unrelated unresolved import")
         .expect("Menu.NamespacedProps is an authored declaration");
-    assert!(namespaced.member_index.contains_key("open"));
+    assert!(namespaced
+        .member_index
+        .contains_key(&crate::semantic_query::PropertyKey::identifier("open")));
     assert!(cache.slot_committed_for_test("Menu.NamespacedProps"));
 }
 

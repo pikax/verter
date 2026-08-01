@@ -5077,6 +5077,14 @@ fn type_def_source_files() -> Vec<(String, String)> {
     // qualified identity never collides with a `verter_session` `crate::…` one.
     const EXTERNAL: &[(&str, &str)] = &[
         ("../verter_type_expr/src/lib.rs", "verter_type_expr"),
+        // `AuthoredPropertyKey` / `PropertyKey` are the typed member-key
+        // identities threaded through the shape-engine algebra sinks
+        // (`member_property` / `member_method`); reading their home lets the
+        // closure classify them as known carriers instead of failing closed.
+        (
+            "../verter_type_expr/src/property_key.rs",
+            "verter_type_expr::property_key",
+        ),
         (
             "../verter_semantic/src/analysis/type_solver/query_engine.rs",
             "verter_semantic::analysis::type_solver::query_engine",

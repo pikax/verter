@@ -305,7 +305,7 @@ pub(super) fn compound_root_surface_view_via_dispatch(
 /// signature carries nothing to publish (never a COMPLETE compound-root
 /// projection). Node-domain — no materialisation feeds this decision.
 pub(super) fn surface_view_is_empty(surface: &SurfaceView) -> bool {
-    surface.closed().is_some_and(|closed| closed.is_empty())
+    surface.closed().is_empty()
 }
 
 #[cfg_attr(

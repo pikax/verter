@@ -109,7 +109,7 @@ export interface TestComponentMetaPayload {
   typeRegistry?: TestTypeRegistryEntry[];
 }
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const NODE_PRIMITIVE = 1;
 const NODE_UNION = 3;
@@ -223,7 +223,9 @@ class TestGraphBuilder {
         proto = typeNode("object", {
           members: expr.properties.map((property) => ({
             kind: MEMBER_PROPERTY,
-            nameId: this.stringId(property.name),
+            propertyKey: {
+              key: { case: "stringId" as const, value: this.stringId(property.name) },
+            },
             typeNodeId: this.nodeId(property.type),
             optional: Boolean(property.optional),
             readonly: false,
@@ -231,6 +233,8 @@ class TestGraphBuilder {
             keyTypeNodeId: 0,
             valueTypeNodeId: 0,
             functionNodeId: 0,
+            methodKind: 0,
+            hasImplementationBody: false,
           })),
         });
         break;

@@ -474,7 +474,7 @@ fn props_emits_slots_share_path_independent_cache() {
             let mut names: Vec<String> = surface
                 .positive_members()
                 .iter()
-                .map(|m| m.name.to_string())
+                .filter_map(|m| m.string_name().map(str::to_string))
                 .collect();
             names.sort();
             names
@@ -574,7 +574,7 @@ fn evaluate_type_expression_for_vue_default_export_matches_props() {
         SemanticNodeData::Object(surface) => surface
             .positive_members()
             .iter()
-            .map(|m| m.name.to_string())
+            .filter_map(|m| m.string_name().map(str::to_string))
             .collect(),
         other => panic!(
             "typeinfo result for `$props` must be an Object \

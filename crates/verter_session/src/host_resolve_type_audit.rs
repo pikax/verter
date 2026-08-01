@@ -466,6 +466,9 @@ fn noop_type_resolution_record(
 fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
     match key {
         SemanticQueryKey::ProjectPath { context, .. } => context.mode,
+        SemanticQueryKey::ProjectObjectSpread { context, .. } => {
+            context.projection_reduction().mode
+        }
         SemanticQueryKey::ProjectMember { mode, .. }
         | SemanticQueryKey::IndexedAccess { mode, .. } => *mode,
         SemanticQueryKey::ResolveMacroPayload { context, .. } => context.mode,

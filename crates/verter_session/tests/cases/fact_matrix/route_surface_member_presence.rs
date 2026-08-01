@@ -43,7 +43,7 @@ fn route_surface_signature_carries_member_presence() {
         canonical_id: "/src/leaf.ts".to_owned(),
         key: FactKey::MemberPresence {
             exporter: InternedName::from("Foo"),
-            name: InternedName::from("a"),
+            name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
             space: SymbolSpace::Type,
         },
         lane: FactLane::Semantic,

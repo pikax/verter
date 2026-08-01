@@ -29,9 +29,9 @@ use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 
 use verter_type_expr::facts::{
-    DeferredKeyUtilityEdge, DeferredKeyUtilityKind, ExternalRouteRefFact, KeyDomainFact,
-    MemberNamesRoute, MemberPathSeedTarget, RouteDependencyRefFact, ShallowRouteFacts,
-    WholeRouteContextFact, WholeRouteEdgeFact,
+    DeferredKeyUtilityEdge, DeferredKeyUtilityKind, ExternalRouteRefFact, FactPropertyKey,
+    KeyDomainFact, MemberNamesRoute, MemberPathSeedTarget, RouteDependencyRefFact,
+    ShallowRouteFacts, WholeRouteContextFact, WholeRouteEdgeFact,
 };
 use verter_type_expr::{merge_route_demands, RouteDemand};
 
@@ -92,7 +92,7 @@ pub trait RouteClosureProvider {
 pub enum KeySourceLookup {
     /// The alias graph enumerated to COMPLETION: the sorted, deduped literal
     /// key set — possibly empty (the legacy `utility → None` fall-through).
-    Ready(Vec<String>),
+    Ready(Vec<FactPropertyKey>),
     /// Header-decidable without any body demand: the alias names no
     /// file-scope TYPE symbol — it enumerates to zero keys (the legacy
     /// non-symbol arm), so the empty-keys fall-through applies.
@@ -200,8 +200,7 @@ pub fn route_closure_over_facts(
         }
         RouteDemand::MemberPath(_) => local_closure_over_facts(provider, symbol_name, budget),
         RouteDemand::Pick(members) => {
-            let refs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
-            member_route_closure(provider, symbol_name, &refs, budget)
+            member_route_closure(provider, symbol_name, members.as_slice(), budget)
         }
         RouteDemand::Omit(omitted) => {
             let Some(facts) = provider.route_facts(symbol_name) else {
@@ -219,7 +218,8 @@ pub fn route_closure_over_facts(
             }
             let remaining = names
                 .iter()
-                .filter(|name| !omitted.contains(name.as_str()))
+                .filter(|name| !omitted.contains(name))
+                .cloned()
                 .collect::<Vec<_>>();
             if remaining.is_empty() {
                 return FactClosureResult {
@@ -229,8 +229,7 @@ pub fn route_closure_over_facts(
                     steps: 1,
                 };
             }
-            let refs: Vec<&str> = remaining.iter().map(|s| s.as_str()).collect();
-            member_route_closure(provider, symbol_name, &refs, budget)
+            member_route_closure(provider, symbol_name, &remaining, budget)
         }
     }
 }
@@ -454,7 +453,7 @@ impl WholeRouteWalk<'_> {
     /// target decl is read WITHOUT a visited mark or budget charge; the seed
     /// walk runs with its own fresh cycle guard; terminal seeds then follow
     /// at `Root` (context reset), seed imports emit whole-route externals.
-    fn follow_local_member_path(&mut self, name: &str, path: &[String]) -> bool {
+    fn follow_local_member_path(&mut self, name: &str, path: &[FactPropertyKey]) -> bool {
         if !self.provider.has_type_symbol(name) {
             return true;
         }
@@ -565,7 +564,7 @@ impl WholeRouteWalk<'_> {
             DeferredKeyUtilityKind::Omit => RouteDemand::omit(keys),
             DeferredKeyUtilityKind::IndexedAccess => {
                 if keys.len() == 1 {
-                    let mut full: Vec<String> = deferred.base_path.to_vec();
+                    let mut full: Vec<FactPropertyKey> = deferred.base_path.to_vec();
                     full.extend(keys);
                     RouteDemand::member_path(full)
                 } else if deferred.base_path.is_empty() {
@@ -626,7 +625,7 @@ fn compose_follow(
 fn member_path_seed_walk(
     provider: &dyn RouteClosureProvider,
     facts: &ShallowRouteFacts,
-    path: &[String],
+    path: &[FactPropertyKey],
     seed_entries: &mut Vec<RouteDependencyRefFact>,
     seed_external: &mut FactExternalAccumulator,
     seen_symbols: &mut FxHashSet<String>,
@@ -704,7 +703,7 @@ fn member_path_seed_walk(
 fn member_route_closure(
     provider: &dyn RouteClosureProvider,
     symbol_name: &str,
-    members: &[&str],
+    members: &[FactPropertyKey],
     budget: usize,
 ) -> FactClosureResult {
     let Some(facts) = provider.route_facts(symbol_name) else {
@@ -716,7 +715,7 @@ fn member_route_closure(
         return local_closure_over_facts(provider, symbol_name, budget);
     }
 
-    let direct_member_names: &[String] = match &facts.member_names {
+    let direct_member_names: &[FactPropertyKey] = match &facts.member_names {
         MemberNamesRoute::Closed(names) => names,
         MemberNamesRoute::OpenKeyDomain => &[],
     };
@@ -777,11 +776,11 @@ fn member_route_closure(
 fn member_path_route_closure(
     provider: &dyn RouteClosureProvider,
     symbol_name: &str,
-    path: &[String],
+    path: &[FactPropertyKey],
     budget: usize,
 ) -> FactClosureResult {
     if path.len() == 1 {
-        return member_route_closure(provider, symbol_name, &[path[0].as_str()], budget);
+        return member_route_closure(provider, symbol_name, &[path[0].clone()], budget);
     }
 
     let Some(facts) = provider.route_facts(symbol_name) else {

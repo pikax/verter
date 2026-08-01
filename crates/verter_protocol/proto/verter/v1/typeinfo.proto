@@ -184,16 +184,16 @@ message GraphQueryIdentity {
 
 // GraphTypeNode — the closed taxonomy of typeinfo graph nodes. The
 // `oneof kind` is the canonical place to add new variants; the
-// reserved range (33-100) is enforced future-additive space. Bump
+// reserved range (34-100) is enforced future-additive space. Bump
 // `SemanticTypeGraph.schema_version` whenever a variant is added.
 message GraphTypeNode {
-  // 33 - 100 reserved for additive variants of the `kind` oneof.
+  // 34 - 100 reserved for additive variants of the `kind` oneof.
   // protoc rejects reusing any of these tags with a different
   // shape until a real variant lands. Adding a variant requires
   // bumping `SemanticTypeGraph.schema_version`. The directive lives
   // at the enclosing message level because proto3 forbids
   // `reserved` inside an `oneof` block.
-  reserved 33 to 100;
+  reserved 34 to 100;
   // Tag 28 / name `relation_proof` held the retired relation-proof
   // oneof arm. The proof witness moved OFF the type-values surface to
   // the payload-side `SemanticTypeGraph.relation_proofs` table (field
@@ -241,6 +241,7 @@ message GraphTypeNode {
     GraphEnum enum_node = 30;
     GraphOpaque opaque = 31;
     GraphCycle cycle = 32;
+    GraphObjectSpreadProgram object_spread_program = 33;
   }
 }
 
@@ -264,9 +265,82 @@ message GraphObject {
   uint32 flags = 5;
 }
 
+// Canonical source-ordered authority for every spread-bearing object. The
+// effect list is never replaced by a derived member surface.
+message GraphObjectSpreadProgram {
+  repeated GraphObjectConstructionEffect effects = 1;
+}
+
+// One lossless source-ordered object-construction effect.
+message GraphObjectConstructionEffect {
+  oneof kind {
+    GraphObjectNamedEffect direct_property = 1;
+    GraphObjectNamedEffect direct_method = 2;
+    GraphObjectNamedEffect direct_get = 3;
+    GraphObjectNamedEffect direct_set = 4;
+    GraphObjectIndexEffect direct_index = 5;
+    GraphObjectSignatureEffect direct_call = 6;
+    GraphObjectSignatureEffect direct_construct = 7;
+    GraphObjectSpreadEffect spread = 8;
+  }
+}
+
+// Lossless payload shared by property/method/get/set effects. The enclosing
+// oneof arm is the authored kind discriminator. `readonly` is meaningful for
+// properties; `has_implementation_body` is meaningful for methods/accessors.
+message GraphObjectNamedEffect {
+  GraphPropertyKey property_key = 1;
+  uint32 value_node_id = 2;
+  bool optional = 3;
+  bool readonly = 4;
+  bool has_implementation_body = 5;
+  GraphAccessibility accessibility = 6;
+  GraphObjectMemberSpans spans = 7;
+  uint32 declaration_origin_name_id = 8;
+  bool has_declaration_origin = 9;
+  bool declared_in_macro_type_arg = 10;
+  GraphObjectMergeRole merge_role = 11;
+  GraphObjectExcessOrigin excess_origin = 12;
+}
+
+message GraphObjectIndexEffect {
+  uint32 key_type_node_id = 1;
+  uint32 value_type_node_id = 2;
+  bool readonly = 3;
+  GraphObjectIndexSpans spans = 4;
+  uint32 declaration_origin_name_id = 5;
+  bool has_declaration_origin = 6;
+}
+
+message GraphObjectSignatureEffect { uint32 signature_node_id = 1; }
+message GraphObjectSpreadEffect { uint32 operand_node_id = 1; }
+
+message GraphObjectMemberSpans {
+  GraphSpanRef declaration = 1;
+  GraphSpanRef name = 2;
+  GraphSpanRef type_annotation = 3;
+}
+
+message GraphObjectIndexSpans {
+  GraphSpanRef declaration = 1;
+  GraphSpanRef key = 2;
+  GraphSpanRef value = 3;
+}
+
+enum GraphObjectMergeRole {
+  GRAPH_OBJECT_MERGE_ROLE_AUTHORED = 0;
+  GRAPH_OBJECT_MERGE_ROLE_OWN_BODY = 1;
+  GRAPH_OBJECT_MERGE_ROLE_HERITAGE = 2;
+}
+
+enum GraphObjectExcessOrigin {
+  GRAPH_OBJECT_EXCESS_ORIGIN_NON_LITERAL = 0;
+  GRAPH_OBJECT_EXCESS_ORIGIN_FRESH_OWN = 1;
+  GRAPH_OBJECT_EXCESS_ORIGIN_SPREAD_TAINTED = 2;
+}
+
 message GraphObjectMember {
-  uint32 name_id = 1;
-  GraphMemberNameKind name_kind = 2;
+  reserved 1, 2;
   uint32 value_node_id = 3;
   bool optional = 4;
   bool readonly = 5;
@@ -274,6 +348,25 @@ message GraphObjectMember {
   bool static_side = 7;
   // 0 when no declaration symbol is recorded.
   uint32 declaration_symbol_id = 8;
+  GraphPropertyKey property_key = 9;
+  GraphObjectMemberKind member_kind = 10;
+  bool has_implementation_body = 11;
+}
+
+message GraphPropertyKey {
+  oneof key {
+    uint32 string_id = 1;
+    sint64 canonical_number = 2;
+    uint32 unique_symbol_decl_id = 3;
+    uint32 computed_node_id = 4;
+  }
+}
+
+enum GraphObjectMemberKind {
+  GRAPH_OBJECT_MEMBER_KIND_PROPERTY = 0;
+  GRAPH_OBJECT_MEMBER_KIND_METHOD = 1;
+  GRAPH_OBJECT_MEMBER_KIND_GET = 2;
+  GRAPH_OBJECT_MEMBER_KIND_SET = 3;
 }
 
 message GraphIndexSignature {
@@ -1075,13 +1168,6 @@ message GraphLiteralValue {
   }
 }
 
-enum GraphMemberNameKind {
-  GRAPH_MEMBER_NAME_KIND_IDENTIFIER = 0;
-  GRAPH_MEMBER_NAME_KIND_STRING_LITERAL = 1;
-  GRAPH_MEMBER_NAME_KIND_NUMERIC_LITERAL = 2;
-  GRAPH_MEMBER_NAME_KIND_UNIQUE_SYMBOL_REF = 3;
-}
-
 enum GraphIndexKeyKind {
   GRAPH_INDEX_KEY_KIND_STRING = 0;
   GRAPH_INDEX_KEY_KIND_NUMBER = 1;
@@ -1433,11 +1519,27 @@ message ExprObject {
   repeated ExprFunction construct_signatures = 4;
 }
 message ObjectMemberExpr {
-  string name = 1;
-  GraphMemberNameKind name_kind = 2;
+  reserved 1, 2;
   StructuredTypeExpression value = 3;
   bool optional_member = 4;
   bool readonly = 5;
+  PropertyKeyExpr property_key = 6;
+  GraphObjectMemberKind member_kind = 7;
+}
+message PropertyKeyExpr {
+  oneof key {
+    string string_value = 1;
+    sint64 canonical_number = 2;
+    UniqueSymbolKeyExpr unique_symbol = 3;
+    StructuredTypeExpression computed = 4;
+  }
+}
+message UniqueSymbolKeyExpr {
+  string canonical_id = 1;
+  uint32 owner_kind = 2;
+  uint32 owner_ordinal = 3;
+  string symbol = 4;
+  repeated string member_path = 5;
 }
 message IndexSignatureExpr {
   GraphIndexKeyKind key_kind = 1;

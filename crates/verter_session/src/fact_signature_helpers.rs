@@ -846,7 +846,7 @@ pub(crate) fn fact_signature_for_canonical_member(
     observed_hash: Hash16,
 ) -> SignatureAdmission {
     let exporter_name = InternedName::from(exporter);
-    let member_name = InternedName::from(member);
+    let member_name = verter_type_expr::facts::FactPropertyKey::identifier(member);
     let presence_key = FactKey::MemberPresence {
         exporter: exporter_name.clone(),
         name: member_name.clone(),

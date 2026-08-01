@@ -152,6 +152,8 @@ pub enum TypeBodyPathStep {
     TypeArgument { ordinal: u32 },
     /// Into the object / interface member at this ordinal.
     Member { ordinal: u32 },
+    /// Into the computed key expression of the current member.
+    MemberKey,
     /// Into the value-type surface of the current member.
     MemberValue,
     /// Into the constraint / default body of the owning declaration's type

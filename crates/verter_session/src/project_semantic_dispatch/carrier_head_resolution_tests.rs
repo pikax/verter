@@ -282,7 +282,13 @@ fn first_member_primitive_of_object(
     let member = view.positive_members().first()?;
     let value = dispatch.graph().node_data(member.value)?;
     match value.as_ref() {
-        SemanticNodeData::Primitive(k) => Some((member.name.as_ref().to_string(), *k)),
+        SemanticNodeData::Primitive(k) => Some((
+            member
+                .string_name()
+                .expect("string-key fixture")
+                .to_string(),
+            *k,
+        )),
         _ => None,
     }
 }
@@ -869,7 +875,7 @@ fn nested_bare_ref_carrier_in_intersection_resolves() {
     let member_names: Vec<&str> = view
         .positive_members()
         .iter()
-        .map(|m| m.name.as_ref())
+        .map(|m| m.string_name().expect("string-key fixture"))
         .collect();
     assert!(
         member_names.contains(&"a"),
@@ -1078,7 +1084,12 @@ fn normal_path_walker_reenters_carrier_normalization_behind_alias() {
     // Project `.a` over the alias-wrapped carrier in Navigate.
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: alias,
-        path: Arc::from(vec![PathSegment::Member(Arc::from("a"))].into_boxed_slice()),
+        path: Arc::from(
+            vec![PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("a"),
+            )]
+            .into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Navigate),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -1126,7 +1137,12 @@ fn normal_path_walker_unresolvable_carrier_behind_alias_misses() {
 
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: alias,
-        path: Arc::from(vec![PathSegment::Member(Arc::from("a"))].into_boxed_slice()),
+        path: Arc::from(
+            vec![PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("a"),
+            )]
+            .into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Navigate),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -1600,7 +1616,7 @@ fn eager_resolvable_ref_head_still_lowers_and_applies_args() {
     let member = view
         .positive_members()
         .iter()
-        .find(|m| m.name.as_ref() == "v")
+        .find(|m| m.string_name().expect("string-key fixture") == "v")
         .expect("`Box`'s `v` member must be present");
     let value_data = dispatch.graph().node_data(member.value);
     // Discriminating: `v`'s value must be the substituted `ArgT` (an Object body
@@ -1813,7 +1829,7 @@ defineProps<Copy<ImportedProps>>()
             payload_view
                 .positive_members()
                 .iter()
-                .map(|member| member.name.as_ref())
+                .map(|member| member.string_name().expect("string-key fixture"))
                 .collect::<Vec<_>>(),
             ["importedOwn"],
             "ResolveMacroPayload must preserve the exact carrier-to-mapped runtime route"
@@ -1877,7 +1893,7 @@ defineProps<{ setupOnly: string }>()
         matches!(
             parent_surface.as_ref(),
             SemanticNodeData::Object(view)
-                if view.positive_members().iter().any(|member| member.name.as_ref() == "moduleOnly")
+                if view.positive_members().iter().any(|member| member.string_name().expect("string-key fixture") == "moduleOnly")
         ),
         "the sole validated Module companion must remain visible from setup"
     );

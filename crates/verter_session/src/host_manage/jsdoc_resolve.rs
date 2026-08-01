@@ -247,7 +247,6 @@ impl HostComponentMetaResolver<'_> {
                     || !view.construct_signatures.is_empty()
                     || !view.index_signatures.is_empty()
                     || view.has_known_index_signature()
-                    || view.is_open_spread()
             }
             // Emits surface comes from property-style members or callable events
             // (call signatures, or construct signatures folded alongside them).
@@ -255,14 +254,11 @@ impl HostComponentMetaResolver<'_> {
                 !view.positive_members().is_empty()
                     || !view.call_signatures.is_empty()
                     || !view.construct_signatures.is_empty()
-                    || view.is_open_spread()
             }
             // The exposed surface publishes named members only
             // (`exposed_from_typeinfo_surface`), so the presence gate is the
             // named-property surface.
-            AnalyzedMacroKind::DefineExpose => {
-                !view.positive_members().is_empty() || view.is_open_spread()
-            }
+            AnalyzedMacroKind::DefineExpose => !view.positive_members().is_empty(),
             AnalyzedMacroKind::DefineOptions => false,
         }
     }
@@ -690,7 +686,7 @@ fn node_has_direct_macro_reference(
             }
             SemanticNodeData::IndexedAccess { object, index } => {
                 worklist.push(*object);
-                if let IndexKey::TypeNode(index_node) = index {
+                if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);
                 }
             }
@@ -979,7 +975,17 @@ pub(crate) fn resolve_jsdoc_tag_type(
             };
             let mut requested_segments = vec![dependency.imported_name];
             if let crate::resolver_core::RouteDemand::MemberPath(path) = dependency.route {
-                requested_segments.extend(path.iter().cloned());
+                let Some(string_path) = path
+                    .iter()
+                    .map(verter_type_expr::PropertyKey::as_string)
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    // The provider's dotted-name API cannot represent numeric
+                    // or nominal symbol keys. Reject this lookup explicitly;
+                    // the typed route remains intact on the dependency fact.
+                    continue;
+                };
+                requested_segments.extend(string_path.into_iter().map(str::to_owned));
             }
             let requested_name = requested_segments.join(".");
             ctx.resolve_imported_type_root(dep_canonical, &requested_name)

@@ -173,18 +173,23 @@ impl ProjectSemanticDispatch<'_> {
                 let members: Vec<SurfaceMember> = members
                     .iter()
                     .map(|member| SurfaceMember {
-                        name: Arc::from(member.name.as_str()),
+                        key: crate::semantic_query::AuthoredPropertyKey::string(
+                            member.name.as_str(),
+                        ),
                         value: self.raise_required_interior(
                             ctx,
                             scope,
-                            crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                                member.name.as_str(),
-                            )),
+                            crate::meta_resolve::InteriorSourceStep::Member(
+                                verter_type_expr::facts::FactAuthoredPropertyKey::string(
+                                    member.name.as_str(),
+                                ),
+                            ),
                             || self.raise_leaf_fact(&member.ty, ctx),
                         ),
                         optional: member.optional,
                         readonly: false,
-                        is_method: false,
+                        method_kind: None,
+                        has_implementation_body: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
                         // Fact rehydration (declaration domain) is never a
                         // literal origin.
@@ -204,7 +209,6 @@ impl ProjectSemanticDispatch<'_> {
                         index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                         keyspace: None,
                         has_index_signature: false,
-                        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                     }),
                     scope.clone(),
                 )
@@ -225,16 +229,21 @@ impl ProjectSemanticDispatch<'_> {
                 let members: Vec<SurfaceMember> = members
                     .iter()
                     .map(|member| SurfaceMember {
-                        name: Arc::from(member.name.as_str()),
+                        key: crate::semantic_query::AuthoredPropertyKey::string(
+                            member.name.as_str(),
+                        ),
                         value: ctx.with_interior_step(
-                            crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                                member.name.as_str(),
-                            )),
+                            crate::meta_resolve::InteriorSourceStep::Member(
+                                verter_type_expr::facts::FactAuthoredPropertyKey::string(
+                                    member.name.as_str(),
+                                ),
+                            ),
                             || self.raise_fact_or_locator(&member.ty, ctx, &scope),
                         ),
                         optional: member.optional,
                         readonly: false,
-                        is_method: false,
+                        method_kind: None,
+                        has_implementation_body: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
                         // Fact rehydration (declaration domain) is never a
                         // literal origin.
@@ -254,7 +263,6 @@ impl ProjectSemanticDispatch<'_> {
                         index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                         keyspace: None,
                         has_index_signature: false,
-                        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                     }),
                     scope,
                 ))
@@ -317,41 +325,57 @@ impl ProjectSemanticDispatch<'_> {
                 // routes the whole object through the spread fold before this
                 // plain member loop runs.
                 ObjectMemberFact::Spread(_) => {}
-                ObjectMemberFact::Property(property) => members.push(SurfaceMember {
-                    name: Arc::from(property.name.as_str()),
-                    value: self.raise_required_interior(
-                        ctx,
-                        &scope,
-                        crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                            property.name.as_str(),
-                        )),
-                        || self.raise_body_slot(&property.ty, ctx.scope_canonical_id),
-                    ),
-                    optional: property.optional,
-                    readonly: property.readonly,
-                    is_method: false,
-                    visibility: property.visibility,
-                    // Fact rehydration (declaration domain) is never a
-                    // literal origin.
-                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                    spans: verter_type_expr::MemberSpans::default(),
-                    declaration_origin: scope.canonical_file(),
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                }),
+                ObjectMemberFact::Property(property) => {
+                    let key = property.key.clone().map(
+                        |slot| {
+                            self.raise_body_slot(&slot, ctx.scope_canonical_id)
+                                .map(HotTypeRef::node)
+                                .unwrap_or_else(|| self.miss_node(&scope))
+                        },
+                        |identity| identity,
+                    );
+                    members.push(SurfaceMember {
+                        key,
+                        value: self.raise_required_interior(
+                            ctx,
+                            &scope,
+                            crate::meta_resolve::InteriorSourceStep::Member(property.key.clone()),
+                            || self.raise_body_slot(&property.ty, ctx.scope_canonical_id),
+                        ),
+                        optional: property.optional,
+                        readonly: property.readonly,
+                        method_kind: None,
+                        has_implementation_body: false,
+                        visibility: property.visibility,
+                        // Fact rehydration (declaration domain) is never a
+                        // literal origin.
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                        spans: verter_type_expr::MemberSpans::default(),
+                        declaration_origin: scope.canonical_file(),
+                        declared_in_macro_type_arg:
+                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    });
+                }
                 ObjectMemberFact::Method(method) => {
                     let value = ctx.with_interior_step(
-                        crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                            method.name.as_str(),
-                        )),
+                        crate::meta_resolve::InteriorSourceStep::Member(method.key.clone()),
                         || self.compose_function_fact_node(&method.function, ctx, false),
                     );
                     members.push(SurfaceMember {
-                        name: Arc::from(method.name.as_str()),
+                        key: method.key.clone().map(
+                            |slot| {
+                                self.raise_body_slot(&slot, ctx.scope_canonical_id)
+                                    .map(HotTypeRef::node)
+                                    .unwrap_or_else(|| self.miss_node(&scope))
+                            },
+                            |identity| identity,
+                        ),
                         value: value.node(),
                         optional: method.optional,
                         readonly: false,
-                        is_method: true,
+                        method_kind: Some(method.method_kind),
+                        has_implementation_body: method.function.has_implementation_body,
                         visibility: method.visibility,
                         // Fact rehydration (declaration domain) is never a
                         // literal origin.
@@ -414,59 +438,63 @@ impl ProjectSemanticDispatch<'_> {
                 index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                 keyspace: None,
                 has_index_signature,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             }),
             scope,
         ))
     }
 
-    /// Compose a SPREAD-BEARING object-shape fact through the shared spread
-    /// materializer: split the ordered member facts into direct runs (each
-    /// composed as a plain spread-less shape) and spread operands (raised
-    /// through their body slots, pre-tainted), then left-fold.
+    /// Compose a spread-bearing fact into its canonical ordered program.
     fn compose_spread_object_fact_node(
         &self,
         object: &ObjectShapeFact,
         ctx: &SourceRaiseContext<'_>,
         scope: &NodeScopeId,
     ) -> HotTypeRef {
-        use crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind;
-        let mut segments: Vec<(FoldSegmentKind, SemanticNodeId)> = Vec::new();
+        let mut effects = Vec::new();
         let mut run: Vec<ObjectMemberFact> = Vec::new();
         let flush_run =
             |run: &mut Vec<ObjectMemberFact>,
-             segments: &mut Vec<(FoldSegmentKind, SemanticNodeId)>| {
+             effects: &mut Vec<crate::semantic_query::ObjectConstructionEffect>| {
                 if run.is_empty() {
                     return;
                 }
                 let run_fact = ObjectShapeFact {
                     members: Arc::from(std::mem::take(run).into_boxed_slice()),
                 };
-                segments.push((
-                    FoldSegmentKind::DirectRun,
-                    self.compose_object_fact_node(&run_fact, ctx).node(),
-                ));
+                let node = self.compose_object_fact_node(&run_fact, ctx).node();
+                let Some(SemanticNodeData::Object(surface)) =
+                    self.graph().node_data(node).as_deref().cloned()
+                else {
+                    return;
+                };
+                effects.extend(
+                    super::object_spread_program_lowering::direct_effects_from_surface(&surface),
+                );
             };
         for member in object.members.iter() {
             match member {
                 ObjectMemberFact::Spread(spread) => {
-                    flush_run(&mut run, &mut segments);
+                    flush_run(&mut run, &mut effects);
                     let operand = match self.raise_body_slot(&spread.ty, ctx.scope_canonical_id) {
                         Some(hot) => hot.node(),
                         // An unresolvable operand fails the whole shape
                         // closed — never a silently spread-less surface.
                         None => return HotTypeRef::new(self.miss_node(scope)),
                     };
-                    segments.push((
-                        FoldSegmentKind::SpreadOperand,
-                        self.taint_spread_node(operand),
+                    effects.push(crate::semantic_query::ObjectConstructionEffect::Spread(
+                        operand,
                     ));
                 }
                 other => run.push(other.clone()),
             }
         }
-        flush_run(&mut run, &mut segments);
-        HotTypeRef::new(self.fold_spread_segments(segments, scope))
+        flush_run(&mut run, &mut effects);
+        HotTypeRef::new(self.graph().intern_node_with_scope(
+            SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                effects: Arc::from(effects),
+            }),
+            scope.clone(),
+        ))
     }
 
     /// Compose a projected whole-surface fact into an `Object` carrier node.
@@ -480,18 +508,24 @@ impl ProjectSemanticDispatch<'_> {
             .members
             .iter()
             .map(|member| SurfaceMember {
-                name: Arc::from(member.name.as_str()),
+                key: member.key.clone().map(
+                    |slot| {
+                        self.raise_body_slot(&slot, ctx.scope_canonical_id)
+                            .map(HotTypeRef::node)
+                            .unwrap_or_else(|| self.miss_node(&scope))
+                    },
+                    |identity| identity,
+                ),
                 value: self.raise_required_interior(
                     ctx,
                     &scope,
-                    crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                        member.name.as_str(),
-                    )),
+                    crate::meta_resolve::InteriorSourceStep::Member(member.key.clone()),
                     || self.raise_body_slot(&member.ty, ctx.scope_canonical_id),
                 ),
                 optional: member.optional,
                 readonly: member.readonly,
-                is_method: member.is_method,
+                method_kind: member.method_kind,
+                has_implementation_body: member.has_implementation_body,
                 visibility: member.visibility,
                 // Fact rehydration (declaration domain) is never a literal
                 // origin.
@@ -563,7 +597,6 @@ impl ProjectSemanticDispatch<'_> {
                 index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                 keyspace: None,
                 has_index_signature,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             }),
             scope,
         ))

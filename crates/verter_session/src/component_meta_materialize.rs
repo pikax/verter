@@ -1253,7 +1253,16 @@ pub(crate) fn materialize_component_meta_structure(
                     // body_id + keys in caller's mode. Caller's
                     // mode (typically Expanded) drives the final
                     // projection's expansion behavior.
-                    let keys_node = crate::meta_resolve::build_keys_union_node(graph, keys.as_slice());
+                    let Some(keys_node) =
+                        crate::meta_resolve::build_keys_union_node(graph, keys.as_slice())
+                    else {
+                        return finish_materialize_admission(
+                            MaterializeOutcome::Value(key_for_compute.base),
+                            local_fence,
+                            base_origin_self_root.as_ref(),
+                            validated_at_generation,
+                        );
+                    };
                     let pick_or_omit_name = match &extraction.route {
                         RouteDemand::Pick(_) => "Pick",
                         RouteDemand::Omit(_) => "Omit",
@@ -1871,11 +1880,12 @@ fn materialize_object_surface(
         let (sub_id, changed) = materialize_child_at_nested(ctx, key, member.value, local_fence);
         any_changed |= changed;
         new_members.push(SurfaceMember {
-            name: Arc::clone(&member.name),
+            key: member.key.clone(),
             value: sub_id,
             optional: member.optional,
             readonly: member.readonly,
-            is_method: member.is_method,
+            method_kind: member.method_kind,
+            has_implementation_body: member.has_implementation_body,
             // Materialisation preserves member structure — only the value is
             // materialised; the member's declared accessibility and
             // excess-property provenance are carried through unchanged from
@@ -1930,12 +1940,6 @@ fn materialize_object_surface(
         }
         None => None,
     };
-    let new_completeness = surface.completeness_with_mapped_operands(|operand| {
-        let (sub_id, changed) = materialize_child_at_nested(ctx, key, operand, local_fence);
-        any_changed |= changed;
-        sub_id
-    });
-
     if !any_changed {
         return MaterializeOutcome::Value(key.base);
     }
@@ -1947,7 +1951,6 @@ fn materialize_object_surface(
         index_signatures: Arc::from(new_index_signatures.into_boxed_slice()),
         keyspace: new_keyspace,
         has_index_signature: surface.has_known_index_signature(),
-        completeness: new_completeness,
     };
     let new_id = graph.intern_preserving_scope(key.base, SemanticNodeData::Object(new_surface));
     MaterializeOutcome::Value(new_id)

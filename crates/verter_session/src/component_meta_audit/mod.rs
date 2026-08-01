@@ -26,6 +26,7 @@ pub mod audit_records_store;
 #[cfg(test)]
 pub(crate) mod expected_display_snapshots;
 pub mod footprint_miner;
+pub(crate) mod footprint_structural_hash;
 pub(crate) mod session_vfs_sink;
 pub mod structured_event;
 
@@ -1030,6 +1031,9 @@ pub fn audit_key_for_node(
     let label = match data.as_ref() {
         SemanticNodeData::Alias(inner) => format!("Alias({})", inner.0),
         SemanticNodeData::Object(_) => format!("Object#{}", id.0),
+        SemanticNodeData::ObjectSpreadProgram(program) => {
+            format!("ObjectSpreadProgram[{}]#{}", program.effects.len(), id.0)
+        }
         SemanticNodeData::Union(arms) => format!("Union[{}]", arms.len()),
         SemanticNodeData::Intersection(arms) => format!("Intersection[{}]", arms.len()),
         SemanticNodeData::Primitive(p) => format!("Primitive({p:?})"),
@@ -1050,7 +1054,11 @@ pub fn audit_key_for_node(
         SemanticNodeData::IndexedAccess { object, index } => match index {
             IndexKey::String(s) => format!("IndexedAccess({}[\"{}\"])", object.0, s),
             IndexKey::Number(n) => format!("IndexedAccess({}[{}])", object.0, n),
-            IndexKey::TypeNode(n) => format!("IndexedAccess({}[<type:{}>])", object.0, n.0),
+            IndexKey::UniqueSymbol(identity) => format!(
+                "IndexedAccess({}[unique-symbol:{}::{:?}])",
+                object.0, identity.canonical_id, identity.symbol
+            ),
+            IndexKey::Computed(n) => format!("IndexedAccess({}[<type:{}>])", object.0, n.0),
         },
         SemanticNodeData::Mapped { source, .. } => format!("Mapped(source={})", source.0),
         SemanticNodeData::TypeOf(_) => {

@@ -2752,7 +2752,10 @@ fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
         .as_ref()
         .expect("the overlay bundle declares Probe");
     assert!(
-        decl.member_index.contains_key("overlayMember"),
+        decl.member_index
+            .contains_key(&crate::semantic_query::PropertyKey::identifier(
+                "overlayMember"
+            )),
         "fixture invariant: the overlay-aware prepared-decl bundle must yield the \
          overlay `Probe` (member `overlayMember`)",
     );
@@ -3454,7 +3457,6 @@ fn intern_global_object(host: &VerterHost) -> crate::semantic_query::SemanticNod
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             },
         ))
 }
@@ -5403,11 +5405,12 @@ fn shape_member(
     crate::semantic_query::SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        name: Arc::from(name),
+        key: crate::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional: false,
         readonly: false,
-        is_method: false,
+        method_kind: None,
+        has_implementation_body: false,
         declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
         merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),

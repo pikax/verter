@@ -47,16 +47,16 @@ fn object_of(member: ObjectMember) -> TypeExpr {
 fn member_visibility_default_is_public() {
     assert_eq!(MemberVisibility::default(), MemberVisibility::Public);
     // `synthetic_public` / `with_spans_public` constructors are Public.
-    let p = ObjectProperty::synthetic_public("a".into(), string_ty(), false, false);
+    let p = ObjectProperty::synthetic_public_key("a".into(), string_ty(), false, false);
     assert_eq!(p.visibility, MemberVisibility::Public);
-    let m = MethodSignature::synthetic_public("m".into(), empty_fn(), false);
+    let m = MethodSignature::synthetic_public_key("m".into(), empty_fn(), false);
     assert_eq!(m.visibility, MemberVisibility::Public);
 }
 
 #[test]
 fn object_property_visibility_participates_in_identity() {
-    let public = ObjectProperty::synthetic_public("a".into(), string_ty(), false, false);
-    let protected = ObjectProperty::with_visibility(
+    let public = ObjectProperty::synthetic_public_key("a".into(), string_ty(), false, false);
+    let protected = ObjectProperty::with_key_visibility(
         "a".into(),
         string_ty(),
         false,
@@ -64,7 +64,7 @@ fn object_property_visibility_participates_in_identity() {
         MemberVisibility::Protected,
         Default::default(),
     );
-    let private = ObjectProperty::with_visibility(
+    let private = ObjectProperty::with_key_visibility(
         "a".into(),
         string_ty(),
         false,
@@ -82,15 +82,15 @@ fn object_property_visibility_participates_in_identity() {
     assert_ne!(hash_one(&protected), hash_one(&private));
 
     // Same visibility => equal + equal hash.
-    let public2 = ObjectProperty::synthetic_public("a".into(), string_ty(), false, false);
+    let public2 = ObjectProperty::synthetic_public_key("a".into(), string_ty(), false, false);
     assert_eq!(public, public2);
     assert_eq!(hash_one(&public), hash_one(&public2));
 }
 
 #[test]
 fn method_signature_visibility_participates_in_identity() {
-    let public = MethodSignature::synthetic_public("m".into(), empty_fn(), false);
-    let private = MethodSignature::with_visibility(
+    let public = MethodSignature::synthetic_public_key("m".into(), empty_fn(), false);
+    let private = MethodSignature::with_key_visibility(
         "m".into(),
         empty_fn(),
         false,
@@ -108,13 +108,10 @@ fn method_signature_visibility_participates_in_identity() {
 /// to fold visibility into the `TypeExpr` byte stream.
 #[test]
 fn object_member_visibility_distinguishes_embedded_type_expr() {
-    let public_prop = object_of(ObjectMember::Property(ObjectProperty::synthetic_public(
-        "a".into(),
-        string_ty(),
-        false,
-        false,
-    )));
-    let private_prop = object_of(ObjectMember::Property(ObjectProperty::with_visibility(
+    let public_prop = object_of(ObjectMember::Property(
+        ObjectProperty::synthetic_public_key("a".into(), string_ty(), false, false),
+    ));
+    let private_prop = object_of(ObjectMember::Property(ObjectProperty::with_key_visibility(
         "a".into(),
         string_ty(),
         false,
@@ -125,12 +122,12 @@ fn object_member_visibility_distinguishes_embedded_type_expr() {
     assert_ne!(public_prop, private_prop);
     assert_ne!(hash_one(&public_prop), hash_one(&private_prop));
 
-    let public_method = object_of(ObjectMember::Method(MethodSignature::synthetic_public(
+    let public_method = object_of(ObjectMember::Method(MethodSignature::synthetic_public_key(
         "m".into(),
         empty_fn(),
         false,
     )));
-    let protected_method = object_of(ObjectMember::Method(MethodSignature::with_visibility(
+    let protected_method = object_of(ObjectMember::Method(MethodSignature::with_key_visibility(
         "m".into(),
         empty_fn(),
         false,
@@ -146,7 +143,7 @@ fn object_member_visibility_distinguishes_embedded_type_expr() {
 /// `Public`.
 #[test]
 fn object_property_serde_roundtrip_preserves_non_public_visibility() {
-    let private = ObjectProperty::with_visibility(
+    let private = ObjectProperty::with_key_visibility(
         "a".into(),
         string_ty(),
         false,
@@ -161,7 +158,7 @@ fn object_property_serde_roundtrip_preserves_non_public_visibility() {
 
     // JSON missing the `visibility` field deserializes as Public (back-compat).
     let json_without = serde_json::json!({
-        "name": "a",
+        "key": { "String": "a" },
         "ty": { "kind": "primitive", "name": "string" },
         "optional": false,
         "readonly": false,
@@ -213,7 +210,7 @@ fn member_visibility_most_restrictive_picks_least_visible() {
 
 #[test]
 fn method_signature_serde_roundtrip_preserves_non_public_visibility() {
-    let protected = MethodSignature::with_visibility(
+    let protected = MethodSignature::with_key_visibility(
         "m".into(),
         empty_fn(),
         false,

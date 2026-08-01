@@ -96,11 +96,15 @@ fn terminal_partial_field_type_publishes_finite_utility_shape() {
         let ObjectMember::Property(property) = member else {
             continue;
         };
-        published_names.push(property.name.as_str());
+        published_names.push(
+            property
+                .string_name()
+                .expect("utility publication fixture uses string keys"),
+        );
         assert!(
             property.optional,
-            "Partial<EditorOptions> should make `{}` optional",
-            property.name
+            "Partial<EditorOptions> should make `{:?}` optional",
+            property.string_name()
         );
     }
     published_names.sort_unstable();

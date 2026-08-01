@@ -53,10 +53,9 @@ use crate::resolver_core::component_meta_query_engine::{
 };
 use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::{
-    DeclIdentity, FunctionParam, IndexKey, IndexSignature, MapperKey, MapperKind,
-    MemberSurfaceCompleteness, NodeScopeId, OpenSpreadOperands, OptionalityMod, PrimitiveKind,
-    QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryValueTag,
-    SurfaceMember, SurfaceView, TypeParamDecl, ValueRootKey,
+    DeclIdentity, FunctionParam, IndexKey, IndexSignature, MapperKey, MapperKind, NodeScopeId,
+    OptionalityMod, PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryValueTag, SurfaceMember, SurfaceView, TypeParamDecl, ValueRootKey,
 };
 use crate::{CompileErrorPolicy, HostConfig, VerterHost};
 
@@ -319,7 +318,9 @@ fn typed_control_sentinel_producers_raise_byte_identical_and_keep_miss_decision(
                 .properties
                 .iter()
                 .find_map(|m| match m {
-                    verter_type_expr::ObjectMember::Property(p) if p.name == "broken" => {
+                    verter_type_expr::ObjectMember::Property(p)
+                        if p.string_name().expect("string-key fixture") == "broken" =>
+                    {
                         Some(&p.ty)
                     }
                     _ => None,
@@ -738,7 +739,6 @@ fn parity_object_edge_cases() {
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
     assert_classifier_parity(&host, empty, "object-empty");
@@ -779,7 +779,6 @@ fn parity_object_edge_cases() {
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: true,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
     assert_classifier_parity(&host, open, "object-open-index");
@@ -809,7 +808,6 @@ fn parity_intersection_arm_drop_and_collapse() {
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
 
@@ -865,7 +863,6 @@ fn parity_intersection_arm_drop_and_collapse() {
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
     // Sanity: the surface-sentinel node alone raises to the SEMANTIC_OBJECT_SURFACE
@@ -1027,7 +1024,7 @@ fn parity_deferred_operator_shells() {
     });
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: tp,
-        index: IndexKey::TypeNode(k),
+        index: IndexKey::Computed(k),
     });
     assert_classifier_parity(&host, indexed, "indexed-access-T-K");
     assert!(
@@ -1593,7 +1590,6 @@ fn parity_real_index_signature_member() {
             // is true but `index_signatures` is non-empty (NOT the synthetic open
             // case that injects the `projectedOpenSurface` sentinel).
             has_index_signature: true,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
     assert_classifier_parity(
@@ -1631,7 +1627,6 @@ fn parity_real_index_signature_member() {
             ),
             keyspace: None,
             has_index_signature: true,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
     assert_classifier_parity(&host, idx_value_miss, "object-index-signature-value-miss");
@@ -2133,11 +2128,12 @@ fn object_surface(props: &[(&str, SemanticNodeId)]) -> SurfaceView {
         .map(|(name, value)| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            name: Arc::from(*name),
+            key: crate::semantic_query::AuthoredPropertyKey::string(*name),
             value: *value,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
@@ -2151,7 +2147,6 @@ fn object_surface(props: &[(&str, SemanticNodeId)]) -> SurfaceView {
         index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
         keyspace: None,
         has_index_signature: false,
-        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     }
 }
 
@@ -2733,6 +2728,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
             SemanticNodeData::Array { .. } => "array",
             SemanticNodeData::Tuple { .. } => "tuple",
             SemanticNodeData::Object(_) => "object",
+            SemanticNodeData::ObjectSpreadProgram(_) => "object_spread_program",
             SemanticNodeData::MergedDecl { .. } => "merged_decl",
             SemanticNodeData::Conditional { .. } => "conditional",
             SemanticNodeData::TemplateLiteral { .. } => "template_literal",
@@ -2892,81 +2888,6 @@ fn invalid_call_signature_drop_keeps_typed_degradation_in_sidecar() {
         "only the real property survives (the invalid signature is dropped)"
     );
 }
-
-#[test]
-fn open_spread_surface_raises_positive_members_and_typed_operands() {
-    let host = host();
-    let graph = graph_of(&host);
-    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let array = graph.intern_node(SemanticNodeData::Array {
-        element: number,
-        readonly: false,
-    });
-    let mut surface = object_surface(&[("a", number), ("x", number)]);
-    let completeness =
-        MemberSurfaceCompleteness::OpenSpread(OpenSpreadOperands::new(Arc::from([array])));
-    surface.replace_completeness(completeness);
-    let node = graph.intern_node(SemanticNodeData::Object(surface));
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    let mut active = rustc_hash::FxHashSet::default();
-    let folded =
-        super::raise::fold_to_type_expr(&dispatch, node, &mut active).expect("object raises");
-    let TypeExpr::Object(object) = folded.expr() else {
-        panic!("expected an object, got {:?}", folded.expr());
-    };
-    assert!(matches!(
-        object.properties.as_slice(),
-        [
-            verter_type_expr::ObjectMember::Spread(spread),
-            verter_type_expr::ObjectMember::Property(a),
-            verter_type_expr::ObjectMember::Property(x),
-        ] if a.name == "a"
-            && x.name == "x"
-            && matches!(spread.ty, TypeExpr::Array { .. })
-    ));
-    assert_classifier_parity(&host, node, "open-spread");
-}
-
-#[test]
-fn open_spread_surface_raises_sole_positive_member_state_once() {
-    let host = host();
-    let graph = graph_of(&host);
-    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let array = graph.intern_node(SemanticNodeData::Array {
-        element: number,
-        readonly: false,
-    });
-    let mut surface = object_surface(&[("a", number)]);
-    let mut optional = surface.positive_members()[0].clone();
-    optional.optional = true;
-    surface = surface.with_positive_members(Arc::from([optional.clone()]));
-    surface.replace_completeness(MemberSurfaceCompleteness::OpenSpread(
-        OpenSpreadOperands::new(Arc::from([array])),
-    ));
-    let node = graph.intern_node(SemanticNodeData::Object(surface));
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    let mut active = rustc_hash::FxHashSet::default();
-    let folded =
-        super::raise::fold_to_type_expr(&dispatch, node, &mut active).expect("object raises");
-    let TypeExpr::Object(object) = folded.expr() else {
-        panic!("expected an object, got {:?}", folded.expr());
-    };
-    assert!(matches!(
-        object.properties.as_slice(),
-        [
-            verter_type_expr::ObjectMember::Spread(array),
-            verter_type_expr::ObjectMember::Property(property),
-        ] if matches!(array.ty, TypeExpr::Array { .. })
-            && property.name == "a"
-            && property.optional
-    ));
-}
-
-// ---------------------------------------------------------------------------
-// R2-F1 — presence-aware fold: a PRESENT-but-unraisable child fails the
-// WHOLE composite (never silently erased); mandatory-output fallbacks are the
-// TYPED `UnrepresentableSurfaceMember` (never a complete placeholder).
-// ---------------------------------------------------------------------------
 
 fn fold_raises(host: &VerterHost, node: SemanticNodeId) -> bool {
     let dispatch = ProjectSemanticDispatch::new(host);

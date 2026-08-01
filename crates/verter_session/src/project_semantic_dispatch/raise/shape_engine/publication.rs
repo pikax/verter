@@ -611,7 +611,10 @@ impl RaisedShapeAlgebra for PublicationScoreAlg {
 
     fn member_property(
         &mut self,
-        _name: String,
+        _key: verter_type_expr::AuthoredPropertyKey<
+            ScoredOut,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         ty: ScoredOut,
         _optional: bool,
         _readonly: bool,
@@ -626,9 +629,14 @@ impl RaisedShapeAlgebra for PublicationScoreAlg {
     }
     fn member_method(
         &mut self,
-        _name: String,
+        _key: verter_type_expr::AuthoredPropertyKey<
+            ScoredOut,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
         function: FnScore,
         _optional: bool,
+        _method_kind: verter_type_expr::ObjectMethodKind,
+        _has_implementation_body: bool,
         _visibility: MemberVisibility,
         _excess_origin: verter_type_expr::ExcessPropertyOrigin,
         _spans: verter_type_expr::MemberSpans,

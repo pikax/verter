@@ -48,7 +48,6 @@ fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             },
         ))
 }

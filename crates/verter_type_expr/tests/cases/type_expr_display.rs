@@ -94,7 +94,7 @@ fn renders_every_object_and_function_shape_as_valid_type_syntax() {
 
     let expression = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "dash-key".into(),
                 TypeExpr::Array {
                     element: Arc::new(reference("Foo")),
@@ -111,7 +111,7 @@ fn renders_every_object_and_function_shape_as_valid_type_syntax() {
             )),
             ObjectMember::CallSignature(callable),
             ObjectMember::ConstructSignature(constructor),
-            ObjectMember::Method(MethodSignature::synthetic_public(
+            ObjectMember::Method(MethodSignature::synthetic_public_key(
                 "run".into(),
                 method,
                 true,

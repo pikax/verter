@@ -76,9 +76,15 @@ fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() 
         base: a_node,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("c")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("c"),
+                )),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("full"),
+                )),
+                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                    Arc::from("bar"),
+                )),
             ]
             .into_boxed_slice(),
         ),

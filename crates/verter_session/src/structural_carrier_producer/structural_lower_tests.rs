@@ -958,14 +958,16 @@ fn conditional_binds_object_member_infer_in_true_branch() {
             type_arguments: verter_type_expr::empty_type_args(),
         }),
         extends: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "a".to_string(),
-                TypeExpr::Infer {
-                    name: "P".to_string(),
-                },
-                false,
-                false,
-            ))],
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(
+                    "a".to_string().into(),
+                    TypeExpr::Infer {
+                        name: "P".to_string(),
+                    },
+                    false,
+                    false,
+                ),
+            )],
         }))),
         true_type: Arc::new(TypeExpr::Ref {
             name: Arc::from("P"),
@@ -1164,12 +1166,14 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
         ),
     };
     let own_body = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "own".to_string(),
-            TypeExpr::Primitive(PrimitiveName::Number),
-            false,
-            false,
-        ))],
+        properties: vec![ObjectMember::Property(
+            ObjectProperty::synthetic_public_key(
+                "own".to_string().into(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            ),
+        )],
     }));
     let expr = TypeExpr::Intersection(Arc::from(vec![base_ref, own_body].into_boxed_slice()));
     let binders: [BinderScope; 0] = [];
@@ -1204,7 +1208,7 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
         SemanticNodeData::Object(view) => {
             assert_eq!(view.positive_members().len(), 1);
             let m = &view.positive_members()[0];
-            assert_eq!(m.name.as_ref(), "own");
+            assert_eq!(m.string_name().expect("string-key fixture"), "own");
             assert_eq!(
                 m.merge_role,
                 MemberMergeRole::OwnBody,
@@ -1609,12 +1613,14 @@ fn structural_equivalence_for_intersection_of_objects() {
     let host = VerterHost::new_standalone(Default::default());
     let obj = |name: &str, prim: PrimitiveName| {
         TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                name.to_string(),
-                TypeExpr::Primitive(prim),
-                false,
-                false,
-            ))],
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(
+                    name.to_string().into(),
+                    TypeExpr::Primitive(prim),
+                    false,
+                    false,
+                ),
+            )],
         }))
     };
     let expr = TypeExpr::Intersection(Arc::from(
@@ -1710,14 +1716,14 @@ fn structural_equivalence_for_object_with_members() {
     let host = VerterHost::new_standalone(Default::default());
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "a".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "a".to_string().into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                "b".to_string(),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "b".to_string().into(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,
                 false,
@@ -1776,12 +1782,14 @@ fn structural_equivalence_for_nested_composite() {
     let host = VerterHost::new_standalone(Default::default());
     let object_array = TypeExpr::Array {
         element: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "a".to_string(),
-                TypeExpr::Primitive(PrimitiveName::String),
-                false,
-                false,
-            ))],
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(
+                    "a".to_string().into(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                ),
+            )],
         }))),
         readonly: false,
     };

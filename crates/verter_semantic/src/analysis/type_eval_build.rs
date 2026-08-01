@@ -20,10 +20,11 @@ use crate::analysis::type_eval::*;
 use oxc_ast::ast::{
     ArrowFunctionExpression, BinaryOperator, BindingPattern, Class, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, FormalParameters, Function, MethodDefinitionKind,
-    ObjectExpression, ObjectPropertyKind, Program, Statement, TSAccessibility, TSEnumDeclaration,
-    TSInterfaceDeclaration, TSModuleBlock, TSModuleDeclaration, TSModuleDeclarationBody,
-    TSModuleDeclarationName, TSSignature, TSTypeAliasDeclaration, TSTypeParameterDeclaration,
-    UnaryOperator, VariableDeclarationKind, VariableDeclarator,
+    ObjectExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind, Statement,
+    TSAccessibility, TSEnumDeclaration, TSInterfaceDeclaration, TSModuleBlock, TSModuleDeclaration,
+    TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature, TSType, TSTypeAliasDeclaration,
+    TSTypeOperatorOperator, TSTypeParameterDeclaration, UnaryOperator, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use oxc_span::GetSpan;
 use verter_type_expr::facts::{
@@ -43,11 +44,12 @@ use verter_type_expr::span_origins::{
     IndexSignatureSpansOrigin, MemberSpansOrigin, SourceSynthetic,
 };
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans, LiteralValue,
-    MemberSpans, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember, PrimitiveName,
-    TopLevelOwnerId, TypeExpr, TypeParam, ValueRef,
+    AuthoredPropertyKey, FunctionExpr, FunctionParam, FunctionSpans, IndexSignature,
+    IndexSignatureSpans, LiteralValue, MemberSpans, MemberVisibility, MethodSignature, ObjectExpr,
+    ObjectMember, ObjectMethodKind, PrimitiveName, TopLevelOwnerId, TypeAuthoredPropertyKey,
+    TypeExpr, TypeParam, ValueRef,
 };
-use verter_type_expr_oxc::{lower_ts_type, property_key_name};
+use verter_type_expr_oxc::{lower_property_key, lower_ts_type};
 
 fn type_expand_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -262,6 +264,9 @@ pub struct LoweredSignatureParts {
 pub struct LoweredValueDeclParts {
     pub name: String,
     pub kind: ValueDeclKind,
+    /// Exact declaration-site nominality for an authored `unique symbol`
+    /// annotation.
+    pub is_unique_symbol: bool,
     /// The lowered annotation typed IR: the authored TS annotation, the JSDoc
     /// `@type` payload, or the initializer-inferred type (in that precedence).
     pub type_annotation: Option<TypeExpr>,
@@ -1031,7 +1036,7 @@ fn object_shape_fact(
             let ordinal = u32::try_from(index).ok()?;
             Some(match member {
                 ObjectMember::Property(prop) => ObjectMemberFact::Property(ObjectPropertyFact {
-                    name: prop.name.clone(),
+                    key: fact_property_key(&prop.key, anchor, ordinal),
                     optional: prop.optional,
                     readonly: prop.readonly,
                     visibility: prop.visibility,
@@ -1045,15 +1050,16 @@ fn object_shape_fact(
                     span_origin: shape_member_span_origin(contributor, ordinal),
                 }),
                 ObjectMember::Method(method) => ObjectMemberFact::Method(ObjectMethodFact {
-                    name: method.name.clone(),
+                    key: fact_property_key(&method.key, anchor, ordinal),
                     optional: method.optional,
+                    method_kind: method.method_kind,
                     visibility: method.visibility,
                     function: member_signature_fact(
                         &method.function,
                         anchor,
                         ordinal,
                         contributor,
-                        false,
+                        method.has_implementation_body,
                         if declared_ctor.is_some() {
                             member_return_inference
                                 .iter()
@@ -1160,6 +1166,27 @@ fn object_shape_fact(
     ObjectShapeFact { members }
 }
 
+fn fact_property_key(
+    key: &TypeAuthoredPropertyKey,
+    anchor: &AuthoredAnchor,
+    ordinal: u32,
+) -> verter_type_expr::facts::FactAuthoredPropertyKey {
+    match key {
+        AuthoredPropertyKey::String(value) => AuthoredPropertyKey::String(value.clone()),
+        AuthoredPropertyKey::Number(value) => AuthoredPropertyKey::Number(*value),
+        AuthoredPropertyKey::UniqueSymbol(identity) => {
+            AuthoredPropertyKey::UniqueSymbol(identity.clone())
+        }
+        AuthoredPropertyKey::Computed(_) => AuthoredPropertyKey::Computed(anchored_slot(
+            anchor,
+            vec![
+                TypeBodyPathStep::Member { ordinal },
+                TypeBodyPathStep::MemberKey,
+            ],
+        )),
+    }
+}
+
 /// Mint the stored [`ValueDeclInfo`] from transient value-decl parts. Signature
 /// locators are rooted at their LOCAL overload ordinal here; group-level
 /// rebasing happens at registration ([`EvalEnv::add_value`]).
@@ -1177,6 +1204,7 @@ fn mint_value_decl(
     };
     let type_annotation = value_type_annotation_fact(
         parts.type_annotation.as_ref(),
+        parts.is_unique_symbol,
         &parts.name,
         canonical_id,
         owner,
@@ -1264,25 +1292,37 @@ fn member_header_facts_from_body(body: &TypeExpr) -> Arc<[MemberHeaderFact]> {
             TypeExpr::Object(object) => {
                 for member in &object.properties {
                     let fact = match member {
-                        ObjectMember::Property(prop) => MemberHeaderFact {
-                            name: prop.name.clone(),
-                            is_method: false,
-                            optional: prop.optional,
-                            readonly: prop.readonly,
-                            visibility: prop.visibility,
-                        },
-                        ObjectMember::Method(method) => MemberHeaderFact {
-                            name: method.name.clone(),
-                            is_method: true,
-                            optional: method.optional,
-                            readonly: false,
-                            visibility: method.visibility,
-                        },
+                        ObjectMember::Property(prop) => {
+                            let Some(key) = prop.key.cloned_known() else {
+                                continue;
+                            };
+                            MemberHeaderFact {
+                                key,
+                                method_kind: None,
+                                has_implementation_body: false,
+                                optional: prop.optional,
+                                readonly: prop.readonly,
+                                visibility: prop.visibility,
+                            }
+                        }
+                        ObjectMember::Method(method) => {
+                            let Some(key) = method.key.cloned_known() else {
+                                continue;
+                            };
+                            MemberHeaderFact {
+                                key,
+                                method_kind: Some(method.method_kind),
+                                has_implementation_body: method.has_implementation_body,
+                                optional: method.optional,
+                                readonly: false,
+                                visibility: method.visibility,
+                            }
+                        }
                         // Call / construct / index signatures are nameless —
                         // they are not member HEADERS.
                         _ => continue,
                     };
-                    if !out.iter().any(|existing| existing.name == fact.name) {
+                    if !out.iter().any(|existing| existing.key == fact.key) {
                         out.push(fact);
                     }
                 }
@@ -1944,96 +1984,100 @@ fn collect_named_class(
                 // (a `private` / `protected` member is RECORDED; the
                 // published-prop projection re-applies a Public-only filter
                 // at the publication boundary). `static` selects the surface:
-                // instance body vs constructor shape. A `#private` key has no
-                // public name (`property_key_name` → `None`) and never lands
-                // on either surface.
-                if let Some(prop_name) = property_key_name(&prop.key) {
-                    let ty = prop
+                // instance body vs constructor shape. A `#private` brand is
+                // not a type-level member and never lands on either surface.
+                if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
+                    continue;
+                }
+                let prop_key = lower_property_key(&prop.key, source);
+                let ty = prop
+                    .type_annotation
+                    .as_ref()
+                    .map(|ta| lower_ts_type(&ta.type_annotation, source))
+                    .or_else(|| {
+                        prop.value.as_ref().map(|value| {
+                            infer_declaration_or_unknown(
+                                value,
+                                source,
+                                prop.readonly,
+                                &mut inference_unavailable,
+                            )
+                        })
+                    })
+                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown));
+                let spans = MemberSpans {
+                    declaration: Some(prop.span.into()),
+                    name: Some(prop.key.span().into()),
+                    type_annotation: prop
                         .type_annotation
                         .as_ref()
-                        .map(|ta| lower_ts_type(&ta.type_annotation, source))
-                        .or_else(|| {
-                            prop.value.as_ref().map(|value| {
-                                infer_declaration_or_unknown(
-                                    value,
-                                    source,
-                                    prop.readonly,
-                                    &mut inference_unavailable,
-                                )
-                            })
-                        })
-                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown));
-                    let spans = MemberSpans {
-                        declaration: Some(prop.span.into()),
-                        name: Some(prop.key.span().into()),
-                        type_annotation: prop
-                            .type_annotation
-                            .as_ref()
-                            .map(|ta| ta.type_annotation.span().into()),
-                    };
-                    let member =
-                        ObjectMember::Property(verter_type_expr::ObjectProperty::with_visibility(
-                            prop_name,
-                            ty,
-                            prop.optional,
-                            prop.readonly,
-                            visibility_from_ts_accessibility(prop.accessibility),
-                            spans,
-                        ));
-                    if prop.r#static {
-                        static_members.push(member);
-                    } else {
-                        members.push(member);
-                    }
+                        .map(|ta| ta.type_annotation.span().into()),
+                };
+                let member =
+                    ObjectMember::Property(verter_type_expr::ObjectProperty::with_key_visibility(
+                        prop_key,
+                        ty,
+                        prop.optional,
+                        prop.readonly,
+                        visibility_from_ts_accessibility(prop.accessibility),
+                        spans,
+                    ));
+                if prop.r#static {
+                    static_members.push(member);
+                } else {
+                    members.push(member);
                 }
             }
             ClassElement::MethodDefinition(method) => {
+                if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
+                    // A `#private` method/accessor is not a type-level member.
+                    continue;
+                }
                 if method.r#static {
                     // Static method → constructor-shape member with its
                     // declared accessibility (a static can never be the
                     // constructor — `static constructor` is invalid TS).
-                    if let Some(method_name) = property_key_name(&method.key) {
-                        let func = extract_function_signature(&method.value, source);
-                        let return_inference = func.return_inference;
-                        let Some(member_ordinal) = u32::try_from(static_members.len())
-                            .ok()
-                            .and_then(|ordinal| ordinal.checked_add(1))
-                        else {
-                            continue;
-                        };
-                        let fn_spans = FunctionSpans {
-                            signature: Some(method.value.span.into()),
-                            return_type: method
-                                .value
-                                .return_type
-                                .as_ref()
-                                .map(|rt| rt.type_annotation.span().into()),
-                        };
-                        let member_spans = MemberSpans {
-                            declaration: Some(method.span.into()),
-                            name: Some(method.key.span().into()),
-                            type_annotation: None,
-                        };
-                        let mut signature = MethodSignature::with_visibility(
-                            method_name,
-                            FunctionExpr::with_spans(
-                                func.parameters,
-                                func.return_type.map(Arc::new),
-                                func.type_parameters,
-                                fn_spans,
-                            ),
-                            method.optional,
-                            visibility_from_ts_accessibility(method.accessibility),
-                            member_spans,
-                        );
-                        signature.method_kind = object_method_kind(method.kind);
-                        signature.has_implementation_body = method.value.body.is_some();
-                        static_member_return_inference.push(LoweredMemberReturnInference {
-                            member_path: Arc::from(vec![member_ordinal]),
-                            return_inference,
-                        });
-                        static_members.push(ObjectMember::Method(signature));
-                    }
+                    let method_key = lower_property_key(&method.key, source);
+                    let func = extract_function_signature(&method.value, source);
+                    let return_inference = func.return_inference;
+                    let Some(member_ordinal) = u32::try_from(static_members.len())
+                        .ok()
+                        .and_then(|ordinal| ordinal.checked_add(1))
+                    else {
+                        continue;
+                    };
+                    let fn_spans = FunctionSpans {
+                        signature: Some(method.value.span.into()),
+                        return_type: method
+                            .value
+                            .return_type
+                            .as_ref()
+                            .map(|rt| rt.type_annotation.span().into()),
+                    };
+                    let member_spans = MemberSpans {
+                        declaration: Some(method.span.into()),
+                        name: Some(method.key.span().into()),
+                        type_annotation: None,
+                    };
+                    let mut signature = MethodSignature::with_key_visibility(
+                        method_key,
+                        FunctionExpr::with_spans(
+                            func.parameters,
+                            func.return_type.map(Arc::new),
+                            func.type_parameters,
+                            fn_spans,
+                        ),
+                        method.optional,
+                        visibility_from_ts_accessibility(method.accessibility),
+                        member_spans,
+                    );
+                    signature.method_kind = object_method_kind(method.kind);
+                    signature.has_implementation_body = method.value.body.is_some();
+                    static_member_return_inference.push(LoweredMemberReturnInference {
+                        member_path: Arc::from(vec![member_ordinal]),
+                        return_inference,
+                    });
+                    static_members.push(ObjectMember::Method(signature));
                 } else if method.kind == MethodDefinitionKind::Constructor {
                     for parameter in &method.value.params.items {
                         if parameter.accessibility.is_none()
@@ -2062,8 +2106,8 @@ fn collect_named_class(
                             })
                             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown));
                         members.push(ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::with_visibility(
-                                identifier.name.to_string(),
+                            verter_type_expr::ObjectProperty::with_key_visibility(
+                                AuthoredPropertyKey::string(identifier.name.as_str()),
                                 ty,
                                 parameter.optional,
                                 parameter.readonly,
@@ -2096,7 +2140,7 @@ fn collect_named_class(
                                 .map(|rt| rt.type_annotation.span().into()),
                         };
                     }
-                } else if let Some(method_name) = property_key_name(&method.key) {
+                } else {
                     // Record every NON-static instance method with its
                     // declared accessibility (no longer an exclusion).
                     let func = extract_function_signature(&method.value, source);
@@ -2117,8 +2161,8 @@ fn collect_named_class(
                         name: Some(method.key.span().into()),
                         type_annotation: None,
                     };
-                    let mut signature = MethodSignature::with_visibility(
-                        method_name,
+                    let mut signature = MethodSignature::with_key_visibility(
+                        lower_property_key(&method.key, source),
                         FunctionExpr::with_spans(
                             func.parameters,
                             func.return_type.map(Arc::new),
@@ -2245,6 +2289,7 @@ fn collect_named_class(
     out.value_decls.push(LoweredValueDeclParts {
         name,
         kind: ValueDeclKind::Class,
+        is_unique_symbol: false,
         type_annotation: None,
         annotation_is_authored: false,
         inference_unavailable,
@@ -2512,6 +2557,7 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
     out.value_decls.push(LoweredValueDeclParts {
         name: name.clone(),
         kind: ValueDeclKind::Enum,
+        is_unique_symbol: false,
         type_annotation: None,
         annotation_is_authored: false,
         inference_unavailable: None,
@@ -2569,6 +2615,7 @@ fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValu
     Some(LoweredValueDeclParts {
         name,
         kind,
+        is_unique_symbol: false,
         type_annotation: None,
         annotation_is_authored: false,
         inference_unavailable: None,
@@ -2940,6 +2987,15 @@ fn lower_variable_parts(
         VariableDeclarationKind::Var => ValueDeclKind::Var,
     };
 
+    let is_unique_symbol = decl.type_annotation.as_ref().is_some_and(|annotation| {
+        matches!(
+            &annotation.type_annotation,
+            TSType::TSTypeOperatorType(operator)
+                if operator.operator == TSTypeOperatorOperator::Unique
+                    && matches!(&operator.type_annotation, TSType::TSSymbolKeyword(_))
+        )
+    });
+
     // Extract type annotation from the variable declarator
     let mut type_annotation = decl
         .type_annotation
@@ -3019,6 +3075,7 @@ fn lower_variable_parts(
     Some(LoweredValueDeclParts {
         name,
         kind: var_kind,
+        is_unique_symbol,
         type_annotation,
         annotation_is_authored,
         inference_unavailable: if annotation_is_authored {
@@ -3056,6 +3113,7 @@ fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> Lowere
     LoweredValueDeclParts {
         name: "default".to_string(),
         kind: ValueDeclKind::Const,
+        is_unique_symbol: false,
         type_annotation,
         // The default-export expression's type is INFERRED from the exported
         // value (there is no authored annotation position on an
@@ -3345,27 +3403,67 @@ fn extract_object_literal(
     for prop in &obj.properties {
         match prop {
             ObjectPropertyKind::ObjectProperty(p) => {
-                if let Some(name) = property_key_name(&p.key) {
-                    let (ty, readonly) =
-                        object_member_value(&p.value, source, policy, budget, depth + 1)?;
+                let key = lower_property_key(&p.key, source);
+                if p.method || !matches!(p.kind, PropertyKind::Init) {
+                    let Expression::FunctionExpression(function) = &p.value else {
+                        continue;
+                    };
+                    let signature = extract_function_signature_with_budget(
+                        function,
+                        source,
+                        budget,
+                        depth + 1,
+                    )?;
                     let spans = MemberSpans {
                         declaration: Some(p.span.into()),
                         name: Some(p.key.span().into()),
-                        // Value-inferred property: there is no source type
-                        // annotation to anchor.
                         type_annotation: None,
                     };
-                    push_object_property_with_override(
-                        &mut members,
-                        verter_type_expr::ObjectProperty::with_spans_public(
-                            name, ty, false, readonly, spans,
-                        )
-                        // A member written directly in the literal is a fresh
-                        // excess-property candidate until a later spread
-                        // overlaps it (the fold's decision).
-                        .with_excess_origin(verter_type_expr::ExcessPropertyOrigin::FreshOwn),
-                    );
+                    let mut method = MethodSignature::with_key_spans_public(
+                        key,
+                        FunctionExpr::with_spans(
+                            signature.parameters,
+                            signature.return_type.map(Arc::new),
+                            signature.type_parameters,
+                            FunctionSpans {
+                                signature: Some(function.span.into()),
+                                return_type: function
+                                    .return_type
+                                    .as_ref()
+                                    .map(|return_type| return_type.type_annotation.span().into()),
+                            },
+                        ),
+                        false,
+                        spans,
+                    )
+                    .with_excess_origin(verter_type_expr::ExcessPropertyOrigin::FreshOwn);
+                    method.method_kind = match p.kind {
+                        PropertyKind::Get => ObjectMethodKind::Get,
+                        PropertyKind::Set => ObjectMethodKind::Set,
+                        PropertyKind::Init => ObjectMethodKind::Method,
+                    };
+                    method.has_implementation_body = signature.has_implementation_body;
+                    members.push(ObjectMember::Method(method));
+                    continue;
                 }
+                let (ty, readonly) =
+                    object_member_value(&p.value, source, policy, budget, depth + 1)?;
+                let spans = MemberSpans {
+                    declaration: Some(p.span.into()),
+                    name: Some(p.key.span().into()),
+                    // Value-inferred property: there is no source type
+                    // annotation to anchor.
+                    type_annotation: None,
+                };
+                members.push(ObjectMember::Property(
+                    verter_type_expr::ObjectProperty::with_key_spans_public(
+                        key, ty, false, readonly, spans,
+                    )
+                    // A member written directly in the literal is a fresh
+                    // excess-property candidate until a later spread
+                    // overlaps it (the fold's decision).
+                    .with_excess_origin(verter_type_expr::ExcessPropertyOrigin::FreshOwn),
+                ));
             }
             ObjectPropertyKind::SpreadProperty(spread) => {
                 let spread_ty =
@@ -3396,19 +3494,6 @@ fn extract_object_literal_as_type(
     Ok(TypeExpr::Object(Arc::new(extract_object_literal(
         obj, source, policy, budget, depth,
     )?)))
-}
-
-fn push_object_property_with_override(
-    members: &mut Vec<ObjectMember>,
-    property: verter_type_expr::ObjectProperty,
-) {
-    if let Some(existing_index) = members.iter().position(|member| match member {
-        ObjectMember::Property(existing) => existing.name == property.name,
-        _ => false,
-    }) {
-        members.remove(existing_index);
-    }
-    members.push(ObjectMember::Property(property));
 }
 
 #[derive(Debug)]
@@ -4412,7 +4497,7 @@ fn is_const_assertion_type_expr(expr: &TypeExpr) -> bool {
 fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMember> {
     match sig {
         TSSignature::TSPropertySignature(prop) => {
-            let name = property_key_name(&prop.key)?;
+            let key = lower_property_key(&prop.key, source);
             let ty = prop
                 .type_annotation
                 .as_ref()
@@ -4427,8 +4512,8 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                     .map(|ta| ta.type_annotation.span().into()),
             };
             Some(ObjectMember::Property(
-                verter_type_expr::ObjectProperty::with_spans_public(
-                    name,
+                verter_type_expr::ObjectProperty::with_key_spans_public(
+                    key,
                     ty,
                     prop.optional,
                     prop.readonly,
@@ -4437,7 +4522,7 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
             ))
         }
         TSSignature::TSMethodSignature(method) => {
-            let name = property_key_name(&method.key)?;
+            let key = lower_property_key(&method.key, source);
             let params = lower_function_params(&method.params, source);
             let return_type = method
                 .return_type
@@ -4460,17 +4545,19 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 name: Some(method.key.span().into()),
                 type_annotation: None,
             };
-            Some(ObjectMember::Method(MethodSignature::with_spans_public(
-                name,
-                FunctionExpr::with_spans(
-                    params,
-                    return_type.map(Arc::new),
-                    type_parameters,
-                    fn_spans,
+            Some(ObjectMember::Method(
+                MethodSignature::with_key_spans_public(
+                    key,
+                    FunctionExpr::with_spans(
+                        params,
+                        return_type.map(Arc::new),
+                        type_parameters,
+                        fn_spans,
+                    ),
+                    method.optional,
+                    member_spans,
                 ),
-                method.optional,
-                member_spans,
-            )))
+            ))
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
             let params = lower_function_params(&call.params, source);

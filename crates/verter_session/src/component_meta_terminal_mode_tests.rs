@@ -47,7 +47,6 @@ fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         },
     ));
     let mut current = leaf;
@@ -55,11 +54,12 @@ fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
         let member = SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            name: Arc::from(name),
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
             value: current,
             optional: false,
             readonly: false,
-            is_method: false,
+            method_kind: None,
+            has_implementation_body: false,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
@@ -73,7 +73,6 @@ fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             },
         ));
     }
@@ -92,10 +91,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_route_target_pick_omit(
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -144,10 +143,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_fallthrough_inheritance
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -203,10 +202,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_userland_shadowing_pick
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -264,10 +263,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_exclude_extract_reducti
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -326,10 +325,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_slot_binding_lowering()
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -388,10 +387,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),
@@ -447,10 +446,10 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_engine_state_promotion(
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(Arc::from("a")),
-                PathSegment::Member(Arc::from("b")),
-                PathSegment::Member(Arc::from("full")),
-                PathSegment::Member(Arc::from("bar")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
+                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
             ]
             .into_boxed_slice(),
         ),

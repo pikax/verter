@@ -175,7 +175,12 @@ fn canonicalise_for_digest(
     match key {
         SemanticQueryKey::ProjectMember { base, member, mode } => SemanticQueryKey::ProjectPath {
             base: *base,
-            path: Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice()),
+            path: Arc::from(
+                vec![PathSegment::Member(
+                    crate::semantic_query::PropertyKey::identifier(Arc::clone(member)),
+                )]
+                .into_boxed_slice(),
+            ),
             context: crate::semantic_query::ProjectionReductionContext::published(*mode),
         },
         SemanticQueryKey::IndexedAccess { base, index, mode } => SemanticQueryKey::ProjectPath {
@@ -272,6 +277,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::TypeOf { .. } => "TypeOf",
         SemanticQueryKey::NormalizeUnion { .. } => "NormalizeUnion",
         SemanticQueryKey::NormalizeIntersection { .. } => "NormalizeIntersection",
+        SemanticQueryKey::ProjectObjectSpread { .. } => "ProjectObjectSpread",
         SemanticQueryKey::ProjectPath { .. } => "ProjectPath",
         SemanticQueryKey::Relate { .. } => "Relate",
         SemanticQueryKey::ResolveMacroPayload { .. } => "ResolveMacroPayload",
@@ -795,10 +801,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if let Some(ks) = view.keyspace {
                         stack.push(ReduceFrame::descend(ks, parent_context));
                     }
-                    if let Some(operands) = view.open_spread_operands() {
-                        for operand in operands.as_slice() {
-                            stack.push(ReduceFrame::descend(*operand, parent_context));
-                        }
+                }
+            }
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                if is_whole_surface_published(parent_context) {
+                    for child in program.child_nodes() {
+                        stack.push(ReduceFrame::descend(child, parent_context));
                     }
                 }
             }
@@ -856,7 +864,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::IndexedAccess { object, index } => {
                 let object_context = indexed_access_object_context(parent_context);
                 stack.push(ReduceFrame::descend(*object, object_context));
-                if let IndexKey::TypeNode(n) = index {
+                if let IndexKey::Computed(n) = index {
                     stack.push(ReduceFrame::descend(
                         *n,
                         structural_operand_context(parent_context),
@@ -1264,7 +1272,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else {
                     let projection_path: Arc<[PathSegment]> = Arc::from(
                         path.iter()
-                            .map(|segment| PathSegment::Member(Arc::clone(segment)))
+                            .map(|segment| {
+                                PathSegment::Member(
+                                    crate::semantic_query::PropertyKey::identifier(Arc::clone(
+                                        segment,
+                                    )),
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .into_boxed_slice(),
                     );
@@ -1466,6 +1480,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // in `mapping` and return `node` unchanged.
             SemanticNodeData::Object(_) => {
                 rebuild_object(self, node, &state.mapping, context).unwrap_or(node)
+            }
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                let rebuilt = program.map_child_nodes(|child| {
+                    state
+                        .mapping
+                        .get(&(child, context))
+                        .copied()
+                        .unwrap_or(child)
+                });
+                if rebuilt == *program {
+                    node
+                } else {
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ObjectSpreadProgram(rebuilt),
+                    )
+                }
             }
             SemanticNodeData::Union(arms) => rebuild_union_or_intersection(
                 self,
@@ -1807,13 +1838,6 @@ fn rebuild_object(
         }
         Arc::from(out.into_boxed_slice())
     };
-    let new_completeness = view.completeness_with_mapped_operands(|operand| {
-        let mapped = mapping.get(&(operand, context)).copied().unwrap_or(operand);
-        if mapped != operand {
-            changed = true;
-        }
-        mapped
-    });
     if !changed {
         return Some(node);
     }
@@ -1824,7 +1848,6 @@ fn rebuild_object(
         index_signatures: view.index_signatures.clone(),
         keyspace: view.keyspace,
         has_index_signature: view.has_known_index_signature(),
-        completeness: new_completeness,
     };
     Some(
         dispatch
@@ -4017,9 +4040,6 @@ impl<'a> OpenWalk<'a> {
             // generic nested in a member value / function parameter /
             // element type.
             SemanticNodeData::Object(view) => {
-                if view.is_open_spread() {
-                    return true;
-                }
                 if view
                     .index_signatures
                     .iter()
@@ -4176,6 +4196,7 @@ impl<'a> OpenWalk<'a> {
             // An unresolved raw-fallback carrier holds no type arguments and no
             // outer generic (closed for the outer-generic question) but is
             // undecidable for the key-domain question.
+            SemanticNodeData::ObjectSpreadProgram(_) => true,
             SemanticNodeData::RawFallback { .. } => self.role.question().undecidable_is_open(),
             // A synthetic slot-binding is a concrete shallow terminal.
             SemanticNodeData::SyntheticBinding { .. } => false,
@@ -4195,8 +4216,8 @@ impl<'a> OpenWalk<'a> {
     ) -> bool {
         use crate::semantic_query::IndexKey;
         match index {
-            IndexKey::String(_) | IndexKey::Number(_) => false,
-            IndexKey::TypeNode(node) => {
+            IndexKey::String(_) | IndexKey::Number(_) | IndexKey::UniqueSymbol(_) => false,
+            IndexKey::Computed(node) => {
                 self.node_is_open_at(ctx, *node, OperandPosition::KeyDomain)
             }
         }
@@ -5198,7 +5219,6 @@ mod tests {
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             },
         ));
         assert!(
@@ -5285,7 +5305,6 @@ mod tests {
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             },
         ));
         let open_key = graph.intern_node(SemanticNodeData::TypeParam {
@@ -5299,7 +5318,7 @@ mod tests {
         // IndexedAccess { object: concrete, index: TypeNode(open K) }.
         let indexed_open_key = graph.intern_node(SemanticNodeData::IndexedAccess {
             object: concrete_object,
-            index: IndexKey::TypeNode(open_key),
+            index: IndexKey::Computed(open_key),
         });
         assert!(
             super::utility_enumeration_domain_is_open_or_unknown(
@@ -5401,7 +5420,6 @@ mod tests {
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             },
         ));
         let concrete_key =

@@ -101,8 +101,8 @@ pub(crate) enum PublishedSurfaceKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum KeyFilter {
     All,
-    Include(Arc<[Arc<str>]>),
-    Exclude(Arc<[Arc<str>]>),
+    Include(Arc<[crate::semantic_query::PropertyKey]>),
+    Exclude(Arc<[crate::semantic_query::PropertyKey]>),
     UnknownDeferred,
 }
 
@@ -118,11 +118,11 @@ impl KeyFilter {
     /// (returns `false`) so a stale filter does NOT silently admit
     /// every key — the prior behaviour traded a debug panic for
     /// over-admission, which is the worse default.
-    pub(crate) fn admits(&self, key: &str) -> bool {
+    pub(crate) fn admits(&self, key: &crate::semantic_query::PropertyKey) -> bool {
         match self {
             KeyFilter::All => true,
-            KeyFilter::Include(set) => set.iter().any(|k| k.as_ref() == key),
-            KeyFilter::Exclude(set) => set.iter().all(|k| k.as_ref() != key),
+            KeyFilter::Include(set) => set.iter().any(|candidate| candidate == key),
+            KeyFilter::Exclude(set) => set.iter().all(|candidate| candidate != key),
             KeyFilter::UnknownDeferred => {
                 debug_assert!(
                     false,
@@ -330,10 +330,10 @@ impl<'a> ProjectionCursor<'a> {
         let admits = match (&self.node.key_filter, segment) {
             (KeyFilter::All, _) => true,
             (KeyFilter::Include(set), PathSegment::Member(name)) => {
-                set.iter().any(|k| k.as_ref() == name.as_ref())
+                set.iter().any(|key| key == name)
             }
             (KeyFilter::Exclude(set), PathSegment::Member(name)) => {
-                set.iter().all(|k| k.as_ref() != name.as_ref())
+                set.iter().all(|key| key != name)
             }
             // Non-Member segments (Index): filter applies only to
             // member names; pass through so IndexedAccess descent
@@ -380,7 +380,7 @@ impl<'a> ProjectionCursor<'a> {
 
     /// Whether the cursor admits the given key at THIS hop. Used by
     /// the registry walker's Object arm to gate per-member descent.
-    pub(crate) fn admits_key(&self, key: &str) -> bool {
+    pub(crate) fn admits_key(&self, key: &crate::semantic_query::PropertyKey) -> bool {
         self.node.key_filter.admits(key)
     }
 
@@ -420,10 +420,13 @@ impl<'a> ProjectionCursor<'a> {
     /// the next hop keeps walking; `descend_published_member` stops
     /// at a `Navigate`-mode terminal so a macro member's type body is
     /// NOT breadth-enumerated.
-    pub(crate) fn descend_published_member(&self, key: &str) -> Option<ProjectionCursor<'a>> {
+    pub(crate) fn descend_published_member(
+        &self,
+        key: &crate::semantic_query::PropertyKey,
+    ) -> Option<ProjectionCursor<'a>> {
         // (1) Explicit child wins — the consumer walked a deep path
         // into this member; carry that demand verbatim.
-        if let Some(child) = self.node.children.get(&PathSegment::Member(Arc::from(key))) {
+        if let Some(child) = self.node.children.get(&PathSegment::Member(key.clone())) {
             return Some(ProjectionCursor {
                 node: child,
                 surface: self.surface,
@@ -516,10 +519,12 @@ mod tests {
     fn cursor_admits_all_when_whole_surface() {
         let proj = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
         let cursor = proj.cursor();
-        assert!(cursor.admits_key("anything"));
+        assert!(cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("anything")));
         assert!(cursor.is_whole_surface());
         // Descending any segment self-pins (no narrowing).
-        let descended = cursor.descend(&PathSegment::Member(Arc::from("foo")));
+        let descended = cursor.descend(&PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("foo"),
+        ));
         assert!(descended.is_some(), "whole-surface descend must self-pin");
         assert!(descended.unwrap().is_whole_surface());
     }
@@ -527,40 +532,54 @@ mod tests {
     #[test]
     fn cursor_include_filter_rejects_unlisted() {
         let mut node = ProjectionNode::whole_surface_expanded();
-        node.key_filter = KeyFilter::Include(Arc::from([Arc::from("a"), Arc::from("b")]));
+        node.key_filter = KeyFilter::Include(Arc::from([
+            crate::semantic_query::PropertyKey::identifier("a"),
+            crate::semantic_query::PropertyKey::identifier("b"),
+        ]));
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root: node,
         };
         let cursor = proj.cursor();
-        assert!(cursor.admits_key("a"));
-        assert!(cursor.admits_key("b"));
-        assert!(!cursor.admits_key("c"));
+        assert!(cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("a")));
+        assert!(cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("b")));
+        assert!(!cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("c")));
         // Descending a non-included Member returns None.
         assert!(cursor
-            .descend(&PathSegment::Member(Arc::from("c")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("c")
+            ))
             .is_none());
         assert!(cursor
-            .descend(&PathSegment::Member(Arc::from("a")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("a")
+            ))
             .is_some());
     }
 
     #[test]
     fn cursor_exclude_filter_rejects_listed() {
         let mut node = ProjectionNode::whole_surface_expanded();
-        node.key_filter = KeyFilter::Exclude(Arc::from([Arc::from("hidden")]));
+        node.key_filter =
+            KeyFilter::Exclude(Arc::from([crate::semantic_query::PropertyKey::identifier(
+                "hidden",
+            )]));
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root: node,
         };
         let cursor = proj.cursor();
-        assert!(cursor.admits_key("visible"));
-        assert!(!cursor.admits_key("hidden"));
+        assert!(cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("visible")));
+        assert!(!cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("hidden")));
         assert!(cursor
-            .descend(&PathSegment::Member(Arc::from("hidden")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("hidden")
+            ))
             .is_none());
         assert!(cursor
-            .descend(&PathSegment::Member(Arc::from("visible")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("visible")
+            ))
             .is_some());
     }
 
@@ -583,22 +602,29 @@ mod tests {
         let mut bar_node = ProjectionNode::whole_surface_expanded();
         bar_node.terminal_mode = Some(ProjectionMode::Expanded);
         let mut foo_node = ProjectionNode::whole_surface_expanded();
-        foo_node
-            .children
-            .insert(PathSegment::Member(Arc::from("bar")), bar_node);
+        foo_node.children.insert(
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
+            bar_node,
+        );
         let mut root = ProjectionNode::whole_surface_expanded();
-        root.children
-            .insert(PathSegment::Member(Arc::from("foo")), foo_node);
+        root.children.insert(
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo")),
+            foo_node,
+        );
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root,
         };
         let cursor = proj.cursor();
         let foo_cursor = cursor
-            .descend(&PathSegment::Member(Arc::from("foo")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("foo"),
+            ))
             .expect("explicit foo child must descend");
         let bar_cursor = foo_cursor
-            .descend(&PathSegment::Member(Arc::from("bar")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("bar"),
+            ))
             .expect("explicit bar child must descend");
         assert!(bar_cursor.is_terminal());
         assert_eq!(bar_cursor.terminal_mode(), Some(ProjectionMode::Expanded));
@@ -617,8 +643,10 @@ mod tests {
         // so unspecified ones are out of scope.
         let foo_node = ProjectionNode::whole_surface_expanded();
         let mut root = ProjectionNode::whole_surface_expanded();
-        root.children
-            .insert(PathSegment::Member(Arc::from("foo")), foo_node);
+        root.children.insert(
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo")),
+            foo_node,
+        );
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root,
@@ -627,13 +655,17 @@ mod tests {
 
         // The enumerated child still descends.
         assert!(cursor
-            .descend(&PathSegment::Member(Arc::from("foo")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("foo")
+            ))
             .is_some());
         // An un-enumerated sibling MUST return None — this is the
         // F2 contract.
         assert!(
             cursor
-                .descend(&PathSegment::Member(Arc::from("bar")))
+                .descend(&PathSegment::Member(
+                    crate::semantic_query::PropertyKey::identifier("bar")
+                ))
                 .is_none(),
             "F2: explicit children + KeyFilter::All must reject \
              unspecified siblings (was: self-pinning on Some(*self))"
@@ -644,7 +676,9 @@ mod tests {
         let whole = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
         let whole_cursor = whole.cursor();
         assert!(whole_cursor
-            .descend(&PathSegment::Member(Arc::from("anything")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("anything")
+            ))
             .is_some());
     }
 
@@ -662,12 +696,15 @@ mod tests {
         let mut b_node = ProjectionNode::whole_surface_shallow();
         b_node.terminal_mode = Some(ProjectionMode::Shallow);
         let mut a_node = ProjectionNode::whole_surface_expanded();
-        a_node
-            .children
-            .insert(PathSegment::Member(Arc::from("b")), b_node);
+        a_node.children.insert(
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+            b_node,
+        );
         let mut root = ProjectionNode::whole_surface_expanded();
-        root.children
-            .insert(PathSegment::Member(Arc::from("a")), a_node);
+        root.children.insert(
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+            a_node,
+        );
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root,
@@ -676,10 +713,14 @@ mod tests {
 
         // a → b returns the Shallow terminal.
         let a_cursor = cursor
-            .descend(&PathSegment::Member(Arc::from("a")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("a"),
+            ))
             .expect("explicit a child descends");
         let b_cursor = a_cursor
-            .descend(&PathSegment::Member(Arc::from("b")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("b"),
+            ))
             .expect("explicit b child under a descends");
         assert!(b_cursor.is_terminal());
         assert_eq!(b_cursor.terminal_mode(), Some(ProjectionMode::Shallow));
@@ -688,7 +729,9 @@ mod tests {
         // (F3: deeper structure is path-precise too).
         assert!(
             a_cursor
-                .descend(&PathSegment::Member(Arc::from("c")))
+                .descend(&PathSegment::Member(
+                    crate::semantic_query::PropertyKey::identifier("c")
+                ))
                 .is_none(),
             "F3: deep path-precision must reject unspecified child \
              of an enumerated parent"
@@ -701,7 +744,10 @@ mod tests {
         // 'a' MUST return a cursor whose filter is `All` at the child
         // level — the parent narrowing applied at THIS hop only.
         let mut root = ProjectionNode::whole_surface_expanded();
-        root.key_filter = KeyFilter::Include(Arc::from([Arc::from("a")]));
+        root.key_filter =
+            KeyFilter::Include(Arc::from([crate::semantic_query::PropertyKey::identifier(
+                "a",
+            )]));
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root,
@@ -710,14 +756,16 @@ mod tests {
 
         // 'a' admits at this hop.
         let a_cursor = cursor
-            .descend(&PathSegment::Member(Arc::from("a")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("a"),
+            ))
             .expect("Include-admitted key must descend");
 
         // F3: the child cursor's filter is `All` (the parent narrowing
         // does not re-apply at child level). The child admits any
         // sibling at the next level.
         assert!(
-            a_cursor.admits_key("anything"),
+            a_cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("anything")),
             "F3: descended cursor under Include('a') must be \
              whole-surface at the next level (parent filter \
              applied at one hop only)"
@@ -725,7 +773,9 @@ mod tests {
 
         // 'b' is rejected at the parent — descend returns None.
         assert!(cursor
-            .descend(&PathSegment::Member(Arc::from("b")))
+            .descend(&PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("b")
+            ))
             .is_none());
     }
 
@@ -741,7 +791,7 @@ mod tests {
     #[should_panic(expected = "Rule-5 violation site")]
     fn key_filter_admits_panics_on_unknown_deferred() {
         let filter = KeyFilter::UnknownDeferred;
-        let _ = filter.admits("anything");
+        let _ = filter.admits(&crate::semantic_query::PropertyKey::identifier("anything"));
     }
 
     // -----------------------------------------------------------------
@@ -759,7 +809,9 @@ mod tests {
         // Descending a published member yields a TERMINAL CARRIER
         // cursor whose publication mode is Navigate — NOT Expanded.
         let member = cursor
-            .descend_published_member("searchTool")
+            .descend_published_member(&crate::semantic_query::PropertyKey::identifier(
+                "searchTool",
+            ))
             .expect("whole-surface admits every member");
         assert_eq!(
             member.terminal_publication_mode(),
@@ -777,8 +829,10 @@ mod tests {
         let mut child = ProjectionNode::whole_surface_expanded();
         child.terminal_mode = Some(ProjectionMode::Expanded);
         let mut root = ProjectionNode::whole_surface_expanded();
-        root.children
-            .insert(PathSegment::Member(Arc::from("searchTool")), child);
+        root.children.insert(
+            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("searchTool")),
+            child,
+        );
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root,
@@ -786,13 +840,17 @@ mod tests {
         let cursor = proj.cursor();
         // The explicit child carries deep demand → Expanded honoured.
         let member = cursor
-            .descend_published_member("searchTool")
+            .descend_published_member(&crate::semantic_query::PropertyKey::identifier(
+                "searchTool",
+            ))
             .expect("explicit child descends");
         assert_eq!(member.terminal_publication_mode(), ProjectionMode::Expanded);
         // A sibling with no explicit child is OUT OF SCOPE under an
         // explicit-children + KeyFilter::All root.
         assert!(
-            cursor.descend_published_member("other").is_none(),
+            cursor
+                .descend_published_member(&crate::semantic_query::PropertyKey::identifier("other"))
+                .is_none(),
             "AX: explicit children + KeyFilter::All must reject \
              un-enumerated members"
         );
@@ -801,14 +859,21 @@ mod tests {
     #[test]
     fn descend_published_member_rejects_excluded_keys() {
         let mut node = ProjectionNode::whole_surface_expanded();
-        node.key_filter = KeyFilter::Exclude(Arc::from([Arc::from("hidden")]));
+        node.key_filter =
+            KeyFilter::Exclude(Arc::from([crate::semantic_query::PropertyKey::identifier(
+                "hidden",
+            )]));
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root: node,
         };
         let cursor = proj.cursor();
-        assert!(cursor.descend_published_member("hidden").is_none());
-        assert!(cursor.descend_published_member("visible").is_some());
+        assert!(cursor
+            .descend_published_member(&crate::semantic_query::PropertyKey::identifier("hidden"))
+            .is_none());
+        assert!(cursor
+            .descend_published_member(&crate::semantic_query::PropertyKey::identifier("visible"))
+            .is_some());
     }
 
     #[test]
@@ -822,6 +887,8 @@ mod tests {
             root: node,
         };
         let cursor = proj.cursor();
-        let _ = cursor.descend(&PathSegment::Member(Arc::from("any")));
+        let _ = cursor.descend(&PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier("any"),
+        ));
     }
 }

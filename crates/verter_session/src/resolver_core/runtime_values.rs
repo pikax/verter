@@ -227,6 +227,7 @@ mod tests {
     /// the fact-vocabulary spelling of an authored `"lit"` annotation.
     fn string_literal_annotation(lit: &str) -> ValueTypeAnnotationFact {
         ValueTypeAnnotationFact {
+            is_unique_symbol: false,
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Direct,
             annotation: Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
@@ -698,6 +699,7 @@ mod tests {
             declaration_id: 2,
             kind: ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
+                is_unique_symbol: false,
                 typeof_alias_target: Some(verter_type_expr::facts::ValueDeclIdentityPart {
                     canonical_id: Arc::from("/src/theme.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),

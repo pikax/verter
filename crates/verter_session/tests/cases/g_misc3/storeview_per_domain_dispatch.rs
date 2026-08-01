@@ -226,7 +226,7 @@ fn dispatch_table_bound_by_fact_domain_not_fact_key() {
         canonical_id: "/a.ts".into(),
         key: FactKey::MemberPresence {
             exporter: InternedName::from("Foo"),
-            name: InternedName::from("a"),
+            name: verter_type_expr::facts::FactPropertyKey::identifier("a"),
             space: SymbolSpace::Type,
         },
         lane: FactLane::Semantic,

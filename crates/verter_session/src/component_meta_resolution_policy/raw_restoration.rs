@@ -146,7 +146,7 @@ fn collect_macro_participating_refs(
             }
             Some(SemanticNodeData::IndexedAccess { object, index }) => {
                 worklist.push(*object);
-                if let IndexKey::TypeNode(index_node) = index {
+                if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);
                 }
             }
@@ -187,7 +187,7 @@ fn node_contains_ref(
             }
             Some(SemanticNodeData::IndexedAccess { object, index }) => {
                 worklist.push(*object);
-                if let IndexKey::TypeNode(index_node) = index {
+                if let IndexKey::Computed(index_node) = index {
                     worklist.push(*index_node);
                 }
             }

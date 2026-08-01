@@ -422,12 +422,79 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 /// `SemanticNodeData::Object` shell. An empty result does not prove that an
 /// open-spread surface has no additional members.
 ///
+/// An `ObjectSpreadProgram` node is the walker's typed open evidence for an
+/// open / multi-alternative program root (it never fabricates a closed
+/// `Object` for those): publish its POSITIVE member evidence through the
+/// correlated spread query — presence only, never completeness, exactly
+/// this reader's standing contract.
+/// `Union` / `Intersection` / `Conditional` carriers (the walker's typed
+/// open evidence for compound roots containing open programs) recurse
+/// per-branch with the SAME presence-only rule and merge under the macro
+/// enumeration convention (a member present in any branch is published).
 pub(crate) fn read_positive_surface_members(
     ctx: &dyn ResolverContext,
     surface_node: SemanticNodeId,
 ) -> Vec<SurfaceMember> {
     match crate::project_semantic_dispatch::node_data_for(ctx, surface_node).as_deref() {
         Some(SemanticNodeData::Object(view)) => view.positive_members().to_vec(),
+        Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
+            let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let formula = match dispatch.project_object_spread_for_consumer(
+                surface_node,
+                crate::semantic_query::ObjectProjectionSelector::Surface,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Shallow,
+                ),
+            ) {
+                crate::semantic_query::QueryResult::Value(formula) => formula,
+                _ => return Vec::new(),
+            };
+            crate::project_semantic_dispatch::walk::spread_formula_positive_members_for_macro(
+                ctx.project_type_store().semantic_graph(),
+                &formula,
+            )
+        }
+        Some(SemanticNodeData::Union(arms)) => {
+            let arms = Arc::clone(arms);
+            let per_arm: Vec<Vec<SurfaceMember>> = arms
+                .iter()
+                .map(|arm| read_positive_surface_members(ctx, *arm))
+                .collect();
+            crate::project_semantic_dispatch::walk::presence_union_members(
+                ctx.project_type_store().semantic_graph(),
+                &per_arm,
+            )
+        }
+        // Intersection carriers merge under INTERSECTION rules (required
+        // in any declaring arm stays required, same-key collisions
+        // intersect the values, readonly in any arm survives) — the union
+        // rule would mark intersection members optional and union their
+        // values.
+        Some(SemanticNodeData::Intersection(arms)) => {
+            let arms = Arc::clone(arms);
+            let per_arm: Vec<Vec<SurfaceMember>> = arms
+                .iter()
+                .map(|arm| read_positive_surface_members(ctx, *arm))
+                .collect();
+            crate::project_semantic_dispatch::walk::presence_intersection_members(
+                ctx.project_type_store().semantic_graph(),
+                &per_arm,
+            )
+        }
+        Some(SemanticNodeData::Conditional {
+            true_branch_ref,
+            false_branch_ref,
+            ..
+        }) => {
+            let (true_branch, false_branch) = (*true_branch_ref, *false_branch_ref);
+            crate::project_semantic_dispatch::walk::presence_union_members(
+                ctx.project_type_store().semantic_graph(),
+                &[
+                    read_positive_surface_members(ctx, true_branch),
+                    read_positive_surface_members(ctx, false_branch),
+                ],
+            )
+        }
         _ => Vec::new(),
     }
 }
@@ -640,7 +707,7 @@ pub(crate) fn resolve_macro_payload(
     let payload_is_empty_surface = matches!(
         payload_data.as_deref(),
         Some(SemanticNodeData::Object(view))
-            if view.closed().is_some_and(|closed| closed.is_empty())
+            if view.closed().is_empty()
     );
     let payload_is_decl_ref_carrier = matches!(
         payload_data.as_deref(),

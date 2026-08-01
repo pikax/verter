@@ -1162,7 +1162,7 @@ defineProps<{
 // G4.4 unifies the convention: every producer now stores the
 // integer value and every consumer recovers via `*n as f64`.
 // Non-integer literals (`Foo[1.5]`) and out-of-i64 literals
-// remain as `IndexKey::TypeNode` references rather than entering
+// remain as `IndexKey::Computed` references rather than entering
 // the `IndexKey::Number` fast path — matching the existing
 // `evaluate::normalized_index_key_node` admission guard.
 //
@@ -1333,27 +1333,27 @@ defineProps<{
 
 // =====================================================================
 // G4.5 — Mapped narrowing recovers NON-INTEGER numeric path segments
-// via `IndexKey::TypeNode` literal inspection.
+// via `IndexKey::Computed` literal inspection.
 //
 // G4.4 unified `IndexKey::Number` on the integer-i64 convention,
 // bounded by the shared `build::integer_convention_index_key`
 // predicate (fold iff the i64 `Display` IS the canonical
 // `js_number_to_string` spelling). Producers (source lowering,
 // `normalized_index_key_node`, generic substitution) emit
-// `IndexKey::TypeNode` for every numeric literal outside the bound —
+// `IndexKey::Computed` for every numeric literal outside the bound —
 // non-integer literals (`1.5`), exponent-regime literals, and big
 // integers with divergent shortest-round-trip spellings.
 //
 // This guards a soundness gap: the Mapped narrowing path in
 // `walk.rs` only constructs a numeric `LiteralKey` from
 // `IndexKey::Number`. For `{ [K in number]: K }[1.5]`, the producer
-// emits `IndexKey::TypeNode(node)` where `node` resolves to a concrete
+// emits `IndexKey::Computed(node)` where `node` resolves to a concrete
 // `Literal(Number(1.5))`. Pre-G4.5, the walker's TypeNode arm received
-// `IndexKey::TypeNode(_)` back from `normalized_index_key_node` and
+// `IndexKey::Computed(_)` back from `normalized_index_key_node` and
 // dropped to `(None, false)` — Mapped narrowing fell back to a
 // deferred shell instead of substituting `K = 1.5`.
 //
-// G4.5 closes the gap: the walker's `IndexKey::TypeNode(resolved)` arm
+// G4.5 closes the gap: the walker's `IndexKey::Computed(resolved)` arm
 // now inspects the resolved node's `SemanticNodeData::Literal` directly
 // and recovers an f64 `LiteralKey::Number` for any numeric literal
 // (integer OR non-integer), enabling the primitive-domain admission
@@ -1386,7 +1386,7 @@ import type { NumberIdentity } from './types'
 
 defineProps<{
   // Non-integer numeric literal index (1.5). The producer emits
-  // `IndexKey::TypeNode(node)` because 1.5 fails the bounded
+  // `IndexKey::Computed(node)` because 1.5 fails the bounded
   // integer-convention admission. Pre-G4.5, Mapped narrowing
   // dropped this case to a deferred shell. Post-G4.5, the
   // walker recovers the f64 literal from the resolved
@@ -1419,8 +1419,8 @@ defineProps<{
         "guard G4.5: NumberIdentity[1.5] MUST publish the numeric literal 1.5. \
          Absence indicates the Mapped narrowing fell back to a deferred shell \
          for the non-integer numeric path segment — the producer emitted \
-         `IndexKey::TypeNode(node)` (because 1.5 fails the bounded \
-         integer-convention admission), and the walker's `IndexKey::TypeNode(_)` arm dropped \
+         `IndexKey::Computed(node)` (because 1.5 fails the bounded \
+         integer-convention admission), and the walker's `IndexKey::Computed(_)` arm dropped \
          the literal recovery. type: {prop_ty:#?}",
     );
     // Negative: no integer truncation (1.0) leaked through. A 1.0

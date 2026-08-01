@@ -227,25 +227,79 @@ impl VerterHost {
         // does not record dispatch-intent counters itself, so record them
         // here — this surface synthesis stays visible to the projection-op
         // budget fuse exactly as it was through `execute_type_node`.
-        let key = SemanticQueryKey::ProjectPath {
-            base,
-            path,
-            context,
+        let graph = ctx.project_type_store().semantic_graph();
+        // A spread-bearing object is a construction program, not a surface:
+        // the empty-path Shallow terminal now projects program roots through
+        // the correlated spread query (walker's
+        // `program_root_shallow_surface`), but its `SurfaceView` output is
+        // closed-by-construction and cannot carry an openness witness. This
+        // typeinfo path keeps its own projection so the joined surface
+        // reports `members_complete = false` for open / multi-branch
+        // formulas; only a single closed alternative may claim
+        // `members_complete`.
+        let spread_base = if path.is_empty()
+            && matches!(
+                graph.node_data(base).as_deref(),
+                Some(SemanticNodeData::ObjectSpreadProgram(_))
+            ) {
+            Some(base)
+        } else {
+            None
         };
-        dispatch.record_dispatch_intent_counters(&key);
-        let surface_read = dispatch.execute_read(key);
-        if let Some(sink) = walker_diagnostics {
-            sink.extend(surface_read.walker_diagnostics.iter().cloned());
-        }
-        let terminal = match surface_read.value {
-            QueryResult::Value(node) => node,
-            QueryResult::Recursive(node) => node,
-            QueryResult::Error(_) => return None,
+        let (terminal, terminal_is_partial) = match spread_base {
+            Some(base) => (base, false),
+            None => {
+                let key = SemanticQueryKey::ProjectPath {
+                    base,
+                    path,
+                    context,
+                };
+                dispatch.record_dispatch_intent_counters(&key);
+                let surface_read = dispatch.execute_read(key);
+                let read_is_partial = surface_read.result_is_partial;
+                if let Some(sink) = walker_diagnostics {
+                    sink.extend(surface_read.walker_diagnostics.iter().cloned());
+                }
+                match surface_read.value {
+                    QueryResult::Value(node) => (node, read_is_partial),
+                    QueryResult::Recursive(node) => (node, true),
+                    QueryResult::Error(_) => return None,
+                }
+            }
         };
 
-        let graph = ctx.project_type_store().semantic_graph();
         match graph.node_data(terminal).as_deref() {
-            Some(SemanticNodeData::Object(view)) => Some(TypeInfoSurface::build(graph, view)),
+            // A partial terminal read keeps its positive members but never
+            // claims completeness: omission is not absence evidence.
+            Some(SemanticNodeData::Object(view)) => Some(TypeInfoSurface::build_with_completeness(
+                graph,
+                view,
+                !terminal_is_partial,
+            )),
+            // Open carrier terminal (the walker's open-safe policy returns
+            // the compound node when any nested open program contributed):
+            // recurse the branches with the shared presence-only read —
+            // positive members, never complete.
+            Some(
+                SemanticNodeData::Union(_)
+                | SemanticNodeData::Intersection(_)
+                | SemanticNodeData::Conditional { .. },
+            ) => {
+                let members =
+                    crate::meta_resolve::projectors::read_positive_surface_members(ctx, terminal);
+                Some(TypeInfoSurface::from_presence_members(graph, &members))
+            }
+            Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
+                let formula = match dispatch.project_object_spread_for_consumer(
+                    terminal,
+                    crate::semantic_query::ObjectProjectionSelector::Surface,
+                    context,
+                ) {
+                    QueryResult::Value(formula) => formula,
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+                };
+                TypeInfoSurface::from_spread_projection(graph, &formula)
+            }
             _ => None,
         }
     }

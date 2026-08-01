@@ -443,7 +443,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
             }
         };
 
-    let mut project_branch = |branch_node: SemanticNodeId| -> Option<SemanticNodeId> {
+    let mut project_branch = |branch_node: SemanticNodeId| -> Option<(SemanticNodeId, bool)> {
         let branch_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: branch_node,
             path: empty_path(),
@@ -461,8 +461,20 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 branch_read.cache_suppress,
             ));
         }
+        // A branch is OPEN when its read is partial or its terminal stays
+        // a construction program (the walker's typed open evidence): its
+        // positive members are presence-only, never a closed domain.
+        let open = branch_read.result_is_partial;
         match branch_read.value {
-            QueryResult::Value(id) => Some(id),
+            QueryResult::Value(id) => {
+                let open = open
+                    || matches!(
+                        crate::project_semantic_dispatch::node_data_for(dispatch.ctx, id)
+                            .as_deref(),
+                        Some(SemanticNodeData::ObjectSpreadProgram(_))
+                    );
+                Some((id, open))
+            }
             _ => None,
         }
     };
@@ -472,55 +484,57 @@ pub(crate) fn resolve_payload_surface_with_scope(
 
     let read_members = |surface: SemanticNodeId| -> Option<Vec<SurfaceMember>> {
         match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, surface).as_deref() {
-            Some(SemanticNodeData::Object(view)) => view
-                .closed()
-                .map(|closed| closed.complete_members().to_vec()),
+            Some(SemanticNodeData::Object(view)) => Some(view.closed().complete_members().to_vec()),
+            // The walker's typed open evidence for an open /
+            // multi-alternative program branch: publish the positive
+            // member names through the correlated query — presence only.
+            // Incompleteness rides the branch read's `cache_suppress` /
+            // `OpenSpreadProgram` diagnostic into the macro expansion
+            // envelope (see `project_branch` above).
+            Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
+                let formula = match dispatch.project_object_spread_for_consumer(
+                    surface,
+                    crate::semantic_query::ObjectProjectionSelector::Surface,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Shallow,
+                    ),
+                ) {
+                    QueryResult::Value(formula) => formula,
+                    _ => return None,
+                };
+                Some(
+                    crate::project_semantic_dispatch::walk::spread_formula_positive_members_for_macro(
+                        dispatch.ctx.project_type_store().semantic_graph(),
+                        &formula,
+                    ),
+                )
+            }
             _ => None,
         }
     };
 
-    let true_members = true_surface.and_then(read_members);
-    let false_members = false_surface.and_then(read_members);
+    let true_members = true_surface
+        .as_ref()
+        .and_then(|(node, _)| read_members(*node));
+    let false_members = false_surface
+        .as_ref()
+        .and_then(|(node, _)| read_members(*node));
 
     match (true_members, false_members) {
         (Some(t), Some(f)) => {
-            // Merge — union by member name. Members from the true
-            // branch take precedence on collision for the VALUE (TS
-            // conditional semantics: when `Mode extends 'editor'` is
-            // true, the EditorEmits row is the canonical one; the
-            // false-branch row only surfaces when its name is unique
-            // to that branch). Inherited `accepted_events` is the set
-            // union; identical event names across branches dedup
-            // naturally.
-            //
-            // VISIBILITY is NOT first-branch-wins: a name present in
-            // both branches folds its accessibility to the MOST
-            // RESTRICTIVE across both via the shared merge rule (an
-            // open conditional `T extends U ? {public x} : {private x}`
-            // can resolve to either branch, so `x` is only safely
-            // public when public in BOTH). A copy that kept the
-            // true-branch visibility would leak a private false-branch
-            // member as public.
-            let mut merged: Vec<SurfaceMember> = Vec::with_capacity(t.len() + f.len());
-            let mut name_to_index: rustc_hash::FxHashMap<Arc<str>, usize> =
-                rustc_hash::FxHashMap::default();
-            for member in t.iter().chain(f.iter()) {
-                match name_to_index.get(&member.name) {
-                    Some(&existing_idx) => {
-                        // Already represented (true-branch row wins for the
-                        // value/optional/readonly fields); fold in this
-                        // contributor's visibility to the most restrictive.
-                        let folded = merged[existing_idx]
-                            .visibility
-                            .most_restrictive(member.visibility);
-                        merged[existing_idx].visibility = folded;
-                    }
-                    None => {
-                        name_to_index.insert(Arc::clone(&member.name), merged.len());
-                        merged.push(member.clone());
-                    }
-                }
+            // An OPEN branch contributed presence-only evidence: do NOT
+            // intern a closed `Object` from the merge — `SurfaceView`'s
+            // completeness witness is total, so the merged node would
+            // prove absence of every key the open branch omitted. Keep
+            // the conditional carrier instead; the branch diagnostics
+            // already carry the open signal into the macro envelope
+            // (`OpenSpreadProgram` → `IndeterminateConditional`).
+            let either_open = true_surface.as_ref().is_some_and(|(_, open)| *open)
+                || false_surface.as_ref().is_some_and(|(_, open)| *open);
+            if either_open {
+                return Some(conditional_node);
             }
+            let merged = merge_emit_branch_members(&t, &f);
             let view = crate::semantic_query::surface_view! {
                 members: Arc::from(merged.into_boxed_slice()),
                 call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -530,7 +544,6 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 ),
                 keyspace: None,
                 has_index_signature: false,
-                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             };
             Some(
                 dispatch
@@ -541,9 +554,10 @@ pub(crate) fn resolve_payload_surface_with_scope(
             )
         }
         // Partial coverage — better than dropping the inherited set
-        // entirely. The available branch surfaces alone.
-        (Some(_), None) => true_surface,
-        (None, Some(_)) => false_surface,
+        // entirely. The available branch surfaces alone (an open branch
+        // stays its open carrier — no closed-Object claim).
+        (Some(_), None) => true_surface.map(|(node, _)| node),
+        (None, Some(_)) => false_surface.map(|(node, _)| node),
         (None, None) => {
             diag_sink.push(macro_expansion_for_query_error(
                 macro_index,
@@ -553,6 +567,43 @@ pub(crate) fn resolve_payload_surface_with_scope(
             None
         }
     }
+}
+
+/// Union-merge two conditional-branch member lists by member name: the
+/// true-branch row wins the value/optional/readonly fields on collision
+/// (TS conditional semantics), while VISIBILITY folds to the most
+/// restrictive across both branches (an open conditional can resolve to
+/// either branch, so a member is only safely public when public in
+/// both). Dual spellings of one JS property (`Number(1)` / `String("1")`)
+/// merge under element-access collision. Branch member lists are small
+/// (emit rows), so a linear collides scan replaces the strict-key map.
+pub(crate) fn merge_emit_branch_members(
+    true_members: &[SurfaceMember],
+    false_members: &[SurfaceMember],
+) -> Vec<SurfaceMember> {
+    let mut merged: Vec<SurfaceMember> =
+        Vec::with_capacity(true_members.len() + false_members.len());
+    for member in true_members.iter().chain(false_members.iter()) {
+        let Some(key) = member.key.cloned_known() else {
+            merged.push(member.clone());
+            continue;
+        };
+        if let Some(existing) = merged.iter_mut().find(|existing| {
+            existing
+                .key
+                .cloned_known()
+                .is_some_and(|known| known.element_access_collides(&key))
+        }) {
+            // Already represented (true-branch row wins for the
+            // value/optional/readonly fields); fold in this
+            // contributor's visibility to the most restrictive.
+            let folded = existing.visibility.most_restrictive(member.visibility);
+            existing.visibility = folded;
+        } else {
+            merged.push(member.clone());
+        }
+    }
+    merged
 }
 
 /// **Member-value role tag.**

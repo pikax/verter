@@ -20,8 +20,8 @@ fn graph_type_node_roundtrip_covers_every_oneof_variant() {
     let variants = build_every_type_node_variant();
     assert_eq!(
         variants.len(),
-        31,
-        "GraphTypeNode covers exactly 31 oneof variants — the audited closed taxonomy \
+        32,
+        "GraphTypeNode covers exactly 32 oneof variants — the audited closed taxonomy \
          (the tag-28 relation_proof arm is retired + reserved; proofs ride the payload-side \
          relation_proofs table)",
     );
@@ -111,7 +111,7 @@ fn semantic_type_graph_roundtrip_preserves_envelope_shape() {
         g::SemanticTypeGraph::decode(bytes.as_slice()).expect("SemanticTypeGraph must roundtrip");
     assert_eq!(decoded, graph);
     assert_eq!(decoded.schema_version, g::TYPEINFO_GRAPH_SCHEMA_VERSION);
-    assert_eq!(decoded.nodes.len(), 31);
+    assert_eq!(decoded.nodes.len(), 32);
     assert_eq!(
         decoded.relation_proofs.len(),
         4,
@@ -141,7 +141,7 @@ fn semantic_type_graph_v4_payload_decodes_under_v5_with_empty_relation_proofs() 
         decoded.relation_proofs.is_empty(),
         "a v4 payload carries no relation_proofs — the v5 table decodes as empty"
     );
-    assert_eq!(decoded.nodes.len(), 31);
+    assert_eq!(decoded.nodes.len(), 32);
 }
 
 /// One `GraphRelationProofEntry` of each of the four proof shapes — the
@@ -535,10 +535,11 @@ fn supported_empty_and_unsupported_empty_decode_to_distinct_states() {
 fn closed_taxonomies_have_the_documented_cardinalities() {
     // Any drop / unintended add lights up immediately because the
     // variant constructors below must match these numbers. The
-    // GraphTypeNode taxonomy is 31: the tag-28 `relation_proof` arm is
+    // GraphTypeNode taxonomy is 32: the tag-28 `relation_proof` arm is
     // retired + reserved (schema 5) — proofs ride the payload-side
-    // `relation_proofs` table, never the type-values surface.
-    assert_eq!(build_every_type_node_variant().len(), 31);
+    // `relation_proofs` table, never the type-values surface; tag 33 is the
+    // canonical ordered object-spread program (schema 7).
+    assert_eq!(build_every_type_node_variant().len(), 32);
     assert_eq!(build_every_structured_type_expression_variant().len(), 22);
 
     // Primitive kinds: 12 (ANY..OBJECT).
@@ -642,14 +643,17 @@ fn build_every_type_node_variant() -> Vec<g::TypeNode> {
         }),
         K::Object(g::ObjectNode {
             members: vec![g::ObjectMember {
-                name_id: 1,
-                name_kind: g::MemberNameKind::Identifier as i32,
                 value_node_id: 0,
                 optional: false,
                 readonly: true,
                 accessibility: g::Accessibility::Public as i32,
                 static_side: false,
                 declaration_symbol_id: 2,
+                property_key: Some(g::PropertyKey {
+                    key: Some(verter_protocol::verter::v1::graph_property_key::Key::StringId(1)),
+                }),
+                member_kind: g::ObjectMemberKind::Property as i32,
+                has_implementation_body: false,
             }],
             index_signatures: vec![g::IndexSignature {
                 key_kind: g::IndexKeyKind::String as i32,
@@ -806,12 +810,139 @@ fn build_every_type_node_variant() -> Vec<g::TypeNode> {
             cycle_root_node_id: 0,
             participants: vec![22],
         }),
+        K::ObjectSpreadProgram(g::ObjectSpreadProgramNode {
+            effects: vec![
+                g::ObjectConstructionEffect {
+                    kind: Some(
+                        verter_protocol::verter::v1::graph_object_construction_effect::Kind::DirectProperty(
+                            g::ObjectNamedEffect {
+                                property_key: Some(g::PropertyKey {
+                                    key: Some(
+                                        verter_protocol::verter::v1::graph_property_key::Key::ComputedNodeId(4),
+                                    ),
+                                }),
+                                value_node_id: 5,
+                                optional: true,
+                                readonly: true,
+                                has_implementation_body: false,
+                                accessibility: g::Accessibility::Protected as i32,
+                                spans: Some(g::ObjectMemberSpans {
+                                    declaration: Some(g::SpanRef {
+                                        canonical_id: "/a.ts".to_string(),
+                                        start: 1,
+                                        end: 9,
+                                    }),
+                                    name: Some(g::SpanRef {
+                                        canonical_id: "/a.ts".to_string(),
+                                        start: 1,
+                                        end: 2,
+                                    }),
+                                    type_annotation: Some(g::SpanRef {
+                                        canonical_id: "/a.ts".to_string(),
+                                        start: 4,
+                                        end: 9,
+                                    }),
+                                }),
+                                declaration_origin_name_id: 3,
+                                has_declaration_origin: true,
+                                declared_in_macro_type_arg: true,
+                                merge_role: g::ObjectMergeRole::OwnBody as i32,
+                                excess_origin: g::ObjectExcessOrigin::FreshOwn as i32,
+                            },
+                        ),
+                    ),
+                },
+                object_named_effect(
+                    verter_protocol::verter::v1::graph_object_construction_effect::Kind::DirectMethod,
+                    6,
+                ),
+                object_named_effect(
+                    verter_protocol::verter::v1::graph_object_construction_effect::Kind::DirectGet,
+                    7,
+                ),
+                object_named_effect(
+                    verter_protocol::verter::v1::graph_object_construction_effect::Kind::DirectSet,
+                    8,
+                ),
+                g::ObjectConstructionEffect {
+                    kind: Some(
+                        verter_protocol::verter::v1::graph_object_construction_effect::Kind::DirectIndex(
+                            g::ObjectIndexEffect {
+                                key_type_node_id: 9,
+                                value_type_node_id: 10,
+                                readonly: true,
+                                spans: Some(g::ObjectIndexSpans {
+                                    declaration: None,
+                                    key: Some(g::SpanRef {
+                                        canonical_id: "/a.ts".to_string(),
+                                        start: 10,
+                                        end: 12,
+                                    }),
+                                    value: None,
+                                }),
+                                declaration_origin_name_id: 3,
+                                has_declaration_origin: true,
+                            },
+                        ),
+                    ),
+                },
+                g::ObjectConstructionEffect {
+                    kind: Some(
+                        verter_protocol::verter::v1::graph_object_construction_effect::Kind::DirectCall(
+                            g::ObjectSignatureEffect { signature_node_id: 11 },
+                        ),
+                    ),
+                },
+                g::ObjectConstructionEffect {
+                    kind: Some(
+                        verter_protocol::verter::v1::graph_object_construction_effect::Kind::DirectConstruct(
+                            g::ObjectSignatureEffect { signature_node_id: 12 },
+                        ),
+                    ),
+                },
+                g::ObjectConstructionEffect {
+                    kind: Some(
+                        verter_protocol::verter::v1::graph_object_construction_effect::Kind::Spread(
+                            g::ObjectSpreadEffect { operand_node_id: 13 },
+                        ),
+                    ),
+                },
+            ],
+        }),
     ];
 
     kinds
         .into_iter()
         .map(|k| g::TypeNode { kind: Some(k) })
         .collect()
+}
+
+fn object_named_effect(
+    constructor: fn(
+        g::ObjectNamedEffect,
+    ) -> verter_protocol::verter::v1::graph_object_construction_effect::Kind,
+    value_node_id: u32,
+) -> g::ObjectConstructionEffect {
+    g::ObjectConstructionEffect {
+        kind: Some(constructor(g::ObjectNamedEffect {
+            property_key: Some(g::PropertyKey {
+                key: Some(
+                    verter_protocol::verter::v1::graph_property_key::Key::StringId(value_node_id),
+                ),
+            }),
+            value_node_id,
+            optional: false,
+            readonly: false,
+            has_implementation_body: true,
+            accessibility: g::Accessibility::Public as i32,
+            spans: None,
+            declaration_origin_name_id: 0,
+            has_declaration_origin: false,
+            declared_in_macro_type_arg: false,
+            merge_role: g::ObjectMergeRole::Authored as i32,
+            excess_origin: g::ObjectExcessOrigin::NonLiteral as i32,
+        })),
+    }
 }
 
 fn build_every_structured_type_expression_variant() -> Vec<g::StructuredTypeExpression> {
@@ -853,11 +984,17 @@ fn build_every_structured_type_expression_variant() -> Vec<g::StructuredTypeExpr
         })),
         K::ObjectLiteral(g::ExprObject {
             members: vec![g::ObjectMemberExpr {
-                name: "x".to_string(),
-                name_kind: g::MemberNameKind::Identifier as i32,
                 value: Some(prim_string_expr()),
                 optional_member: false,
                 readonly: false,
+                property_key: Some(g::PropertyKeyExpr {
+                    key: Some(
+                        verter_protocol::verter::v1::property_key_expr::Key::StringValue(
+                            "x".to_string(),
+                        ),
+                    ),
+                }),
+                member_kind: g::ObjectMemberKind::Property as i32,
             }],
             index_signatures: vec![],
             call_signatures: vec![],

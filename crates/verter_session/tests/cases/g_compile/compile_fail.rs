@@ -311,3 +311,17 @@ fn instantiate_key_shape_is_sealed_against_forgery_and_extraction() {
     t.compile_fail("tests/cases/compile-fail/instantiate_key_seal_no_features.rs");
     t.compile_fail("tests/cases/compile-fail/instantiate_key_context_not_extractable.rs");
 }
+
+/// Ordinary object-projection evidence is positive-only by type. It cannot
+/// call exact-domain operations, and downstream code cannot mint either
+/// closed witness by struct literal.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn object_projection_complete_domain_is_witness_only() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/object_projection_witness_only.rs");
+    t.compile_fail("tests/cases/compile-fail/object_projection_witness_not_forgeable.rs");
+}
