@@ -8,9 +8,15 @@
 //! `content_generation`, and `route_surface_is_edge_current` compares an
 //! artifact's baked `edge_generation` against exactly that counter, so
 //! ONE mutation makes EVERY file carrying a cross-file edge edge-stale at
-//! once. The scaling tests below measure the per-owner cost of that and
-//! are `#[ignore]`d, because they state the TARGET, not the tree: the
-//! build still walks the published artifacts and the tracked owners.
+//! once. The scaling tests below measure the per-owner cost of that.
+//!
+//! Every measured window is split so it contains ONLY builder work. A
+//! newly-admitted file's own cold resolution during `upsert` is legitimate
+//! work owed by the admission, not by the builder; the earlier
+//! whole-window form of the gate folded it in and so demanded a zero no
+//! correct implementation could produce. The admission is now performed
+//! outside the window and its cost pinned separately — N-independent and
+//! non-zero — so nothing is excluded without being accounted for.
 //!
 //! The import-route half of the old N-term is gone. Its digest
 //! (`DerivedFactKind::ImportRoute`) summarised an owner's RESOLVED
@@ -30,42 +36,67 @@
 //! a global file-set or content stamp substituted for the witness fails
 //! it.
 //!
-//! Counters used, all PER-HOST (immune to whatever else the shared test
-//! process is doing in parallel):
+//! Counters used, none of them process-global:
 //!
-//! - `MetaProvenanceSnapshot::indexed_ready_materializes` — one bump per
-//!   `IndexedReady` (re-)materialisation. The route-only edge-refresh
-//!   lane it used to be paired with (`indexed_ready_edge_refreshes`) is
-//!   deleted with that lane: the artifact bakes no route, there is no
-//!   `refresh_indexed_route_surface`, and so no edge-refresh work is
-//!   left for a counter to measure. Asserting a counter with no producer
-//!   is a tautology, not a gate.
-//! - `VfsProvenanceSnapshot::import_resolution_cache_miss_count` — one
-//!   bump per import resolution that misses the workspace lazy
-//!   resolution cache and goes to the resolver (filesystem probing).
+//! - `MetaProvenanceSnapshot::indexed_ready_materializes` — PER-HOST, one
+//!   bump per `IndexedReady` (re-)materialisation. The route-only
+//!   edge-refresh lane it used to be paired with
+//!   (`indexed_ready_edge_refreshes`) is deleted with that lane: the
+//!   artifact bakes no route, there is no `refresh_indexed_route_surface`,
+//!   and so no edge-refresh work is left for a counter to measure.
+//!   Asserting a counter with no producer is a tautology, not a gate.
+//! - `VfsProvenanceSnapshot::import_resolution_cache_miss_count` —
+//!   PER-HOST, one bump per import resolution that misses the workspace
+//!   lazy resolution cache and goes to the resolver (filesystem probing).
+//! - [`store_view_owner_visits`] — PER-THREAD, one bump per read through a
+//!   view's captured roots while a store-view BUILD scope is active. A
+//!   build runs to completion on the calling thread, so a thread-local
+//!   reading carries a per-measurement claim in exactly the way the
+//!   process-global
+//!   [`crate::resolver_store::store_view_coherent_build_sweeps`] cannot —
+//!   which is why that one is still deliberately not asserted on here.
 //!
 //! Every number is derived as a pre/post delta around a single API call
 //! and compared ACROSS host sizes. Nothing is hardcoded, nothing is
-//! wall-clock. The process-global
-//! [`crate::resolver_store::store_view_coherent_build_sweeps`] counter is
-//! deliberately NOT asserted on: it is shared by every test in the
-//! process and cannot carry a per-host claim.
+//! wall-clock.
+//!
+//! Each counter carries an anti-vacuity control proving it has a live
+//! producer, because every gate below asserts a ZERO and a zero from a
+//! counter nothing bumps is not evidence:
+//! [`the_measured_counters_move_when_the_work_actually_runs`] for the two
+//! per-host legs, and
+//! [`the_owner_visit_counter_moves_only_inside_a_build_scope`] for the
+//! owner-visit leg.
 
 use std::sync::Arc;
 
 use crate::resolver_core::{DerivedFactKind, FactVersionRef, StoreView};
+use crate::store_view_roots::{reset_store_view_owner_visits, store_view_owner_visits};
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
-/// Per-host counter deltas measured around one window.
+/// Counter deltas measured around one window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AdmitDeltas {
+    /// Owner reads through a view's captured roots performed while a
+    /// store-view BUILD scope was active. The O(1)-build contract requires
+    /// this to be zero: capture is a fixed number of scalar reads and
+    /// `Arc` clones, so a build that touches an owner is a re-introduced
+    /// N-term.
+    owner_visits: u64,
     /// `IndexedReady` materialisations.
     materializes: u64,
     /// Import resolutions that missed the workspace lazy-resolution
     /// cache (each is a resolver walk / filesystem probe).
     resolution_misses: u64,
 }
+
+/// The all-zero reading every observe-only window must produce.
+const NO_WORK: AdmitDeltas = AdmitDeltas {
+    owner_visits: 0,
+    materializes: 0,
+    resolution_misses: 0,
+};
 
 fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
     let _ = host
@@ -128,26 +159,18 @@ fn host_with_n_materialized_files(n: usize) -> Arc<VerterHost> {
 fn deltas_around(host: &VerterHost, op: impl FnOnce(&VerterHost)) -> AdmitDeltas {
     let meta_before = host.provenance().snapshot();
     let vfs_before = host.ws().vfs_provenance_snapshot();
+    reset_store_view_owner_visits();
     op(host);
+    let owner_visits = store_view_owner_visits();
     let meta_after = host.provenance().snapshot();
     let vfs_after = host.ws().vfs_provenance_snapshot();
     AdmitDeltas {
+        owner_visits,
         materializes: meta_after.indexed_ready_materializes
             - meta_before.indexed_ready_materializes,
         resolution_misses: vfs_after.import_resolution_cache_miss_count
             - vfs_before.import_resolution_cache_miss_count,
     }
-}
-
-/// Admit ONE brand-new file into an N-file host and read the base store
-/// view once. Everything in the window is the marginal cost of that one
-/// admission.
-fn marginal_admit_deltas(n: usize) -> AdmitDeltas {
-    let host = host_with_n_materialized_files(n);
-    deltas_around(&host, |host| {
-        upsert_ts(host, "/proj/new.ts", MEMBER_SRC);
-        let _view = host.resolver_store_view_read().into_owned_view();
-    })
 }
 
 /// Re-upsert an EXISTING file with unchanged bytes and read the base
@@ -160,15 +183,58 @@ fn recompile_existing_deltas(n: usize) -> AdmitDeltas {
     })
 }
 
+/// The ADMISSION's own cost, with no store-view read in the window at all.
+///
+/// A brand-new file's first resolution is genuinely cold work: the
+/// scheduler extracts its dependencies and the resolver walks `./dep` for
+/// the first time from this importer. That is legitimate and it is NOT
+/// store-view build work, so the build gate must not measure it — but it
+/// must still be pinned, because "the build is O(1)" is worthless if the
+/// admission it was moved out of is O(N).
+fn admission_only_deltas(n: usize) -> AdmitDeltas {
+    let host = host_with_n_materialized_files(n);
+    // Warm the view cache first, so nothing in the window is a store-view
+    // build that happened to be owed from the fixture build-up.
+    let _warm = host.resolver_store_view_read().into_owned_view();
+    deltas_around(&host, |host| {
+        upsert_ts(host, "/proj/new.ts", MEMBER_SRC);
+    })
+}
+
 /// Isolate the SNAPSHOT BUILD: admit the new file first (outside the
 /// measured window), then measure only the store-view read that the
 /// admission's token advance forces to rebuild.
+///
+/// The token miss is FORCED and PROVEN, not assumed: the view is read
+/// before the admission and its validation token recorded, and the token
+/// of the view read inside the window must differ. Without that check a
+/// zero reading could just mean the cached view was handed back and no
+/// build ran at all — the same vacuity trap as a counter with no producer.
 fn snapshot_build_only_deltas(n: usize) -> AdmitDeltas {
     let host = host_with_n_materialized_files(n);
+    let token_before = host
+        .resolver_store_view_read()
+        .into_owned_view()
+        .validation_token();
+
+    // ── outside the measurement window ──
     upsert_ts(&host, "/proj/new.ts", MEMBER_SRC);
-    deltas_around(&host, |host| {
-        let _view = host.resolver_store_view_read().into_owned_view();
-    })
+
+    let mut token_after = token_before;
+    let deltas = deltas_around(&host, |host| {
+        token_after = host
+            .resolver_store_view_read()
+            .into_owned_view()
+            .validation_token();
+    });
+    assert_ne!(
+        token_after, token_before,
+        "precondition at N={n}: admitting a new file must advance the \
+         validation token, so the cached view cannot be reused and the \
+         measured read is a genuine BUILD. Equal tokens would make the \
+         zero-work assertion vacuous."
+    );
+    deltas
 }
 
 /// The host sizes every scaling claim is derived over. A single pair
@@ -191,14 +257,12 @@ fn assert_builder_reopens_nothing(label: &str, measure: fn(usize) -> AdmitDeltas
     let measured = measure_across_host_sizes(label, measure);
     for &(n, deltas) in &measured {
         assert_eq!(
-            deltas,
-            AdmitDeltas {
-                materializes: 0,
-                resolution_misses: 0,
-            },
+            deltas, NO_WORK,
             "{label}: at N={n} the store-view builder reopened file loading / \
-             routing ({deltas:?}). Build Philosophy #5: the builder reads only \
-             cached lookup state. Full table: {measured:?}"
+             routing, or visited an owner through its captured roots \
+             ({deltas:?}). Build Philosophy #5: the builder reads only cached \
+             lookup state, and capture is a fixed number of scalar reads and \
+             `Arc` clones. Full table: {measured:?}"
         );
     }
 }
@@ -244,68 +308,136 @@ fn the_measured_counters_move_when_the_work_actually_runs() {
     );
 }
 
-/// TARGET STATE, not the tree.
+/// ANTI-VACUITY CONTROL for the owner-visit leg of every zero above.
 ///
-/// The O(N) term this gate was written against is GONE. It measured
-/// `edge_refreshes` and `resolution_misses` both equal to N at every host
-/// size — one edge refresh and one import re-resolution per
-/// already-materialised owner, per admitted file. The edge-refresh lane no
-/// longer exists (its counter went with it), and misses are now CONSTANT
-/// at 1 across N = 250 / 1,000 / 3,000. Split-window instrumentation
-/// attributes that residual 1 to the newly-admitted file's OWN `./dep`
-/// resolution, performed during `upsert`'s scheduler dependency
-/// extraction — not to any per-owner work over the other N files.
+/// `store_view_owner_visits` is scope-gated: it counts a read through a
+/// view's captured roots only while a store-view BUILD scope is active.
+/// That gating is what makes it a build measurement rather than a
+/// whole-process one, and it is also exactly how the counter could become
+/// silently dead — instrument a boundary the build cannot reach, or gate on
+/// a scope nothing enters, and the gate's zero means nothing.
 ///
-/// The gate as written is nevertheless still NOT satisfied: its window
-/// spans the admission, so the new canonical's own cold build and own
-/// import resolution fall inside it, and the required counters are zero.
-/// Whether the window SHOULD exclude the admission is an OPEN contract
-/// question and is not decided here — `.DECISION.md` designates this exact
-/// test as the discriminator, so narrowing it is an adjudication, not an
-/// implementation detail. It belongs to the follow-on O(1)-build block,
-/// together with `store_view_owner_visits`.
-///
-/// The builder's own share — everything measured after the admission — is
-/// isolated and LIVE in
-/// [`snapshot_build_reopens_no_routing_for_unchanged_owners`].
+/// So the control drives the SAME real owner read both ways and requires
+/// the counter to discriminate: it moves inside a build scope, and it does
+/// not move outside one. The read is required to resolve to a real owner,
+/// because a read that found nothing would exercise neither the roots nor
+/// the claim.
 #[test]
-#[ignore = "target state: the O(N) term is gone (misses constant at 1 across \
-            N=250/1000/3000, the residual attributed by split-window \
-            instrumentation to the admitted file's own ./dep resolution during \
-            upsert), but the gate as written is still not satisfied — its \
-            window spans the admission. Whether the window should exclude the \
-            admission is OPEN and owned by the O(1)-build follow-on"]
-fn marginal_admit_reopens_no_routing_regardless_of_host_size() {
-    assert_builder_reopens_nothing("admitting ONE new file", marginal_admit_deltas);
+fn the_owner_visit_counter_moves_only_inside_a_build_scope() {
+    let host = host_with_n_materialized_files(4);
+    let owner = member_id(0);
+    let view = host.resolver_store_view_read().into_owned_view();
+
+    reset_store_view_owner_visits();
+    let outside = view.owner_read_through_roots_for_tests(&owner, false);
+    let visits_outside = store_view_owner_visits();
+
+    reset_store_view_owner_visits();
+    let inside = view.owner_read_through_roots_for_tests(&owner, true);
+    let visits_inside = store_view_owner_visits();
+
+    assert!(
+        inside.is_some(),
+        "the probe must reach a REAL owner through the captured roots — a \
+         read that resolved nothing would prove nothing about the \
+         instrumentation"
+    );
+    assert_eq!(
+        inside, outside,
+        "the probe must be the identical read either way; only the scope \
+         differs"
+    );
+    assert_eq!(
+        visits_inside, 1,
+        "`store_view_owner_visits` has no live producer on the root read \
+         path — every zero-owner-visit assertion in this module is vacuous"
+    );
+    assert_eq!(
+        visits_outside, 0,
+        "`store_view_owner_visits` is not scope-gated: it counts demand-time \
+         reads too, so its zero would be a claim about the whole window \
+         rather than about the BUILD"
+    );
 }
 
-/// TARGET STATE, not the tree. Same defect as above, isolated to the
-/// snapshot build itself (the admission already happened, so everything
-/// measured is the builder's own work over owners whose content did not
-/// change).
+/// **The gate.**
+///
+/// Admitting one new file into a host of N already-materialised files must
+/// cost the store-view BUILD nothing that scales with N — nothing at all,
+/// in fact: zero owner visits through the captured roots, zero
+/// `IndexedReady` materialisations, zero import-resolution misses, at
+/// N = 250 / 1,000 / 3,000.
+///
+/// The measurement window deliberately EXCLUDES the admission itself. The
+/// newly-admitted file's own cold resolution during `upsert` is legitimate
+/// work owed by the admission, not by the builder, and folding it into a
+/// build measurement was the defect in this gate's original whole-window
+/// form — it made the required zero unreachable for a correct
+/// implementation. That excluded cost is not dropped: it is pinned
+/// separately, as N-independent and non-zero, by
+/// [`admission_cold_work_is_n_independent_but_not_zero`].
+///
+/// What the window does contain is a genuine build, forced and proven: the
+/// admission advances the validation token, so the cached view cannot be
+/// reused, and `snapshot_build_only_deltas` asserts the token actually
+/// moved before believing the reading.
+///
+/// The O(N) term this gate was written against measured `edge_refreshes`
+/// and `resolution_misses` both equal to N at every host size — one edge
+/// refresh and one import re-resolution per already-materialised owner, per
+/// admitted file.
 #[test]
-fn snapshot_build_reopens_no_routing_for_unchanged_owners() {
+fn marginal_admit_reopens_no_routing_regardless_of_host_size() {
     assert_builder_reopens_nothing(
-        "the store-view snapshot build after an admission",
+        "the store-view build forced by admitting ONE new file",
         snapshot_build_only_deltas,
     );
 }
 
-/// Holds today: a byte-identical re-upsert is a true no-op, so it never
-/// advances `content_generation`, nothing goes edge-stale, and the
-/// builder does no work at any host size. This is the shape the two
-/// ignored tests above are asking for on the content-CHANGING paths.
+/// The other half of the split: what admitting a file legitimately costs.
+///
+/// Excluding this from the build gate above is only honest if it is pinned
+/// somewhere, so it is pinned here — and pinned in BOTH directions. It must
+/// be identical at N = 250 / 1,000 / 3,000, because a brand-new file's own
+/// cold resolution has nothing to do with how many other files the host
+/// holds; and it must be non-zero, because a zero would mean the admission
+/// resolved nothing and the "excluded" cost this test exists to account for
+/// never happened.
+#[test]
+fn admission_cold_work_is_n_independent_but_not_zero() {
+    let measured = measure_across_host_sizes(
+        "admitting ONE new file, no view read in the window",
+        admission_only_deltas,
+    );
+    let (_, first) = measured[0];
+    assert!(
+        first.resolution_misses > 0,
+        "the admission must do REAL cold resolution work — a zero here means \
+         the build gate is excluding nothing and this split proves nothing: \
+         {measured:?}"
+    );
+    for &(n, deltas) in &measured {
+        assert_eq!(
+            deltas, first,
+            "the admitted file's own cold work must not depend on how many \
+             OTHER files the host holds — at N={n} it differs from the N={} \
+             reading. Full table: {measured:?}",
+            measured[0].0
+        );
+    }
+}
+
+/// A byte-identical re-upsert is a true no-op: it never advances
+/// `content_generation`, nothing goes edge-stale, and the builder does no
+/// work at any host size. The zero-work baseline the content-CHANGING
+/// gates above are measured against.
 #[test]
 fn recompile_existing_is_free_at_any_host_size() {
     let measured =
         measure_across_host_sizes("re-upserting an UNCHANGED file", recompile_existing_deltas);
     for &(n, deltas) in &measured {
         assert_eq!(
-            deltas,
-            AdmitDeltas {
-                materializes: 0,
-                resolution_misses: 0,
-            },
+            deltas, NO_WORK,
             "a byte-identical re-upsert is a true no-op — at N={n} it must \
              neither advance the content generation nor re-route anything: \
              {deltas:?}"

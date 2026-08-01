@@ -16183,30 +16183,36 @@ fn fn_body_span(src: &str, fn_name: &str) -> (usize, usize) {
     panic!("guard anchor moved: unbalanced braces in `fn {fn_name}`");
 }
 
-/// STRUCTURAL guard for the augmentation-index under-invalidation class.
+/// STRUCTURAL guard for the augmentation-index under-invalidation class
+/// AND the artifact retention lease.
 ///
-/// Every path that drops an entry from `self.artifacts` in
-/// `file_artifact_store.rs` MUST route through the single removal
-/// chokepoint `evict_artifact_keys`, which is the only site allowed to
+/// Every path that removes an entry from `self.artifacts` in
+/// `file_artifact_store.rs` MUST route through the single retirement
+/// chokepoint `retire_artifact_keys`, which is the only site allowed to
 /// call `self.artifacts.remove(...)` / `.retain(...)` / `.drain(...)` /
-/// `.swap_remove(...)` / `.pop(...)`. The chokepoint always collects the
-/// removed entries' augmentation facts and feeds them to
-/// `invalidate_augmentation_index_for_augmenter`, so it is impossible by
-/// construction to evict an artifact while leaving a stale `AugmenterSet`
-/// behind. The single exception is the whole-store reset
-/// `self.artifacts.clear()` in `evict_if_schema_mismatch`, which is paired
-/// with `self.augmentation_index.clear()` in the same method (the
-/// strongest possible invalidation).
+/// `.swap_remove(...)` / `.pop(...)` / `.clear(...)`. The chokepoint
+/// always (a) moves the removed version into the retired chain under a
+/// fresh membership epoch, so no `FileArtifactRoot` loses reachability
+/// to a world it captured, and (b) collects the removed entries'
+/// augmentation facts and feeds them to the index invalidation under
+/// that SAME epoch. Both are therefore impossible to bypass by
+/// construction.
 ///
-/// This closes the class as a compile-time invariant: a 3rd, 4th, … future
-/// removal site that bypasses the chokepoint fails this guard instead of
-/// silently reintroducing the round-6 P1 bug.
+/// `self.artifacts.clear()` has NO exception any more: a whole-store
+/// reset (the schema-mismatch path) is a retirement like every other
+/// removal — clearing the map would free versions a live root still
+/// addresses. That is a STRENGTHENING of the previous contract, where
+/// the schema reset was allowed to clear the map outright.
+///
+/// This closes both classes as compile-time invariants: a 3rd, 4th, …
+/// future removal site that bypasses the chokepoint fails this guard
+/// instead of silently reintroducing the round-6 P1 under-invalidation
+/// bug or silently revoking a captured root's lease.
 #[test]
 fn artifact_removal_routes_through_single_chokepoint() {
     let src = read_workspace_file("crates/verter_session/src/file_artifact_store.rs");
 
-    let (choke_start, choke_end) = fn_body_span(&src, "evict_artifact_keys");
-    let (schema_start, schema_end) = fn_body_span(&src, "evict_if_schema_mismatch");
+    let (choke_start, choke_end) = fn_body_span(&src, "retire_artifact_keys");
 
     // Mutating-removal operations that drop entries from the map.
     let removal_ops = [
@@ -16215,6 +16221,7 @@ fn artifact_removal_routes_through_single_chokepoint() {
         "self.artifacts.drain(",
         "self.artifacts.swap_remove(",
         "self.artifacts.pop(",
+        "self.artifacts.clear(",
     ];
     for op in removal_ops {
         let mut search_from = 0usize;
@@ -16224,48 +16231,70 @@ fn artifact_removal_routes_through_single_chokepoint() {
             let inside_chokepoint = at >= choke_start && at < choke_end;
             assert!(
                 inside_chokepoint,
-                "`{op}` at byte {at} is OUTSIDE the `evict_artifact_keys` \
+                "`{op}` at byte {at} is OUTSIDE the `retire_artifact_keys` \
                  chokepoint (bytes {choke_start}..{choke_end}). Every \
                  `self.artifacts` removal MUST route through that chokepoint so \
-                 the augmentation index is invalidated for the removed \
-                 augmenters — otherwise a stale `AugmenterSet` survives an \
+                 (a) the removed version is RETIRED rather than freed — a live \
+                 `FileArtifactRoot` must keep reaching the world it captured — \
+                 and (b) the augmentation index is invalidated for the removed \
+                 augmenters, else a stale `AugmenterSet` survives an \
                  artifact-only eviction (round-6 P1 under-invalidation class). \
-                 Route this removal through `evict_artifact_keys` / \
+                 Route this removal through `retire_artifact_keys` / \
                  `drop_artifact_entry`."
             );
         }
     }
 
-    // `self.artifacts.clear()` is only allowed in the schema-mismatch
-    // whole-store reset, which clears the augmentation index in the same
-    // method.
-    let clear_op = "self.artifacts.clear(";
-    let mut search_from = 0usize;
-    while let Some(rel) = src[search_from..].find(clear_op) {
-        let at = search_from + rel;
-        search_from = at + clear_op.len();
-        let inside_schema_reset = at >= schema_start && at < schema_end;
-        assert!(
-            inside_schema_reset,
-            "`{clear_op}` at byte {at} is OUTSIDE `evict_if_schema_mismatch` \
-             (bytes {schema_start}..{schema_end}). A whole-store clear must be \
-             paired with `self.augmentation_index.clear()` in that method; any \
-             other `self.artifacts.clear()` would orphan the augmentation index."
-        );
-    }
+    // The chokepoint must actually retain AND invalidate — not a
+    // vacuous wrapper in either direction.
+    let choke_body = &src[choke_start..choke_end];
     assert!(
-        src[schema_start..schema_end].contains("self.augmentation_index.clear("),
-        "the `evict_if_schema_mismatch` whole-store reset MUST clear the \
-         augmentation index in the same method, else the clear orphans a \
-         stale index."
+        choke_body.contains("invalidate_augmentation_index_at_epoch"),
+        "`retire_artifact_keys` MUST call \
+         `invalidate_augmentation_index_at_epoch` — the chokepoint exists \
+         precisely to make removal and index-invalidation inseparable, under \
+         ONE membership epoch."
     );
-
-    // The chokepoint must actually invalidate — not a vacuous wrapper.
+    let publish_call = choke_body.find("self.publish_retired_version(");
     assert!(
-        src[choke_start..choke_end].contains("invalidate_augmentation_index_for_augmenter"),
-        "`evict_artifact_keys` MUST call \
-         `invalidate_augmentation_index_for_augmenter` — the chokepoint exists \
-         precisely to make removal and index-invalidation inseparable."
+        publish_call.is_some(),
+        "`retire_artifact_keys` MUST move the removed version into the \
+         retired chain (via `publish_retired_version`) — a removal that frees \
+         the payload revokes the lease every live `FileArtifactRoot` holds on \
+         its captured world."
+    );
+    // PUBLISH BEFORE RETRACT. A version MOVES between two maps and a
+    // root-relative reader consults them in sequence holding neither, so
+    // retracting first opens a window where the version is in NEITHER —
+    // and the first-writer-wins `CanonicalView` memo freezes that
+    // never-existed world into every request the racing view serves.
+    let remove_call = choke_body
+        .find("self.artifacts.remove(")
+        .expect("the chokepoint performs the removal");
+    assert!(
+        publish_call.is_some_and(|publish| publish < remove_call),
+        "`retire_artifact_keys` MUST publish the retired version BEFORE it \
+         removes the live entry — the reverse order lets a concurrent \
+         root-relative read find the version in neither map."
+    );
+    assert!(
+        choke_body.contains("reserve_membership_epoch"),
+        "`retire_artifact_keys` MUST reserve a retirement epoch, else the \
+         retired version has no visibility window and no root can address it."
+    );
+    // The reservation must outlive the application: releasing it before
+    // the last mutation lands would let a capture name a half-applied
+    // epoch.
+    let reserve_at = choke_body
+        .find("reserve_membership_epoch")
+        .expect("checked above");
+    let release_at = choke_body
+        .find("drop(reservation)")
+        .expect("`retire_artifact_keys` MUST release its epoch reservation");
+    assert!(
+        reserve_at < remove_call && remove_call < release_at,
+        "the epoch reservation MUST span the whole application — a capture \
+         may never name an epoch whose mutation is still in flight."
     );
 }
 

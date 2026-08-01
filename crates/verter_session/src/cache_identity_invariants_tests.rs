@@ -1263,3 +1263,90 @@ fn route_export_resolution_terminates_on_barrel_cycle() {
         "cycle traversal must read each canonical a bounded number of times",
     );
 }
+
+/// A sealed view's artifact-only authority gate reads LIVE state
+/// (`derived_raw_cache` presence, `file_exists`) that no O(1) capture can
+/// freeze per canonical. Those reads are only sound while their outcome
+/// cannot be MORE permissive than the captured world — and on the
+/// `FileWholeHash` / `DirectSource` rail, an absent hash is ACCEPTED.
+///
+/// So a live withdrawal over a canonical the captured root still holds an
+/// artifact for must REJECT, not degrade into "untracked, therefore
+/// fine". Deleting the file after capture turns `file_exists` false; the
+/// view then has no hash for a canonical it demonstrably knew about, and
+/// every stale recorded hash for it would otherwise validate.
+///
+/// The window exists only because per-canonical answers are now derived
+/// on demand: a view that copied its `whole_hashes` map at build time had
+/// an immutable tracked/untracked classification for its whole life.
+#[test]
+fn a_withdrawn_artifact_only_canonical_rejects_instead_of_accepting_a_stale_hash() {
+    use crate::resolver_core::{DerivedFactKind, FactVersionRef, StoreView};
+
+    let canonical = "/seeded/withdrawn.d.ts";
+    let never_seen = "/seeded/never_seen.d.ts";
+    let ws = StdArc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    ws.inject_file(canonical.to_string(), Arc::from("export type W = 1;"));
+    let host = VerterHost::new(
+        HostConfig::default(),
+        StdArc::clone(&ws) as StdArc<dyn WorkspaceAccess>,
+    );
+    let seeded = seed_artifact_only(&host, canonical);
+    let stale_hash = [0xEEu8; 16];
+    assert_ne!(
+        seeded.whole_hash, stale_hash,
+        "precondition: the stale recorded hash must differ from the live one"
+    );
+
+    // Capture the view while the file is present — and do NOT resolve the
+    // canonical through it yet, so the withdrawal happens before its
+    // first lookup.
+    let view = host
+        .resolver_store_view_read()
+        .into_cold_seed_view()
+        .into_inner();
+
+    // The file disappears after capture.
+    ws.remove_file(canonical);
+
+    assert!(
+        !StoreView::validates(
+            &view,
+            &FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_string(),
+                hash: stale_hash,
+            }
+        ),
+        "a canonical whose artifact-only authority WITHDREW its answer must \
+         reject a recorded hash — the view knew this canonical, so an \
+         unconfirmable hash is stale, not new"
+    );
+    assert!(
+        !StoreView::validates(
+            &view,
+            &FactVersionRef::DerivedFactHash {
+                canonical_id: canonical.to_string(),
+                kind: DerivedFactKind::DirectSource,
+                hash: stale_hash,
+            }
+        ),
+        "the DirectSource rail is a content-hash alias for FileWholeHash and \
+         must reject identically"
+    );
+
+    // Discrimination: a canonical this view NEVER held keeps the
+    // optimistic accept. Otherwise the rejection above would just be a
+    // blanket "reject everything absent", which would force every
+    // dependency loaded after the snapshot through a cold recheck.
+    assert!(
+        StoreView::validates(
+            &view,
+            &FactVersionRef::FileWholeHash {
+                canonical_id: never_seen.to_string(),
+                hash: stale_hash,
+            }
+        ),
+        "a genuinely untracked dependency — no artifact at the captured root \
+         at all — must still be accepted optimistically"
+    );
+}

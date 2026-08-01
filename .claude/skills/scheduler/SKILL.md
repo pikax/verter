@@ -829,6 +829,60 @@ Under Block 7, `submit_batch(reqs: Vec<Request>)` becomes a thin shim
 constructing a no-edge `CacheNodeDag` and calling `submit_dag`. On the
 current tree it loops over `submit_request` (see the surface table below).
 
+## MVCC source root (`source_root.rs`)
+
+`Scheduler.nodes` is EXECUTION state only: a `FileNode` holds its
+CURRENT `ArcSwap` snapshots, `bump_generation` makes the prior source
+immediately unreachable, and `node_ids()` is a full map walk. Beside it
+the scheduler owns `SchedulerSourceDirectory` — the epoch-indexed MVCC
+authority for what `try_get_source` LOGICALLY answers.
+
+```text
+SchedulerSourceRoot { visible_epoch, root_lease }
+canonical -> version history of
+    { epoch, incarnation, generation, Present(whole_hash) | Absent }
+```
+
+| Surface | Contract |
+|---|---|
+| `Scheduler::capture_source_root() -> Arc<SchedulerSourceRoot>` | O(1) in file count: one publication-lock acquisition, one scalar read, one lease bump. Measured 37 ns @250 files, 33 ns @3,000 (release). |
+| `SchedulerSourceRoot::lookup(canonical) -> SourceStateAt` | AS-OF, sealed to the root's epoch. `Unknown` / `Absent{incarnation,generation}` / `Present{…, whole_hash, semantic_hash}`. The root exposes NO path to the live directory. |
+| `SchedulerSourceDirectory::publish_transition(f)` | Runs the node mutation AND the version append under ONE publication hold. |
+| `SchedulerSourceDirectory::reclaim_superseded_versions()` | Root-gated GC; floor = oldest LIVE captured root capped by the current epoch. |
+
+Rules:
+
+- **Publication is atomic with the lifecycle transition.** The node
+  mutation happens INSIDE the `publish_transition` closure and
+  `capture_root` takes the same lock, so a capture is totally ordered
+  against every transition — never a torn `(node moved, root did not)`
+  pair. Publishing sites: `invalidate`, `close_file`, `remove`, `reset`
+  (ONE epoch for all removed members), the `handle_new_request`
+  source-update bump and language-replacement, and the Source-stage
+  commit in `execute_source_stage`. Node CREATION publishes nothing —
+  a fresh node has no source and an untracked canonical already reads
+  `Unknown`.
+- **The epoch ADDRESSES a snapshot, never validates a cache.** It is
+  not a `StoreViewValidationToken` dimension and must not become one.
+- **A root is a RETENTION LEASE.** GC may free a version only once it
+  is invisible from the current root AND from every live captured root
+  — the same reachability discipline `FileArtifactStore` applies to
+  artifact versions. `HostStoreView` captures one in its pre-build read
+  window and retains it by `Arc`.
+- **Lock rank:** `SchedulerDag` (outer) > source-root publication >
+  `nodes` / `versions` DashMap shards (inner). A publication may take a
+  DashMap shard; nothing takes the publication lock while holding one,
+  and nothing takes the DAG lock while holding the publication lock.
+- Write-path cost: one publication is 53-59 ns (release), taking
+  end-to-end `Scheduler::invalidate` from 53 ns to 103 ns.
+
+Contract tests: `crates/verter_scheduler/src/source_root_tests.rs`
+(as-of sealing, atomic publication, lease-gated reclamation, O(1)
+capture) and `crates/verter_session/src/source_root_retention_tests.rs`
+(the `HostStoreView` lease at the host boundary). Normative text:
+`docs/arch/path-precise-resolution-currency.md` → "An immutable root is
+also a retention lease".
+
 ## Scheduler surface (current → Block 7 planned)
 
 The right column is the Block 7 cache-runtime design target from

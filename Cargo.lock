@@ -4271,6 +4271,7 @@ dependencies = [
  "parking_lot",
  "rayon",
  "rustc-hash 2.1.2",
+ "smallvec",
  "verter_audit",
  "verter_language",
  "verter_span",

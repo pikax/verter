@@ -295,6 +295,8 @@ pub mod meta;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod runtime_render_lane_tests;
 
+#[cfg(test)]
+mod artifact_root_retention_tests;
 pub mod meta_resolve;
 #[cfg(test)]
 mod negative_import_route_tests;
@@ -326,9 +328,12 @@ pub mod session_view;
 mod shared;
 pub(crate) mod source_map_remap;
 #[cfg(test)]
+mod source_root_retention_tests;
+#[cfg(test)]
 mod store_view_manager_tests;
 #[cfg(test)]
 mod store_view_non_current_contract_tests;
+mod store_view_roots;
 pub(crate) mod structural_carrier_producer;
 pub(crate) mod template_convert;
 /// Test-only re-exports for integration tests in `tests/`.

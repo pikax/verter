@@ -891,9 +891,306 @@ travelled with the artifact. With every consumer resolving on demand, a
 session-bound consumer that resolved through the base host would make an
 overlay-only target disappear.
 
+## An immutable root is also a retention lease
+
+The retained-capture argument above generalises to EVERY StoreView
+validation authority, not just the resolution world: **an immutable root
+must both NAME state and KEEP that state reachable.** Content-addressing
+establishes identity, not lifetime and not immutable membership. A
+capture that records `(canonical, content_hash)` and nothing else names a
+world it cannot re-enter the moment the producer frees the artifact that
+pair addressed — which is exactly what a lazy `HostStoreView` capture
+must not do.
+
+The rule is per-AUTHORITY, not per-store: **every dimension a StoreView
+can validate against requires a captured versioned root**, or the view
+answers that dimension from live state and silently validates a
+post-mutation fact against a pre-mutation world. The six are:
+
+| Validation authority | Captured root |
+|---|---|
+| Scheduler source state (a canonical's tracked whole hash) | `SchedulerSourceRoot` |
+| Artifact membership (`FileFacts`, `Route` digest) | `FileArtifactRoot` |
+| Source-env / project selection | `ProjectEnvRoot` (env bundle + published project graph) |
+| Augmentation membership | `FileArtifactRoot` (the index is versioned on the same root) |
+| Session overlays | `SessionOverlayRoot` |
+| Resolution facts | `CapturedResolutionWorld` |
+
+`ResolvedImportFactsDb` and `RouteDb` are the deliberate non-roots: they
+stay LIVE candidate stores, because every candidate they return is
+admitted only after `ReadSetSignature` validation through the six roots
+above. A live handle is sound for a candidate in a way it is never sound
+for an answer.
+
+The artifact half of that contract is landed. `FileArtifactStore` owns a
+`FileArtifactRoot`: an epoch-indexed MVCC root over three versioned
+membership domains — exact artifact keys, the canonical→keys index, and
+augmentation-index keys. Insertion assigns a BIRTH epoch; logical
+removal assigns a RETIREMENT epoch; a root at `epoch` sees a version iff
+`birth <= epoch < retirement`. `HostStoreView` captures one root in its
+pre-build read window (`PreBuildTokenInputs`) and retains it by `Arc`.
+
+**Physical reclamation is legal only when the entry is invisible from
+(a) the current artifact root AND (b) every live root captured by a
+StoreView, session or request.** That is the complete reachability
+rule. `FileArtifactStore` owns root publication, the live-root registry
+and reclamation; `ProjectTypeStore` may REQUEST a GC sweep, and that
+request carries no reachability information — `live_publish_set` names
+the current world's live content and knows nothing about captured roots.
+
+Three rules were unsound against this contract and are fixed: the legacy
+per-canonical insert drained prior versions physically, the fixed
+per-canonical retention cap could discard a PINNED version, and the
+reachability sweep decided freeing from `live_publish_set` alone. All
+three are now logical retirements plus a root-gated reclamation pass.
+
+The epoch ADDRESSES a snapshot and is never a cache-validity oracle:
+validity stays with the by-value token generations and the R26 fact
+signatures.
+
+Two ordering rules make a root genuinely immutable under concurrency:
+
+- **Reserve, apply, release.** A mutation RESERVES its epoch before
+  applying it and releases the reservation only once the application has
+  landed; a capture takes the newest FULLY APPLIED epoch, never a
+  reserved one. Without that fence a capture landing between the bump
+  and the apply registers at the new epoch, reads the PRE-apply world for
+  it, and then reads the POST-apply world for the same epoch — the root's
+  answer changing under it, which an immutable snapshot may not do.
+- **Publish before retract.** A version MOVES between the live map and
+  the retired chain, and a root-relative reader consults them in
+  sequence without holding either. The superseded version is therefore
+  published into the retired chain BEFORE the live slot stops holding
+  it, so the transient window is one where the version is reachable from
+  BOTH (identical `Arc`, identical span) rather than from NEITHER. The
+  writer-side slot guard cannot substitute for this: readers do not take
+  it, so it orders writers against each other — not the move against a
+  read. A "neither" window is not a benign transient miss: `CanonicalView`
+  is memoized per view first-writer-wins, so one racing read freezes a
+  world no epoch ever had into every request that view serves.
+
+**Honest memory bound:** `current retained working set + versions
+reachable from live view roots`. Reachability is decided PER LIVE ROOT:
+a root at epoch `E` selects exactly ONE version per membership entry —
+the one visible at `E` — so everything born after it and superseded
+before now is reachable from nothing and is freed while that root is
+still alive. A floor rule ("retain everything retired above the oldest
+live root") is NOT the same predicate and is unbounded: one stale root
+pins the entire future, and since the `StoreViewManager`'s own cached
+base view survives an upsert, an unattended editor session would add a
+permanently-unreachable version per keystroke until the process died.
+
+A hard ceiling independent of request lifetime is still impossible while
+promising arbitrarily long immutable views; if one is ever required, the
+host must bound or cancel view lifetimes explicitly — it may NEVER
+silently evict a reachable version. On a root-free edit loop the store
+self-triggers an amortised reclamation sweep, so retention does not
+degrade into an unbounded leak there either.
+
+Measured, sequential content edits of one canonical (one live artifact
+version throughout):
+
+| Shape | Retained retired versions |
+|---|---|
+| Steady state — view rebuilt per edit (the LSP shape), 200 edits | 16, FLAT in edit count |
+| Root-free edit loop, no view at all, 200 edits | 14, bounded by the amortised sweep |
+| ONE view leased across every edit — 50 / 100 / 200 / 800 / 1600 edits | 2, 2, 2, 2, 2 — FLAT |
+| After that view is released and the manager rebuilds past it | 0 |
+
+The pinned number does not move with the edit count: the leased root
+retains its own version and the current one, and nothing in between.
+Note that the `StoreViewManager`'s own cached base view is a live root:
+it too retains exactly one version, and the retained set drains fully
+once no root addresses it. Pinned by
+`artifact_root_retention_tests::retention_is_flat_under_a_pinned_view_and_drains_after_it`
+(which measures TWO edit counts precisely because one cannot tell
+"bounded" from "linear") and, at the store's own surface, by
+`file_artifact_store_tests::one_pinned_root_does_not_retain_the_versions_born_after_it`.
+
+**Epoch exhaustion.** The counter saturates at `u64::MAX` instead of
+wrapping — a wrap would invert visibility outright, since a version born
+"after" a root would compare as born before it. Every root captured on
+the exhausted line FAILS CLOSED: it addresses no artifact, no
+canonical→keys membership and no augmenter set, so reads miss and
+callers recompute. The scheduler source root saturates identically and
+answers `Unknown` for every canonical, and the store view treats an
+exhausted source root as a WITHDRAWAL (below), not as an absence.
+
+The source half is landed too. `Scheduler.nodes` stays EXECUTION
+state — a `FileNode` holds only its current `ArcSwap` snapshots, so
+`bump_generation` makes the prior source immediately unreachable and
+`node_ids()` is a full map walk. Beside it the scheduler owns a
+separate `SchedulerSourceDirectory`: an epoch-indexed MVCC source
+authority mapping each canonical to a version history of
+`{ epoch, incarnation, generation, Present(whole_hash) | Absent }`.
+
+Every transition that changes what `try_get_source` LOGICALLY answers
+publishes a version — generation bump / invalidation / node
+replacement / removal publish `Absent`, a coherent Source completion
+publishes `Present`. Node CREATION publishes nothing: a fresh node has
+no source and an untracked canonical already reads `Unknown`, so the
+answer is unchanged and the write path stays clean.
+
+Publication is ATOMIC with the lifecycle transition.
+`publish_transition` runs the node mutation AND the version append
+under one hold of the publication lock, and `capture_root` takes the
+SAME lock, so a capture is totally ordered against every transition:
+it sees the node state and the root membership either both before or
+both after, never a torn pair. A batch (`reset`) publishes ONE epoch
+covering all of its changed members. `SchedulerSourceRoot::lookup` is
+an as-of lookup sealed to the root's `visible_epoch` — the root
+exposes no path to the live directory. The epoch ADDRESSES a snapshot
+and is NOT a cache-validity oracle, and it is not a
+`StoreViewValidationToken` dimension.
+
+Why this and not a persistent HAMT on the keystroke path: capture is
+one `Arc` clone plus a scalar read, independent of file count; a write
+is one appended per-canonical version plus one epoch bump, with no map
+path-copy and no global CAS retry; a read is one canonical lookup plus
+a predecessor search in that canonical's short retained history. A
+version implicitly retires at its SUCCESSOR's birth, so there is no
+second retirement field to keep in sync.
+
+GC reuses the artifact store's reachability discipline verbatim, per
+LIVE ROOT and not by a floor: the retained set for a canonical is the
+version each live captured root selects, plus the version the current
+epoch selects, and everything else is reclaimable — invisible from the
+current root AND from every live captured root. The sweep's work list is the
+set of canonicals that gained a superseding version, so reclamation is
+O(recently edited canonicals) and never O(tracked canonicals); a
+canonical still pinned by a live root is re-queued and drains once
+that root drops. A root-free edit loop self-triggers the amortised
+sweep at 64 supersessions.
+
+`HostStoreView` captures the source root in the SAME pre-build read
+window as the artifact root and retains it by `Arc`. Measured, release
+build: capture is 37 ns/op at 250 tracked files and 33 ns/op at 3,000
+(flat — an enumerating capture measures 12x the size ratio); one
+one-entry publication is 53-59 ns, which takes an end-to-end
+`Scheduler::invalidate` from 53 ns to 103 ns.
+
+### The composed token
+
+Both MVCC prerequisites landed first; the scans then went in one cutover.
+The complete authority set a `HostStoreView` captures is now a single
+sealed `StoreViewRoots` token:
+
+| Root | What it seals | Kind |
+|---|---|---|
+| `source_root` | scheduler source membership — the tracked whole hash | leased MVCC root |
+| `artifact_root` | exact artifact keys, canonical→keys index, augmentation index | leased MVCC root |
+| `project_env_root` | R21 env bundle, project identity, project generation, the published project graph for per-canonical env selection | immutable published snapshot |
+| `resolution_root` | the workspace's published resolution world | immutable published snapshot |
+| `session_root` | the session's per-canonical override layer | O(overlay set), never O(owners) |
+| `resolved_import_facts` | resolve-imports candidates | live candidate store |
+| `route_db` | route-surface candidates | live candidate store |
+
+The last two may stay LIVE because nothing they return is believed on its
+own: every candidate must additionally validate its recorded
+`ReadSetSignature` through the captured roots, which is the single R26
+validation authority — there is no second validator, cache, signature type
+or overflow convention anywhere in this path.
+
+Two read-through handles ride alongside (`artifact_reader`, `workspace`).
+They are not live-state oracles: they are the stores the roots ADDRESS, and
+every read through them is root-relative (`artifacts_at_root`,
+`artifact_keys_at_root`, `augmenter_set_at_root`), so it answers for the
+captured epoch. The one exception is the artifact-only authority gate — a
+canonical the scheduler never owned, e.g. a package-backed `.d.ts`, whose
+whole hash comes from its artifact. Two of its legs are live reads
+(`derived_raw_cache` presence and `file_exists`), because neither can be
+captured per canonical without re-introducing an O(owners) enumeration.
+Its content-transition leg is CLAMPED to the view's captured
+`content_generation`, so a transition recorded after capture — which is
+not part of the view's world — cannot retroactively untrack a canonical the
+view had already placed.
+
+**"It can only withdraw a candidate" is not by itself a safety
+argument.** Whether a withdrawal is conservative depends on the rail it
+feeds, and on the `FileWholeHash` / `DirectSource` rail an ABSENT hash is
+ACCEPTED optimistically (a dependency loaded after the snapshot is new,
+not stale). A live withdrawal would therefore turn a canonical the view
+had tracked into one whose every stale recorded hash validates — and,
+via the first-writer-wins `CanonicalView` memo, freeze that verdict for
+the view's life. Pre-cutover this was unreachable, because the view's
+`whole_hashes` map was frozen at build time and tracked-ness was
+immutable for the view's life.
+
+So the gate reports its outcome as one of THREE states, not two:
+
+| Outcome | Meaning | `FileWholeHash` / `DirectSource` |
+|---|---|---|
+| `Present(hash)` | the view's world places the canonical | exact hash comparison |
+| `Untracked` | no artifact for it at the captured root at all — genuinely outside this view's world | optimistic ACCEPT (unchanged) |
+| `Withdrawn` | the captured root DOES hold an artifact for it, but a live leg withdrew the answer (file gone, or the scheduler took content authority) | REJECT |
+
+`Withdrawn` costs one extra point lookup, on the withdrawal path only. An
+exhausted source root reports `Withdrawn` for every canonical, so epoch
+exhaustion degrades into recomputation rather than into blanket
+acceptance. Pinned by
+`cache_identity_invariants_tests::a_withdrawn_artifact_only_canonical_rejects_instead_of_accepting_a_stale_hash`,
+whose discrimination leg requires that a genuinely untracked canonical
+still validates — otherwise the fix would be a blanket reject that forces
+every post-snapshot dependency through a cold recheck.
+
+What the token may NEVER contain is as load-bearing as what it does: no
+per-owner copy of a whole hash, `FileFacts` handle, derived hash,
+source-env identity, tombstone set or augmentation fingerprint; no owner
+list; no eagerly cloned `Arc<FileFacts>` population; no raw live map handle
+whose lookup means "current now"; and no fallback enumeration when a point
+lookup misses.
+
+There is deliberately NO `ViewSuperseded` arm on this path. The C5a text
+above anticipated one for "a cold lookup that needs absent state", but the
+retention lease removes the case it would serve: the roots always answer for
+the captured epoch, so a lookup either finds the version that was live then
+or finds nothing — it never has to consult current mutable state and
+therefore never has to report that the view has been overtaken. Adding the
+variant would land an arm with no producer.
+
+Session overlays are the one per-canonical layer that remains, and it is
+sized by the SESSION's own overlay and tombstone sets, not by the host.
+Source-env and project selection are now sealed on `project_env_root`.
+
 ## Complexity and ownership
 
-- World-root and StoreView capture are O(1).
+- World-root capture is O(1), artifact-ROOT capture is O(1), and **full
+  StoreView capture is now O(1) in landed behaviour**. `HostStoreView::build`
+  performs a fixed number of scalar reads and `Arc` clones into one sealed
+  `StoreViewRoots` token and returns; it walks no owner list and copies no
+  per-owner answer. The six linear terms it used to pay — the
+  scheduler-node/compile-cache union, the per-canonical source probe, the
+  whole-artifact-store scan, the per-tracked-file artifact walk and the
+  whole-augmentation-index scan — are deleted, and `whole_hashes`,
+  `derived_hashes`, `file_facts`, `source_envs` and the augmentation
+  fingerprint map no longer exist as snapshot state.
+- Measured, median of 21 builds per size, same fixture before and after the
+  cutover: 1.25 ms / 5.34 ms / 15.61 ms at N = 250 / 1000 / 3000 (ratio
+  12.48 against a 12.0x host-size ratio — exactly linear) becomes
+  5.5 µs / 5.4 µs / 5.4 µs (ratio 1.02). Pinned by
+  `store_view_o1_build_tests::store_view_build_wall_cost_is_flat_across_host_sizes`,
+  which fails RED on the pre-cutover tree.
+- Per-canonical validation is an exact POINT LOOKUP through the captured
+  roots, resolved on first demand: the whole hash from
+  `SchedulerSourceRoot::lookup`, the `FileFacts` / `Route` digest /
+  source-env identity from `FileArtifactStore::artifact_keys_at_root` +
+  `artifacts_at_root`, the augmentation fingerprint from
+  `augmenter_set_at_root`. A miss is a miss — there is no fallback
+  enumeration to recover one.
+- Validation is O(`ReadSetSignature`). A per-view memo caches the resolved
+  answer per canonical actually queried — O(request footprint), a cost
+  mechanism only: every entry is a pure function of the roots and the
+  canonical, so discarding it changes latency and nothing else. There is
+  no upfront working-set enumeration, and the all-owner `Arc<FileFacts>`
+  clone is not replaced by a "bounded" eager clone, because the request's
+  footprint is not knowable before the mutation.
+- Deferring the read is sound ONLY because the roots are retention leases.
+  A view captured before a mutation resolves the PRE-mutation world for a
+  canonical it had never observed at capture time — a lazy read of live
+  state would answer the new world. That is the exact defect that reverted
+  an earlier lazy-capture attempt, and it is pinned by
+  `store_view_o1_build_tests::view_answers_the_premutation_world_for_a_dependency_it_never_observed`
+  alongside the four `meta_tests` immutable-request-view gates.
 - Warm lookup is O(candidates × witness facts), with candidate cap 4 and
   signature cap 1,024.
 - Cold resolution is O(actual resolver observations).
@@ -911,7 +1208,7 @@ overlay-only target disappear.
 - `IndexedReady` and `ShallowFileState` are parse/index artifacts and own no
   resolution currency.
 
-## Zero-work counter set — what is measured, and what is still owed
+## Zero-work counter set — what is measured
 
 The architecture decision names four counters that must read zero at every
 tested workspace size. Their landed status is:
@@ -921,7 +1218,7 @@ tested workspace size. Their landed status is:
 | `indexed_ready_materializes` | LIVE producer, asserted zero by `store_view_marginal_admit_tests` |
 | `import_resolution_cache_misses` | LIVE producer, asserted zero by the same gates |
 | `indexed_ready_edge_refreshes` | DELETED — see below |
-| `store_view_owner_visits` | NOT IMPLEMENTED — owed by the O(1)-build follow-on |
+| `store_view_owner_visits` | LIVE producer, asserted zero by the same gates |
 
 `indexed_ready_edge_refreshes` measured the route-only edge-refresh
 materialise lane. C4b deleted that lane (`refresh_indexed_route_surface`,
@@ -933,21 +1230,95 @@ gate. The two surviving legs carry an explicit anti-vacuity control
 (`the_measured_counters_move_when_the_work_actually_runs`) proving both DO move
 when the work runs, so their zero assertions discriminate.
 
-`store_view_owner_visits` does not exist in the tree, and the property it would
-measure is NOT yet held: `HostStoreView::build` still walks
-`indexed().snapshot_all()` per published owner. The walk is now observe-only —
-it performs no resolution, no materialisation and no route refresh, which is
-what the three live counters pin — but it is still O(published owners), so the
-counter would read non-zero. Making the build O(1) in published-owner count,
-and instrumenting owner enumeration directly, is the remaining half of the
-observe-only store-view work and owns this counter. Recording the gap here is
-deliberate: the alternative is an architecture decision whose required counter
-set is silently unmet.
+`store_view_owner_visits` is a THREAD-LOCAL count of reads through a view's
+captured roots taken while a store-view BUILD scope is active. A build runs to
+completion on the calling thread, so a thread-local reading carries a
+per-measurement claim in the way the process-global
+`store_view_coherent_build_sweeps` cannot. Its producer
+(`store_view_roots::note_owner_visit`) sits at the two entry points that make up
+the ENTIRE root read surface — `StoreViewRoots::resolve_canonical` and
+`StoreViewRoots::augmentation_fingerprint` — so the instrumentation covers the
+boundary exhaustively rather than covering a hand-picked call site; every other
+read in that module is a private helper reachable only through one of them. The
+scope is entered by `HostStoreView::build` and by nothing else, which is what
+makes the number a claim about CAPTURE rather than about the whole window:
+demand-time reads through the roots are correct and expected.
+
+Two independent mechanisms hold "the build enumerates nothing", because either
+alone degrades into a claim nobody checks.
+
+- **Structural — the builder's reachable vocabulary.** `HostStoreView::build`
+  does not take `&VerterHost`. With no host in scope there is no scheduler, no
+  artifact store, no workspace and no candidate store to walk; planting an
+  enumeration there is `E0425: cannot find value host in this scope`. The one
+  store-bearing input it does receive is a `store_view_roots::RootCapture`
+  whose fields are PRIVATE to that module and whose only operation is
+  `StoreViewRoots::seal`, which consumes it into the sealed token; reaching a
+  store through it is `E0616: field is private`. Neither surviving root type
+  offers an iteration API — `FileArtifactRoot` exposes `epoch()` alone and
+  `SchedulerSourceRoot` exposes `epoch()` plus a single-canonical `lookup()`.
+  This is a structural mechanism, not a source scanner keyed on the names of
+  today's enumeration APIs.
+- **Dynamic — the counter.** It backstops the read surface the builder DOES
+  hold once the token is sealed, and it is the leg that keeps working if the
+  structural shape is later loosened.
+
+All three legs of the zero carry anti-vacuity controls, because every gate here
+asserts a ZERO and a zero from a counter nothing bumps is not evidence.
+`the_measured_counters_move_when_the_work_actually_runs` covers the two
+per-host legs. `the_owner_visit_counter_moves_only_inside_a_build_scope`
+covers the owner-visit leg and discriminates in BOTH directions: the same real
+owner read moves the counter to 1 inside a build scope and leaves it at 0
+outside one, so neither a dead producer nor an ungated counter passes it.
+
+Two further witnesses in `store_view_o1_build_tests` pin the same property
+independently of the counter:
+
+- **Request footprint.** The per-view memo counts the canonicals a view has
+  actually RESOLVED. It is zero immediately after a build at N = 250 / 1000 /
+  3000 (`store_view_build_resolves_zero_canonicals_at_any_host_size`), and its
+  anti-vacuity control `the_resolved_canonical_witness_moves_when_a_canonical_is_actually_resolved`
+  proves the witness moves 0 → 1 → 2 as canonicals are demanded.
+- **Wall-clock.** `store_view_build_wall_cost_is_flat_across_host_sizes`
+  compares medians across the same three sizes and fails RED on the
+  pre-cutover tree at ratio 12.48.
+
+### The marginal-admit measurement excludes the admitted file's own cold work
+
+`marginal_admit_reopens_no_routing_regardless_of_host_size` is the ratified
+discriminator for the whole zero-work program, and its original whole-window
+form was MIS-SPECIFIED: the window spanned the `upsert`, so the newly-admitted
+file's own cold resolution — the scheduler extracting its dependencies and the
+resolver walking `./dep` for the first time from that importer — fell inside a
+measurement of store-view BUILD work. That cost is legitimate, is owed by the
+admission rather than by the builder, and is N-independent; folding it in made
+the required zero unreachable for a correct implementation, which is why the
+gate sat `#[ignore]`d rather than red.
+
+The amended gate performs the admission OUTSIDE the measurement window, forces
+and PROVES the ensuing token miss (the pre-admission view's
+`StoreViewValidationToken` is recorded and must differ from the token of the
+view read inside the window — otherwise a zero could just mean the cached view
+was handed back and no build ran at all), measures the store-view build alone,
+and requires zero owner visits, zero materialisations and zero
+resolution misses at N = 250 / 1,000 / 3,000. Measured: `(0, 0, 0)` at all
+three.
+
+Nothing is excluded without being accounted for. The excluded cost is pinned
+separately by `admission_cold_work_is_n_independent_but_not_zero`, in BOTH
+directions: it must be identical across the three host sizes, because a new
+file's own cold resolution has nothing to do with how many other files the host
+holds; and it must be NON-zero, because a zero would mean the admission
+resolved nothing and the split proves nothing. Measured: exactly 1 resolution
+miss at each of N = 250 / 1,000 / 3,000.
 
 ## The named follow-on block
 
-Five things are deliberately NOT in this tree. They are one block, gated on
-measurement, and listed here so none of them reads as an oversight:
+Three things are deliberately NOT in this tree. They are one block, gated on
+measurement, and listed here so none of them reads as an oversight. Two of the
+original five — O(1) `HostStoreView::build` with its `store_view_owner_visits`
+counter, and the marginal-admit contract question — are LANDED; see "Complexity
+and ownership", "Zero-work counter set" and the O(1)-build adjudication below.
 
 1. **Directory-grouped absence revalidation.** Group a witness's `Absent`
    probes by parent directory (pure string work) and issue ONE live `readdir`
@@ -968,17 +1339,11 @@ measurement, and listed here so none of them reads as an oversight:
    it wedged for fourteen minutes in the first place. One ledger, one lock,
    world gate entered only on a real value change — the entire ordering class
    disappears instead of being documented.
-3. **O(1) `HostStoreView::build`** in published-owner count, plus the
-   `store_view_owner_visits` counter it owns (see the counter table above).
-4. **The marginal-admit contract question** — whether the ratified zero-work
-   gate's measurement window should exclude the newly-admitted file's own cold
-   build. Recorded as OPEN and owned by the O(1)-build block; the ratified
-   discriminator is not reclassified as mis-specified in the meantime.
-5. **Witness memoisation** for the per-demand witness inventory.
+3. **Witness memoisation** for the per-demand witness inventory.
 
 ## Recorded adjudications
 
-Three rulings changed this contract's execution while it was being implemented.
+Four rulings changed this contract's execution while it was being implemented.
 All are recorded here because the reasoning is load-bearing for anyone reading
 the resulting tree, and because one of them authorises an edit that the C0
 freeze otherwise forbids.
@@ -1041,12 +1406,24 @@ So C5 splits and the order becomes **C5a → C4 → C5b**:
   onto the `Resolution(..)` witness, then land the deletions in one
   compile-breaking cutover.
 - **C5b — observe-only StoreView**, the remainder: remove the published-artifact
-  and tracked-owner scans, make `HostStoreView::build` O(1) in published-owner
-  count, and un-ignore the counter gates.
+  and tracked-owner scans and make `HostStoreView::build` O(1) in published-owner
+  count. C5b explicitly REQUIRED both MVCC prerequisites before deleting the
+  scans: the `FileArtifactRoot` retention lease AND the scheduler
+  `SchedulerSourceRoot` MVCC publication. Deleting a scan before the root it
+  would read from exists reproduces the original failure — a captured identity
+  that can no longer reach its own world. Both prerequisites landed first, then
+  the scan deletion landed as one cutover; see "Complexity and ownership".
 
-C5b keeps ownership of un-ignoring the counter gates. An earlier stage that
-incidentally makes one passable must NOT un-ignore it, because C5b owns proving
-it is green for the right reason.
+The COUNTER gates were deliberately NOT part of that cutover. Un-ignoring
+`marginal_admit_reopens_no_routing_regardless_of_host_size` waited on the
+`store_view_owner_visits` instrumentation AND on the amendment that gate needed
+(its whole-window zero requirement was mis-specified: the newly admitted file's
+own cold resolution is legitimate and N-independent, and is not StoreView-build
+work). An earlier stage that incidentally made it passable must NOT have
+un-ignored it — the follow-on owned proving it is green for the right reason.
+Both landed in a fourth step, after the scans were structurally absent; the
+gate is un-ignored and green, and why it is green for the right reason is
+recorded under "Zero-work counter set".
 
 ### The concurrency fixture's `resolution_event_bridge_complete` override
 
@@ -1077,3 +1454,47 @@ oracle, assertion reached. Planting `resolution_world_still_current -> true`
 turns all six cases red, that one included.
 
 No further edits to C0-frozen files are authorised without a fresh ruling.
+
+### The O(1) observe-only StoreView build, and the amendment to its own gate
+
+The O(1) bar was ratified as correct, and the missing architecture identified
+as a snapshot-LIFETIME substrate rather than a cheaper capture. That is why the
+prior lazy-capture attempt failed: it captured `(canonical, whole_hash)`, but
+`FileArtifactStore` had already evicted the artifact that hash named, so the
+view could not re-enter its own captured world. Content-addressing establishes
+identity, never lifetime and never immutable membership.
+
+The ruling's normative content is folded into the sections above — the
+per-authority root table and both MVCC roots under "An immutable root is also a
+retention lease", the sealed `StoreViewRoots` token and the complexity bounds
+(capture O(1), validation O(bounded read set), optional O(request-footprint)
+memo, no upfront working-set enumeration) under "Complexity and ownership", and
+the counter instrumentation under "Zero-work counter set". Three of its
+directions are worth restating because they are easy to re-lose:
+
+- **GC reachability includes every live captured root**, for both MVCC roots.
+  A store may not decide freeing from its current world alone.
+- **A "bounded" eager clone is not a repair for the all-owner clone.** It would
+  be correct only if the request's complete footprint were known before the
+  mutation, and generally it is not.
+- **The four-step sequence was load-bearing**: artifact retention lease, then
+  scheduler source MVCC, then the composed roots plus the one-cutover scan
+  deletion, and only THEN the counter and the un-ignored gate. Deleting a scan
+  before the root it would read from exists reproduces the original failure.
+
+The ruling also amended the ratified discriminator itself, which is why the
+amendment is recorded as an adjudication rather than an implementation choice:
+`marginal_admit_reopens_no_routing_regardless_of_host_size` was mis-specified,
+and the amended window, its forced-and-proven token miss, and the separate
+N-independent-but-non-zero pin on the excluded admission cost are described
+under "Zero-work counter set". The file it lives in was verified to be OUTSIDE
+the C0 frozen range before it was edited.
+
+**One recorded deviation from the ruling.** It specified a typed
+`ViewSuperseded` arm for a cold lookup whose captured root is no longer
+current. That arm is deliberately NOT landed: the retention lease removes the
+case it would serve. The roots always answer for the captured epoch, so a
+lookup either finds the version that was live then or finds nothing — it never
+consults current mutable state and therefore never encounters a
+non-current-root read to report. Landing the variant would land an arm with no
+producer, which is the same defect as a counter with no producer.

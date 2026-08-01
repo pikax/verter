@@ -1511,10 +1511,21 @@ impl ProjectTypeStore {
     /// LSP affected-files reporting + diagnostics, but is **never**
     /// wired to cache invalidation. Any cached `FileArtifacts` entry
     /// whose `(canonical_id, content_hash)` pair is not present in
-    /// `live_publish_set` is dropped. The publish set is the union of
-    /// every `(canonical_id, content_hash)` reachable from any open
-    /// editor / live VFS state — callers compute it from their VFS
-    /// snapshot and pass it in.
+    /// `live_publish_set` is RETIRED from the store's current root. The
+    /// publish set is the union of every `(canonical_id, content_hash)`
+    /// reachable from any open editor / live VFS state — callers compute
+    /// it from their VFS snapshot and pass it in.
+    ///
+    /// **`live_publish_set` is NOT a reachability oracle for physical
+    /// memory.** It names the CURRENT world's live content and knows
+    /// nothing about the immutable roots a `HostStoreView` / session /
+    /// request has already captured. Deciding to free bytes from it
+    /// alone would revoke a lease those holders were promised. So this
+    /// sweep only retires, then REQUESTS a reclamation pass; the store
+    /// applies the complete reachability rule (invisible from the
+    /// current root AND from every live captured root) using state only
+    /// it owns. `ProjectTypeStore` may request GC, never decide
+    /// reachability.
     ///
     /// Per D40 + D119: when `memory_pressure: true`, an additional
     /// LRU floor sweep runs after reachability and drops entries down
@@ -1587,6 +1598,10 @@ impl ProjectTypeStore {
             self.indexed
                 .evict_lru_promoted(policy.min_floor, policy.promote_threshold);
         }
+        // GC REQUEST — carries no reachability judgement. Every
+        // retirement above is logical; the store decides which retired
+        // versions no root can still reach and frees exactly those.
+        let _reclaimed = self.indexed.reclaim_retired_versions();
     }
     /// D48 matrix row 1 — Source content change for owner.
     ///
