@@ -67,7 +67,7 @@ pub use crate::semantic_query_memo::{
 /// Carrier type for cache-entry dependency signatures. Integration
 /// tests construct `ReadSetSignature` directly when seeding
 /// fixtures into `ComponentMetaResultEntry` / `MaterializeStructureEntry` /
-/// `OwnerImportSurface` / `RefCycleEntry` / `MemoEntry`.
+/// `OwnerImportSurface` / `MemoEntry`.
 pub use crate::fact_signature_helpers::ReadSetSignature;
 
 /// Re-export the cooperative-admission outcome enum so integration

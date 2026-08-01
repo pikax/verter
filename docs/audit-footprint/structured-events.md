@@ -60,7 +60,7 @@ just component-meta:
   `AuditObserver` populates `RequestStoreAudit::cache_layers` —
   every host-owned cache (`FileArtifactStore`,
   `ComponentMetaResultDb`, `MaterializeStructureDb`,
-  `RefCycleResultDb`, `OwnerImportSurfaceDb`, `SemanticGraphStore`)
+  `OwnerImportSurfaceDb`, `SemanticGraphStore`)
   routes through this hook.
 - **Lock acquisition.** `record_lock_acquisition(name, wait_ns)`
   contributes to `WaitAudit::lock_wait_ns` /

@@ -19643,6 +19643,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             FlowNarrowingAt { .. } => "FlowNarrowingAt",
             ContextualTypeAt { .. } => "ContextualTypeAt",
             LowerLocator { .. } => "LowerLocator",
+            ClassifyMaterializationCycleGate(_) => "ClassifyMaterializationCycleGate",
         }
     }
     // Sanity probe: each variant carries a distinct label and the

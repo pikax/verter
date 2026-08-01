@@ -142,8 +142,6 @@ crates/verter_session/src/component_meta_caches.rs:1216: /// Plan §6.10 sub-tas
 crates/verter_session/src/component_meta_caches.rs:1223: reason = "B1's validated_at_generation field + the test that consumes this accessor land in WT5/R; this accessor is reserved for that wiring per plan §6.10 sub-task 8"
 crates/verter_session/src/component_meta_caches.rs:1229: /// Read-only peek with proactive stale-entry removal. Plan §1.5:
 crates/verter_session/src/component_meta_caches.rs:1260: /// `canonical_id`. Plan §1.5 — uses the `canonical_to_keys`
-crates/verter_session/src/component_meta_caches.rs:1369: // Plan §4.8 / Phase C / Commit R — RefCycleResultDb
-crates/verter_session/src/component_meta_caches.rs:1375: /// Plan §4.8 / Phase C — entry stored in `RefCycleResultDb`. Carries the
 crates/verter_session/src/component_meta_caches.rs:1391: /// Plan §4.9 — generation-local validity field. Updated to the
 crates/verter_session/src/component_meta_caches.rs:1405: /// Plan §4.8 / §4.9 / Commit R — host-owned cache for transitive
 crates/verter_session/src/component_meta_caches.rs:1468: /// Plan §6.10 sub-task 8 — read-only test accessor for the shared
@@ -219,7 +217,6 @@ crates/verter_session/src/component_meta_materialize.rs:1808: /// Plan §10.8 #2
 crates/verter_session/src/component_meta_materialize.rs:1837: /// Plan §10.8 #3 — cycle BFS dispatches Instantiate per visited decl.
 crates/verter_session/src/component_meta_materialize.rs:1875: /// Plan §10.8 #4 — orphan entry (stale dep_signature) is caught
 crates/verter_session/src/component_meta_materialize.rs:1933: /// Plan §10.8 #5 — orphan entry inserted directly into the cache
-crates/verter_session/src/component_meta_materialize.rs:1988: // Plan §6.13 / Commit R — RefCycleResultDb cache integration tests.
 crates/verter_session/src/component_meta_materialize.rs:2001: /// Plan §6.13 test 1 — generation-local fast-path skips Instantiate
 crates/verter_session/src/component_meta_materialize.rs:2062: /// Plan §6.13 test 2 — `invalidate_for_canonical` drains the
 crates/verter_session/src/component_meta_materialize.rs:2097: /// Plan §6.13 test 3 — `dep_signature` captures every canonical the

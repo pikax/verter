@@ -54,7 +54,7 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
     // used by recursive-helper detection per CLAUDE.md §"Macro Type
     // Traversal Rule"). The dispatcher's instantiate_active stack
     // is the reentry guard; this exercise is a real production
-    // path for `ref_root_reaches_transitive_cycle_node`'s BFS step.
+    // path for the materialization cycle gate's per-hop `Instantiate`.
     //
     // We do NOT have a stable `whole_hash` value to embed in the
     // DeclIdentity literal; the host owns it. Construct a

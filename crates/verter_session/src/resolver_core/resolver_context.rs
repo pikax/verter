@@ -698,7 +698,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// Reach the concrete `VerterHost` underneath this context.
     ///
     /// Used by Family B/C/D producers (`MaterializeStructureDb`,
-    /// `RefCycleResultDb`, `AppConfigNoOverrideProofDb`,
+    /// `AppConfigNoOverrideProofDb`,
     /// `OwnerImportSurfaceDb`) to call
     /// [`crate::VerterHost::with_fact_tracer`] from inside their
     /// cooperative-admission cold-compute closures. The seal trait

@@ -1,6 +1,6 @@
 //! Cross-consumer × fact-kind matrix.
 //!
-//! 10 caches × 5 fact-kinds = 50 slices. Each slice characterises
+//! 9 caches × 5 fact-kinds = 45 slices. Each slice characterises
 //! one matrix cell. The Family B/C/D caches use a host-pipeline
 //! counter-delta discriminator. The Family A consumers
 //! (`compile_tier`, `component_meta`, `fallthrough`,
@@ -42,18 +42,6 @@ mod materialize_structure_member_presence;
 mod materialize_structure_module_augmentation_index_shape;
 #[path = "fact_matrix/materialize_structure_route_surface.rs"]
 mod materialize_structure_route_surface;
-
-// ── ref_cycle × * ────────────────────────────────────────────────────
-#[path = "fact_matrix/ref_cycle_import_ref.rs"]
-mod ref_cycle_import_ref;
-#[path = "fact_matrix/ref_cycle_member.rs"]
-mod ref_cycle_member;
-#[path = "fact_matrix/ref_cycle_member_presence.rs"]
-mod ref_cycle_member_presence;
-#[path = "fact_matrix/ref_cycle_module_augmentation_index_shape.rs"]
-mod ref_cycle_module_augmentation_index_shape;
-#[path = "fact_matrix/ref_cycle_route_surface.rs"]
-mod ref_cycle_route_surface;
 
 // ── memo_entry × * ───────────────────────────────────────────────────
 #[path = "fact_matrix/memo_entry_import_ref.rs"]

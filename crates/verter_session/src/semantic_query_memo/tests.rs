@@ -10389,6 +10389,22 @@ mod prepared_identity_bijection {
                 locator_key(&[]),
                 locator_key(&[TypeBodyPathStep::Member { ordinal: 0 }]),
             ),
+            SemanticQueryKeyTag::ClassifyMaterializationCycleGate => (
+                SemanticQueryKey::ClassifyMaterializationCycleGate(
+                    crate::semantic_query::MaterializationCycleGateKey {
+                        root: type_slot("CycleA"),
+                        parse_env_hash: h16(0),
+                        resolve_env_hash: h16(0),
+                    },
+                ),
+                SemanticQueryKey::ClassifyMaterializationCycleGate(
+                    crate::semantic_query::MaterializationCycleGateKey {
+                        root: type_slot("CycleB"),
+                        parse_env_hash: h16(0),
+                        resolve_env_hash: h16(0),
+                    },
+                ),
+            ),
         }
     }
 

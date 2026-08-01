@@ -55,8 +55,10 @@
 >   excludes any session-bearing full `Relate` key, so a published `NotAssignable` leaks no
 >   `SessionId`.
 > - **One builder for the reentry substrate.** RI-3 is the SOLE builder of the shared
->   `CheckerReentryStack` and the SOLE wirer of `Relate` onto it; RI-8 reuses the RI-3 substrate and
->   retires `RefCycleResultDb`, wiring nothing new onto the substrate. Routing of
+>   `CheckerReentryStack` and the SOLE wirer of `Relate` onto it; RI-8 wires NOTHING onto the
+>   substrate — it retires `RefCycleResultDb` into the sealed
+>   `ClassifyMaterializationCycleGate` semantic query, a query-owned ordered walk that pushes no
+>   checker frame (`CheckerTransaction` stays relation-only). Routing of
 >   `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` and the flow depth-sentinel
 >   retirement are deferred to U6. The content-free `InferenceSession` projection shape lives at qvd
 >   §2.2.
@@ -605,24 +607,36 @@ already registered at U2 as **non-producing shells** (`execute → Error(Miss)`)
 reentry-wiring are deferred to **U6**. **U6** routes all four onto this same shared stack (the Rescope section
 records U6, not RI-8, as the owner of that routing).
 
-**RI-8 (U2) consumes the RI-3-built substrate and deletes ONE per-family stand-in: `RefCycleResultDb`** (today's
-cycle authority for parameterized generics — a `ComputeAdmission` cold-path BFS dispatching
-`Instantiate { args: [], context: InstantiateContext { projection_reduction, resolve_env_hash } } (with context.projection_reduction.mode = Skeleton)` with strict self-root validation) → its *transient* cycle
-detection collapses into the `Skeleton`-mode SCC over the shared stack (the BFS becomes a `reentry_stack` walk);
-its *persistent boolean* `ref_root_reaches_transitive_cycle_node` result becomes an ordinary derived
-query-identity cache entry off the closed SCC. There is no bespoke ref-cycle DB after RI-8. **Keeping
-`RefCycleResultDb` "as a non-authoritative optimization" is FORBIDDEN** — two cycle-detection paths over the
-same question is the precise divergence/hang class the architecture forbids. The RI-8 migration MUST preserve
-the existing strict self-root warm-read semantics (the BFS root file plus every visited declaration's file)
-inside the SCC's `ReadSetSignature.self_root_canonicals`. **RI-3 is the SOLE builder + `Relate`-wirer of
-`CheckerReentryStack`; RI-8 builds no substrate and wires no `Relate`** — it only consumes the existing
-substrate (a second "build … and wire `Relate`" would invite a forked second substrate, the divergence class
-the architecture forbids).
+**RI-8 (U2) deletes ONE per-family stand-in: `RefCycleResultDb`** (the last standalone cycle
+authority for parameterized generics — a `ComputeAdmission` cold-path BFS dispatching
+`Instantiate { args: [], context: InstantiateContext { projection_reduction, resolve_env_hash } } (with context.projection_reduction.mode = Skeleton)` with strict self-root validation) → the SAME verdict
+contract is now owned by ONE sealed semantic query,
+`SemanticQueryKey::ClassifyMaterializationCycleGate(MaterializationCycleGateKey) →
+MaterializationCycleGateOutcome` (key: env-bearing root slot `T`/`L`/`J` + `P` + `R`; fixed axes
+empty-args / `StructuralTransit` / `Skeleton`). This is a **verdict-preserving retirement, NOT a
+semantics upgrade**: the producer runs the existing ordered, bounded reachability walk verbatim —
+FIFO declaration queue with the 64-dequeue bound, `visited: DeclIdentity` on enqueue,
+first-visit-wins path signal, empty-args `StructuralTransit`/`Skeleton` `Instantiate` per hop, the
+existing complex-surface taxonomy and reference emission order, `Opaque(RecursiveRef)` root-name
+back-edge handling, and cycle recognition ONLY for `child == root || child == current` (NOT full
+SCC reachability — the intermediate-SCC strengthening is deferred debt). There is **NO SCC stage
+and NO checker-stack generalization**: `CheckerTransaction` stays relation-only, the classifier has
+no checker-stack API, and classification contributes no frame and no lowlink edge, so `Relate`
+calls nested during classification see exactly the relation frames that would otherwise exist.
+Hop-limit polarity is the carried signal (complex → Stop, plain → Continue, `ReturnOnly` but NOT
+partial); a nested `Recursive`/`Error`/missing observation continues the walk as before but demotes
+the outcome to `LegacyFallback` (always `cache_suppress`; `result_is_partial` for every reason
+except `HopLimit`) — only `Decided` admits into the family memo, and consumers branch on the
+carried verdict from BOTH arms. The strict self-root warm-read semantics (the root file plus every
+visited declaration's file) live on the family's `observed_self_roots` + the live-generation gate
+(the bare-generation-bump hole the old DB closed with `validated_at_generation`). **Keeping
+`RefCycleResultDb` "as a non-authoritative optimization" is FORBIDDEN** — two cycle-detection paths
+over the same question is the precise divergence/hang class the architecture forbids.
 
 **The flow depth-sentinel retirement is DEFERRED to U6** — it is replaced by the `FlowReturn` view of
 `reentry_stack`, which only exists once `FlowReturn` lands at U6 — so it is **NOT** an RI-8 deletion. RI-8's
 sole legacy deletion is the `RefCycleResultDb` / `ref_root_reaches_transitive_cycle_node` path (a
-generic-instantiation concern live at U2 via the `Skeleton` BFS).
+generic-instantiation concern live at U2 via the ordered `Skeleton`-mode walk).
 
 ---
 
@@ -1145,7 +1159,7 @@ RI-1 ──┬── RI-2 ──────────────────
 | **RI-5** Fast-reject prefilter + memo locality | RI-1 | O(tag) structural discriminators before structural relate; interned-id locality layout | `relation_negative_and_unknown_paths_are_fast` (bench) | — |
 | **RI-6** `InferenceSession`/`SessionStack` + candidate combination + immutable `InferenceSessionSetup`/`InferenceContextKey` + completed-deterministic admission + `SessionAdmissionLedger` | RI-3 | §4.2 session substrate; closed `InferencePriority` ladder + combination rules; one immutable setup/key authority (R-b); binding-`Relate` `ReturnOnly`-until-complete (R-c); the per-session `SessionAdmissionLedger` (on `CheckerTransaction`, keyed by transient `SessionId`) — populated by RI-4's `SccLedger` with the PROVISIONAL SCC-close snapshot (caller-return + deferral metadata, NEVER published verbatim) and DRAINED at session-close through a THREE-outcome gate whose **published payload IS the session-converged re-discharge**: when every relevant session is `CompletedDeterministic` it re-discharges each deferred member through the same `execute(Relate{K})` dispatch against the converged state (final bindings, final own verdict, final consumed-sibling verdicts), publishing that result ONLY when it is a STABLE determined publishable outcome — each deferred **POSITIVE** member as `Assignable` + a `CoinductiveCycle` proof referencing only frozen persistent keys, each deferred **NEGATIVE** member as a slotless `NotAssignable` with no `CoinductiveCycle` proof; on a non-stable re-discharge (own-verdict flip, consumed-sibling sign-flip, or bindings change), OR on `Abandoned`, it drops the whole deferred batch to `ReturnOnly` and **releases the held singleflight registration WITHOUT publish** (no entry / fact signature / backfill), so any concurrent joiner recomputes | `inference_runs_in_checker_transaction_not_per_surface_matcher`; `only_completed_deterministic_sessions_are_admitted`; `inference_candidate_combination_matches_priority_and_variance`; `relate_same_nodes_different_inference_context_do_not_warm_hit`; `inference_context_key_projects_every_session_setup_axis` (R-b); `binding_relate_scc_member_admits_only_at_session_close` (deferred binding-member admission — lands TDD-first with this sub-block) | any standalone / per-surface inference matcher |
 | **RI-7** Reverse-mapped inference pass + per-property freshness spread-taint | RI-6 | relation-owned session pass for homomorphic-mapped recovery; per-property freshness/taint algorithm | `reverse_mapped_inference_is_relation_owned_in_session`; `freshness_tracks_per_property_spread_taint` | any private reverse-mapping matcher |
-| **RI-8** `CheckerReentryStack` substrate REUSE + `RefCycleResultDb` retirement (U2 scope) | RI-4 | CONSUME the RI-3 `CheckerReentryStack` substrate (RI-3 is the SOLE builder + `Relate`-wirer — RI-8 builds NO substrate and wires NO `Relate`): collapse the `Instantiate{args:[], context.projection_reduction.mode=Skeleton}` ref-cycle BFS into the shared `Skeleton`-mode SCC over that substrate (the BFS becomes a `reentry_stack` walk) and demote the persistent boolean `ref_root_reaches_transitive_cycle_node` to a derived query-identity entry off the closed SCC; retire `RefCycleResultDb`. **Routing `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` onto the substrate is DEFERRED to U6** (those variants land at U6). | `cross_engine_cycle_discharge_admits_only_stable_deterministic_results` (at U2 exercises a U2-available `Relate` ↔ `Instantiate`/`Skeleton` cross-engine cycle ONLY; the `FlowReturn`/`ResolveCall` cross-engine-discharge guard lands at U6); retired-symbol: `RefCycleResultDb` / `ref_root_reaches_transitive_cycle_node` / its `ComputeAdmission` BFS cannot be re-introduced | `RefCycleResultDb`; `ref_root_reaches_transitive_cycle_node` bespoke path (NOT the flow depth-sentinel — that retires at U6 with `FlowReturn`) |
+| **RI-8** `RefCycleResultDb` retirement into ONE sealed cycle-gate query (U2 scope) | RI-4 | Retire the last standalone cycle authority (`RefCycleResultDb` + its bespoke bounded walk) into the sealed `SemanticQueryKey::ClassifyMaterializationCycleGate` family: the producer owns the SAME ordered bounded walk verbatim (FIFO queue, 64-dequeue bound, first-visit-wins signal, empty-args `StructuralTransit`/`Skeleton` `Instantiate` per hop, cycle recognition only `child == root || child == current`) — NO SCC stage and NO checker-stack use (`CheckerTransaction` stays relation-only). Outcome `Decided | LegacyFallback`; only `Decided` admits; consumers branch on the carried verdict from both arms. **Routing `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` onto the substrate is DEFERRED to U6** (those variants land at U6). | `cross_engine_cycle_discharge_admits_only_stable_deterministic_results` (at U2 exercises a U2-available `Relate` ↔ `Instantiate`/`Skeleton` cross-engine cycle ONLY; the `FlowReturn`/`ResolveCall` cross-engine-discharge guard lands at U6); retired-symbol: `RefCycleResultDb` / `ref_root_reaches_transitive_cycle_node` / its `ComputeAdmission` BFS cannot be re-introduced | `RefCycleResultDb`; `ref_root_reaches_transitive_cycle_node` bespoke path (NOT the flow depth-sentinel — that retires at U6 with `FlowReturn`) |
 | **RI-9** `RelationBudget` on full identity + three-layer non-admission | RI-4 | budget exhaustion → `BudgetExceeded` → `ReturnOnly` (no result / artifact / fact signature) | `relation_budget_exceeded_admits_nothing` | — |
 | **RI-10** Strict-family behavioral branch (A.3 slice) | RI-1 | reducers BRANCH on the strict family; `type_env_hash` isolates strict-on/off | `reducers_branch_on_strict_family_not_only_key` | — |
 
@@ -1209,10 +1223,11 @@ The deferred-guard→owner registry (the mini-DAG table) is the gate's landable 
    the immutable setup/key remains outside the fingerprint. The exhaustive behavioral guard forces every new
    setup struct field to be classified; the differential `tsgo`-parity oracle (§6.3) remains the backstop for
    an inference axis that has not yet been modeled at all.
-5. **RI-8 migration risk (U2 scope).** RI-8 reuses the shared `CheckerReentryStack` substrate (RI-3 is the
-   SOLE builder + `Relate`-wirer; RI-8 builds no substrate and wires no `Relate`) and retires
-   `RefCycleResultDb`; the retirement must preserve the existing strict self-root warm-read semantics (the BFS
-   root file plus every visited declaration's file) inside the SCC's `ReadSetSignature.self_root_canonicals`.
+5. **RI-8 migration risk (U2 scope).** RI-8 retires `RefCycleResultDb` into the sealed
+   `ClassifyMaterializationCycleGate` family (no checker-stack use — `CheckerTransaction` stays
+   relation-only); the retirement must preserve the existing strict self-root warm-read semantics
+   (the walk root file plus every visited declaration's file) as the family's
+   `observed_self_roots` + live-generation gate.
    Routing the `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` engines onto the substrate — and
    the flow depth-sentinel retirement — are DEFERRED to U6 (those variants land at U6), so they are NOT part of
    RI-8's risk surface. Scoped as its own sub-block with a retired-symbol guard; second only to RI-6/RI-7 in
@@ -1275,8 +1290,8 @@ The deferred-guard→owner registry (the mini-DAG table) is the gate's landable 
   defers binding-member admission to session-close, the proof table) OVER those shapes.
 - **U3.CACHE_FACT_MODEL** owns the per-family adaptive cap + multi-candidate substrate RI-1 wires `Relate`
   into (§6.1), and proves the `ReadSetSignature` tracer captures relation footprints.
-- **U6** consumes the shared `CheckerReentryStack` substrate RI-3 builds (RI-8 reuses; RI-8 wires no
-  `Relate`), and **routes** the
+- **U6** consumes the shared `CheckerReentryStack` substrate RI-3 builds (RI-8 wires nothing onto
+  it — its cycle gate is a sealed semantic query, not a substrate consumer), and **routes** the
   `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` engines onto it (those variants + spec rows +
   behavior land at U6 per the parity §2.3 added-key table / qvd "Rescope of later phases" — RI-3 wires only `Relate`; RI-8 wires
   nothing onto the substrate). The flow

@@ -96,7 +96,7 @@ on lib data:
 - `ResolvedImportFacts` does **NOT** include `lib_env_hash`. A lib
   update does not change where `./theme` resolves.
 - `RouteDb`, typed-IR resolve, `MaterializeStructureDb`,
-  `RefCycleResultDb`, `SemanticGraphStore`, `ComponentMetaResultDb`
+  `SemanticGraphStore`, `ComponentMetaResultDb`
   **DO** include `lib_env_hash` because semantic meaning depends on
   intrinsic types (`Array<T>`, `HTMLElement`, etc.) and / or module
   augmentations stitching into the effective surface.
@@ -117,7 +117,7 @@ together. Concretely:
   `decorator_semantics`, `use_define_for_class_fields`) folds into
   `type_env_hash`, so it enters every layer that already carries
   `type_env_hash` (typed-IR resolve, `MaterializeStructureDb`,
-  `RefCycleResultDb`, `SemanticGraphStore`, `ComponentMetaResultDb`,
+  `SemanticGraphStore`, `ComponentMetaResultDb`,
   `TypeInfoGraphResultDb`) and stays absent from `ResolvedImportFacts`
   (which carries no `type_env_hash`).
 - A `resolve_env` addition (`jsx_import_source`, `module_resolution`,
@@ -162,7 +162,7 @@ material:
   the per-reducer budgets, parent §4.3 / §6) is part of the **cache
   identity + the recorded facts** of the depth-sensitive query-identity
   caches (`SemanticGraphStore` `Instantiate` / `Conditional` / `MappedType`
-  nodes, `MaterializeStructureDb`, `RefCycleResultDb`, `TypeInfoGraphResultDb`).
+  nodes, `MaterializeStructureDb`, `TypeInfoGraphResultDb`).
   Two reductions of the same type under different depth policies reduce
   differently (one truncates at a shallower depth), so the policy is a
   meaning-affecting input. It folds into `type_env_hash` (the depth limit is a
@@ -186,7 +186,7 @@ material:
 | `RouteDb` effective barrel surface | Query-identity (multi-candidate) | `BarrelSurfaceKey { barrel_canonical, project_identity, resolve_env_hash, lib_env_hash, resolver_version }` (R6 content-free; R21 split-env) | Fact-validated per candidate via the value-side `ValidatedFactCache` over `BarrelRouteSurface.fact_dep_signature: Arc<[FactVersionRef]>` |
 | `RouteDb` effective export set | Query-identity (multi-candidate) | `EffectiveExportSetKey { provider_canonical, project_identity, resolve_env_hash, lib_env_hash, session_scope }` (R21 — lib_env enters because module augmentations live in libs; `session_scope: EffectiveExportSetScope {Base, Session(scope_id)}` is the CONTENT-FREE session scope, R6 — the overlay-set content fingerprint never enters the key) | Fact-validated per candidate via `EffectiveExportSetEntry.fact_dep_signature`, which records `RouteSurface(ModuleAugmentationIndexShape)` (the augmenter-set fingerprint) + per-contributor `FileWholeHash` anchors (R29 + G1). **Overlay-aware**: a session view stitches its own overlay augmenters (unioned with base) into a `Session(scope_id)` slot distinct from the `Base` slot; overlay CONTENT identity is validated on the value's facts (revalidated on every warm hit), NOT smuggled into the key. The content-addressed augmentation index it stitches keys its `Session` slot by the overlay-set fingerprint (compute input). |
 | `MaterializeStructureDb` | Query-identity (multi-candidate) | `MaterializationCacheKey { decl: ResolvedDeclSlotIdentity, projection_path: RouteDemand, scope_axis, projection_mode, normalized_type_args: Arc<[SemanticNodeId]>, resolve_env_hash }` (R6 — the SUBJECT is the content-free env-bearing slot, NOT a graph-instance `SemanticNodeId`; `normalized_type_args` carries `SemanticNodeId`s exactly as the compliant `SemanticQueryKey::Instantiate.args` does — args are query-identity, the violation was a SemanticNodeId *subject*. R21 — slot carries `type_env`/`lib_env`/`project_identity`, the key adds `resolve_env_hash`.) The per-thread recursion/depth identity is the SEPARATE `MaterializeRuntimeKey { base: SemanticNodeId, scope_axis, mode }` (NOT a cache key). A root-less anonymous subject keys NO slot (uncached). | Fact-validated per candidate (`ReadSetSignature.facts` + `self_root_canonicals` = the materialise subject's declaration-origin file — the extracted route root for a route-shaped subject, the `base` node's origin for a non-route subject; never the consumer scope — + `validated_at_generation`) |
-| `RefCycleResultDb` | Query-identity (multi-candidate) | `RefCycleResultKey { root: ResolvedDeclSlotIdentity, resolve_env_hash, version }` (R6 content-free — the versioned `DeclIdentity` is NOT the key; R21 — slot carries `type_env`/`lib_env`/`project_identity`, the key adds `resolve_env_hash`) | Fact-validated per candidate (`ReadSetSignature.facts` + `self_root_canonicals` = the BFS root + every visited declaration's file + `validated_at_generation`) |
+| `ClassifyMaterializationCycleGate` (materialization cycle gate) | Semantic-query family over the `SemanticGraphStore` memo | `MaterializationCycleGateKey { root: ResolvedDeclSlotIdentity, parse_env_hash, resolve_env_hash }` (R6 content-free — no `DeclIdentity`, generation, or algorithm version; the slot carries `type_env`/`lib_env`/`project_identity`; fixed empty-args / `StructuralTransit` / `Skeleton` axes) | Only `Decided` admits (`LegacyFallback` always suppressed); fact-validated per candidate (`ReadSetSignature.facts` + observed self-roots = the walk root + every visited declaration's file) + live-generation gate |
 | `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `SemanticQueryKey` (slot identity, e.g. `Instantiate { base: ResolvedDeclSlotIdentity, args }`) | Fact-validated per candidate; the memo value version-roots on `ReadSetSignature.facts` + `self_root_canonicals` |
 | `ComponentMetaResultDb` | Query-identity (multi-candidate) | `ComponentMetaResultKey { owner_canonical, options_fingerprint, project_identity, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash }` (R6 content-free — the owner whole-hash is the value-side candidate discriminant, never a key field; R21 full split-env) | Fact-validated per candidate (owner whole-hash candidate discriminant + `ReadSetSignature.facts` + `validated_at_generation`; the owner `FileWholeHash` stays in the value facts) |
 | `CompileSlot.fact_dep_signature` (per-profile compile cache) | Profile-keyed (`CompileProfile`) on `compile_slots: FxHashMap<u64, CompileSlot>` | `(canonical, compile_profile_hash)` (no version hash in the key; `semantic_hash` + override-hashes ride on the slot value) | Carrier is `ReadSetSignature { facts, overflowed }`. Cold-build producer routes the finalised tracer through `SignatureAdmission::from_finalise(...)`; `Cacheable(sig)` → `compile_slots.insert(CompileSlot { fact_dep_signature: sig, .. })`; `NonCacheable` (overflow / unresolved provenance / self-root conflict / route-generation dependency) → skip-publish refusal, fresh value returned to caller without admitting. Empty (`facts.is_empty() && !overflowed`) is a valid admitted state — the warm-hit oracle validates vacuously and falls back to the `semantic_hash` / override-hash pre-filter |

@@ -429,6 +429,7 @@ semantic_query_names! {
     ContextualTypeAt,
     LowerLocator,
     ClassifyBroadRuntime,
+    ClassifyMaterializationCycleGate,
 }
 
 /// Deterministic identifier for a generated TS7 oracle snapshot. Closed
@@ -700,6 +701,10 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         // work: it exists to give the Vue macro runtime-shape projection
         // its per-member constructor verdicts through canonical dispatch.
         ResolveMacroPayload | ClassifyBroadRuntime => U14MacroAdapter,
+        // The materialization cycle gate is core query-value machinery:
+        // a sealed classifier family whose `Decided` verdicts admit
+        // through the family singleflight.
+        ClassifyMaterializationCycleGate => U2QueryValueDomain,
     }
 }
 
@@ -1961,6 +1966,12 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         // composes; no manifest row consumes it).
         (LowerLocator, U2QueryValueDomain),
         (ClassifyBroadRuntime, U14MacroAdapter),
+        // The materialization cycle gate at U2.QUERY_VALUE_DOMAIN — a
+        // sealed classifier family over the family memo (the retired
+        // `RefCycleResultDb`'s replacement); its `Decided` verdicts
+        // admit through the singleflight like every other value-domain
+        // family.
+        (ClassifyMaterializationCycleGate, U2QueryValueDomain),
     ];
 
     // DISCRIMINATING per-key pin: a wrong `key_owning_block` arm FAILS here.

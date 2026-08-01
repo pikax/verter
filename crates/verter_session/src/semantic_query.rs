@@ -1704,8 +1704,9 @@ pub type IndexKey = AuthoredPropertyKey;
 ///   / R10-2. `build_instantiate` synthesizes `TypeParam` shells for
 ///   unbound type parameters when invoked in this mode, preserving
 ///   project-rule "Navigate/Shallow over open generics preserves type
-///   parameters". Used by `ref_root_reaches_transitive_cycle_node`'s BFS
-///   step. Existing Navigate/Expanded callers see no change.
+///   parameters". Used by the materialization cycle gate's per-hop
+///   `Instantiate` (`ClassifyMaterializationCycleGate`).
+///   Existing Navigate/Expanded callers see no change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProjectionMode {
     Identity,
@@ -4002,12 +4003,16 @@ pub enum QueryResult<T> {
 /// Every live [`SemanticQueryKey`] that PRODUCES a value produces
 /// [`TypeNode`](Self::TypeNode) — the interned graph node id for the
 /// resolved type — EXCEPT [`SemanticQueryKey::ProjectObjectSpread`],
-/// [`SemanticQueryKey::ResolveOverloadSet`], and
-/// [`SemanticQueryKey::ClassifyBroadRuntime`]. The projection family has the
+/// [`SemanticQueryKey::ResolveOverloadSet`],
+/// [`SemanticQueryKey::ClassifyBroadRuntime`], and
+/// [`SemanticQueryKey::ClassifyMaterializationCycleGate`]. The projection
+/// family has the
 /// dedicated [`ObjectProjection`](Self::ObjectProjection) domain and remains
-/// non-producing until its ordered-effect evaluator lands; the other two live
+/// non-producing until its ordered-effect evaluator lands; the next two live
 /// producers fill [`OverloadSet`](Self::OverloadSet) and
-/// [`BroadRuntime`](Self::BroadRuntime), respectively. The
+/// [`BroadRuntime`](Self::BroadRuntime), respectively, and the
+/// materialization cycle gate fills
+/// [`MaterializationCycleGate`](Self::MaterializationCycleGate). The
 /// non-producing keys (`Relate`, plus the `NonProducingPendingReducer`
 /// variants `ResolveAmbientNamespace`, `ResolveEnum`, `ApparentType`,
 /// `FlowNarrowingAt`, `ContextualTypeAt`) return `Miss` and forward-declare
@@ -4018,8 +4023,9 @@ pub enum QueryResult<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticQueryValue {
     /// The interned graph node id for the resolved type — the domain every
-    /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`]
-    /// and [`SemanticQueryKey::ClassifyBroadRuntime`].
+    /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`],
+    /// [`SemanticQueryKey::ClassifyBroadRuntime`], and
+    /// [`SemanticQueryKey::ClassifyMaterializationCycleGate`].
     TypeNode(SemanticNodeId),
     /// Selector-aware correlated projection facts for one authored object
     /// construction program. This is intentionally not disguised as a graph
@@ -4055,6 +4061,13 @@ pub enum SemanticQueryValue {
     /// runtime lowering. The classifier is a semantic query, not a consumer-
     /// local graph walk.
     BroadRuntime(BroadRuntimeClassification),
+    /// The sealed materialization cycle-gate outcome — the LIVE value domain
+    /// of [`SemanticQueryKey::ClassifyMaterializationCycleGate`], the sole
+    /// authority for "does this declaration transitively reach a cycle
+    /// through a complex helper surface". Only
+    /// [`MaterializationCycleGateOutcome::Decided`] admits into the family
+    /// memo; a `LegacyFallback` flows to the caller suppressed.
+    MaterializationCycleGate(MaterializationCycleGateOutcome),
     /// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
     /// producer, no key spec row. Uses a local shell so this crate keeps no
     /// back-edge to `verter_tsc::CheckResult`.
@@ -4073,6 +4086,7 @@ pub enum SemanticQueryValueTag {
     OverloadSet,
     Relation,
     BroadRuntime,
+    MaterializationCycleGate,
     DiagnosticAnalysis,
 }
 
@@ -4088,6 +4102,7 @@ impl SemanticQueryValue {
             Self::OverloadSet(_) => SemanticQueryValueTag::OverloadSet,
             Self::Relation(_) => SemanticQueryValueTag::Relation,
             Self::BroadRuntime(_) => SemanticQueryValueTag::BroadRuntime,
+            Self::MaterializationCycleGate(_) => SemanticQueryValueTag::MaterializationCycleGate,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
     }
@@ -4153,6 +4168,215 @@ impl BroadRuntimeClassification {
     pub fn contains_unknown(&self) -> bool {
         self.kinds.contains(&BroadRuntimeKind::Unknown)
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Materialization cycle gate (ClassifyMaterializationCycleGate)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// The verdict the materialization cycle gate carries. `Stop` halts
+/// materialisation (the root declaration transitively reaches a cycle
+/// through a complex helper surface); `Continue` lets it proceed.
+///
+/// Consumers branch on THIS verdict from BOTH outcome arms — never on
+/// the arm kind. A `LegacyFallback` carries the same verdict vocabulary
+/// as a `Decided`; treating "fallback" itself as a stop condition would
+/// false-seal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MaterializationCycleGateVerdict {
+    Stop,
+    Continue,
+}
+
+/// Why a gate walk could not produce a complete [`MaterializationCycleGateOutcome::Decided`]
+/// outcome. Recoverable incomplete observations do not stop the walk;
+/// the reason set records that the walk was incomplete, so the outcome
+/// demotes to `LegacyFallback`.
+///
+/// Partiality contract (binding): every reason EXCEPT
+/// [`HopLimit`](Self::HopLimit) marks the producer's `result_is_partial`.
+/// The hop-limit fallback returns the carried path signal — a complete
+/// observation of a bounded walk — so it is `ReturnOnly` (cache-suppressed)
+/// but NOT partial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MaterializationCycleGateFallbackReason {
+    /// The 64-dequeue hop bound was exhausted; the verdict is the carried
+    /// path signal. NOT partial.
+    HopLimit,
+    /// A nested per-hop `Instantiate` read returned `Recursive` or `Error`
+    /// (including a missing root body); the walk continued past it.
+    /// Partial.
+    NestedIncompleteObservation,
+    /// A graph node the walk or a scanner needed had no node data (a
+    /// torn graph). Partial. A body that LOWERS to `Opaque(Miss)` (a
+    /// missing prepared decl, a type parameter, a builtin, an external
+    /// decl) is NOT this reason — it is an ordinary empty body the walk
+    /// traverses and decides on.
+    MissingGraphData,
+    /// A body scanner's depth fuse tripped; observations beyond the fuse
+    /// are ignored (the walk continues). Partial.
+    ScannerLimit,
+    /// The multi-root aggregator's root-surface collection hit its bound;
+    /// the aggregate ORs only the collected roots. Partial.
+    RootCollectorLimit,
+    /// The read was cancelled. Partial.
+    Cancelled,
+    /// The project generation moved under the walk. Partial.
+    UnstableGeneration,
+}
+
+impl MaterializationCycleGateFallbackReason {
+    /// Whether this reason marks the producer's `result_is_partial`
+    /// (everything except the hop-limit polarity fallback).
+    #[must_use]
+    pub const fn is_partial(self) -> bool {
+        !matches!(self, Self::HopLimit)
+    }
+}
+
+/// A non-empty, deduplicated, order-stable set of
+/// [`MaterializationCycleGateFallbackReason`]s. Non-emptiness is sealed:
+/// the only constructor collects into `Some` first element or returns
+/// `None`, so an empty `LegacyFallback` reason set is unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializationCycleGateFallbackReasons(Arc<[MaterializationCycleGateFallbackReason]>);
+
+impl MaterializationCycleGateFallbackReasons {
+    /// Collect `reasons` into a deduplicated set, or `None` when empty.
+    #[must_use]
+    pub fn new(
+        reasons: impl IntoIterator<Item = MaterializationCycleGateFallbackReason>,
+    ) -> Option<Self> {
+        let mut ordered: Vec<MaterializationCycleGateFallbackReason> = Vec::new();
+        for reason in reasons {
+            if !ordered.contains(&reason) {
+                ordered.push(reason);
+            }
+        }
+        if ordered.is_empty() {
+            return None;
+        }
+        Some(Self(Arc::from(ordered.into_boxed_slice())))
+    }
+
+    #[must_use]
+    pub fn contains(&self, reason: MaterializationCycleGateFallbackReason) -> bool {
+        self.0.contains(&reason)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = MaterializationCycleGateFallbackReason> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// Union of two reason sets (multi-root aggregation: reasons ∪).
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        Self::new(self.iter().chain(other.iter()))
+            .expect("union of two non-empty reason sets is non-empty")
+    }
+
+    /// Whether any reason in the set marks the result partial.
+    #[must_use]
+    pub fn any_partial(&self) -> bool {
+        self.iter()
+            .any(MaterializationCycleGateFallbackReason::is_partial)
+    }
+}
+
+/// The sealed outcome of [`SemanticQueryKey::ClassifyMaterializationCycleGate`].
+///
+/// `Decided` is a complete walk — the ONLY arm admitted into the family
+/// memo. `LegacyFallback` carries the walk's computed verdict plus the
+/// non-empty reason set explaining why the walk was incomplete; it
+/// always suppresses family admission
+/// (`cache_suppress`) and marks `result_is_partial` iff any reason
+/// [`is_partial`](MaterializationCycleGateFallbackReason::is_partial).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterializationCycleGateOutcome {
+    Decided(MaterializationCycleGateVerdict),
+    LegacyFallback {
+        verdict: MaterializationCycleGateVerdict,
+        reasons: MaterializationCycleGateFallbackReasons,
+    },
+}
+
+impl MaterializationCycleGateOutcome {
+    /// The carried verdict from EITHER arm — the only value consumers
+    /// may branch on.
+    #[must_use]
+    pub fn verdict(&self) -> MaterializationCycleGateVerdict {
+        match self {
+            Self::Decided(verdict) => *verdict,
+            Self::LegacyFallback { verdict, .. } => *verdict,
+        }
+    }
+
+    #[must_use]
+    pub fn is_decided(&self) -> bool {
+        matches!(self, Self::Decided(_))
+    }
+
+    /// The fallback reason set, or `None` for a `Decided` outcome.
+    #[must_use]
+    pub fn fallback_reasons(&self) -> Option<&MaterializationCycleGateFallbackReasons> {
+        match self {
+            Self::Decided(_) => None,
+            Self::LegacyFallback { reasons, .. } => Some(reasons),
+        }
+    }
+
+    /// The multi-root OR lattice (the node-root aggregator's
+    /// composition rule): Stop dominates Continue; ANY
+    /// `LegacyFallback` in the inputs infects the aggregate — a
+    /// `Decided(Continue)` beside a `LegacyFallback(...)` is NOT a
+    /// complete `Decided`; reasons union across all fallback inputs.
+    /// An empty input decides `Continue` (no roots, no cycle, no
+    /// incompleteness).
+    #[must_use]
+    pub fn aggregate(outcomes: impl IntoIterator<Item = Self>) -> Self {
+        let mut stop = false;
+        let mut reasons: Vec<MaterializationCycleGateFallbackReason> = Vec::new();
+        for outcome in outcomes {
+            stop |= matches!(outcome.verdict(), MaterializationCycleGateVerdict::Stop);
+            if let Some(fallback) = outcome.fallback_reasons() {
+                reasons.extend(fallback.iter());
+            }
+        }
+        let verdict = if stop {
+            MaterializationCycleGateVerdict::Stop
+        } else {
+            MaterializationCycleGateVerdict::Continue
+        };
+        match MaterializationCycleGateFallbackReasons::new(reasons) {
+            None => Self::Decided(verdict),
+            Some(union) => Self::LegacyFallback {
+                verdict,
+                reasons: union,
+            },
+        }
+    }
+}
+
+/// The sealed, content-free key of
+/// [`SemanticQueryKey::ClassifyMaterializationCycleGate`].
+///
+/// `root` is the env-bearing [`ResolvedDeclSlotIdentity`] of the gate
+/// root declaration (it carries the `T` / `L` / `J` env dims);
+/// `parse_env_hash` (`P`) and `resolve_env_hash` (`R`) complete the
+/// env identity — the per-hop `Instantiate` reads the producer issues
+/// are file-backed (`P`) and resolve imports (`R`). The remaining axes
+/// are FIXED, not key fields: empty args, `StructuralTransit` demand,
+/// `Skeleton` mode, neutral policy / provenance. No content hash,
+/// generation, `DeclIdentity`, or algorithm version enters the key —
+/// version-rooting lives on the cached value's read-set facts +
+/// observed self-roots (R6).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MaterializationCycleGateKey {
+    pub root: ResolvedDeclSlotIdentity,
+    /// Parse dimension (`P`).
+    pub parse_env_hash: HashValue,
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
 }
 
 /// A single call/construct signature, identified by its graph node
@@ -5967,6 +6191,22 @@ pub enum SemanticQueryKey {
     LowerLocator {
         key: crate::locator_identity::LocatorLoweringKey,
     },
+    /// Classify whether the `root` declaration transitively reaches a
+    /// cycle through a complex helper surface — the materialization
+    /// cycle gate.
+    ///
+    /// The payload is the sealed [`MaterializationCycleGateKey`]: the
+    /// env-bearing root slot (`T`/`L`/`J`) plus `P` and `R`. All other
+    /// axes are FIXED inside the producer (empty args, `StructuralTransit`
+    /// demand, `Skeleton` mode, neutral policy / provenance), so they
+    /// cannot fork the family identity. The value domain is
+    /// [`SemanticQueryValue::MaterializationCycleGate`]; only
+    /// [`MaterializationCycleGateOutcome::Decided`] admits into the family
+    /// memo. Version-rooting lives on the cached value's read-set facts +
+    /// observed self-roots (R6), never in the key.
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    ClassifyMaterializationCycleGate(MaterializationCycleGateKey),
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -6008,6 +6248,7 @@ pub enum SemanticQueryKeyTag {
     FlowNarrowingAt,
     ContextualTypeAt,
     LowerLocator,
+    ClassifyMaterializationCycleGate,
 }
 
 impl SemanticQueryKeyTag {
@@ -6039,6 +6280,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::FlowNarrowingAt,
         SemanticQueryKeyTag::ContextualTypeAt,
         SemanticQueryKeyTag::LowerLocator,
+        SemanticQueryKeyTag::ClassifyMaterializationCycleGate,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -6072,6 +6314,9 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::FlowNarrowingAt => "FlowNarrowingAt",
             SemanticQueryKeyTag::ContextualTypeAt => "ContextualTypeAt",
             SemanticQueryKeyTag::LowerLocator => "LowerLocator",
+            SemanticQueryKeyTag::ClassifyMaterializationCycleGate => {
+                "ClassifyMaterializationCycleGate"
+            }
         }
     }
 
@@ -6083,7 +6328,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 24 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 25 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -6158,6 +6403,9 @@ impl SemanticQueryKey {
             SemanticQueryKey::FlowNarrowingAt { .. } => SemanticQueryKeyTag::FlowNarrowingAt,
             SemanticQueryKey::ContextualTypeAt { .. } => SemanticQueryKeyTag::ContextualTypeAt,
             SemanticQueryKey::LowerLocator { .. } => SemanticQueryKeyTag::LowerLocator,
+            SemanticQueryKey::ClassifyMaterializationCycleGate(_) => {
+                SemanticQueryKeyTag::ClassifyMaterializationCycleGate
+            }
         }
     }
 }
@@ -7950,6 +8198,14 @@ mod tests {
                 SemanticQueryValueTag::BroadRuntime,
             ),
             (
+                SemanticQueryValue::MaterializationCycleGate(
+                    MaterializationCycleGateOutcome::Decided(
+                        MaterializationCycleGateVerdict::Continue,
+                    ),
+                ),
+                SemanticQueryValueTag::MaterializationCycleGate,
+            ),
+            (
                 SemanticQueryValue::DiagnosticAnalysis(DiagnosticAnalysisShell),
                 SemanticQueryValueTag::DiagnosticAnalysis,
             ),
@@ -7957,13 +8213,13 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: eight cases, eight unique tags. Sort before dedup so
+        // Distinctness: nine cases, nine unique tags. Sort before dedup so
         // non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
         tags.sort_by_key(|t| *t as u8);
         tags.dedup();
-        assert_eq!(tags.len(), 8, "every value domain must have a distinct tag");
+        assert_eq!(tags.len(), 9, "every value domain must have a distinct tag");
     }
 
     /// Taint shape: every `ResultTaint` / `BrokenInputClass` variant is

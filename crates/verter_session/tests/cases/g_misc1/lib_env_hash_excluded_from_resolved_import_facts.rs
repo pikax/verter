@@ -3,7 +3,7 @@
 //!
 //! Per R21 / the Cache Architecture rule: `ResolvedImportFacts` does NOT
 //! include `lib_env_hash`; `RouteDb`, typed-IR resolve, `MaterializeStructureDb`,
-//! `RefCycleResultDb`, `SemanticGraphStore`, `ComponentMetaResultDb` DO
+//! `SemanticGraphStore`, `ComponentMetaResultDb` DO
 //! include `lib_env_hash`. This guard locks the scoping decision so a
 //! future refactor cannot silently add `lib_env_hash` to `ResolvedImportFactsKey`
 //! and re-conflate the syntactic-resolution layer with the lib-data

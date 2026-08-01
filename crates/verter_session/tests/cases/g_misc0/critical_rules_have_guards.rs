@@ -201,11 +201,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "barrel_surface_key_carries_split_env_and_no_content_hash",
             "route_db_does_not_key_routes_or_barrels_on_bare_strings",
             "route_keys_env_axes_discriminate",
-            // (3) RefCycleResultDb — content-free `ResolvedDeclSlotIdentity`
-            //     slot, never the versioned `DeclIdentity` (whole_hash).
-            "ref_cycle_result_key_is_content_free_slot_keyed",
-            "ref_cycle_db_is_keyed_on_content_free_slot_not_decl_identity",
-            "ref_cycle_result_key_is_content_free_and_env_discriminating",
+            // (3) ClassifyMaterializationCycleGate — content-free
+            //     `ResolvedDeclSlotIdentity` slot + P/R, never the versioned
+            //     `DeclIdentity` (whole_hash), a generation, or an
+            //     algorithm version.
+            "materialization_cycle_gate_key_is_content_free_slot_keyed",
+            "materialization_cycle_gate_key_is_content_free_and_env_discriminating",
+            "materialization_cycle_gate_key_slot_env_axes_discriminate",
             // (4) MaterializeStructureDb — content-free canonical-subject
             //     `MaterializationCacheKey`, never the graph-instance
             //     `MaterializeRuntimeKey` (base: SemanticNodeId) subject.

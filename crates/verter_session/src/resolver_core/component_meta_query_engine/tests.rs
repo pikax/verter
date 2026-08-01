@@ -2654,7 +2654,7 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
 /// the compute's `refuse_result_cache_admission_if_partial` gate — which only
 /// catches the wildcard-route FUSE trip — does NOT fire. The ONLY rail that
 /// refuses the poisoned verdict is the nested fact tracer (the
-/// `RefCycleResultDb` / `app_config_no_override_proof` sibling pattern), which
+/// `app_config_no_override_proof` sibling pattern), which
 /// pre-fix `can_resolve_registry_symbol` never installed — admitting a verdict
 /// derived from a served-without-publication basis whose facts validate live.
 ///
@@ -2731,7 +2731,7 @@ fn fenced_serve_resolvability_verdict_is_not_admitted() {
         db.live_count(),
         before,
         "POISON: a fenced (non-cacheable) resolvability compute admitted its verdict into \
-         ResolvabilityDb — the nested fact tracer (RefCycleResultDb / app_config sibling \
+         ResolvabilityDb — the nested fact tracer (the app_config sibling \
          pattern) must refuse admission, else a later same-generation warm hit inherits the \
          stale verdict derived from a served-without-publication basis",
     );

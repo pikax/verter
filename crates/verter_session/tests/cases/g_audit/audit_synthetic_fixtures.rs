@@ -16,10 +16,10 @@
 //!    a `RequestAuditRecord` whose footprint records do not surface
 //!    `MaterializeSkipReason` variants individually (the audit
 //!    pipeline mines `structured_events` into shape-aware records).
-//! 2. The cycle-guard predicates themselves are unit-tested directly:
-//!    - `component_meta_materialize::tests::recursive_helper_cycle_guard_predicate_fires_on_dot_path_keys_helper`
-//!      verifies `ref_root_reaches_transitive_cycle_node` returns
-//!      `true` on the canonical nuxt-ui DotPathKeys shape.
+//! 2. The cycle-gate verdicts themselves are unit-tested directly:
+//!    - `project_semantic_dispatch::cycle_gate_tests::cycle_gate_decided_stop_on_nuxt_dotpathkeys_shape`
+//!      verifies the sealed gate returns `Decided(Stop)`
+//!      on the canonical nuxt-ui DotPathKeys shape.
 //!    - `component_meta_materialize::tests::registry_route_extracts_actual_root_for_builtin_pick_over_recursive_helper`
 //!      verifies `extract_route_root_identity_node` recurses into
 //!      `args[0]` so the cycle guard sees the actual root identity.
@@ -43,8 +43,8 @@ const REGISTRY_ROUTE_FIXTURE_VUE: &str = include_str!("../fixtures/audit/registr
 /// Architectural contract: published prop types stay shallow.
 /// Eager materialisation does not run at publication time, so the
 /// projector path emits the bare carrier and the cycle guard is not
-/// exercised here — the on-demand resolver-side guard
-/// (`ref_root_reaches_transitive_cycle_node`, covered by separate
+/// exercised here — the sealed materialization cycle gate
+/// (`ClassifyMaterializationCycleGate`, covered by separate
 /// unit tests) keeps consumer re-resolution terminal.
 ///
 /// Discriminator: the resolved `value` field's `r#type` is the bare

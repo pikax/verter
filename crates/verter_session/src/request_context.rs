@@ -353,8 +353,11 @@ pub struct PerRequestCacheCounters {
     pub component_meta: HitMiss,
     /// `RouteDb` — host-backed resolver route cache.
     pub route_db: HitMiss,
-    /// `RefCycleResultDb` — transitive-cycle result cache for
-    /// parameterized generic helpers.
+    /// Always-zero counter for the retired `RefCycleResultDb` cache.
+    /// Retained under the legacy name to preserve audit-harness JSON
+    /// schema compatibility; the materialization cycle gate is a
+    /// semantic-query family now, so its warm hits ride
+    /// `semantic_graph` (and `type_resolution_ref_root_cycle_hits`).
     pub ref_cycle: HitMiss,
     /// `IntrinsicRegistry` — intrinsic dispatch lookup cache.
     pub intrinsic_registry: HitMiss,
@@ -643,8 +646,10 @@ pub struct RequestContext {
     /// Number of conditional-type branch decisions resolved (open
     /// distributions + closed branch reductions).
     pub type_resolution_conditional_decisions: AtomicU64,
-    /// Number of `ref_root_reaches_transitive_cycle_node` cache hits
-    /// observed during the request.
+    /// Number of materialization cycle gate
+    /// (`ClassifyMaterializationCycleGate`) warm family hits observed
+    /// during the request. Field name retained for audit-harness JSON
+    /// schema compatibility.
     pub type_resolution_ref_root_cycle_hits: AtomicU64,
     /// Total projection ops executed against the projection-op
     /// budget (`SemanticQueryKey::ProjectPath` invocations).
@@ -1333,8 +1338,8 @@ impl RequestContext {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Bump the `ref_root_reaches_transitive_cycle_node` cache-hit
-    /// counter.
+    /// Bump the materialization cycle gate warm-hit counter
+    /// (`type_resolution_ref_root_cycle_hits`).
     pub fn bump_type_resolution_ref_root_cycle_hit(&self) {
         self.type_resolution_ref_root_cycle_hits
             .fetch_add(1, Ordering::Relaxed);

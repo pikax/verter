@@ -2,7 +2,7 @@
 //! the TLS tracer stack.
 //!
 //! The 5 Family B/C/D caches (`MaterializeStructureDb`,
-//! `RefCycleResultDb`, `MemoEntry`, `AppConfigNoOverrideProofDb`,
+//! `MemoEntry`, `AppConfigNoOverrideProofDb`,
 //! `OwnerImportSurfaceDb`) wrap their cold builds with
 //! `install_fact_tracer`. This test installs an OUTER tracer, then
 //! drives the AppConfigNoOverrideProofDb producer (which installs

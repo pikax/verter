@@ -408,8 +408,10 @@ component_meta: CacheLayerHitMiss,
  */
 route_db: CacheLayerHitMiss,
 /**
- * `RefCycleResultDb` — transitive-cycle result cache for
- * parameterized generic helpers.
+ * Always-zero row for the retired `RefCycleResultDb`. Retained
+ * under the legacy name to preserve audit-harness JSON schema
+ * compatibility; the materialization cycle gate is a
+ * semantic-query family now (its warm hits ride `semantic_graph`).
  */
 ref_cycle: CacheLayerHitMiss,
 /**
@@ -3137,7 +3139,9 @@ expansions: number,
  */
 conditional_decisions: number,
 /**
- * Number of `ref_root_reaches_transitive_cycle_node` cache hits.
+ * Number of materialization cycle gate
+ * (`ClassifyMaterializationCycleGate`) warm family hits. Field
+ * name retained for JSON schema compatibility.
  */
 ref_root_cycle_hits: number,
 /**

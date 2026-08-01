@@ -1050,7 +1050,7 @@ pub(crate) fn empty_fact_signature() -> Arc<[FactVersionRef]> {
 /// path-precise `FactVersionRef` signature plus the explicit self-root
 /// canonical set the warm-read validator checks **strictly**. Produced
 /// by `materialize_structure_read_set` (the `MaterializeStructureDb`
-/// carrier) and `ref_cycle_read_set` (the `RefCycleResultDb` carrier).
+/// carrier).
 /// `materialize_structure_read_set` returns
 /// `Result<StructuralCarrierReadSet, NonAdmissionReason>` so refusal
 /// modes (`SelfRootConflict`, `RouteGenerationDependency`) reach the

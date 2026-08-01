@@ -840,7 +840,7 @@ A macro/import that resolves its surface through anything other than the shared 
   - `Shallow`: one surface level of the requested node without recursive expansion.
   - `Expanded`: recursive materialization of the requested result.
   - `Skeleton`: specialised generic-helper/cycle traversal that keeps unbound type parameters as shells.
-- `Skeleton` is a distinct mode, not a synonym for `Navigate`. It is currently scoped to cycle/generic-helper traversal such as `ref_root_reaches_transitive_cycle_node`'s BFS step. New call sites must justify why they need Skeleton semantics instead of `Navigate` / `Shallow`.
+- `Skeleton` is a distinct mode, not a synonym for `Navigate`. It is currently scoped to cycle/generic-helper traversal — the materialization cycle gate's per-hop `Instantiate` (`ClassifyMaterializationCycleGate`, see `project_semantic_dispatch::cycle_gate`). New call sites must justify why they need Skeleton semantics instead of `Navigate` / `Shallow`.
 - Do not introduce ad hoc navigate/shallow flags; use the canonical modes and the path-precise projection surface.
 - Do not walk unrelated imports from the same file.
 - Do not treat plain imports as implicit exports.

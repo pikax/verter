@@ -629,8 +629,8 @@ where
 /// **Compute closure synchronicity contract.** The
 /// `compute` closure runs SYNCHRONOUSLY on the caller's thread.
 /// Future maintainers MUST preserve this invariant; it underpins
-/// borrow-capture safety in callers (e.g.,
-/// `RefCycleResultDb::get_or_compute` borrows `&VerterHost`
+/// borrow-capture safety in callers (e.g., the materialise-structure
+/// cooperative build borrows `&VerterHost`
 /// directly without `'static` bounds or thread-hop dispatch).
 ///
 /// **Halt grep before each commit modifying this function**

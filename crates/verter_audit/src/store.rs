@@ -52,8 +52,10 @@ pub struct CacheLayerBreakdown {
     pub component_meta: CacheLayerHitMiss,
     /// `RouteDb` — host-backed resolver route cache.
     pub route_db: CacheLayerHitMiss,
-    /// `RefCycleResultDb` — transitive-cycle result cache for
-    /// parameterized generic helpers.
+    /// Always-zero row for the retired `RefCycleResultDb`. Retained
+    /// under the legacy name to preserve audit-harness JSON schema
+    /// compatibility; the materialization cycle gate is a
+    /// semantic-query family now (its warm hits ride `semantic_graph`).
     pub ref_cycle: CacheLayerHitMiss,
     /// `IntrinsicRegistry` — intrinsic dispatch lookup cache.
     pub intrinsic_registry: CacheLayerHitMiss,

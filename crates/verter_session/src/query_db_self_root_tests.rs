@@ -1,6 +1,6 @@
 //! Self-version-root discriminator tests for the component-meta
 //! query-identity caches AND the structural carriers
-//! (`MaterializeStructureDb`, `RefCycleResultDb`).
+//! (`MaterializeStructureDb`).
 //!
 //! Each query-identity cache is keyed by a canonical (the entry's
 //! *keyed canonical*). The warm-read validator must validate the
@@ -113,7 +113,7 @@ fn host_with_unrelated_file() -> VerterHost {
 
 /// The self-root canonical set for a [`planted_self_root`] signature —
 /// the single keyed canonical it roots. The planted `MaterializeStructureDb`
-/// / `RefCycleResultDb` entries carry an explicit `self_root_canonicals`
+/// / the retired `RefCycleResultDb` carried an explicit `self_root_canonicals`
 /// set; a synthetic prime passes this so the entry's strict-validation
 /// set matches the planted fact.
 fn planted_self_root_canonicals(canonical: &str) -> Arc<[Arc<str>]> {
@@ -3421,15 +3421,14 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
 }
 
 // ===========================================================================
-// Structural carriers — `MaterializeStructureDb` and `RefCycleResultDb`.
+// Structural carriers — `MaterializeStructureDb`.
 //
-// These two query-identity caches carry an explicit `self_root_canonicals`
+// This query-identity cache carries an explicit `self_root_canonicals`
 // set: `MaterializeStructureDb` roots the materialise SUBJECT's
 // declaration-origin file — the extracted route root for a route-shaped
 // subject, the `base` node's origin for a non-route subject (the consumer
-// materialise scope is NEVER a self-root — R7 cross-owner reuse);
-// `RefCycleResultDb` roots the BFS root
-// file plus every visited declaration's file. Every warm read validates
+// materialise scope is NEVER a self-root — R7 cross-owner reuse).
+// Every warm read validates
 // those self-roots strictly via `ReadSetSignature::validate_with_self_roots`,
 // so a same-canonical / visited-canonical content edit — or an untracked
 // self-root canonical — rejects the entry. The tests below discriminate the
@@ -3970,354 +3969,6 @@ fn route_shaped_materialize_self_roots_at_extracted_root_not_consumer_wrapper() 
     );
 }
 
-/// Build a `DeclIdentity` carrying `canonical`'s CURRENT observed whole
-/// hash — the identity shape the BFS root + visited identities use.
-fn ref_cycle_decl_identity(
-    host: &VerterHost,
-    canonical: &str,
-    name: &str,
-) -> crate::semantic_query::DeclIdentity {
-    let whole_hash = host
-        .shallow_file_state(canonical)
-        .map(|s| s.whole_hash)
-        .unwrap_or([0u8; 16]);
-    crate::semantic_query::DeclIdentity {
-        canonical_id: Arc::from(canonical),
-        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        whole_hash,
-        decl_name: Arc::from(name),
-    }
-}
-
-/// `RefCycleResultDb` rejects a warm entry after a content edit to its
-/// BFS ROOT canonical.
-///
-/// Same-canonical invalidation is lazy: the upsert performs no eager
-/// own-canonical cache drain, so a `RefCycleResultDb` entry for the
-/// edited root physically survives the upsert and must reject the edit
-/// on its own. The BFS records the root identity's `(canonical,
-/// whole_hash)` as a strict self-root; this test edits the root file
-/// through the production `upsert` and asserts the warm `peek` misses.
-/// The BFS cache key is the `DeclIdentity`, which embeds `whole_hash` —
-/// the test holds the identity at its ORIGINAL hash (the `DeclIdentity`
-/// a stale caller would still hold); `peek` on that key finds the entry
-/// and MUST reject it via the strict self-root.
-#[test]
-fn ref_cycle_db_root_edit_rejects_warm_entry() {
-    use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let root = "/struct_carrier_qdb/rc_root.ts";
-    upsert(&host, root, "export type Probe = { a: number };\n");
-    assert!(
-        host.ensure_indexed_ready(root).is_some(),
-        "root IndexedReady materialises",
-    );
-
-    let ctx: &dyn ResolverContext = &host;
-    let id = ref_cycle_decl_identity(&host, root, "Probe");
-
-    // Cold BFS — publishes a warm entry self-rooted on `root`.
-    let mut fence = Vec::new();
-    let _ = ref_root_reaches_transitive_cycle_node(&id, ctx, &mut fence);
-    let db = host.project_type_store().ref_cycle_db();
-    assert!(
-        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx).is_some(),
-        "fixture invariant: the cold BFS admitted a warm RefCycleResultDb entry \
-         self-rooted on the root canonical",
-    );
-
-    // Edit the root file through the production `upsert`. The upsert
-    // performs no eager own-canonical drain, so the entry physically
-    // survives and the strict self-root must reject it.
-    upsert(
-        &host,
-        root,
-        "export type Probe = { a: string; b: number };\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(root).is_some(),
-        "root IndexedReady re-materialises after the edit",
-    );
-
-    let ctx2: &dyn ResolverContext = &host;
-    assert!(
-        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx2).is_none(),
-        "RefCycleResultDb::peek MUST reject the warm entry after a content edit to its \
-         BFS root canonical — the BFS records the root identity as a strict self-root, \
-         so the shifted FileWholeHash rejects the entry. Same-canonical invalidation is \
-         lazy: with no eager upsert-time drain, the carrier rejects the edit on its own.",
-    );
-}
-
-/// `RefCycleResultDb` rejects a warm entry after a content edit to a
-/// VISITED (non-root) canonical the BFS walked. This is a
-/// **characterization** test: it confirms a visited-canonical edit
-/// rejects the warm entry — same-canonical invalidation is lazy, so the
-/// entry physically survives the upsert and the carrier must reject it
-/// on its own. It is not a strict-vs-lax discriminator — a visited
-/// canonical is also carried in the legacy `DepSignature` rail (the
-/// per-`Instantiate` dispatch dep-signature), which
-/// `validate_dep_signature` already rejects on a content edit to a
-/// tracked file. The strict-self-root discriminator for
-/// `RefCycleResultDb` is the untracked-self-root test below.
-#[test]
-fn ref_cycle_db_visited_canonical_edit_rejects_warm_entry() {
-    use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let root = "/struct_carrier_qdb/rc_visit_root.ts";
-    let helper = "/struct_carrier_qdb/rc_visit_helper.ts";
-    upsert(
-        &host,
-        helper,
-        "export type Helper<T> = { wrapped: T; next: Helper<T> };\n",
-    );
-    upsert(
-        &host,
-        root,
-        "import type { Helper } from './rc_visit_helper';\nexport type Probe = Helper<number>;\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(helper).is_some(),
-        "helper IndexedReady materialises",
-    );
-    assert!(
-        host.ensure_indexed_ready(root).is_some(),
-        "root IndexedReady materialises",
-    );
-
-    let ctx: &dyn ResolverContext = &host;
-    let id = ref_cycle_decl_identity(&host, root, "Probe");
-
-    // Cold BFS — walks `root` then `helper`; publishes a warm entry
-    // whose self-root set includes BOTH the root and the visited
-    // helper.
-    let mut fence = Vec::new();
-    let _ = ref_root_reaches_transitive_cycle_node(&id, ctx, &mut fence);
-    let db = host.project_type_store().ref_cycle_db();
-    let primed = crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx);
-    assert!(
-        primed.is_some(),
-        "fixture invariant: the cold BFS admitted a warm RefCycleResultDb entry",
-    );
-
-    // Edit ONLY the visited helper file through the production
-    // `upsert`. The BFS root file is untouched, so a producer that
-    // rooted only the root would keep the entry valid.
-    upsert(
-        &host,
-        helper,
-        "export type Helper<T> = { wrapped: T; sibling: string; next: Helper<T> };\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(helper).is_some(),
-        "helper IndexedReady re-materialises after the edit",
-    );
-
-    let ctx2: &dyn ResolverContext = &host;
-    assert!(
-        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx2).is_none(),
-        "RefCycleResultDb::peek MUST reject the warm entry after a content edit to a \
-         VISITED (non-root) canonical the BFS walked — the visited helper is both a \
-         strict self-root (recorded by the BFS) AND a legacy-rail dependency, and a \
-         content edit to it rejects the entry on its own self-root.",
-    );
-}
-
-/// `RefCycleResultDb` validates the BFS root's self-root **strictly**.
-///
-/// Discriminating property: a synthetic `RefCycleEntry` is planted
-/// whose `facts` rail holds a `FileWholeHash` self-root for an
-/// UNTRACKED root canonical and `self_root_canonicals = [root]`, with
-/// an EMPTY legacy rail. The lax `validate(ctx)` routes the untracked
-/// `FileWholeHash` through `StoreView::validates`, whose untracked-accept
-/// arm returns `true`, and an empty legacy rail validates vacuously —
-/// so the pre-self-root tree serves the entry warm. The strict
-/// `validate_with_self_roots(ctx, [root])` routes the `FileWholeHash`
-/// through `validates_self_root_whole_hash`, which rejects an untracked
-/// self-root. The peek misses iff the validator is strict; reverting
-/// `RefCycleResultDb::peek` to `validate(ctx)` flips this test.
-///
-/// (The legacy rail is left empty deliberately: the legacy
-/// `DepSignature` validator's `WholeHash` arm rejects an untracked
-/// canonical, so a `legacy`-rail untracked entry would mask the
-/// strict-vs-lax distinction. The untracked-accept permissiveness lives
-/// ONLY on the `facts` rail's `FileWholeHash` via
-/// `StoreView::validates`.)
-#[test]
-fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
-    let host = host_with_unrelated_file();
-    let root = "/struct_carrier_qdb/rc_never_loaded.ts";
-    assert_untracked(&host, root);
-    let ctx: &dyn ResolverContext = &host;
-    let db = host.project_type_store().ref_cycle_db();
-    let id = crate::semantic_query::DeclIdentity {
-        canonical_id: Arc::from(root),
-        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        whole_hash: PLANTED_HASH,
-        decl_name: Arc::from("Probe"),
-    };
-
-    // Plant a synthetic candidate: the carrier's facts rail holds a
-    // self-root `FileWholeHash` for the untracked root and
-    // `self_root_canonicals` lists the root. A lax validator admits this;
-    // the strict one does not.
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: root.to_string(),
-        hash: PLANTED_HASH,
-    }]);
-    db.insert_for_test(
-        &id,
-        ctx,
-        true,
-        crate::fact_signature_helpers::ReadSetSignature::new(facts),
-        planted_self_root_canonicals(root),
-        // Live project generation — this test exercises the carrier's
-        // strict self-root rejection, not the generation gate, so the
-        // stamp must match the live generation.
-        ctx.project_type_store().current_project_generation(),
-    );
-
-    assert!(
-        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx).is_none(),
-        "RefCycleResultDb::peek MUST reject a warm candidate whose self-root FileWholeHash \
-         names an UNTRACKED root canonical — the lax `validate` accepts the untracked \
-         self-root and serves the candidate stale; only the strict `validate_with_self_roots` \
-         rejects it.",
-    );
-}
-
-/// The ref-cycle BFS `ComputeAdmission::ReturnOnly` path MUST propagate
-/// the BFS's read fence into the caller's `local_fence`.
-///
-/// Discriminating property. `ref_root_reaches_transitive_cycle_node`'s
-/// cold path runs the BFS inside `ref_cycle_db_get_or_compute`'s
-/// `compute` closure. When that closure refuses cache admission
-/// (tracer overflow, an unrootable / torn self-root, or a
-/// `RouteGeneration` fence dependency) it returns the computed bool via
-/// `ComputeAdmission::ReturnOnly`. The caller's `Some(read)` arm merges
-/// `read.dep_signature` into the caller's `local_fence` — so an outer
-/// computation that called `ref_root_reaches_transitive_cycle_node` can
-/// be cached without the files the BFS read unless the `ReturnOnly`
-/// `CacheRead` carries the BFS fence.
-///
-/// This test forces the `ReturnOnly` exit AFTER the real BFS has run
-/// (real `root` + `helper` files read, real `compute_fence` populated)
-/// and asserts `local_fence` carries a `WholeHash` fact for BOTH the
-/// BFS root and the visited helper, pinned to their CURRENT observed
-/// content hashes.
-///
-/// - Pre-fix (`return_only_value` builds an empty `dep_signature`):
-///   `local_fence` is empty — the BFS reads are dropped, the stale
-///   outer-cache hole.
-/// - Post-fix (`return_only_value` carries the `legacy` fence built
-///   from `compute_fence`): `local_fence` carries the root + helper
-///   `WholeHash` facts — observably equivalent to the proven `None`-arm
-///   fallback that runs `local_fence.extend(fence)`, without a second
-///   uncached BFS.
-///
-/// Reverting the `component_meta_caches.rs` `ReturnOnly` fence
-/// propagation flips this test RED.
-#[test]
-fn ref_cycle_db_return_only_path_propagates_bfs_fence_to_caller() {
-    use crate::meta_resolve::ref_root_reaches_transitive_cycle_node;
-    use crate::semantic_query::DepVersion;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let root = "/struct_carrier_qdb/rc_returnonly_root.ts";
-    let helper = "/struct_carrier_qdb/rc_returnonly_helper.ts";
-    upsert(
-        &host,
-        helper,
-        "export type Helper<T> = { wrapped: T; next: Helper<T> };\n",
-    );
-    upsert(
-        &host,
-        root,
-        "import type { Helper } from './rc_returnonly_helper';\n\
-         export type Probe = Helper<number>;\n",
-    );
-    assert!(
-        host.ensure_indexed_ready(helper).is_some(),
-        "helper IndexedReady materialises",
-    );
-    assert!(
-        host.ensure_indexed_ready(root).is_some(),
-        "root IndexedReady materialises",
-    );
-
-    // The CURRENT observed whole hashes of the two files the BFS reads.
-    // The `ReturnOnly` fence must pin these exact hashes.
-    let root_hash = host
-        .shallow_file_state(root)
-        .map(|s| s.whole_hash)
-        .expect("root shallow state present");
-    let helper_hash = host
-        .shallow_file_state(helper)
-        .map(|s| s.whole_hash)
-        .expect("helper shallow state present");
-
-    let ctx: &dyn ResolverContext = &host;
-    let id = ref_cycle_decl_identity(&host, root, "Probe");
-
-    // Force the cold `compute` closure down a `ComputeAdmission::ReturnOnly`
-    // exit. The BFS still runs in full — `root` then `helper` are read,
-    // `compute_fence` is populated — only the admission decision is
-    // forced, reproducing the production overflow / unrootable-self-root
-    // / RouteGeneration refusal contract.
-    let _refusal = crate::component_meta_caches::force_ref_cycle_return_only_for_tests();
-    let refusals_before = host
-        .provenance
-        .ref_cycle_overflow_refusals
-        .load(std::sync::atomic::Ordering::Relaxed);
-
-    let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
-    let _ = ref_root_reaches_transitive_cycle_node(&id, ctx, &mut local_fence);
-
-    let refusals_after = host
-        .provenance
-        .ref_cycle_overflow_refusals
-        .load(std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        refusals_after > refusals_before,
-        "fixture invariant: the forced `ComputeAdmission::ReturnOnly` exit must have \
-         fired (ref_cycle_overflow_refusals advanced) — without it the test would not \
-         be exercising the ReturnOnly path at all",
-    );
-    let db = host.project_type_store().ref_cycle_db();
-    assert!(
-        crate::component_meta_caches::ref_cycle_db_peek(db, &id, ctx).is_none(),
-        "fixture invariant: a `ReturnOnly` compute does NOT admit a warm entry — the \
-         RefCycleResultDb slot stays empty",
-    );
-
-    // Discriminating assertion: the caller's `local_fence` carries a
-    // `WholeHash` fact for the BFS root AND the visited helper, each
-    // pinned to that file's CURRENT observed content hash.
-    let fence_has = |canonical: &str, hash: [u8; 16]| {
-        local_fence.iter().any(|(c, v)| {
-            c.as_ref() == canonical && matches!(v, DepVersion::WholeHash(h) if *h == hash)
-        })
-    };
-    assert!(
-        fence_has(root, root_hash),
-        "the `ReturnOnly` ref-cycle path MUST propagate the BFS's read fence into the \
-         caller's `local_fence`: it must carry a `WholeHash` fact for the BFS root \
-         `{root}` pinned to its current observed content hash. Pre-fix the \
-         `ReturnOnly` `CacheRead` carried an empty `dep_signature`, so `local_fence` \
-         was empty and an outer computation could be cached without the BFS's root \
-         file — a stale-cache hole. local_fence = {local_fence:?}",
-    );
-    assert!(
-        fence_has(helper, helper_hash),
-        "the `ReturnOnly` ref-cycle path MUST propagate the BFS's read fence into the \
-         caller's `local_fence`: the BFS walked through `root` into the visited helper \
-         `{helper}`, so `local_fence` must also carry a `WholeHash` fact for the \
-         helper pinned to its current observed content hash. local_fence = {local_fence:?}",
-    );
-}
-
 // ===========================================================================
 // Closure guard — every in-scope query-identity cache has a
 // self-version-root discriminator.
@@ -4369,10 +4020,6 @@ const IN_SCOPE_QUERY_IDENTITY_SELF_ROOT_COVERAGE: &[(&str, &str)] = &[
     (
         "materialize_structure_db",
         "materialize_structure_db_planted_untracked_self_root_rejects_warm_entry",
-    ),
-    (
-        "ref_cycle_db",
-        "ref_cycle_db_untracked_self_root_rejects_warm_entry",
     ),
 ];
 
@@ -4995,7 +4642,6 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
             + store.owner_collection_db().live_count()
             + store.shape_cache_db().live_count()
             + store.materialize_structure_db().live_count()
-            + store.ref_cycle_db().live_count()
     };
 
     // Drive a failed-revalidation cold compute through each of the
@@ -5728,7 +5374,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
 ///
 /// A fenced serve is non-cacheable but NOT partial, so the
 /// `MaterializedOutputTypeExpr` `result_is_partial()`-only admission gate cannot
-/// reject it; the nested fact tracer wrapping the cold reduce (the `RefCycleResultDb`
+/// reject it; the nested fact tracer wrapping the cold reduce (the
 /// / `app_config_no_override_proof` / `ResolvabilityDb` sibling pattern, identical to
 /// the stabiliser twin) is the only rail that does. The subject here is a `typeof`
 /// value node, which is a reducible operator (`needs_reduction == true`), so it

@@ -493,6 +493,24 @@ pub(super) enum FamilyKey {
     LowerLocator {
         key: Box<crate::locator_identity::LocatorLoweringKey>,
     },
+    /// Mode-erased `ClassifyMaterializationCycleGate` identity. The family
+    /// fields are EXACTLY the sealed
+    /// [`crate::semantic_query::MaterializationCycleGateKey`] — the
+    /// env-bearing root slot (`T` / `L` / `J`) + `parse_env_hash` (`P`) +
+    /// `resolve_env_hash` (`R`) — and NOTHING else: the remaining axes
+    /// (empty args, `StructuralTransit`, `Skeleton`, neutral
+    /// policy/provenance) are FIXED inside the producer, so the family is
+    /// mode-free and lives in the `Single` slot. No content hash,
+    /// generation, `DeclIdentity`, or algorithm version enters the family
+    /// identity (R6); version-rooting lives on the cached value's read-set
+    /// facts + observed self-roots.
+    ///
+    /// The payload is BOXED (mirroring [`Self::Relate`]'s
+    /// `Box<RelateMemoKey>`): the root slot composite would inflate EVERY
+    /// entry of the hot single-node `FamilyKey → FamilySlots` keyspace.
+    ClassifyMaterializationCycleGate {
+        key: Box<crate::semantic_query::MaterializationCycleGateKey>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -577,6 +595,9 @@ impl FamilyKey {
             FamilyKey::FlowNarrowingAt { .. } => "FlowNarrowingAt",
             FamilyKey::ContextualTypeAt { .. } => "ContextualTypeAt",
             FamilyKey::LowerLocator { .. } => "LowerLocator",
+            FamilyKey::ClassifyMaterializationCycleGate { .. } => {
+                "ClassifyMaterializationCycleGate"
+            }
         }
     }
 
@@ -629,6 +650,7 @@ impl FamilyKey {
             FamilyKey::FlowNarrowingAt { .. } => 4,
             FamilyKey::ContextualTypeAt { .. } => 4,
             FamilyKey::LowerLocator { .. } => 4,
+            FamilyKey::ClassifyMaterializationCycleGate { .. } => 4,
         }
     }
 }
@@ -1790,6 +1812,17 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         // slot.
         SemanticQueryKey::LowerLocator { key } => (
             FamilyKey::LowerLocator {
+                key: Box::new(key.clone()),
+            },
+            ModeSlot::Single,
+        ),
+        // ClassifyMaterializationCycleGate — LIVE producer with a
+        // mode-erased key: the sealed `MaterializationCycleGateKey` IS the
+        // family identity (root slot + P + R, nothing else; T/L/J
+        // slot-carried; args/demand/mode/policy fixed inside the
+        // producer), so the family uses the `Single` slot.
+        SemanticQueryKey::ClassifyMaterializationCycleGate(key) => (
+            FamilyKey::ClassifyMaterializationCycleGate {
                 key: Box::new(key.clone()),
             },
             ModeSlot::Single,

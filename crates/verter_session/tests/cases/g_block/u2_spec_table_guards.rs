@@ -158,6 +158,9 @@ fn semantic_query_key_spec_table_equals_enum() {
             SemanticQueryKeyTag::Relate => SemanticQueryValueTag::Relation,
             SemanticQueryKeyTag::ResolveOverloadSet => SemanticQueryValueTag::OverloadSet,
             SemanticQueryKeyTag::ClassifyBroadRuntime => SemanticQueryValueTag::BroadRuntime,
+            SemanticQueryKeyTag::ClassifyMaterializationCycleGate => {
+                SemanticQueryValueTag::MaterializationCycleGate
+            }
             SemanticQueryKeyTag::ProjectObjectSpread => SemanticQueryValueTag::ObjectProjection,
             // Flow narrowing + contextual typing carry the program-analysis
             // value domain (the narrowed / contextual node), NOT `TypeNode`.
@@ -172,7 +175,8 @@ fn semantic_query_key_spec_table_equals_enum() {
             "value-domain mismatch for `{}`: `Relate` must be `Relation`, \
              `ResolveOverloadSet` must be `OverloadSet`, `FlowNarrowingAt` / \
              `ContextualTypeAt` must be `ProgramAnalysis`, `ClassifyBroadRuntime` \
-             must be `BroadRuntime`, `ProjectObjectSpread` must be \
+             must be `BroadRuntime`, `ClassifyMaterializationCycleGate` must be \
+             `MaterializationCycleGate`, `ProjectObjectSpread` must be \
              `ObjectProjection`, and every other \
              live key must be `TypeNode`",
             spec.variant.name()

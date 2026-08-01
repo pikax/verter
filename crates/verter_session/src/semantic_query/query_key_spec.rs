@@ -24,7 +24,8 @@
 //!    `TypeNode` value domain EXCEPT `ProjectObjectSpread`
 //!    (`ObjectProjection`), `Relate` (`Relation`),
 //!    `ResolveOverloadSet` (`OverloadSet`), `ClassifyBroadRuntime`
-//!    (`BroadRuntime`), and `FlowNarrowingAt` /
+//!    (`BroadRuntime`), `ClassifyMaterializationCycleGate`
+//!    (`MaterializationCycleGate`), and `FlowNarrowingAt` /
 //!    `ContextualTypeAt` (`ProgramAnalysis`), which is the current-tree truth,
 //!    and the
 //!    [`SemanticQueryKeyTag::ALL`](crate::semantic_query::SemanticQueryKeyTag::ALL)
@@ -34,7 +35,8 @@
 //!
 //! - Every live variant resolves to
 //!   [`SemanticQueryValueTag::TypeNode`] EXCEPT `ProjectObjectSpread`, `Relate`,
-//!   `ResolveOverloadSet`, `ClassifyBroadRuntime`, `FlowNarrowingAt`, and
+//!   `ResolveOverloadSet`, `ClassifyBroadRuntime`,
+//!   `ClassifyMaterializationCycleGate`, `FlowNarrowingAt`, and
 //!   `ContextualTypeAt`:
 //!   `ProjectSemanticDispatch::execute` wraps the
 //!   `TypeNode` keys' results as `SemanticQueryValue::TypeNode(node)`.
@@ -54,7 +56,10 @@
 //!   judgements surface `Miss` and never admit. That is why this row's
 //!   `admission` is [`Singleflight`](AdmissionSpec::Singleflight). `ResolveOverloadSet`
 //!   set. `ClassifyBroadRuntime` records the live terminal
-//!   [`SemanticQueryValueTag::BroadRuntime`] domain. `FlowNarrowingAt`
+//!   [`SemanticQueryValueTag::BroadRuntime`] domain.
+//!   `ClassifyMaterializationCycleGate` records the live
+//!   [`SemanticQueryValueTag::MaterializationCycleGate`] domain; only its
+//!   `Decided` arm admits. `FlowNarrowingAt`
 //!   and `ContextualTypeAt` both record
 //!   [`SemanticQueryValueTag::ProgramAnalysis`] as a FORWARD-DECLARED
 //!   value domain: each `execute` arm is non-producing (returns `Miss`,
@@ -954,6 +959,29 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "lower_locator_family_distinct_by_parse_env_and_locator",
             admission: AdmissionSpec::Singleflight,
         },
+        // ClassifyMaterializationCycleGate(key: MaterializationCycleGateKey)
+        // — the sealed materialization cycle gate: classifies whether the
+        // root declaration transitively reaches a cycle through a complex
+        // helper surface. The root slot carries `T L J`; `P` + `R` ride on
+        // the sealed key (the producer's per-hop `Instantiate` reads are
+        // file-backed and resolve imports), so the FULL `P R T L J` set.
+        // The remaining axes (args, demand, mode, policy, provenance) are
+        // FIXED inside the producer, so `allowed_demand` is empty and the
+        // family lives in the `Single` slot. Value domain is
+        // `MaterializationCycleGate` (NOT `TypeNode`) — the opaque
+        // Decided/LegacyFallback outcome. LIVE producer; only `Decided`
+        // admits through the family singleflight (`LegacyFallback` always
+        // suppresses), and the family carries the live-generation gate.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ClassifyMaterializationCycleGate,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "MaterializationCycleGateKey",
+            value_domain: SemanticQueryValueTag::MaterializationCycleGate,
+            env_dims: EnvDimSpec::Static(env_full()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "classify_materialization_cycle_gate_keys_do_not_warm_hit_across_env_axes",
+            admission: AdmissionSpec::Singleflight,
+        },
     ]
 }
 
@@ -989,6 +1017,7 @@ fn render_value_domain(tag: SemanticQueryValueTag) -> &'static str {
         SemanticQueryValueTag::OverloadSet => "OverloadSet",
         SemanticQueryValueTag::Relation => "Relation",
         SemanticQueryValueTag::BroadRuntime => "BroadRuntime",
+        SemanticQueryValueTag::MaterializationCycleGate => "MaterializationCycleGate",
         SemanticQueryValueTag::DiagnosticAnalysis => "DiagnosticAnalysis",
     }
 }

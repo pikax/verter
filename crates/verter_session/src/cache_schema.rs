@@ -43,9 +43,11 @@
 //! | `ShapeCacheDb`             | `component_meta_caches.rs`      |
 //! | `MaterializeStructureDb`   | `component_meta_caches.rs`      |
 //!
-//! `RefCycleResultDb` (`component_meta_caches.rs`) is intentionally NOT
-//! enrolled — it caches booleans / cycle identities only and carries no
-//! analyzer-published typed fields.
+//! The retired `RefCycleResultDb` was intentionally NOT enrolled — it
+//! cached booleans / cycle identities only and carried no
+//! analyzer-published typed fields. Its replacement (the
+//! `ClassifyMaterializationCycleGate` semantic-query family) lives in
+//! the semantic memo, which is likewise outside this cluster.
 
 /// Workspace-wide cache-cluster schema version.
 ///

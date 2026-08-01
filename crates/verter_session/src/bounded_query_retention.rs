@@ -20,8 +20,7 @@
 //!   the eviction carries a different `seq` and must survive. Caches
 //!   whose backing map is
 //!   owned by the cooperative-admission primitive
-//!   ([`crate::component_meta_caches::MaterializeStructureDb`],
-//!   [`crate::component_meta_caches::RefCycleResultDb`], the
+//!   ([`crate::component_meta_caches::MaterializeStructureDb`], the
 //!   [`crate::semantic_query_memo::SemanticGraphStore`] memo + node
 //!   arena) embed a `GlobalRetentionBudget` and drive eviction from
 //!   their write-side `post_publish` hook.

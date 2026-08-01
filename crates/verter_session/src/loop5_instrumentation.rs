@@ -132,7 +132,8 @@ pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0
 ///  21 = FlowNarrowingAt
 ///  22 = ContextualTypeAt
 ///  23 = LowerLocator
-pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 24;
+///  24 = ClassifyMaterializationCycleGate
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 25;
 
 /// Human-readable labels for each operator-kind index. Kept in sync
 /// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
@@ -162,6 +163,7 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "FlowNarrowingAt",
     "ContextualTypeAt",
     "LowerLocator",
+    "ClassifyMaterializationCycleGate",
 ];
 
 /// Per-kind call counts. `dispatch_operator_with_recurse` increments
@@ -170,6 +172,7 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
 pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
     // All zero-initialised; order within the array is immaterial —
     // `kind_index_for_key` keys it.
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -204,6 +207,7 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
 pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
     // All zero-initialised; order within the array is immaterial —
     // `kind_index_for_key` keys it.
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -372,6 +376,7 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::FlowNarrowingAt { .. } => 21,
         SemanticQueryKey::ContextualTypeAt { .. } => 22,
         SemanticQueryKey::LowerLocator { .. } => 23,
+        SemanticQueryKey::ClassifyMaterializationCycleGate(_) => 24,
     }
 }
 

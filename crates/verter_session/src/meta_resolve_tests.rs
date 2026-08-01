@@ -8369,7 +8369,6 @@ mod node_predicates_tests {
     use crate::meta_resolve::{
         component_meta_ref_resolves_to_package_node,
         declaration_body_prefers_inline_materialization_node, extract_route_root_identity_node,
-        ref_root_reaches_transitive_cycle_node,
     };
     use crate::resolver_core::RouteDemand;
     use crate::semantic_query::{
@@ -8709,98 +8708,6 @@ mod node_predicates_tests {
         assert!(
             !declaration_body_prefers_inline_materialization_node(graph, mapped_body),
             "KeyOf body must NOT be inline-materialisable (no route extracted)"
-        );
-    }
-
-    /// Predicate matrix row 7: A → B → C → A cycle through a complex
-    /// helper.
-    ///
-    /// 13 / R7-14 — the legacy parity BFS only flags a
-    /// self-cycle as "transitively cyclic" when the path carries a
-    /// **complex signal**: either the body has a complex top-level
-    /// shape (Conditional / Mapped / KeyOf / IndexedAccess / etc.) OR
-    /// any traversed reference carries type arguments. A purely
-    /// Object-aliased self-cycle (`A { next: B }`, `B { next: C }`,
-    /// `C { next: A }`) does NOT trigger — that's the legitimate
-    /// productive-recursion shape. The fixture below routes through
-    /// a `keyof` helper, which is a complex shape per legacy parity
-    /// and composes the complex signal so the self-rediscovery fires.
-    ///
-    /// The graph-native cycle BFS must rediscover `A` as a child
-    /// reachable from `A`'s body within at most three `Instantiate`
-    /// dispatches; their `dep_signatures` must accumulate into
-    /// `local_fence`.
-    #[test]
-    fn ref_root_cycle_bfs_detects_three_decl_cycle_and_accumulates_dep_facts() {
-        let project = make_project();
-        // Three-decl cycle: A's body refers to B; B's body uses
-        // `keyof C` (complex shape per legacy parity); C's body refs
-        // back to A. The complex-signal composes through the keyof
-        // hop, and self-rediscovery of A fires.
-        project
-            .upsert_base(
-                "/cycle.ts",
-                r#"
-export type A = { next: B }
-export type B = keyof C
-export type C = { back: A }
-"#,
-            )
-            .unwrap();
-        project
-            .upsert_base(
-                "/Owner.vue",
-                r#"<script setup lang="ts">
-import type { A } from './cycle'
-defineProps<{ value: A }>()
-</script>
-<template><div /></template>"#,
-            )
-            .unwrap();
-
-        let session = project.open_session_batch().unwrap();
-        // Seed the host: this populates IndexedReady + analysis for
-        // `/cycle.ts` so `Instantiate` dispatches against the
-        // declarations succeed.
-        let _ = session.evaluate_types("/Owner.vue").unwrap();
-
-        let host = session.host();
-
-        // In MemoryWorkspace fixtures the upsert path is itself the
-        // canonical id; resolve via `shallow_file_state` to obtain the
-        // matching whole_hash.
-        let cycle_canonical = "/cycle.ts";
-        let shallow = host
-            .shallow_file_state(cycle_canonical)
-            .expect("cycle.ts must be indexed");
-        let a_identity = DeclIdentity {
-            canonical_id: StdArc::from(cycle_canonical),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            whole_hash: shallow.whole_hash,
-            decl_name: StdArc::from("A"),
-        };
-
-        let mut local_fence: Vec<(StdArc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-        let detected = ref_root_reaches_transitive_cycle_node(&a_identity, host, &mut local_fence);
-
-        assert!(
-            detected,
-            "A -> B (keyof C) -> C -> A must be detected by the graph-native BFS — \
-             the keyof hop composes complex_signal per legacy parity"
-        );
-        assert!(
-            !local_fence.is_empty(),
-            "Instantiate dispatches must accumulate dep_signatures into local_fence — \
-             empty fence indicates the BFS skipped the dispatch path"
-        );
-        // Fence should contain at least one fact about `/cycle.ts`
-        // (the file under traversal).
-        let touches_cycle_file = local_fence
-            .iter()
-            .any(|(canonical, _)| canonical.as_ref() == cycle_canonical);
-        assert!(
-            touches_cycle_file,
-            "local_fence must include a dep fact for /cycle.ts — got {local_fence:?}"
         );
     }
 

@@ -117,6 +117,9 @@ pub fn display(
                 .collect::<Vec<_>>()
                 .join(" | "),
         ),
+        SemanticQueryValue::MaterializationCycleGate(outcome) => {
+            DisplayString(format!("{outcome:?}"))
+        }
         SemanticQueryValue::DeclarationAnalysis(d) => display_declaration_analysis(store, d, needs),
         SemanticQueryValue::ProgramAnalysis(p) => display_program_analysis(store, p, needs),
         // §14.1: the reserved native-checker seam. No producer constructs it,

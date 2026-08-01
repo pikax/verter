@@ -538,7 +538,7 @@ fn materialize_macro_shape_member_type_expr_cycle_short_circuits() {
 // the test does not compile against a pre-bump tree. Post-bump it
 // compiles AND the eviction returns > 0 (drains real entries).
 //
-// `RefCycleResultDb` is intentionally OUT of the cohort — it caches
+// The retired `RefCycleResultDb` was intentionally OUT of the cohort — it cached
 // booleans / cycle identities only. Confirm the absence by inspection.
 
 use verter_session::cache_schema::{CacheSchemaVersioned, CACHE_CLUSTER_SCHEMA_VERSION};

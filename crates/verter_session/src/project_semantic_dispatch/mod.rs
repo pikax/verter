@@ -90,6 +90,7 @@ pub(crate) mod absorb;
 mod broad_runtime;
 pub(crate) mod build;
 pub(crate) mod carrier;
+pub(crate) mod cycle_gate;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
 pub(crate) mod locator_shape;
@@ -2159,6 +2160,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if let SemanticQueryKey::ClassifyBroadRuntime { subject, .. } = &key_for_build {
                 return self.build_classify_broad_runtime(subject);
             }
+            if let SemanticQueryKey::ClassifyMaterializationCycleGate(key) = &key_for_build {
+                return self.build_classify_materialization_cycle_gate(key);
+            }
             // The SOLE relation authority (design
             // `docs/arch/u2-relation-infer-design.md`): `execute(Relate)`
             // is a LIVE producer — decided binary judgements admit into
@@ -2329,6 +2333,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     context: _,
                 } => self.build_resolve_overload_set(*callee, type_args),
                 SemanticQueryKey::ClassifyBroadRuntime { .. } => {
+                    unreachable!("typed classifier returned before node-domain build")
+                }
+                SemanticQueryKey::ClassifyMaterializationCycleGate(_) => {
                     unreachable!("typed classifier returned before node-domain build")
                 }
                 // ResolveAmbientNamespace / ResolveEnum / ApparentType /
@@ -3613,5 +3620,8 @@ mod raised_shape_tests;
 
 #[cfg(test)]
 mod broad_runtime_tests;
+
+#[cfg(test)]
+mod cycle_gate_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;

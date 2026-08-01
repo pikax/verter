@@ -2781,9 +2781,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // produces TypeParam graph nodes (instead of resolving
                 // T-refs to Opaque(Miss)). The relation engine treats
                 // TypeParam as deferred → Conditional branches stay live
-                // → collect_ref_identities_node walks both → recursive refs
+                // → the cycle gate's ref collector walks both → recursive refs
                 // through nested mapped/template-literal/conditional
-                // bodies become visible to the cycle BFS.
+                // bodies become visible to the cycle gate.
                 let display_name: Arc<str> = Arc::from(param.name.as_str());
                 let decl_identity = crate::semantic_query::DeclIdentity {
                     canonical_id: Arc::clone(decl_canonical),

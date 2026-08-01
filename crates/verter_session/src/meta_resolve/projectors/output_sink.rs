@@ -358,7 +358,7 @@ fn member_shape_peek_or_compute(
             // member value's carrier head through the shared carrier resolver
             // (`node_root_identity` -> `resolve_carrier_subject_node`), which rides
             // `ensure_indexed_ready_serve`. The enclosing cacheability scope already covers
-            // it — as it covers the key classification, the peek, the cycle BFS, the shell
+            // it — as it covers the key classification, the peek, the cycle gate, the shell
             // raises, and the cold reduce — so every admission arm below reads ONE verdict
             // off `probe` instead of stitching per-step tracer bits together.
             let (route_is_package_backed, package_backed_fence_opt) =
@@ -397,9 +397,9 @@ fn member_shape_peek_or_compute(
             let gates = super::classify_node_reduction_gates(ctx, member_value);
 
             // (4) Cycle gate — only a generic instantiation can reach a transitive cycle,
-            // so the BFS fires lazily on that fact. A recursive parameterised helper stays
+            // so the gate fires lazily on that fact. A recursive parameterised helper stays
             // a shallow carrier (the cycle prevents finite reduction); admit so subsequent
-            // peeks skip the BFS. The BFS resolves carrier heads through the same shared
+            // peeks skip the gate. The gate resolves carrier heads through the same shared
             // resolver; the enclosing cacheability scope observes those serves.
             let cycle_fence: crate::semantic_query::DepSignature = if gates
                 .generic_instantiation_ref
@@ -411,7 +411,7 @@ fn member_shape_peek_or_compute(
                         member_value,
                     );
                 if reaches_cycle {
-                    // Combine both gate fences (package-backed + cycle BFS) so the
+                    // Combine both gate fences (package-backed + cycle gate) so the
                     // admit's `fact_dep_signature` invalidates on edits to any visited
                     // declaration file.
                     let combined_fence =

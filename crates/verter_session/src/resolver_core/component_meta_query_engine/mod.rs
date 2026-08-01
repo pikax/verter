@@ -28,9 +28,10 @@
 //!   Engine subqueries dispatch via
 //!   [`ProjectSemanticDispatch`](crate::project_semantic_dispatch::ProjectSemanticDispatch)
 //!   which deduplicates against this store.
-//! - [`RefCycleResultDb`](crate::component_meta_caches::RefCycleResultDb)
-//!   — host-cached transitive cycle-detection BFS results keyed by
-//!   parameterized generic helpers. Cooperative-admission cold build.
+//! - `ClassifyMaterializationCycleGate`
+//!   (`project_semantic_dispatch::cycle_gate`) — the sealed
+//!   materialization cycle gate, a semantic-query family over the
+//!   `SemanticGraphStore` memo (singleflight cold build).
 //! - [`MaterializeStructureDb`](crate::component_meta_caches::MaterializeStructureDb)
 //!   — interned structural projections produced by the canonical
 //!   materialiser; sole authoritative materialiser cache.

@@ -25,3 +25,4 @@ TemplateLiteralReduce | Live | TypeNode | R T L J | — | TemplateLiteralReduceC
 FlowNarrowingAt | Live | ProgramAnalysis | P R T L J | — | ProgramAnalysisContext | flow_narrowing_at_do_not_warm_hit | NonProducingPendingReducer
 ContextualTypeAt | Live | ProgramAnalysis | P R T L J | — | ProgramAnalysisContext | contextual_type_at_do_not_warm_hit | NonProducingPendingReducer
 LowerLocator | Live | TypeNode | P R T L J | — | LocatorLoweringKey | lower_locator_family_distinct_by_parse_env_and_locator | Singleflight
+ClassifyMaterializationCycleGate | Live | MaterializationCycleGate | P R T L J | — | MaterializationCycleGateKey | classify_materialization_cycle_gate_keys_do_not_warm_hit_across_env_axes | Singleflight

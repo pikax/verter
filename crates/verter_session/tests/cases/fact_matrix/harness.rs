@@ -7,7 +7,6 @@
 //!   read for the AppConfigNoOverrideProofDb producer.
 //! - `read_materialize_structure_installs(host)` — same for
 //!   `MaterializeStructureDb`.
-//! - `read_ref_cycle_installs(host)` — same for `RefCycleResultDb`.
 //! - `read_memo_entry_installs(host)` — same for the memo
 //!   (`SemanticGraphStore::execute_cooperative` cold builds).
 //! - `read_owner_import_surface_installs(host)` — same for
@@ -42,12 +41,6 @@ pub fn read_app_config_proof_installs(host: &VerterHost) -> u64 {
 pub fn read_materialize_structure_installs(host: &VerterHost) -> u64 {
     host.provenance()
         .materialize_structure_fact_tracer_installs
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub fn read_ref_cycle_installs(host: &VerterHost) -> u64 {
-    host.provenance()
-        .ref_cycle_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 

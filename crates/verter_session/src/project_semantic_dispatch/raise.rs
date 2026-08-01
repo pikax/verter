@@ -291,6 +291,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::FlowNarrowingAt { .. } => "FlowNarrowingAt",
         SemanticQueryKey::ContextualTypeAt { .. } => "ContextualTypeAt",
         SemanticQueryKey::LowerLocator { .. } => "LowerLocator",
+        SemanticQueryKey::ClassifyMaterializationCycleGate(_) => "ClassifyMaterializationCycleGate",
     }
 }
 

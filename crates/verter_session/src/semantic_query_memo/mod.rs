@@ -140,9 +140,16 @@ pub fn family_variant_label_for_tests(
 /// memo's contract): a `ProjectGeneration` reset (tsconfig / path-alias /
 /// SDK / workspace-folder change) bumps no file content, so the carrier
 /// alone would miss it — a stale relation judgement must not warm-serve
-/// across a project-shape boundary.
+/// across a project-shape boundary. The `ClassifyMaterializationCycleGate`
+/// family carries the same gate: its walk reads cross-file declaration
+/// bodies whose reachability can shift with a project-shape change that
+/// touches no tracked file content, so a bare generation bump must reject
+/// the warm candidate.
 fn family_requires_live_generation_gate(family: &FamilyKey) -> bool {
-    matches!(family, FamilyKey::Relate { .. })
+    matches!(
+        family,
+        FamilyKey::Relate { .. } | FamilyKey::ClassifyMaterializationCycleGate { .. }
+    )
 }
 
 fn narrow_value_result(result: QueryResult<SemanticQueryValue>) -> QueryResult<SemanticNodeId> {
