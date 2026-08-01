@@ -39,6 +39,12 @@ pub struct HostTestAuditState {
     total_reads: std::sync::atomic::AtomicU64,
     total_shallow_processes: std::sync::atomic::AtomicU64,
     loaded: Mutex<FxHashSet<Arc<str>>>,
+    /// Semantic owner-edge event sink for the exact-resolution currency
+    /// contract. It rides the host's single test-audit state rather than a
+    /// second host-owned sink, so there is exactly one test-observation
+    /// authority on `VerterHost`.
+    #[cfg(test)]
+    resolution_currency: Mutex<ResolutionCurrencyObserver>,
 }
 
 impl HostTestAuditState {
@@ -289,5 +295,144 @@ impl<'a> HostTestAudit<'a> {
         self.graph
             .stats_snapshot()
             .decl_subexpression_lowering_count as usize
+    }
+}
+
+// ── Resolution-currency owner-edge observations ────────────────────────
+//
+// Test-only semantic observations for the exact-resolution currency
+// contract. The events name durable owner-edge behavior — validation,
+// recompute, publication, reuse — rather than the cache or artifact that
+// currently implements it, so the contract tests keep observing the same
+// events as the emission sites move.
+
+/// One owner-edge semantic event recorded during a resolution-currency
+/// observation window.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolutionCurrencyObservation {
+    ExactWitnessValidation {
+        owner: String,
+        specifier: String,
+        target: Option<String>,
+        accepted: bool,
+    },
+    OwnerEdgeRecomputed {
+        owner: String,
+        specifier: String,
+        target: Option<String>,
+    },
+    OwnerEdgePublished {
+        owner: String,
+        specifier: String,
+        target: Option<String>,
+    },
+    OwnerEdgeReused {
+        owner: String,
+        specifier: String,
+        target: Option<String>,
+    },
+}
+
+/// Ordered event buffer. Inert until a test opens a window with
+/// [`crate::VerterHost::begin_resolution_currency_observation`], so the
+/// emission sites cost one uncontended lock and a boolean test otherwise.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct ResolutionCurrencyObserver {
+    active: bool,
+    observations: Vec<ResolutionCurrencyObservation>,
+}
+
+#[cfg(test)]
+impl ResolutionCurrencyObserver {
+    fn begin(&mut self) {
+        self.active = true;
+        self.observations.clear();
+    }
+
+    fn take(&mut self) -> Vec<ResolutionCurrencyObservation> {
+        std::mem::take(&mut self.observations)
+    }
+
+    fn push(&mut self, observation: ResolutionCurrencyObservation) {
+        if self.active {
+            self.observations.push(observation);
+        }
+    }
+}
+
+#[cfg(test)]
+impl crate::VerterHost {
+    pub(crate) fn begin_resolution_currency_observation(&self) {
+        self.test_audit.resolution_currency.lock().begin();
+    }
+
+    pub(crate) fn take_resolution_currency_observations(
+        &self,
+    ) -> Vec<ResolutionCurrencyObservation> {
+        self.test_audit.resolution_currency.lock().take()
+    }
+
+    pub(crate) fn observe_exact_witness_validation(
+        &self,
+        owner: &str,
+        specifier: &str,
+        target: Option<&str>,
+        accepted: bool,
+    ) {
+        self.test_audit.resolution_currency.lock().push(
+            ResolutionCurrencyObservation::ExactWitnessValidation {
+                owner: owner.to_owned(),
+                specifier: specifier.to_owned(),
+                target: target.map(str::to_owned),
+                accepted,
+            },
+        );
+    }
+
+    pub(crate) fn observe_owner_edge_recomputed(
+        &self,
+        owner: &str,
+        specifier: &str,
+        target: Option<&str>,
+    ) {
+        self.test_audit.resolution_currency.lock().push(
+            ResolutionCurrencyObservation::OwnerEdgeRecomputed {
+                owner: owner.to_owned(),
+                specifier: specifier.to_owned(),
+                target: target.map(str::to_owned),
+            },
+        );
+    }
+
+    pub(crate) fn observe_owner_edge_published(
+        &self,
+        owner: &str,
+        specifier: &str,
+        target: Option<&str>,
+    ) {
+        self.test_audit.resolution_currency.lock().push(
+            ResolutionCurrencyObservation::OwnerEdgePublished {
+                owner: owner.to_owned(),
+                specifier: specifier.to_owned(),
+                target: target.map(str::to_owned),
+            },
+        );
+    }
+
+    pub(crate) fn observe_owner_edge_reused(
+        &self,
+        owner: &str,
+        specifier: &str,
+        target: Option<&str>,
+    ) {
+        self.test_audit.resolution_currency.lock().push(
+            ResolutionCurrencyObservation::OwnerEdgeReused {
+                owner: owner.to_owned(),
+                specifier: specifier.to_owned(),
+                target: target.map(str::to_owned),
+            },
+        );
     }
 }

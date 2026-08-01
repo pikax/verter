@@ -695,6 +695,10 @@ async fn sync_non_carrier_file_to_provider(
             let published = ws.load_published()?;
             Some(crate::server::PublishedResolverSnapshot {
                 resolver: published.snapshot.resolver.clone(),
+                resolution_view: Some(crate::server::PublishedResolutionView {
+                    workspace: Arc::clone(ws),
+                    published: Arc::clone(&published),
+                }),
                 ownership_ready: published.ownership_ready,
             })
         })
@@ -911,6 +915,10 @@ pub(crate) async fn sync_file_to_provider(
             Some((
                 crate::server::PublishedResolverSnapshot {
                     resolver: published.snapshot.resolver.clone(),
+                    resolution_view: Some(crate::server::PublishedResolutionView {
+                        workspace: Arc::clone(ws),
+                        published: Arc::clone(&published),
+                    }),
                     ownership_ready: published.ownership_ready,
                 },
                 Arc::clone(ws),

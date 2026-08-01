@@ -187,20 +187,35 @@ impl MemoryWorkspace {
 
     /// Inject a file into the snapshot.
     pub fn inject_file(&self, canonical_id: String, source: Arc<str>) {
-        self.engine.invalidate_package_manifest(&canonical_id);
-        self.engine
-            .snapshot
-            .write()
-            .inject(canonical_id.clone(), source);
-        self.engine.bump_content_generation_for(&canonical_id);
+        self.engine.mutate_content_for(
+            &canonical_id,
+            false,
+            Some(crate::resolution_currency::PathProbe::File),
+            crate::engine::BaseRealpathTransition::Known(Some(canonical_id.clone())),
+            || {
+                self.engine.invalidate_package_manifest(&canonical_id);
+                self.engine
+                    .snapshot
+                    .write()
+                    .inject(canonical_id.clone(), source);
+                ((), true)
+            },
+        );
     }
 
     /// Remove a file from the snapshot.
     pub fn remove_file(&self, canonical_id: &str) {
-        self.engine.invalidate_package_manifest(canonical_id);
-        self.engine.snapshot.write().remove(canonical_id);
-        self.engine.edges.write().remove_file(canonical_id);
-        self.engine.bump_content_generation_for(canonical_id);
+        self.engine.mutate_content_for(
+            canonical_id,
+            true,
+            Some(crate::resolution_currency::PathProbe::Absent),
+            crate::engine::BaseRealpathTransition::Known(None),
+            || {
+                self.engine.invalidate_package_manifest(canonical_id);
+                self.engine.snapshot.write().remove(canonical_id);
+                ((), true)
+            },
+        );
     }
 
     /// Apply a batch of workspace changes.
@@ -219,6 +234,7 @@ impl MemoryWorkspace {
 
     /// Set the project graph and rebuild the resolver.
     pub fn set_project_graph(&self, graph: ProjectGraph) {
+        self.engine.set_configured_resolver_projects(None);
         *self.engine.project_graph.write() = graph;
         self.engine.rebuild_and_publish();
     }
@@ -235,6 +251,7 @@ impl MemoryWorkspace {
 
     /// Add an explicit project to the graph and rebuild the resolver.
     pub fn add_explicit_project(&self, config: VfsProjectConfig) {
+        self.engine.set_configured_resolver_projects(None);
         let mut graph = self.engine.project_graph.write();
         let mut projects: Vec<VfsProjectConfig> = graph.iter().cloned().collect();
         projects.push(config);
@@ -311,6 +328,29 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
             || self.engine.snapshot.read().contains(canonical_id)
     }
 
+    fn probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+        if self.file_exists(canonical_id) {
+            crate::resolution_currency::PathProbe::File
+        } else {
+            crate::resolution_currency::PathProbe::Absent
+        }
+    }
+
+    fn resolution_event_bridge_complete(&self) -> bool {
+        true
+    }
+
+    fn resolution_population(&self) -> crate::resolution_currency::ResolutionPopulation {
+        self.engine.default_resolution_population()
+    }
+
+    fn capture_resolution_world(
+        &self,
+    ) -> Option<Arc<crate::resolution_currency::CapturedResolutionWorld>> {
+        self.engine
+            .capture_published_resolution_world(self.engine.default_resolution_population())
+    }
+
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         if self.file_exists(canonical_id) {
             Some(canonical_id.to_string())
@@ -329,8 +369,65 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
         specifier: &str,
         ctx: crate::types::ResolutionContext,
     ) -> Option<crate::types::ResolveResult> {
-        self.engine
-            .resolve_import(self, importer_id, specifier, ctx)
+        self.engine.resolve_import_with_evidence(
+            self,
+            crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+            importer_id,
+            specifier,
+            ctx,
+        )
+    }
+
+    fn resolve_import_outcome(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        // An in-memory workspace's overlay and snapshot ARE its resolution
+        // truth — there is no event-invalidated copy behind them — so reading
+        // through this reader IS a live read.
+        self.engine.resolve_import_outcome_with_evidence(
+            self,
+            crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+            importer_id,
+            specifier,
+            ctx,
+        )
+    }
+
+    fn resolve_import_outcome_with_overlay(
+        &self,
+        overlay: &crate::resolution_currency::ResolutionOverlaySnapshot,
+        importer_id: &str,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        let reader = crate::resolution_currency::OverlaySnapshotReader::new(self, overlay);
+        self.engine.resolve_import_outcome_with_evidence(
+            &reader,
+            crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+            importer_id,
+            specifier,
+            ctx,
+        )
+    }
+
+    fn resolve_import_at_published(
+        &self,
+        published: &Arc<crate::published_state::PublishedRoot>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        self.engine.resolve_import_outcome_for_published(
+            self,
+            crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+            published,
+            importer_id,
+            specifier,
+            ctx,
+        )
     }
 
     fn resolve_import_for_project(
@@ -341,6 +438,16 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
     ) -> Option<crate::types::ResolveResult> {
         self.engine
             .resolve_import_for_project(self, owner, specifier, ctx)
+    }
+
+    fn resolve_import_for_project_outcome(
+        &self,
+        owner: &crate::types::ProjectOwnership,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        self.engine
+            .resolve_import_for_project_outcome(self, owner, specifier, ctx)
     }
 
     fn is_workspace_owned(&self, canonical_id: &str) -> bool {
@@ -357,6 +464,10 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
 
     fn content_generation(&self) -> u64 {
         self.engine.current_content_generation()
+    }
+
+    fn resolution_fact_generation(&self) -> u64 {
+        self.engine.current_resolution_fact_generation()
     }
 
     fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
@@ -565,32 +676,48 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         // the content generation. Bumping when nothing changed would
         // needlessly clear the lazy-resolution cache and force
         // downstream observers to re-validate.
-        let changed = self
-            .engine
-            .overlay
-            .write()
-            .set(canonical_id.to_string(), source);
-        if changed {
-            self.engine.invalidate_package_manifest(canonical_id);
-            self.engine.bump_content_generation_for(canonical_id);
-        }
+        self.engine.mutate_overlay_upsert(canonical_id, || {
+            let changed = self
+                .engine
+                .overlay
+                .write()
+                .set(canonical_id.to_string(), source);
+            if changed {
+                self.engine.invalidate_package_manifest(canonical_id);
+            }
+            ((), changed)
+        });
     }
 
     fn notify_close(&self, canonical_id: &str) {
-        self.engine.invalidate_package_manifest(canonical_id);
-        self.engine.overlay.write().clear(canonical_id);
-        self.engine.bump_content_generation_for(canonical_id);
+        self.engine.mutate_overlay_close(canonical_id, || {
+            self.engine.invalidate_package_manifest(canonical_id);
+            let changed = self.engine.overlay.write().clear(canonical_id);
+            ((), changed)
+        });
     }
 
     fn notify_delete(&self, canonical_id: &str) {
-        self.engine.invalidate_package_manifest(canonical_id);
-        self.engine.overlay.write().clear(canonical_id);
-        self.engine.snapshot.write().remove(canonical_id);
-        self.engine.edges.write().remove_file(canonical_id);
-        self.engine.bump_content_generation_for(canonical_id);
+        self.engine.mutate_overlay_close(canonical_id, || {
+            let changed = self.engine.overlay.write().clear(canonical_id);
+            ((), changed)
+        });
+        self.engine.mutate_content_for(
+            canonical_id,
+            true,
+            Some(crate::resolution_currency::PathProbe::Absent),
+            crate::engine::BaseRealpathTransition::Known(None),
+            || {
+                self.engine.invalidate_package_manifest(canonical_id);
+                self.engine.snapshot.write().remove(canonical_id);
+                ((), true)
+            },
+        );
     }
 
     fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {
+        self.engine
+            .set_configured_resolver_projects(Some(projects.clone()));
         let vfs_configs: Vec<crate::project_graph::VfsProjectConfig> = projects
             .into_iter()
             .map(|p| crate::project_graph::VfsProjectConfig {
@@ -614,15 +741,21 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
     // ── Directory mutations (in-memory) ──
 
     fn write_file(&self, path: &str, content: &str) -> Result<(), crate::error::VfsError> {
-        self.engine.invalidate_package_manifest(path);
-        mark_parent_dir_dirty(&self.engine, path);
-        self.engine.edges.write().remove_file(path);
-        self.engine
-            .snapshot
-            .write()
-            .inject(path.to_string(), Arc::from(content));
-        self.engine.bump_content_generation_for(path);
-        Ok(())
+        self.engine.mutate_content_for(
+            path,
+            true,
+            Some(crate::resolution_currency::PathProbe::File),
+            crate::engine::BaseRealpathTransition::Known(Some(path.to_string())),
+            || {
+                self.engine.invalidate_package_manifest(path);
+                mark_parent_dir_dirty(&self.engine, path);
+                self.engine
+                    .snapshot
+                    .write()
+                    .inject(path.to_string(), Arc::from(content));
+                (Ok(()), true)
+            },
+        )
     }
 
     fn create_dir_all(&self, _path: &str) -> Result<(), crate::error::VfsError> {
@@ -631,12 +764,18 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
     }
 
     fn delete_file(&self, path: &str) -> Result<(), crate::error::VfsError> {
-        self.engine.invalidate_package_manifest(path);
-        mark_parent_dir_dirty(&self.engine, path);
-        self.engine.snapshot.write().remove(path);
-        self.engine.edges.write().remove_file(path);
-        self.engine.bump_content_generation_for(path);
-        Ok(())
+        self.engine.mutate_content_for(
+            path,
+            true,
+            Some(crate::resolution_currency::PathProbe::Absent),
+            crate::engine::BaseRealpathTransition::Known(None),
+            || {
+                self.engine.invalidate_package_manifest(path);
+                mark_parent_dir_dirty(&self.engine, path);
+                self.engine.snapshot.write().remove(path);
+                (Ok(()), true)
+            },
+        )
     }
 
     fn delete_dir_all(&self, path: &str) -> Result<(), crate::error::VfsError> {
@@ -644,29 +783,22 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         // (also covers the exact entry): `delete_dir_all("/a/")` and
         // `delete_dir_all("/a")` remove the same id set, and a
         // byte-prefix sibling (`/ab.ts` under `/a`) never matches.
-        let mut snapshot = self.engine.snapshot.write();
-        let ids_to_remove: Vec<String> = snapshot
-            .ids()
-            .filter(|id| path_matches_prefix(id, path))
-            .map(|id| id.to_string())
-            .collect();
-        for id in &ids_to_remove {
-            self.engine.invalidate_package_manifest(id);
-            snapshot.remove(id);
-        }
-        drop(snapshot);
-        let mut edges = self.engine.edges.write();
-        for id in &ids_to_remove {
-            edges.remove_file(id);
-        }
-        drop(edges);
-        self.engine.dir_index.write().mark_dirty_under(path);
-        mark_parent_dir_dirty(&self.engine, path);
-        for id in &ids_to_remove {
-            self.engine.record_content_transition(id);
-        }
-        self.engine.bump_content_generation();
-        Ok(())
+        self.engine.mutate_content_files_under(path, || {
+            let mut snapshot = self.engine.snapshot.write();
+            let ids_to_remove: Vec<String> = snapshot
+                .ids()
+                .filter(|id| path_matches_prefix(id, path))
+                .map(|id| id.to_string())
+                .collect();
+            for id in &ids_to_remove {
+                self.engine.invalidate_package_manifest(id);
+                snapshot.remove(id);
+            }
+            drop(snapshot);
+            self.engine.dir_index.write().mark_dirty_under(path);
+            mark_parent_dir_dirty(&self.engine, path);
+            (Ok(()), ids_to_remove, true)
+        })
     }
 
     fn copy_file(&self, src: &str, dst: &str) -> Result<(), crate::error::VfsError> {
@@ -676,15 +808,21 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             .read()
             .read(src)
             .ok_or_else(|| crate::error::VfsError::NotFound(src.to_string()))?;
-        self.engine.invalidate_package_manifest(dst);
-        mark_parent_dir_dirty(&self.engine, dst);
-        self.engine.edges.write().remove_file(dst);
-        self.engine
-            .snapshot
-            .write()
-            .inject(dst.to_string(), content);
-        self.engine.bump_content_generation_for(dst);
-        Ok(())
+        self.engine.mutate_content_for(
+            dst,
+            true,
+            Some(crate::resolution_currency::PathProbe::File),
+            crate::engine::BaseRealpathTransition::Known(Some(dst.to_string())),
+            || {
+                self.engine.invalidate_package_manifest(dst);
+                mark_parent_dir_dirty(&self.engine, dst);
+                self.engine
+                    .snapshot
+                    .write()
+                    .inject(dst.to_string(), content);
+                (Ok(()), true)
+            },
+        )
     }
 
     fn register_audit_sink(

@@ -4,7 +4,7 @@
 //! - workspace-bridge accessors (`set_workspace`, `provenance`,
 //!   `provenance_snapshot`, `ws`, `bump_store_view_epoch`,
 //!   `current_store_view_epoch`)
-//! - import-resolution wrappers (`resolve_import_via_workspace`,
+//! - import-resolution wrappers (`resolve_import_transient`,
 //!   `resolve_via_vfs`, `preferred_specifier`)
 //! - cache-cascade methods (`integrate_scheduler_snapshot`,
 //!   `clear_compile_cache`, `intrinsic_members_for_tag`)
@@ -183,22 +183,73 @@ impl VerterHost {
             + 1
     }
 
-    /// Resolve an import through the workspace (VFS).
-    pub fn resolve_import_via_workspace(
+    /// Resolve an import for an explicitly transient query.
+    ///
+    /// The returned target may be ReturnOnly and therefore must never be passed
+    /// to provider sync, artifact materialization, or a durable graph/cache sink.
+    pub fn resolve_import_transient(
         &self,
         parent_canonical_id: &str,
         import_source: &str,
     ) -> Option<String> {
-        self.ws()
-            .resolve_import(
+        let outcome = self.ws().resolve_import_outcome(
+            parent_canonical_id,
+            import_source,
+            verter_workspace::ResolutionContext {
+                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                kind: verter_workspace::ResolveRequestKind::EsmImport,
+            },
+        );
+        #[cfg(test)]
+        self.observe_owner_edge_outcome(parent_canonical_id, import_source, &outcome);
+        outcome
+            .into_transient_result()
+            .map(|result| result.source_id)
+    }
+
+    /// Record one owner-edge resolution's semantic trace onto the host's
+    /// test audit.
+    ///
+    /// The resolution-currency contract observes the owner-edge lifecycle
+    /// through four events (`ExactWitnessValidation`,
+    /// `OwnerEdgeRecomputed`, `OwnerEdgePublished`, `OwnerEdgeReused`)
+    /// and requires the store-view build to emit NONE of them. That assertion only
+    /// discriminates if the sink is reachable from the resolution
+    /// chokepoints the build would use if it regressed to routing work,
+    /// so this hangs on EVERY host resolution entry point — the
+    /// explicitly transient query AND both persistent-state entries —
+    /// not just the one the contract tests happen to call. A build that
+    /// re-indexed or re-resolved an owner would drive
+    /// `resolve_for_persistent_state` and light the sink up.
+    ///
+    /// The observer itself stays `cfg(test)`; the emission adds nothing
+    /// to a production build.
+    #[cfg(test)]
+    fn observe_owner_edge_outcome(
+        &self,
+        parent_canonical_id: &str,
+        import_source: &str,
+        outcome: &verter_workspace::ResolutionOutcome,
+    ) {
+        for target in outcome.trace().rejected_exact_targets() {
+            self.observe_exact_witness_validation(
                 parent_canonical_id,
                 import_source,
-                verter_workspace::ResolutionContext {
-                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                    kind: verter_workspace::ResolveRequestKind::EsmImport,
-                },
-            )
-            .map(|r| r.source_id)
+                target.as_deref(),
+                false,
+            );
+        }
+        if outcome.trace().published() {
+            let target = outcome.result().map(|result| result.source_id.as_str());
+            self.observe_owner_edge_recomputed(parent_canonical_id, import_source, target);
+            self.observe_owner_edge_published(parent_canonical_id, import_source, target);
+        } else if outcome.trace().reused() {
+            self.observe_owner_edge_reused(
+                parent_canonical_id,
+                import_source,
+                outcome.result().map(|result| result.source_id.as_str()),
+            );
+        }
     }
 
     /// Resolve an import through the VFS with full resolution context.
@@ -208,10 +259,137 @@ impl VerterHost {
         parent_canonical_id: &str,
         import_source: &str,
         ctx: verter_workspace::ResolutionContext,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        self.resolve_for_persistent_state(parent_canonical_id, import_source, ctx)
+            .map_result(|result| result.source_id)
+    }
+
+    /// Resolve at a boundary that may retain the target in session state.
+    ///
+    /// The explicitly transient public query above may return a useful
+    /// ReturnOnly target. Artifact, route, and dependency producers use this
+    /// sibling so only a transaction-admitted result can reach their stores.
+    pub fn resolve_for_persistent_state(
+        &self,
+        parent_canonical_id: &str,
+        import_source: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> verter_workspace::ResolutionPublication {
+        // Typeinfo scratch files inline the active request scope and therefore
+        // resolve their synthetic imports in that real scope's project
+        // context. The request context supplies the actual published-project
+        // identity; absent that context the synthetic URI remains unowned and
+        // Engine refuses publication.
+        let importer =
+            if crate::resolver_core::vue_default_synth::is_typeinfo_scratch(parent_canonical_id) {
+                crate::request_context::current_request_context()
+                    .map(|request| Arc::clone(&request.canonical_id))
+                    .unwrap_or_else(|| Arc::from(parent_canonical_id))
+            } else {
+                Arc::from(parent_canonical_id)
+            };
+        let outcome = self
+            .ws()
+            .resolve_import_outcome(importer.as_ref(), import_source, ctx);
+        #[cfg(test)]
+        self.observe_owner_edge_outcome(importer.as_ref(), import_source, &outcome);
+        let publication = outcome.into_publication();
+        crate::host_manage::import_route_witness::record_resolution_witness(&publication);
+        publication
+    }
+
+    /// The session view's resolution-visible overlay: its upserted
+    /// sources plus its tombstones.
+    ///
+    /// Load-bearing since the parse artifact stopped baking resolved
+    /// targets. A session's overlay-only dependency used to reach base
+    /// readers implicitly — the overlay materialiser resolved it and the
+    /// baked canonical travelled with the artifact — so a base-host
+    /// resolve of the same specifier was never attempted. Now every
+    /// consumer resolves on demand, and a session-bound consumer must
+    /// resolve through ITS OWN overlay or an overlay-only target
+    /// disappears.
+    pub(crate) fn resolution_overlay_snapshot(
+        &self,
+        view: &dyn crate::session_view::SessionView,
+    ) -> verter_workspace::ResolutionOverlaySnapshot {
+        let upserts = view
+            .overlay_canonicals()
+            .into_iter()
+            .filter_map(|canonical| view.source(&canonical).map(|source| (canonical, source)));
+        verter_workspace::ResolutionOverlaySnapshot::new(upserts, view.tombstoned_canonicals())
+    }
+
+    pub(crate) fn resolve_for_persistent_state_with_overlay(
+        &self,
+        overlay: &verter_workspace::ResolutionOverlaySnapshot,
+        parent_canonical_id: &str,
+        import_source: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> verter_workspace::ResolutionPublication {
+        let importer =
+            if crate::resolver_core::vue_default_synth::is_typeinfo_scratch(parent_canonical_id) {
+                crate::request_context::current_request_context()
+                    .map(|request| Arc::clone(&request.canonical_id))
+                    .unwrap_or_else(|| Arc::from(parent_canonical_id))
+            } else {
+                Arc::from(parent_canonical_id)
+            };
+        let outcome = self.ws().resolve_import_outcome_with_overlay(
+            overlay,
+            importer.as_ref(),
+            import_source,
+            ctx,
+        );
+        #[cfg(test)]
+        self.observe_owner_edge_outcome(importer.as_ref(), import_source, &outcome);
+        let publication = outcome.into_publication();
+        crate::host_manage::import_route_witness::record_resolution_witness(&publication);
+        publication
+    }
+
+    /// The overlay-aware sibling of
+    /// [`crate::VerterHost::resolve_type_dependency_canonical`]: the shared
+    /// TS-first type-route policy (TypeImport → ESM fallback →
+    /// re-normalise) resolved against a session's overlay.
+    pub(crate) fn resolve_type_dependency_canonical_with_overlay(
+        &self,
+        overlay: &verter_workspace::ResolutionOverlaySnapshot,
+        owner_canonical: &str,
+        import_source: &str,
     ) -> Option<String> {
-        self.ws()
-            .resolve_import(parent_canonical_id, import_source, ctx)
-            .map(|r| r.source_id)
+        let type_lane = self.resolve_for_persistent_state_with_overlay(
+            overlay,
+            owner_canonical,
+            import_source,
+            verter_workspace::ResolutionContext {
+                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                kind: verter_workspace::ResolveRequestKind::TypeImport,
+            },
+        );
+        let type_lane = match type_lane {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
+                .into_result()
+                .map(|resolution| resolution.source_id),
+            verter_workspace::ResolutionPublication::Refused(_) => return None,
+        };
+        if let Some(resolved) = type_lane {
+            return Some(resolved);
+        }
+        match self.resolve_for_persistent_state_with_overlay(
+            overlay,
+            owner_canonical,
+            import_source,
+            verter_workspace::ResolutionContext {
+                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                kind: verter_workspace::ResolveRequestKind::EsmImport,
+            },
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
+                .into_result()
+                .map(|resolution| resolution.source_id),
+            verter_workspace::ResolutionPublication::Refused(_) => None,
+        }
     }
 
     /// Compute the preferred alias-based import specifier for a target file.
@@ -481,21 +659,11 @@ impl VerterHost {
         self.ws().configure_resolver(projects);
         // Project-config change drops resolution-derived state:
         // `import_routes` (DerivedRawState) and `dependencies`
-        // (DependencyState). The `import_routes_known_miss_recorded_at_generation`
-        // sidecar is cleared in lockstep so a stale `content_generation`
-        // stamp does not survive a project-graph reset: leaving it
-        // behind would suppress re-resolution after the next admission
-        // because the reader's `import_route_is_known_miss` predicate
-        // would still consult a generation tag from the previous
-        // project graph. Symmetric with
-        // [`Self::finish_upsert_post_commit`], which clears both fields
-        // when owner source content advances.
+        // (DependencyState). Symmetric with
+        // [`Self::finish_upsert_post_commit`], which clears the same
+        // fields when owner source content advances.
         for mut entry in self.derived_raw_cache().iter_mut() {
             entry.import_routes.clear();
-            entry
-                .import_routes_known_miss_recorded_at_generation
-                .clear();
-            entry.import_routes_positive_recorded_at_generation.clear();
         }
         for mut entry in self.dependency_cache().iter_mut() {
             entry.dependencies.clear();
@@ -646,15 +814,11 @@ impl VerterHost {
             return;
         }
         // Owner-scoped route-mirror repair: the workspace exacts for
-        // THIS owner just changed, so its derived route mirror (and the
-        // generation sidecars that root it) is stale. Other canonicals'
-        // mirrors are untouched — their routes did not move.
+        // THIS owner just changed, so its caller-supplied route table is
+        // stale. Other canonicals' tables are untouched — their routes
+        // did not move.
         if let Some(mut entry) = self.derived_raw_cache().get_mut(canonical) {
             entry.import_routes.clear();
-            entry
-                .import_routes_known_miss_recorded_at_generation
-                .clear();
-            entry.import_routes_positive_recorded_at_generation.clear();
         }
         self.project_type_store.bump_project_generation();
         self.resolver.runtime.invalidate_canonical(canonical);

@@ -1329,13 +1329,31 @@ fn component_meta_registry_local_import_for_instantiated_route(
     resolved_identity: Option<&(std::sync::Arc<str>, std::sync::Arc<str>)>,
 ) -> Option<String> {
     let (resolved_canonical, resolved_symbol) = resolved_identity?;
-    ctx.shallow_file_state(producer_scope.canonical_id.as_ref())?
-        .unique_local_import_for_resolved_target_in(
-            producer_scope.owner,
-            resolved_canonical.as_ref(),
-            resolved_symbol.as_ref(),
-        )
-        .map(str::to_string)
+    let state = ctx.shallow_file_state(producer_scope.canonical_id.as_ref())?;
+    // The shallow inventory is parse domain: it names the AUTHORED
+    // specifier, never a resolved canonical. Each candidate alias
+    // resolves through the one workspace resolution authority here, and
+    // the fail-closed uniqueness rule (two distinct locals landing on
+    // the same target recover no alias) is applied over the resolved
+    // answers.
+    let mut unique: Option<String> = None;
+    for (local, specifier) in
+        state.local_imports_of_name_in(producer_scope.owner, resolved_symbol.as_ref())
+    {
+        let Some(target_canonical) =
+            ctx.resolve_type_dependency_canonical(producer_scope.canonical_id.as_ref(), specifier)
+        else {
+            continue;
+        };
+        if target_canonical.as_str() != resolved_canonical.as_ref() {
+            continue;
+        }
+        if unique.is_some() {
+            return None;
+        }
+        unique = Some(local.to_string());
+    }
+    unique
 }
 
 /// The node-domain sibling of

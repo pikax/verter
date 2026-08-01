@@ -189,8 +189,16 @@ pub(crate) use self::background_drain_decl_closure::{carrier_dependency_ids, Dec
 ///
 /// Preserves the `.resolver` field access pattern so callers don't need deep changes.
 #[derive(Debug, Clone)]
+pub(crate) struct PublishedResolutionView {
+    pub(crate) workspace: Arc<verter_workspace::FilesystemWorkspace>,
+    pub(crate) published: Arc<verter_workspace::PublishedRoot>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct PublishedResolverSnapshot {
     pub(crate) resolver: crate::project_resolver::NativeProjectResolver,
+    /// Exact Engine-backed workspace publication paired with `resolver`.
+    pub(crate) resolution_view: Option<PublishedResolutionView>,
     /// `true` after `background_init` publishes a real snapshot with the
     /// full project graph. `false` during bootstrap (empty resolver).
     pub(crate) ownership_ready: bool,

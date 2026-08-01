@@ -52,10 +52,54 @@ impl NativeFs {
         std::fs::read_to_string(&os_path).ok().map(Arc::from)
     }
 
+    /// Read current disk bytes without consulting any workspace snapshot.
+    ///
+    /// `Ok(None)` is reserved for stable absence. Every other I/O failure is
+    /// retained so a resolution transaction cannot validate uncertainty as an
+    /// absent file.
+    pub(crate) fn read_file_live(&self, path: &str) -> std::io::Result<Option<Arc<str>>> {
+        let os_path = to_os_path(path);
+        match std::fs::read_to_string(&os_path) {
+            Ok(source) => Ok(Some(Arc::from(source))),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Check if a file exists on disk.
     pub fn file_exists(&self, path: &str) -> bool {
         let os_path = to_os_path(path);
         std::path::Path::new(&os_path).exists()
+    }
+
+    /// Typed metadata probe used by resolution. In particular, permission and
+    /// transient I/O failures are never reported as a stable absence.
+    pub fn probe_path(&self, path: &str) -> crate::resolution_currency::PathProbe {
+        let os_path = to_os_path(path);
+        match std::fs::metadata(&os_path) {
+            Ok(metadata) if metadata.is_file() => crate::resolution_currency::PathProbe::File,
+            Ok(metadata) if metadata.is_dir() => crate::resolution_currency::PathProbe::Directory,
+            Ok(_) => crate::resolution_currency::PathProbe::Unknown,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                crate::resolution_currency::PathProbe::Absent
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                crate::resolution_currency::PathProbe::Inaccessible
+            }
+            Err(_) => crate::resolution_currency::PathProbe::Unknown,
+        }
     }
 
     /// Resolve symlinks to real path.
@@ -88,6 +132,25 @@ impl NativeFs {
             .map(|p| normalize_path_str(&p.to_string_lossy()))?;
         self.commit_realpath(key, &resolved, epoch_before);
         Some(resolved)
+    }
+
+    /// Canonicalize against current disk state without consulting or updating
+    /// the realpath memo.
+    pub(crate) fn realpath_live(&self, path: &str) -> std::io::Result<Option<String>> {
+        let key = normalize_path_str(path);
+        let os_path = to_os_path(&key);
+        match std::fs::canonicalize(&os_path) {
+            Ok(path) => Ok(Some(normalize_path_str(&path.to_string_lossy()))),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Commit a freshly-canonicalized `resolved` for `key` only if no
@@ -635,6 +698,21 @@ mod tests {
         let fs = NativeFs::new();
         assert!(fs.is_dir(&canonical));
         assert!(!fs.is_dir(&format!("{canonical}/nonexistent")));
+    }
+
+    #[test]
+    fn probe_descendant_of_file_is_stable_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("module.vue");
+        std::fs::write(&file, "source").unwrap();
+        let impossible_descendant = file.join("package.json");
+        let canonical = impossible_descendant.to_string_lossy().replace('\\', "/");
+
+        assert_eq!(
+            NativeFs::new().probe_path(&canonical),
+            crate::resolution_currency::PathProbe::Absent,
+            "ENOTDIR is stable absence, not transient filesystem uncertainty"
+        );
     }
 
     #[test]

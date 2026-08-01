@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use verter_compiler::svelte::parser::template_ast::{
     SvelteAttributeKind, SvelteElementKind, SvelteNode,
 };

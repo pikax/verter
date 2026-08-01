@@ -9,6 +9,26 @@ use crate::types::{
     ExactResolution, ParsedEdge, ResolutionContext, ResolvePhase, ResolveRequestKind,
 };
 
+fn set_fallback_projects(ws: &MemoryWorkspace, roots: &[&str]) {
+    ws.set_project_graph(ProjectGraph::from_configs(
+        roots
+            .iter()
+            .map(|root| VfsProjectConfig {
+                root: (*root).to_string(),
+                rank: ProjectRank::Inferred,
+                tsconfig_path: None,
+                root_files: Vec::new(),
+                extensions: vec![".vue".to_string(), ".ts".to_string(), ".js".to_string()],
+                workspace_root: (*root).to_string(),
+                workspace_aliases: Vec::new(),
+                compiler_options: IdeProjectCompilerOptions::default(),
+                references: Vec::new(),
+                membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new(root)),
+            })
+            .collect(),
+    ));
+}
+
 // ── MemorySnapshot tests ──
 
 #[test]
@@ -516,6 +536,7 @@ fn package_manifest_cache_invalidates_after_package_json_write() {
 #[test]
 fn lazy_import_resolution_cache_invalidates_after_package_json_write() {
     let ws = MemoryWorkspace::new(MemoryOptions::default());
+    set_fallback_projects(&ws, &["/repo", "/repo/node_modules/pkg"]);
     ws.inject_file("/repo/src/App.vue".to_string(), Arc::from("<template/>"));
     ws.inject_file(
         "/repo/node_modules/pkg/package.json".to_string(),
@@ -655,6 +676,7 @@ fn record_parsed_edges_bare_stored_not_resolved() {
 #[test]
 fn record_parsed_edges_external_src_resolved() {
     let ws = MemoryWorkspace::new(MemoryOptions::default());
+    set_fallback_projects(&ws, &["d:/project"]);
 
     ws.record_parsed_edges(
         "d:/project/src/app.vue",
@@ -918,6 +940,7 @@ fn record_parsed_edges_with_exact_resolutions_records_and_applies_atomically() {
     use crate::traits::WorkspaceAccess;
 
     let ws = MemoryWorkspace::new(MemoryOptions::default());
+    set_fallback_projects(&ws, &["d:/project"]);
     let owner = "d:/project/src/app.vue";
     let target = "d:/project/src/utils.ts";
     ws.inject_file(target.to_string(), Arc::from("export const x = 1;"));
@@ -1573,12 +1596,13 @@ fn notify_close_case_mismatch_clears_overlay() {
 
 // ── §4.2 — MemoryWorkspace integration tests for the new dep model ──
 
-/// §4.2 #1 — Workspace-only oracle for §4.6 regressors. No project graph;
+/// §4.2 #1 — Workspace-only oracle for §4.6 regressors.
 /// `record_parsed_edges` with `Relative { "./types" }`; assert
 /// `reverse_deps_for("/src/types.ts")` returns the importer.
 #[test]
 fn memory_unresolved_relative_records_stem_without_published_root() {
     let ws = MemoryWorkspace::new(MemoryOptions::default());
+    set_fallback_projects(&ws, &["/src"]);
     ws.record_parsed_edges(
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {
@@ -1662,6 +1686,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         default_resolve_extensions: Some(vec![".ts".to_string()]),
         ..MemoryOptions::default()
     });
+    set_fallback_projects(&ws, &["/src"]);
 
     // (a) `.vue` strips (from probe).
     ws.record_parsed_edges(
@@ -1734,6 +1759,7 @@ fn memory_replace_semantic_transitive_creates_canonical_reverse_bucket() {
 #[test]
 fn memory_set_exact_resolutions_dampens_active_stem_canonical_works() {
     let ws = MemoryWorkspace::new(MemoryOptions::default());
+    set_fallback_projects(&ws, &["/src"]);
     ws.record_parsed_edges(
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {

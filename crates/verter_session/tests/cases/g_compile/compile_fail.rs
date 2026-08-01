@@ -32,6 +32,19 @@ fn workspace_accessor_visibility() {
     t.compile_fail("tests/cases/compile-fail/workspace_accessor_visibility.rs");
 }
 
+/// Raw module-resolution entry points are private to the resolver's own unit
+/// tests. Production callers must cross the Engine-owned transaction boundary,
+/// whose tracked wrapper requires an unforgeable Engine capability.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn raw_resolver_entry_points_are_private() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/raw_resolver_entry_points_are_private.rs");
+}
+
 /// API-surface half of `carrier_access_token_minted_only_in_verter_language`:
 /// an out-of-crate `CarrierAccessToken` struct literal must fail
 /// to compile — the `_private: ()` field is the in-language forging

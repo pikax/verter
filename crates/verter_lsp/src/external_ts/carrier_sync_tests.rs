@@ -248,7 +248,8 @@ fn api_companion_publishes_the_ts_labeled_rendering() {
         None,
         "/workspace/src/App.vue",
         None,
-    );
+    )
+    .expect("API-only companion batch");
     let api = companions
         .iter()
         .find(|companion| companion.role == SnapshotRole::CarrierApi)
@@ -274,7 +275,8 @@ fn api_companion_publishes_the_ts_labeled_rendering() {
         None,
         "/workspace/src/App.vue",
         None,
-    );
+    )
+    .expect("API-only companion batch");
     let api = companions
         .iter()
         .find(|companion| companion.role == SnapshotRole::CarrierApi)
@@ -284,6 +286,60 @@ fn api_companion_publishes_the_ts_labeled_rendering() {
         "declare const App: number\nexport default App\n",
         "without a split, the companion carries `code` unchanged"
     );
+}
+
+/// Carrier projection is itself provider publication: a useful live-disk
+/// target cannot be allowed to select the bytes of an IDE companion unless the
+/// resolution transaction admitted it.
+#[test]
+fn carrier_companion_refuses_return_only_projection() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().to_string_lossy().replace('\\', "/");
+    let canonical_id = format!("{root}/App.vue");
+    let dependency = format!("{root}/Child.vue");
+    std::fs::write(&dependency, "<script>export const child = true;</script>")
+        .expect("write carrier dependency");
+    let workspace =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions {
+            roots: vec![root],
+            eager_preload: false,
+        });
+    let mut state = owned_carrier_state();
+    state.ide_path = Some(format!("{canonical_id}.tsx"));
+    state.api_path = Some(format!("{canonical_id}.verter.ts"));
+    let ide = verter_session::IdeResponse {
+        code: Arc::from("import Child from './Child.vue'; void Child;\n"),
+        source_map: None,
+        is_jsx: false,
+        destructured_block: None,
+    };
+    let api = verter_session::TscResponse::new(
+        Arc::from("declare const App: unknown;\nexport default App;\n"),
+        None,
+        verter_compiler::tsc::SfcScriptDialect::TypeScript,
+        None,
+    );
+
+    let companions = build_carrier_companions(
+        &state,
+        Some(&ide),
+        Some(&api),
+        Some(&workspace),
+        &canonical_id,
+        None,
+    );
+
+    assert!(
+        matches!(
+            companions,
+            Err(CarrierCompanionBuildError::ResolutionRefused(_))
+        ),
+        "a refusal while preparing the later IDE constituent must remain distinct \
+         from a genuine empty batch and prevent partial provider publication"
+    );
+
+    // Mutation recipe: return the already-built API vector when IDE projection
+    // refuses. The assertion observes that partial batch.
 }
 
 /// A `CarrierCompanion` for the IDE role at `uri` carrying `content` + optional map.
@@ -424,11 +480,14 @@ fn recorded_ide_surface_hash_equals_the_receipt_stamped_committed_surface() {
     // The publish path's companion: bytes + projection, prepared once.
     let mut companions = vec![CarrierCompanion::carrier_ide(
         Arc::from(ide_path),
-        crate::carrier_provider_projection::prepare_carrier_provider_imports(
-            None,
-            canonical,
-            compiler_bytes,
-            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        crate::carrier_provider_projection::expect_admitted(
+            crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                None,
+                canonical,
+                compiler_bytes,
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            ),
+            "no workspace resolution is needed",
         ),
         Some(Arc::from(map_json.as_str())),
         verter_session::external_ts::ScriptKind::Tsx,

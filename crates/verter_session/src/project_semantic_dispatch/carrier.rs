@@ -610,27 +610,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Demand-time recovery rail (same as `build_typeof`'s import-miss
             // arm): the head names an AUTHORED IMPORT whose route is
             // currently unresolvable, so the lowered value stays an honest
-            // `BareRef` carrier. Observe the owner's `ImportRoute` derived
-            // fact into the active tracer — `generation_current_import_route_hash`
-            // re-resolves known-miss specifiers per generation, so every
+            // `BareRef` carrier. Observe the owner's import-route RESOLUTION
+            // WITNESS into the active tracer — resolving the owner's authored
+            // specifiers fans the exhausted probe set for each miss, so every
             // consuming warm entry misses to a cold recompute the moment the
             // dependency appears. This is what lets a carrier-bearing surface
             // stay COMPLETE + cacheable instead of poisoning root
             // completeness with member-level partiality.
             if let NodeScopeId::File { canonical_id, .. } = scope {
-                if let Some(route_hash) = self
-                    .ctx
+                self.ctx
                     .host_for_fact_tracer_install()
-                    .generation_current_import_route_hash(canonical_id.as_ref())
-                {
-                    crate::fact_signature_helpers::observe_fact_signature(&[
-                        crate::resolver_core::FactVersionRef::DerivedFactHash {
-                            canonical_id: canonical_id.as_ref().to_string(),
-                            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                            hash: route_hash,
-                        },
-                    ]);
-                }
+                    .observe_owner_import_route_witness(canonical_id.as_ref());
             }
         }
 

@@ -163,7 +163,7 @@ pub(super) async fn handle_goto_definition(
             let canonical_id = canonical_id.clone();
             let host = &server.documents.host;
             move |specifier: &str| -> Option<String> {
-                host.resolve_import_via_workspace(&canonical_id, specifier)
+                host.resolve_import_transient(&canonical_id, specifier)
             }
         };
         #[allow(clippy::type_complexity)]

@@ -76,6 +76,113 @@ pub trait WorkspaceRead: Send + Sync {
     /// Check whether a file exists. In Filesystem mode, probes disk on miss.
     fn file_exists(&self, canonical_id: &str) -> bool;
 
+    /// Classify a path without collapsing I/O uncertainty into absence.
+    ///
+    /// The ONLY path-classification seam resolution may use: no
+    /// resolver-side code path may reach [`Self::file_exists`], because
+    /// that boolean folds
+    /// [`PathProbe::Inaccessible`](crate::resolution_currency::PathProbe::Inaccessible)
+    /// and [`PathProbe::Unknown`](crate::resolution_currency::PathProbe::Unknown)
+    /// into `false` — laundering an I/O error into a witnessable
+    /// `Absent`, the one outcome a resolution witness may never cache.
+    ///
+    /// Every backend with an error channel answers for itself:
+    /// `FilesystemWorkspace` classifies through `NativeFs`, and the
+    /// recorder / frozen / overlay / transaction readers each carry the
+    /// typed outcome through unchanged. The provided body exists ONLY
+    /// for error-channel-free adapters (in-memory and fixture readers),
+    /// where "not present" is total information and no laundering is
+    /// possible.
+    fn probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+        if self.file_exists(canonical_id) {
+            crate::resolution_currency::PathProbe::File
+        } else if self.is_dir(canonical_id) {
+            crate::resolution_currency::PathProbe::Directory
+        } else {
+            crate::resolution_currency::PathProbe::Absent
+        }
+    }
+
+    /// Whether every resolver-visible backend mutation is serialized through
+    /// this workspace's resolution-world publisher.
+    ///
+    /// Backends that cannot make that guarantee still return correct results,
+    /// but Engine transactions conservatively refuse cache admission.
+    fn resolution_event_bridge_complete(&self) -> bool {
+        false
+    }
+
+    /// Whether this reader's answers are SCOPED to one request rather than
+    /// to the population its cache key names.
+    ///
+    /// A request-local reader may admit a result after its own final fence,
+    /// but must neither reuse nor populate the shared resolution
+    /// caches/edges: its answers are correct only inside the batch that
+    /// composed it. The overlay snapshot reader is the case — its answers
+    /// are overlay-effective while the enclosing cache key names the
+    /// underlying population, so a published candidate would be served to
+    /// requests that cannot see the overlay.
+    ///
+    /// This is NOT the admission question. A reader that observes the shared
+    /// population but cannot guarantee event-bridge coverage answers
+    /// [`Self::resolution_event_bridge_complete`] `false` instead: it may
+    /// still READ a warm candidate (and should — that is the memo), it
+    /// simply cannot admit one. Conflating the two disables the resolution
+    /// memo wholesale for the backend that answers `true` here, which is a
+    /// silent, suite-invisible cold-path regression rather than a
+    /// correctness fence.
+    fn resolution_snapshot_is_request_local(&self) -> bool {
+        false
+    }
+
+    // The live evidence capability is deliberately NOT a hook on this trait.
+    // A reader hook is forwarded by every delegating wrapper, and a wrapper
+    // that forgets one silently inherits the default. The capability is a
+    // required parameter on the Engine's resolution entry points instead,
+    // stated once by the backend that owns the Engine — see
+    // `crate::resolution_currency::ResolutionEvidenceSource`. Nothing composed
+    // on top of a reader can strip it.
+
+    /// Drain exact directory enumerations performed internally by the most
+    /// recent resolver-facing read on the current thread.
+    ///
+    /// Some backends answer a typed path probe by enumerating its parent
+    /// directory. [`crate::resolution_currency::TransactionReader`] consumes
+    /// this evidence so the corresponding `DirectoryMembers` fact enters the
+    /// transaction signature. Implementations that never enumerate
+    /// directories internally keep the empty default.
+    fn take_resolution_directory_observations(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Resolution population visible through this reader.
+    ///
+    /// Standalone readers observe the base population. Engine-backed editor
+    /// workspaces override this with their independently fenced overlay
+    /// session.
+    fn resolution_population(&self) -> crate::resolution_currency::ResolutionPopulation {
+        crate::resolution_currency::ResolutionPopulation::Base
+    }
+
+    /// Capture this reader's immutable resolution world for the population
+    /// it observes, as the validity root a consumer view retains.
+    ///
+    /// O(1) for an Engine-backed workspace: the composition of the current
+    /// published base root and, for a session population, that session's
+    /// overlay root. A consumer captures it ONCE and validates every
+    /// resolution fact against that capture, never against the live
+    /// registry.
+    ///
+    /// `None` means this reader publishes no resolution world — an adapter
+    /// with no Engine behind it, or a capture that never observed a settled
+    /// world. A consumer holding `None` validates no resolution fact at all,
+    /// so the absence is a fail-closed miss and never an optimistic accept.
+    fn capture_resolution_world(
+        &self,
+    ) -> Option<std::sync::Arc<crate::resolution_currency::CapturedResolutionWorld>> {
+        None
+    }
+
     /// Resolve symlinks to real path.
     fn realpath(&self, canonical_id: &str) -> Option<String>;
 
@@ -121,6 +228,57 @@ pub trait WorkspaceRead: Send + Sync {
         None
     }
 
+    /// Resolve with the Engine transaction's fact-signature admission product.
+    ///
+    /// Adapter backends that do not own an Engine are conservatively
+    /// ReturnOnly; concrete Engine-backed workspaces override this method.
+    fn resolve_import_outcome(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        crate::resolution_currency::ResolutionOutcome::adapter_return_only(self.resolve_import(
+            importer_id,
+            specifier,
+            ctx,
+        ))
+    }
+
+    /// Resolve through this workspace's Engine with an immutable request-local
+    /// overlay snapshot layered over the workspace.
+    ///
+    /// Concrete Engine-backed workspaces override this bridge. Adapter
+    /// workspaces cannot mint an admitted publication and therefore retain the
+    /// ordinary ReturnOnly behavior.
+    fn resolve_import_outcome_with_overlay(
+        &self,
+        _overlay: &crate::resolution_currency::ResolutionOverlaySnapshot,
+        importer_id: &str,
+        specifier: &str,
+        ctx: ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        self.resolve_import_outcome(importer_id, specifier, ctx)
+    }
+
+    /// Resolve against one explicitly captured published root.
+    ///
+    /// Engine-backed workspaces admit only if this root is still the root
+    /// captured by the transaction. Adapter backends remain ReturnOnly.
+    fn resolve_import_at_published(
+        &self,
+        _published: &Arc<crate::published_state::PublishedRoot>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        crate::resolution_currency::ResolutionOutcome::adapter_return_only(self.resolve_import(
+            importer_id,
+            specifier,
+            ctx,
+        ))
+    }
+
     /// Resolve an import specifier against an explicit owning project.
     ///
     /// This is used for project-scoped lookups that are not naturally rooted at
@@ -135,6 +293,18 @@ pub trait WorkspaceRead: Send + Sync {
         _ctx: ResolutionContext,
     ) -> Option<ResolveResult> {
         None
+    }
+
+    /// Explicit-project counterpart of [`Self::resolve_import_outcome`].
+    fn resolve_import_for_project_outcome(
+        &self,
+        owner: &ProjectOwnership,
+        specifier: &str,
+        ctx: ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        crate::resolution_currency::ResolutionOutcome::adapter_return_only(
+            self.resolve_import_for_project(owner, specifier, ctx),
+        )
     }
 
     /// Whether `canonical_id` is a workspace-owned source file.
@@ -177,6 +347,34 @@ pub trait WorkspaceRead: Send + Sync {
     /// Monotonic content generation. Bumped when workspace file content or
     /// overlays change, so long-lived consumers can invalidate cached reads.
     fn content_generation(&self) -> u64 {
+        0
+    }
+
+    /// Monotonic count of resolution FACT VERSIONS minted by this
+    /// workspace's resolution world.
+    ///
+    /// Advances by exactly one per
+    /// [`crate::resolution_currency::ResolutionFactVersion`] mint — i.e.
+    /// once per fact whose OBSERVED VALUE actually moved. Recording a
+    /// first-observation baseline for a path the world had never seen
+    /// mints no version and does not advance it, so a cold compute's own
+    /// discovery does not churn this dimension.
+    ///
+    /// It exists for consumers that RETAIN a captured
+    /// [`crate::resolution_currency::CapturedResolutionWorld`] and answer
+    /// resolution-fact validity out of that capture. Validity itself stays
+    /// fact-precise and is never decided by this counter (world identity
+    /// is barred from being a cross-root warm-validity oracle). What the
+    /// counter decides is whether a RETAINED capture is still the right
+    /// snapshot to answer from: while it is unchanged, no fact version has
+    /// moved, so the capture and the live world agree on every fact.
+    /// Without it a cached view could keep serving pre-mutation fact
+    /// versions after a resolution-visible change that moved no other
+    /// dimension.
+    ///
+    /// Default `0` for adapters with no resolution world (they capture no
+    /// world and validate no resolution fact either).
+    fn resolution_fact_generation(&self) -> u64 {
         0
     }
 
@@ -555,7 +753,11 @@ pub trait WorkspaceAccess: WorkspaceRead {
             } else {
                 format!("{package_dir}/{target}")
             };
-            if !self.file_exists(&candidate) {
+            // Typed probe, never the boolean: this runs inside the
+            // resolver's manifest lane, so an `Inaccessible` / `Unknown`
+            // manifest entry must reach the transaction as itself rather
+            // than as a witnessable absence.
+            if self.probe_path(&candidate) != crate::resolution_currency::PathProbe::File {
                 return None;
             }
             Some(self.realpath(&candidate).unwrap_or(candidate))
@@ -732,7 +934,10 @@ pub trait WorkspaceAccess: WorkspaceRead {
                     phase: ResolvePhase::CodegenBlocker,
                     kind: ResolveRequestKind::EsmImport,
                 };
-                if let Some(result) = self.resolve_import(from, specifier, ctx) {
+                if let Some(result) = self
+                    .resolve_import_outcome(from, specifier, ctx)
+                    .into_transient_result()
+                {
                     files.push(workspace_audit_file_entry(
                         &result.source_id,
                         FileRole::DirectImport,
@@ -772,7 +977,10 @@ pub trait WorkspaceAccess: WorkspaceRead {
                     phase: ResolvePhase::CodegenBlocker,
                     kind: ResolveRequestKind::EsmImport,
                 };
-                if let Some(result) = self.resolve_import("", specifier, ctx) {
+                if let Some(result) = self
+                    .resolve_import_outcome("", specifier, ctx)
+                    .into_transient_result()
+                {
                     files.push(workspace_audit_file_entry(
                         &result.source_id,
                         FileRole::ResolverWalk,
@@ -1058,6 +1266,96 @@ mod ambient_default_tests {
         assert!(
             view.by_project.is_empty(),
             "default impl MUST return empty registry"
+        );
+    }
+
+    /// The resolver's manifest lane classifies its `types` candidate
+    /// through the TYPED probe, never the boolean.
+    ///
+    /// Discriminating by construction: `TypedProbeWs::file_exists`
+    /// reports `true` for the `types` candidate while `probe_path`
+    /// reports `Inaccessible`. Against the pre-change body
+    /// (`if !self.file_exists(&candidate) { return None; }`) the entry
+    /// is accepted and `manifest_types_entry_for` answers
+    /// `Some(".../index.d.ts")` — the exact laundering
+    /// `.DECISION.md` §2 forbids, because an I/O error would be
+    /// witnessed as a stable positive resolution. Against the typed
+    /// body it answers `None`, so the outcome stays with the
+    /// transaction's non-admission rail instead.
+    struct TypedProbeWs;
+
+    const TYPED_PROBE_PACKAGE_MAIN: &str = "/w/node_modules/pkg/index.js";
+    const TYPED_PROBE_TYPES_CANDIDATE: &str = "/w/node_modules/pkg/index.d.ts";
+
+    impl WorkspaceRead for TypedProbeWs {
+        fn read_file(&self, id: &str) -> Option<Arc<str>> {
+            (id == "/w/node_modules/pkg/package.json")
+                .then(|| Arc::from(r#"{"types":"./index.d.ts"}"#))
+        }
+        fn file_exists(&self, id: &str) -> bool {
+            id == TYPED_PROBE_TYPES_CANDIDATE
+        }
+        fn probe_path(&self, id: &str) -> crate::resolution_currency::PathProbe {
+            if id == TYPED_PROBE_TYPES_CANDIDATE {
+                // The one divergence: occupancy says "there", typed
+                // classification says "the answer is unknowable".
+                crate::resolution_currency::PathProbe::Inaccessible
+            } else {
+                crate::resolution_currency::PathProbe::Absent
+            }
+        }
+        fn is_package_backed(&self, _id: &str) -> bool {
+            true
+        }
+        fn realpath(&self, id: &str) -> Option<String> {
+            Some(id.to_string())
+        }
+        fn reverse_deps_for(&self, _id: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn forward_deps_for(&self, _id: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn dependency_snapshot(&self, _id: &str) -> Option<DependencySnapshotView> {
+            None
+        }
+    }
+
+    impl WorkspaceAccess for TypedProbeWs {
+        fn record_parsed_edges(&self, _id: &str, _edges: &[ParsedEdge]) {}
+        fn set_exact_resolutions(
+            &self,
+            _id: &str,
+            _resolutions: Vec<ExactResolution>,
+        ) -> ExactResolutionResult {
+            ExactResolutionResult::default()
+        }
+        fn record_parsed_edges_with_exact_resolutions(
+            &self,
+            _id: &str,
+            _edges: &[ParsedEdge],
+            _resolutions: Vec<ExactResolution>,
+        ) -> ExactResolutionResult {
+            ExactResolutionResult::default()
+        }
+        fn replace_semantic_transitive(&self, _id: &str, _deps: BTreeSet<String>) {}
+        fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
+        fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
+    }
+
+    #[test]
+    fn manifest_types_entry_declines_an_inaccessible_candidate_the_boolean_calls_present() {
+        let ws = TypedProbeWs;
+        assert!(
+            ws.file_exists(TYPED_PROBE_TYPES_CANDIDATE),
+            "fixture precondition: the boolean rail must report the candidate present, \
+             otherwise this test cannot discriminate the typed conversion",
+        );
+        assert_eq!(
+            ws.manifest_types_entry_for(TYPED_PROBE_PACKAGE_MAIN),
+            None,
+            "an Inaccessible types candidate must not be laundered into a positive \
+             manifest types entry",
         );
     }
 

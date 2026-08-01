@@ -114,6 +114,10 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
         (
             super::PublishedResolverSnapshot {
                 resolver: published.snapshot.resolver.clone(),
+                resolution_view: Some(super::PublishedResolutionView {
+                    workspace: Arc::clone(ws),
+                    published: Arc::clone(&published),
+                }),
                 ownership_ready: published.ownership_ready,
             },
             Arc::clone(ws),
@@ -216,6 +220,10 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             Some((
                 super::PublishedResolverSnapshot {
                     resolver: published.snapshot.resolver.clone(),
+                    resolution_view: Some(super::PublishedResolutionView {
+                        workspace: Arc::clone(ws),
+                        published: Arc::clone(&published),
+                    }),
                     ownership_ready: published.ownership_ready,
                 },
                 Arc::clone(ws),
@@ -266,20 +274,25 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         };
 
         // Static imports (same pipeline as did_open line 6103)
-        let ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
+        let ids = match collect_imported_carrier_priority_ids_from_imports_for_publication(
             &analysis.imports,
             Some(&canonical_id),
             |parent, specifier| resolve_import_specifier_standalone(host, parent, specifier),
-        );
+        ) {
+            Ok(ids) => ids,
+            Err(_) => return false,
+        };
 
         // Dynamic imports via module_references
         let reader = LspProjectResolverReader::new(documents);
-        let dynamic_ids = collect_priority_carrier_public_api_targets_from_module_references(
+        let Some(dynamic_ids) = collect_priority_carrier_public_api_targets_from_module_references(
             Some(&snapshot),
             &reader,
             &canonical_id,
             &analysis.module_references,
-        );
+        ) else {
+            return false;
+        };
 
         for id in ids.into_iter().chain(dynamic_ids) {
             if seen.insert(id.clone()) {
@@ -423,11 +436,16 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 let Some(import_source) = component.import_source.as_deref() else {
                     continue;
                 };
-                let Some(resolved) =
-                    resolve_import_specifier_standalone(host, &canonical_id, import_source)
-                else {
-                    continue;
-                };
+                let resolved =
+                    match resolve_import_specifier_standalone(host, &canonical_id, import_source) {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            let Some(resolved) = admitted.into_result() else {
+                                continue;
+                            };
+                            resolved
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return false,
+                    };
                 if verter_workspace::path_is_carrier(&resolved) {
                     continue; // a directly-resolved carrier is already handled by the carrier pass
                 }
@@ -445,14 +463,23 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                     for module_ref in barrel_analysis.module_references.iter() {
                         if let Some(specifier) = &module_ref.literal_specifier {
                             if verter_workspace::path_is_carrier(specifier) {
-                                if let Some(carrier_id) =
-                                    resolve_import_specifier_standalone(host, &resolved, specifier)
-                                {
-                                    if verter_workspace::path_is_carrier(&carrier_id)
-                                        && seen_barrel_carrier.insert(carrier_id.clone())
-                                    {
-                                        barrel_carrier_deps.push(carrier_id);
+                                let carrier_id = match resolve_import_specifier_standalone(
+                                    host, &resolved, specifier,
+                                ) {
+                                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                                        let Some(carrier_id) = admitted.into_result() else {
+                                            continue;
+                                        };
+                                        carrier_id
                                     }
+                                    verter_workspace::ResolutionPublication::Refused(_) => {
+                                        return false;
+                                    }
+                                };
+                                if verter_workspace::path_is_carrier(&carrier_id)
+                                    && seen_barrel_carrier.insert(carrier_id.clone())
+                                {
+                                    barrel_carrier_deps.push(carrier_id);
                                 }
                             }
                         }

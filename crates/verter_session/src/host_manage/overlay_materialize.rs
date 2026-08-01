@@ -22,10 +22,10 @@ use std::sync::Arc;
 
 use verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners;
 
-use crate::types::{DependencyResolution, Hash16};
+use crate::types::Hash16;
 use crate::VerterHost;
 
-use super::{dep_edges_from_resolutions, is_raw_import_specifier_id, HostShallowImportResolver};
+use super::is_raw_import_specifier_id;
 
 /// The two canonical identities an overlay artifact is keyed by.
 ///
@@ -198,63 +198,6 @@ impl OverlayArtifactIdentity {
         let key = self.overlay_artifact_key(view)?;
         host.project_type_store().indexed().get_artifacts(&key)
     }
-}
-
-/// Discover an overlay-only candidate for a relative import.
-///
-/// When the workspace cannot resolve a relative `./foo`-style import
-/// (e.g. because the helper file exists only as a session overlay and
-/// has no disk presence yet), this helper consults the session view
-/// for candidates that match common TypeScript/JS extensions and
-/// returns the first one the view carries content for. Used by the
-/// view-aware overlay materialiser to remove prewarm-order dependence
-/// when an owner overlay imports overlay-only helpers.
-///
-/// Returns `None` when `specifier` is not a relative import, or when
-/// no extension candidate resolves through `view.content_hash_for` /
-/// `view.source`.
-fn resolve_relative_overlay_candidate(
-    view: &dyn crate::session_view::SessionView,
-    owner_canonical: &str,
-    specifier: &str,
-) -> Option<String> {
-    if !specifier.starts_with('.') {
-        return None;
-    }
-    let direct = crate::id::resolve_external(owner_canonical, specifier);
-    // Try the directly-joined form first (specifier may already include
-    // an extension).
-    if !direct.is_empty()
-        && (view.content_hash_for(direct.as_str()).is_some()
-            || view.source(direct.as_str()).is_some())
-    {
-        return Some(direct);
-    }
-    // Iterate the standard TS/JS extension probe order. The set
-    // mirrors `effective_target` precedence: `.d.ts` > `.d.cts` >
-    // `.d.mts` > `.ts` > `.tsx` > `.js` > `.jsx` > `.cjs` > `.mjs`.
-    const EXTENSIONS: &[&str] = &[
-        ".d.ts", ".d.cts", ".d.mts", ".ts", ".tsx", ".js", ".jsx", ".cjs", ".mjs",
-    ];
-    for ext in EXTENSIONS {
-        let candidate = format!("{direct}{ext}");
-        if view.content_hash_for(candidate.as_str()).is_some()
-            || view.source(candidate.as_str()).is_some()
-        {
-            return Some(candidate);
-        }
-    }
-    // Index-style resolution (./theme/index.ts) — same extension order
-    // applied to a `/index` suffix.
-    for ext in EXTENSIONS {
-        let candidate = format!("{direct}/index{ext}");
-        if view.content_hash_for(candidate.as_str()).is_some()
-            || view.source(candidate.as_str()).is_some()
-        {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 impl VerterHost {
@@ -788,183 +731,22 @@ impl VerterHost {
             Arc::clone(&self.provenance),
             Some(cold_lease.lease),
         ));
-        let declaration_file = analysis_canonical_id.ends_with(".d.ts")
-            || analysis_canonical_id.ends_with(".d.mts")
-            || analysis_canonical_id.ends_with(".d.cts");
-
-        // Seed import routes from the host's DerivedRawState if the
-        // session-side caller pre-populated them. Overlays use the
-        // same `set_import_dependencies` surface as the base, so
-        // overlay-specific deps land here when explicitly set. Same
-        // gate as the base `build_indexed_route_surface` seed — the
-        // per-entry freshness oracle: a generation-stamped
-        // host-memoized positive seeds only while its stamp matches
-        // the live `content_generation`, and a known-miss seeds only
-        // while its known-miss sidecar stamp matches — a stale entry
-        // re-resolves below instead of re-baking.
-        let mut import_routes: rustc_hash::FxHashMap<String, DependencyResolution> =
-            rustc_hash::FxHashMap::default();
-        if let Some(cc) = self.derived_raw_cache().get(analysis_canonical_id) {
-            let live_generation = self.ws().content_generation();
-            for (specifier, resolution) in cc.import_routes.iter() {
-                if !cc.import_route_entry_is_generation_current(
-                    specifier,
-                    resolution,
-                    live_generation,
-                ) {
-                    continue;
-                }
-                import_routes.insert(specifier.clone(), resolution.clone());
-            }
-        }
-
-        let mut required_import_sources: Vec<(String, verter_workspace::ResolveRequestKind)> =
-            snapshot
-                .imports
-                .iter()
-                .map(|import| {
-                    (
-                        import.source.clone(),
-                        if import.is_type_only || declaration_file {
-                            verter_workspace::ResolveRequestKind::TypeImport
-                        } else {
-                            verter_workspace::ResolveRequestKind::EsmImport
-                        },
-                    )
-                })
-                .collect();
-        required_import_sources.extend(snapshot.export_signatures.iter().filter_map(|export| {
-            let source = export.reexport_source.clone()?;
-            let kind = if declaration_file || export.is_type {
-                verter_workspace::ResolveRequestKind::TypeImport
-            } else {
-                verter_workspace::ResolveRequestKind::EsmImport
-            };
-            Some((source, kind))
-        }));
-        required_import_sources.sort_by(|(left_source, left_kind), (right_source, right_kind)| {
-            left_source.cmp(right_source).then_with(|| {
-                let kind_rank = |kind: verter_workspace::ResolveRequestKind| match kind {
-                    verter_workspace::ResolveRequestKind::TypeImport => 0u8,
-                    verter_workspace::ResolveRequestKind::EsmImport => 1u8,
-                    verter_workspace::ResolveRequestKind::RequireCall => 2u8,
-                    verter_workspace::ResolveRequestKind::SfcSrcAttr => 3u8,
-                };
-                kind_rank(*left_kind).cmp(&kind_rank(*right_kind))
-            })
-        });
-        required_import_sources.dedup();
-
-        let mut resolve_memo: rustc_hash::FxHashMap<
-            (String, verter_workspace::ResolveRequestKind),
-            Option<String>,
-        > = rustc_hash::FxHashMap::default();
-
-        // The flight stamps double as the artifact's edge/project stamps —
-        // captured at flight start so the fence window covers the whole
-        // build, parse included.
-        let edge_generation = flight_workspace_generation;
-        let project_generation = flight_project_generation;
-
-        for (specifier, kind) in &required_import_sources {
-            if import_routes.contains_key(specifier) {
-                continue;
-            }
-            let kind = *kind;
-            // `resolve_relative_overlay_candidate` probes the view's
-            // overlay maps (`view.source` / `view.content_hash_for`)
-            // for an overlay-only relative helper, so it takes the RAW
-            // `canonical_id` — the owner the overlay is keyed under.
-            // Workspace resolution uses the normalised
-            // `analysis_canonical_id` (directory-equivalent for the
-            // `.js`→`.d.ts` rewrite, and the base path's identity).
-            let resolved: Option<String> = if kind
-                == verter_workspace::ResolveRequestKind::TypeImport
-            {
-                // Type-route edges resolve through the SINGLE shared route-edge
-                // policy (`resolve_route_edge_canonical`): TypeImport →
-                // relative companion → ESM fallback, ALL normalized identically
-                // to route traversal + known-miss revalidation. Recording the
-                // RAW `EsmImport` `source_id` here (the runtime `.js`) diverged
-                // the overlay's route facts from the base `IndexedReady` route
-                // surface (which records the `.d.ts` companion) — a stale serve across
-                // the overlay boundary. Then the
-                // overlay-only relative candidate (overlay maps are keyed by the
-                // RAW owner). `export *` wildcard sources flow through this same
-                // chain, so normalizing it normalizes wildcard edges too.
-                self.resolve_route_edge_canonical(analysis_canonical_id, specifier)
-                    .or_else(|| resolve_relative_overlay_candidate(view, canonical_id, specifier))
-            } else {
-                let primary = resolve_memo
-                    .entry((specifier.clone(), kind))
-                    .or_insert_with(|| {
-                        self.ws()
-                            .resolve_import(
-                                analysis_canonical_id,
-                                specifier,
-                                verter_workspace::ResolutionContext {
-                                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                                    kind,
-                                },
-                            )
-                            .map(|resolution| resolution.source_id)
-                    })
-                    .clone();
-                primary
-                    .or_else(|| resolve_relative_overlay_candidate(view, canonical_id, specifier))
-            };
-            let mut resolution = DependencyResolution {
-                specifier: specifier.clone(),
-                resolved_canonical_id: None,
-                possible_canonical_ids: Vec::new(),
-            };
-            if let Some(resolved) = resolved {
-                resolution.resolved_canonical_id = Some(resolved.clone());
-                resolution.possible_canonical_ids.push(resolved);
-            }
-            import_routes.insert(specifier.clone(), resolution);
-        }
-
-        // Re-resolve every `export *` wildcard reexport source through the
-        // shared route-edge policy and OVERWRITE the loop-baked entry, mirroring
-        // the base indexed materialiser. The loop above classifies a PLAIN
-        // (non-type) `export *` as `EsmImport` and bakes the runtime `.js`
-        // `source_id` without TS-first normalization; this pass routes the
-        // wildcard edge through `resolve_route_edge_canonical` (the `.d.ts`
-        // companion), so the overlay wildcard `canonical_id`s agree with the
-        // base `IndexedReady` route surface. An unresolvable source leaves
-        // the loop-baked known-miss in place.
-        for wildcard in &route_inventory.wildcard_reexports {
-            let source = wildcard.source.as_str();
-            if let Some(resolved) = self.resolve_route_edge_canonical(analysis_canonical_id, source)
-            {
-                import_routes.insert(
-                    source.to_string(),
-                    DependencyResolution {
-                        specifier: source.to_string(),
-                        resolved_canonical_id: Some(resolved.clone()),
-                        possible_canonical_ids: vec![resolved],
-                    },
-                );
-            }
-        }
-
-        let import_route_hash = (!import_routes.is_empty())
-            .then(|| crate::resolver_store::hash_import_route_targets(&import_routes));
-        let dep_edges = dep_edges_from_resolutions(&import_routes);
-        let resolver = HostShallowImportResolver {
-            dep_edges: &dep_edges,
-        };
+        // Materialisation performs ZERO import resolution. The artifact
+        // it publishes is a content-addressed PARSE/INDEX product: the
+        // shallow inventory names AUTHORED specifiers, and every
+        // consumer that needs a target demands it from the workspace
+        // resolution authority at the point of use. Resolving here is
+        // what made a content-addressed artifact carry
+        // dependency-set-derived state and forced the global
+        // edge-generation stamp that guarded it.
         self.provenance
             .shallow_state_builds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut shallow_state_inner =
-            crate::resolver_core::ShallowFileState::from_route_inventory_with_resolver(
-                whole_hash,
-                Arc::clone(&route_inventory),
-                Arc::clone(&decl_bodies),
-                &resolver,
-            );
+        let mut shallow_state_inner = crate::resolver_core::ShallowFileState::from_route_inventory(
+            whole_hash,
+            Arc::clone(&route_inventory),
+            Arc::clone(&decl_bodies),
+        );
         self.inject_component_default_into_shallow_state(
             analysis_canonical_id,
             &mut shallow_state_inner,
@@ -991,20 +773,10 @@ impl VerterHost {
         ));
         let export_signatures = Some(Arc::clone(&snapshot.export_signatures));
 
-        let import_routes = Arc::new(import_routes);
-
-        let route_hash = shallow_state
-            .has_resolvable_surface()
-            .then(|| crate::resolver_store::hash_route_surface(shallow_state.as_ref()));
-
         let indexed = Arc::new(crate::project_type_store::IndexedReady {
             whole_hash,
             shallow_state: Arc::clone(&shallow_state),
-            import_routes: Arc::clone(&import_routes),
-            import_route_hash,
-            route_hash,
-            edge_generation,
-            project_generation,
+            built_at_content_generation: flight_workspace_generation,
             parse_env_hash: flight_parse_env_hash,
             raw_source: Arc::clone(&raw_source),
             eval_source: Arc::clone(&eval_source),

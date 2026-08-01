@@ -5,7 +5,7 @@
 //! validation cannot work if the validator reads a stale artifact as
 //! 'current.'
 //!
-//! `current_derived_fact_hash(Route)` / `current_cached_import_route_hash`
+//! `current_derived_fact_hash(Route)` / the owner's import-route witness
 //! are the Route / ImportRoute fact-validation oracles. Pre-fix they
 //! read `FileArtifactStore::get_any` — which returns ANY cached
 //! `IndexedReady` for a canonical regardless of content hash. Once
@@ -76,10 +76,6 @@ fn plant_stale_indexed(host: &VerterHost, canonical: &str) {
         .expect("real IndexedReady must exist before planting the stale one");
     let mut stale = (*real).clone();
     stale.whole_hash = STALE_HASH;
-    // Drop the cached route-surface / import-route hashes to a sentinel
-    // so a `get_any`-based oracle would observe THESE as "current".
-    stale.route_hash = Some(STALE_HASH);
-    stale.import_route_hash = Some(STALE_HASH);
     host.project_type_store()
         .indexed()
         .insert(Arc::from(canonical), Arc::new(stale));
@@ -259,60 +255,51 @@ fn route_derived_fact_hash_ignores_stale_artifact_route_hash() {
     let _ = real_hash;
 }
 
-/// `current_cached_import_route_hash` is the ImportRoute fact oracle.
-/// Same discrimination as the Route oracle: a stale artifact's
-/// `import_route_hash` must not be served as the current ImportRoute
-/// fact.
+/// The owner's import-route witness is resolver-derived, never
+/// artifact-derived.
+///
+/// The deleted `ImportRoute` digest oracle read a hash BAKED into
+/// `IndexedReady`, so a stale artifact planted in the store could serve
+/// its hash as the current fact and confirm a stale dependent entry as
+/// valid. The successor rail cannot: the witness is the sealed
+/// resolution transaction's own observations, produced by resolving the
+/// owner's AUTHORED specifiers — no artifact-baked resolved state
+/// participates.
+///
+/// Discriminating in the inverted direction: plant the same doctored
+/// artifact the old oracle surfaced and assert the witness is UNCHANGED.
+/// A regression that re-derives the import-route rail from artifact
+/// state makes the planted artifact move it.
 #[test]
-fn import_route_derived_fact_hash_ignores_stale_artifact_hash() {
+fn import_route_witness_ignores_a_planted_stale_artifact() {
     let canonical = "/pinned/import_owner.ts";
-    // A file with an import edge so `import_route_hash` is populated on
-    // the real artifact.
     let (host, _real_hash) = host_with_materialized_ts(
         canonical,
         "import { dep } from './dep';\nexport const reexport = dep;\n",
     );
 
+    let before = host
+        .owner_import_route_witness_for_tests(canonical)
+        .expect("the owner has an authored import — the witness must be rootable");
+    assert!(
+        !before.is_empty(),
+        "fixture invariant: resolving './dep' must observe at least one \
+         resolver fact, otherwise the assertion below is vacuous",
+    );
+
     plant_stale_indexed(&host, canonical);
 
-    // With ONLY the stale artifact in the store, the pinned read misses
-    // (its content hash is the doctored sentinel). Pre-fix the `get_any`
-    // oracle returns the planted stale `import_route_hash`
-    // (`Some(STALE_HASH)`); post-fix the content-pinned read misses and
-    // the oracle answers from the genuine `DerivedRawState` import-route
-    // table instead.
-    let import_route_after_plant =
-        host.current_derived_fact_hash(canonical, DerivedFactKind::ImportRoute);
-    assert_ne!(
-        import_route_after_plant,
-        Some(STALE_HASH),
-        "current_derived_fact_hash(ImportRoute) MUST NOT surface the planted \
-         stale artifact's import_route_hash. Pre-fix the `get_any` oracle \
-         returns the stale hash, confirming a stale dependent cache entry as \
-         valid — the exact stale-artifact-served-as-valid defect.",
-    );
-
-    // Now re-materialise the genuine current `IndexedReady` (the stale
-    // entry is overwritten by the real-hash artifact). The content-pinned
-    // read now HITS the current artifact and the oracle returns its
-    // genuine `import_route_hash` — proving the pinned read serves the
-    // current content rather than systematically falling through.
-    host.project_type_store().indexed().remove(canonical);
-    let fresh = host
-        .ensure_indexed_ready(canonical)
-        .expect("IndexedReady must re-materialise");
-    let import_route_fresh =
-        host.current_derived_fact_hash(canonical, DerivedFactKind::ImportRoute);
+    let after = host
+        .owner_import_route_witness_for_tests(canonical)
+        .expect("the planted artifact must not make the witness unrootable");
     assert_eq!(
-        import_route_fresh, fresh.import_route_hash,
-        "after the genuine current artifact is materialised, the content-pinned \
-         ImportRoute oracle must return that artifact's import_route_hash",
-    );
-    assert_ne!(
-        import_route_fresh,
-        Some(STALE_HASH),
-        "the genuine current ImportRoute hash must never equal the planted \
-         stale sentinel",
+        after, before,
+        "ARTIFACT-DERIVED RAIL REGRESSION: the owner's import-route \
+         witness must be identical with and without a doctored artifact \
+         in the store. The rail is the resolver's own observation set; \
+         any hash or target read out of a parse artifact re-opens the \
+         stale-artifact-served-as-valid defect the deleted ImportRoute \
+         digest had.",
     );
 }
 
@@ -514,8 +501,8 @@ fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerializat
         .expect("real probe IndexedReady must exist before planting the stale one");
     let mut stale = (*real_probe_indexed).clone();
     stale.whole_hash = STALE_HASH;
-    stale.route_hash = Some(STALE_HASH);
-    stale.import_route_hash = Some(STALE_HASH);
+    // The planted artifact carries the DONOR's routing surface, so a
+    // `get_any`-based oracle would derive the donor's route digest.
     stale.shallow_state = Arc::clone(&donor_indexed.shallow_state);
     host.project_type_store()
         .indexed()

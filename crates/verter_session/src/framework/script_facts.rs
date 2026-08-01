@@ -48,7 +48,7 @@ pub use verter_semantic::analysis::framework_facts::{
 
 use crate::cache_runtime::SignatureAdmission;
 use crate::fact_signature_helpers::{
-    named_cacheability_scope, named_fact_tracer, ReadSetSignature,
+    named_cacheability_scope, named_fact_tracer, ReadSetSignature, ReadSetSignatureExt as _,
 };
 use crate::framework::registry::FrameworkRegistration;
 use crate::resolver_core::{ResolverContext, StoreView};
@@ -808,14 +808,15 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // each candidate specifier through its OWN import resolver
     // (`resolve_snapshot_imports`) and hands the outcome to the provider as
     // data — the provider never reaches the resolver itself.
-    // The owner's import-route resolution walks the route resolver, which
-    // reaches `ensure_indexed_ready_serve` — a FENCED (ReturnOnly,
-    // `store_published == false`) serve there derives STALE resolved import
-    // targets, and the facts entry built from them validates against the LIVE
-    // view (the fenced-serve poison model). This resolution runs BEFORE the
-    // `provider.validate` tracer installed further down, so it needs its OWN
-    // traced scope; the captured `import_non_cacheable` bit refuses this facts
-    // entry's `publish_if_cacheable` admission below (the standalone entry-point
+    // The owner's import-route resolution establishes the owner's
+    // `IndexedReady` (its authored import inventory IS that artifact's
+    // shallow surface) — a FENCED (ReturnOnly, `store_published == false`)
+    // serve there means the basis is superseded, and the facts entry built
+    // on it would validate against the LIVE view (the fenced-serve poison
+    // model). This resolution runs BEFORE the `provider.validate` tracer
+    // installed further down, so it needs its OWN traced scope; the captured
+    // `import_non_cacheable` bit refuses this facts entry's
+    // `publish_if_cacheable` admission below (the standalone entry-point
     // has no enclosing tracer, so the outer surface tracer cannot cover it).
     //
     // The facts entry's signature comes from the `provider.validate` tracer below,
@@ -1015,13 +1016,10 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // IMPORT ROUTE surface. A route change (a barrel / path-alias re-route that
     // points a specifier at a different canonical) leaves the owner's content
     // AND the old target's content unchanged, so the whole-hash rail alone
-    // would stale-serve. The owner `ImportRoute` derived fact roots the cached
-    // payload against that route surface.
+    // would stale-serve. The owner's import-route RESOLUTION WITNESS roots the
+    // cached payload against that route surface.
     let owner_has_imports = !resolved_import_targets.is_empty();
-    let import_route_hash = host.current_derived_fact_hash(
-        canonical,
-        crate::resolver_core::DerivedFactKind::ImportRoute,
-    );
+    let import_route_witness = host.owner_import_route_witness(canonical);
 
     // ── Cold resolved-validation, fact-traced ──
     //
@@ -1042,14 +1040,8 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             );
             // Root the payload against the owner's import-route surface so a
             // re-route (unchanged file contents) misses the warm entry.
-            if let Some(hash) = import_route_hash {
-                crate::resolver_core::resolver_context::observe_fan_out(
-                    crate::resolver_core::FactVersionRef::DerivedFactHash {
-                        canonical_id: canonical.to_string(),
-                        kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                        hash,
-                    },
-                );
+            if let Some(witness) = import_route_witness.as_deref() {
+                crate::resolver_core::resolver_context::observe_fan_out_borrowed(witness);
             }
             for target in &resolved_import_targets {
                 if let Some(import_canonical) = &target.resolved_canonical {
@@ -1156,7 +1148,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // An import-dependent validation whose owner import-route rail could NOT be
     // produced must NOT warm the store (it would stale-serve on a re-route).
     // Return the computed value to this caller alone, uncached.
-    if owner_has_imports && import_route_hash.is_none() {
+    if owner_has_imports && import_route_witness.is_none() {
         return match exact_payload.downcast::<T>() {
             Some(exact) => ScriptFactEvidence::Exact(exact),
             None => ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(

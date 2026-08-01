@@ -911,7 +911,10 @@ impl VerterHost {
         // lookup so a canonical with no artifact at all (the common probe
         // shape for unresolvable specifiers) costs no workspace
         // `file_exists` probe.
-        if !self.artifact_only_candidate_is_fresh(analysis_canonical, indexed.edge_generation) {
+        if !self.artifact_only_candidate_is_fresh(
+            analysis_canonical,
+            indexed.built_at_content_generation,
+        ) {
             return None;
         }
         // Edge-currency gate (same rationale as
@@ -1007,7 +1010,7 @@ impl VerterHost {
     /// Serving-class freshness for an artifact-only CANDIDATE: the
     /// authority gate ([`Self::artifact_only_authority_allows`]) PLUS the
     /// workspace's per-canonical content-transition rail — the
-    /// candidate's build generation (`IndexedReady.edge_generation`, the
+    /// candidate's build generation (`IndexedReady.built_at_content_generation`, the
     /// `content_generation` captured when the artifact was built from
     /// live workspace content) must be at-or-after the canonical's last
     /// recorded content transition. The workspace records transitions at
@@ -1045,6 +1048,7 @@ impl VerterHost {
     /// normalization candidate and must not fan workspace probes out
     /// over candidates that have no artifact at all).
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn artifact_only_entry_exists(&self, canonical_id: &str) -> bool {
         self.is_artifact_only_scope(canonical_id)
             && self
@@ -1090,8 +1094,11 @@ impl VerterHost {
         // scope's surviving artifact is a stale leftover. Gate evaluated
         // AFTER the artifact lookup so a canonical with no artifact costs
         // no workspace `file_exists` probe.
-        self.artifact_only_candidate_is_fresh(analysis_canonical, indexed.edge_generation)
-            .then_some(indexed)
+        self.artifact_only_candidate_is_fresh(
+            analysis_canonical,
+            indexed.built_at_content_generation,
+        )
+        .then_some(indexed)
     }
 
     /// Current-content-pinned [`crate::file_artifact_store::FileArtifacts`]
@@ -1155,8 +1162,11 @@ impl VerterHost {
             .project_type_store
             .indexed()
             .get_artifacts_any(analysis_canonical)?;
-        self.artifact_only_candidate_is_fresh(analysis_canonical, artifacts.indexed.edge_generation)
-            .then_some(artifacts)
+        self.artifact_only_candidate_is_fresh(
+            analysis_canonical,
+            artifacts.indexed.built_at_content_generation,
+        )
+        .then_some(artifacts)
     }
 
     /// Establish ONE tear-free
@@ -1503,19 +1513,28 @@ impl VerterHost {
             return Some(source);
         }
 
-        let dep_id = self
-            .resolve_loaded_dependency_canonical(
-                owner_canonical,
-                specifier,
-                verter_workspace::ResolveRequestKind::SfcSrcAttr,
-            )
-            .or_else(|| {
-                self.resolve_loaded_dependency_canonical(
-                    owner_canonical,
-                    specifier,
-                    verter_workspace::ResolveRequestKind::EsmImport,
-                )
-            })?;
+        let dep_id = match self.resolve_loaded_dependency_canonical(
+            owner_canonical,
+            specifier,
+            verter_workspace::ResolveRequestKind::SfcSrcAttr,
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                match admitted.into_result() {
+                    Some(resolved) => Some(resolved),
+                    None => match self.resolve_loaded_dependency_canonical(
+                        owner_canonical,
+                        specifier,
+                        verter_workspace::ResolveRequestKind::EsmImport,
+                    ) {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return None,
+                    },
+                }
+            }
+            verter_workspace::ResolutionPublication::Refused(_) => return None,
+        }?;
 
         self.get_source(&dep_id)
             .or_else(|| {
@@ -1535,28 +1554,56 @@ impl VerterHost {
         parent_canonical_id: &str,
         snapshot: &mut FileAnalysisSnapshot,
     ) {
-        for import in &mut snapshot.imports {
+        // Establish the owner's canonical post-parse artifact FIRST. The
+        // snapshot being enriched here is the owner's, and its authored
+        // import inventory is that artifact's shallow surface — so the
+        // artifact is this resolution's basis, not an incidental
+        // by-product. Two consequences ride on making the dependency
+        // explicit:
+        //
+        // * one shared file-ready/read/parse/shallow-process lifecycle —
+        //   a caller that reaches this path does not leave the canonical
+        //   unpublished for the next consumer to parse again;
+        // * a FENCED (ReturnOnly, `store_published == false`) serve marks
+        //   the enclosing cacheability scope, so a consumer building a
+        //   durable entry from a superseded basis refuses its own
+        //   admission.
+        let _ = self.ensure_indexed_ready_serve(parent_canonical_id);
+
+        let mut resolved_imports = Vec::new();
+        for (index, import) in snapshot.imports.iter().enumerate() {
             if import.resolved_canonical_id.is_none() {
-                import.resolved_canonical_id = self
+                let authoritative = self
                     .authoritative_import_route(parent_canonical_id, &import.source)
                     .and_then(|resolution| {
                         resolution
                             .resolved_canonical_id
                             .clone()
                             .or_else(|| resolution.effective_target().map(str::to_string))
-                    })
-                    .or_else(|| {
-                        let ctx = verter_workspace::ResolutionContext {
-                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                            kind: if import.is_type_only {
-                                verter_workspace::ResolveRequestKind::TypeImport
-                            } else {
-                                verter_workspace::ResolveRequestKind::EsmImport
-                            },
-                        };
-                        self.resolve_via_vfs(parent_canonical_id, &import.source, ctx)
                     });
+                let resolved = if authoritative.is_some() {
+                    authoritative
+                } else {
+                    let ctx = verter_workspace::ResolutionContext {
+                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                        kind: if import.is_type_only {
+                            verter_workspace::ResolveRequestKind::TypeImport
+                        } else {
+                            verter_workspace::ResolveRequestKind::EsmImport
+                        },
+                    };
+                    match self.resolve_via_vfs(parent_canonical_id, &import.source, ctx) {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return,
+                    }
+                };
+                resolved_imports.push((index, resolved));
             }
+        }
+        for (index, resolved) in resolved_imports {
+            snapshot.imports[index].resolved_canonical_id = resolved;
         }
     }
 
@@ -1944,24 +1991,21 @@ impl VerterHost {
     ///
     /// `set_import_dependencies` is the **complete caller-supplied
     /// route-snapshot writer** for
-    /// [`DerivedRawState::import_routes`](crate::types::DerivedRawState)
-    /// AND the **single producer** of
-    /// [`DerivedRawState::import_routes_known_miss_recorded_at_generation`].
-    /// For every known-miss specifier in the supplied snapshot (no
-    /// resolved canonical, no candidates, no effective target), the
-    /// current workspace `content_generation` is recorded so the
-    /// reader can detect when a new canonical may now satisfy a
-    /// previously unresolvable specifier. Positive resolutions do
-    /// not need a generation tag — they stay valid until the
-    /// owner's source content changes.
+    /// [`DerivedRawState::import_routes`](crate::types::DerivedRawState).
+    /// Known-miss specifiers in the supplied snapshot (no resolved
+    /// canonical, no candidates, no effective target) carry no
+    /// currency stamp: a negative answer is not evidence that the
+    /// answer is still negative, so the reader always re-resolves it
+    /// through the one owner-edge authority. Positive resolutions are
+    /// caller-supplied and authoritative — they stay valid until the
+    /// owner's source content changes or the caller re-pushes.
     ///
-    /// Positive-only route point admission lives in
-    /// [`Self::cache_positive_import_route_result`]: that helper
-    /// must NOT touch the known-miss generation sidecar, and this
-    /// method must NOT be used as a positive-only point cache (doing
-    /// so would risk re-stamping a previously admitted known miss at
-    /// the current `content_generation` and incorrectly extending a
-    /// stale negative answer that should have re-resolved).
+    /// This is the ONLY writer of `DerivedRawState.import_routes`: the
+    /// host memoises no resolution there. A host-side positive-route
+    /// memo would duplicate the workspace's bounded owner-edge candidate
+    /// slot and, having no witness of its own, would need a global
+    /// `content_generation` equality to decide whether it was still
+    /// true.
     pub fn set_import_dependencies(
         &self,
         canonical_or_alias: &str,
@@ -2017,68 +2061,26 @@ impl VerterHost {
             deps.extend(Self::resolved_dependency_targets(&existing_routes));
             deps
         };
-        // Replace import_routes on DerivedRawState.
-        // R3/R26/R28: for each known-miss in the new map,
-        // record the workspace `content_generation` at admission so
-        // the reader can detect when a new canonical (which advances
-        // content_generation) may now satisfy the previously
-        // unresolvable specifier. The pushed POSITIVE resolutions are
-        // caller-supplied authoritative routes (the bundler tells the
-        // host how ITS resolver resolves and re-pushes on its own
-        // watch events), so they carry NO positive generation stamp —
-        // the wholesale replace also drops any host-memoized stamps
-        // from the previous table.
-        //
-        // EXEMPTION from the capture-before-resolve stamp discipline:
-        // this stamp is a LIVE read at record time, unlike the
-        // host-memoized positive stamps (which are captured by the
-        // resolving caller before its resolution runs). The resolution
-        // here ran in the CALLER's process (the bundler's own
-        // resolver) — there is no host-side pre-resolve point to
-        // capture. The record-time read is the tightest capture
-        // available, and the residual window (a file appears after the
-        // bundler resolved but before this push records — the miss is
-        // then stamped current for the remainder of this generation) is
-        // covered by the caller-authority contract itself: the bundler
-        // re-pushes on its own watch events, and any subsequent
-        // content-generation move stales the stamp and re-resolves the
-        // miss host-side.
-        let current_generation = self.ws().content_generation();
-        let mut known_miss_generations: rustc_hash::FxHashMap<String, u64> =
-            rustc_hash::FxHashMap::default();
-        for (specifier, res) in import_routes.iter() {
-            if res.resolved_canonical_id.is_none() && res.possible_canonical_ids.is_empty() {
-                known_miss_generations.insert(specifier.clone(), current_generation);
-            }
-        }
+        // Replace import_routes on DerivedRawState. Every entry is a
+        // caller-supplied authoritative route (the bundler tells the host
+        // how ITS resolver resolves and re-pushes on its own watch
+        // events); the host memoises nothing here, so the table is the
+        // caller's statement verbatim. Its currency rides the
+        // `ExactResolution` facts the exact-table sync below installs.
         {
             let mut derived_ref = self
                 .derived_raw_cache()
                 .entry(canonical.clone())
                 .or_default();
             derived_ref.value_mut().import_routes = import_routes.clone();
-            derived_ref
-                .value_mut()
-                .import_routes_known_miss_recorded_at_generation = known_miss_generations;
-            derived_ref
-                .value_mut()
-                .import_routes_positive_recorded_at_generation
-                .clear();
         }
+
         let old_transitive_deps = old_deps
             .difference(&old_direct_deps)
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();
 
         self.sync_transitive_macro_type_dependencies(&canonical, &old_transitive_deps);
-
-        // Admit the resolved-import facts bundle for the owner so
-        // downstream consumers (`RouteDb`, materialiser, etc.) can
-        // read resolved facts directly instead of re-walking the
-        // AST. First-writer-wins on the cache key composed of the
-        // owner's per-canonical env hashes. Skipping on duplicate
-        // keys keeps `Arc` identity stable for in-flight readers.
-        let _ = self.admit_resolved_import_facts_for_owner(&canonical, &import_routes);
 
         // Sync exact resolutions to workspace. The workspace's
         // `replace_exact_resolutions` is value-idempotent and reports
@@ -2090,6 +2092,20 @@ impl VerterHost {
             .ws()
             .set_exact_resolutions(&canonical, vfs_resolutions)
             .changed;
+
+        // Admit the resolved-import facts bundle for the owner so
+        // downstream consumers (`RouteDb`, materialiser, etc.) can
+        // read resolved facts directly instead of re-walking the AST.
+        //
+        // ORDERING: strictly AFTER the exact-resolution sync above. The
+        // bundle roots on the owner's import-route resolution witness,
+        // whose observations include the `ExactResolution` fact for each
+        // specifier. Admitting before the push would record the
+        // PRE-push exact version, which the push immediately advances —
+        // the candidate would never validate again and every read would
+        // rebuild it.
+        let _ = self.admit_resolved_import_facts_for_owner(&canonical, &import_routes);
+
         if !routes_changed && !exacts_changed {
             // TRUE no-op: nothing route-observable changed, so there is
             // nothing for a fence to make visible and nothing to evict.
@@ -2481,7 +2497,10 @@ impl VerterHost {
             phase: verter_workspace::ResolvePhase::CodegenBlocker,
             kind: verter_workspace::ResolveRequestKind::EsmImport,
         };
-        self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind)
+        match self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(_) => None,
+        }
     }
 
     #[cfg(test)]

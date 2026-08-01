@@ -405,9 +405,10 @@ byte-identical fingerprints regardless of declaration order.
   rule set with semantic content.
 - `crates/verter_workspace/src/env_hash.rs` — env-hash function
   implementations.
-- `crates/verter_semantic/src/facts/registry.rs` — `FactKey` /
+- `crates/verter_workspace/src/fact_registry.rs` — `FactKey` /
   `Fact` / `FactRegistry` / `SymbolSpace` definitions; the
-  `Interned*` newtype set lives here.
+  `Interned*` newtype set lives here. The semantic registry module
+  compatibility-re-exports these dependency-neutral types.
 - `crates/verter_semantic/src/facts/hashing.rs` —
   `compute_semantic_hash`, `compute_member_presence_hash`,
   `compute_member_shape_hash`, `CrossDeclLens`,

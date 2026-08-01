@@ -1104,7 +1104,17 @@ impl ResolverContext for crate::VerterHost {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        crate::VerterHost::resolve_type_dependency_canonical(self, owner_canonical, import_source)
+        match crate::VerterHost::resolve_type_dependency_canonical(
+            self,
+            owner_canonical,
+            import_source,
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(_) => {
+                note_non_cacheable_read_fan_out(NonCacheableReadReason::UnrootableRoute);
+                None
+            }
+        }
     }
 
     #[inline]

@@ -400,6 +400,43 @@ impl verter_workspace::WorkspaceRead for LspProjectResolverReader<'_> {
             .realpath(canonical_id)
     }
 
+    fn resolve_import(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> Option<verter_workspace::ResolveResult> {
+        self.documents
+            .host()
+            .workspace_read()
+            .resolve_import(importer_id, specifier, ctx)
+    }
+
+    fn resolve_import_outcome(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> verter_workspace::ResolutionOutcome {
+        self.documents
+            .host()
+            .workspace_read()
+            .resolve_import_outcome(importer_id, specifier, ctx)
+    }
+
+    fn resolve_import_at_published(
+        &self,
+        published: &Arc<verter_workspace::PublishedRoot>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> verter_workspace::ResolutionOutcome {
+        self.documents
+            .host()
+            .workspace_read()
+            .resolve_import_at_published(published, importer_id, specifier, ctx)
+    }
+
     fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
         Vec::new()
     }
@@ -460,46 +497,75 @@ impl verter_workspace::WorkspaceAccess for LspProjectResolverReader<'_> {
 /// translate them to per-line (line, column) segments (the self-file position
 /// mapper); apply them with [`apply_specifier_replacements`] (which sorts
 /// descending so earlier in-place edits don't shift later spans).
+fn resolve_import_from_published_snapshot(
+    resolution_view: Option<&super::PublishedResolutionView>,
+    reader: &dyn verter_workspace::WorkspaceRead,
+    importer_id: &str,
+    specifier: &str,
+    context: verter_workspace::ResolutionContext,
+) -> verter_workspace::ResolutionPublication {
+    let outcome = match resolution_view {
+        Some(view) => verter_workspace::WorkspaceRead::resolve_import_at_published(
+            view.workspace.as_ref(),
+            &view.published,
+            importer_id,
+            specifier,
+            context,
+        ),
+        None => reader.resolve_import_outcome(importer_id, specifier, context),
+    };
+    outcome.into_publication()
+}
+
 pub(crate) fn compute_specifier_replacements(
-    resolver: &crate::project_resolver::NativeProjectResolver,
+    _resolver: &crate::project_resolver::NativeProjectResolver,
+    resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     source: &str,
     module_references: &[verter_session::ScriptModuleReference],
-) -> Vec<(usize, usize, String)> {
-    let mut replacements: Vec<(usize, usize, String)> = module_references
-        .iter()
-        .filter_map(|reference| {
-            if reference.analyzability
-                != verter_semantic::analysis::ModuleReferenceAnalyzability::Exact
-            {
-                return None;
-            }
+) -> Option<Vec<(usize, usize, String)>> {
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    for reference in module_references {
+        if reference.analyzability != verter_semantic::analysis::ModuleReferenceAnalyzability::Exact
+        {
+            continue;
+        }
 
-            let specifier = reference.literal_specifier.as_ref()?;
-            let resolved = resolver.resolve_with_reader(
-                reader,
-                &crate::project_resolver::ResolveRequest {
-                    importer_id: importer_id.to_string(),
-                    specifier: specifier.clone(),
-                    kind: module_reference_request_kind(reference),
-                    phase: crate::project_resolver::ResolvePhase::ProviderGraph,
-                },
-            )?;
+        let Some(specifier) = reference.literal_specifier.as_ref() else {
+            continue;
+        };
+        let resolved = match resolve_import_from_published_snapshot(
+            resolution_view,
+            reader,
+            importer_id,
+            specifier,
+            verter_workspace::ResolutionContext {
+                kind: module_reference_request_kind(reference),
+                phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+            },
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(_) => return None,
+        };
+        let Some(resolved) = resolved else {
+            continue;
+        };
 
-            let start = reference.expr_span.start as usize;
-            let end = reference.expr_span.end as usize;
-            source.get(start..end)?;
+        let start = reference.expr_span.start as usize;
+        let end = reference.expr_span.end as usize;
+        if source.get(start..end).is_none() {
+            continue;
+        }
 
-            Some((
-                start,
-                end,
-                quote_wrapped_specifier(&reference.raw_text, &resolved.provider_specifier),
-            ))
-        })
-        .collect();
+        replacements.push((
+            start,
+            end,
+            quote_wrapped_specifier(&reference.raw_text, &resolved.provider_specifier),
+        ));
+    }
     replacements.sort_by_key(|replacement| replacement.0);
-    replacements
+    Some(replacements)
 }
 
 /// Apply the specifier replacements to `source` — the SELF-FILE path's AUTHORED
@@ -603,18 +669,20 @@ pub(crate) async fn sync_self_file_shadow_state(
     // the supersession check below.
     let derive_projection = |snapshot: Option<&super::PublishedResolverSnapshot>| {
         let replacements = if rewrite_import_specifiers {
-            snapshot
-                .map(|snapshot| {
+            match snapshot {
+                Some(snapshot) => {
                     let ws = documents.host().workspace_read();
                     compute_specifier_replacements(
                         &snapshot.resolver,
+                        snapshot.resolution_view.as_ref(),
                         ws.as_ref(),
                         canonical_id,
                         &source,
                         &module_references,
-                    )
-                })
-                .unwrap_or_default()
+                    )?
+                }
+                None => Vec::new(),
+            }
         } else {
             Vec::new()
         };
@@ -627,10 +695,12 @@ pub(crate) async fn sync_self_file_shadow_state(
                 )
             })
             .unwrap_or(crate::provider_sync::ProviderOwnerBinding::Unresolved);
-        (replacements, owner_binding)
+        Some((replacements, owner_binding))
     };
 
-    let (replacements, delivered_owner_binding) = derive_projection(snapshot);
+    let Some((replacements, delivered_owner_binding)) = derive_projection(snapshot) else {
+        return false;
+    };
     documents.refresh_self_file_rewrites(uri, &replacements);
 
     let rewritten = apply_specifier_replacements(&source, &replacements);
@@ -726,10 +796,13 @@ pub(crate) async fn sync_self_file_shadow_state(
             // the same live/current/owner-matched state ends up over a superseded
             // rewrite with no race at all. Closing that needs publish-side
             // invalidation of shadow witnesses across all four writers.
-            let (current_replacements, current_owner_binding) =
-                derive_projection(published_snapshot().as_ref());
-            let superseded = current_owner_binding != delivered_owner_binding
-                || apply_specifier_replacements(&source, &current_replacements) != rewritten;
+            let superseded = match derive_projection(published_snapshot().as_ref()) {
+                Some((current_replacements, current_owner_binding)) => {
+                    current_owner_binding != delivered_owner_binding
+                        || apply_specifier_replacements(&source, &current_replacements) != rewritten
+                }
+                None => true,
+            };
             if superseded {
                 // Liveness only: the buffer IS open, but its projection is no
                 // longer the current one, so nothing may read it as a current,
@@ -784,14 +857,21 @@ pub(crate) async fn sync_self_file_shadow_state(
 
 pub(crate) fn rewrite_non_carrier_source_with_resolver(
     resolver: &crate::project_resolver::NativeProjectResolver,
+    resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     source: &str,
     module_references: &[verter_session::ScriptModuleReference],
-) -> String {
-    let replacements =
-        compute_specifier_replacements(resolver, reader, importer_id, source, module_references);
-    apply_specifier_replacements(source, &replacements)
+) -> Option<String> {
+    let replacements = compute_specifier_replacements(
+        resolver,
+        resolution_view,
+        reader,
+        importer_id,
+        source,
+        module_references,
+    )?;
+    Some(apply_specifier_replacements(source, &replacements))
 }
 
 pub(crate) fn prepare_non_carrier_provider_sync(
@@ -805,11 +885,12 @@ pub(crate) fn prepare_non_carrier_provider_sync(
     let provider_path = snapshot.resolver.provider_id_for_source(importer_id)?;
     let rewritten = rewrite_non_carrier_source_with_resolver(
         &snapshot.resolver,
+        snapshot.resolution_view.as_ref(),
         reader,
         importer_id,
         source,
         module_references,
-    );
+    )?;
     // Channel B: a standalone Svelte rune module (`.svelte.ts`/
     // `.svelte.js`) serves `<module rune prelude> + <bytes>` from its OWN
     // canonical path so a consumer resolving it from disk sees the inferred
@@ -826,10 +907,11 @@ pub(crate) fn prepare_non_carrier_provider_sync(
         };
     let resolved_dependencies = collect_resolved_provider_dependencies(
         &snapshot.resolver,
+        snapshot.resolution_view.as_ref(),
         reader,
         importer_id,
         module_references,
-    );
+    )?;
 
     Some(PreparedNonCarrierProviderSync {
         provider_path,
@@ -839,11 +921,12 @@ pub(crate) fn prepare_non_carrier_provider_sync(
 }
 
 pub(crate) fn collect_resolved_provider_dependencies(
-    resolver: &crate::project_resolver::NativeProjectResolver,
+    _resolver: &crate::project_resolver::NativeProjectResolver,
+    resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     module_references: &[verter_session::ScriptModuleReference],
-) -> Vec<crate::project_resolver::ResolveResult> {
+) -> Option<Vec<crate::project_resolver::ResolveResult>> {
     let mut seen = HashSet::new();
     let mut resolved = Vec::new();
 
@@ -852,15 +935,22 @@ pub(crate) fn collect_resolved_provider_dependencies(
         match reference.analyzability {
             verter_semantic::analysis::ModuleReferenceAnalyzability::Exact => {
                 if let Some(specifier) = &reference.literal_specifier {
-                    if let Some(result) = resolver.resolve_with_reader(
+                    let result = match resolve_import_from_published_snapshot(
+                        resolution_view,
                         reader,
-                        &crate::project_resolver::ResolveRequest {
-                            importer_id: importer_id.to_string(),
-                            specifier: specifier.clone(),
+                        importer_id,
+                        specifier,
+                        verter_workspace::ResolutionContext {
                             kind,
                             phase: crate::project_resolver::ResolvePhase::ProviderGraph,
                         },
                     ) {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return None,
+                    };
+                    if let Some(result) = result {
                         let key = (result.source_id.clone(), result.provider_id.clone());
                         if seen.insert(key) {
                             resolved.push(result);
@@ -870,15 +960,22 @@ pub(crate) fn collect_resolved_provider_dependencies(
             }
             verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet => {
                 for specifier in &reference.finite_specifiers {
-                    if let Some(result) = resolver.resolve_with_reader(
+                    let result = match resolve_import_from_published_snapshot(
+                        resolution_view,
                         reader,
-                        &crate::project_resolver::ResolveRequest {
-                            importer_id: importer_id.to_string(),
-                            specifier: specifier.clone(),
+                        importer_id,
+                        specifier,
+                        verter_workspace::ResolutionContext {
                             kind,
                             phase: crate::project_resolver::ResolvePhase::ProviderGraph,
                         },
                     ) {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return None,
+                    };
+                    if let Some(result) = result {
                         let key = (result.source_id.clone(), result.provider_id.clone());
                         if seen.insert(key) {
                             resolved.push(result);
@@ -890,15 +987,16 @@ pub(crate) fn collect_resolved_provider_dependencies(
         }
     }
 
-    resolved
+    Some(resolved)
 }
 
 pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
-    resolver: &crate::project_resolver::NativeProjectResolver,
+    _resolver: &crate::project_resolver::NativeProjectResolver,
+    resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     module_references: &[verter_semantic::analysis::AnalyzedModuleReference],
-) -> Vec<crate::project_resolver::ResolveResult> {
+) -> Option<Vec<crate::project_resolver::ResolveResult>> {
     let mut seen = HashSet::new();
     let mut resolved = Vec::new();
 
@@ -915,15 +1013,22 @@ pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
         };
 
         for specifier in specifiers {
-            if let Some(result) = resolver.resolve_with_reader(
+            let result = match resolve_import_from_published_snapshot(
+                resolution_view,
                 reader,
-                &crate::project_resolver::ResolveRequest {
-                    importer_id: importer_id.to_string(),
-                    specifier: specifier.to_string(),
+                importer_id,
+                specifier,
+                verter_workspace::ResolutionContext {
                     kind: analyzed_module_reference_request_kind(reference),
                     phase: crate::project_resolver::ResolvePhase::ProviderGraph,
                 },
             ) {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    admitted.into_result()
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => return None,
+            };
+            if let Some(result) = result {
                 let key = (result.source_id.clone(), result.provider_id.clone());
                 if seen.insert(key) {
                     resolved.push(result);
@@ -932,7 +1037,7 @@ pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
         }
     }
 
-    resolved
+    Some(resolved)
 }
 
 pub(crate) fn module_reference_request_kind(
@@ -1070,9 +1175,7 @@ pub(crate) fn resolve_component_for(
     }
 
     // Try 2: VFS resolution (path aliases, tsconfig paths, disk probing)
-    if let Some(resolved_path) =
-        host.resolve_import_via_workspace(parent_canonical_id, import_source)
-    {
+    if let Some(resolved_path) = host.resolve_import_transient(parent_canonical_id, import_source) {
         if let Some(a) = read_component_analysis(&resolved_path) {
             return Some((resolved_path, a));
         }
@@ -1377,8 +1480,16 @@ pub(super) fn resolve_import_specifier_standalone(
     host: &verter_session::VerterHost,
     parent_canonical_id: &str,
     specifier: &str,
-) -> Option<String> {
-    host.resolve_import_via_workspace(parent_canonical_id, specifier)
+) -> verter_workspace::ResolutionPublication<String> {
+    host.resolve_for_persistent_state(
+        parent_canonical_id,
+        specifier,
+        verter_workspace::ResolutionContext {
+            phase: verter_workspace::ResolvePhase::CodegenBlocker,
+            kind: verter_workspace::ResolveRequestKind::EsmImport,
+        },
+    )
+    .map_result(|resolved| resolved.source_id)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1391,14 +1502,18 @@ pub(super) fn collect_imported_carrier_priority_ids(
 pub(super) fn collect_imported_carrier_priority_ids_from_imports(
     imports: &[verter_semantic::analysis::AnalyzedImport],
 ) -> Vec<String> {
-    collect_imported_carrier_priority_ids_from_imports_with_fallback(
-        imports,
-        None,
-        |_parent, _specifier| None,
-    )
+    let mut seen = HashSet::new();
+    imports
+        .iter()
+        .filter_map(|import| import.resolved_canonical_id.as_ref())
+        .filter(|canonical_id| carrier_language_for(canonical_id).is_some())
+        .filter(|canonical_id| seen.insert((*canonical_id).clone()))
+        .cloned()
+        .collect()
 }
 
-pub(super) fn collect_imported_carrier_priority_ids_from_imports_with_fallback<F>(
+#[cfg(test)]
+pub(super) fn collect_imported_carrier_priority_ids_from_imports_with_transient_fallback<F>(
     imports: &[verter_semantic::analysis::AnalyzedImport],
     parent_canonical_id: Option<&str>,
     mut resolve_import: F,
@@ -1427,26 +1542,28 @@ where
     ids
 }
 
-/// Resolve active-document carrier imports directly from the parse/upsert result.
-/// This is the ingress-path counterpart to the richer analyzed-import helper above:
-/// it deliberately consumes only syntax facts, so `didOpen` never has to request a
-/// full Verter analysis merely to determine which carrier API companions matter.
-pub(super) fn collect_imported_carrier_priority_ids_from_specifiers<F>(
-    imports: &[verter_session::ScriptImportInfo],
+pub(super) fn collect_imported_carrier_priority_ids_from_imports_for_publication<F>(
+    imports: &[verter_semantic::analysis::AnalyzedImport],
     parent_canonical_id: Option<&str>,
     mut resolve_import: F,
-) -> Vec<String>
+) -> std::result::Result<Vec<String>, verter_workspace::ResolutionPublicationRefusal>
 where
-    F: FnMut(&str, &str) -> Option<String>,
+    F: FnMut(&str, &str) -> verter_workspace::ResolutionPublication<String>,
 {
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
-    let Some(parent) = parent_canonical_id else {
-        return ids;
-    };
 
     for import in imports {
-        let Some(canonical_id) = resolve_import(parent, &import.source) else {
+        let Some(parent) = parent_canonical_id else {
+            continue;
+        };
+        let canonical_id = match resolve_import(parent, &import.source) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(refusal) => {
+                return Err(refusal);
+            }
+        };
+        let Some(canonical_id) = canonical_id else {
             continue;
         };
         if carrier_language_for(&canonical_id).is_some() && seen.insert(canonical_id.clone()) {
@@ -1454,7 +1571,43 @@ where
         }
     }
 
-    ids
+    Ok(ids)
+}
+
+/// Resolve active-document carrier imports directly from the parse/upsert result.
+/// This is the ingress-path counterpart to the richer analyzed-import helper above:
+/// it deliberately consumes only syntax facts, so `didOpen` never has to request a
+/// full Verter analysis merely to determine which carrier API companions matter.
+pub(super) fn collect_imported_carrier_priority_ids_from_specifiers_for_publication<F>(
+    imports: &[verter_session::ScriptImportInfo],
+    parent_canonical_id: Option<&str>,
+    mut resolve_import: F,
+) -> std::result::Result<Vec<String>, verter_workspace::ResolutionPublicationRefusal>
+where
+    F: FnMut(&str, &str) -> verter_workspace::ResolutionPublication<String>,
+{
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    let Some(parent) = parent_canonical_id else {
+        return Ok(ids);
+    };
+
+    for import in imports {
+        let canonical_id = match resolve_import(parent, &import.source) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(refusal) => {
+                return Err(refusal);
+            }
+        };
+        let Some(canonical_id) = canonical_id else {
+            continue;
+        };
+        if carrier_language_for(&canonical_id).is_some() && seen.insert(canonical_id.clone()) {
+            ids.push(canonical_id);
+        }
+    }
+
+    Ok(ids)
 }
 
 pub(super) fn collect_priority_carrier_public_api_targets_from_module_references(
@@ -1462,9 +1615,9 @@ pub(super) fn collect_priority_carrier_public_api_targets_from_module_references
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     module_references: &[verter_semantic::analysis::AnalyzedModuleReference],
-) -> Vec<String> {
+) -> Option<Vec<String>> {
     let Some(snapshot) = snapshot else {
-        return Vec::new();
+        return Some(Vec::new());
     };
 
     let mut seen = HashSet::new();
@@ -1478,13 +1631,22 @@ pub(super) fn collect_priority_carrier_public_api_targets_from_module_references
         };
 
         for specifier in specifiers {
-            let request = crate::project_resolver::ResolveRequest {
-                importer_id: importer_id.to_string(),
-                specifier,
-                kind: analyzed_module_reference_request_kind(reference),
-                phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+            let resolved = match resolve_import_from_published_snapshot(
+                snapshot.resolution_view.as_ref(),
+                reader,
+                importer_id,
+                &specifier,
+                verter_workspace::ResolutionContext {
+                    kind: analyzed_module_reference_request_kind(reference),
+                    phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+                },
+            ) {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    admitted.into_result()
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => return None,
             };
-            let Some(resolved) = snapshot.resolver.resolve_with_reader(reader, &request) else {
+            let Some(resolved) = resolved else {
                 continue;
             };
             if resolved.provider_target == crate::project_resolver::ProviderTarget::CarrierPublicApi
@@ -1495,7 +1657,7 @@ pub(super) fn collect_priority_carrier_public_api_targets_from_module_references
         }
     }
 
-    ids
+    Some(ids)
 }
 
 /// Compute verter diagnostics (host errors + lint rules + component usage) for a document.

@@ -218,6 +218,18 @@ impl verter_workspace::WorkspaceRead for CountingWs {
     fn file_exists(&self, canonical_id: &str) -> bool {
         self.inner.file_exists(canonical_id)
     }
+    fn resolution_event_bridge_complete(&self) -> bool {
+        self.inner.resolution_event_bridge_complete()
+    }
+    fn resolve_import_outcome(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> verter_workspace::ResolutionOutcome {
+        self.inner
+            .resolve_import_outcome(importer_id, specifier, ctx)
+    }
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         self.inner.realpath(canonical_id)
     }
@@ -235,6 +247,10 @@ impl verter_workspace::WorkspaceRead for CountingWs {
     }
     fn content_generation(&self) -> u64 {
         self.inner.content_generation()
+    }
+
+    fn resolution_fact_generation(&self) -> u64 {
+        self.inner.resolution_fact_generation()
     }
 }
 
@@ -270,6 +286,9 @@ impl WorkspaceAccess for CountingWs {
     }
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.inner.set_default_resolve_extensions(host_extensions)
+    }
+    fn configure_resolver(&self, projects: Vec<verter_workspace::IdeProjectConfig>) {
+        self.inner.configure_resolver(projects)
     }
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
         self.inner.notify_upsert(canonical_id, source)
@@ -326,6 +345,10 @@ impl verter_workspace::WorkspaceRead for BumpOrderProbeWs {
     fn content_generation(&self) -> u64 {
         self.inner.content_generation()
     }
+
+    fn resolution_fact_generation(&self) -> u64 {
+        self.inner.resolution_fact_generation()
+    }
 }
 
 impl WorkspaceAccess for BumpOrderProbeWs {
@@ -366,6 +389,9 @@ impl WorkspaceAccess for BumpOrderProbeWs {
     }
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.inner.set_default_resolve_extensions(host_extensions)
+    }
+    fn configure_resolver(&self, projects: Vec<verter_workspace::IdeProjectConfig>) {
+        self.inner.configure_resolver(projects)
     }
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
         self.inner.notify_upsert(canonical_id, source)
@@ -480,6 +506,10 @@ impl verter_workspace::WorkspaceRead for RouteSyncProbeWs {
     fn content_generation(&self) -> u64 {
         self.inner.content_generation()
     }
+
+    fn resolution_fact_generation(&self) -> u64 {
+        self.inner.resolution_fact_generation()
+    }
 }
 
 impl WorkspaceAccess for RouteSyncProbeWs {
@@ -529,6 +559,9 @@ impl WorkspaceAccess for RouteSyncProbeWs {
     }
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.inner.set_default_resolve_extensions(host_extensions)
+    }
+    fn configure_resolver(&self, projects: Vec<verter_workspace::IdeProjectConfig>) {
+        self.inner.configure_resolver(projects)
     }
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
         self.inner.notify_upsert(canonical_id, source)
@@ -659,7 +692,6 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
             FxHashMap::default(),
             vec![crate::resolver_core::shallow_file_state::WildcardReexport {
                 source_specifier: "./real_aug".to_string(),
-                canonical_id: real_aug.to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             }],
             rustc_hash::FxHashSet::default(),
@@ -713,8 +745,7 @@ fn seed_artifact_only(
     canonical: &str,
 ) -> StdArc<crate::project_type_store::IndexedReady> {
     let mut artifact = crate::project_type_store::IndexedReady::new_for_test([7u8; 16]);
-    artifact.edge_generation = host.ws().content_generation();
-    artifact.project_generation = host.project_type_store().current_project_generation();
+    artifact.built_at_content_generation = host.ws().content_generation();
     let artifact = StdArc::new(artifact);
     host.project_type_store()
         .indexed()

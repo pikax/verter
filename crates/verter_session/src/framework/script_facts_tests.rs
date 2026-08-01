@@ -430,8 +430,8 @@ fn fixture_provider_resolves_validates_and_caches_end_to_end() {
     );
     // The cached entry's read-set ROOTS the payload against the owner's
     // IMPORT-ROUTE surface (not just whole-hashes) — a re-route that leaves
-    // file contents unchanged must still invalidate. (If the ImportRoute
-    // fact were dropped, this assertion fails.)
+    // file contents unchanged must still invalidate. (If the resolution
+    // witness were dropped, this assertion fails.)
     let stored = host
         .framework_script_caches()
         .facts
@@ -440,17 +440,14 @@ fn fixture_provider_resolves_validates_and_caches_end_to_end() {
     let has_import_route_fact = stored.read_set_signature.facts.iter().any(|f| {
         matches!(
             f,
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                ..
-            } if canonical_id == "/proj/Consumer.ts"
+            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+                if inner.resolution_fact().is_some()
         )
     });
     assert!(
         has_import_route_fact,
-        "the cached resolved fact must observe the owner's ImportRoute \
-             derived fact so a re-route invalidates it"
+        "the cached resolved fact must observe the owner's import-route \
+             RESOLUTION WITNESS so a re-route invalidates it"
     );
     // Second resolve: warm hit returns the same typed payload.
     let facts2 = resolve_script_facts::<fixtures::FixtureFactPayload>(

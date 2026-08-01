@@ -189,6 +189,24 @@ fn is_package_backed_true_for_third_party_node_modules_source() {
 }
 
 #[test]
+fn root_project_does_not_claim_top_level_node_modules_source() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.set_project_graph(ProjectGraph::from_configs(vec![make_project(
+        "/",
+        Some("/tsconfig.json"),
+    )]));
+    ws.inject_file(
+        "/node_modules/lodash/index.js".to_string(),
+        Arc::from("module.exports = {};"),
+    );
+
+    assert!(
+        ws.is_package_backed("/node_modules/lodash/index.js"),
+        "a root project must not consume the leading slash that identifies its top-level node_modules segment",
+    );
+}
+
+#[test]
 fn is_package_backed_false_for_workspace_package_source() {
     let ws = MemoryWorkspace::new(MemoryOptions::default());
     ws.set_project_graph(ProjectGraph::from_configs(vec![make_project(

@@ -505,7 +505,7 @@ impl TestSessionBuilder {
             &[root_uri.clone()],
             &vite_opts,
         );
-        // Sync resolver to host's VFS so resolve_import_via_workspace works
+        // Sync resolver to host's VFS so resolve_import_transient works
         host.configure_projects(
             build_result
                 .registry

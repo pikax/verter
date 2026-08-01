@@ -258,85 +258,91 @@ impl VerterHost {
             return;
         };
 
-        let workspace = self.workspace();
         let mut blocker_ids = std::collections::BTreeSet::new();
-        // Capture-before-resolve: the positive-route stamps below reflect
-        // the file set the resolutions ran under, never a later one (a
-        // mutation racing this hydration leaves the stamps conservatively
-        // stale — a harmless re-resolve, never forged currency).
-        let resolved_at_generation = self.ws().content_generation();
+        let mut pending_routes = Vec::new();
 
         for request in blockers.external_source_requests {
-            let resolved = workspace
-                .resolve_import(
-                    canonical_id,
-                    &request.specifier,
-                    verter_workspace::ResolutionContext {
-                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                        kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
-                    },
-                )
-                .map(|resolution| {
-                    self.cache_positive_import_route_result(
-                        canonical_id,
-                        &request.specifier,
-                        &resolution.source_id,
-                        resolved_at_generation,
+            let resolved = match self.resolve_for_persistent_state(
+                canonical_id,
+                &request.specifier,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
+                },
+            ) {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    let Some(resolution) = admitted.into_result() else {
+                        if request.resolved_canonical_id != canonical_id {
+                            blocker_ids.insert(request.resolved_canonical_id);
+                        }
+                        continue;
+                    };
+                    pending_routes.push((
+                        request.specifier,
+                        resolution.source_id.clone(),
                         verter_workspace::ResolveRequestKind::SfcSrcAttr,
-                    );
+                    ));
                     resolution.source_id
-                })
-                .unwrap_or(request.resolved_canonical_id);
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => return,
+            };
             if resolved != canonical_id {
                 blocker_ids.insert(resolved);
             }
         }
 
         for dep in blockers.macro_type_deps.iter() {
-            let resolved = workspace
-                .resolve_import(
-                    canonical_id,
-                    &dep.import_source,
-                    verter_workspace::ResolutionContext {
-                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                        kind: verter_workspace::ResolveRequestKind::TypeImport,
-                    },
-                )
-                .inspect(|resolution| {
-                    self.cache_positive_import_route_result(
-                        canonical_id,
-                        &dep.import_source,
-                        &resolution.source_id,
-                        resolved_at_generation,
-                        verter_workspace::ResolveRequestKind::TypeImport,
-                    );
-                })
-                .or_else(|| {
-                    workspace
-                        .resolve_import(
+            let type_resolution = self.resolve_for_persistent_state(
+                canonical_id,
+                &dep.import_source,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::TypeImport,
+                },
+            );
+            let resolved = match type_resolution {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    match admitted.into_result() {
+                        Some(resolution) => {
+                            pending_routes.push((
+                                dep.import_source.clone(),
+                                resolution.source_id.clone(),
+                                verter_workspace::ResolveRequestKind::TypeImport,
+                            ));
+                            Some(resolution)
+                        }
+                        None => match self.resolve_for_persistent_state(
                             canonical_id,
                             &dep.import_source,
                             verter_workspace::ResolutionContext {
                                 phase: verter_workspace::ResolvePhase::CodegenBlocker,
                                 kind: verter_workspace::ResolveRequestKind::EsmImport,
                             },
-                        )
-                        .inspect(|resolution| {
-                            self.cache_positive_import_route_result(
-                                canonical_id,
-                                &dep.import_source,
-                                &resolution.source_id,
-                                resolved_at_generation,
-                                verter_workspace::ResolveRequestKind::EsmImport,
-                            );
-                        })
-                })
-                .map(|resolution| resolution.source_id);
+                        ) {
+                            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                                admitted.into_result().inspect(|resolution| {
+                                    pending_routes.push((
+                                        dep.import_source.clone(),
+                                        resolution.source_id.clone(),
+                                        verter_workspace::ResolveRequestKind::EsmImport,
+                                    ));
+                                })
+                            }
+                            verter_workspace::ResolutionPublication::Refused(_) => return,
+                        },
+                    }
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => return,
+            }
+            .map(|resolution| resolution.source_id);
             if let Some(resolved) = resolved.filter(|resolved| resolved != canonical_id) {
                 blocker_ids.insert(resolved);
             }
         }
 
+        for (_specifier, resolved, _kind) in pending_routes {
+            self.record_resolved_dependency_edge(canonical_id, &resolved);
+        }
         for blocker_id in blocker_ids {
             let _ = self.ensure_loaded(&blocker_id);
         }
@@ -420,48 +426,60 @@ impl VerterHost {
         // of route observation (R26).
         note_serve(&self.ensure_indexed_ready_serve(owner_canonical));
 
-        let workspace = self.workspace();
         let mut resolved_deps = std::collections::BTreeSet::<String>::new();
-        // Capture-before-resolve: the positive-route stamps below reflect
-        // the file set the resolutions ran under, never a later one.
-        let resolved_at_generation = self.ws().content_generation();
+        let mut pending_routes = Vec::new();
 
-        // Macro-type deps: TypeImport first, ESM fallback. Cache the
-        // import-route so `resolve_import_source_to_canonical` in
-        // `compile_fact_emission` finds it.
+        // Macro-type deps: TypeImport first, ESM fallback. The resolved
+        // canonical is registered as a dependency edge; the resolution
+        // itself is memoised only by the workspace owner-edge slot.
         for dep in macro_type_deps {
-            let resolved = workspace
-                .resolve_import(
-                    owner_canonical,
-                    &dep.import_source,
-                    verter_workspace::ResolutionContext {
-                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                        kind: verter_workspace::ResolveRequestKind::TypeImport,
-                    },
-                )
-                .map(|resolution| (resolution, verter_workspace::ResolveRequestKind::TypeImport))
-                .or_else(|| {
-                    workspace
-                        .resolve_import(
+            let type_resolution = self.resolve_for_persistent_state(
+                owner_canonical,
+                &dep.import_source,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::TypeImport,
+                },
+            );
+            let resolved = match type_resolution {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    match admitted.into_result() {
+                        Some(resolution) => {
+                            Some((resolution, verter_workspace::ResolveRequestKind::TypeImport))
+                        }
+                        None => match self.resolve_for_persistent_state(
                             owner_canonical,
                             &dep.import_source,
                             verter_workspace::ResolutionContext {
                                 phase: verter_workspace::ResolvePhase::CodegenBlocker,
                                 kind: verter_workspace::ResolveRequestKind::EsmImport,
                             },
-                        )
-                        .map(|resolution| {
-                            (resolution, verter_workspace::ResolveRequestKind::EsmImport)
-                        })
-                });
+                        ) {
+                            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                                admitted.into_result().map(|resolution| {
+                                    (resolution, verter_workspace::ResolveRequestKind::EsmImport)
+                                })
+                            }
+                            verter_workspace::ResolutionPublication::Refused(_) => {
+                                return CompileTierPrefetchObservation {
+                                    fenced_serve_observed: true,
+                                };
+                            }
+                        },
+                    }
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => {
+                    return CompileTierPrefetchObservation {
+                        fenced_serve_observed: true,
+                    };
+                }
+            };
             if let Some((resolution, resolved_kind)) = resolved {
-                self.cache_positive_import_route_result(
-                    owner_canonical,
-                    &dep.import_source,
-                    &resolution.source_id,
-                    resolved_at_generation,
+                pending_routes.push((
+                    dep.import_source.clone(),
+                    resolution.source_id.clone(),
                     resolved_kind,
-                );
+                ));
                 if resolution.source_id != owner_canonical {
                     resolved_deps.insert(resolution.source_id);
                 }
@@ -478,7 +496,7 @@ impl VerterHost {
             } else {
                 verter_workspace::ResolveRequestKind::EsmImport
             };
-            if let Some(resolution) = workspace.resolve_import(
+            match self.resolve_for_persistent_state(
                 owner_canonical,
                 import.source.as_str(),
                 verter_workspace::ResolutionContext {
@@ -486,15 +504,22 @@ impl VerterHost {
                     kind,
                 },
             ) {
-                self.cache_positive_import_route_result(
-                    owner_canonical,
-                    import.source.as_str(),
-                    &resolution.source_id,
-                    resolved_at_generation,
-                    kind,
-                );
-                if resolution.source_id != owner_canonical {
-                    resolved_deps.insert(resolution.source_id);
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    if let Some(resolution) = admitted.into_result() {
+                        pending_routes.push((
+                            import.source.clone(),
+                            resolution.source_id.clone(),
+                            kind,
+                        ));
+                        if resolution.source_id != owner_canonical {
+                            resolved_deps.insert(resolution.source_id);
+                        }
+                    }
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => {
+                    return CompileTierPrefetchObservation {
+                        fenced_serve_observed: true,
+                    };
                 }
             }
         }
@@ -503,82 +528,72 @@ impl VerterHost {
         // a `FileWholeHash` of each external canonical, so each
         // external dep must reach the store before the tracer runs.
         //
-        // Route-source discipline — the per-entry freshness oracle
-        // (`import_route_entry_is_generation_current`) decides whether a
-        // pre-existing route may answer:
-        //
-        // * An UNSTAMPED route is caller-authoritative
-        //   (`set_import_dependencies` — e.g. an aliased `src=`
-        //   (`@/partials/panel.html`) only the embedder's resolver can
-        //   map): served until replaced, never overwritten here.
-        // * A STAMPED route is a host memo this prefetch (or the
-        //   blocker hydration) wrote on an earlier compile: served only
-        //   while its capture-before-resolve stamp matches the live
-        //   `content_generation`. A stale memo means the dependency
-        //   file set moved since the memo resolved — the `SfcSrcAttr`
-        //   resolution may have retargeted — so it is treated as ABSENT
-        //   and re-resolved + re-stamped. Serving it would suppress the
-        //   retarget AND misattribute the compile-tier whole-hash
-        //   observation to the retargeted-away canonical (the merge
-        //   resolves live, the observation resolves through this memo).
-        // * A generation-current known-miss (caller-pushed) keeps the
-        //   parse-time-canonical fallback below; a stale one re-resolves.
-        let live_generation = self.ws().content_generation();
+        // Route-source discipline: `DerivedRawState.import_routes` holds
+        // ONLY caller-supplied authoritative routes
+        // (`set_import_dependencies` — e.g. an aliased `src=`
+        // (`@/partials/panel.html`) only the embedder's resolver can
+        // map). They serve until the caller replaces them and are never
+        // overwritten here; their currency rides the workspace
+        // exact-resolution facts the same push installs. Everything else
+        // resolves through the one owner-edge authority below, whose
+        // warm candidate is reused when its observation set is
+        // unchanged.
         for request in external_requests {
-            let existing_route = self.derived_raw_cache().get(owner_canonical).and_then(|d| {
-                let route = d.import_routes.get(&request.specifier)?;
-                d.import_route_entry_is_generation_current(
-                    &request.specifier,
-                    route,
-                    live_generation,
-                )
-                .then(|| route.clone())
-            });
+            let existing_route = self
+                .derived_raw_cache()
+                .get(owner_canonical)
+                .and_then(|d| d.import_routes.get(&request.specifier).cloned());
             let resolved = if let Some(route) = existing_route {
-                // Generation-current (or caller-authoritative) route: use
-                // its canonical for the indexed-ready prefetch and leave
-                // the entry untouched.
+                // Caller-authoritative route: use its canonical for the
+                // indexed-ready prefetch and leave the entry untouched.
                 route
                     .resolved_canonical_id
                     .clone()
                     .or_else(|| route.effective_target().map(str::to_string))
                     .unwrap_or_else(|| request.resolved_canonical_id.clone())
             } else {
-                // No current route — resolve through the SfcSrcAttr lane
-                // and cache the result (stamped with the pre-resolve
-                // generation capture) so the producer's
-                // `resolve_import_source_to_canonical` finds it. When the
-                // workspace cannot resolve the specifier, the parse-time
-                // canonical answers and is memoized under the same stamp:
-                // the resolution attempt DID run against this file set and
-                // the memo records its fallback decision; any later
-                // file-set move stales the stamp and re-runs the attempt,
-                // so a specifier that becomes resolvable repairs itself.
-                let resolved = workspace
-                    .resolve_import(
-                        owner_canonical,
-                        &request.specifier,
-                        verter_workspace::ResolutionContext {
-                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                            kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
-                        },
-                    )
-                    .map(|resolution| resolution.source_id)
-                    .unwrap_or_else(|| request.resolved_canonical_id.clone());
+                // No caller-supplied route — resolve through the
+                // `SfcSrcAttr` lane. When the workspace cannot resolve
+                // the specifier, the parse-time canonical answers. The
+                // answer is not memoised host-side: the workspace's own
+                // owner-edge candidate slot is the one memo, and a
+                // specifier that becomes resolvable repairs itself
+                // because the appearance advances exactly the
+                // `PathProbe` the miss observed.
+                let resolved = match self.resolve_for_persistent_state(
+                    owner_canonical,
+                    &request.specifier,
+                    verter_workspace::ResolutionContext {
+                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                        kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
+                    },
+                ) {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
+                        .into_result()
+                        .map(|resolution| resolution.source_id)
+                        .unwrap_or_else(|| request.resolved_canonical_id.clone()),
+                    verter_workspace::ResolutionPublication::Refused(_) => {
+                        return CompileTierPrefetchObservation {
+                            fenced_serve_observed: true,
+                        };
+                    }
+                };
                 if !resolved.is_empty() && resolved != owner_canonical {
-                    self.cache_positive_import_route_result(
-                        owner_canonical,
-                        &request.specifier,
-                        &resolved,
-                        resolved_at_generation,
+                    pending_routes.push((
+                        request.specifier.clone(),
+                        resolved.clone(),
                         verter_workspace::ResolveRequestKind::SfcSrcAttr,
-                    );
+                    ));
                 }
                 resolved
             };
             if !resolved.is_empty() && resolved != owner_canonical {
                 resolved_deps.insert(resolved);
             }
+        }
+
+        for (_specifier, resolved, _kind) in pending_routes {
+            self.record_resolved_dependency_edge(owner_canonical, &resolved);
         }
 
         // Drive each resolved dep to IndexedReady so its

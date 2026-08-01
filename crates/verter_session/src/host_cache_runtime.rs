@@ -143,6 +143,7 @@ impl VerterHost {
         type ResolveMemo =
             std::cell::RefCell<rustc_hash::FxHashMap<(Arc<str>, Arc<str>), Option<Arc<str>>>>;
         let resolve_memo: ResolveMemo = std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+        let resolution_refused = std::cell::Cell::new(false);
         let memoised_resolve = |augmenter_canonical: &str, specifier: &str| -> Option<Arc<str>> {
             let key = (
                 Arc::<str>::from(augmenter_canonical),
@@ -151,9 +152,16 @@ impl VerterHost {
             if let Some(cached) = resolve_memo.borrow().get(&key).cloned() {
                 return cached;
             }
-            let resolved = self
-                .resolve_type_dependency_canonical(augmenter_canonical, specifier)
-                .map(Arc::<str>::from);
+            let resolved =
+                match self.resolve_type_dependency_canonical(augmenter_canonical, specifier) {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                        admitted.into_result().map(Arc::<str>::from)
+                    }
+                    verter_workspace::ResolutionPublication::Refused(_) => {
+                        resolution_refused.set(true);
+                        None
+                    }
+                };
             resolve_memo.borrow_mut().insert(key, resolved.clone());
             resolved
         };
@@ -238,16 +246,15 @@ impl VerterHost {
                 // admits a content-addressed entry with NO augmenter
                 // fingerprint — stale serves after the augmenter edits.
                 let is_relative = verter_workspace::resolver::is_relative_specifier(specifier);
-                // Resolve a relative specifier's canonical: prefer the
-                // shallow-baked `canonical_id`, falling back to the live
-                // type-dependency resolver when it is empty (a bare-`.`/`..`
-                // edge whose shallow-time route resolver returned nothing) so
-                // a `ResolvedRelativeCanonical("")` never silently matches no
-                // augmenter. The live resolver is the SAME `pathIsRelative`
-                // authority the fact-side matcher uses.
-                let resolved: Arc<str> = if !import.canonical_id.is_empty() {
-                    Arc::from(import.canonical_id.as_str())
-                } else if is_relative {
+                // Resolve a relative specifier's canonical through the live
+                // type-dependency resolver — the ONE resolution authority,
+                // and the SAME `pathIsRelative` authority the fact-side
+                // matcher uses. The shallow inventory is parse domain and
+                // bakes no target, so there is no artifact-derived arm to
+                // prefer: an artifact whose owner bytes are unchanged can
+                // still have a retargeted edge, which is exactly what a
+                // baked target got wrong.
+                let resolved: Arc<str> = if is_relative {
                     resolver(canonical, specifier)
                         .filter(|c| !c.is_empty())
                         .unwrap_or_else(|| Arc::from(""))
@@ -458,57 +465,31 @@ impl VerterHost {
                 // covers chained barrels (a barrel re-exporting a
                 // barrel) up to `REEXPORT_WALK_DEPTH`.
                 //
-                // The `shallow_state.wildcard_reexports[i].canonical_id`
-                // and `ExportTarget::Reexport.canonical_id` fields are
-                // populated by the shallow-analysis resolver, which can
-                // leave them empty for declaration files whose
-                // module-resolution context differs from the live
-                // type-dependency resolver (e.g. packaged `.d.ts`
-                // entries). Re-resolve the raw source specifier through
-                // `resolve_type_dependency_canonical` here — same
-                // authority the binding-driven walk above uses — so a
-                // barrel whose shallow-time resolver returned `""`
-                // still surfaces the re-exported augmenter.
+                // The shallow routing surface names AUTHORED specifiers
+                // only. Each barrel edge resolves through
+                // `resolve_type_dependency_canonical` — the same
+                // authority the binding-driven walk above uses.
                 {
                     use crate::resolver_core::shallow_file_state::ExportTarget;
                     // The barrel edges come from the artifact the ensure
                     // above returned (never a permissive `get_any` scan,
-                    // which can surface a stale multi-candidate row).
-                    // Baked edge `canonical_id`s are ROUTE-derived: they
-                    // are consumed only while the surface passes the
-                    // shared currency gate; a route-stale surface (e.g.
-                    // a fenced ReturnOnly serve under sustained churn)
-                    // re-resolves the raw source specifiers through the
-                    // live resolver instead.
-                    let baked_edges_current =
-                        self.indexed_surface_is_current(&resolved_canonical, &walk_indexed);
+                    // which can surface a stale multi-candidate row); the
+                    // TARGETS come from the live resolver.
                     for wildcard in &walk_indexed.shallow_state.wildcard_reexports {
-                        let target_canonical: Option<Arc<str>> =
-                            if baked_edges_current && !wildcard.canonical_id.is_empty() {
-                                Some(Arc::from(wildcard.canonical_id.as_str()))
-                            } else {
-                                resolver(&resolved_canonical, &wildcard.source_specifier)
-                                    .filter(|c| !c.is_empty())
-                            };
-                        if let Some(c) = target_canonical {
+                        if let Some(c) = resolver(&resolved_canonical, &wildcard.source_specifier)
+                            .filter(|c| !c.is_empty())
+                        {
                             queue.push_back((c, depth + 1));
                         }
                     }
                     for target in walk_indexed.shallow_state.exports.values() {
                         if let ExportTarget::Reexport {
-                            canonical_id: cached_canonical,
-                            source_specifier,
-                            ..
+                            source_specifier, ..
                         } = target
                         {
-                            let target_canonical: Option<Arc<str>> =
-                                if baked_edges_current && !cached_canonical.is_empty() {
-                                    Some(Arc::from(cached_canonical.as_str()))
-                                } else {
-                                    resolver(&resolved_canonical, source_specifier)
-                                        .filter(|c| !c.is_empty())
-                                };
-                            if let Some(c) = target_canonical {
+                            if let Some(c) = resolver(&resolved_canonical, source_specifier)
+                                .filter(|c| !c.is_empty())
+                            {
                                 queue.push_back((c, depth + 1));
                             }
                         }
@@ -539,11 +520,20 @@ impl VerterHost {
                 return true;
             }
         }
+        if resolution_refused.get() {
+            return true;
+        }
         if any_non_empty(AugmentationTargetKind::GlobalAugmentation) {
+            return true;
+        }
+        if resolution_refused.get() {
             return true;
         }
         for pattern in store.declared_wildcard_ambient_patterns() {
             if any_non_empty(AugmentationTargetKind::WildcardAmbient(pattern)) {
+                return true;
+            }
+            if resolution_refused.get() {
                 return true;
             }
         }

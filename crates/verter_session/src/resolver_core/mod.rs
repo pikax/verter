@@ -146,8 +146,7 @@ pub use runtime_values::{
 pub use shallow_file_state::{
     BudgetDomain, BudgetExceededFailure, ClassifiedTypeDeps, ExportTarget, ExternalSymbolRef,
     ImportTarget, LocalClosureResult, LocalClosureStatus, ResolutionBudgets, ResolutionCounters,
-    ShallowFileState, ShallowImportResolver, ShallowTypeSymbol, ShallowTypeView,
-    ShallowValueSymbol, WildcardReexport,
+    ShallowFileState, ShallowTypeSymbol, ShallowTypeView, ShallowValueSymbol, WildcardReexport,
 };
 
 /// Lane-identity token for singleflight / stability-request
@@ -361,10 +360,11 @@ pub trait StoreView {
     ///   `FileWholeHash` self-root).
     /// - Insert `route_hash` into the overlay's `derived_hashes` under
     ///   the `Route` kind when `Some`.
-    /// - Insert `import_route_hash` into the overlay's `derived_hashes`
-    ///   under the `ImportRoute` kind when `Some` (this is the leak
-    ///   the producer captures — the bundle's fact hash MUST match
-    ///   what the view's snapshot would carry).
+    ///
+    /// The owner's import-route dependency is deliberately NOT promoted:
+    /// it is a resolve-domain resolution witness validated against the
+    /// base view's captured immutable resolution world, not a
+    /// per-canonical derived hash the overlay can carry.
     ///
     /// Default impl is no-op so non-request views (the bare
     /// [`crate::resolver_store::HostStoreView`], test-only
@@ -375,8 +375,14 @@ pub trait StoreView {
         _canonical: &str,
         _whole_hash: crate::types::Hash16,
         _route_hash: Option<crate::types::Hash16>,
-        _import_route_hash: Option<crate::types::Hash16>,
     ) {
+    }
+}
+
+impl verter_workspace::FactVersionValidator for dyn StoreView + '_ {
+    #[inline]
+    fn validates_fact_version(&self, fact: &FactVersionRef) -> bool {
+        StoreView::validates(self, fact)
     }
 }
 
@@ -452,9 +458,8 @@ impl<T: StoreView + ?Sized> StoreView for &T {
         canonical: &str,
         whole_hash: crate::types::Hash16,
         route_hash: Option<crate::types::Hash16>,
-        import_route_hash: Option<crate::types::Hash16>,
     ) {
-        (**self).promote_route_completion(canonical, whole_hash, route_hash, import_route_hash)
+        (**self).promote_route_completion(canonical, whole_hash, route_hash)
     }
 }
 
@@ -503,140 +508,9 @@ pub struct ResolveRequest {
     pub target: ResolveRequestTarget,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DerivedFactKind {
-    /// Provider-owned export route surface hash.
-    Route,
-    /// Importer-owned effective import-target surface hash.
-    ImportRoute,
-    DirectSource,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum FactVersionRef {
-    FileWholeHash {
-        canonical_id: String,
-        hash: ResolverHash16,
-    },
-    DerivedFactHash {
-        canonical_id: String,
-        kind: DerivedFactKind,
-        hash: ResolverHash16,
-    },
-    // ── R12 per-domain variants ──
-    //
-    // Each variant carries the fact's domain-scoped reference so
-    // [`StoreView::validates`] can route via
-    // [`crate::resolver_core::FactDomainTag::from_fact_version_ref`]
-    // to the matching per-domain validator. The dispatch table is
-    // bounded by `FactDomain` (3 variants), not by `FactKey` — adding
-    // a new `FactKey` extends a per-domain `*FactRef` enum but does
-    // NOT widen the trait (R26).
-    /// Parse-domain fact reference: per-file `FactKey` + observed
-    /// hash + lane. Validates against `FileFacts.registry`.
-    Parse(ParseFactRef),
-    /// Resolve-imports-domain fact reference: per-file
-    /// `ResolvedImportFacts` entry. The resolver populates the
-    /// underlying store; the variant defines the dispatch surface.
-    ResolveImports(ResolveImportsFactRef),
-    /// Route-surface-domain fact reference: `RouteDb`-owned
-    /// effective-export-set / augmentation-index fingerprint. The
-    /// `RouteDb` producer populates the underlying store.
-    RouteSurface(RouteSurfaceFactRef),
-    /// Contributor source-env identity reference: the exact artifact
-    /// identity — minus content — a cross-file contributor read was
-    /// served under. Recorded per folded contributor via
-    /// [`crate::fact_signature_helpers::observe_file_source_env_from_artifact_key`]
-    /// from the artifact key the read actually used, never re-derived
-    /// at the recording site.
-    ///
-    /// Validates STRICTLY against the view-current artifact identity
-    /// through [`StoreView::validates_file_source_env`]: a differing,
-    /// missing, tombstoned, or untracked contributor identity rejects
-    /// — even while the contributor's `FileWholeHash` still validates
-    /// (content validity stays on the separate `FileWholeHash` fact;
-    /// this fact is source-env identity only). Closes the warm-parent
-    /// gap where a contributor's `parse_env_hash` / `parser_version` /
-    /// `file_language_id` moves under unchanged content: the
-    /// content-rooted facts keep validating, so only this fact makes
-    /// the env move observable to the parent's warm hit.
-    FileSourceEnv {
-        canonical_id: String,
-        parse_env_hash: crate::locator_identity::ParseEnvHash,
-        parser_version: u32,
-        file_language_id: verter_language::FileLanguage,
-    },
-    /// Project-generation reference: the observed monotonic project
-    /// generation a cached value depended on. Validates iff the
-    /// host's current project generation equals `generation`.
-    ///
-    /// Unlike the file-scoped variants above this carries no
-    /// canonical id — it roots a value against the project-wide
-    /// resolver/config/lib generation rather than any single file's
-    /// content. The generation advances on `tsconfig`, path-alias,
-    /// SDK, workspace-folder, and project-graph changes (never on a
-    /// pure file-content edit).
-    ProjectGeneration { generation: u64 },
-}
-
-impl FactVersionRef {
-    /// The canonical file id this fact references, when the variant is
-    /// file-scoped. Used by callers that need to scope a fact set by
-    /// owning file (e.g. excluding the owner's own facts when fanning
-    /// a curated dependency set into the fact tracer).
-    ///
-    /// Returns `None` for [`FactVersionRef::ProjectGeneration`], which
-    /// is not file-scoped — it roots a value against the project-wide
-    /// generation rather than a single canonical's content. A
-    /// project-generation fact is therefore never equal to any
-    /// excluded owner canonical, so owner-scoped fan-out filters keep
-    /// it.
-    #[inline]
-    #[must_use]
-    pub fn canonical_id(&self) -> Option<&str> {
-        match self {
-            FactVersionRef::FileWholeHash { canonical_id, .. }
-            | FactVersionRef::DerivedFactHash { canonical_id, .. } => Some(canonical_id.as_str()),
-            FactVersionRef::Parse(p) => Some(p.canonical_id.as_str()),
-            FactVersionRef::ResolveImports(r) => Some(r.canonical_id.as_str()),
-            FactVersionRef::RouteSurface(r) => Some(r.canonical_id.as_str()),
-            FactVersionRef::FileSourceEnv { canonical_id, .. } => Some(canonical_id.as_str()),
-            FactVersionRef::ProjectGeneration { .. } => None,
-        }
-    }
-}
-
-/// Parse-domain fact reference. Lane is recorded explicitly so
-/// validators know whether to check `semantic_hash` (cosmetic edits
-/// invariant) or `display_hash` (cosmetic-sensitive). See R13 lane
-/// model.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ParseFactRef {
-    pub canonical_id: String,
-    pub key: verter_semantic::facts::FactKey,
-    pub lane: verter_semantic::facts::FactLane,
-    pub expected_hash: ResolverHash16,
-}
-
-/// Resolve-imports-domain fact reference. The resolver producer
-/// populates the matching store.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ResolveImportsFactRef {
-    pub canonical_id: String,
-    pub key: verter_semantic::facts::FactKey,
-    pub lane: verter_semantic::facts::FactLane,
-    pub expected_hash: ResolverHash16,
-}
-
-/// Route-surface-domain fact reference. The `RouteDb` producer
-/// populates the matching store.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RouteSurfaceFactRef {
-    pub canonical_id: String,
-    pub key: verter_semantic::facts::FactKey,
-    pub lane: verter_semantic::facts::FactLane,
-    pub expected_hash: ResolverHash16,
-}
+pub use verter_workspace::{
+    DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TraversalLens {
@@ -1323,14 +1197,16 @@ impl<V> ValidatedFactAdmission<V> {
 }
 
 /// Per-slot candidate cap. The 5th admission triggers FIFO eviction
-/// of the oldest candidate.
-pub const CANDIDATE_CAP: usize = 4;
+/// of the oldest candidate. Owned by the dependency-neutral carrier
+/// module so the workspace resolution slot and this slot share one
+/// bound.
+pub use verter_workspace::CANDIDATE_CAP;
 
 /// Per-candidate `fact_dep_signature` size cap. Larger signatures
 /// are admitted as `NonCacheable` (the candidate is dropped and the
 /// `FactSignatureOverflow` audit event fires). Callers fall back to
 /// cold recompute; correctness is preserved.
-pub const FACT_SIGNATURE_CAP: usize = 1024;
+pub use verter_workspace::FACT_SIGNATURE_CAP;
 
 fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
     use std::hash::{BuildHasher, Hash, Hasher};
@@ -1768,6 +1644,27 @@ where
     /// publish boundary actually admitted into the cache (a warm-read
     /// helper would hide a candidate that fails validation under the
     /// live view, but the strip contract is about the ADMITTED set).
+    /// `true` when the slot already retains a candidate admitted under
+    /// exactly `facts`.
+    ///
+    /// Admission dedupe for producers whose recompute is deterministic
+    /// for a given `(key, witness)` pair: re-admitting an identical
+    /// candidate is pure churn that ages a genuinely distinct
+    /// concurrent candidate out of the bounded slot. Compares the
+    /// recorded signatures directly rather than the fingerprint so a
+    /// fingerprint collision cannot suppress a real admission.
+    #[must_use]
+    pub fn holds_candidate_with_signature(&self, key: &K, facts: &[FactVersionRef]) -> bool {
+        match self.entries.get(key) {
+            Some(entry) => entry
+                .candidates
+                .load()
+                .iter()
+                .any(|candidate| candidate.fact_dep_signature.as_ref() == facts),
+            None => false,
+        }
+    }
+
     #[cfg(test)]
     pub fn candidate_signatures_for_key(&self, key: &K) -> Vec<Arc<[FactVersionRef]>> {
         match self.entries.get(key) {
@@ -5027,7 +4924,7 @@ mod fact_signature_fingerprint_pins {
                 lane: FactLane::Semantic,
                 expected_hash: [3u8; 16],
             }),
-            FactVersionRef::ResolveImports(ResolveImportsFactRef {
+            FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
                 canonical_id: "/w/imports.ts".to_string(),
                 key: export_key("Bar"),
                 lane: FactLane::Semantic,
@@ -5081,7 +4978,7 @@ mod fact_signature_fingerprint_pins {
                 1,
                 FactVersionRef::DerivedFactHash {
                     canonical_id: "/w/dep.ts".to_string(),
-                    kind: DerivedFactKind::ImportRoute,
+                    kind: DerivedFactKind::DirectSource,
                     hash: [2u8; 16],
                 },
             ),
@@ -5096,7 +4993,7 @@ mod fact_signature_fingerprint_pins {
             ),
             (
                 3,
-                FactVersionRef::ResolveImports(ResolveImportsFactRef {
+                FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
                     canonical_id: "/w/imports-prime.ts".to_string(),
                     key: export_key("Bar"),
                     lane: FactLane::Semantic,
@@ -5151,7 +5048,7 @@ mod fact_signature_fingerprint_pins {
             lane: FactLane::Semantic,
             expected_hash: [9u8; 16],
         });
-        let imports = FactVersionRef::ResolveImports(ResolveImportsFactRef {
+        let imports = FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
             canonical_id: "/w/same.ts".to_string(),
             key: export_key("Same"),
             lane: FactLane::Semantic,

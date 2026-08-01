@@ -321,9 +321,6 @@ fn write_export_target(
         ExportTarget::Reexport {
             source_specifier,
             original_name,
-            // Resolved canonical_id is INTENTIONALLY excluded (R12 — parse
-            // domain emits syntactic shape only).
-            canonical_id: _,
             is_type,
         } => {
             buf.push(b'R');

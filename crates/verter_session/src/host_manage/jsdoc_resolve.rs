@@ -116,12 +116,9 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
         // owner-local.
         let shallow = self.ctx.shallow_file_state(dep_canonical)?;
         let import_target = shallow.import_target_in(dep_owner, resolved_name)?;
-        let next_canonical = if import_target.canonical_id.is_empty() {
-            self.ctx
-                .resolve_type_dependency_canonical(dep_canonical, &import_target.source_specifier)?
-        } else {
-            import_target.canonical_id.clone()
-        };
+        let next_canonical = self
+            .ctx
+            .resolve_type_dependency_canonical(dep_canonical, &import_target.source_specifier)?;
         let (resolved, route_facts) = self
             .ctx
             .resolve_imported_type_root_with_facts(&next_canonical, &import_target.imported_name);
@@ -964,9 +961,12 @@ pub(crate) fn resolve_jsdoc_tag_type(
                     ctx.resolve_imported_type_root(&provider, &requested)
                 })
         } else {
-            let Some(dep_canonical) = dependency.canonical_id.as_deref() else {
+            let Some(dep_canonical) = ctx
+                .resolve_type_dependency_canonical(canonical_source, &dependency.source_specifier)
+            else {
                 continue;
             };
+            let dep_canonical = dep_canonical.as_str();
             let mut requested_segments = vec![dependency.imported_name];
             if let crate::resolver_core::RouteDemand::MemberPath(path) = dependency.route {
                 requested_segments.extend(path.iter().cloned());

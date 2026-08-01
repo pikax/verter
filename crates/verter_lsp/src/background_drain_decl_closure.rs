@@ -781,17 +781,38 @@ impl DeclOverlayOwner {
         let live_roots = collect_open_carrier_roots();
 
         for root in &live_roots {
-            // Per-root BFS over the transitive carrier-dependency graph. The visited
-            // set bounds cycles; the worklist is the frontier. SEED with the root
-            // itself so the root's OWN declaration overlay is opened.
+            // Resolve the complete per-root carrier-dependency closure before
+            // opening any overlay. A refusal at any later edge therefore leaves
+            // both provider companions and reachability edges untouched.
             let mut visited: HashSet<String> = HashSet::new();
-            let mut reached_decl_paths: Vec<String> = Vec::new();
             let mut frontier: Vec<String> = vec![root.clone()];
+            let mut closure_nodes = Vec::new();
+            let mut resolution_refused = false;
             while let Some(node) = frontier.pop() {
                 if !visited.insert(node.clone()) {
                     continue; // already walked this carrier under this root
                 }
+                closure_nodes.push(node.clone());
 
+                let dependencies = match carrier_dependency_ids(host, &node) {
+                    Ok(dependencies) => dependencies,
+                    Err(_) => {
+                        resolution_refused = true;
+                        break;
+                    }
+                };
+                for next in dependencies {
+                    if !visited.contains(&next) {
+                        frontier.push(next);
+                    }
+                }
+            }
+            if resolution_refused {
+                continue;
+            }
+
+            let mut reached_decl_paths: Vec<String> = Vec::new();
+            for node in closure_nodes {
                 if let Some(decl_path) = self
                     .open_overlay(
                         sync,
@@ -806,12 +827,6 @@ impl DeclOverlayOwner {
                 {
                     synced_any = true;
                     reached_decl_paths.push(decl_path);
-                }
-
-                for next in carrier_dependency_ids(host, &node) {
-                    if !visited.contains(&next) {
-                        frontier.push(next);
-                    }
                 }
             }
 
@@ -1278,7 +1293,7 @@ impl DeclOverlayOwner {
 /// Each carrier specifier is resolved through the SAME workspace resolver the engine
 /// uses for codegen: the analysis-time `resolved_canonical_id`, falling back to
 /// [`resolve_import_specifier_standalone`] (which routes through
-/// `host.resolve_import_via_workspace` — the alias / tsconfig-`paths` /
+/// `host.resolve_for_persistent_state` — the alias / tsconfig-`paths` /
 /// `node_modules` resolver under `ResolvePhase::CodegenBlocker`). This covers the
 /// carrier dependencies the engine itself can resolve; it is the carrier subset of
 /// the script imports (template component imports are a subset of the script
@@ -1294,17 +1309,20 @@ impl DeclOverlayOwner {
 pub(crate) fn carrier_dependency_ids(
     host: &verter_session::VerterHost,
     canonical_id: &str,
-) -> Vec<String> {
+) -> std::result::Result<Vec<String>, verter_workspace::ResolutionPublicationRefusal> {
     let Some(analysis) = host.get_analysis(canonical_id) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut deps: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for import in &analysis.imports {
-        let resolved = import
-            .resolved_canonical_id
-            .clone()
-            .or_else(|| resolve_import_specifier_standalone(host, canonical_id, &import.source));
+        let resolved = match resolve_import_specifier_standalone(host, canonical_id, &import.source)
+        {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(refusal) => {
+                return Err(refusal);
+            }
+        };
         let Some(resolved) = resolved else {
             continue;
         };
@@ -1312,7 +1330,7 @@ pub(crate) fn carrier_dependency_ids(
             deps.push(resolved);
         }
     }
-    deps
+    Ok(deps)
 }
 
 #[cfg(test)]

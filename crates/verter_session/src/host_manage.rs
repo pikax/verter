@@ -33,7 +33,7 @@ pub(crate) mod component_meta_extract;
 // the `*_inner` audited variants). Belongs in host-impl tier per
 // sub-
 pub(crate) mod component_meta_methods;
-pub(crate) mod import_route_currency;
+pub(crate) mod import_route_witness;
 // Moved from `meta_resolve/request_host.rs`. The file holds
 // `impl ComponentMetaRequestHost for VerterHost`.
 // Belongs in host-impl tier per sub-
@@ -178,6 +178,11 @@ fn workspace_vfs_source_kind(detail: Option<String>) -> String {
     }
 }
 
+/// Generate declaration-companion candidates in resolver precedence order.
+///
+/// This helper is pure with respect to resolution authority: the caller owns
+/// the `has_candidate` operation. Production passes an Engine transaction;
+/// tests may pass a recording or direct-probe oracle to pin candidate order.
 pub(crate) fn resolve_eval_dependency_canonical_with(
     dep_canonical: &str,
     mut has_candidate: impl FnMut(&str) -> bool,
@@ -259,35 +264,6 @@ pub(crate) fn resolve_eval_dependency_canonical_with(
     }
 
     None
-}
-
-/// Build a dep_edges map (import specifier → resolved canonical ID) from
-/// the host's `import_routes`. Used when building prepared
-/// declarations so that `name_resolution` and `external_deps` contain
-/// resolved canonical IDs rather than raw import specifiers.
-pub(in crate::host_manage) fn dep_edges_from_resolutions(
-    resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
-) -> rustc_hash::FxHashMap<String, String> {
-    let mut edges = rustc_hash::FxHashMap::default();
-    for (specifier, res) in resolutions {
-        // Prefer the highest-priority candidate from possible_canonical_ids
-        // (e.g. .d.ts over .js) when available, otherwise fall back to
-        // resolved_canonical_id / effective_target.
-        let target = if !res.possible_canonical_ids.is_empty() {
-            res.possible_canonical_ids
-                .iter()
-                .min_by_key(|c| crate::types::extension_priority(c))
-                .cloned()
-        } else {
-            res.resolved_canonical_id
-                .clone()
-                .or_else(|| res.effective_target().map(str::to_string))
-        };
-        if let Some(target) = target {
-            edges.insert(specifier.clone(), target);
-        }
-    }
-    edges
 }
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
@@ -855,11 +831,21 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         binding_kind: Option<crate::resolver_core::ImportBindingKind>,
     ) -> Option<String> {
         debug_assert_eq!(self.parent_canonical_id, parent_canonical);
-        let dep_canonical = self.host.resolve_loaded_dependency_canonical(
+        let dep_canonical = match self.host.resolve_loaded_dependency_canonical(
             parent_canonical,
             import_source,
             verter_workspace::ResolveRequestKind::EsmImport,
-        )?;
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                admitted.into_result()?
+            }
+            verter_workspace::ResolutionPublication::Refused(_) => {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
+                return None;
+            }
+        };
 
         let derived_import_binding = self
             .parent_snapshot
@@ -1133,21 +1119,6 @@ pub(crate) struct ComputedEvaluatedTypes {
     pub(crate) surface_identities: Option<crate::meta_resolve::SurfaceNodeIdentities>,
 }
 
-/// Host-backed import resolver for `ShallowFileState` construction.
-///
-/// Resolves import specifiers to canonical file IDs from already-cached
-/// import routes. Used during shallow state materialization to
-/// pre-canonicalize cross-file edges without live workspace reads.
-pub(crate) struct HostShallowImportResolver<'a> {
-    pub(crate) dep_edges: &'a rustc_hash::FxHashMap<String, String>,
-}
-
-impl crate::resolver_core::ShallowImportResolver for HostShallowImportResolver<'_> {
-    fn resolve_canonical(&self, specifier: &str) -> Option<String> {
-        self.dep_edges.get(specifier).cloned()
-    }
-}
-
 pub(in crate::host_manage) struct HostRuntimeValueResolver<'a> {
     pub(in crate::host_manage) host: &'a VerterHost,
 }
@@ -1188,31 +1159,40 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         source: &str,
         _sig: &verter_semantic::analysis::ExportSignature,
     ) -> Option<String> {
-        if let Some(shallow) = self.host.shallow_file_state(canonical_id) {
-            for target in shallow.exports.values() {
-                if let crate::resolver_core::ExportTarget::Reexport {
-                    source_specifier,
-                    canonical_id: reexport_canonical,
-                    ..
-                } = target
-                {
-                    if source_specifier == source && !reexport_canonical.is_empty() {
-                        return Some(reexport_canonical.clone());
-                    }
+        // The shallow reexport surface names AUTHORED specifiers only,
+        // so there is no artifact-baked target to prefer here: the
+        // specifier resolves through the loaded-dependency authority
+        // below, which is the same answer the baked target was a
+        // snapshot of — minus the staleness.
+        match self.host.resolve_loaded_dependency_canonical(
+            canonical_id,
+            source,
+            verter_workspace::ResolveRequestKind::EsmImport,
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                if let Some(resolved) = admitted.into_result() {
+                    return Some(resolved);
                 }
             }
+            verter_workspace::ResolutionPublication::Refused(_) => {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
+                return None;
+            }
         }
-
-        self.host
-            .resolve_loaded_dependency_canonical(
-                canonical_id,
-                source,
-                verter_workspace::ResolveRequestKind::EsmImport,
-            )
-            .or_else(|| {
-                self.host
-                    .resolve_type_dependency_canonical(canonical_id, source)
-            })
+        match self
+            .host
+            .resolve_type_dependency_canonical(canonical_id, source)
+        {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(_) => {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
+                None
+            }
+        }
     }
 }
 
@@ -1259,13 +1239,6 @@ pub(in crate::host_manage) fn exact_resolution_uses_type_preferred_target(
             verter_workspace::ResolveRequestKind::TypeImport,
         ) | (verter_workspace::ResolvePhase::ProviderGraph, _)
     )
-}
-
-pub(in crate::host_manage) fn is_runtime_script_target(canonical_id: &str) -> bool {
-    canonical_id.ends_with(".js")
-        || canonical_id.ends_with(".jsx")
-        || canonical_id.ends_with(".mjs")
-        || canonical_id.ends_with(".cjs")
 }
 
 fn is_type_preferred_target(canonical_id: &str) -> bool {

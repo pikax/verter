@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::fact_signature_helpers::ReadSetSignature;
+use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt as _};
 use crate::semantic_query::demand::{
     cached_satisfies, Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
 };
@@ -1583,7 +1583,7 @@ pub(super) fn carrier_facts_reference_canonical(
         } => c.as_str() == canonical_id,
         crate::resolver_core::FactVersionRef::Parse(p) => p.canonical_id.as_str() == canonical_id,
         crate::resolver_core::FactVersionRef::ResolveImports(r) => {
-            r.canonical_id.as_str() == canonical_id
+            r.canonical_id() == Some(canonical_id)
         }
         crate::resolver_core::FactVersionRef::RouteSurface(r) => {
             r.canonical_id.as_str() == canonical_id

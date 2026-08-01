@@ -90,14 +90,22 @@ impl ProjectSync {
             .and_then(|workspace| workspace.read().clone());
         // ONE preparation produces the delivered bytes AND the mapper describing
         // them, so the ledger below can hand both to a recorder as one value.
-        let surface = crate::carrier_provider_projection::prepare_carrier_provider_surface(
+        let surface = match crate::carrier_provider_projection::prepare_carrier_provider_surface(
             workspace.as_deref(),
             &companion.source,
             tsx_path,
             specialized.as_ref(),
             tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
             matches!(self.kind, TypeProviderKind::Tsgo),
-        );
+        ) {
+            Ok(surface) => surface,
+            Err(refusal) => {
+                return Err(TypeProviderError::new(format!(
+                    "carrier provider projection was not admitted for {tsx_path}: {:?}",
+                    refusal.reason()
+                )));
+            }
+        };
         Ok(PreparedTsxContent {
             virtual_verter_types_path: surface.virtual_verter_types_path().map(str::to_owned),
             prepared: surface.into_prepared(),

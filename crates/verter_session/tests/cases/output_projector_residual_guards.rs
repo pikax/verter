@@ -5130,6 +5130,18 @@ fn type_def_source_files() -> Vec<(String, String)> {
             "../verter_type_expr/src/facts.rs",
             "verter_type_expr::facts",
         ),
+        // `SignatureAdmission { Cacheable(ReadSetSignature) | NonCacheable(reason) }`
+        // and `ReadSetSignature { facts, overflowed }` are the fact-validation
+        // substrate, owned by `verter_workspace` (the lowest crate that serves
+        // every consumer — `verter_workspace` cannot depend on
+        // `verter_session`). `SignatureAdmission` is returned by the
+        // fact-signature sink fns (`engine_fact_signature_for_exported_type` /
+        // `…_for_materialize_memo`); reading its home lets the closure classify
+        // it as non-bearing structurally, instead of asserting it by ident.
+        (
+            "../verter_workspace/src/fact_cache.rs",
+            "verter_workspace::fact_cache",
+        ),
     ];
     for (rel, module_base) in EXTERNAL {
         let path = crate_root().join(rel);
@@ -5323,6 +5335,12 @@ fn reexport_only_source_files() -> Vec<(String, String)> {
             "../verter_semantic/src/analysis/type_solver/mod.rs",
             "verter_semantic::analysis::type_solver",
         ),
+        // `pub use fact_cache::{ReadSetSignature, SignatureAdmission, …}` —
+        // re-exports the `verter_workspace::fact_cache` def home up to the
+        // crate root, which is the qualifier `verter_session`'s
+        // `cache_runtime` re-export writes (`pub(crate) use
+        // verter_workspace::SignatureAdmission`).
+        ("../verter_workspace/src/lib.rs", "verter_workspace"),
     ];
     let mut out: Vec<(String, String)> = Vec::new();
     for (rel, module_base) in REEXPORT_ONLY {

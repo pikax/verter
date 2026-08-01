@@ -393,6 +393,7 @@ impl VerterHost {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn analysis_source_exists(&self, canonical_id: &str) -> bool {
         if canonical_id.is_empty() {
             return false;

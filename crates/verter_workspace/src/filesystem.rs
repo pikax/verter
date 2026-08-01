@@ -1,5 +1,6 @@
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::audit_sink::{SinkHandle, VfsAuditLayer, VfsAuditSink, VfsReadEvent};
@@ -14,6 +15,45 @@ use crate::types::{ExactResolution, ExactResolutionResult};
 // registry below.
 thread_local! {
     static LAST_READ_FILE_TRACE_DETAIL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+    static RESOLUTION_DIRECTORY_OBSERVATIONS: RefCell<Vec<ResolutionDirectoryObservation>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A recorded directory-membership observation.
+///
+/// Only the `Unstable` arm exists on `wasm32`: that target has no directory
+/// enumeration at all (`FilesystemWorkspace::read_dir` and the `NativeFs`
+/// boundary behind it are native-only), so no enumerable outcome can ever be
+/// observed there and the frozen reader always reports the observation set as
+/// incomplete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolutionDirectoryValue {
+    #[cfg(not(target_arch = "wasm32"))]
+    Entries(Vec<crate::error::DirEntry>),
+    #[cfg(not(target_arch = "wasm32"))]
+    NotFound,
+    /// The path exists but is not a directory (e.g. an index-file probe
+    /// under a carrier FILE an alias maps onto). A deterministic, stable
+    /// observation — the typed path-probe seam classifies the same errno as
+    /// `Absent` — never unstable I/O.
+    #[cfg(not(target_arch = "wasm32"))]
+    NotADirectory,
+    Unstable,
+}
+
+/// Whether a directory enumeration failed because the path is a FILE — the
+/// stable "not enumerable" outcome, distinct from genuinely unstable I/O.
+#[cfg(not(target_arch = "wasm32"))]
+fn vfs_error_is_not_a_directory(error: &crate::error::VfsError) -> bool {
+    matches!(
+        error,
+        crate::error::VfsError::Io(io) if io.kind() == std::io::ErrorKind::NotADirectory
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolutionDirectoryObservation {
+    canonical: String,
+    value: ResolutionDirectoryValue,
 }
 
 fn set_last_read_file_trace_detail(canonical_id: &str, detail: impl Into<String>) {
@@ -32,6 +72,50 @@ fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
             _ => None,
         }
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn record_resolution_directory_observation(canonical_id: &str, value: ResolutionDirectoryValue) {
+    RESOLUTION_DIRECTORY_OBSERVATIONS.with(|observations| {
+        observations
+            .borrow_mut()
+            .push(ResolutionDirectoryObservation {
+                canonical: crate::resolver::normalize_canonical_id(canonical_id),
+                value,
+            });
+    });
+}
+
+fn take_resolution_directory_evidence() -> Vec<ResolutionDirectoryObservation> {
+    RESOLUTION_DIRECTORY_OBSERVATIONS
+        .with(|observations| std::mem::take(&mut *observations.borrow_mut()))
+}
+
+fn take_resolution_directory_observations() -> Vec<String> {
+    take_resolution_directory_evidence()
+        .into_iter()
+        .map(|observation| observation.canonical)
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn record_resolution_directory_result(
+    canonical_id: &str,
+    result: &Result<Vec<crate::error::DirEntry>, crate::error::VfsError>,
+) {
+    let value = match result {
+        Ok(entries) => {
+            let mut entries = entries.clone();
+            entries.sort();
+            ResolutionDirectoryValue::Entries(entries)
+        }
+        Err(crate::error::VfsError::NotFound(_)) => ResolutionDirectoryValue::NotFound,
+        Err(error) if vfs_error_is_not_a_directory(error) => {
+            ResolutionDirectoryValue::NotADirectory
+        }
+        Err(_) => ResolutionDirectoryValue::Unstable,
+    };
+    record_resolution_directory_observation(canonical_id, value);
 }
 
 #[cfg(test)]
@@ -171,7 +255,12 @@ impl FilesystemWorkspace {
             .native_fs_read_dir_count
             .fetch_add(1, Ordering::Relaxed);
         match self.native_fs.read_dir(parent) {
-            Ok(entries) => {
+            Ok(mut entries) => {
+                entries.sort();
+                record_resolution_directory_observation(
+                    parent,
+                    ResolutionDirectoryValue::Entries(entries.clone()),
+                );
                 let basenames = entries
                     .into_iter()
                     .filter(|entry| !entry.is_dir)
@@ -191,6 +280,7 @@ impl FilesystemWorkspace {
                 self.engine.dir_index.read().file_exists(canonical_id)
             }
             Err(crate::error::VfsError::NotFound(_)) => {
+                record_resolution_directory_observation(parent, ResolutionDirectoryValue::NotFound);
                 self.engine.dir_index.write().refresh(parent, Vec::new());
                 self.engine
                     .vfs_provenance
@@ -204,21 +294,43 @@ impl FilesystemWorkspace {
                 }
                 Some(false)
             }
-            Err(_) => None,
+            Err(error) if vfs_error_is_not_a_directory(&error) => {
+                // The "parent" is a FILE (an index-file probe under a carrier
+                // file): a stable observation — nothing exists under it.
+                record_resolution_directory_observation(
+                    parent,
+                    ResolutionDirectoryValue::NotADirectory,
+                );
+                self.engine.dir_index.write().refresh(parent, Vec::new());
+                self.engine
+                    .vfs_provenance
+                    .dir_index_refresh_count
+                    .fetch_add(1, Ordering::Relaxed);
+                Some(false)
+            }
+            Err(_) => {
+                record_resolution_directory_observation(parent, ResolutionDirectoryValue::Unstable);
+                None
+            }
         }
     }
 
     /// Inject a file directly into the snapshot cache.
     pub fn inject_file(&self, canonical_id: String, source: Arc<str>) {
-        self.engine.invalidate_package_manifest(&canonical_id);
-        self.engine
-            .snapshot
-            .write()
-            .inject(canonical_id.clone(), source);
-        // Per-canonical content transition — same recording chokepoint
-        // as every other per-canonical mutator, so artifact-only
-        // freshness gates observe the injection.
-        self.engine.bump_content_generation_for(&canonical_id);
+        self.engine.mutate_content_for(
+            &canonical_id,
+            false,
+            Some(crate::resolution_currency::PathProbe::File),
+            crate::engine::BaseRealpathTransition::Unknown,
+            || {
+                self.engine.invalidate_package_manifest(&canonical_id);
+                self.engine
+                    .snapshot
+                    .write()
+                    .inject(canonical_id.clone(), source);
+                ((), true)
+            },
+        );
     }
 
     /// Apply a batch of workspace changes.
@@ -232,22 +344,27 @@ impl FilesystemWorkspace {
     /// `FileDeleted` evict the changed path, `DirectoryTreeDirty` evicts the
     /// subtree.
     pub fn apply_changes(&self, changes: Vec<WorkspaceChange>) -> ChangeResult {
-        #[cfg(not(target_arch = "wasm32"))]
-        for change in &changes {
-            match change {
-                WorkspaceChange::FileChanged { canonical_id, .. }
-                | WorkspaceChange::FileDeleted { canonical_id } => {
-                    self.native_fs.invalidate_realpath_under(canonical_id);
+        self.engine
+            .apply_changes_with_preflight(changes, |changes| {
+                // The realpath memo lives on `NativeFs`, which exists only on
+                // native targets; `wasm32` has no memo to evict.
+                let _ = changes;
+                #[cfg(not(target_arch = "wasm32"))]
+                for change in changes {
+                    match change {
+                        WorkspaceChange::FileChanged { canonical_id, .. }
+                        | WorkspaceChange::FileDeleted { canonical_id } => {
+                            self.native_fs.invalidate_realpath_under(canonical_id);
+                        }
+                        WorkspaceChange::DirectoryTreeDirty { prefix } => {
+                            self.native_fs.invalidate_realpath_under(prefix);
+                        }
+                        WorkspaceChange::OverlaySet { .. }
+                        | WorkspaceChange::OverlayClear { .. }
+                        | WorkspaceChange::ConfigChanged { .. } => {}
+                    }
                 }
-                WorkspaceChange::DirectoryTreeDirty { prefix } => {
-                    self.native_fs.invalidate_realpath_under(prefix);
-                }
-                WorkspaceChange::OverlaySet { .. }
-                | WorkspaceChange::OverlayClear { .. }
-                | WorkspaceChange::ConfigChanged { .. } => {}
-            }
-        }
-        self.engine.apply_changes(changes)
+            })
     }
 
     /// Set exact resolutions for a file.
@@ -261,6 +378,7 @@ impl FilesystemWorkspace {
 
     /// Set the project graph and rebuild the resolver.
     pub fn set_project_graph(&self, graph: ProjectGraph) {
+        self.engine.set_configured_resolver_projects(None);
         *self.engine.project_graph.write() = graph;
         self.engine.rebuild_and_publish();
     }
@@ -282,12 +400,1024 @@ impl FilesystemWorkspace {
 
     /// Add an explicit project to the graph and rebuild the resolver.
     pub fn add_explicit_project(&self, config: VfsProjectConfig) {
+        self.engine.set_configured_resolver_projects(None);
         let mut graph = self.engine.project_graph.write();
         let mut projects: Vec<VfsProjectConfig> = graph.iter().cloned().collect();
         projects.push(config);
         *graph = ProjectGraph::from_configs(projects);
         drop(graph);
         self.engine.rebuild_and_publish();
+    }
+
+    /// Resolve against an immutable, request-local snapshot of every
+    /// filesystem observation made by the resolver.
+    ///
+    /// A discovery pass records live VFS/OS observations but is necessarily
+    /// ReturnOnly. After the observation set is revalidated, the Engine reruns
+    /// the request against a frozen reader. Only that second pass may admit a
+    /// durable resolution product. A new observation in the second pass marks
+    /// the snapshot incomplete and forces another bounded discovery attempt.
+    fn resolve_import_at_published_snapshot(
+        &self,
+        published: &Arc<crate::published_state::PublishedRoot>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        const MAX_SNAPSHOT_ATTEMPTS: usize = 4;
+
+        for _ in 0..MAX_SNAPSHOT_ATTEMPTS {
+            let recorder = FilesystemResolutionRecorder::new(self, Arc::clone(published));
+            let discovery = self.engine.resolve_import_outcome_for_published(
+                &recorder,
+                self.resolution_evidence_source(),
+                published,
+                importer_id,
+                specifier,
+                ctx,
+            );
+            if discovery.non_admission_reason()
+                == Some(verter_audit::NonAdmissionReason::ResolutionViewSuperseded)
+            {
+                return discovery;
+            }
+
+            let frozen = recorder.freeze();
+            if !frozen.revalidate() {
+                continue;
+            }
+            let outcome = self.engine.resolve_import_outcome_for_published(
+                &frozen,
+                self.resolution_evidence_source(),
+                published,
+                importer_id,
+                specifier,
+                ctx,
+            );
+            if frozen.complete() && frozen.revalidate() {
+                return outcome;
+            }
+        }
+
+        crate::resolution_currency::ResolutionOutcome::refused(
+            None,
+            verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
+        )
+    }
+
+    fn resolve_import_with_overlay_snapshot(
+        &self,
+        overlay: &crate::resolution_currency::ResolutionOverlaySnapshot,
+        importer_id: &str,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        const MAX_SNAPSHOT_ATTEMPTS: usize = 4;
+        let Some(published) = self.load_published() else {
+            return crate::resolution_currency::ResolutionOutcome::refused(
+                None,
+                verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance,
+            );
+        };
+
+        for _ in 0..MAX_SNAPSHOT_ATTEMPTS {
+            let recorder = FilesystemResolutionRecorder::new(self, Arc::clone(&published));
+            let discovery = {
+                let reader =
+                    crate::resolution_currency::OverlaySnapshotReader::new(&recorder, overlay);
+                self.engine.resolve_import_outcome_for_published(
+                    &reader,
+                    self.resolution_evidence_source(),
+                    &published,
+                    importer_id,
+                    specifier,
+                    ctx,
+                )
+            };
+            if discovery.non_admission_reason()
+                == Some(verter_audit::NonAdmissionReason::ResolutionViewSuperseded)
+            {
+                return discovery;
+            }
+
+            let frozen = recorder.freeze();
+            if !frozen.revalidate() {
+                continue;
+            }
+            let outcome = {
+                let reader =
+                    crate::resolution_currency::OverlaySnapshotReader::new(&frozen, overlay);
+                self.engine.resolve_import_outcome_for_published(
+                    &reader,
+                    self.resolution_evidence_source(),
+                    &published,
+                    importer_id,
+                    specifier,
+                    ctx,
+                )
+            };
+            if frozen.complete() && frozen.revalidate() {
+                return outcome;
+            }
+        }
+
+        crate::resolution_currency::ResolutionOutcome::refused(
+            None,
+            verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
+        )
+    }
+
+    /// Record a resolution-derived parsed-edge batch against an immutable,
+    /// request-local snapshot of every filesystem observation the recording
+    /// makes.
+    ///
+    /// The live filesystem reader is never resolution-event-bridge complete,
+    /// so every relative edge resolved through it refuses admission and the
+    /// whole batch is dropped. A discovery pass records the live VFS/OS
+    /// observations and publishes nothing; once that observation set
+    /// revalidates, the SAME recording reruns against the frozen reader —
+    /// the only reader whose parsed-edge resolutions the Engine admits.
+    ///
+    /// `None` when no root is published yet (nothing durable may be recorded
+    /// against an unpublished workspace) or when the observation snapshot
+    /// never stabilised within the bounded attempt budget.
+    fn record_parsed_edges_with_frozen_evidence<T>(
+        &self,
+        canonical_id: &str,
+        edges: &[crate::types::ParsedEdge],
+        publish: impl Fn(&dyn crate::traits::WorkspaceRead) -> T,
+    ) -> Option<T> {
+        const MAX_SNAPSHOT_ATTEMPTS: usize = 4;
+        let published = self.load_published()?;
+
+        for _ in 0..MAX_SNAPSHOT_ATTEMPTS {
+            let recorder = FilesystemResolutionRecorder::new(self, Arc::clone(&published));
+            self.engine
+                .observe_parsed_edge_evidence(&recorder, canonical_id, edges);
+
+            let frozen = recorder.freeze();
+            if !frozen.revalidate() {
+                continue;
+            }
+            let product = publish(&frozen);
+            if frozen.complete() && frozen.revalidate() {
+                return Some(product);
+            }
+        }
+        None
+    }
+}
+
+struct FilesystemResolutionObservations {
+    files: parking_lot::Mutex<HashMap<String, Option<Arc<str>>>>,
+    probes: parking_lot::Mutex<HashMap<String, crate::resolution_currency::PathProbe>>,
+    realpaths: parking_lot::Mutex<HashMap<String, Option<String>>>,
+    manifests: parking_lot::Mutex<HashMap<String, Option<crate::types::PackageManifest>>>,
+    directories: parking_lot::Mutex<HashMap<String, ResolutionDirectoryValue>>,
+    consistent: AtomicBool,
+}
+
+impl Default for FilesystemResolutionObservations {
+    fn default() -> Self {
+        Self {
+            files: parking_lot::Mutex::new(HashMap::new()),
+            probes: parking_lot::Mutex::new(HashMap::new()),
+            realpaths: parking_lot::Mutex::new(HashMap::new()),
+            manifests: parking_lot::Mutex::new(HashMap::new()),
+            directories: parking_lot::Mutex::new(HashMap::new()),
+            consistent: AtomicBool::new(true),
+        }
+    }
+}
+
+impl FilesystemResolutionObservations {
+    fn record<T: PartialEq>(
+        &self,
+        map: &parking_lot::Mutex<HashMap<String, T>>,
+        canonical_id: &str,
+        value: T,
+    ) {
+        let mut map = map.lock();
+        let key = observation_key(canonical_id);
+        if map.get(&key).is_some_and(|previous| previous != &value) {
+            self.consistent.store(false, Ordering::Release);
+        }
+        map.insert(key, value);
+    }
+
+    fn record_manifest(&self, canonical_id: &str, value: Option<crate::types::PackageManifest>) {
+        let mut manifests = self.manifests.lock();
+        let key = observation_key(canonical_id);
+        if manifests
+            .get(&key)
+            .is_some_and(|previous| !manifests_equal(previous.as_ref(), value.as_ref()))
+        {
+            self.consistent.store(false, Ordering::Release);
+        }
+        manifests.insert(key, value);
+    }
+
+    fn absorb_directory_evidence(&self, observations: Vec<ResolutionDirectoryObservation>) {
+        for observation in observations {
+            if observation.value == ResolutionDirectoryValue::Unstable {
+                self.consistent.store(false, Ordering::Release);
+            }
+            self.record(&self.directories, &observation.canonical, observation.value);
+        }
+    }
+}
+
+/// Backend-internal memos a live read has PROVEN stale, collected so one
+/// repair call drops exactly them.
+///
+/// Kept as sets rather than repaired inline because the directory-index
+/// repair takes a write lock: a freeze that contradicted forty probes under
+/// one parent must take it once, not forty times.
+#[derive(Debug, Default)]
+struct StaleResolutionMemos {
+    directories: std::collections::BTreeSet<String>,
+    realpath_prefixes: std::collections::BTreeSet<String>,
+    manifests: std::collections::BTreeSet<String>,
+}
+
+struct FilesystemResolutionRecorder<'a> {
+    workspace: &'a FilesystemWorkspace,
+    published: Arc<crate::published_state::PublishedRoot>,
+    observations: FilesystemResolutionObservations,
+}
+
+impl<'a> FilesystemResolutionRecorder<'a> {
+    fn new(
+        workspace: &'a FilesystemWorkspace,
+        published: Arc<crate::published_state::PublishedRoot>,
+    ) -> Self {
+        Self {
+            workspace,
+            published,
+            observations: FilesystemResolutionObservations::default(),
+        }
+    }
+
+    /// Seal the observation set into the immutable evidence the admitted
+    /// replay reads, re-reading every observed path type, file/manifest value,
+    /// realpath and directory membership INDEPENDENTLY from the live
+    /// filesystem.
+    ///
+    /// Discovery is allowed to read through the ordinary workspace caches —
+    /// it only has to identify WHICH observations the resolver makes. The
+    /// frozen evidence may not: a directory index or realpath memo that went
+    /// stale (a path that appeared or vanished without an event reaching the
+    /// bridge) would otherwise be contradicted by [`Self::revalidate`]'s
+    /// independent re-read on every single attempt, so the request could never
+    /// admit again.
+    ///
+    /// A re-read that CONFLICTS with the recorded observation is exactly
+    /// "state newer than the captured root". It enters through the ordinary
+    /// invalidation protocol — the affected directory index and realpath memo
+    /// are marked dirty — so the next attempt's discovery observes the live
+    /// truth, and this snapshot is marked incomplete so the current attempt
+    /// retries instead of admitting a half-refreshed evidence set.
+    fn freeze(self) -> FrozenFilesystemResolutionReader<'a> {
+        self.observations
+            .absorb_directory_evidence(take_resolution_directory_evidence());
+        let workspace = self.workspace;
+        let mut complete = self.observations.consistent.into_inner();
+        // Memos whose cached answer demonstrably disagrees with the live
+        // filesystem, so the retry reads current state instead of replaying
+        // the same stale answer.
+        let mut stale = StaleResolutionMemos::default();
+
+        let mut files = self.observations.files.into_inner();
+        for (canonical, recorded) in &mut files {
+            match workspace.independent_file_bytes(canonical) {
+                Ok(live) if live == *recorded => {}
+                Ok(live) => {
+                    *recorded = live;
+                    complete = false;
+                }
+                Err(()) => complete = false,
+            }
+        }
+
+        let mut probes = self.observations.probes.into_inner();
+        for (canonical, recorded) in &mut probes {
+            let live = workspace.independent_probe_path(canonical);
+            if live == *recorded {
+                continue;
+            }
+            *recorded = live;
+            complete = false;
+            if let Some((parent, _)) = split_parent_basename(canonical) {
+                stale.directories.insert(parent.to_owned());
+                stale.realpath_prefixes.insert(parent.to_owned());
+            }
+        }
+
+        let mut realpaths = self.observations.realpaths.into_inner();
+        for (canonical, recorded) in &mut realpaths {
+            match workspace.independent_realpath(canonical) {
+                Ok(live) if live == *recorded => {}
+                Ok(live) => {
+                    *recorded = live;
+                    complete = false;
+                    stale.realpath_prefixes.insert(canonical.clone());
+                }
+                Err(()) => complete = false,
+            }
+        }
+
+        let mut manifests = self.observations.manifests.into_inner();
+        for (canonical, recorded) in &mut manifests {
+            match workspace.independent_manifest(canonical) {
+                Ok(live) if manifests_equal(live.as_ref(), recorded.as_ref()) => {}
+                Ok(live) => {
+                    *recorded = live;
+                    complete = false;
+                    stale.manifests.insert(canonical.clone());
+                }
+                Err(()) => complete = false,
+            }
+        }
+
+        let mut directories = self.observations.directories.into_inner();
+        for (canonical, recorded) in &mut directories {
+            let live = workspace.independent_directory(canonical);
+            if live == ResolutionDirectoryValue::Unstable {
+                complete = false;
+            }
+            if live == *recorded {
+                continue;
+            }
+            *recorded = live;
+            complete = false;
+            stale.directories.insert(canonical.clone());
+        }
+
+        workspace.repair_resolution_memos(&stale);
+
+        FrozenFilesystemResolutionReader {
+            workspace,
+            published: self.published,
+            content_generation: workspace.engine.current_content_generation(),
+            files,
+            probes,
+            realpaths,
+            manifests,
+            directories,
+            complete: AtomicBool::new(complete),
+        }
+    }
+}
+
+fn observation_key(canonical_id: &str) -> String {
+    crate::resolver::normalize_canonical_id(canonical_id)
+}
+
+impl FilesystemWorkspace {
+    /// Count one live evidence syscall. The counter is the cost model's
+    /// measurement rail: warm reuse on this backend is zero-syscall WITHIN a
+    /// content generation and O(distinct witness path-canonicals) live reads
+    /// per generation, so a change that turns it into O(reuses) is visible
+    /// as a number rather than as a regression nobody notices.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn count_live_evidence_read(&self) {
+        self.engine
+            .vfs_provenance
+            .resolution_evidence_live_read_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn independent_file_bytes(&self, canonical_id: &str) -> Result<Option<Arc<str>>, ()> {
+        if let Some(source) = self.engine.overlay.read().get(canonical_id) {
+            return Ok(Some(source));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.count_live_evidence_read();
+            self.native_fs.read_file_live(canonical_id).map_err(|_| ())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = canonical_id;
+            Err(())
+        }
+    }
+
+    fn independent_probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+        if self.engine.overlay.read().has_overlay(canonical_id) {
+            return crate::resolution_currency::PathProbe::File;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.count_live_evidence_read();
+            self.native_fs.probe_path(canonical_id)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = canonical_id;
+            crate::resolution_currency::PathProbe::Unknown
+        }
+    }
+
+    fn independent_realpath(&self, canonical_id: &str) -> Result<Option<String>, ()> {
+        if self.engine.overlay.read().has_overlay(canonical_id) {
+            return Ok(Some(observation_key(canonical_id)));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.count_live_evidence_read();
+            self.native_fs.realpath_live(canonical_id).map_err(|_| ())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = canonical_id;
+            Err(())
+        }
+    }
+
+    fn independent_manifest(
+        &self,
+        canonical_id: &str,
+    ) -> Result<Option<crate::types::PackageManifest>, ()> {
+        self.independent_file_bytes(canonical_id).map(|source| {
+            source.map(|source| crate::package_index::parse_package_json(source.as_ref()))
+        })
+    }
+
+    /// **This backend's live evidence read** — the implementation behind
+    /// [`crate::traits::WorkspaceRead::observe_resolution_evidence`].
+    ///
+    /// It goes through the `independent_*` rail, which is the whole point:
+    /// the ordinary reads answer a typed probe out of a CLEAN parent
+    /// directory index without a syscall, a realpath out of the `NativeFs`
+    /// memo, a manifest out of the package cache, and bytes out of the shared
+    /// file snapshot — all four refreshed only by an event. When no event
+    /// exists (a package installed into an unwatched `node_modules`), reading
+    /// through them can only ever confirm them. The overlay is the one thing
+    /// consulted, because an open buffer's content is authoritative state
+    /// rather than a copy of disk.
+    ///
+    /// Cost, per canonical: one `metadata` for a path that is absent, or
+    /// inaccessible, or unclassifiable; plus one `canonicalize` for a present
+    /// one; plus one `read` for a present manifest. Every non-present probe
+    /// short-circuits the other two — the same errno the metadata call just
+    /// reported would come back from both, so skipping them is an identical
+    /// answer for fewer syscalls, not an approximation.
+    ///
+    /// `Absent`, `Inaccessible` and `Unknown` are all observed VALUES, and all
+    /// three are returned as such. `Inaccessible` in particular is a
+    /// first-class outcome this codebase already acts on — an observed
+    /// `Inaccessible` forces
+    /// [`verter_audit::NonAdmissionReason::ResolutionInaccessiblePath`] — so
+    /// dropping it here would leave the candidate's `PathProbe` fact frozen at
+    /// its last readable value, its signature validating forever, and the
+    /// canonical pinned in the pending ledger, never stamped: a positive
+    /// candidate whose target became unreadable would be served warm for the
+    /// process's lifetime. Revoked macOS Full Disk Access, a root-owned bind
+    /// mount under `node_modules`, `ELOOP`/`EIO`, and a Windows sharing
+    /// violation all land here.
+    ///
+    /// `None` is reserved for "this source genuinely cannot observe the
+    /// canonical at all": unstable I/O behind a present path. A read that did
+    /// not happen must certify nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn observe_live_evidence(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::resolution_currency::LiveResolutionObservation> {
+        use crate::resolution_currency::{
+            is_package_manifest_path, manifest_fingerprint_of, LiveResolutionObservation, PathProbe,
+        };
+
+        let key = observation_key(canonical_id);
+        let is_manifest = is_package_manifest_path(&key);
+        let probe = self.independent_probe_path(canonical_id);
+        match probe {
+            PathProbe::File | PathProbe::Directory => {}
+            PathProbe::Absent | PathProbe::Inaccessible | PathProbe::Unknown => {
+                return Some(LiveResolutionObservation {
+                    probe,
+                    realpath: None,
+                    manifest: is_manifest.then_some(None),
+                });
+            }
+        }
+        let realpath = self
+            .independent_realpath(canonical_id)
+            .ok()?
+            .map(|path| crate::resolver::normalize_canonical_id(&path));
+        let manifest = if is_manifest {
+            Some(
+                self.independent_manifest(canonical_id)
+                    .ok()?
+                    .as_ref()
+                    .map(manifest_fingerprint_of),
+            )
+        } else {
+            None
+        };
+        Some(LiveResolutionObservation {
+            probe,
+            realpath,
+            manifest,
+        })
+    }
+
+    /// **This backend's memo repair** — the one place a stale directory index
+    /// entry or realpath memo entry is dropped.
+    ///
+    /// Called only where a live read has already CONTRADICTED a recorded
+    /// value: by `FilesystemResolutionRecorder::freeze` when its independent
+    /// re-read disagrees with a discovery observation, and by the evidence
+    /// hook when it disagrees with the world's recorded baseline. One
+    /// invalidation rail, driven from two places, so a repair can never be
+    /// performed by one path and skipped by the other.
+    fn repair_resolution_memos(&self, stale: &StaleResolutionMemos) {
+        if !stale.directories.is_empty() {
+            let mut dir_index = self.engine.dir_index.write();
+            for directory in &stale.directories {
+                dir_index.mark_dirty(directory);
+            }
+        }
+        for manifest in &stale.manifests {
+            // BOTH layers, or the repair does not repair. The parsed manifest
+            // is derived from bytes the shared file snapshot is holding
+            // read-through, so dropping only the parse re-parses the same
+            // stale bytes and the next discovery pass observes the same stale
+            // manifest the live read just contradicted — a two-pass bridge
+            // that can never converge, which surfaces as a resolution refused
+            // for retry exhaustion rather than as a stale answer.
+            //
+            // The overlay is untouched: it wins over the snapshot in every
+            // read, and its content is authoritative rather than cached.
+            self.engine.invalidate_package_manifest(manifest);
+            self.engine.snapshot.write().remove(manifest);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        for prefix in &stale.realpath_prefixes {
+            self.native_fs.invalidate_realpath_under(prefix);
+        }
+    }
+
+    /// Read `canonical_id` live and repair the memos that the live value
+    /// proves stale — exactly the memos, and only on disagreement.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn observe_live_evidence_and_repair(
+        &self,
+        canonical_id: &str,
+        recorded: Option<&crate::resolution_currency::RecordedResolutionBaseline>,
+    ) -> Option<crate::resolution_currency::LiveResolutionObservation> {
+        let live = self.observe_live_evidence(canonical_id)?;
+        // No belief to contradict — a first observation repairs nothing,
+        // because nothing is evidence that anything cached is wrong.
+        let disagreement = recorded
+            .map(|recorded| recorded.disagreements(&live))
+            .unwrap_or_default();
+        if !disagreement.any() {
+            return Some(live);
+        }
+        let mut stale = StaleResolutionMemos::default();
+        if disagreement.probe {
+            // A path that appeared or vanished invalidates its parent's
+            // membership; both its own realpath and anything resolving
+            // THROUGH it are stale.
+            if let Some((parent, _)) = split_parent_basename(canonical_id) {
+                stale.directories.insert(parent.to_owned());
+            }
+            stale
+                .realpath_prefixes
+                .insert(observation_key(canonical_id));
+        }
+        if disagreement.realpath {
+            // A symlink can retarget with the typed probe UNCHANGED (`File`
+            // before, `File` after), so this limb is not implied by the one
+            // above: without it the memo keeps answering with the old target.
+            stale
+                .realpath_prefixes
+                .insert(observation_key(canonical_id));
+        }
+        if disagreement.manifest {
+            stale.manifests.insert(observation_key(canonical_id));
+        }
+        self.repair_resolution_memos(&stale);
+        Some(live)
+    }
+
+    /// This backend's declared evidence capability, stated at every Engine
+    /// resolution entry it calls.
+    ///
+    /// `Uncovered`: no watcher covers `node_modules`, so a package appearing
+    /// there reaches this backend with no event of any kind. On `wasm32`
+    /// there is no live filesystem behind the caches at all — no
+    /// `independent_*` read can succeed — so the honest answer is `Inert`, and
+    /// nothing is re-observed or stamped rather than a fabricated `Unknown`
+    /// being folded over every recorded baseline.
+    fn resolution_evidence_source(
+        &self,
+    ) -> crate::resolution_currency::ResolutionEvidenceSource<'_> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::resolution_currency::ResolutionEvidenceSource::Uncovered(self)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::resolution_currency::ResolutionEvidenceSource::Inert
+        }
+    }
+
+    fn independent_directory(&self, canonical_id: &str) -> ResolutionDirectoryValue {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match self.native_fs.read_dir(canonical_id) {
+                Ok(mut entries) => {
+                    entries.sort();
+                    ResolutionDirectoryValue::Entries(entries)
+                }
+                Err(crate::error::VfsError::NotFound(_)) => ResolutionDirectoryValue::NotFound,
+                Err(error) if vfs_error_is_not_a_directory(&error) => {
+                    ResolutionDirectoryValue::NotADirectory
+                }
+                Err(_) => ResolutionDirectoryValue::Unstable,
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = canonical_id;
+            ResolutionDirectoryValue::Unstable
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl crate::resolution_currency::LiveResolutionEvidence for FilesystemWorkspace {
+    fn observe_live_resolution_evidence(
+        &self,
+        canonical_id: &str,
+        recorded: Option<&crate::resolution_currency::RecordedResolutionBaseline>,
+    ) -> Option<crate::resolution_currency::LiveResolutionObservation> {
+        self.observe_live_evidence_and_repair(canonical_id, recorded)
+    }
+}
+
+impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+        let result = crate::traits::WorkspaceRead::read_file(self.workspace, canonical_id);
+        self.observations
+            .record(&self.observations.files, canonical_id, result.clone());
+        result
+    }
+
+    fn file_exists(&self, canonical_id: &str) -> bool {
+        matches!(
+            self.probe_path(canonical_id),
+            crate::resolution_currency::PathProbe::File
+                | crate::resolution_currency::PathProbe::Directory
+        )
+    }
+
+    fn probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+        let result = crate::traits::WorkspaceRead::probe_path(self.workspace, canonical_id);
+        self.observations
+            .record(&self.observations.probes, canonical_id, result);
+        result
+    }
+
+    fn resolution_event_bridge_complete(&self) -> bool {
+        // The DISCOVERY pass reads live disk through mutable caches, so it
+        // can never admit; only the frozen replay below can. It is NOT
+        // request-local, though: it may READ the shared candidate slot, so
+        // a warm owner edge answers without touching the filesystem at
+        // all. Suppressing the read here is what made every resolution on
+        // this backend cold.
+        false
+    }
+
+    fn take_resolution_directory_observations(&self) -> Vec<String> {
+        let observations = take_resolution_directory_evidence();
+        let canonicals = observations
+            .iter()
+            .map(|observation| observation.canonical.clone())
+            .collect();
+        self.observations.absorb_directory_evidence(observations);
+        canonicals
+    }
+
+    fn resolution_population(&self) -> crate::resolution_currency::ResolutionPopulation {
+        crate::traits::WorkspaceRead::resolution_population(self.workspace)
+    }
+
+    fn capture_resolution_world(
+        &self,
+    ) -> Option<Arc<crate::resolution_currency::CapturedResolutionWorld>> {
+        crate::traits::WorkspaceRead::capture_resolution_world(self.workspace)
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        let result = crate::traits::WorkspaceRead::realpath(self.workspace, canonical_id);
+        self.observations
+            .record(&self.observations.realpaths, canonical_id, result.clone());
+        result
+    }
+
+    fn read_package_manifest(&self, canonical_id: &str) -> Option<crate::types::PackageManifest> {
+        let result =
+            crate::traits::WorkspaceRead::read_package_manifest(self.workspace, canonical_id);
+        self.observations
+            .record_manifest(canonical_id, result.clone());
+        result
+    }
+
+    fn classify_file(&self, canonical_id: &str) -> verter_language::FileLanguage {
+        crate::traits::WorkspaceRead::classify_file(self.workspace, canonical_id)
+    }
+
+    fn is_workspace_owned(&self, canonical_id: &str) -> bool {
+        let resolved = self.realpath(canonical_id);
+        self.workspace
+            .engine
+            .is_workspace_owned(resolved.as_deref().unwrap_or(canonical_id))
+    }
+
+    fn is_package_backed(&self, canonical_id: &str) -> bool {
+        let resolved = self.realpath(canonical_id);
+        self.workspace
+            .engine
+            .is_package_backed(resolved.as_deref().unwrap_or(canonical_id))
+    }
+
+    fn content_generation(&self) -> u64 {
+        self.workspace.engine.current_content_generation()
+    }
+
+    fn resolution_fact_generation(&self) -> u64 {
+        self.workspace.engine.current_resolution_fact_generation()
+    }
+
+    fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
+        self.workspace
+            .engine
+            .last_content_transition_generation(canonical_id)
+    }
+
+    fn published_root(&self) -> Option<Arc<crate::published_state::PublishedRoot>> {
+        Some(Arc::clone(&self.published))
+    }
+
+    fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
+        crate::traits::WorkspaceRead::reverse_deps_for(self.workspace, canonical_id)
+    }
+
+    fn forward_deps_for(&self, canonical_id: &str) -> Vec<String> {
+        crate::traits::WorkspaceRead::forward_deps_for(self.workspace, canonical_id)
+    }
+
+    fn dependency_snapshot(&self, canonical_id: &str) -> Option<crate::DependencySnapshotView> {
+        crate::traits::WorkspaceRead::dependency_snapshot(self.workspace, canonical_id)
+    }
+
+    fn read_dir(&self, dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
+        crate::traits::WorkspaceRead::read_dir(self.workspace, dir)
+    }
+
+    fn walk(
+        &self,
+        root: &str,
+        filter_dir: &dyn Fn(&str) -> bool,
+        filter_file: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<String>, crate::error::VfsError> {
+        self.observations.consistent.store(false, Ordering::Release);
+        crate::traits::WorkspaceRead::walk(self.workspace, root, filter_dir, filter_file)
+    }
+
+    fn is_dir(&self, path: &str) -> bool {
+        crate::traits::WorkspaceRead::is_dir(self.workspace, path)
+    }
+}
+
+struct FrozenFilesystemResolutionReader<'a> {
+    workspace: &'a FilesystemWorkspace,
+    published: Arc<crate::published_state::PublishedRoot>,
+    content_generation: u64,
+    files: HashMap<String, Option<Arc<str>>>,
+    probes: HashMap<String, crate::resolution_currency::PathProbe>,
+    realpaths: HashMap<String, Option<String>>,
+    manifests: HashMap<String, Option<crate::types::PackageManifest>>,
+    directories: HashMap<String, ResolutionDirectoryValue>,
+    complete: AtomicBool,
+}
+
+impl FrozenFilesystemResolutionReader<'_> {
+    fn mark_incomplete(&self) {
+        self.complete.store(false, Ordering::Release);
+    }
+
+    fn complete(&self) -> bool {
+        self.complete.load(Ordering::Acquire)
+    }
+
+    fn revalidate(&self) -> bool {
+        if !self.complete() {
+            return false;
+        }
+        if self.workspace.engine.current_content_generation() != self.content_generation {
+            return false;
+        }
+        let Some(current) = self.workspace.engine.load_published() else {
+            return false;
+        };
+        if !Arc::ptr_eq(&current, &self.published) {
+            return false;
+        }
+        self.files.iter().all(|(canonical, expected)| {
+            self.workspace
+                .independent_file_bytes(canonical)
+                .is_ok_and(|actual| actual == *expected)
+        }) && self.probes.iter().all(|(canonical, expected)| {
+            self.workspace.independent_probe_path(canonical) == *expected
+        }) && self.realpaths.iter().all(|(canonical, expected)| {
+            self.workspace
+                .independent_realpath(canonical)
+                .is_ok_and(|actual| actual == *expected)
+        }) && self.manifests.iter().all(|(canonical, expected)| {
+            self.workspace
+                .independent_manifest(canonical)
+                .is_ok_and(|actual| manifests_equal(actual.as_ref(), expected.as_ref()))
+        }) && self.directories.iter().all(|(canonical, expected)| {
+            self.workspace.independent_directory(canonical) == *expected
+        })
+    }
+}
+
+fn manifests_equal(
+    left: Option<&crate::types::PackageManifest>,
+    right: Option<&crate::types::PackageManifest>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.name == right.name
+                && left.version == right.version
+                && left.main == right.main
+                && left.module == right.module
+                && left.types == right.types
+                && left.typings == right.typings
+                && left.exports == right.exports
+                && left.imports == right.imports
+                && left.raw == right.raw
+        }
+        _ => false,
+    }
+}
+
+impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+        match self.files.get(&observation_key(canonical_id)) {
+            Some(result) => result.clone(),
+            None => {
+                self.mark_incomplete();
+                None
+            }
+        }
+    }
+
+    fn file_exists(&self, canonical_id: &str) -> bool {
+        matches!(
+            self.probe_path(canonical_id),
+            crate::resolution_currency::PathProbe::File
+                | crate::resolution_currency::PathProbe::Directory
+        )
+    }
+
+    fn probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+        self.probes
+            .get(&observation_key(canonical_id))
+            .copied()
+            .unwrap_or_else(|| {
+                self.mark_incomplete();
+                crate::resolution_currency::PathProbe::Unknown
+            })
+    }
+
+    fn resolution_event_bridge_complete(&self) -> bool {
+        self.complete() && self.revalidate()
+    }
+
+    fn resolution_population(&self) -> crate::resolution_currency::ResolutionPopulation {
+        crate::traits::WorkspaceRead::resolution_population(self.workspace)
+    }
+
+    fn capture_resolution_world(
+        &self,
+    ) -> Option<Arc<crate::resolution_currency::CapturedResolutionWorld>> {
+        crate::traits::WorkspaceRead::capture_resolution_world(self.workspace)
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        match self.realpaths.get(&observation_key(canonical_id)) {
+            Some(result) => result.clone(),
+            None => {
+                self.mark_incomplete();
+                None
+            }
+        }
+    }
+
+    fn read_package_manifest(&self, canonical_id: &str) -> Option<crate::types::PackageManifest> {
+        match self.manifests.get(&observation_key(canonical_id)) {
+            Some(result) => result.clone(),
+            None => {
+                self.mark_incomplete();
+                None
+            }
+        }
+    }
+
+    fn classify_file(&self, canonical_id: &str) -> verter_language::FileLanguage {
+        crate::traits::WorkspaceRead::classify_file(self.workspace, canonical_id)
+    }
+
+    fn is_workspace_owned(&self, canonical_id: &str) -> bool {
+        let resolved = self.realpath(canonical_id);
+        self.workspace
+            .engine
+            .is_workspace_owned(resolved.as_deref().unwrap_or(canonical_id))
+    }
+
+    fn is_package_backed(&self, canonical_id: &str) -> bool {
+        let resolved = self.realpath(canonical_id);
+        self.workspace
+            .engine
+            .is_package_backed(resolved.as_deref().unwrap_or(canonical_id))
+    }
+
+    fn content_generation(&self) -> u64 {
+        self.content_generation
+    }
+
+    fn resolution_fact_generation(&self) -> u64 {
+        crate::traits::WorkspaceRead::resolution_fact_generation(self.workspace)
+    }
+
+    fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
+        self.workspace
+            .engine
+            .last_content_transition_generation(canonical_id)
+    }
+
+    fn published_root(&self) -> Option<Arc<crate::published_state::PublishedRoot>> {
+        Some(Arc::clone(&self.published))
+    }
+
+    fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
+        crate::traits::WorkspaceRead::reverse_deps_for(self.workspace, canonical_id)
+    }
+
+    fn forward_deps_for(&self, canonical_id: &str) -> Vec<String> {
+        crate::traits::WorkspaceRead::forward_deps_for(self.workspace, canonical_id)
+    }
+
+    fn dependency_snapshot(&self, canonical_id: &str) -> Option<crate::DependencySnapshotView> {
+        crate::traits::WorkspaceRead::dependency_snapshot(self.workspace, canonical_id)
+    }
+
+    fn read_dir(&self, dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
+        match self.directories.get(&observation_key(dir)) {
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(ResolutionDirectoryValue::Entries(entries)) => Ok(entries.clone()),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(ResolutionDirectoryValue::NotFound) => {
+                Err(crate::error::VfsError::NotFound(observation_key(dir)))
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(ResolutionDirectoryValue::NotADirectory) => Err(crate::error::VfsError::Io(
+                std::io::Error::from(std::io::ErrorKind::NotADirectory),
+            )),
+            Some(ResolutionDirectoryValue::Unstable) | None => {
+                self.mark_incomplete();
+                Err(crate::error::VfsError::UnsupportedOperation(
+                    "incomplete frozen resolution directory",
+                ))
+            }
+        }
+    }
+
+    fn walk(
+        &self,
+        _root: &str,
+        _filter_dir: &dyn Fn(&str) -> bool,
+        _filter_file: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<String>, crate::error::VfsError> {
+        self.mark_incomplete();
+        Err(crate::error::VfsError::UnsupportedOperation(
+            "walk is not a frozen resolution observation",
+        ))
+    }
+
+    fn is_dir(&self, path: &str) -> bool {
+        matches!(
+            self.probe_path(path),
+            crate::resolution_currency::PathProbe::Directory
+        )
     }
 }
 
@@ -409,6 +1539,47 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         false
     }
 
+    fn probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+        if self.engine.overlay.read().has_overlay(canonical_id)
+            || self.engine.snapshot.read().contains(canonical_id)
+        {
+            return crate::resolution_currency::PathProbe::File;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // A complete clean directory index can answer stable absence
+            // without a syscall. A positive still goes through metadata so a
+            // directory is not laundered into File.
+            if self.ensure_parent_dir_indexed(canonical_id) == Some(false) {
+                return crate::resolution_currency::PathProbe::Absent;
+            }
+            self.native_fs.probe_path(canonical_id)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::resolution_currency::PathProbe::Absent
+        }
+    }
+
+    fn resolution_event_bridge_complete(&self) -> bool {
+        false
+    }
+
+    fn take_resolution_directory_observations(&self) -> Vec<String> {
+        take_resolution_directory_observations()
+    }
+
+    fn resolution_population(&self) -> crate::resolution_currency::ResolutionPopulation {
+        self.engine.default_resolution_population()
+    }
+
+    fn capture_resolution_world(
+        &self,
+    ) -> Option<Arc<crate::resolution_currency::CapturedResolutionWorld>> {
+        self.engine
+            .capture_published_resolution_world(self.engine.default_resolution_population())
+    }
+
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         // If in overlay or snapshot, return as-is
         if self.engine.overlay.read().has_overlay(canonical_id)
@@ -436,8 +1607,48 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         specifier: &str,
         ctx: crate::types::ResolutionContext,
     ) -> Option<crate::types::ResolveResult> {
-        self.engine
-            .resolve_import(self, importer_id, specifier, ctx)
+        self.engine.resolve_import_with_evidence(
+            self,
+            self.resolution_evidence_source(),
+            importer_id,
+            specifier,
+            ctx,
+        )
+    }
+
+    fn resolve_import_outcome(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        let Some(published) = self.load_published() else {
+            return crate::resolution_currency::ResolutionOutcome::refused(
+                None,
+                verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance,
+            );
+        };
+        self.resolve_import_at_published_snapshot(&published, importer_id, specifier, ctx)
+    }
+
+    fn resolve_import_outcome_with_overlay(
+        &self,
+        overlay: &crate::resolution_currency::ResolutionOverlaySnapshot,
+        importer_id: &str,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        self.resolve_import_with_overlay_snapshot(overlay, importer_id, specifier, ctx)
+    }
+
+    fn resolve_import_at_published(
+        &self,
+        published: &Arc<crate::published_state::PublishedRoot>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        self.resolve_import_at_published_snapshot(published, importer_id, specifier, ctx)
     }
 
     fn resolve_import_for_project(
@@ -448,6 +1659,16 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     ) -> Option<crate::types::ResolveResult> {
         self.engine
             .resolve_import_for_project(self, owner, specifier, ctx)
+    }
+
+    fn resolve_import_for_project_outcome(
+        &self,
+        owner: &crate::types::ProjectOwnership,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        self.engine
+            .resolve_import_for_project_outcome(self, owner, specifier, ctx)
     }
 
     fn is_workspace_owned(&self, canonical_id: &str) -> bool {
@@ -464,6 +1685,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
 
     fn content_generation(&self) -> u64 {
         self.engine.current_content_generation()
+    }
+
+    fn resolution_fact_generation(&self) -> u64 {
+        self.engine.current_resolution_fact_generation()
     }
 
     fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
@@ -483,8 +1708,12 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     }
 
     fn preferred_specifier(&self, importer_id: &str, target_id: &str) -> Option<String> {
-        self.engine
-            .preferred_specifier(self, importer_id, target_id)
+        self.engine.preferred_specifier(
+            self,
+            self.resolution_evidence_source(),
+            importer_id,
+            target_id,
+        )
     }
 
     fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
@@ -512,7 +1741,9 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn read_dir(&self, dir: &str) -> Result<Vec<crate::error::DirEntry>, crate::error::VfsError> {
-        self.native_fs.read_dir(dir)
+        let result = self.native_fs.read_dir(dir);
+        record_resolution_directory_result(dir, &result);
+        result
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -569,7 +1800,9 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     }
 
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[crate::types::ParsedEdge]) {
-        self.engine.record_parsed_edges(self, canonical_id, edges);
+        self.record_parsed_edges_with_frozen_evidence(canonical_id, edges, |reader| {
+            self.engine.record_parsed_edges(reader, canonical_id, edges);
+        });
     }
 
     fn set_exact_resolutions(
@@ -586,12 +1819,15 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         edges: &[crate::types::ParsedEdge],
         resolutions: Vec<crate::types::ExactResolution>,
     ) -> crate::types::ExactResolutionResult {
-        self.engine.record_parsed_edges_with_exact_resolutions(
-            self,
-            canonical_id,
-            edges,
-            resolutions,
-        )
+        self.record_parsed_edges_with_frozen_evidence(canonical_id, edges, |reader| {
+            self.engine.record_parsed_edges_with_exact_resolutions(
+                reader,
+                canonical_id,
+                edges,
+                resolutions.clone(),
+            )
+        })
+        .unwrap_or_default()
     }
 
     fn replace_semantic_transitive(
@@ -613,40 +1849,56 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         // the content generation. Bumping when nothing changed would
         // needlessly clear the lazy-resolution cache and force
         // downstream observers to re-validate.
-        let changed = self
-            .engine
-            .overlay
-            .write()
-            .set(canonical_id.to_string(), source);
-        if changed {
-            self.engine.invalidate_package_manifest(canonical_id);
-            self.engine.bump_content_generation_for(canonical_id);
-        }
+        self.engine.mutate_overlay_upsert(canonical_id, || {
+            let changed = self
+                .engine
+                .overlay
+                .write()
+                .set(canonical_id.to_string(), source);
+            if changed {
+                self.engine.invalidate_package_manifest(canonical_id);
+            }
+            ((), changed)
+        });
     }
 
     fn notify_close(&self, canonical_id: &str) {
-        self.engine.invalidate_package_manifest(canonical_id);
-        self.engine.overlay.write().clear(canonical_id);
-        // Invalidate snapshot so next read falls through to disk,
-        // picking up any saves made while the overlay was active.
-        self.engine.snapshot.write().remove(canonical_id);
-        self.engine.bump_content_generation_for(canonical_id);
+        self.engine.mutate_overlay_close(canonical_id, || {
+            self.engine.invalidate_package_manifest(canonical_id);
+            let changed = self.engine.overlay.write().clear(canonical_id);
+            // Invalidate snapshot so next read falls through to disk,
+            // picking up any saves made while the overlay was active.
+            self.engine.snapshot.write().remove(canonical_id);
+            ((), changed)
+        });
     }
 
     fn notify_delete(&self, canonical_id: &str) {
-        self.engine.invalidate_package_manifest(canonical_id);
-        if let Some((parent, _)) = split_parent_basename(canonical_id) {
-            self.engine.dir_index.write().mark_dirty(parent);
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        self.native_fs.invalidate_realpath_under(canonical_id);
-        self.engine.overlay.write().clear(canonical_id);
-        self.engine.snapshot.write().remove(canonical_id);
-        self.engine.edges.write().remove_file(canonical_id);
-        self.engine.bump_content_generation_for(canonical_id);
+        self.engine.mutate_overlay_close(canonical_id, || {
+            let changed = self.engine.overlay.write().clear(canonical_id);
+            ((), changed)
+        });
+        self.engine.mutate_content_for(
+            canonical_id,
+            true,
+            Some(crate::resolution_currency::PathProbe::Absent),
+            crate::engine::BaseRealpathTransition::Known(None),
+            || {
+                self.engine.invalidate_package_manifest(canonical_id);
+                if let Some((parent, _)) = split_parent_basename(canonical_id) {
+                    self.engine.dir_index.write().mark_dirty(parent);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                self.native_fs.invalidate_realpath_under(canonical_id);
+                self.engine.snapshot.write().remove(canonical_id);
+                ((), true)
+            },
+        );
     }
 
     fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {
+        self.engine
+            .set_configured_resolver_projects(Some(projects.clone()));
         let vfs_configs: Vec<crate::project_graph::VfsProjectConfig> = projects
             .into_iter()
             .map(|p| crate::project_graph::VfsProjectConfig {
@@ -671,72 +1923,103 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn write_file(&self, path: &str, content: &str) -> Result<(), crate::error::VfsError> {
-        self.native_fs.write_file(path, content)?;
-        self.engine.invalidate_package_manifest(path);
-        mark_parent_dir_dirty(&self.engine, path);
-        self.engine.edges.write().remove_file(path);
-        // Inject into snapshot so subsequent reads see the new content
-        self.engine
-            .snapshot
-            .write()
-            .inject(path.to_string(), Arc::from(content));
-        self.engine.bump_content_generation_for(path);
-        Ok(())
+        self.engine.mutate_content_for(
+            path,
+            true,
+            Some(crate::resolution_currency::PathProbe::File),
+            crate::engine::BaseRealpathTransition::Unknown,
+            || {
+                if let Err(error) = self.native_fs.write_file(path, content) {
+                    return (Err(error), false);
+                }
+                self.engine.invalidate_package_manifest(path);
+                mark_parent_dir_dirty(&self.engine, path);
+                // Inject into snapshot so subsequent reads see the new content.
+                self.engine
+                    .snapshot
+                    .write()
+                    .inject(path.to_string(), Arc::from(content));
+                (Ok(()), true)
+            },
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn create_dir_all(&self, path: &str) -> Result<(), crate::error::VfsError> {
-        self.native_fs.create_dir_all(path)?;
-        {
-            let mut dir_index = self.engine.dir_index.write();
-            dir_index.mark_dirty(path);
-        }
-        mark_parent_dir_dirty(&self.engine, path);
-        self.engine.bump_content_generation();
-        Ok(())
+        self.engine.mutate_content_for(
+            path,
+            false,
+            Some(crate::resolution_currency::PathProbe::Directory),
+            crate::engine::BaseRealpathTransition::Unknown,
+            || {
+                if let Err(error) = self.native_fs.create_dir_all(path) {
+                    return (Err(error), false);
+                }
+                {
+                    let mut dir_index = self.engine.dir_index.write();
+                    dir_index.mark_dirty(path);
+                }
+                mark_parent_dir_dirty(&self.engine, path);
+                (Ok(()), true)
+            },
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn delete_file(&self, path: &str) -> Result<(), crate::error::VfsError> {
-        self.native_fs.delete_file(path)?;
-        self.engine.invalidate_package_manifest(path);
-        mark_parent_dir_dirty(&self.engine, path);
-        self.engine.snapshot.write().remove(path);
-        self.engine.edges.write().remove_file(path);
-        self.engine.bump_content_generation_for(path);
-        Ok(())
+        self.engine.mutate_content_for(
+            path,
+            true,
+            Some(crate::resolution_currency::PathProbe::Absent),
+            crate::engine::BaseRealpathTransition::Known(None),
+            || {
+                if let Err(error) = self.native_fs.delete_file(path) {
+                    return (Err(error), false);
+                }
+                self.engine.invalidate_package_manifest(path);
+                mark_parent_dir_dirty(&self.engine, path);
+                self.engine.snapshot.write().remove(path);
+                (Ok(()), true)
+            },
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn delete_dir_all(&self, path: &str) -> Result<(), crate::error::VfsError> {
-        self.native_fs.delete_dir_all(path)?;
-        self.engine.package_index.write().invalidate_under(path);
-        {
-            let mut dir_index = self.engine.dir_index.write();
-            dir_index.mark_dirty_under(path);
-        }
-        mark_parent_dir_dirty(&self.engine, path);
-        self.engine.snapshot.write().remove_under(path);
-        self.engine.edges.write().remove_under(path);
-        // A recursive disk delete transitions EVERY canonical under
-        // `path` — including ones the snapshot cache never saw (the
-        // filesystem engine reads through to disk). Record the SUBTREE
-        // so a delete→recreate of any member never serves a retained
-        // pre-delete artifact as fresh.
-        self.engine.record_subtree_content_transition(path);
-        self.engine.bump_content_generation();
-        Ok(())
+        self.engine.mutate_content_subtree(path, true, || {
+            if let Err(error) = self.native_fs.delete_dir_all(path) {
+                return (Err(error), false);
+            }
+            self.engine.package_index.write().invalidate_under(path);
+            {
+                let mut dir_index = self.engine.dir_index.write();
+                dir_index.mark_dirty_under(path);
+            }
+            mark_parent_dir_dirty(&self.engine, path);
+            self.engine.snapshot.write().remove_under(path);
+            // A recursive disk delete transitions EVERY canonical under
+            // `path` — including ones the snapshot cache never saw.
+            (Ok(()), true)
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn copy_file(&self, src: &str, dst: &str) -> Result<(), crate::error::VfsError> {
-        self.native_fs.copy_file(src, dst)?;
-        self.engine.invalidate_package_manifest(dst);
-        mark_parent_dir_dirty(&self.engine, dst);
-        self.engine.snapshot.write().remove(dst);
-        self.engine.edges.write().remove_file(dst);
-        self.engine.bump_content_generation_for(dst);
-        Ok(())
+        self.engine.mutate_content_for(
+            dst,
+            true,
+            Some(crate::resolution_currency::PathProbe::File),
+            crate::engine::BaseRealpathTransition::Unknown,
+            || {
+                if let Err(error) = self.native_fs.copy_file(src, dst) {
+                    return (Err(error), false);
+                }
+                self.engine.invalidate_package_manifest(dst);
+                mark_parent_dir_dirty(&self.engine, dst);
+                self.engine.snapshot.write().remove(dst);
+                (Ok(()), true)
+            },
+        )
     }
 
     fn register_audit_sink(

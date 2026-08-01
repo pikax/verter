@@ -70,13 +70,6 @@ fn synthetic_facts() -> Arc<ResolvedImportFacts> {
 }
 
 /// Build a `ResolvedImportFactsKey` with explicit hash components.
-///
-/// Helper defaults `known_miss_generation` to `[0u8; 16]` — the same
-/// value the producer composes when the owner has no recorded
-/// known-misses (empty
-/// `DerivedRawState::import_routes_known_miss_recorded_at_generation`
-/// or no `DerivedRawState` entry yet). Tests that want to vary
-/// `known_miss_generation` construct the literal directly.
 fn key_with(
     canonical: &str,
     content_hash: Hash16,
@@ -90,8 +83,19 @@ fn key_with(
         parse_env_hash,
         resolve_env_hash,
         resolver_version,
-        known_miss_generation: [0u8; 16],
     }
+}
+
+/// Seed the store under the SAME witness the production producer
+/// composes for `key.canonical`, so a seeded bundle validates through
+/// exactly the rail a produced one does.
+fn seed(host: &VerterHost, key: ResolvedImportFactsKey, payload: Arc<ResolvedImportFacts>) -> bool {
+    let facts = host
+        .resolved_import_facts_witness_for(key.canonical.as_ref(), key.content_hash)
+        .expect("the production witness must be rootable for a seeded owner");
+    host.project_type_store()
+        .resolved_import_facts()
+        .insert_if_absent(key, payload, facts)
 }
 
 /// Build an `EnvHashes` carrier with a non-default lib_env_hash so a
@@ -139,10 +143,7 @@ fn key_excludes_lib_env_hash() {
         RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
     );
     let payload = synthetic_facts();
-    let admitted = host
-        .project_type_store()
-        .resolved_import_facts()
-        .insert_if_absent(key, Arc::clone(&payload));
+    let admitted = seed(&host, key, Arc::clone(&payload));
     assert!(admitted, "first admission should win on the empty cache");
 
     let view_a =
@@ -190,9 +191,7 @@ fn lib_change_does_not_invalidate_resolved_import_facts() {
         RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
     );
     let payload = synthetic_facts();
-    host.project_type_store()
-        .resolved_import_facts()
-        .insert_if_absent(key, Arc::clone(&payload));
+    seed(&host, key, Arc::clone(&payload));
 
     let view_with_dom_lib = HostView::with_env_hashes(
         Arc::clone(&host),
@@ -251,9 +250,7 @@ fn paths_edit_invalidates_resolved_import_facts() {
         resolve_h_before,
         RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
     );
-    host.project_type_store()
-        .resolved_import_facts()
-        .insert_if_absent(key_before, synthetic_facts());
+    seed(&host, key_before, synthetic_facts());
 
     let view_after = HostView::with_env_hashes(
         Arc::clone(&host),
@@ -308,12 +305,8 @@ fn two_resolve_envs_coexist() {
     let payload_a = synthetic_facts();
     let payload_b = synthetic_facts();
 
-    host.project_type_store()
-        .resolved_import_facts()
-        .insert_if_absent(key_a, Arc::clone(&payload_a));
-    host.project_type_store()
-        .resolved_import_facts()
-        .insert_if_absent(key_b, Arc::clone(&payload_b));
+    seed(&host, key_a, Arc::clone(&payload_a));
+    seed(&host, key_b, Arc::clone(&payload_b));
 
     assert_eq!(
         host.project_type_store()
@@ -377,9 +370,7 @@ fn parse_env_hash_isolates_cache() {
         resolve_h,
         RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
     );
-    host.project_type_store()
-        .resolved_import_facts()
-        .insert_if_absent(key_a, synthetic_facts());
+    seed(&host, key_a, synthetic_facts());
 
     let view_b = HostView::with_env_hashes(
         Arc::clone(&host),
@@ -411,9 +402,7 @@ fn content_hash_isolates_cache() {
         resolve_h,
         RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
     );
-    host.project_type_store()
-        .resolved_import_facts()
-        .insert_if_absent(key_v1, synthetic_facts());
+    seed(&host, key_v1, synthetic_facts());
 
     // Edit the source — content hash should change.
     upsert(&host, "/r.ts", "export const f = 7;");
@@ -453,9 +442,7 @@ fn resolver_version_isolates_cache() {
         .checked_sub(1)
         .unwrap_or(0xDEAD_BEEF);
     let key_stale = key_with("/s.ts", content_hash, parse_h, resolve_h, stale_version);
-    host.project_type_store()
-        .resolved_import_facts()
-        .insert_if_absent(key_stale, synthetic_facts());
+    seed(&host, key_stale, synthetic_facts());
 
     let view =
         HostView::with_env_hashes(Arc::clone(&host), env_hashes(parse_h, resolve_h, [0u8; 16]));
@@ -498,16 +485,10 @@ fn insert_if_absent_is_first_writer_wins() {
         "the two payloads start as distinct `Arc`s — pre-condition"
     );
 
-    let admitted_first = host
-        .project_type_store()
-        .resolved_import_facts()
-        .insert_if_absent(key.clone(), Arc::clone(&payload_first));
+    let admitted_first = seed(&host, key.clone(), Arc::clone(&payload_first));
     assert!(admitted_first, "the first writer wins");
 
-    let admitted_second = host
-        .project_type_store()
-        .resolved_import_facts()
-        .insert_if_absent(key.clone(), Arc::clone(&payload_second));
+    let admitted_second = seed(&host, key.clone(), Arc::clone(&payload_second));
     assert!(
         !admitted_second,
         "the second writer must lose; admission returns false"
@@ -546,4 +527,116 @@ fn _construct_payload_compiles() {
     // Construct the unused-import sentinel so the `FxHashMap`
     // import is not dropped by future maintenance edits.
     let _: FxHashMap<String, Arc<str>> = FxHashMap::default();
+}
+
+// ---------------------------------------------------------------------------
+// Resolution currency is a candidate witness, not a key dimension
+// ---------------------------------------------------------------------------
+
+/// A specifier retarget leaves the owner's bytes, env hashes, and
+/// resolver version untouched, so the slot key is byte-identical before
+/// and after. The bundle admitted under the OLD route surface must stop
+/// being served anyway — its validity is carried by the import-route
+/// witness recorded on the candidate — and the re-admitted bundle must
+/// join the SAME slot rather than escaping to a fresh key.
+///
+/// Discriminating: against a tree that folds resolution currency into
+/// the key, the retarget re-keys, so either the key-equality
+/// precondition fails or the slot count grows past one.
+#[test]
+fn specifier_retarget_reseats_the_slot_under_an_unchanged_key() {
+    let host = fresh_host();
+    let owner = "/retarget/owner.ts";
+    upsert(
+        &host,
+        "/retarget/first.ts",
+        "export interface T { a: string }\n",
+    );
+    upsert(
+        &host,
+        "/retarget/second.ts",
+        "export interface T { b: string }\n",
+    );
+    upsert(
+        &host,
+        owner,
+        "import { T } from './dep'\nexport type Re = T\n",
+    );
+
+    let route = |target: &str| {
+        vec![verter_session::DependencyResolution {
+            specifier: "./dep".to_string(),
+            resolved_canonical_id: Some(target.to_string()),
+            possible_canonical_ids: vec![target.to_string()],
+        }]
+    };
+
+    host.set_import_dependencies(owner, route("/retarget/first.ts"));
+    let view = HostView::new(Arc::clone(&host));
+    let before = view
+        .resolved_import_facts(owner)
+        .expect("precondition: the producer admitted a bundle for the first target");
+    assert!(
+        before.specifier_resolutions.iter().any(|entry| {
+            entry.specifier.as_ref() == "./dep"
+                && entry.resolved_canonical.as_deref() == Some("/retarget/first.ts")
+        }),
+        "precondition: the admitted bundle points ./dep at the first target"
+    );
+
+    let key_before = key_with(
+        owner,
+        view.content_hash_for(owner)
+            .expect("owner has a content hash"),
+        view.env_hashes().parse_env_hash,
+        view.env_hashes().resolve_env_hash,
+        RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+    );
+    let slots_before = host
+        .project_type_store()
+        .resolved_import_facts()
+        .entry_count();
+
+    // Retarget. The owner's own bytes never change.
+    host.set_import_dependencies(owner, route("/retarget/second.ts"));
+
+    let view_after = HostView::new(Arc::clone(&host));
+    let key_after = key_with(
+        owner,
+        view_after
+            .content_hash_for(owner)
+            .expect("owner still has a content hash"),
+        view_after.env_hashes().parse_env_hash,
+        view_after.env_hashes().resolve_env_hash,
+        RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+    );
+    assert_eq!(
+        key_before, key_after,
+        "precondition: the retarget must NOT re-key the owner's slot — \
+         currency is not a key dimension"
+    );
+
+    let after = view_after
+        .resolved_import_facts(owner)
+        .expect("the retargeted bundle must be served");
+    assert!(
+        !Arc::ptr_eq(&after, &before),
+        "the bundle admitted under the old route surface must no longer be \
+         served after the retarget"
+    );
+    assert!(
+        after.specifier_resolutions.iter().any(|entry| {
+            entry.specifier.as_ref() == "./dep"
+                && entry.resolved_canonical.as_deref() == Some("/retarget/second.ts")
+        }),
+        "the served bundle must point ./dep at the retargeted canonical"
+    );
+    assert_eq!(
+        host.project_type_store()
+            .resolved_import_facts()
+            .entry_count(),
+        slots_before,
+        "the re-admitted bundle must join the owner's EXISTING slot as a \
+         second candidate, not occupy a new key"
+    );
 }

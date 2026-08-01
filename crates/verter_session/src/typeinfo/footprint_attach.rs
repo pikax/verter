@@ -92,19 +92,13 @@ pub(crate) fn mine_typeinfo_footprint(
         return (None, Vec::new());
     };
     let state = acc.drain();
-    // Direct imports of the entry file: lets the file-role classifier
-    // distinguish first-level imports (`DirectImport`) from deeper-closure
-    // files (`TransitiveImport`). An absent shallow surface (rare cold
-    // path) falls back to `DirectImport` for every non-Entry file.
-    let direct_imports: rustc_hash::FxHashSet<String> = host
-        .shallow_file_state(ctx.canonical_id.as_ref())
-        .map(|sfs| {
-            sfs.import_targets
-                .values()
-                .map(|t| t.canonical_id.clone())
-                .collect()
-        })
-        .unwrap_or_default();
+    // Direct imports of the entry file — the entry's AUTHORED specifiers
+    // resolved through the one route-edge authority: lets the file-role
+    // classifier distinguish first-level imports (`DirectImport`) from
+    // deeper-closure files (`TransitiveImport`). An absent shallow
+    // surface (rare cold path) falls back to `DirectImport` for every
+    // non-Entry file.
+    let direct_imports = host.direct_import_canonicals(ctx.canonical_id.as_ref());
     let files = crate::component_meta_audit::build_file_audit_vec(
         &state,
         ctx.canonical_id.as_ref(),

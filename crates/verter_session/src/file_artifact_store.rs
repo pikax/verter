@@ -689,20 +689,21 @@ impl FileArtifacts {
 /// - the file's route surface (`shallow_state.has_resolvable_surface()`
 ///   gates whether a `Route` derived fact is emitted at all, and
 ///   `hash_route_surface(&shallow_state)` is the fact's hash content).
-/// - `indexed.import_route_hash` — the content-pinned import-route summary;
-///   included defensively so a route-surface shift always bumps even though
-///   `build` re-resolves the live `ImportRoute` hash at host level.
 /// - `facts` — snapshotted into `file_facts` (`FileFacts` is `PartialEq`).
-/// - the currency stamps (`project_generation` AND `edge_generation`, both
-///   read for any surface the complete `IndexedReady::has_cross_file_edges`
-///   authority judges edge-bearing — shallow-inventory edges and
-///   `import_routes` entries alike) — the base view gates the canonical's
-///   `Route` fact on the STORED artifact's currency
-///   (`indexed_surface_is_current`), so replacing a stamp-stale artifact
-///   with a stamp-fresh one (the edge-refresh republish) changes what a
-///   base snapshot sees even when every surface hash above is identical.
-///   A surface WITHOUT cross-file edges never consults either stamp, so a
-///   byte-identical republish of such a surface stays a literal no-op.
+/// - `indexed.parse_env_hash` — the reuse gate
+///   (`indexed_surface_is_current`) is exactly parse-env equality, so an
+///   artifact built under a different parse environment is a different
+///   answer to "may this be served?" even when every surface hash above
+///   is identical.
+/// - `indexed.built_at_content_generation` — the artifact-only serving
+///   gate (`artifact_only_candidate_is_fresh`) compares it against the
+///   canonical's last recorded content transition, so a fresher stamp
+///   can flip a canonical from EXCLUDED to INCLUDED in the base
+///   snapshot.
+///
+/// There is no route- or edge-currency dimension: `IndexedReady` retains
+/// no resolved target, so a base snapshot's view of a canonical is a
+/// pure function of the by-value dimensions above.
 ///
 /// `parse_stable_hash` and `augmentations` are NOT read by the base view's
 /// per-canonical snapshot maps (the augmentation INDEX is a separate,
@@ -715,20 +716,9 @@ impl FileArtifacts {
 fn base_snapshot_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool {
     let prev_indexed = &prev.indexed;
     let next_indexed = &next.indexed;
-    // Stamp dimensions, gated on where the shared currency predicate
-    // actually reads them (mirrors `indexed_surface_is_current` /
-    // `route_surface_is_edge_current`): BOTH stamps are read for any
-    // surface the complete `IndexedReady::has_cross_file_edges` authority
-    // judges edge-bearing — including import-route-only surfaces whose
-    // edges the shallow component cannot see. A surface without
-    // cross-file edges never consults either stamp, so a byte-identical
-    // republish of such a surface stays a literal no-op.
-    let stamp_equivalent = !next_indexed.has_cross_file_edges()
-        || (prev_indexed.project_generation == next_indexed.project_generation
-            && prev_indexed.edge_generation == next_indexed.edge_generation);
-    stamp_equivalent
-        && prev_indexed.whole_hash == next_indexed.whole_hash
-        && prev_indexed.import_route_hash == next_indexed.import_route_hash
+    prev_indexed.whole_hash == next_indexed.whole_hash
+        && prev_indexed.parse_env_hash == next_indexed.parse_env_hash
+        && prev_indexed.built_at_content_generation == next_indexed.built_at_content_generation
         && prev_indexed.shallow_state.has_resolvable_surface()
             == next_indexed.shallow_state.has_resolvable_surface()
         && crate::resolver_store::hash_route_surface(&prev_indexed.shallow_state)

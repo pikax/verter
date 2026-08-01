@@ -1089,51 +1089,22 @@ pub(crate) type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>
 ///   is valid but the path-precise signature is too large to admit
 ///   safely. Cache consumers route overflowed values through
 ///   `ComputeAdmission::ReturnOnly` (return without admitting).
-#[derive(Clone, Debug)]
-pub struct ReadSetSignature {
-    pub facts: Arc<[FactVersionRef]>,
-    /// Marks the carrier as constructed from a tracer that returned
-    /// `FactReadSetFinalise::Overflow`. The materialised value is
-    /// valid; the signature is too large to admit. The cooperative
-    /// admission path routes the value through
-    /// `ComputeAdmission::ReturnOnly` and the in-flight slot
-    /// broadcasts the value to joiners.
-    pub overflowed: bool,
+pub use verter_workspace::ReadSetSignature;
+
+pub(crate) trait ReadSetSignatureExt {
+    fn validate_with_self_roots(
+        &self,
+        ctx: &dyn ResolverContext,
+        self_root_canonicals: &[Arc<str>],
+    ) -> bool;
+    fn has_view_discriminating_self_root(&self, self_root_canonicals: &[Arc<str>]) -> bool;
+    fn records_missing_dependency_fact(&self) -> bool;
+    fn records_negative_resolution_fact(&self) -> bool;
+    fn bubble(&self, ctx: &dyn ResolverContext);
+    fn bubble_via_tls(&self);
 }
 
-impl ReadSetSignature {
-    /// Construct a carrier from the traced path-precise fact set.
-    #[inline]
-    pub fn new(facts: Arc<[FactVersionRef]>) -> Self {
-        Self {
-            facts,
-            overflowed: false,
-        }
-    }
-
-    /// Construct an overflow carrier. The fact rail is empty; the
-    /// `overflowed` flag is set. Cooperative admission consumers
-    /// route values bearing this carrier through
-    /// `ComputeAdmission::ReturnOnly`.
-    #[inline]
-    pub fn overflow() -> Self {
-        Self {
-            facts: empty_fact_signature(),
-            overflowed: true,
-        }
-    }
-
-    /// Empty carrier. The fact rail is empty; the `overflowed` flag is
-    /// false. Used for synthetic publishes that pre-date the
-    /// fact-tracer substrate.
-    #[inline]
-    pub fn empty() -> Self {
-        Self {
-            facts: empty_fact_signature(),
-            overflowed: false,
-        }
-    }
-
+impl ReadSetSignatureExt for ReadSetSignature {
     /// Validate the fact rail against the host's live state, validating
     /// every `FileWholeHash` fact whose canonical is listed in
     /// `self_root_canonicals` **strictly**.
@@ -1155,7 +1126,7 @@ impl ReadSetSignature {
     /// store view no longer tracks, fails validation.
     #[inline]
     #[track_caller]
-    pub(crate) fn validate_with_self_roots(
+    fn validate_with_self_roots(
         &self,
         ctx: &dyn ResolverContext,
         self_root_canonicals: &[Arc<str>],
@@ -1202,10 +1173,7 @@ impl ReadSetSignature {
     /// winner's view-specific result. The fork is not gated on
     /// `cache_suppress`.
     #[inline]
-    pub(crate) fn has_view_discriminating_self_root(
-        &self,
-        self_root_canonicals: &[Arc<str>],
-    ) -> bool {
+    fn has_view_discriminating_self_root(&self, self_root_canonicals: &[Arc<str>]) -> bool {
         if self_root_canonicals.is_empty() {
             return false;
         }
@@ -1222,24 +1190,22 @@ impl ReadSetSignature {
     ///
     /// A missing-dependency result (`import { X } from './missing'` where
     /// `./missing` does not yet exist) is fact-rooted-cacheable ONLY when
-    /// the producer recorded the import-route rail: when the dependency
-    /// later appears, the `DerivedFactKind::ImportRoute` rail's hash shifts
-    /// and the warm read misses (lazy cross-file invalidation, the normal
-    /// rail). The bare presence of arbitrary file facts is NOT sufficient —
-    /// a positive `FileWholeHash` would warm-admit a degraded result with
-    /// no rail that the dependency's appearance can invalidate. The
-    /// `admit_decision` rule consults THIS, never the taint enum class, to
-    /// decide `Warm` vs `ReturnOnly` for `Partial(MissingDependency)`.
+    /// the producer recorded the import-route rail: the sealed resolution
+    /// transaction's own observations, which include the exhausted probe
+    /// set for the miss. When the dependency later appears, the observed
+    /// `PathProbe` advances and the warm read misses (lazy cross-file
+    /// invalidation, the normal rail). The bare presence of arbitrary
+    /// file facts is NOT sufficient — a positive `FileWholeHash` would
+    /// warm-admit a degraded result with no rail that the dependency's
+    /// appearance can invalidate. The `admit_decision` rule consults
+    /// THIS, never the taint enum class, to decide `Warm` vs
+    /// `ReturnOnly` for `Partial(MissingDependency)`.
     #[inline]
-    #[must_use]
-    pub(crate) fn records_missing_dependency_fact(&self) -> bool {
+    fn records_missing_dependency_fact(&self) -> bool {
         self.facts.iter().any(|fact| {
             matches!(
                 fact,
-                FactVersionRef::DerivedFactHash {
-                    kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                    ..
-                }
+                FactVersionRef::ResolveImports(inner) if inner.resolution_fact().is_some()
             )
         })
     }
@@ -1259,21 +1225,23 @@ impl ReadSetSignature {
     /// negative rail, so trusting it would warm-admit a degraded result.
     /// `admit_decision` consults THIS, never the taint enum class.
     #[inline]
-    #[must_use]
-    pub(crate) fn records_negative_resolution_fact(&self) -> bool {
+    fn records_negative_resolution_fact(&self) -> bool {
         self.facts.iter().any(|fact| match fact {
-            FactVersionRef::ResolveImports(r) => match &r.key {
-                FactKey::ResolvedImportClause {
-                    resolved_canonical, ..
-                }
-                | FactKey::ResolvedReexportBinding {
-                    resolved_canonical, ..
-                } => {
-                    resolved_canonical.as_ref()
-                        == crate::resolved_import_facts_producer::UNRESOLVED_SENTINEL
-                }
-                _ => false,
-            },
+            FactVersionRef::ResolveImports(
+                crate::resolver_core::ResolveImportsFactRef::Semantic {
+                    key:
+                        FactKey::ResolvedImportClause {
+                            resolved_canonical, ..
+                        }
+                        | FactKey::ResolvedReexportBinding {
+                            resolved_canonical, ..
+                        },
+                    ..
+                },
+            ) => {
+                resolved_canonical.as_ref()
+                    == crate::resolved_import_facts_producer::UNRESOLVED_SENTINEL
+            }
             _ => false,
         })
     }
@@ -1282,7 +1250,7 @@ impl ReadSetSignature {
     /// tracer on the current TLS stack. No-op when the tracer stack
     /// is empty or `facts` is empty.
     #[inline]
-    pub(crate) fn bubble(&self, ctx: &dyn ResolverContext) {
+    fn bubble(&self, ctx: &dyn ResolverContext) {
         bubble_fact_signature(ctx, &self.facts);
     }
 
@@ -1290,59 +1258,63 @@ impl ReadSetSignature {
     /// thread a `ResolverContext` reference. Equivalent to
     /// `bubble_fact_signature_via_tls(&self.facts)`.
     #[inline]
-    pub fn bubble_via_tls(&self) {
+    fn bubble_via_tls(&self) {
         bubble_fact_signature_via_tls(&self.facts);
     }
+}
 
-    /// Canonical IDs referenced by this carrier's fact rail,
-    /// deduplicated by string equality. The reverse index drains via
-    /// this iterator.
-    ///
-    /// A `ProjectGeneration` fact references no canonical and
-    /// contributes nothing — it is a project-wide fact validated
-    /// on-read, not indexed per-canonical.
-    pub fn canonical_ids(&self) -> Vec<Arc<str>> {
-        // Small dedup set; cache entries' canonical sets typically
-        // hold fewer than 16 entries each. `FxHashSet` over Arc<str>
-        // keeps comparison O(1) per insertion when arcs are shared.
-        let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
-        let mut out: Vec<Arc<str>> = Vec::new();
-        for fact in self.facts.iter() {
-            // `ProjectGeneration` references no canonical — it
-            // contributes nothing to the reverse index.
-            let Some(canon_str) = fact.canonical_id() else {
-                continue;
-            };
-            let canon: Arc<str> = Arc::from(canon_str);
-            if seen.insert(Arc::clone(&canon)) {
-                out.push(canon);
-            }
-        }
-        out
-    }
+/// A REAL resolve-domain resolution witness fact, minted by driving one
+/// genuine Engine resolution of an unresolvable specifier.
+///
+/// Test fixtures that need "a fact of the import-route rooting kind" use
+/// this rather than constructing one: [`ResolutionFactRef`]'s fields are
+/// crate-private to `verter_workspace` precisely so no consumer can forge
+/// a witness the sealed transaction never admitted. Minting a real one
+/// keeps the fixture honest — the fact carries a live fact key and the
+/// version the world actually published.
+///
+/// Panics if the resolution refuses or carries no resolution fact: either
+/// would make every downstream assertion vacuous.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn resolution_witness_fact_for_tests() -> FactVersionRef {
+    use crate::types::FileLanguage;
+    use crate::{HostConfig, UpsertRequest, VerterHost};
 
-    /// True iff the original tracer finalised with `Overflow`. The
-    /// entry's value is valid; cache consumers route it through
-    /// `ComputeAdmission::ReturnOnly` instead of admitting it.
-    #[inline]
-    pub fn is_overflow(&self) -> bool {
-        self.overflowed
-    }
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/witness_fixture/main.ts".to_string(),
+            source: std::sync::Arc::from("import { x } from './absent'\nexport { x }\n"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("witness fixture upsert must succeed");
 
-    /// True iff this signature may be promoted into a warm cache entry.
-    ///
-    /// Cacheability is a function of overflow alone: an overflowed
-    /// signature is too large to admit safely and must route through
-    /// `ComputeAdmission::ReturnOnly`. **Emptiness is NOT a
-    /// non-cacheable condition** — a tracer that observed zero facts
-    /// validates vacuously on warm hits and is still safely cacheable.
-    /// Producers that need to distinguish "no facts observed" from
-    /// "non-empty fact rail" should read `self.facts.is_empty()`
-    /// directly.
-    #[inline]
-    pub fn is_cacheable(&self) -> bool {
-        !self.overflowed
-    }
+    let publication = host.resolve_for_persistent_state(
+        "/witness_fixture/main.ts",
+        "./absent",
+        verter_workspace::ResolutionContext {
+            phase: verter_workspace::ResolvePhase::ProviderGraph,
+            kind: verter_workspace::ResolveRequestKind::EsmImport,
+        },
+    );
+    let verter_workspace::ResolutionPublication::Admitted(admitted) = publication else {
+        panic!("witness fixture resolution must be admitted");
+    };
+    admitted
+        .signature()
+        .facts
+        .iter()
+        .find(|fact| {
+            matches!(
+                fact,
+                FactVersionRef::ResolveImports(inner) if inner.resolution_fact().is_some()
+            )
+        })
+        .expect("an admitted resolution must carry at least one resolution-currency fact")
+        .clone()
 }
 
 #[cfg(test)]

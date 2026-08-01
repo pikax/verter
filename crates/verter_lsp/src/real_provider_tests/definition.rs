@@ -609,7 +609,7 @@ real_provider_test!(
             .server()
             .test_documents()
             .host()
-            .resolve_import_via_workspace(&parent_path, "./PropChild.svelte");
+            .resolve_import_transient(&parent_path, "./PropChild.svelte");
         assert_eq!(
             resolved_child.as_deref(),
             Some(RealProviderTestSession::uri_to_path(&child).as_str()),

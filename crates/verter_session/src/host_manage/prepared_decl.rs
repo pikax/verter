@@ -18,8 +18,7 @@ use crate::VerterHost;
 
 use super::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
-    dep_edges_from_resolutions, is_raw_import_specifier_id, is_runtime_script_target,
-    HostShallowImportResolver,
+    is_raw_import_specifier_id,
 };
 
 /// An `IndexedReady` serve plus its publication status — the value-flow
@@ -159,22 +158,18 @@ impl VerterHost {
                     verter_audit::AuditEvent::PreparedDeclBundleRejectSelfRootUntracked
                 }
             }
-            Some(crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: fact_canonical,
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                ..
-            }) if fact_canonical == canonical_id => {
-                if view
-                    .derived_hash_for(
-                        fact_canonical,
-                        crate::resolver_core::DerivedFactKind::ImportRoute,
-                    )
-                    .is_some()
-                {
-                    verter_audit::AuditEvent::PreparedDeclBundleRejectImportRouteMismatch
-                } else {
-                    verter_audit::AuditEvent::PreparedDeclBundleRejectImportRouteAbsent
-                }
+            Some(crate::resolver_core::FactVersionRef::ResolveImports(fact))
+                if fact.resolution_fact().is_some() =>
+            {
+                // The owner's import-route resolution witness moved: the
+                // observed resolver input (a path probe, a realpath, an
+                // exact-resolution row) no longer carries the version the
+                // bundle recorded. The absent/mismatch distinction the
+                // legacy digest drew does not exist on this rail — a
+                // resolution fact either validates against the view's
+                // captured world or it does not.
+                let _ = view;
+                verter_audit::AuditEvent::PreparedDeclBundleRejectImportRouteMismatch
             }
             _ => verter_audit::AuditEvent::PreparedDeclBundleRejectOther,
         };
@@ -580,8 +575,11 @@ impl VerterHost {
         {
             return None;
         }
-        let (dep_edges, _import_route_hash) =
-            self.prepared_decl_bundle_route_dep_edges(route_canonical_id, state.as_ref());
+        let dep_edges = self.prepared_decl_bundle_route_dep_edges_with_context(
+            ctx,
+            route_canonical_id,
+            state.as_ref(),
+        )?;
 
         let script_setup_type_bindings = if bundle_canonical_id.ends_with(".vue") {
             self.build_script_setup_type_bindings(bundle_canonical_id, state.as_ref(), &dep_edges)
@@ -628,18 +626,34 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         state: &crate::resolver_core::ShallowFileState,
-    ) -> (
-        rustc_hash::FxHashMap<String, String>,
-        Option<crate::resolver_core::ResolverHash16>,
-    ) {
-        let declaration_file = canonical_id.ends_with(".d.ts")
-            || canonical_id.ends_with(".d.mts")
-            || canonical_id.ends_with(".d.cts");
+    ) -> Option<rustc_hash::FxHashMap<String, String>> {
+        self.prepared_decl_bundle_route_dep_edges_with_context(self, canonical_id, state)
+    }
+
+    /// Resolve the owner's authored import specifiers into the bundle's
+    /// dep-edge table.
+    ///
+    /// CONTEXT-BOUND, because the shallow surface bakes no target: every
+    /// edge resolves here, so a session-overlay build must resolve
+    /// through its OWN view or an overlay-only dependency silently
+    /// disappears from the bundle. The base host is the ctx on the base
+    /// path.
+    fn prepared_decl_bundle_route_dep_edges_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+        state: &crate::resolver_core::ShallowFileState,
+    ) -> Option<rustc_hash::FxHashMap<String, String>> {
         let mut dep_edges = rustc_hash::FxHashMap::default();
-        let mut import_routes = rustc_hash::FxHashMap::default();
         let mut seen_sources = rustc_hash::FxHashSet::default();
 
-        for target in state.import_targets.values() {
+        // The OWNER-QUALIFIED table, not the ordinary-file one: a `.vue`
+        // SFC's `<script setup>` bindings carry a module/instance
+        // top-level owner and never land in `import_targets`, so an
+        // ordinary-file-only walk would resolve none of a carrier's
+        // imports. That was invisible while the shallow surface baked a
+        // resolved target the consumer could fall back on.
+        for target in state.owner_import_targets.values() {
             if !seen_sources.insert(target.source_specifier.clone()) {
                 continue;
             }
@@ -647,47 +661,42 @@ impl VerterHost {
             let cached_resolution =
                 self.cached_import_route_resolution(canonical_id, target.source_specifier.as_str());
             let resolved: Option<String> = if let Some(resolution) = cached_resolution.as_ref() {
-                self.prefer_type_dependency_target_from_resolution(
+                let preferred = match self.prefer_type_dependency_target_from_resolution(
                     canonical_id,
                     target.source_specifier.as_str(),
                     resolution,
-                )
-                .or_else(|| {
+                ) {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                        admitted.into_result()
+                    }
+                    verter_workspace::ResolutionPublication::Refused(_) => return None,
+                };
+                preferred.or_else(|| {
                     if Self::import_route_is_known_miss(resolution) {
                         None
-                    } else if !(target.canonical_id.is_empty()
-                        || declaration_file && is_runtime_script_target(&target.canonical_id))
-                    {
-                        Some(target.canonical_id.clone())
                     } else {
-                        self.resolve_route_type_edge(canonical_id, target.source_specifier.as_str())
+                        self.resolve_route_type_edge_with_context(
+                            ctx,
+                            canonical_id,
+                            target.source_specifier.as_str(),
+                        )
                     }
                 })
-            } else if !(target.canonical_id.is_empty()
-                || declaration_file && is_runtime_script_target(&target.canonical_id))
-            {
-                Some(target.canonical_id.clone())
             } else {
-                self.resolve_route_type_edge(canonical_id, target.source_specifier.as_str())
+                self.resolve_route_type_edge_with_context(
+                    ctx,
+                    canonical_id,
+                    target.source_specifier.as_str(),
+                )
             };
             let Some(resolved) = resolved else {
                 continue;
             };
 
-            dep_edges.insert(target.source_specifier.clone(), resolved.clone());
-            import_routes.insert(
-                target.source_specifier.clone(),
-                cached_resolution.unwrap_or(crate::types::DependencyResolution {
-                    specifier: target.source_specifier.clone(),
-                    resolved_canonical_id: Some(resolved.clone()),
-                    possible_canonical_ids: vec![resolved],
-                }),
-            );
+            dep_edges.insert(target.source_specifier.clone(), resolved);
         }
 
-        let import_route_hash = (!import_routes.is_empty())
-            .then(|| crate::resolver_store::hash_import_route_targets(&import_routes));
-        (dep_edges, import_route_hash)
+        Some(dep_edges)
     }
 
     /// Record each import binding's DIRECT-hop identity for DEMAND-DRIVEN
@@ -740,18 +749,15 @@ impl VerterHost {
             if target.is_namespace {
                 continue;
             }
-            // The import's resolved direct canonical (dep_edges → target →
-            // raw): the same precedence `resolve_import_target` applies.
-            let direct_canonical =
-                if let Some(resolved) = dep_edges.get(&target.source_specifier).cloned() {
-                    resolved
-                } else if !target.canonical_id.is_empty() {
-                    target.canonical_id.clone()
-                } else {
-                    // No resolvable canonical means there is no authoritative
-                    // target owner to publish.
-                    continue;
-                };
+            // The import's resolved direct canonical comes from the
+            // owner's resolved dep-edge table (built through the shared
+            // route-edge authority). The shallow inventory bakes no
+            // target, so there is no artifact-derived fallback: an
+            // unresolvable specifier has no authoritative target owner
+            // to publish.
+            let Some(direct_canonical) = dep_edges.get(&target.source_specifier).cloned() else {
+                continue;
+            };
             if direct_canonical.is_empty() {
                 continue;
             }
@@ -816,8 +822,7 @@ impl VerterHost {
             });
         }
 
-        let (dep_edges, _legacy_import_route_hash) =
-            self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref());
+        let dep_edges = self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref())?;
         // Record the DIRECT-hop import identities; final canonicalization is
         // DEMAND-DRIVEN (chain facts are observed into the CONSUMING query's
         // read-set at decl-prepare demand, never pinned on the bundle rail).
@@ -834,35 +839,33 @@ impl VerterHost {
             ),
         );
 
-        // ImportRoute fact MUST match the view's snapshot. The
-        // [`crate::resolver_store::HostStoreView::build`] /
-        // `snapshot_tracked_import_route_hashes` route delegates to
-        // [`crate::host_manage::component_meta_methods::VerterHost::generation_current_import_route_hash`]
-        // which reads the canonical's `IndexedReady.import_routes`
-        // or the `DerivedRawState.import_routes` map. This
-        // routed-shallow path admits bundles for declaration
-        // files (`.d.ts` / `.d.mts` / `.d.cts`) where neither layer
-        // may be populated; in that case the view inserts the
-        // canonical with the `empty_import_route_hash` sentinel via
-        // `unwrap_or(empty_import_route_hash)`. Using the live
-        // generation hash here keeps the bundle's stored fact
-        // identical to the view's snapshot, eliminating the
-        // perpetual `PreparedDeclBundleRejectImportRouteMismatch` /
-        // `PreparedDeclBundleRejectImportRouteAbsent` warm-read
-        // rejection loop the pre-fix
-        // `prepared_decl_bundle_route_dep_edges` shape produced.
-        let live_import_route_hash = self.generation_current_import_route_hash(canonical_id);
-
+        // The bundle roots its import-route dependency on the owner's
+        // RESOLUTION WITNESS. Unlike the legacy digest — which producer
+        // and validator had to re-derive identically from two different
+        // route-table source orders — the witness IS the observation
+        // set, so a store view validates it against the immutable
+        // resolution world it captured with nothing to re-derive.
+        //
+        // FAIL CLOSED on an unrootable witness. `None` means a refused
+        // resolution, an unreadable parse surface, or a union that
+        // overflows `FACT_SIGNATURE_CAP` — the bundle's import-route
+        // dependency cannot be expressed as facts, so nothing can
+        // invalidate it. Admitting it rooted on `FileWholeHash` ALONE
+        // would serve pre-appearance dependency edges forever: the
+        // owner's bytes never move when a dependency appears or
+        // retargets. `decline_import_route_witness` has already marked
+        // the enclosing compute non-cacheable, but `insert_arc_with_kind`
+        // does not consult that flag — a lone `FileWholeHash` is a
+        // perfectly well-formed signature — so the producer must refuse
+        // here, exactly as the sibling `resolved_import_facts_witness`
+        // and `framework::script_facts` producers do.
+        let import_route_witness = self.owner_import_route_witness(canonical_id);
         let mut facts = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: canonical_id.to_string(),
             hash: state.whole_hash,
         }];
-        if let Some(import_route_hash) = live_import_route_hash {
-            facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: canonical_id.to_string(),
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                hash: import_route_hash,
-            });
+        if let Some(witness) = import_route_witness.clone() {
+            facts.extend(witness);
         }
         // No import-chain facts are pinned here: canonicalization is
         // demand-driven, so retarget invalidation rides the CONSUMING
@@ -875,7 +878,7 @@ impl VerterHost {
         // just-published canonical (the snapshot is built once at
         // request entry — entries published after that lookup are
         // invisible to the view), and every subsequent warm-validation of the bundle's
-        // stored `(FileWholeHash, ImportRoute)` facts falls through to
+        // stored `FileWholeHash` fact falls through to
         // the base view's untracked-canonical reject. The next read
         // therefore triggers a fresh cold rebuild, and the loop
         // repeats every time the canonical is consulted. With the
@@ -903,12 +906,7 @@ impl VerterHost {
         let route_hash = state
             .has_resolvable_surface()
             .then(|| crate::resolver_store::hash_route_surface(state.as_ref()));
-        view.promote_route_completion(
-            canonical_id,
-            state.whole_hash,
-            route_hash,
-            live_import_route_hash,
-        );
+        view.promote_route_completion(canonical_id, state.whole_hash, route_hash);
 
         // Strict admission. Bundles always carry `FileWholeHash` — gated
         // on the routed-shallow serve's publication status (ReturnOnly
@@ -917,16 +915,15 @@ impl VerterHost {
         // FENCED `IndexedReady` is served to this caller WITHOUT
         // admission. The fenced artifact's route surface was resolved
         // against superseded state, while the fact versions above
-        // (`state.whole_hash`; the LIVE
-        // `generation_current_import_route_hash`) validate against a
-        // fresh view — so the read-side fact rail cannot reject the entry
+        // (`state.whole_hash`; the LIVE import-route witness) validate
+        // against a fresh view — so the read-side fact rail cannot reject the entry
         // and this gate is the only correct refusal point. The flag flows
         // BY VALUE through `routed_shallow_state_serve` (see
         // `RoutedShallowServe`), so the gate works with or without an
         // installed `RequestContext`. The `promote_route_completion` call
         // above stays ungated: the request overlay is request-scoped
         // (discarded with the request), not a shared publication.
-        if serve.store_published {
+        if serve.store_published && import_route_witness.is_some() {
             self.resolver
                 .runtime
                 .prepared_decl_bundles
@@ -1013,8 +1010,7 @@ impl VerterHost {
                 serve_published: serve.store_published,
             });
         }
-        let (dep_edges, _legacy_import_route_hash) =
-            self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref());
+        let dep_edges = self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref())?;
 
         // 4. Build script-setup type bindings for Vue SFCs (once per bundle).
         // Non-Vue files get an empty map — zero cost.
@@ -1045,48 +1041,29 @@ impl VerterHost {
         );
 
         // 6. Compute fact versions.
-        // The ImportRoute fact hash MUST match what the live
-        // `HostStoreView` snapshots. Both view-side producers
-        // (`HostStoreView::build` line 684, IndexedReady loop; and
-        // `snapshot_tracked_import_route_hashes`, file-without-indexed
-        // loop) use
-        // [`crate::host_manage::component_meta_methods::VerterHost::generation_current_import_route_hash`]
-        // uniformly — that method reads the canonical's
-        // `IndexedReady.import_routes` (or the live
-        // `DerivedRawState.import_routes` map) AND re-resolves
-        // known-miss specifiers against the current workspace
-        // generation. Using the static `IndexedReady.import_route_hash`
-        // here diverges from the view whenever a file has a
-        // known-miss specifier that has since become resolvable: the
-        // view re-derives the hash including the now-positive
-        // resolution, the bundle's stored fact keeps the stale miss,
-        // and every warm-read validator rejection routes through
-        // `PreparedDeclBundleRejectImportRouteMismatch` /
-        // `PreparedDeclBundleRejectImportRouteAbsent`. Worse, the
-        // routed-shallow path at
-        // `materialize_prepared_decl_bundle_from_routed_shallow`
-        // already uses `generation_current_import_route_hash` (line
-        // 502), so the two cold-materialise paths admitted bundles
-        // with DIFFERENT `ImportRoute` hashes for the same canonical
-        // depending on which producer the cold-walk hit first — a
-        // gratuitous extra rebuild per known-miss flip.
+        // The bundle's import-route rooting is the owner's RESOLUTION
+        // WITNESS: resolving the owner's authored specifiers through the
+        // shared route-edge policy yields the sealed transactions'
+        // observations, which the store view validates against its
+        // captured immutable resolution world. Producer and validator
+        // agree by construction — the producer records the observed fact
+        // versions and the validator compares them to the world it
+        // captured, with no digest for the two sides to re-derive
+        // differently.
         //
-        // Unify on the dynamic hash. For a fully-resolved file (no
-        // known-miss specifiers) `generation_current_import_route_hash`
-        // takes the cached-hash fast path and equals
-        // `facts.import_route_hash` — zero overhead in the common
-        // case.
+        // FAIL CLOSED on an unrootable witness — see the sibling
+        // materialiser above. A bundle admitted on `FileWholeHash` alone
+        // keeps serving its pre-appearance resolved edges for as long as
+        // the owner's bytes stay put, which is precisely the invalidation
+        // this rail exists to provide.
+        let import_route_witness = self.owner_import_route_witness(canonical_id);
         let whole_hash = facts.whole_hash;
         let mut fact_versions = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: canonical_id.to_string(),
             hash: whole_hash,
         }];
-        if let Some(import_route_hash) = self.generation_current_import_route_hash(canonical_id) {
-            fact_versions.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: canonical_id.to_string(),
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                hash: import_route_hash,
-            });
+        if let Some(witness) = import_route_witness.clone() {
+            fact_versions.extend(witness);
         }
         // No import-chain facts are pinned here: canonicalization is
         // demand-driven, so retarget invalidation rides the CONSUMING
@@ -1099,9 +1076,8 @@ impl VerterHost {
         // at a FENCED IndexedReady is served to this caller WITHOUT
         // admission. The fenced artifact's route surface was resolved
         // against superseded state, while the fact versions above
-        // (`facts.whole_hash`; the LIVE
-        // `generation_current_import_route_hash`) validate against a fresh
-        // view — so the read-side fact rail cannot reject the entry and
+        // (`facts.whole_hash`; the LIVE import-route witness) validate
+        // against a fresh view — so the read-side fact rail cannot reject the entry and
         // the admission gate is the only correct refusal point. The gate
         // keys on the VALUE-flowed `store_published` flag, not the
         // request-sticky `current_request_result_is_partial` channel:
@@ -1111,7 +1087,7 @@ impl VerterHost {
         // partial in the same request would wrongly decline a COMPLETE
         // bundle built from a store-current artifact — the A2 signal split
         // documented on `observe_component_meta_read_suppress`).
-        if serve.store_published {
+        if serve.store_published && import_route_witness.is_some() {
             self.resolver
                 .runtime
                 .prepared_decl_bundles
@@ -1485,26 +1461,21 @@ impl VerterHost {
     }
 }
 
-/// The coherent route-surface bundle `build_indexed_route_surface`
-/// produces — everything on `IndexedReady` that derives from route
-/// resolution rather than from the file's own content.
-struct BuiltIndexedRouteSurface {
-    import_routes: Arc<rustc_hash::FxHashMap<String, crate::types::DependencyResolution>>,
-    import_route_hash: Option<Hash16>,
-    route_hash: Option<Hash16>,
-    shallow_state: Arc<crate::resolver_core::ShallowFileState>,
-    edge_generation: u64,
-}
-
 impl VerterHost {
-    /// Build the COHERENT route surface for one canonical from its
-    /// content-addressed payload parts: resolved `import_routes`, the
-    /// `ShallowFileState` (with canonicalised cross-file edges + the Vue
-    /// `default` synth), `route_hash`, `import_route_hash`, and the
-    /// `edge_generation` stamp. Shared by the full materialise closure
-    /// and the edge-refresh path — the refresh rebuilds exactly this
-    /// surface from the RETAINED payload, never a patched map.
-    fn build_indexed_route_surface(
+    /// Build the file's `ShallowFileState` from its content-addressed
+    /// payload parts: the parser's route inventory, the lazy
+    /// declaration-body memo, and the framework component-`default`
+    /// synth.
+    ///
+    /// PURE PARSE DOMAIN — it performs ZERO import resolution. The
+    /// shallow inventory it produces names AUTHORED specifiers; the
+    /// resolved target of each is a resolve-domain answer every consumer
+    /// demands from the workspace resolution authority at the point of
+    /// use. Resolving here is what made a content-addressed artifact
+    /// carry dependency-set-derived state, and what forced the global
+    /// `edge_generation` stamp (plus a whole edge-refresh materialise
+    /// lane) to guard it.
+    fn build_indexed_shallow_surface(
         &self,
         canonical_id: &str,
         whole_hash: Hash16,
@@ -1514,234 +1485,19 @@ impl VerterHost {
         >,
         decl_bodies: &Arc<crate::decl_body_memo::DeclBodyMemo>,
         eval_source: Option<&str>,
-    ) -> BuiltIndexedRouteSurface {
-        let declaration_file = canonical_id.ends_with(".d.ts")
-            || canonical_id.ends_with(".d.mts")
-            || canonical_id.ends_with(".d.cts");
-
-        // Canonicalize shallow import/reexport edges once during module-facts
-        // materialization. Later resolver stages read these facts instead of
-        // treating compile-cache/store-view import-route maps as truth.
-        //
-        // Seed import routes from DerivedRawState if present (set by
-        // `set_import_dependencies` — D48 split: import_routes live on
-        // DerivedRawState as a sub-mirror of IndexedReady.import_routes).
-        // Unstamped positives are authoritative caller-provided targets.
-        // The per-entry freshness oracle
-        // (`import_route_entry_is_generation_current`) gates everything
-        // else: a HOST-MEMOIZED positive seeds only while its
-        // capture-before-resolve stamp matches the live
-        // `content_generation`, and a KNOWN-MISS seeds only while its
-        // known-miss sidecar stamp matches — a stale negative must NOT
-        // be re-baked under a fresh `edge_generation` (the file that
-        // appeared may now satisfy it). Every skipped specifier
-        // re-resolves through `resolve_missing` below.
-        let mut import_routes = rustc_hash::FxHashMap::default();
-        {
-            if let Some(cc) = self.derived_raw_cache().get(canonical_id) {
-                let live_generation = self.ws().content_generation();
-                for (specifier, resolution) in cc.import_routes.iter() {
-                    if !cc.import_route_entry_is_generation_current(
-                        specifier,
-                        resolution,
-                        live_generation,
-                    ) {
-                        continue;
-                    }
-                    import_routes.insert(specifier.clone(), resolution.clone());
-                }
-            }
-        }
-        let mut required_import_sources = snapshot
-            .imports
-            .iter()
-            .map(|import| {
-                (
-                    import.source.clone(),
-                    // In declaration files (.d.ts), all imports are
-                    // effectively type-only even without the `type`
-                    // keyword. This ensures the TypeImport resolution
-                    // path is used, which prefers .d.ts companions
-                    // over .js runtime files.
-                    if import.is_type_only || declaration_file {
-                        verter_workspace::ResolveRequestKind::TypeImport
-                    } else {
-                        verter_workspace::ResolveRequestKind::EsmImport
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-        required_import_sources.extend(snapshot.export_signatures.iter().filter_map(|export| {
-            let source = export.reexport_source.clone()?;
-            let kind = if declaration_file || export.is_type {
-                verter_workspace::ResolveRequestKind::TypeImport
-            } else {
-                verter_workspace::ResolveRequestKind::EsmImport
-            };
-            Some((source, kind))
-        }));
-        required_import_sources.sort_by(|(left_source, left_kind), (right_source, right_kind)| {
-            left_source.cmp(right_source).then_with(|| {
-                let kind_rank = |kind: verter_workspace::ResolveRequestKind| match kind {
-                    verter_workspace::ResolveRequestKind::TypeImport => 0u8,
-                    verter_workspace::ResolveRequestKind::EsmImport => 1u8,
-                    verter_workspace::ResolveRequestKind::RequireCall => 2u8,
-                    verter_workspace::ResolveRequestKind::SfcSrcAttr => 3u8,
-                };
-                kind_rank(*left_kind).cmp(&kind_rank(*right_kind))
-            })
-        });
-        required_import_sources.dedup();
-
-        let mut resolve_memo: rustc_hash::FxHashMap<
-            (String, verter_workspace::ResolveRequestKind),
-            Option<String>,
-        > = rustc_hash::FxHashMap::default();
-        let mut resolve_missing = |specifier: &str,
-                                   kind: verter_workspace::ResolveRequestKind,
-                                   prefer_live_fallback: bool| {
-            if import_routes.contains_key(specifier) {
-                return;
-            }
-            let primary = resolve_memo
-                .entry((specifier.to_string(), kind))
-                .or_insert_with(|| {
-                    self.ws()
-                        .resolve_import(
-                            canonical_id,
-                            specifier,
-                            verter_workspace::ResolutionContext {
-                                phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                                kind,
-                            },
-                        )
-                        .map(|resolution| {
-                            if kind == verter_workspace::ResolveRequestKind::TypeImport {
-                                self.normalize_live_type_dependency_target(
-                                    canonical_id,
-                                    specifier,
-                                    resolution.source_id.as_str(),
-                                )
-                            } else {
-                                resolution.source_id
-                            }
-                        })
-                })
-                .clone();
-            let resolved: Option<String> =
-                if kind == verter_workspace::ResolveRequestKind::TypeImport {
-                    primary
-                        .or_else(|| self.fallback_relative_type_companion(canonical_id, specifier))
-                        .or_else(|| {
-                            if !prefer_live_fallback {
-                                return None;
-                            }
-                            // ESM fallback for a type-route edge: normalize
-                            // the effective target through declaration-
-                            // companion preference, identically to the
-                            // shared route-edge policy
-                            // (`resolve_route_edge_canonical`). Recording the
-                            // raw `source_id` here diverged the indexed
-                            // shallow surface from route traversal and known-
-                            // miss revalidation (so the indexed surface and route traversal never record divergent edge canonicals).
-                            self.ws()
-                                .resolve_import(
-                                    canonical_id,
-                                    specifier,
-                                    verter_workspace::ResolutionContext {
-                                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                                        kind: verter_workspace::ResolveRequestKind::EsmImport,
-                                    },
-                                )
-                                .map(|resolution| {
-                                    self.normalize_live_type_dependency_target(
-                                        canonical_id,
-                                        specifier,
-                                        resolution.source_id.as_str(),
-                                    )
-                                })
-                        })
-                } else {
-                    primary
-                };
-            let mut resolution = DependencyResolution {
-                specifier: specifier.to_string(),
-                resolved_canonical_id: None,
-                possible_canonical_ids: Vec::new(),
-            };
-            if let Some(resolved) = resolved {
-                resolution.resolved_canonical_id = Some(resolved.clone());
-                resolution.possible_canonical_ids.push(resolved);
-            }
-            import_routes.insert(specifier.to_string(), resolution);
-        };
-
-        // Capture the workspace generation BEFORE any edge is
-        // canonicalized. The import/wildcard edges resolved below bake
-        // target `canonical_id`s that depend on the dependency file set;
-        // recording the generation here (and never re-stamping it after)
-        // means a file-set change during or after this build leaves
-        // `edge_generation < content_generation()`, so the shared
-        // edge-currency oracle judges the surface stale and forces a
-        // re-resolve — never a torn entry served as fresh.
-        let edge_generation = self.ws().content_generation();
-
-        for (source, kind) in &required_import_sources {
-            resolve_missing(source, *kind, true);
-        }
-
-        // Re-resolve every `export *` wildcard reexport source through the
-        // shared route-edge policy (`resolve_route_edge_canonical`) — the
-        // SAME TS-first policy the overlay materialiser uses — so the
-        // indexed wildcard `canonical_id`s agree with the overlay producer
-        // and `hash_route_surface` hashes identically.
-        //
-        // A bare `export *` source IS captured in `snapshot.export_signatures`
-        // (an `ExportSignature` with `reexport_source = Some(..)`), so the
-        // `resolve_missing` loop above already resolved it. But for a PLAIN
-        // (non-type) `export *` that loop classifies the source as
-        // `EsmImport` and bakes the runtime `.js` `source_id` WITHOUT
-        // TS-first normalization — diverging from the overlay surface,
-        // which resolves the `.d.ts` companion. This pass therefore
-        // OVERWRITES (does not skip) any `resolve_missing`-baked entry with
-        // the policy result, so a `.js`-with-`.d.ts`-companion wildcard
-        // source resolves to its declaration companion on every producer.
-        // `resolve_route_edge_canonical` returning `None` (an unresolvable
-        // source) leaves the `resolve_missing` known-miss in place.
-        for wildcard in &route_inventory.wildcard_reexports {
-            let source = wildcard.source.as_str();
-            if let Some(resolved) = self.resolve_route_edge_canonical(canonical_id, source) {
-                import_routes.insert(
-                    source.to_string(),
-                    DependencyResolution {
-                        specifier: source.to_string(),
-                        resolved_canonical_id: Some(resolved.clone()),
-                        possible_canonical_ids: vec![resolved],
-                    },
-                );
-            }
-        }
-
-        let import_route_hash = (!import_routes.is_empty())
-            .then(|| crate::resolver_store::hash_import_route_targets(&import_routes));
-        let dep_edges = dep_edges_from_resolutions(&import_routes);
-        let resolver = HostShallowImportResolver {
-            dep_edges: &dep_edges,
-        };
+    ) -> Arc<crate::resolver_core::ShallowFileState> {
+        self.provenance
+            .shallow_state_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut shallow_state_inner = crate::resolver_core::ShallowFileState::from_route_inventory(
+            whole_hash,
+            Arc::clone(route_inventory),
+            Arc::clone(decl_bodies),
+        );
         // Synthesise the implicit component `default` value symbol from
         // type-based macros, dispatched through the framework registry's
         // synthesis leg — see `framework::synth` for the policy and the
         // per-framework legs (Vue's macro synth, Svelte's, …).
-        self.provenance
-            .shallow_state_builds
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut shallow_state_inner =
-            crate::resolver_core::ShallowFileState::from_route_inventory_with_resolver(
-                whole_hash,
-                Arc::clone(route_inventory),
-                Arc::clone(decl_bodies),
-                &resolver,
-            );
         self.inject_component_default_into_shallow_state(
             canonical_id,
             &mut shallow_state_inner,
@@ -1752,145 +1508,7 @@ impl VerterHost {
             // owner mid-index and recurses).
             decl_bodies.framework_parse(),
         );
-        let shallow_state = Arc::new(shallow_state_inner);
-
-        let route_hash = shallow_state
-            .has_resolvable_surface()
-            .then(|| crate::resolver_store::hash_route_surface(shallow_state.as_ref()));
-
-        BuiltIndexedRouteSurface {
-            import_routes: Arc::new(import_routes),
-            import_route_hash,
-            route_hash,
-            shallow_state,
-            edge_generation,
-        }
-    }
-
-    /// Edge-refresh materialise: rebuild ONLY the route surface of a
-    /// content-current `IndexedReady` whose edges or `project_generation`
-    /// stamp went stale (a route-resolution mutation or a dependency
-    /// file-set change while the owner's content stayed put).
-    ///
-    /// The content-addressed payload — `raw_source`, `eval_source`,
-    /// `framework_parse`, `snapshot`, `script_analysis`,
-    /// `route_inventory`, the memo-owned whole-env demand product,
-    /// the shallow symbol bodies'
-    /// inputs — is REUSED (`whole_hash` unchanged, no re-read, no
-    /// re-parse); the COHERENT route surface (`import_routes`,
-    /// `ShallowFileState` route edges, `route_hash`, `import_route_hash`)
-    /// rebuilds through the same `build_indexed_route_surface` the full
-    /// materialise uses, and the artifact republishes with fresh
-    /// `edge_generation` / `project_generation` stamps.
-    ///
-    /// Runs inside the `indexed_singleflight` flight. Carries the same
-    /// pre-publish fence as the full materialise: a generation move
-    /// detected at the fence serves the result without publishing
-    /// (ReturnOnly) — the returned outcome carries `published == false`
-    /// so the flight is not retained and followers re-validate.
-    ///
-    /// `flight_workspace_generation` / `flight_project_generation` are
-    /// flight-captured by the caller BEFORE the parse-env reuse gate
-    /// that authorises entering this refresh (never re-read here): the
-    /// fence must cover the gate→publish window because a
-    /// parse-env-moving mutation in that window — which always bumps
-    /// `project_generation` — would otherwise stamp a CURRENT
-    /// `project_generation` onto a payload parsed under the superseded
-    /// env. `indexed_surface_is_current` short-circuits on a current
-    /// project stamp as proof of parse-env currency, so that
-    /// forged-current entry is the one publish the read-side gates
-    /// cannot reject; the fence comparing against the pre-gate capture
-    /// declines it (ReturnOnly).
-    ///
-    /// The wholesale `stale.snapshot` reuse rests on snapshots carrying
-    /// SPECIFIER-level route inputs only (`snapshot.imports` sources,
-    /// `export_signatures.reexport_source`) — never baked resolved
-    /// canonicals; the rebuild re-resolves every edge against the live
-    /// file set. Pinned behaviorally by
-    /// `non_wildcard_route_fact_retargets_via_edge_refresh_on_warm_host`:
-    /// the refresh reuses the pre-retarget snapshot and must still
-    /// resolve the NEW target — a snapshot that baked the old canonical
-    /// would re-bake it and fail that test.
-    fn refresh_indexed_route_surface(
-        &self,
-        canonical_id: &str,
-        stale: &Arc<crate::project_type_store::IndexedReady>,
-        flight_workspace_generation: u64,
-        flight_project_generation: u64,
-    ) -> crate::project_type_store::IndexedFlightOutcome {
-        self.provenance
-            .indexed_ready_edge_refreshes
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(test)]
-        self.fire_materialize_seam();
-
-        let surface = self.build_indexed_route_surface(
-            canonical_id,
-            stale.whole_hash,
-            stale.snapshot.as_ref(),
-            &stale.route_inventory,
-            // The content-addressed declaration-body memo is REUSED
-            // across route-only edge refreshes (same content generation;
-            // bodies are canonical-free) — only the route surface and
-            // its per-state classification caches rebuild.
-            stale.shallow_state.decl_bodies(),
-            Some(stale.eval_source.as_ref()),
-        );
-        let indexed = Arc::new(crate::project_type_store::IndexedReady {
-            whole_hash: stale.whole_hash,
-            shallow_state: surface.shallow_state,
-            import_routes: surface.import_routes,
-            import_route_hash: surface.import_route_hash,
-            route_hash: surface.route_hash,
-            edge_generation: surface.edge_generation,
-            project_generation: flight_project_generation,
-            // The refresh reuses `framework_parse` / `eval_env`, so it is
-            // entered only when the stale artifact's parse env equals
-            // the live one at the reuse gate — carry the (equal) stamp
-            // forward. A parse-env move AFTER that gate bumps
-            // `project_generation` and trips the fence below, so the
-            // carried stamp is never published as forged-current.
-            parse_env_hash: stale.parse_env_hash,
-            raw_source: Arc::clone(&stale.raw_source),
-            eval_source: Arc::clone(&stale.eval_source),
-            framework_parse: stale.framework_parse.clone(),
-            script_analysis: stale.script_analysis.clone(),
-            export_signatures: stale.export_signatures.clone(),
-            snapshot: Arc::clone(&stale.snapshot),
-            route_inventory: Arc::clone(&stale.route_inventory),
-            declares_interface_app_config: stale.declares_interface_app_config,
-            macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
-        });
-        // PRE-PUBLISH FENCE — same ReturnOnly contract as the full
-        // materialise: serve, never publish a known-superseded surface.
-        // As there, the fence→insert pair is not atomic; a mutation
-        // landing in the window leaves a stale-stamped insert that every
-        // reader rejects via the content-pinned lookup +
-        // `indexed_surface_is_current` (see the full materialise's fence
-        // comment for the per-mutation-class breakdown). That read-side
-        // rejection argument holds ONLY because the published stamps are
-        // the flight captures taken BEFORE the parse-env reuse gate —
-        // never live re-reads: a mid-flight mutation always leaves the
-        // landed stamps strictly older than the live generations, so the
-        // reader gates see the entry as stale. A live re-read here would
-        // stamp the post-mutation generation onto the pre-mutation
-        // payload (forged-current — see the fn docs), which no read-side
-        // gate can reject.
-        if self.ws().content_generation() != flight_workspace_generation
-            || self.project_type_store.current_project_generation() != flight_project_generation
-        {
-            return crate::project_type_store::IndexedFlightOutcome {
-                indexed,
-                published: false,
-            };
-        }
-        self.project_type_store
-            .indexed()
-            .insert(Arc::from(canonical_id), Arc::clone(&indexed));
-        crate::project_type_store::IndexedFlightOutcome {
-            indexed,
-            published: true,
-        }
+        Arc::new(shallow_state_inner)
     }
 
     /// Test-only seam used by mid-flight mutation tests — see the
@@ -1911,19 +1529,6 @@ impl VerterHost {
     #[cfg(test)]
     pub(crate) fn fire_flight_retry_seam(&self) {
         let hook = self.flight_retry_seam_hook.lock().clone();
-        if let Some(hook) = hook {
-            hook();
-        }
-    }
-
-    /// Test-only seam fired after the edge-refresh parse-env reuse gate
-    /// passes and before the refresh flight runs — see the
-    /// `edge_refresh_gate_seam_hook` field docs. Same
-    /// clone-out-then-invoke discipline as
-    /// [`Self::fire_materialize_seam`].
-    #[cfg(test)]
-    pub(crate) fn fire_edge_refresh_gate_seam(&self) {
-        let hook = self.edge_refresh_gate_seam_hook.lock().clone();
         if let Some(hook) = hook {
             hook();
         }
@@ -2055,7 +1660,7 @@ impl VerterHost {
         if crate::resolver_core::resolver_context::fact_tracer_installed() {
             if let Some(serve) = serve.as_ref() {
                 if serve.store_published {
-                    if let Some(route_hash) = serve.indexed.route_hash {
+                    if let Some(route_hash) = serve.indexed.route_surface_hash() {
                         let normalized = self.normalized_analysis_canonical(canonical_id);
                         if serve.indexed.shallow_state.has_resolvable_surface()
                             && self.indexed_surface_is_current(normalized.as_ref(), &serve.indexed)
@@ -2099,15 +1704,12 @@ impl VerterHost {
                 .indexed()
                 .get(canonical_id, current_hash)
             {
-                // A content-current artifact is reusable ONLY while
-                // edge-current. An artifact whose baked cross-file edges
-                // are stale (a dependency appeared / retargeted while this
-                // file's content stayed put) must be rebuilt so its edges
-                // re-resolve against the live file set — the materialiser
-                // below re-inserts under the same content key, replacing
-                // the stale candidate with a fresh `edge_generation`.
-                // Falling through (not returning) routes an edge-stale hit
-                // into the rebuild.
+                // A content-current artifact is reusable while its parse
+                // environment is unchanged. A moved parse env means the
+                // retained `framework_parse` / `shallow_state` /
+                // `decl_bodies` were produced under a superseded
+                // environment, so falling through (not returning) routes
+                // the hit into the full re-materialise (re-parse).
                 if self.indexed_surface_is_current(canonical_id, &indexed) {
                     component_meta_trace_custom!(
                         "ensure_indexed_ready_fast_hit",
@@ -2450,7 +2052,7 @@ impl VerterHost {
                 Some(cold_lease.lease),
             ));
 
-            let surface = self.build_indexed_route_surface(
+            let shallow_state = self.build_indexed_shallow_surface(
                 canonical_id,
                 whole_hash,
                 snapshot.as_ref(),
@@ -2504,12 +2106,8 @@ impl VerterHost {
             // This is the single authoritative cache consumers read from.
             let indexed = Arc::new(crate::project_type_store::IndexedReady {
                 whole_hash,
-                shallow_state: surface.shallow_state,
-                import_routes: surface.import_routes,
-                import_route_hash: surface.import_route_hash,
-                route_hash: surface.route_hash,
-                edge_generation: surface.edge_generation,
-                project_generation: flight_project_generation,
+                shallow_state,
+                built_at_content_generation: flight_workspace_generation,
                 parse_env_hash: flight_parse_env_hash,
                 raw_source: Arc::clone(&raw_source),
                 eval_source: Arc::clone(&eval_source),
@@ -2546,18 +2144,12 @@ impl VerterHost {
             //   (`indexed().get(canonical, current_hash)` /
             //   `artifact_current_indexed_raw`), so the torn artifact —
             //   keyed under the pre-mutation hash — is a key miss.
-            // * A foreign-content mutation (`content_generation`
-            //   advanced): `indexed_surface_is_current` →
-            //   `route_surface_is_edge_current` rejects any surface
-            //   with cross-file edges whose `edge_generation` predates
-            //   the move; an edge-FREE surface is insensitive to the
-            //   dependency file set, so serving it is sound.
-            // * A route-resolution / config mutation
-            //   (`project_generation` advanced):
+            // * A foreign-content mutation: the artifact retains no
+            //   resolved target and no dependency-set-derived state, so
+            //   nothing about it can be stale — serving it is sound.
+            // * A parse-env-moving mutation:
             //   `indexed_surface_is_current` rejects on the stale
-            //   `project_generation` stamp (edge-free surfaces
-            //   additionally require parse-env equality — every
-            //   parse-env-moving mutation bumps `project_generation`).
+            //   `parse_env_hash`.
             //
             // Closing the window with a lock would order this store's
             // lock against the workspace/scheduler generation locks for
@@ -2598,23 +2190,6 @@ impl VerterHost {
             validity_fingerprint: 0,
         };
         let flight_body = || -> Result<crate::project_type_store::IndexedFlightOutcome, ()> {
-            // Edge-refresh fence generations — flight-captured BEFORE
-            // any read, in particular BEFORE the parse-env reuse gate
-            // below (the full materialise's own captures live inside
-            // `materialize`, equally before its env read). The refresh
-            // publishes under THESE stamps and fences against them: a
-            // parse-env-moving mutation landing after this capture —
-            // which always bumps `project_generation` — either fails
-            // the gate (env already moved when compared) or trips the
-            // refresh fence (generation moved after the gate passed).
-            // Capturing after the gate instead would stamp the
-            // post-mutation generation onto a payload parsed under the
-            // superseded env — a forged-current entry
-            // `indexed_surface_is_current` cannot reject (a current
-            // project stamp short-circuits as proof of parse-env
-            // currency).
-            let flight_workspace_generation = self.ws().content_generation();
-            let flight_project_generation = self.project_type_store.current_project_generation();
             // Re-check cache inside the flight — another thread may have
             // populated it after we dropped the first probe. Gate the
             // re-check on the scheduler's current `whole_hash` for the
@@ -2646,30 +2221,13 @@ impl VerterHost {
                         published: true,
                     });
                 }
-                // The content identity is unchanged — only the ROUTE
-                // surface is stale (edge generation or project stamp).
-                // Refresh it from the retained content-addressed payload:
-                // no re-read, no re-parse, no env/analysis rebuild — the
-                // coherent route surface (import_routes, route edges,
-                // route_hash, import_route_hash) rebuilds and republishes
-                // with fresh stamps. This REPLACES the full re-parse
-                // edge-stale rebuild. The refresh REUSES `framework_parse` /
-                // `eval_env`, so it is valid only while the owner's parse
-                // environment (the R21 parse dimension) is unchanged — a
-                // moved parse env falls through to the full re-materialise
-                // (re-parse under the live env).
-                if self.host_view_env_hashes_for(canonical_id).parse_env_hash
-                    == candidate.parse_env_hash
-                {
-                    #[cfg(test)]
-                    self.fire_edge_refresh_gate_seam();
-                    return Ok(self.refresh_indexed_route_surface(
-                        canonical_id,
-                        &candidate,
-                        flight_workspace_generation,
-                        flight_project_generation,
-                    ));
-                }
+                // A content-current candidate that fails the gate can
+                // only have failed on parse env, and the retained
+                // payload was parsed under the superseded one — so the
+                // full re-materialise (re-parse) is the ONLY successor.
+                // There is no route-only refresh lane: the artifact
+                // carries no resolved target for a route mutation to
+                // stale.
             }
             materialize().ok_or(())
         };
@@ -2816,36 +2374,25 @@ impl VerterHost {
         }
         let derived = self.derived_raw_cache().get(canonical_id)?;
         let resolution = derived.import_routes.get(import_source).cloned()?;
-        // R3/R26/R28: the shared per-entry freshness oracle. A
-        // known-miss must invalidate once `content_generation` advances
-        // past its admission stamp — a NEW canonical may now satisfy the
-        // previously-unresolvable specifier. HOST-MEMOIZED positives are
-        // the same dependency-set-derived class (a `.d.ts` companion or
-        // a more-specific sibling can retarget them while the owner's
-        // content stays put): a stamped positive serves only while its
-        // capture-before-resolve stamp equals the live generation; the
-        // caller re-resolves and re-admits otherwise. Caller-supplied
-        // authoritative routes (`set_import_dependencies`) carry no
-        // positive stamp and serve until replaced.
-        let current = self.ws().content_generation();
-        if !derived.import_route_entry_is_generation_current(import_source, &resolution, current) {
-            if resolution.is_known_miss() {
-                // Per-request audit attribution: the known-miss entry
-                // is stale relative to the current `content_generation`
-                // — caller will recompute against the live workspace.
-                if let Some(obs) = verter_audit::current_observer() {
-                    obs.record_event(verter_audit::AuditEvent::KnownMissRouteRecomputed);
-                }
+        // A known-miss is NEVER served warm: a negative answer is not
+        // evidence that the answer is still negative. The caller
+        // re-resolves through the one owner-edge authority, where a warm
+        // candidate whose exhausted probe set is unchanged is reused, so
+        // the re-resolve is cheap rather than cold.
+        //
+        // A POSITIVE entry is a caller-supplied authoritative route and
+        // serves until the caller replaces it. There is no host-memoised
+        // positive class any more, and therefore no global
+        // `content_generation` equality deciding whether one is still
+        // true — that was the last global-generation warm-resolution
+        // validity test in the session.
+        if resolution.is_known_miss() {
+            // Per-request audit attribution: the caller will recompute
+            // the miss against the live workspace.
+            if let Some(obs) = verter_audit::current_observer() {
+                obs.record_event(verter_audit::AuditEvent::KnownMissRouteRecomputed);
             }
             return None;
-        }
-        if resolution.is_known_miss() {
-            // Per-request audit attribution: the known-miss entry
-            // revalidated successfully against the current generation
-            // — caller short-circuits without re-resolving.
-            if let Some(obs) = verter_audit::current_observer() {
-                obs.record_event(verter_audit::AuditEvent::KnownMissRouteRevalidated);
-            }
         }
         Some(resolution)
     }
@@ -2946,7 +2493,7 @@ impl VerterHost {
             .or_else(|| {
                 ctx.indexed_for_current_content(canonical_id)
                     .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
-                    .and_then(|indexed| indexed.route_hash)
+                    .and_then(|indexed| indexed.route_surface_hash())
             });
         if let Some(hash) = route_hash {
             let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
@@ -3065,14 +2612,10 @@ impl VerterHost {
             crate::resolver_core::ExportTarget::Reexport {
                 source_specifier,
                 original_name,
-                canonical_id,
                 ..
             } => {
-                let next_canonical = if canonical_id.is_empty() {
-                    self.resolve_route_type_edge(dep_canonical, source_specifier)?
-                } else {
-                    canonical_id.clone()
-                };
+                let next_canonical =
+                    self.resolve_route_type_edge(dep_canonical, source_specifier)?;
                 (next_canonical, original_name.clone())
             }
             crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
@@ -3100,20 +2643,16 @@ impl VerterHost {
                     );
                     return Some((resolved, facts));
                 };
-                let next_canonical = if import_target.canonical_id.is_empty() {
-                    self.resolve_route_type_edge(
-                        dep_canonical,
-                        import_target.source_specifier.as_str(),
-                    )?
-                } else {
-                    import_target.canonical_id.clone()
-                };
+                let next_canonical = self.resolve_route_type_edge(
+                    dep_canonical,
+                    import_target.source_specifier.as_str(),
+                )?;
                 (next_canonical, import_target.imported_name.clone())
             }
         };
         let normalized_target = self
-            .resolve_eval_dependency_canonical(target_canonical.as_str())
-            .unwrap_or(target_canonical);
+            .normalized_analysis_canonical(target_canonical.as_str())
+            .into_owned();
         let (leaf_owner, leaf_symbol, target_hash, target_store_published) = {
             let target_serve =
                 self.routed_shallow_state_serve_with_context(ctx, normalized_target.as_str())?;
@@ -3180,11 +2719,8 @@ impl VerterHost {
         );
         let shallow = self.shallow_file_state(dep_canonical)?;
         let import_target = shallow.import_target(resolved_name)?;
-        let next_canonical = if import_target.canonical_id.is_empty() {
-            self.resolve_route_type_edge(dep_canonical, &import_target.source_specifier)?
-        } else {
-            import_target.canonical_id.clone()
-        };
+        let next_canonical =
+            self.resolve_route_type_edge(dep_canonical, &import_target.source_specifier)?;
         component_meta_trace_custom!(
             "resolve_local_import_symbol_target_result",
             format!(
@@ -3308,20 +2844,23 @@ impl VerterHost {
             // target, an unproduce-able wildcard hash) — equally
             // inadmissible negative state, fail-closed.
             let mut unrooted_route_walk = false;
+            let mut resolution_refused = false;
             for (local_name, target) in shallow.import_targets.iter() {
-                let resolved_canonical_id = if target.canonical_id.is_empty() {
-                    match self.resolve_type_dependency_canonical(
-                        owner_canonical,
-                        &target.source_specifier,
-                    ) {
-                        Some(canonical) => canonical,
-                        None => {
+                let resolved_canonical_id = match self
+                    .resolve_type_dependency_canonical(owner_canonical, &target.source_specifier)
+                {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                        let Some(canonical) = admitted.into_result() else {
                             unresolved_sources.insert(target.source_specifier.clone());
                             continue;
-                        }
+                        };
+                        canonical
                     }
-                } else {
-                    target.canonical_id.clone()
+                    verter_workspace::ResolutionPublication::Refused(_) => {
+                        resolution_refused = true;
+                        unresolved_sources.insert(target.source_specifier.clone());
+                        continue;
+                    }
                 };
 
                 // Observe the producer's dep-side `FileWholeHash` for the
@@ -3377,9 +2916,20 @@ impl VerterHost {
                 chain_facts,
                 unresolved_sources,
                 unrooted_route_walk,
+                resolution_refused,
             )
         };
-        let (entries, mut chain_facts, unresolved_sources, unrooted_route_walk) = cold_body();
+        let (
+            entries,
+            mut chain_facts,
+            unresolved_sources,
+            unrooted_route_walk,
+            resolution_refused,
+        ) = cold_body();
+
+        if resolution_refused {
+            return crate::cache_runtime::singleflight::ComputeAdmission::Failed;
+        }
 
         // A per-binding route walk returning the empty-facts strict-admission
         // signal is served but never published. This also covers a fenced serve
@@ -3403,29 +2953,24 @@ impl VerterHost {
             };
         }
 
-        // Root every SKIPPED unresolved direct import in the owner's
-        // `ImportRoute` fact rail — the same rail that roots unresolvable
-        // wildcard route misses. `generation_current_import_route_hash`
-        // re-resolves the owner's known-miss specifiers against the live
-        // workspace on warm validation, so the recorded fact MOVES the
-        // moment a skipped specifier becomes resolvable and the cached
-        // surface (computed without that import) declines. When the rail
-        // cannot cover every skipped specifier the entry is refused
-        // admission (fail-closed): the surface is still served to the
-        // caller, and the next request cold-recomputes.
+        // Root every SKIPPED unresolved direct import on the owner's
+        // resolution-witness rail — the same rail that roots unresolvable
+        // wildcard route misses. Resolving the skipped specifiers fans the
+        // sealed transactions' observations (including the exhausted probe
+        // set for each miss), so the recorded witness MOVES the moment a
+        // skipped specifier becomes resolvable and the cached surface
+        // (computed without that import) declines. Coverage is structural:
+        // the witness is built FROM the skipped specifiers. A REFUSED
+        // resolution refuses admission (fail-closed): the surface is still
+        // served to the caller, and the next request cold-recomputes.
         if !unresolved_sources.is_empty() {
             let required: Vec<String> = unresolved_sources.into_iter().collect();
-            match self
-                .generation_current_import_route_hash_covering_sources(owner_canonical, &required)
-            {
-                Some(hash) => {
-                    let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
-                        canonical_id: owner_canonical.to_string(),
-                        kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                        hash,
-                    };
-                    if !chain_facts.contains(&fact) {
-                        chain_facts.push(fact);
+            match self.import_route_witness_for_specifiers(owner_canonical, &required) {
+                Some(witness) => {
+                    for fact in witness {
+                        if !chain_facts.contains(&fact) {
+                            chain_facts.push(fact);
+                        }
                     }
                 }
                 None => {

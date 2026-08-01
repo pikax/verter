@@ -37,11 +37,21 @@ impl VerterHost {
         String,
         Vec<crate::resolver_core::ResolvedNativeProp>,
     )> {
-        let dep_canonical = self.resolve_loaded_dependency_canonical(
+        let dep_canonical = match self.resolve_loaded_dependency_canonical(
             owner_canonical,
             import_source,
             verter_workspace::ResolveRequestKind::TypeImport,
-        )?;
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                admitted.into_result()?
+            }
+            verter_workspace::ResolutionPublication::Refused(_) => {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
+                return None;
+            }
+        };
 
         tracked_deps.insert(dep_canonical.clone());
         resolution_deps.insert(dep_canonical.clone());
@@ -146,10 +156,13 @@ impl VerterHost {
             .map(|import| import.source.clone())
             .collect();
         for specifier in specifiers {
-            if let Some(dep_canonical) =
-                self.resolve_type_dependency_canonical(owner_canonical, specifier.as_str())
-            {
-                let _ = ctx.ensure_indexed_ready_serve(dep_canonical.as_str());
+            match self.resolve_type_dependency_canonical(owner_canonical, specifier.as_str()) {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    if let Some(dep_canonical) = admitted.into_result() {
+                        let _ = ctx.ensure_indexed_ready_serve(dep_canonical.as_str());
+                    }
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => return,
             }
         }
     }

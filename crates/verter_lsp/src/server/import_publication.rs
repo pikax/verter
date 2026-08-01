@@ -306,20 +306,30 @@ impl VerterLanguageServer {
             return ImportSyncOutcome::Complete;
         };
 
-        let mut import_ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
-            &ingress.imports,
-            Some(&canonical_id),
-            |parent, specifier| self.resolve_import_specifier(parent, specifier),
-        );
+        let mut import_ids =
+            match collect_imported_carrier_priority_ids_from_imports_for_publication(
+                &ingress.imports,
+                Some(&canonical_id),
+                |parent, specifier| {
+                    self.resolve_import_specifier_for_publication(parent, specifier)
+                },
+            ) {
+                Ok(import_ids) => import_ids,
+                Err(_) => {
+                    return ImportSyncOutcome::Retry;
+                }
+            };
 
         let snapshot = self.published_resolver();
         let reader = LspProjectResolverReader::new(&self.documents);
-        let dynamic_ids = collect_priority_carrier_public_api_targets_from_module_references(
+        let Some(dynamic_ids) = collect_priority_carrier_public_api_targets_from_module_references(
             snapshot.as_ref(),
             &reader,
             &canonical_id,
             &ingress.module_references,
-        );
+        ) else {
+            return ImportSyncOutcome::Retry;
+        };
         let mut seen: HashSet<String> = import_ids.iter().cloned().collect();
         for import_id in dynamic_ids {
             if seen.insert(import_id.clone()) {
@@ -456,9 +466,18 @@ impl VerterLanguageServer {
         // Direct carriers are already handled by carrier sync.
         let mut frontier: Vec<String> = Vec::new();
         for import in ingress.imports.iter() {
-            let Some(resolved) = self.resolve_import_specifier(&canonical_id, &import.source)
-            else {
-                continue;
+            let resolved = match self
+                .resolve_import_specifier_for_publication(&canonical_id, &import.source)
+            {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    let Some(resolved) = admitted.into_result() else {
+                        continue;
+                    };
+                    resolved
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => {
+                    return ImportSyncOutcome::Retry;
+                }
             };
             if verter_workspace::path_is_carrier(&resolved) {
                 continue;
@@ -498,9 +517,18 @@ impl VerterLanguageServer {
                     let Some(specifier) = module_ref.literal_specifier.as_deref() else {
                         continue;
                     };
-                    let Some(target) = self.resolve_import_specifier(barrel_id, specifier) else {
-                        continue;
-                    };
+                    let target =
+                        match self.resolve_import_specifier_for_publication(barrel_id, specifier) {
+                            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                                let Some(target) = admitted.into_result() else {
+                                    continue;
+                                };
+                                target
+                            }
+                            verter_workspace::ResolutionPublication::Refused(_) => {
+                                return ImportSyncOutcome::Retry;
+                            }
+                        };
                     if verter_workspace::path_is_carrier(&target) {
                         if seen_barrel_carrier.insert(target.clone()) {
                             barrel_carrier_deps.push(target);

@@ -190,14 +190,15 @@ impl VerterLanguageServer {
                 // The shared carrier-import projection is the whole answer.
                 let workspace = self.vfs_workspace.read().clone();
                 let encoding = self.position_encoding.read().clone();
-                Some(
-                    crate::carrier_provider_projection::prepare_carrier_provider_imports(
-                        workspace.as_deref(),
-                        canonical_id,
-                        ide_code,
-                        encoding,
-                    ),
-                )
+                match crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                    workspace.as_deref(),
+                    canonical_id,
+                    ide_code,
+                    encoding,
+                ) {
+                    Ok(prepared) => Some(prepared),
+                    Err(_) => return false,
+                }
             }
         };
         // Fail closed: a buffer whose provider bytes cannot be modelled is not
@@ -532,27 +533,46 @@ impl VerterLanguageServer {
                 // script: fail closed rather than assume it imports nothing.
                 return false;
             };
-            for target in super::server_utils::collect_imported_carrier_priority_ids_from_imports_with_fallback(
-                &ingress.imports,
-                Some(source.as_str()),
-                |parent, specifier| self.resolve_import_specifier(parent, specifier),
-            ) {
+            let direct_targets =
+                match super::server_utils::collect_imported_carrier_priority_ids_from_imports_for_publication(
+                    &ingress.imports,
+                    Some(source.as_str()),
+                    |parent, specifier| {
+                        self.resolve_import_specifier_for_publication(parent, specifier)
+                    },
+                ) {
+                    Ok(targets) => targets,
+                    Err(_) => return false,
+                };
+            for target in direct_targets {
                 push_carrier(target, &mut carrier_targets);
             }
-            for target in super::server_utils::collect_priority_carrier_public_api_targets_from_module_references(
+            let Some(dynamic_targets) =
+                super::server_utils::collect_priority_carrier_public_api_targets_from_module_references(
                 resolver_snapshot.as_ref(),
                 &reader,
                 source,
                 &ingress.module_references,
-            ) {
+            )
+            else {
+                return false;
+            };
+            for target in dynamic_targets {
                 push_carrier(target, &mut carrier_targets);
             }
             for import in ingress.imports.iter() {
-                let Some(resolved) = import
-                    .resolved_canonical_id
-                    .clone()
-                    .or_else(|| self.resolve_import_specifier(source, &import.source))
-                else {
+                let resolved = match import.resolved_canonical_id.clone() {
+                    Some(resolved) => Some(resolved),
+                    None => match self
+                        .resolve_import_specifier_for_publication(source, &import.source)
+                    {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return false,
+                    },
+                };
+                let Some(resolved) = resolved else {
                     continue;
                 };
                 if verter_workspace::resolver::path_is_carrier(&resolved) {
@@ -588,8 +608,15 @@ impl VerterLanguageServer {
                 let Some(specifier) = module_reference.literal_specifier.as_deref() else {
                     continue;
                 };
-                let Some(target) = self.resolve_import_specifier(&barrel, specifier) else {
-                    continue;
+                let target = match self.resolve_import_specifier_for_publication(&barrel, specifier)
+                {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                        let Some(target) = admitted.into_result() else {
+                            continue;
+                        };
+                        target
+                    }
+                    verter_workspace::ResolutionPublication::Refused(_) => return false,
                 };
                 if verter_workspace::resolver::path_is_carrier(&target) {
                     re_exports_carrier = true;

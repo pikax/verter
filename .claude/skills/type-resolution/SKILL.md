@@ -82,17 +82,78 @@ Host-backed type/import resolution must treat the canonical file ID as cache ide
 
 ### Import-Route Admission Ownership
 
-`DerivedRawState.import_routes` and the `DerivedRawState.import_routes_known_miss_recorded_at_generation` sidecar split into two admission modes with distinct validity models:
+`DerivedRawState.import_routes` is exclusively the CALLER-SUPPLIED
+authoritative route table — a bundler telling the host how ITS resolver
+resolves. The host memoises NO resolution there: the workspace's own
+bounded owner-edge candidate slot is the one resolution memo, validated
+per-reader against a captured immutable resolution world.
 
-- **Complete caller-supplied snapshot + known-miss sidecar admission** — `VerterHost::set_import_dependencies` is the **single producer** admitting both the full route snapshot AND the per-specifier `content_generation` stamp for known-miss specifiers. A known miss is a specifier with no resolved canonical, no candidates, no effective target (`import_route_is_known_miss`). The sidecar tag lets the reader detect when a new canonical (which advances workspace `content_generation`) may now satisfy a previously unresolvable specifier.
-- **Positive route point admission** — `VerterHost::cache_positive_import_route_result` is the **single positive-only point producer**. It constructs `DependencyResolution { resolved_canonical_id: Some(...), possible_canonical_ids: vec![...] }` for the supplied `(owner, specifier, resolved)` tuple and must NOT touch the known-miss sidecar. Positive resolutions stay valid until the owner's source content changes; they need no generation tag.
-- **Lifecycle reset** — `VerterHost::configure_projects` (project-graph reconfiguration) and `VerterHost::upsert_via_scheduler_with_priority` (owner source update) may `.clear()` both `import_routes` and the known-miss sidecar in lockstep. Resetting only the route map would leave a stale `content_generation` stamp in the sidecar that would suppress re-resolution after the next admission.
+- **Complete caller-supplied snapshot** — `VerterHost::set_import_dependencies`
+  is the **single producer**. Its entries serve until the caller replaces them;
+  their currency rides the `ExactResolution` facts the same push installs, and
+  their KEYS join the owner's authored specifiers in the import-route witness
+  inventory, so a caller-pushed specifier with no authored counterpart is
+  witnessed like any other resolution.
+- **Lifecycle reset** — `VerterHost::configure_projects` (project-graph
+  reconfiguration) and `VerterHost::upsert_via_scheduler_with_priority` (owner
+  source update) may `.clear()` the table.
+- **Deleted** — the host-side positive-route memo
+  (`cache_positive_import_route_result`), its `PositiveRouteStamp` /
+  `import_routes_positive_recorded_at_generation` sidecar, the known-miss
+  generation sidecar, and the per-entry oracles
+  `import_route_is_generation_current` /
+  `import_route_entry_is_generation_current`. A host-side memo duplicated the
+  workspace candidate slot and, having no witness of its own, needed a global
+  `content_generation` equality to decide whether it was still true — the last
+  such warm-resolution validity test in the session. What remains host-owned is
+  the resolved dependency EDGE set (`record_resolved_dependency_edge` writing
+  `DependencyState.dependencies`), which is reverse-dependency bookkeeping, not
+  a resolution answer.
+
+A KNOWN-MISS entry is never served warm: a negative answer is not evidence that
+the answer is still negative, so the reader refuses it and the specifier
+re-resolves through the one owner-edge authority (where a warm candidate whose
+exhausted probe set is unchanged is reused, so the re-resolve is cheap).
 
 Architectural rules carried by the writer guard at `crates/verter_session/tests/cases/g_misc3/import_route_writer_guard.rs`:
 
-- Any new positive-route discovery must call `cache_positive_import_route_result`. A direct `derived_raw_cache().entry(...).import_routes.insert(...)` outside that helper, the snapshot writer, and the lifecycle reset methods is rejected.
-- The known-miss generation sidecar is admission-only inside `set_import_dependencies`. Any sidecar `insert`, `extend`, `retain`, or `remove` outside that writer is rejected.
-- Routing positive-only point inserts through `set_import_dependencies` is wrong: it would synthesize a full snapshot, re-stamp previously admitted known misses at the current `content_generation`, and extend stale negative answers that should have re-resolved.
+- A direct `derived_raw_cache().entry(...).import_routes.insert(...)` outside
+  `set_import_dependencies` and the lifecycle reset methods is rejected — that
+  is how a host-side route memo would be reintroduced.
+- `positive_route_memo_producer_is_deleted` asserts the deleted producer and
+  stamp are absent from production source.
+
+### Parse/Resolve Ownership
+
+`IndexedReady` and `ShallowFileState` are content-addressed PARSE/INDEX
+artifacts. They retain authored import/export syntax, specifiers, shallow
+declarations, locators, and parse-domain facts — and NO resolved canonical.
+Materialising an artifact performs ZERO import resolution.
+
+- The complete reuse gate is `indexed_surface_is_current` = the owner's
+  `parse_env_hash` equals its live parse environment. No route-resolution
+  mutation can stale a parse artifact, so there is no edge-currency oracle and
+  no route-only edge-refresh materialise lane.
+- `IndexedReady.built_at_content_generation` is a CONTENT-domain stamp with one
+  consumer, `artifact_only_candidate_is_fresh` (a per-canonical comparison
+  against the workspace content-transition ledger). Never a global-generation
+  equality, never a route currency oracle.
+- `Route` is a pure parse-domain digest of the AUTHORED routing surface. The
+  resolve-domain half of a route answer rides the import-route resolution
+  WITNESS: a route walk collects a PATH-PRECISE witness through
+  `ResolutionWitnessScope` over exactly the edges it TRAVERSED, never the
+  owner's whole authored inventory (which for a barrel is far broader than any
+  route through it).
+- The layer-ordered wildcard walk keeps each descendant as an unresolved
+  `(owner, source_specifier)` edge and resolves it only when visited, so a
+  barrel's later-declared `export *` siblings are never resolved or loaded when
+  an earlier-declared one carries the requested export.
+- Resolution is SESSION-SCOPED for a session-bound consumer
+  (`SessionResolverContext::resolve_type_dependency_canonical` resolves through
+  the session's own overlay): with nothing baked into the artifact, a base-host
+  resolve would make an overlay-only dependency disappear.
+
+Full normative text: `docs/arch/path-precise-resolution-currency.md`.
 
 ### Module-resolution keying (split env)
 

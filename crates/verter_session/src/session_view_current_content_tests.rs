@@ -457,21 +457,19 @@ fn overlay_materialiser_view_lookups_use_raw_canonical_for_normalised_js() {
         "the materialised `raw_source` must NOT be the base `.d.ts` companion text",
     );
 
-    // Discriminator 2 — the overlay-only `./helper` import resolved to
-    // the overlay-only `/pkg/helper.ts`. The base `.d.ts` companion has
-    // no `./helper` import at all, so a pre-fix build from it carries
-    // no such route.
-    let helper_route = indexed
-        .import_routes
-        .get("./helper")
-        .and_then(|resolution| resolution.resolved_canonical_id.clone());
-    assert_eq!(
-        helper_route.as_deref(),
-        Some("/pkg/helper.ts"),
-        "the overlaid `.js` imports `./helper`; the materialiser MUST resolve it \
-         to the overlay-only `/pkg/helper.ts`. A missing route means the \
-         materialiser parsed the base `.d.ts` companion (which has no `./helper` \
-         import) instead of the overlaid `.js`",
+    // Discriminator 2 — the overlaid `.js` AUTHORS a `./helper` import.
+    // The base `.d.ts` companion has no `./helper` import at all, so an
+    // artifact built from it carries no such specifier.
+    assert!(
+        indexed
+            .shallow_state
+            .import_targets
+            .values()
+            .any(|target| target.source_specifier == "./helper"),
+        "the overlaid `.js` imports `./helper`; the materialiser MUST publish that \
+         AUTHORED specifier. Its absence means the materialiser parsed the base \
+         `.d.ts` companion (which has no `./helper` import) instead of the \
+         overlaid `.js`",
     );
 }
 

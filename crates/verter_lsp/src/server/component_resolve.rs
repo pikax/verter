@@ -137,7 +137,12 @@ impl VerterLanguageServer {
         local_binding_name: Option<&str>,
     ) -> Option<String> {
         let parent_canonical_id = uri_to_canonical_id(parent_uri);
-        let workspace_resolved = self.resolve_import_specifier(&parent_canonical_id, import_source);
+        let workspace_resolved = match self
+            .resolve_import_specifier_for_publication(&parent_canonical_id, import_source)
+        {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(_) => return None,
+        };
         let candidates = imported_component_canonical_candidates(
             &parent_canonical_id,
             parent_analysis,
@@ -204,14 +209,32 @@ impl VerterLanguageServer {
         })
     }
 
-    pub(super) fn resolve_import_specifier(
+    pub(super) fn resolve_import_specifier_transient(
         &self,
         parent_canonical_id: &str,
         specifier: &str,
     ) -> Option<String> {
         self.documents
             .host()
-            .resolve_import_via_workspace(parent_canonical_id, specifier)
+            .resolve_import_transient(parent_canonical_id, specifier)
+    }
+
+    pub(super) fn resolve_import_specifier_for_publication(
+        &self,
+        parent_canonical_id: &str,
+        specifier: &str,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        self.documents
+            .host()
+            .resolve_for_persistent_state(
+                parent_canonical_id,
+                specifier,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::EsmImport,
+                },
+            )
+            .map_result(|resolved| resolved.source_id)
     }
 
     pub(super) fn component_import_binding_name(
@@ -372,7 +395,7 @@ impl VerterLanguageServer {
         canonical_id: &str,
         specifier: &str,
     ) -> Option<String> {
-        self.resolve_import_specifier(canonical_id, specifier)
+        self.resolve_import_specifier_transient(canonical_id, specifier)
     }
 
     pub(super) fn resolve_precise_export_location(

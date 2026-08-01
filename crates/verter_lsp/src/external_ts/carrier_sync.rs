@@ -620,14 +620,23 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                 return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
             }
         };
-        let companions = build_carrier_companions(
+        let companions = match build_carrier_companions(
             &transition.next,
             req.ide,
             api.as_ref(),
             req.vfs,
             req.canonical_id,
             req.project_sync,
-        );
+        ) {
+            Ok(companions) => companions,
+            Err(error) => {
+                tracing::debug!(
+                    "carrier-sync gateway: companion preparation refused for {}: {error}",
+                    req.canonical_id
+                );
+                return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
+            }
+        };
         // The source revision is the carrier source's AUTHORITATIVE per-canonical content
         // freshness rail (the workspace's `last_content_transition_generation`), captured
         // at OPEN time — a content edit advances it, so a prepare-then-open transaction
@@ -683,14 +692,23 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     };
     let ide = req.ide.or(fetched_ide.as_ref());
 
-    let mut companions = build_carrier_companions(
+    let mut companions = match build_carrier_companions(
         &committed_state,
         ide,
         api.as_ref(),
         req.vfs,
         req.canonical_id,
         req.project_sync,
-    );
+    ) {
+        Ok(companions) => companions,
+        Err(error) => {
+            tracing::debug!(
+                "carrier-sync gateway: companion preparation refused for {}: {error}",
+                req.canonical_id
+            );
+            return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
+        }
+    };
     if companions.is_empty() {
         // The owned source produced NO companion content this pass — a genuine
         // compile-to-nothing (ownership is AUTHORITATIVE here, since `Bound` only comes
@@ -844,6 +862,27 @@ fn carrier_source_revision(host: &VerterHost, canonical_id: &str) -> u64 {
 
 /// Build the carrier companion set (public-API + IDE) from the owner-resolved
 /// transition's provider paths and the freshly-compiled artifacts.
+#[derive(Debug)]
+enum CarrierCompanionBuildError {
+    ProviderSurfaceUnavailable,
+    ResolutionRefused(verter_workspace::ResolutionPublicationRefusal),
+}
+
+impl std::fmt::Display for CarrierCompanionBuildError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProviderSurfaceUnavailable => formatter.write_str("provider surface unavailable"),
+            Self::ResolutionRefused(refusal) => {
+                write!(
+                    formatter,
+                    "resolution publication refused: {:?}",
+                    refusal.reason()
+                )
+            }
+        }
+    }
+}
+
 fn build_carrier_companions(
     next_state: &ProviderSyncState,
     ide: Option<&IdeResponse>,
@@ -851,7 +890,7 @@ fn build_carrier_companions(
     workspace: Option<&FilesystemWorkspace>,
     canonical_id: &str,
     project_sync: Option<&crate::type_provider::project_sync::ProjectSync>,
-) -> Vec<CarrierCompanion> {
+) -> Result<Vec<CarrierCompanion>, CarrierCompanionBuildError> {
     let mut companions: Vec<CarrierCompanion> = Vec::new();
     if let (Some(api), Some(dts_path)) = (api, next_state.api_path.as_ref()) {
         companions.push(CarrierCompanion::verbatim(
@@ -872,20 +911,28 @@ fn build_carrier_companions(
         // shared projection here would stamp a receipt for bytes the engine does not
         // have, and the committed-surface gate would then refuse every capture.
         let prepared = match project_sync {
-            Some(sync) => sync.carrier_provider_surface(ide_path, &ide.code),
-            None => Some(
-                crate::carrier_provider_projection::prepare_carrier_provider_imports(
+            Some(sync) => Some(
+                sync.carrier_provider_surface_for_publication(ide_path, &ide.code)
+                    .map_err(|_| CarrierCompanionBuildError::ProviderSurfaceUnavailable)?,
+            ),
+            None => {
+                match crate::carrier_provider_projection::prepare_carrier_provider_imports(
                     workspace,
                     canonical_id,
                     &ide.code,
                     tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
-                ),
-            ),
+                ) {
+                    Ok(prepared) => Some(prepared),
+                    Err(refusal) => {
+                        return Err(CarrierCompanionBuildError::ResolutionRefused(refusal));
+                    }
+                }
+            }
         };
         // Fail closed: an unmodellable provider buffer publishes no IDE companion
         // rather than one attesting bytes no engine holds.
         let Some(prepared) = prepared else {
-            return companions;
+            return Err(CarrierCompanionBuildError::ProviderSurfaceUnavailable);
         };
         companions.push(CarrierCompanion::carrier_ide(
             Arc::from(ide_path.as_str()),
@@ -898,7 +945,7 @@ fn build_carrier_companions(
             },
         ));
     }
-    companions
+    Ok(companions)
 }
 
 /// The per-source admission barrier the [`CarrierTransactionCoordinator`] maintains OUTSIDE

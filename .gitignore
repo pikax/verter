@@ -109,3 +109,10 @@ packages/native/npm/*/*.node
 # Build-system directory stamps.
 .dirstamp
 **/.dirstamp
+
+# Per-review scratch adjudication notes. Ephemeral working state for one
+# review round; the durable record lives in `docs/arch/`.
+/.DECISION.md
+/.BRIEF-*.md
+/.RULING-*.md
+/.FINDINGS-*.md

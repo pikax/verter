@@ -49,6 +49,7 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
         })
         .unwrap();
 }
+
 /// A completely EMPTY .vue file (0 bytes — e.g. motion-vue's playground
 /// Home.vue) is a valid empty component. The host must serve a Main virtual
 /// node exporting `defineComponent({ __name })` with an empty public surface

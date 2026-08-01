@@ -32,6 +32,53 @@ pub(crate) fn next_host_instance_id() -> u64 {
     NEXT_HOST_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Unit-test standalone hosts model an explicitly configured in-memory
+/// project. Production standalone hosts remain unconfigured until their
+/// caller supplies project authority; tests that exercise the no-project
+/// state construct a host with an explicit workspace instead.
+#[cfg(test)]
+pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace::WorkspaceAccess) {
+    if workspace.resource_snapshot().published_project_count != 0 {
+        return;
+    }
+    let roots = std::iter::once("/".to_string())
+        .chain((b'a'..=b'z').map(|drive| format!("{}:/", char::from(drive))));
+    let projects = roots
+        .map(|root| {
+            let mut membership = verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new(&root),
+            );
+            let include = if root == "/" {
+                "/**/*".to_string()
+            } else {
+                format!("{}**/*", root)
+            };
+            membership.spec.include = vec![verter_workspace::CompiledGlob::new(
+                verter_workspace::NormalizedGlob::new(&include),
+            )];
+            membership.spec.exclude =
+                ["node_modules/**", "bower_components/**", "jspm_packages/**"]
+                    .into_iter()
+                    .map(|pattern| {
+                        verter_workspace::CompiledGlob::new(verter_workspace::NormalizedGlob::new(
+                            &format!("{root}{pattern}"),
+                        ))
+                    })
+                    .collect();
+            let tsconfig_path = if root == "/" {
+                "/__verter_test__/tsconfig.json".to_string()
+            } else {
+                format!("{root}__verter_test__/tsconfig.json")
+            };
+            let mut project =
+                verter_workspace::IdeProjectConfig::new(root.clone(), root, Some(tsconfig_path));
+            project.membership = membership;
+            project
+        })
+        .collect();
+    workspace.configure_resolver(projects);
+}
+
 /// Consolidated resolver state: bundles the unified sub-node resolver runtime
 /// with host-level top caches and singleflight groups.
 ///
@@ -146,6 +193,9 @@ impl VerterHost {
         workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
     ) -> Self {
+        #[cfg(test)]
+        configure_workspace_test_projects(workspace.as_ref());
+
         // Register the session-side "clear all install_tls slots"
         // hook with the scheduler's substrate registry. Idempotent
         // across hosts; the scheduler crate uses a `OnceLock` and
@@ -348,7 +398,6 @@ impl VerterHost {
             #[cfg(test)]
             compile_input_seam_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
-            edge_refresh_gate_seam_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             raw_snapshot_template_join_seam_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]

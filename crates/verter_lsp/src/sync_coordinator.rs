@@ -742,6 +742,10 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             let published = ws.load_published()?;
             Some(crate::server::PublishedResolverSnapshot {
                 resolver: published.snapshot.resolver.clone(),
+                resolution_view: Some(crate::server::PublishedResolutionView {
+                    workspace: Arc::clone(ws),
+                    published: Arc::clone(&published),
+                }),
                 ownership_ready: published.ownership_ready,
             })
         })

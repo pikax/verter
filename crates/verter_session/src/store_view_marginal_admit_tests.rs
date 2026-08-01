@@ -4,46 +4,42 @@
 //! Build Philosophy #5 — "the builder/solver reads only from cached
 //! lookup state; it does not reopen file loading or routing" — says
 //! [`crate::resolver_store::HostStoreView::build`] must not re-open a
-//! file when it snapshots it. It does. Any content change bumps the
-//! workspace `content_generation`, `route_surface_is_edge_current`
-//! compares an artifact's baked `edge_generation` against exactly that
-//! counter, so ONE mutation makes EVERY file carrying a cross-file edge
-//! edge-stale at once — and the builder's `ImportRoute` arm routes each
-//! stale surface through `ensure_indexed_ready_serve`. Cost per
-//! admission: one edge refresh and one import re-resolution per
-//! already-materialised owner in the host. The scaling tests below
-//! measure exactly that and are `#[ignore]`d, because they state the
-//! TARGET, not the tree.
+//! file when it snapshots it. Any content change bumps the workspace
+//! `content_generation`, and `route_surface_is_edge_current` compares an
+//! artifact's baked `edge_generation` against exactly that counter, so
+//! ONE mutation makes EVERY file carrying a cross-file edge edge-stale at
+//! once. The scaling tests below measure the per-owner cost of that and
+//! are `#[ignore]`d, because they state the TARGET, not the tree: the
+//! build still walks the published artifacts and the tracked owners.
 //!
-//! **Why the obvious fix is not landable on its own.** Making the
-//! `ImportRoute` arm observe-only (declining, or re-deriving the hash
-//! side-effect-free) removes the whole N-term and keeps the `ImportRoute`
-//! fact correct — and still regresses the project catastrophically,
-//! because the `Route` fact FREE-RIDES on that arm's re-index. The
-//! `Route` arm is already observe-only: it publishes nothing for an
-//! edge-stale surface. Today it survives an unrelated edit only because
-//! the `ImportRoute` arm re-indexes the owner mid-build,
-//! `artifact_generation` moves, `build_coherent`'s coherence check fails,
-//! and the RETRY re-runs the `Route` arm against the now-refreshed
-//! artifact. Remove the re-index and every warm entry rooted on a `Route`
-//! fact dies on every keystroke in any unrelated file. Measured, not
-//! reasoned: `unrelated_edit_keeps_both_route_facts_warm` below holds
-//! that contract, and it is what makes the observe-only change fail.
+//! The import-route half of the old N-term is gone. Its digest
+//! (`DerivedFactKind::ImportRoute`) summarised an owner's RESOLVED
+//! import table, so composing it forced the build to route each
+//! generation-stale surface through `ensure_indexed_ready_serve` — one
+//! edge refresh and one import re-resolution per already-materialised
+//! owner. The value is now the owner's import-route RESOLUTION WITNESS:
+//! the resolver observations the sealed transaction actually made,
+//! recorded by the producer and validated against the view's captured
+//! immutable resolution world. Nothing about it is derivable at build
+//! time, so the build no longer derives it.
 //!
-//! So the durable fix is not in this builder at all: it is that
-//! `content_generation` is the wrong stamp for EDGE currency. An import
-//! resolves against the file SET; editing the contents of an existing
-//! file cannot retarget anything. Until edge currency keys on something
-//! that only moves when the file set moves, the builder has no cheap way
-//! to know an owner's baked edges are still good, and the N-term cannot
-//! be removed without giving up warm reuse.
+//! The warm-reuse contract that arm used to pay for is held directly
+//! below by `unrelated_edit_keeps_both_route_facts_warm`: an owner whose
+//! specifiers still resolve to the same targets keeps both route rails
+//! across an unrelated file's edit. That is a path-precision property —
+//! a global file-set or content stamp substituted for the witness fails
+//! it.
 //!
 //! Counters used, all PER-HOST (immune to whatever else the shared test
 //! process is doing in parallel):
 //!
-//! - `MetaProvenanceSnapshot::indexed_ready_materializes` /
-//!   `indexed_ready_edge_refreshes` — one bump per `IndexedReady`
-//!   (re-)materialisation and per route-surface edge refresh.
+//! - `MetaProvenanceSnapshot::indexed_ready_materializes` — one bump per
+//!   `IndexedReady` (re-)materialisation. The route-only edge-refresh
+//!   lane it used to be paired with (`indexed_ready_edge_refreshes`) is
+//!   deleted with that lane: the artifact bakes no route, there is no
+//!   `refresh_indexed_route_surface`, and so no edge-refresh work is
+//!   left for a counter to measure. Asserting a counter with no producer
+//!   is a tautology, not a gate.
 //! - `VfsProvenanceSnapshot::import_resolution_cache_miss_count` — one
 //!   bump per import resolution that misses the workspace lazy
 //!   resolution cache and goes to the resolver (filesystem probing).
@@ -64,10 +60,8 @@ use crate::{HostConfig, UpsertRequest, VerterHost};
 /// Per-host counter deltas measured around one window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AdmitDeltas {
-    /// `IndexedReady` materialisations (cold builds + edge refreshes).
+    /// `IndexedReady` materialisations.
     materializes: u64,
-    /// The edge-refresh sub-lane of the above.
-    edge_refreshes: u64,
     /// Import resolutions that missed the workspace lazy-resolution
     /// cache (each is a resolver walk / filesystem probe).
     resolution_misses: u64,
@@ -120,15 +114,9 @@ fn host_with_n_materialized_files(n: usize) -> Arc<VerterHost> {
         .get_any(&member_id(0))
         .expect("every preloaded member must be materialised");
     assert!(
-        !sample.import_routes.is_empty(),
-        "precondition: a preloaded member must carry a resolved import route \
-         (got an empty route table — the fixture no longer exercises the \
-         ImportRoute domain)"
-    );
-    assert!(
-        sample.has_cross_file_edges(),
-        "precondition: a preloaded member must carry cross-file edges, so its \
-         edge currency is decided by the workspace content generation"
+        sample.shallow_state.has_shallow_cross_file_edges(),
+        "precondition: a preloaded member must carry cross-file edges, so it \
+         genuinely has import routes to resolve"
     );
     assert!(
         host.indexed_surface_is_current(&member_id(0), &sample),
@@ -146,8 +134,6 @@ fn deltas_around(host: &VerterHost, op: impl FnOnce(&VerterHost)) -> AdmitDeltas
     AdmitDeltas {
         materializes: meta_after.indexed_ready_materializes
             - meta_before.indexed_ready_materializes,
-        edge_refreshes: meta_after.indexed_ready_edge_refreshes
-            - meta_before.indexed_ready_edge_refreshes,
         resolution_misses: vfs_after.import_resolution_cache_miss_count
             - vfs_before.import_resolution_cache_miss_count,
     }
@@ -208,7 +194,6 @@ fn assert_builder_reopens_nothing(label: &str, measure: fn(usize) -> AdmitDeltas
             deltas,
             AdmitDeltas {
                 materializes: 0,
-                edge_refreshes: 0,
                 resolution_misses: 0,
             },
             "{label}: at N={n} the store-view builder reopened file loading / \
@@ -218,22 +203,78 @@ fn assert_builder_reopens_nothing(label: &str, measure: fn(usize) -> AdmitDeltas
     }
 }
 
+/// ANTI-VACUITY CONTROL for every zero-work assertion in this module.
+///
+/// `assert_builder_reopens_nothing` compares against
+/// `AdmitDeltas::default`-shaped zeros. If neither surviving counter had
+/// a live producer, every one of those gates would pass on an empty
+/// measurement and prove nothing — which is exactly what a third leg
+/// (`indexed_ready_edge_refreshes`) did once the edge-refresh lane it
+/// measured stopped existing, and why that leg is deleted rather than
+/// asserted.
+///
+/// So: measure a window that DOES the work, and require both surviving
+/// legs to move. Materialising a fresh edge-bearing owner from cold must
+/// bump `materializes`, and resolving its import must miss the workspace
+/// resolution cache at least once.
+#[test]
+fn the_measured_counters_move_when_the_work_actually_runs() {
+    let host = host_with_n_materialized_files(4);
+    let deltas = deltas_around(&host, |host| {
+        upsert_ts(host, "/proj/control.ts", MEMBER_SRC);
+        let _artifact = host
+            .ensure_indexed_ready("/proj/control.ts")
+            .expect("the freshly upserted owner must materialise");
+        let resolved = host.resolve_type_dependency_canonical("/proj/control.ts", "./dep");
+        assert_eq!(
+            resolved.as_deref(),
+            Some(DEP_ID),
+            "precondition: the control owner's import must actually resolve"
+        );
+    });
+    assert!(
+        deltas.materializes > 0,
+        "`materializes` has no live producer — every zero-work assertion in \
+         this module is vacuous: {deltas:?}"
+    );
+    assert!(
+        deltas.resolution_misses > 0,
+        "`resolution_misses` has no live producer — every zero-work assertion \
+         in this module is vacuous: {deltas:?}"
+    );
+}
+
 /// TARGET STATE, not the tree.
 ///
-/// Currently fails with `edge_refreshes` and `resolution_misses` both
-/// equal to N at every host size — one edge refresh and one import
-/// re-resolution per already-materialised owner, per admitted file. That
-/// is the O(N²) cold-build term.
+/// The O(N) term this gate was written against is GONE. It measured
+/// `edge_refreshes` and `resolution_misses` both equal to N at every host
+/// size — one edge refresh and one import re-resolution per
+/// already-materialised owner, per admitted file. The edge-refresh lane no
+/// longer exists (its counter went with it), and misses are now CONSTANT
+/// at 1 across N = 250 / 1,000 / 3,000. Split-window instrumentation
+/// attributes that residual 1 to the newly-admitted file's OWN `./dep`
+/// resolution, performed during `upsert`'s scheduler dependency
+/// extraction — not to any per-owner work over the other N files.
 ///
-/// Un-ignoring this requires edge currency to stop keying on
-/// `content_generation` (see the module docs): the `ImportRoute` arm
-/// cannot simply be made observe-only, because
-/// `unrelated_edit_keeps_both_route_facts_warm` below shows the `Route`
-/// fact free-rides on its re-index.
+/// The gate as written is nevertheless still NOT satisfied: its window
+/// spans the admission, so the new canonical's own cold build and own
+/// import resolution fall inside it, and the required counters are zero.
+/// Whether the window SHOULD exclude the admission is an OPEN contract
+/// question and is not decided here — `.DECISION.md` designates this exact
+/// test as the discriminator, so narrowing it is an adjudication, not an
+/// implementation detail. It belongs to the follow-on O(1)-build block,
+/// together with `store_view_owner_visits`.
+///
+/// The builder's own share — everything measured after the admission — is
+/// isolated and LIVE in
+/// [`snapshot_build_reopens_no_routing_for_unchanged_owners`].
 #[test]
-#[ignore = "target state: the builder still re-indexes every edge-stale owner; \
-            blocked on edge currency keying on the file set rather than \
-            content_generation — see the module docs"]
+#[ignore = "target state: the O(N) term is gone (misses constant at 1 across \
+            N=250/1000/3000, the residual attributed by split-window \
+            instrumentation to the admitted file's own ./dep resolution during \
+            upsert), but the gate as written is still not satisfied — its \
+            window spans the admission. Whether the window should exclude the \
+            admission is OPEN and owned by the O(1)-build follow-on"]
 fn marginal_admit_reopens_no_routing_regardless_of_host_size() {
     assert_builder_reopens_nothing("admitting ONE new file", marginal_admit_deltas);
 }
@@ -243,9 +284,6 @@ fn marginal_admit_reopens_no_routing_regardless_of_host_size() {
 /// measured is the builder's own work over owners whose content did not
 /// change).
 #[test]
-#[ignore = "target state: same defect as \
-            marginal_admit_reopens_no_routing_regardless_of_host_size, \
-            isolated to the snapshot build"]
 fn snapshot_build_reopens_no_routing_for_unchanged_owners() {
     assert_builder_reopens_nothing(
         "the store-view snapshot build after an admission",
@@ -266,7 +304,6 @@ fn recompile_existing_is_free_at_any_host_size() {
             deltas,
             AdmitDeltas {
                 materializes: 0,
-                edge_refreshes: 0,
                 resolution_misses: 0,
             },
             "a byte-identical re-upsert is a true no-op — at N={n} it must \
@@ -278,25 +315,19 @@ fn recompile_existing_is_free_at_any_host_size() {
 
 // ── The warm-reuse contract the N-term currently buys ──
 
-/// **The constraint that blocks the obvious fix.**
+/// **The warm-reuse contract the builder must not trade away.**
 ///
 /// An unrelated file changing makes every edge-carrying owner edge-stale,
 /// but an owner whose specifiers still resolve to the same targets must
-/// keep BOTH its derived facts — `Route` as well as `ImportRoute` — or
-/// every warm entry in the project dies on every keystroke.
+/// keep BOTH route rails — the `Route` derived fact AND its import-route
+/// RESOLUTION WITNESS — or every warm entry in the project dies on every
+/// keystroke.
 ///
-/// `ImportRoute` survives because its producer re-resolves. `Route`
-/// survives only as a SIDE EFFECT: the `ImportRoute` arm re-indexes the
-/// owner mid-build, which moves `artifact_generation`, fails
-/// `build_coherent`'s coherence check, and the retry re-runs the
-/// (observe-only, publishes-nothing-for-stale) `Route` arm against the
-/// refreshed artifact.
-///
-/// So this test fails the moment the `ImportRoute` arm stops
-/// materialising — which is exactly what the ignored scaling tests above
-/// ask for. Any change that removes the N-term must keep this green by
-/// giving `Route` its own currency answer, not by dropping the fact. The
-/// printed delta is the price currently paid for that survival.
+/// The witness half is what makes this discriminating after the
+/// `DerivedFactKind::ImportRoute` digest is gone: it is a set of
+/// path-precise resolver observations, so a global file-set or content
+/// stamp standing in for it would mark the owner stale here and fail.
+/// The printed delta is the builder cost of the survival.
 #[test]
 fn unrelated_edit_keeps_both_route_facts_warm() {
     const N: usize = 8;
@@ -304,20 +335,28 @@ fn unrelated_edit_keeps_both_route_facts_warm() {
     let owner = member_id(0);
 
     let view_before = host.resolver_store_view_read().into_owned_view();
-    let facts: Vec<FactVersionRef> = [DerivedFactKind::Route, DerivedFactKind::ImportRoute]
-        .into_iter()
-        .map(|kind| {
-            let hash =
-                StoreView::derived_hash_for(&view_before, &owner, kind).unwrap_or_else(|| {
-                    panic!("precondition: a current owner must publish its {kind:?} fact")
-                });
-            FactVersionRef::DerivedFactHash {
-                canonical_id: owner.clone(),
-                kind,
-                hash,
-            }
-        })
-        .collect();
+    let route_hash = StoreView::derived_hash_for(&view_before, &owner, DerivedFactKind::Route)
+        .expect("precondition: a current owner must publish its Route fact");
+    let mut facts: Vec<FactVersionRef> = vec![FactVersionRef::DerivedFactHash {
+        canonical_id: owner.clone(),
+        kind: DerivedFactKind::Route,
+        hash: route_hash,
+    }];
+    let witness = host
+        .owner_import_route_witness_for_tests(&owner)
+        .expect("precondition: a current owner must produce a rootable import-route witness");
+    assert!(
+        !witness.is_empty(),
+        "precondition: an owner with cross-file imports must observe at least \
+         one resolver fact — an empty witness would make this test vacuous"
+    );
+    facts.extend(witness);
+    for fact in &facts {
+        assert!(
+            StoreView::validates(&view_before, fact),
+            "precondition: {fact:?} must validate against the view it was captured from"
+        );
+    }
 
     // Edit an UNRELATED file. The owner does not import it, its own
     // content is unchanged, and none of its specifiers retarget.
@@ -346,13 +385,23 @@ fn unrelated_edit_keeps_both_route_facts_warm() {
 }
 
 /// The other direction, and the reason "reuse the owner's last recorded
-/// hash" is not an acceptable way to make the builder observe-only: a
+/// answer" is not an acceptable way to make the builder observe-only: a
 /// previously-unresolvable specifier becoming resolvable MUST invalidate
-/// every warm entry rooted on the importer's `ImportRoute` fact — with
+/// every warm entry rooted on the importer's import-route witness — with
 /// the importer fully INDEXED, so its known-miss lives in the published
 /// artifact's baked route table rather than in `DerivedRawState`.
+///
+/// The witness is the resolve-domain successor to the deleted
+/// `DerivedFactKind::ImportRoute` digest, so the property is now stated
+/// against the observations themselves: the miss recorded the exhausted
+/// probe set, and the appearance advances exactly the `PathProbe` it
+/// observed. Note what is deliberately NOT asserted any more — that the
+/// store-view build eagerly produces a *different current value*. Per
+/// `.DECISION.md` the build performs zero routing work; the durable
+/// invariant is that the old witness stops validating and the next real
+/// demand recomputes.
 #[test]
-fn known_miss_appearance_invalidates_indexed_importer_import_route_fact() {
+fn known_miss_appearance_invalidates_indexed_importer_import_route_witness() {
     const IMPORTER_ID: &str = "/proj/importer.ts";
     const APPEARS_LATER_ID: &str = "/proj/appears-later.ts";
 
@@ -368,32 +417,39 @@ fn known_miss_appearance_invalidates_indexed_importer_import_route_fact() {
         .indexed;
 
     // Precondition: the miss is baked into the PUBLISHED artifact's
-    // route table (not only into `DerivedRawState`), which is the arm
-    // the store-view builder reads.
-    let recorded = indexed.import_routes.get("./appears-later").expect(
-        "precondition: the unresolvable specifier must be recorded in the \
-         artifact's baked route table",
-    );
+    // route table (not only into `DerivedRawState`).
     assert!(
-        VerterHost::import_route_is_known_miss(recorded),
-        "precondition: ./appears-later must be recorded as a known-miss while \
-         the target file does not exist"
+        indexed
+            .shallow_state
+            .import_targets
+            .values()
+            .any(|target| target.source_specifier == "./appears-later"),
+        "precondition: the unresolvable specifier must be in the importer's \
+         AUTHORED inventory, or the witness cannot observe it",
+    );
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow(IMPORTER_ID, "./appears-later"),
+        None,
+        "precondition: ./appears-later must not resolve while the target file \
+         does not exist"
     );
 
-    // The fact a consumer would record while the dependency is missing.
+    // The witness a consumer would record while the dependency is missing.
     let view_before = host.resolver_store_view_read().into_owned_view();
-    let hash_before =
-        StoreView::derived_hash_for(&view_before, IMPORTER_ID, DerivedFactKind::ImportRoute)
-            .expect("a current importer surface must publish an ImportRoute fact");
-    let cached_fact = FactVersionRef::DerivedFactHash {
-        canonical_id: IMPORTER_ID.to_string(),
-        kind: DerivedFactKind::ImportRoute,
-        hash: hash_before,
-    };
+    let witness_before = host
+        .owner_import_route_witness_for_tests(IMPORTER_ID)
+        .expect("a current importer surface must produce a rootable witness");
     assert!(
-        StoreView::validates(&view_before, &cached_fact),
-        "precondition: the fact must validate against the view it was captured from"
+        !witness_before.is_empty(),
+        "precondition: the known-miss must have observed at least one resolver \
+         fact — an empty witness would make this test vacuous"
     );
+    for fact in &witness_before {
+        assert!(
+            StoreView::validates(&view_before, fact),
+            "precondition: {fact:?} must validate against the view it was captured from"
+        );
+    }
 
     // The dependency appears. The importer's own content — hence its
     // published `IndexedReady` — does not change.
@@ -410,27 +466,18 @@ fn known_miss_appearance_invalidates_indexed_importer_import_route_fact() {
 
     let view_after = host.resolver_store_view_read().into_owned_view();
     assert!(
-        !StoreView::validates(&view_after, &cached_fact),
-        "a warm entry rooted on the pre-appearance ImportRoute fact MUST NOT \
-         validate once ./appears-later resolves — otherwise the cached \
-         known-miss is served forever"
+        witness_before
+            .iter()
+            .any(|fact| !StoreView::validates(&view_after, fact)),
+        "a warm entry rooted on the pre-appearance import-route witness MUST \
+         NOT validate once ./appears-later resolves — otherwise the cached \
+         known-miss is served forever. Witness: {witness_before:?}"
     );
 
-    let hash_after =
-        StoreView::derived_hash_for(&view_after, IMPORTER_ID, DerivedFactKind::ImportRoute)
-            .expect("the importer must still publish an ImportRoute fact");
-    assert_ne!(
-        hash_before, hash_after,
-        "the post-appearance ImportRoute hash must differ from the \
-         pre-appearance one"
-    );
     assert_eq!(
-        host.current_content_pinned_indexed(IMPORTER_ID)
-            .and_then(|i| i
-                .import_routes
-                .get("./appears-later")
-                .and_then(|r| r.resolved_canonical_id.clone())),
-        Some(APPEARS_LATER_ID.to_string()),
+        host.resolve_type_dependency_canonical_shallow(IMPORTER_ID, "./appears-later")
+            .as_deref(),
+        Some(APPEARS_LATER_ID),
         "the demand-side reader must re-resolve the specifier to the file that \
          appeared"
     );

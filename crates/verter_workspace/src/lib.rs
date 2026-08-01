@@ -75,6 +75,9 @@ pub(crate) mod dir_index;
 pub mod env_hash;
 pub mod error;
 pub mod exact_resolution;
+pub mod fact_cache;
+pub mod fact_read_set;
+pub mod fact_registry;
 pub mod filesystem;
 pub mod intrinsic_library;
 pub mod membership;
@@ -92,6 +95,7 @@ pub(crate) mod project_graph;
 pub mod project_key;
 pub mod published_state;
 pub mod relative_path;
+pub mod resolution_currency;
 pub mod resolver;
 pub mod snapshot_builder;
 pub mod traits;
@@ -138,6 +142,14 @@ pub use config::{
 pub use engine::SVELTE_RUNE_AMBIENT_PARSER_FLAG;
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
+pub use fact_cache::{
+    DerivedFactKind, FactHash16, FactVersionRef, FactVersionValidator, ParseEnvHash, ParseFactRef,
+    ReadSetSignature, ResolveImportsFactRef, RouteSurfaceFactRef, SignatureAdmission,
+    CANDIDATE_CAP,
+};
+pub use fact_read_set::{
+    FactReadSet, FactReadSetCell, FactReadSetFinalise, NonCacheablePropagation, FACT_SIGNATURE_CAP,
+};
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
 #[cfg(not(target_arch = "wasm32"))]
 pub use intrinsic_library::NativeIntrinsicLibrary;
@@ -151,6 +163,12 @@ pub use overlay::OverlayStore;
 pub use package_index::PackageIndex;
 pub use project_key::ProjectStableKey;
 pub use published_state::{ProjectEnvHashArray, PublishedRoot};
+pub use resolution_currency::{
+    AdmittedResolution, CapturedResolutionWorld, ContentRevision, PathProbe, ResolutionEpoch,
+    ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome, ResolutionOverlaySnapshot,
+    ResolutionPopulation, ResolutionPublication, ResolutionPublicationRefusal, ResolutionQueryKey,
+    ResolutionWorldId, ResolveContextId,
+};
 pub use resolver::{
     carrier_api_provider_path, carrier_ide_provider_path, carrier_source_extensions,
     path_is_carrier, strip_carrier_extension, IdeProjectCompilerOptions, IdeProjectConfig,

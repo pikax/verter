@@ -591,7 +591,7 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
 
     // Build the `ResolveImportsFactRef` shape the wrapper validator
     // receives at runtime.
-    let fact_ref = ResolveImportsFactRef {
+    let fact_ref = ResolveImportsFactRef::Semantic {
         canonical_id: "/owner.ts".to_string(),
         key: FactKey::ResolvedImportClause {
             specifier: InternedSpecifier::from(entry.specifier.as_ref()),
