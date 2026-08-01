@@ -22,15 +22,17 @@
 
 import {
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, posix } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 
 import { addFileAnchors, stripAnchors, type Anchor, type AnchorMap } from "./anchors.js";
 import {
@@ -293,6 +295,103 @@ export async function createMaterializedWorkspace(
     rmSync(root, { recursive: true, force: true });
     throw err;
   }
+}
+
+/**
+ * Remove the baseline's ON-DISK generated layer from a materialized workspace,
+ * returning the absolute paths actually deleted.
+ *
+ * C materializes the baseline's artifacts as REAL FILES beside the authored
+ * carriers (`App.vue` → `App.vue.tsx` entry + `App.vue.ts` public-API twin), which
+ * is exactly what the tsserver-backed baseline bridge needs to type-check.
+ * `verter-lsp` OWNS that companion namespace: under the project-bound external-TS
+ * contract a real user file sitting at a carrier's companion path is a detected
+ * resolution conflict, so the server marks the carrier ambiguous and fails closed
+ * (`CarrierPathOccupiedByRealFile`) rather than shadowing what looks like a user's
+ * own file. A driver that points `verter-lsp` at a workspace C materialized
+ * therefore gets NO TypeScript semantics for any carrier in it — every provider
+ * signal comes back empty — until this generated layer is pruned.
+ *
+ * The report is the authority for what to delete: every `generatedPath` C
+ * actually emitted, never a companion name this layer re-derives. A path outside
+ * {@link MaterializedWorkspace.root} is refused loudly — pruning is scoped to the
+ * temp workspace and must never reach a caller's real files.
+ *
+ * @throws {Error} if a reported artifact path lies outside `ws.root`.
+ */
+export function pruneBaselineGeneratedArtifacts(ws: MaterializedWorkspace): readonly string[] {
+  // Containment must be decided on the path `rmSync` will actually act on, which
+  // means the PHYSICAL path — lexical normalisation is not enough in either
+  // direction:
+  //
+  //   - `path.resolve` alone collapses `..` but follows no links, so
+  //     `${root}/link/victim` stays lexically inside while `link` points out of the
+  //     workspace and the deletion lands outside. pnpm produces exactly that shape
+  //     throughout this repo (`node_modules/.pnpm/node_modules/@verter/x` →
+  //     `packages/x`), so it is a real layout, not a contrived one.
+  //   - conversely, comparing unresolved spellings produces FALSE refusals when the
+  //     two sides spell the same directory differently (macOS `/tmp` →
+  //     `/private/tmp`).
+  //
+  // So the CHECK resolves links (see `containingDirectoryIsInside`) while the
+  // DELETION uses the unresolved requested path — deliberately not one path for
+  // both. Resolving the path handed to `rmSync` would follow a symlinked ARTIFACT
+  // to its target and delete that instead of the link; leaving it unresolved makes
+  // `rmSync` unlink the link itself. The materializer is an injectable interface,
+  // so a reported path is untrusted input, not a fixed value.
+  const rootPrefix = `${canonicalizePath(realpathSync(resolve(ws.root))).replace(/\/+$/, "")}/`;
+  const removed: string[] = [];
+  const reported = [...ws.materializeReport.ideArtifacts, ...ws.materializeReport.publicApiTwins];
+  for (const artifact of reported) {
+    const requested = resolve(artifact.generatedPath);
+    if (!containingDirectoryIsInside(requested, rootPrefix)) {
+      throw new Error(
+        `materialize reported a generated artifact outside the workspace root: ` +
+          `${artifact.generatedPath} is not under ${ws.root}`,
+      );
+    }
+    // `existsSync` before `rmSync` so the return value is evidence of a real
+    // deletion: a caller gating on `removed.length` must not be satisfied by an
+    // artifact the report named but C never wrote.
+    if (!existsSync(requested)) continue;
+    // Delete the REQUESTED path, never a realpathed one. `rmSync` unlinks a symlink
+    // rather than following it, so a reported `A.vue.tsx -> A.vue` removes the link
+    // and leaves the authored file intact; handing `rmSync` the resolved target
+    // would delete `A.vue` itself.
+    rmSync(requested, { force: true });
+    removed.push(canonicalizePath(requested));
+  }
+  return removed;
+}
+
+/**
+ * Whether `candidate` physically resides inside `rootPrefix` (a canonical,
+ * realpathed, trailing-slash directory prefix).
+ *
+ * Containment is decided on the candidate's DIRECTORY, resolved through symlinks;
+ * the final segment is deliberately left unresolved, because `rmSync` unlinks it
+ * rather than following it. Resolving the final segment would both mis-locate a
+ * symlink artifact and license deleting its target.
+ *
+ * The directory is found by realpathing the DEEPEST EXISTING ancestor and
+ * re-attaching the remaining segments. Realpathing only the immediate parent is not
+ * enough: a report may legitimately name an artifact under directories C never
+ * created, and if the root itself is reached through a symlinked spelling (macOS
+ * `/tmp` → `/private/tmp`) the unresolved ancestors then compare unequal and a
+ * perfectly contained path is refused.
+ */
+function containingDirectoryIsInside(candidate: string, rootPrefix: string): boolean {
+  let existing = dirname(candidate);
+  const trailing: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    // `dirname` is idempotent at the filesystem root; stop rather than loop.
+    if (parent === existing) return false;
+    trailing.unshift(basename(existing));
+    existing = parent;
+  }
+  const directory = join(realpathSync(existing), ...trailing);
+  return `${canonicalizePath(directory).replace(/\/+$/, "")}/`.startsWith(rootPrefix);
 }
 
 /** Remove a materialized workspace's temp root (best-effort). */

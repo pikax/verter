@@ -24,21 +24,21 @@ use verter_workspace::workspace_snapshot::{
 use super::*;
 use crate::external_ts::tsserver_backend::TsserverEngineBackend;
 use crate::external_ts::{
-    default_carrier_store_host_version, CanonicalSource, CarrierPublishStore, ProjectUri,
-    ReconcileErr, ReconcileOutcome, ReconcileReason,
+    carrier_store_dir_for, default_carrier_store_host_version, CanonicalSource,
+    CarrierPublishStore, Manifest, ProjectUri, ReconcileErr, ReconcileOutcome, ReconcileReason,
 };
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 
 /// A test IDE companion for `provider`.
 fn ide_companion(provider: &str) -> CarrierCompanion {
-    CarrierCompanion {
-        provider_uri: Arc::from(provider),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 1,
-    }
+    CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider),
+        "/workspace/src/App.vue",
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    )
 }
 
 /// Build a coordinator over a fresh backend + a mock provider, returning both so
@@ -145,10 +145,24 @@ async fn cold_bootstrap_defers_without_thrash() {
     );
 }
 
+/// The synthetic workspace root for a store-isolating test, built from the three
+/// disambiguators a concurrent test run varies over.
+///
+/// `pid` is the load-bearing one. This suite runs one test per PROCESS, so the
+/// per-process counter in [`unique_ws_root`] reads 0 in every process and
+/// disambiguates nothing across them, and `SystemTime::now()` is only
+/// MICROSECOND-resolution on macOS. Without the process identity the root collides
+/// whenever two test processes reach it inside the same microsecond, which aliases
+/// both onto ONE on-disk carrier store and one `manifest.json`.
+fn ws_root_for(pid: u32, nanos: u128, n: u64) -> String {
+    format!("d:/verter_publish_retract_{pid}_{nanos}_{n}/ws")
+}
+
 /// A unique, already-canonical (lowercase drive, forward slashes) workspace root —
 /// so the on-disk carrier store dir (`temp/verter-carrier-store/<host>/<hash(ws)>`)
 /// is isolated per run and `CarrierPublishStore::open` keys the same dir the
-/// coordinator's backend wrote.
+/// coordinator's backend wrote. Unique across concurrent PROCESSES, not merely
+/// within one — see [`ws_root_for`].
 fn unique_ws_root() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -157,7 +171,136 @@ fn unique_ws_root() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("d:/verter_publish_retract_{nanos}_{n}/ws")
+    ws_root_for(std::process::id(), nanos, n)
+}
+
+/// Read the manifest of the carrier store the coordinator's backend writes for
+/// `ws_root`, STRICTLY: `Ok(None)` ONLY when the manifest genuinely does not exist,
+/// and `Err` for every other failure.
+///
+/// The oracle must NOT read through [`CarrierPublishStore::current_manifest`]. That
+/// reader deliberately reports a fresh EMPTY manifest for an unreadable or unparseable
+/// one — correct for a read-only diagnostics view, but underneath a presence assertion
+/// it launders "the store could not be read" into "the carrier is not advertised", so
+/// a store failure surfaces as a clean carrier ABSENCE and the test blames the wrong
+/// thing.
+fn read_store_manifest_strict(ws_root: &str) -> Result<Option<Manifest>, String> {
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
+    let path = store.manifest_path();
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
+            .map(Some)
+            .map_err(|e| {
+                format!(
+                    "carrier manifest at {} is present but unparseable: {e}",
+                    path.display()
+                )
+            }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "carrier manifest at {} is unreadable: {e} (kind={:?}, errno={:?})",
+            path.display(),
+            e.kind(),
+            e.raw_os_error()
+        )),
+    }
+}
+
+/// The synthetic workspace root a store-isolating test derives must be unique across
+/// concurrent PROCESSES, not merely within one process.
+///
+/// This suite runs one test per PROCESS, so the per-process `COUNTER` in
+/// [`unique_ws_root`] reads 0 in every process and disambiguates nothing across them,
+/// and `SystemTime::now()` is only MICROSECOND-resolution on macOS (repeated
+/// tight-loop calls return the identical value). A root built from the clock and that
+/// counter alone therefore ALIASES two test processes that reach it inside the same
+/// microsecond onto ONE on-disk carrier store — and the tests in this file then
+/// trample each other there: `durable_retract_failure_propagates_not_silent_success`
+/// writes a deliberately corrupt manifest into it, and
+/// `owner_loss_retracts_previously_published_carrier` retracts the very source that
+/// `owner_change_a_to_b_retracts_from_old_project` asserts is present.
+#[test]
+fn synthetic_ws_root_is_unique_across_processes_not_only_within_one() {
+    // Same microsecond AND same per-process counter — exactly what two concurrent
+    // one-test-per-process runs observe. Only the process identity differs.
+    const SAME_MICROSECOND: u128 = 1_785_068_278_682_867_000;
+    let a = ws_root_for(4242, SAME_MICROSECOND, 0);
+    let b = ws_root_for(4243, SAME_MICROSECOND, 0);
+    assert_ne!(
+        a, b,
+        "two test PROCESSES deriving a root in the same microsecond must not get the \
+         SAME workspace root (the per-process counter reads 0 in both)"
+    );
+
+    // The consequence that actually bites: the derived on-disk store dirs must differ,
+    // or both processes read-modify-write ONE manifest.json.
+    let host = default_carrier_store_host_version();
+    assert_ne!(
+        carrier_store_dir_for(host, &a),
+        carrier_store_dir_for(host, &b),
+        "distinct test processes must resolve DISTINCT carrier-store dirs; an aliased \
+         dir means two processes share one manifest"
+    );
+
+    // The within-process disambiguator must still work.
+    assert_ne!(
+        ws_root_for(4242, SAME_MICROSECOND, 0),
+        ws_root_for(4242, SAME_MICROSECOND, 1),
+        "two roots taken inside one microsecond by ONE process must still differ"
+    );
+
+    // And the live derivation must actually vary the process identity in — otherwise
+    // its uniqueness rests on a microsecond clock alone.
+    let live = unique_ws_root();
+    assert!(
+        live.starts_with(&format!(
+            "d:/verter_publish_retract_{}_",
+            std::process::id()
+        )),
+        "unique_ws_root must carry this process's identity; got {live}"
+    );
+}
+
+/// The store oracle must surface an unreadable / unparseable manifest as a FAILURE,
+/// never launder it into "the carrier is absent".
+///
+/// [`CarrierPublishStore::current_manifest`] deliberately reports a fresh EMPTY
+/// manifest for a corrupt one — correct for a read-only diagnostics view (it never
+/// writes, so there is nothing to clobber), but WRONG underneath a test oracle:
+/// reading a presence assertion through it turns "the store could not be read" into
+/// "the carrier is not advertised". That laundering is why an aliased/corrupted store
+/// surfaced as the misleading "after the A publish the carrier must be in A's
+/// owned+ready set" instead of naming the real cause.
+#[test]
+fn store_oracle_reports_a_corrupt_manifest_as_a_failure_not_as_absence() {
+    let corrupt_root = unique_ws_root();
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &corrupt_root);
+    std::fs::create_dir_all(store.workspace_dir()).expect("create the store dir");
+    std::fs::write(store.manifest_path(), b"{ this manifest is truncated")
+        .expect("write a corrupt manifest");
+
+    // Pin the fail-open behaviour of the diagnostics reader the oracle must NOT inherit.
+    assert!(
+        store.current_manifest().projects.is_empty(),
+        "the diagnostics reader is fail-open by design; this pins what the oracle must \
+         not inherit"
+    );
+
+    let detail = read_store_manifest_strict(&corrupt_root).expect_err(
+        "a present-but-corrupt manifest must be an ERROR from the oracle's reader, never \
+         an empty manifest that reads as carrier ABSENCE",
+    );
+    assert!(
+        detail.contains("unparseable"),
+        "the error must name the actual cause; got {detail:?}"
+    );
+
+    // A genuinely absent manifest stays distinguishable from a corrupt one.
+    let absent_root = unique_ws_root();
+    assert!(
+        matches!(read_store_manifest_strict(&absent_root), Ok(None)),
+        "a store that was never published must read as Ok(None), not as an error"
+    );
 }
 
 /// Build a real `WorkspaceSnapshot` with ONE configured project owning `src/**/*`
@@ -215,8 +358,17 @@ fn carrier_is_in_store(
     source: &str,
     provider: &str,
 ) -> (bool, bool) {
-    let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
-    let manifest = store.current_manifest();
+    let manifest = match read_store_manifest_strict(ws_root) {
+        Ok(Some(manifest)) => manifest,
+        // No manifest at all ⇒ genuinely nothing published for this workspace.
+        Ok(None) => return (false, false),
+        // A store FAILURE is not a carrier absence — surface the real cause instead of
+        // letting a presence assertion report a misleading "not owned/ready".
+        Err(detail) => panic!(
+            "the carrier-store oracle must surface a store failure rather than report \
+             the carrier absent: {detail}"
+        ),
+    };
     let Some(project) = manifest.projects.get(tsconfig) else {
         return (false, false);
     };
@@ -247,14 +399,14 @@ async fn owner_loss_retracts_previously_published_carrier() {
     let fs =
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
 
-    let companion = CarrierCompanion {
-        provider_uri: Arc::from(provider.as_str()),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 1,
-    };
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        "/workspace/src/App.vue",
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
 
     // 1. Publish under a resolved configured owner (ProjectBinding) through the
     //    reconciler — the production transition entry (durable store + ledger).
@@ -355,14 +507,14 @@ async fn owner_change_a_to_b_retracts_from_old_project() {
     let fs =
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
 
-    let companion = CarrierCompanion {
-        provider_uri: Arc::from(provider.as_str()),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 1,
-    };
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        "/workspace/src/App.vue",
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
 
     // 1. Publish under owner A through the reconciler.
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
@@ -474,14 +626,14 @@ async fn owner_move_with_failing_prune_leaves_no_stale_or_duplicate_ready_file()
     let fs =
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
 
-    let companion = CarrierCompanion {
-        provider_uri: Arc::from(provider.as_str()),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 1,
-    };
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        "/workspace/src/App.vue",
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
 
     // 1. Publish under owner A.
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(

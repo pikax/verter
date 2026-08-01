@@ -1,0 +1,8 @@
+{
+  "name": "@out-of-tree/app",
+  "private": true,
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "vue": "^3.5.0"
+  }
+}

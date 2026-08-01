@@ -9,9 +9,9 @@
 //! module head) and the options element is stripped. The static `<svelte:head>`
 //! / `<svelte:window>` / … family rewrites to a conservative intrinsic carrier.
 //!
-//! This module is a continuation of [`super`]'s `TemplateProjector` impl —
-//! extracted for file size; it accesses the parent module's private projector
-//! type + helpers through `use super::*`.
+//! This module is the special-element continuation of [`super`]'s
+//! `TemplateProjector` impl; it accesses the parent module's private projector
+//! type and helpers through `use super::*`.
 
 use super::*;
 use oxc_allocator::Allocator;

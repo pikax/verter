@@ -18,6 +18,9 @@ hotpath = [
   "hotpath/hotpath",
 ]
 hotpath-alloc = ["verter_compiler/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"]
+# Measurement-only rail for `examples/currency_phase_probe.rs`. Enables the
+# per-site wall-clock/call-count timers on the currency chokepoints.
+currency_probe = ["verter_session/currency_probe", "verter_workspace/currency_probe"]
 
 [dependencies]
 verter_compiler = { path = "../verter_compiler", features = ["bench"] }
@@ -105,6 +108,10 @@ name = "fact_validation_hot_path"
 harness = false
 
 [[bench]]
+name = "fact_emission_scaling"
+harness = false
+
+[[bench]]
 name = "repo_warm_second_pass"
 harness = false
 
@@ -152,3 +159,7 @@ path = "examples/profile_component_meta.rs"
 [[example]]
 name = "profile_public_api_batch"
 path = "examples/profile_public_api_batch.rs"
+
+[[example]]
+name = "currency_phase_probe"
+path = "examples/currency_phase_probe.rs"

@@ -38,7 +38,7 @@ use verter_session::{
 use crate::api_check;
 use crate::error_map::map_tsc_position;
 use crate::reporter::{self, Diagnostic, TscDiagnostic};
-use crate::tsconfig::{strip_unc_prefix, TsConfig};
+use crate::tsconfig::{simplify_verbatim_path, TsConfig};
 
 /// Options controlling what the checker emits.
 pub struct EmitOptions {
@@ -56,6 +56,14 @@ pub struct CheckResult {
     pub emitted_files: Vec<PathBuf>,
     pub public_api_outcomes: Vec<PublicApiOutcome>,
     pub public_api_failures: Vec<PublicApiFailure>,
+    /// How many input carriers were ADMITTED — i.e. had companions generated
+    /// for them at all. Lower than the input count exactly when the run refused
+    /// an invalid SFC (see [`CarrierAdmission`]).
+    ///
+    /// The public-API projection produces one outcome per admitted carrier, so
+    /// this — not the input count — is what that per-carrier invariant is
+    /// checked against. A refused SFC has no projection to have an outcome for.
+    pub admitted_carriers: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,8 +113,9 @@ impl std::fmt::Display for PublicApiFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "{}: error VTER1001: {} [code={}, detailCode={}, subject={}, declarationShapeReason={}, memberOrdinal={}, outcomeKind={}, outcomeReason={}, outcomeDiagnostic={}]",
+            "{}: error {}: {} [code={}, detailCode={}, subject={}, declarationShapeReason={}, memberOrdinal={}, outcomeKind={}, outcomeReason={}, outcomeDiagnostic={}]",
             self.source.display(),
+            crate::reporter::VerterCode::PublicApiProjectionFailure,
             self.message,
             self.code,
             self.detail_code,
@@ -204,8 +213,16 @@ fn generate_public_api_stubs(
 
         // Rewrite relative imports in the public API code to absolute paths
         // (the stub will live in temp_dir, not the vue file's directory).
+        //
+        // DIALECT-labeled rendering: this stub is named
+        // `{name}.vue.{dialect.extension()}` below, so a JavaScript SFC's
+        // JSDoc-widened rendering lands in a `.js`/`.jsx` file that honors it.
         let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
-        let code = rewrite_relative_imports(&tsc_response.code, vue_dir);
+        let code = rewrite_relative_imports(tsc_response.dialect_labeled_code(), vue_dir);
+        // …and canonicalize the NON-relative carrier specifiers the first pass
+        // cannot reach, so an aliased root-component reference resolves to its
+        // generated stub instead of the empty `*.vue` wildcard shim.
+        let code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
 
         let raw_name = vue_path
             .file_stem()
@@ -215,8 +232,29 @@ fn generate_public_api_stubs(
         let hash = simple_hash(canonical_id.as_bytes());
         // The stub's on-disk name is internal: `lower_tsc_validation_carrier_specifiers` connects
         // the codegen's carrier-API specifier to this file via `vue_ts_map`, so
-        // the `.vue.ts` extension here only needs `allowImportingTsExtensions`.
-        let stub_name = format!("{component_name}_{hash:016x}.vue.ts");
+        // a `.vue.ts`/`.vue.tsx` extension here only needs
+        // `allowImportingTsExtensions` (a `.vue.js`/`.vue.jsx` stub needs
+        // nothing — it is an ordinary JavaScript specifier).
+        //
+        // The STUB'S OWN DIALECT picks the extension, for the same reason the
+        // validation carrier's does: the stub is a program root and its
+        // diagnostics are surfaced passthrough, and TypeScript decides both
+        // what to typecheck AND how to parse from the extension/ScriptKind.
+        // Almost every stub is a GENERATED TypeScript declaration surface
+        // (JavaScript `<script setup>` SFCs included — their surface is
+        // `declare`-based TypeScript), so this is not simply the SFC's script
+        // language. The exception is the Options-API stub, which passes the
+        // authored `<script>` body through verbatim: for a JavaScript
+        // Options-API SFC that root is JavaScript, and labelling it `.ts` made
+        // `strict`/`noImplicitAny` report TS7006 on every untyped parameter of
+        // a file the project never asked to have checked — while collapsing
+        // `lang="jsx"` onto `.js` or `lang="tsx"` onto `.ts` makes the authored
+        // `<div/>` a SYNTAX error. All four extensions are reachable; the
+        // dialect comes from the projection itself, never re-derived here.
+        let stub_name = format!(
+            "{component_name}_{hash:016x}.vue.{ext}",
+            ext = tsc_response.dialect.extension()
+        );
         let stub_path = base_dir.join(&stub_name);
 
         vue_ts_map.insert(canonical_id, stub_path.clone());
@@ -237,9 +275,14 @@ fn generate_public_api_stubs(
 ///
 /// Uses `compile()` with `CompileTarget::TSX` for full type checking.
 /// IN-MEMORY: nothing is written to disk — `base_dir` only roots each carrier's
-/// deterministic virtual path (`<base>/Name_<hash>.tsx`). Returns
-/// `(vue_path, tsx_code, virtual tsx_path)` tuples; the in-memory `--api` overlay
+/// deterministic virtual path (`<base>/Name_<hash>.tsx`, or `.jsx` for a
+/// JavaScript carrier — see the extension derivation below). Returns
+/// `(vue_path, tsx_code, virtual tsx_path)` rows; the in-memory `--api` overlay
 /// serves the code and the synthetic tsconfig lists the path in `files`.
+///
+/// `vue_files` is the ADMITTED set ([`CarrierAdmission`]) — an SFC Vue itself
+/// refuses to compile never reaches here, so there is no carrier for it to
+/// mislabel.
 fn generate_all_tsx(
     host: &VerterHost,
     vue_files: &[PathBuf],
@@ -307,9 +350,20 @@ fn generate_all_tsx(
                 ))
             })?;
 
-            // Rewrite relative imports (both `import('...')` and `from '...'` patterns)
+            // Rewrite relative imports to absolute paths (the carriers live in a
+            // virtual directory, not beside the source)…
             let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
             let mut code = rewrite_relative_imports(&tsx_block.code, vue_dir);
+            // …and canonicalize the NON-relative carrier specifiers the first
+            // pass cannot reach. This is not stub-only work: the IDE codegen
+            // deliberately preserves an aliased child import (`@/Child.vue`)
+            // bare, and the lowering that follows needs an exact canonical-map
+            // key or it leaves the carrier on the `*.vue` wildcard shim — an
+            // EMPTY `DefineComponent<{}, {}, any>`. Without this the widening
+            // is simply absent for every alias-importing consumer, which is the
+            // headline case of issue #97 for a project using `paths`.
+            let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+            code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
 
             // Append inline source map so `map_tsc_position()` can remap errors.
             if !tsx_block.source_map.is_empty() {
@@ -321,12 +375,41 @@ fn generate_all_tsx(
             }
 
             let hash = simple_hash(vue_path.to_string_lossy().as_bytes());
-            let tsx_name = format!("{component_name}_{hash:016x}.tsx");
+            // The CARRIER'S LANGUAGE picks the companion extension, through the
+            // SAME derivation the LSP uses. TypeScript decides what to check
+            // from the file's extension/ScriptKind, not from a Verter flag:
+            // `.tsx` is always typechecked (so `strict`/`noImplicitAny` fires
+            // TS7006 on every untyped parameter of a JavaScript SFC), while
+            // `.jsx` is checked only under `checkJs`. Hardcoding `.tsx` here
+            // therefore mislabelled every JS carrier as TypeScript and produced
+            // a TS7006 flood the LSP never shows for the same file. The fix is
+            // the label, NOT a `checkJs` switch and NOT a diagnostic filter:
+            // `checkJs` still comes from the user's own tsconfig through the
+            // synthetic config's `extends`, so a `checkJs: true` project keeps
+            // reporting real JavaScript errors.
+            let tsx_name = verter_workspace::carrier_ide_provider_path(
+                &format!("{component_name}_{hash:016x}"),
+                tsx_block.is_jsx,
+            );
             let tsx_path = base_dir.join(&tsx_name);
 
             Ok((vue_path.clone(), code, tsx_path))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+}
+
+/// The 1-indexed `(line, column)` of a byte offset in `source`.
+///
+/// Column counts UTF-16 code units, matching what the TypeScript engine reports
+/// for every other diagnostic on this rail, so a Verter-native diagnostic and an
+/// engine one point at the same place in an editor.
+fn one_indexed_position(source: &str, offset: usize) -> (u32, u32) {
+    let offset = offset.min(source.len());
+    let before = &source[..offset];
+    let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    let column = source[line_start..offset].encode_utf16().count() + 1;
+    (line as u32, column as u32)
 }
 
 /// Declaration-generation stage: generate minimal TSC declaration output for every `.vue` file.
@@ -381,8 +464,12 @@ fn generate_all_tsc(
         // Rewrite relative import() paths in the generated code to absolute paths.
         // The .tsc.tsx files live in a temp dir, so relative imports like
         // `import('./types')` need to resolve from the .vue file's directory.
+        //
+        // TS-labeled rendering: this consumer writes to a FIXED `.tsc.tsx`
+        // name below regardless of the SFC's dialect, and a `.tsx` ScriptKind
+        // silently ignores the JSDoc-widened JavaScript rendering.
         let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
-        let code = rewrite_relative_imports(&tsc_out.code, vue_dir);
+        let code = rewrite_relative_imports(tsc_out.ts_labeled_code(), vue_dir);
 
         let raw_name = vue_path
             .file_stem()
@@ -412,6 +499,55 @@ fn generate_all_tsc(
     })
 }
 
+/// Give the shared host the project's REAL workspace, so module resolution is
+/// the one shared owner rather than bare path arithmetic.
+///
+/// Without this the host is workspace-less and
+/// [`VerterHost::resolve_import`] answers `None` for every NON-RELATIVE
+/// specifier — including a `paths` alias. The consequences reach well past
+/// module bookkeeping: the inheritance resolver cannot follow
+/// `import Child from "@/Child.vue"` to its target, so an alias-importing
+/// component's root chain is unresolved, its attribute-fallthrough surface is
+/// empty, and the generated carrier silently rejects every attribute Vue
+/// forwards (issue #97). The same blindness costs alias-imported types,
+/// cross-component prop checking, and every other cross-file answer.
+///
+/// The snapshot is built for the tsconfig the user SELECTED, through the
+/// shared `verter_workspace::build_selected_project_snapshot` — the same
+/// per-config body (`configured_project`) the LSP's discovery path runs, given
+/// one config instead of a walk.
+///
+/// Discovery would be wrong here. `build_workspace_snapshot` answers "what
+/// projects exist under this root?" and then lets precedence — longest root,
+/// configured over fallback, then alphabetical `tsconfig_path` — pick the
+/// owner. `verter-tsc -p tsconfig.app.json` in the default Vue + Vite scaffold
+/// has a sibling `tsconfig.json`, and precedence, not the `-p` argument,
+/// would decide which one's `paths` resolved an alias.
+///
+/// Vite config discovery is not merely disabled on this path, it is absent:
+/// the vite branch lives inside the discovery loop and fires only when NO
+/// tsconfig was found, and this entry performs no discovery and takes no
+/// `ViteConfigOptions`.
+fn install_project_workspace(host: &VerterHost, root_dir: &Path, tsconfig_path: &Path) {
+    let workspace = std::sync::Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let root = root_dir.to_string_lossy().replace('\\', "/");
+    let selected = tsconfig_path.to_string_lossy().replace('\\', "/");
+    let snapshot = verter_workspace::build_selected_project_snapshot(
+        workspace.as_ref(),
+        &selected,
+        &root,
+        verter_workspace::workspace_snapshot::SnapshotGeneration(1),
+    );
+    workspace.publish_snapshot(
+        verter_workspace::published_state::PublishedRoot::new_vfs_only(std::sync::Arc::new(
+            snapshot,
+        )),
+    );
+    host.set_workspace(workspace as std::sync::Arc<dyn verter_workspace::WorkspaceAccess>);
+}
+
 /// Single source of truth for the [`HostConfig`] the production `verter-tsc`
 /// checker constructs its shared [`VerterHost`] from.
 ///
@@ -425,6 +561,71 @@ fn generate_all_tsc(
 /// flips both the production host and the discriminating unit test together.
 fn build_host_config() -> HostConfig {
     HostConfig::batch_typecheck()
+}
+
+/// Which carrier sources this run will generate companions for, and why the
+/// others were refused.
+///
+/// **A build refuses what Vue refuses.** `@vue/compiler-sfc`'s `compileScript`
+/// THROWS on an SFC whose `<script>` and `<script setup>` declare different
+/// `lang`s, so such a file has no authored dialect and Verter has nothing
+/// correct to generate from it. Both available labels are wrong in a way no
+/// test downstream can see:
+///
+/// - a `.tsx`/`.ts` companion is ALWAYS typechecked, so the JavaScript block's
+///   every untyped parameter reports TS7006 — a flood on code the project never
+///   asked to have checked, which is precisely the defect the generated
+///   companions' dialect labelling exists to remove;
+/// - a `.jsx`/`.js` companion is checked only under `checkJs`, so every genuine
+///   error in the TypeScript block silently disappears.
+///
+/// So the file is REFUSED: it contributes ONE `VTER1002` diagnostic against the
+/// authored `.vue` and NO companion of any kind — no validation carrier, no
+/// public-API stub, no declaration carrier. Nothing derived from an invalid SFC
+/// is ever handed to the engine. Importers are unaffected: the `declare module
+/// '*.vue'` ambient shim still resolves the bare import, so a refusal does not
+/// cascade into TS2307 across the project.
+///
+/// This is a BUILD boundary, and it is drawn there on the merits, not out of
+/// deference to the existing corpus. The editing surfaces deliberately keep
+/// working on a transiently-mixed file — a user is mid-keystroke between giving
+/// one block its `lang` and the other, and an editor that blanks out at that
+/// moment is a worse tool — so they classify fail-closed toward TypeScript
+/// (`verter_parser::parser::types::sfc_script_dialect`). A build has no such
+/// excuse: the file is finished, and it is wrong.
+///
+/// Breadth of existing fixtures is explicitly NOT part of that reasoning. The
+/// tracked corpus holds many dual-script SFCs but almost none that actually
+/// disagree, so "too much would break" was never true and is not why the
+/// refusal lives here. If the editing surfaces later gain a defensible way to
+/// refuse too, this boundary should move — the argument above is the only thing
+/// holding it.
+#[derive(Debug, Default)]
+struct CarrierAdmission {
+    /// The sources companions WILL be generated from, in input order.
+    admitted: Vec<PathBuf>,
+    /// One Verter-native diagnostic per refused source.
+    refusals: Vec<Diagnostic>,
+}
+
+impl CarrierAdmission {
+    /// Admit `vue_path` unless its two script blocks disagree about `lang`.
+    fn admit(&mut self, vue_path: &Path, source: &str) {
+        let Some(span) = verter_compiler::parser::sfc_script_lang_mismatch_span(source) else {
+            self.admitted.push(vue_path.to_path_buf());
+            return;
+        };
+        let (line, col) = one_indexed_position(source, span.start as usize);
+        self.refusals.push(Diagnostic::verter(
+            vue_path.to_string_lossy().replace('\\', "/"),
+            line,
+            col,
+            crate::reporter::VerterCode::ScriptLangMismatch,
+            verter_compiler::diagnostics::CompilerErrorCode::ScriptLangMismatch
+                .message()
+                .to_string(),
+        ));
+    }
 }
 
 /// Run the full type-checking pipeline.
@@ -452,12 +653,15 @@ pub fn run(
             emitted_files: Vec::new(),
             public_api_outcomes: Vec::new(),
             public_api_failures: Vec::new(),
+            admitted_carriers: 0,
         });
     }
 
     // ONE shared VerterHost (Batch preset): upsert every `.vue` once. Both stages
     // build from it — the typecheck overlay carriers and the declaration `.tsc.tsx`.
     let host = VerterHost::new_standalone(build_host_config());
+    install_project_workspace(&host, &config.root_dir, tsconfig_path);
+    let mut admission = CarrierAdmission::default();
     for vue_path in &config.vue_files {
         let source = fs::read_to_string(vue_path).map_err(|error| {
             api_check::TypecheckError::new(format!(
@@ -465,6 +669,7 @@ pub fn run(
                 vue_path.display()
             ))
         })?;
+        admission.admit(vue_path, &source);
         let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
         let _update = host
             .upsert(UpsertRequest {
@@ -485,8 +690,14 @@ pub fn run(
     // ── Typecheck stage: in-memory tsgo `--api` (the `--noEmit` diagnostic set). ──
     // A hard failure here (engine absent / connect / protocol) aborts the whole run
     // with `Err` — we never proceed to emit against a compromised typecheck.
-    let in_memory = run_inmemory_typecheck(&host, config, tsconfig_path, tsgo_bin)?;
-    let mut diagnostics = in_memory.value;
+    //
+    // Only ADMITTED carriers reach it. A refused SFC produces no companion at
+    // all, so nothing of it is ever handed to the engine; its refusal
+    // diagnostic leads the report.
+    let in_memory =
+        run_inmemory_typecheck(&host, config, &admission.admitted, tsconfig_path, tsgo_bin)?;
+    let mut diagnostics = admission.refusals.clone();
+    diagnostics.extend(in_memory.value);
     let public_api_outcomes = in_memory.outcomes;
     let mut public_api_failures = in_memory.failures;
 
@@ -494,8 +705,14 @@ pub fn run(
     //    emit surface). Only when `--declaration` is requested. FAIL-CLOSED: an
     //    engine that cannot run the emit is a hard error, never silent success. ──
     let emitted_files = if opts.declaration {
-        let (decl_diagnostics, emitted, declaration_failures) =
-            run_declaration_stage(&host, config, tsconfig_path, opts, tsgo_bin)?;
+        let (decl_diagnostics, emitted, declaration_failures) = run_declaration_stage(
+            &host,
+            config,
+            &admission.admitted,
+            tsconfig_path,
+            opts,
+            tsgo_bin,
+        )?;
         diagnostics.extend(decl_diagnostics);
         for failure in declaration_failures {
             if !public_api_failures.iter().any(|existing| {
@@ -522,6 +739,7 @@ pub fn run(
         emitted_files,
         public_api_outcomes,
         public_api_failures,
+        admitted_carriers: admission.admitted.len(),
     })
 }
 
@@ -572,6 +790,17 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
     let mut vue_global_components_augment = String::from("import \"vue\";\n");
     vue_global_components_augment.push_str(verter_compiler::VUE_GLOBAL_COMPONENTS_AUGMENTATION);
     vue_global_components_augment.push_str("\nexport {};\n");
+    // The introduce-on-absence `IntrinsicElementAttributes` augmentation. Every
+    // WIDENED TypeScript-carrier stub carries it in-file, but a widened
+    // JavaScript Options-API stub spells its fallthrough surface in JSDoc,
+    // which cannot express `declare module` — so the PROGRAM carries the
+    // augmentation for it here. Without this, an old-`vue` contract (< 3.3, no
+    // exported map) turns the JSDoc reference into a silent error type — the
+    // widening degrades OPEN, accepting every attribute — and, under `checkJs`,
+    // into a TS2694 on generated code.
+    let mut vue_intrinsic_map_augment = String::from("import \"vue\";\n");
+    vue_intrinsic_map_augment.push_str(verter_compiler::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION);
+    vue_intrinsic_map_augment.push_str("\nexport {};\n");
     vec![
         (
             slash(&base.join("vue-shims.d.ts")),
@@ -592,6 +821,10 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
         (
             slash(&base.join("vue-global-components-augment.d.ts")),
             vue_global_components_augment,
+        ),
+        (
+            slash(&base.join("vue-intrinsic-map-augment.d.ts")),
+            vue_intrinsic_map_augment,
         ),
     ]
 }
@@ -762,13 +995,18 @@ fn resolve_tsgo_engine_for(
 /// (full TSX + public-API stubs + ambient shims) and the synthetic tsconfig as an
 /// in-memory overlay, then drive the gated [`api_check::typecheck`] over EVERY
 /// configured-project root file. No temp files, no subprocess, no tsc fallback.
+///
+/// `admitted` is the [`CarrierAdmission`] set, NOT `config.vue_files`: a refused
+/// SFC contributes no carrier, no stub, and no `files` entry, so nothing derived
+/// from it can reach the engine.
 fn run_inmemory_typecheck(
     host: &VerterHost,
     config: &TsConfig,
+    admitted: &[PathBuf],
     tsconfig_path: &Path,
     tsgo_bin: Option<&Path>,
 ) -> Result<PublicApiBatch<Vec<Diagnostic>>, api_check::TypecheckError> {
-    let root = strip_unc_prefix(&config.root_dir);
+    let root = simplify_verbatim_path(&config.root_dir).into_owned();
 
     // Resolve the GATED `--api` engine (a supported tsgo native binary —
     // validated end-to-end by the resolver). No tsc fallback for the typecheck
@@ -780,7 +1018,7 @@ fn run_inmemory_typecheck(
         verter_tsgo_api::toolchain::validation::Capability::Api,
         tsgo_bin,
     ) {
-        Ok(p) => strip_unc_prefix(&p),
+        Ok(p) => simplify_verbatim_path(&p).into_owned(),
         Err(e) => {
             return Err(api_check::TypecheckError::new(format!(
                 "verter-tsc: {e}\n(There is no tsc fallback for the typecheck path.)"
@@ -790,9 +1028,25 @@ fn run_inmemory_typecheck(
 
     // Generate the validation carriers IN-MEMORY, rooted at deterministic
     // in-project virtual paths (so node_modules resolution walks from the root).
-    let stubs = generate_public_api_stubs(host, &config.vue_files, &root);
-    let (stub_files, vue_ts_map) = stubs.value;
-    let mut tsx_files = generate_all_tsx(host, &config.vue_files, &root)?;
+    let stubs = generate_public_api_stubs(host, admitted, &root);
+    let (mut stub_files, vue_ts_map) = stubs.value;
+    // The stubs reference each OTHER: a component whose root is another
+    // component names that child's carrier to carry its declared props onto the
+    // parent-facing surface. Those specifiers are Verter's own generated
+    // carrier references, and the stub lives in `base_dir` under a hashed name
+    // rather than beside the source, so the same lowering the validation TSX
+    // gets must run here too — otherwise the reference resolves to nothing and
+    // the inherited surface silently degrades to `{}`.
+    //
+    // Runs after the whole batch is generated, so `vue_ts_map` is complete: a
+    // stub may name a child that appears later in `admitted`.
+    for (_, code) in &mut stub_files {
+        let rewritten = lower_tsc_validation_carrier_specifiers(code, &vue_ts_map);
+        if rewritten != *code {
+            *code = rewritten;
+        }
+    }
+    let mut tsx_files = generate_all_tsx(host, admitted, &root)?;
     // Lower the generated TSX's OWN carrier specifiers to the public-API stubs (or
     // strip back to the bare carrier for the `*.vue` wildcard shim).
     for (_, code, _) in &mut tsx_files {
@@ -838,7 +1092,7 @@ fn run_inmemory_typecheck(
     // `synthetic_tsconfig_value` builder), served in-memory at a virtual in-project
     // path so node_modules + the real user tsconfig (via `extends`) resolve from disk.
     let original_abs = match tsconfig_path.canonicalize() {
-        Ok(p) => slash(&strip_unc_prefix(&p)),
+        Ok(p) => slash(&simplify_verbatim_path(&p)),
         Err(e) => {
             return Err(api_check::TypecheckError::new(format!(
                 "verter-tsc: cannot resolve tsconfig {}: {e}",
@@ -867,7 +1121,7 @@ fn run_inmemory_typecheck(
     };
     let virtual_tsconfig_path = slash(&root.join("verter-tsc-check.tsconfig.json"));
 
-    let diagnostics = api_check::typecheck(api_check::TypecheckInputs {
+    let engine_diagnostics = api_check::typecheck(api_check::TypecheckInputs {
         engine: engine.as_path(),
         cwd: root.as_path(),
         tsconfig_path: virtual_tsconfig_path,
@@ -875,7 +1129,7 @@ fn run_inmemory_typecheck(
         files: overlay_files,
     })?;
     Ok(PublicApiBatch {
-        value: diagnostics,
+        value: engine_diagnostics,
         outcomes: stubs.outcomes,
         failures: stubs.failures,
     })
@@ -898,6 +1152,7 @@ fn run_inmemory_typecheck(
 fn run_declaration_stage(
     host: &VerterHost,
     config: &TsConfig,
+    admitted: &[PathBuf],
     tsconfig_path: &Path,
     opts: &EmitOptions,
     tsgo_bin: Option<&Path>,
@@ -919,7 +1174,7 @@ fn run_declaration_stage(
             decl_dir.display()
         ))
     })?;
-    let declaration_batch = generate_all_tsc(host, &config.vue_files, &decl_dir)?;
+    let declaration_batch = generate_all_tsc(host, admitted, &decl_dir)?;
     let declaration_generated = declaration_batch.value;
 
     // vue-shims so the checker resolves `import X from '*.vue'`.
@@ -935,11 +1190,12 @@ fn run_declaration_stage(
     let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
     let mut tsc_tsx_paths: Vec<PathBuf> = vec![shims_path];
     for (vue_path, tsc_code, tsc_tsx_path) in &declaration_generated {
-        let canon = strip_unc_prefix(
+        let canon = simplify_verbatim_path(
             &tsc_tsx_path
                 .canonicalize()
                 .unwrap_or_else(|_| tsc_tsx_path.clone()),
-        );
+        )
+        .into_owned();
         tsx_to_vue.insert(
             canon.to_string_lossy().replace('\\', "/"),
             (vue_path.clone(), tsc_code.clone()),
@@ -957,7 +1213,7 @@ fn run_declaration_stage(
     // proves the binary spawns and completes a real handshake, so a candidate
     // that merely answers `--version` can no longer mask a working one. A
     // resolution failure is a HARD failure (fail-closed).
-    let root = strip_unc_prefix(&config.root_dir);
+    let root = simplify_verbatim_path(&config.root_dir).into_owned();
     let checker_bin = match resolve_tsgo_engine(
         &root,
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
@@ -968,7 +1224,7 @@ fn run_declaration_stage(
                 "verter-tsc: declaration emit using tsgo at {}",
                 path.display()
             );
-            strip_unc_prefix(&path)
+            simplify_verbatim_path(&path).into_owned()
         }
         Err(e) => {
             return Err(api_check::TypecheckError::new(format!(
@@ -1063,16 +1319,22 @@ fn invoke_checker(
     invoke_checker_bounded(checker_bin, tsconfig_path, opts, DECLARATION_INVOKE_BOUND)
 }
 
-/// The bound-injectable core of [`invoke_checker`] (tests drive a wedged engine
-/// against a short bound).
-fn invoke_checker_bounded(
+/// Build the EXACT command the external checker is invoked with.
+/// [`invoke_checker_bounded`] adds only the stdio wiring and the process-tree
+/// configuration, so this is the single argument-construction site for the tsc
+/// lane and the one place a path crosses into an argv another program parses.
+///
+/// Both path-valued arguments go through
+/// [`verter_span::path::simplify_verbatim_path`]: the checker parses them with
+/// its own path logic and does not understand the Windows extended-length
+/// (`\\?\`) prefix that `Path::canonicalize()` produces. A verbatim path with no
+/// Win32 equivalent is passed through untouched rather than rewritten to a
+/// different target.
+fn build_checker_command(
     checker_bin: &Path,
     tsconfig_path: &Path,
     opts: &EmitOptions,
-    bound: std::time::Duration,
-) -> Result<CheckerInvocation, String> {
-    use verter_tsgo_api::process::{configure_tree_spawn_std, TreeKill};
-
+) -> std::process::Command {
     let mut cmd = if cfg!(target_os = "windows")
         && !reporter::is_native_binary(checker_bin)
         && checker_bin
@@ -1087,17 +1349,32 @@ fn invoke_checker_bounded(
         std::process::Command::new(checker_bin)
     };
 
-    let tsconfig_clean = strip_unc_prefix(tsconfig_path);
-    cmd.arg("--project").arg(&tsconfig_clean);
+    cmd.arg("--project")
+        .arg(simplify_verbatim_path(tsconfig_path).as_ref());
     if opts.no_emit {
         cmd.arg("--noEmit");
     }
     if opts.declaration {
         cmd.arg("--declaration");
         if let Some(dir) = &opts.declaration_dir {
-            cmd.arg("--declarationDir").arg(dir);
+            cmd.arg("--declarationDir")
+                .arg(simplify_verbatim_path(dir).as_ref());
         }
     }
+    cmd
+}
+
+/// The bound-injectable core of [`invoke_checker`] (tests drive a wedged engine
+/// against a short bound).
+fn invoke_checker_bounded(
+    checker_bin: &Path,
+    tsconfig_path: &Path,
+    opts: &EmitOptions,
+    bound: std::time::Duration,
+) -> Result<CheckerInvocation, String> {
+    use verter_tsgo_api::process::{configure_tree_spawn_std, TreeKill};
+
+    let mut cmd = build_checker_command(checker_bin, tsconfig_path, opts);
 
     // Spawn with piped I/O and drain stdout/stderr in background threads to
     // avoid deadlock (child blocks on full pipe buffer if we don't read). The
@@ -1214,6 +1491,20 @@ fn reap_std_child_bounded(child: &mut std::process::Child, bound: std::time::Dur
     }
 }
 
+/// How a resolved path is spelled INSIDE the synthetic tsconfig — the `extends`
+/// target and every `files` entry. The external checker reads this JSON and
+/// resolves the strings itself, so the Windows extended-length (`\\?\`) prefix
+/// `Path::canonicalize()` produces must not survive into it; forward slashes are
+/// tsconfig's own separator on every platform.
+///
+/// ONE spelling for both, so an `extends` target and a `files` entry naming the
+/// same file can never disagree.
+fn synthetic_tsconfig_spelling(resolved: &Path) -> String {
+    simplify_verbatim_path(resolved)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// Write a synthetic tsconfig.json in `temp_dir` that:
 /// - Extends the original tsconfig
 /// - Includes all .tsc.tsx files
@@ -1225,29 +1516,18 @@ fn write_temp_tsconfig(
     opts: &EmitOptions,
     root_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let original_abs = strip_unc_prefix(
+    let original_abs = synthetic_tsconfig_spelling(
         &original_tsconfig
             .canonicalize()
             .map_err(|e| format!("cannot resolve original tsconfig: {e}"))?,
     );
 
-    // Build file list with absolute paths (strip \\?\ prefix for Windows compatibility).
     let files: Vec<String> = tsc_tsx_files
         .iter()
-        .map(|p| {
-            let canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-            strip_unc_prefix(&canon)
-                .to_string_lossy()
-                .replace('\\', "/")
-        })
+        .map(|p| synthetic_tsconfig_spelling(&p.canonicalize().unwrap_or_else(|_| p.to_path_buf())))
         .collect();
 
-    let tsconfig_json = synthetic_tsconfig_value(
-        &original_abs.to_string_lossy().replace('\\', "/"),
-        &files,
-        opts,
-        root_dir,
-    );
+    let tsconfig_json = synthetic_tsconfig_value(&original_abs, &files, opts, root_dir);
 
     let suffix = if opts.declaration { "decl" } else { "check" };
     let temp_tsconfig = temp_dir.join(format!("verter-tsc-{suffix}.tsconfig.json"));
@@ -1302,6 +1582,24 @@ fn synthetic_tsconfig_value(
         compiler_options["jsxFactory"] = serde_json::json!(null);
         compiler_options["jsxFragmentFactory"] = serde_json::json!(null);
     }
+    // A JavaScript carrier (`.jsx`, from a JS SFC) is only a legal program root
+    // under `allowJs`; without it TypeScript rejects the explicitly-listed file
+    // outright (TS6054, "unsupported extension"). This is MEMBERSHIP only —
+    // `checkJs`, which decides whether those carriers are TYPECHECKED, is
+    // deliberately NOT written here so it keeps coming from the user's own
+    // tsconfig through `extends`. Set only when a JS carrier is actually
+    // present, so a TypeScript-only project's module resolution is byte-for-byte
+    // unchanged; `include` is `[]` and every root is listed in `files`, so this
+    // can never widen the program. The predicate is the JavaScript-root class,
+    // not just today's producer: `.jsx` is the only JS root anything currently
+    // contributes (`classify_file` admits `.ts`/`.tsx`/`.mts`/`.cts` only), and
+    // `allowJs` governs `.js` identically, so both belong here.
+    if files
+        .iter()
+        .any(|f| f.ends_with(".jsx") || f.ends_with(".js"))
+    {
+        compiler_options["allowJs"] = serde_json::json!(true);
+    }
     if opts.declaration {
         compiler_options["declaration"] = serde_json::json!(true);
         compiler_options["emitDeclarationOnly"] = serde_json::json!(true);
@@ -1326,6 +1624,24 @@ fn synthetic_tsconfig_value(
     })
 }
 
+/// The `tsx_to_vue` lookup key for a checker-reported path, taken from the path
+/// already resolved against disk.
+///
+/// Must derive the SAME spelling [`synthetic_tsconfig_spelling`] gave the checker
+/// for that file, or the direct lookup misses and the remap falls through to
+/// suffix matching — which cannot distinguish two files that share a tail. The
+/// deleted crate-local `strip_unc_prefix` produced the RELATIVE `UNC/srv/...`
+/// for a network share, so on a UNC checkout every direct lookup missed.
+///
+/// Resolution against disk stays in the CALLER: this is the pure derivation, so
+/// the UNC branch is exercised without a `canonicalize()` that would attempt a
+/// real SMB/DNS round trip on Windows.
+fn diagnostic_file_key(resolved: &Path) -> String {
+    simplify_verbatim_path(resolved)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// Remap raw tsc diagnostics from `.tsc.tsx` positions to `.vue` positions.
 fn remap_diagnostics(
     raw: Vec<TscDiagnostic>,
@@ -1336,12 +1652,11 @@ fn remap_diagnostics(
         .filter(|d| !is_temp_tsconfig_error(d))
         .map(|d| {
             // Try to find a matching vue entry using a suffix match on the file path.
-            let file_canon = strip_unc_prefix(
+            let file_key = diagnostic_file_key(
                 &PathBuf::from(&d.file)
                     .canonicalize()
                     .unwrap_or_else(|_| PathBuf::from(&d.file)),
             );
-            let file_key = file_canon.to_string_lossy().replace('\\', "/");
 
             // Direct map lookup.
             let maybe_vue = tsx_to_vue.get(&file_key).or_else(|| {
@@ -1456,121 +1771,132 @@ fn collect_dts_files(dir: &Path) -> Vec<PathBuf> {
 /// - `import('./types')` — dynamic import syntax
 /// - `from './types'` — ES module import/export syntax
 fn rewrite_relative_imports(code: &str, vue_dir: &Path) -> String {
-    let mut result = String::with_capacity(code.len());
-    let mut rest = code;
+    rewrite_import_specifiers(code, |specifier| {
+        absolutize_relative_specifier(specifier, vue_dir)
+    })
+}
 
-    loop {
-        // Find the earliest occurrence of either pattern.
-        let import_paren = rest.find("import(");
-        let from_kw = rest.find("from ");
-
-        let (pos, kind) = match (import_paren, from_kw) {
-            (Some(a), Some(b)) if a <= b => (a, ImportKind::DynamicImport),
-            (Some(_), Some(b)) => (b, ImportKind::FromKeyword),
-            (Some(a), None) => (a, ImportKind::DynamicImport),
-            (None, Some(b)) => (b, ImportKind::FromKeyword),
-            (None, None) => break,
-        };
-
-        result.push_str(&rest[..pos]);
-
-        match kind {
-            ImportKind::DynamicImport => {
-                let after = &rest[pos + 7..]; // skip "import("
-                match rewrite_quoted_path(after, vue_dir) {
-                    Some((rewritten, consumed)) => {
-                        result.push_str("import(");
-                        result.push_str(&rewritten);
-                        rest = &after[consumed..];
-                    }
-                    None => {
-                        result.push_str("import(");
-                        rest = after;
-                    }
-                }
-            }
-            ImportKind::FromKeyword => {
-                let after = &rest[pos + 5..]; // skip "from "
-                match rewrite_quoted_path(after, vue_dir) {
-                    Some((rewritten, consumed)) => {
-                        result.push_str("from ");
-                        result.push_str(&rewritten);
-                        rest = &after[consumed..];
-                    }
-                    None => {
-                        result.push_str("from ");
-                        rest = after;
-                    }
-                }
-            }
+/// Canonicalize NON-relative CARRIER specifiers through the host's own module
+/// resolver, so the stub map lookup that follows can exact-hit them.
+///
+/// `rewrite_relative_imports` absolutizes only the relative class, so an owner
+/// that reaches its root child through a tsconfig alias emits
+/// `import("@/B.vue")`, which misses the canonical `vue_ts_map` and resolves
+/// through the ambient `*.vue` wildcard shim instead: an EMPTY
+/// `DefineComponent<{}, {}, any>` whose `$props` carries none of B's members, so
+/// the inherited surface silently degrades to `{}`. Asking
+/// [`VerterHost::resolve_import`] — the same resolver that produced the
+/// canonical id in the first place — turns the alias into the canonical carrier
+/// path the map is keyed by. A specifier the host cannot resolve is left exactly
+/// as it is.
+fn canonicalize_nonrelative_carrier_specifiers(
+    code: &str,
+    owner_canonical_id: &str,
+    host: &VerterHost,
+) -> String {
+    rewrite_import_specifiers(code, |specifier| {
+        if verter_workspace::resolver::is_relative_specifier(specifier) {
+            return None;
         }
-    }
+        // Only CARRIER specifiers: everything else (`vue`, a package type
+        // import) must keep the spelling node resolution expects.
+        let carrier = CARRIER_VIRTUAL_IMPORT_SUFFIXES
+            .iter()
+            .find_map(|suffix| specifier.strip_suffix(suffix))
+            .filter(|carrier| verter_workspace::path_is_carrier(carrier))
+            .or_else(|| verter_workspace::path_is_carrier(specifier).then_some(specifier))?;
+        let resolved = host.resolve_import(owner_canonical_id, carrier)?;
+        let suffix = &specifier[carrier.len()..];
+        Some(format!("{resolved}{suffix}"))
+    })
+}
 
-    result.push_str(rest);
+/// Rewrite every MODULE SPECIFIER in `code` that `rewrite` answers `Some` for.
+///
+/// The specifier inventory is STRUCTURAL: it comes from
+/// [`verter_compiler::tsc::collect_module_specifier_spans`], which walks the
+/// parsed program and reports the source range of each real specifier node.
+/// That is not an optimisation over a substring scan for `import(` / `from ` —
+/// it is a correctness requirement. The Options-API stub passes the user's
+/// authored script body through VERBATIM, so a scan rewrites the interior of
+///
+/// ```ts
+/// const marker = 'import("@/Child.vue")' as const
+/// ```
+///
+/// silently changing the user's literal type and the diagnostics they see. A
+/// span-driven splice cannot reach anything that is not a specifier.
+///
+/// FAIL-CLOSED: a source the parser cannot handle yields NO inventory, and the
+/// code comes back unchanged rather than rewritten on a guess. That is the safe
+/// direction — an un-rewritten specifier surfaces as a module-resolution
+/// diagnostic the user can see, where a wrongly-rewritten one silently
+/// retargets their import.
+fn rewrite_import_specifiers(code: &str, rewrite: impl Fn(&str) -> Option<String>) -> String {
+    let Some(spans) = verter_compiler::tsc::collect_module_specifier_spans(code) else {
+        return code.to_string();
+    };
+    let mut result = String::with_capacity(code.len());
+    let mut cursor = 0usize;
+    for span in spans {
+        let Some(replacement) = rewrite(&span.text) else {
+            continue;
+        };
+        result.push_str(&code[cursor..span.start]);
+        // Re-emit the WHOLE literal rather than splicing into it: the recorded
+        // text is the specifier's decoded value, so an escaped one (a Windows
+        // `'..\\x'`) round-trips instead of being corrupted or skipped.
+        result.push_str(&verter_compiler::tsc::quote_module_specifier(
+            &replacement,
+            span.quote,
+        ));
+        cursor = span.end;
+    }
+    result.push_str(&code[cursor..]);
     result
 }
 
-enum ImportKind {
-    DynamicImport,
-    FromKeyword,
-}
-
-/// Try to extract a quoted path, resolve it if relative, and return the rewritten
-/// quoted string plus the number of bytes consumed from `after` (including closing quote).
-fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
-    let quote = match after.chars().next() {
-        Some(q @ '\'') | Some(q @ '"') => q,
-        _ => return None,
-    };
-    let path_start = 1; // skip opening quote
-    let path_end = after[path_start..].find(quote)? + path_start;
-    let import_path = &after[path_start..path_end];
-
+/// The absolute form of a RELATIVE specifier, or `None` for every other class.
+fn absolutize_relative_specifier(import_path: &str, vue_dir: &Path) -> Option<String> {
     // Relative classification is the full TS `pathIsRelative` class (bare
     // `.`/`..` plus the `./`/`../`/`.\`/`..\` prefixes) — the SAME shared
     // predicate the workspace resolver uses. A narrower `./`/`../` prefix
     // check leaves the bare and backslash spellings un-absolutized in the
     // generated temp TSX, and TypeScript then resolves them against the
     // TEMP directory: spurious missing-module diagnostics on this lane.
-    let result = if verter_workspace::resolver::is_relative_specifier(import_path) {
-        // Check if the path after "./" is already an absolute path (e.g., "./D:/...")
-        // This happens when the IDE codegen embeds a full filename in import('./filename.vue.verter.ts').
-        let after_dot = import_path.strip_prefix("./").unwrap_or(import_path);
-        if after_dot.contains(':') || after_dot.starts_with('/') {
-            // Already absolute — just strip the "./" prefix
-            format!("{quote}{after_dot}{quote}")
-        } else if import_path == "." {
-            // Bare `.` — the importer directory's own index module.
-            // Joining "." would leave a trailing `/.` segment
-            // (Path::join does not normalize "." segments on all
-            // platforms), so emit the directory itself.
-            let abs_path = vue_dir.to_string_lossy().replace('\\', "/");
-            format!("{quote}{abs_path}{quote}")
-        } else {
-            // `\` is a module-specifier separator in the same
-            // `pathIsRelative` class (TS `normalizeSlashes`) — normalize
-            // before joining so `..\x` joins identically to `../x`.
-            // Then strip a leading "./" before joining to avoid
-            // "dir/./rest" in the result (Path::join does not normalize
-            // "." segments on all platforms). Bare `..` joins as-is —
-            // TypeScript normalizes the `..` segment during resolution,
-            // exactly as it does for the `../x` forms.
-            let normalized: std::borrow::Cow<'_, str> = if import_path.contains('\\') {
-                std::borrow::Cow::Owned(import_path.replace('\\', "/"))
-            } else {
-                std::borrow::Cow::Borrowed(import_path)
-            };
-            let clean_rel = normalized.strip_prefix("./").unwrap_or(&normalized);
-            let resolved = vue_dir.join(clean_rel);
-            let abs_path = resolved.to_string_lossy().replace('\\', "/");
-            format!("{quote}{abs_path}{quote}")
-        }
+    if !verter_workspace::resolver::is_relative_specifier(import_path) {
+        return None;
+    }
+    // Check if the path after "./" is already an absolute path (e.g., "./D:/...")
+    // This happens when the IDE codegen embeds a full filename in import('./filename.vue.verter.ts').
+    let after_dot = import_path.strip_prefix("./").unwrap_or(import_path);
+    if after_dot.contains(':') || after_dot.starts_with('/') {
+        // Already absolute — just strip the "./" prefix
+        return Some(after_dot.to_string());
+    }
+    if import_path == "." {
+        // Bare `.` — the importer directory's own index module.
+        // Joining "." would leave a trailing `/.` segment
+        // (Path::join does not normalize "." segments on all
+        // platforms), so emit the directory itself.
+        return Some(vue_dir.to_string_lossy().replace('\\', "/"));
+    }
+    // `\` is a module-specifier separator in the same
+    // `pathIsRelative` class (TS `normalizeSlashes`) — normalize
+    // before joining so `..\x` joins identically to `../x`.
+    // Then strip a leading "./" before joining to avoid
+    // "dir/./rest" in the result (Path::join does not normalize
+    // "." segments on all platforms). Bare `..` joins as-is —
+    // TypeScript normalizes the `..` segment during resolution,
+    // exactly as it does for the `../x` forms.
+    let normalized: std::borrow::Cow<'_, str> = if import_path.contains('\\') {
+        std::borrow::Cow::Owned(import_path.replace('\\', "/"))
     } else {
-        format!("{quote}{import_path}{quote}")
+        std::borrow::Cow::Borrowed(import_path)
     };
-
-    // consumed = opening quote + path + closing quote
-    Some((result, path_end + 1))
+    let clean_rel = normalized.strip_prefix("./").unwrap_or(&normalized);
+    let resolved = vue_dir.join(clean_rel);
+    Some(resolved.to_string_lossy().replace('\\', "/"))
 }
 
 /// The virtual-file suffixes the IDE codegen appends onto a carrier path, in
@@ -1658,6 +1984,75 @@ enum SpecifierExpect {
     NextString,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SignificantByteScanWork {
+    /// Source bytes classified by the shared forward lexical walk.
+    bytes_scanned: usize,
+    /// Identifier positions that read the running significant byte.
+    identifier_lookups: usize,
+}
+
+/// Previous-significant-byte state carried by the existing forward specifier
+/// lexer. Strings, templates, and comments advance the work cursor without
+/// changing `last_significant`; code-level bytes update it in source order.
+#[derive(Default)]
+struct SignificantByteState {
+    last_significant: Option<u8>,
+    cursor: usize,
+    work: SignificantByteScanWork,
+}
+
+impl SignificantByteState {
+    fn previous_for_identifier(&mut self, start: usize) -> Option<u8> {
+        debug_assert_eq!(
+            self.cursor, start,
+            "significant-byte state must advance with the lexical scanner"
+        );
+        self.work.identifier_lookups += 1;
+        self.last_significant
+    }
+
+    fn skip_insignificant(&mut self, start: usize, end: usize) {
+        debug_assert_eq!(
+            self.cursor, start,
+            "insignificant lexical runs must be consumed in source order"
+        );
+        self.work.bytes_scanned += end - start;
+        self.cursor = end;
+    }
+
+    fn consume_identifier(&mut self, start: usize, end: usize, last_byte: u8) {
+        debug_assert_eq!(
+            self.cursor, start,
+            "identifier tokens must be consumed in source order"
+        );
+        debug_assert!(end > start, "an identifier token must not be empty");
+        self.work.bytes_scanned += end - start;
+        self.cursor = end;
+        self.last_significant = Some(last_byte);
+    }
+
+    fn consume_code_byte(&mut self, offset: usize, byte: u8) {
+        debug_assert_eq!(
+            self.cursor, offset,
+            "code bytes must be consumed in source order"
+        );
+        self.work.bytes_scanned += 1;
+        self.cursor = offset + 1;
+        if !byte.is_ascii_whitespace() {
+            self.last_significant = Some(byte);
+        }
+    }
+
+    fn finish(self, len: usize) -> SignificantByteScanWork {
+        debug_assert_eq!(
+            self.cursor, len,
+            "the lexical scanner must classify every source byte"
+        );
+        self.work
+    }
+}
+
 /// Lexical carrier-specifier lowering over module-specifier positions: copies
 /// `code` to the output verbatim, lowering ONLY the carrier specifier that
 /// occupies a genuine module-specifier position. It recognizes the
@@ -1688,11 +2083,23 @@ fn lower_carrier_specifiers_in_module_positions(
     code: &str,
     vue_ts_map: &HashMap<String, PathBuf>,
 ) -> String {
+    lower_carrier_specifiers_in_module_positions_observed(code, vue_ts_map, |_, _| {}).0
+}
+
+fn lower_carrier_specifiers_in_module_positions_observed<F>(
+    code: &str,
+    vue_ts_map: &HashMap<String, PathBuf>,
+    mut observe_identifier: F,
+) -> (String, SignificantByteScanWork)
+where
+    F: FnMut(usize, Option<u8>),
+{
     let bytes = code.as_bytes();
     let len = bytes.len();
     let mut result = String::with_capacity(len);
     let mut i = 0usize;
     let mut expect = SpecifierExpect::None;
+    let mut significant = SignificantByteState::default();
 
     while i < len {
         let b = bytes[i];
@@ -1705,6 +2112,7 @@ fn lower_carrier_specifiers_in_module_positions(
                 i += 1;
             }
             result.push_str(&code[start..i]);
+            significant.skip_insignificant(start, i);
             continue;
         }
 
@@ -1717,6 +2125,7 @@ fn lower_carrier_specifiers_in_module_positions(
             }
             i = (i + 2).min(len); // consume closing `*/` (or run to EOF)
             result.push_str(&code[start..i]);
+            significant.skip_insignificant(start, i);
             continue;
         }
 
@@ -1754,11 +2163,13 @@ fn lower_carrier_specifiers_in_module_positions(
                 i += 1;
             }
             result.push_str(&code[start..i]);
+            significant.skip_insignificant(start, i);
             continue;
         }
 
         // String literal (single or double quote).
         if b == b'\'' || b == b'"' {
+            let start = i;
             let quote = b;
             let content_start = i + 1;
             let mut j = content_start;
@@ -1801,6 +2212,7 @@ fn lower_carrier_specifiers_in_module_positions(
             } else {
                 i = j; // unterminated — already at EOF
             }
+            significant.skip_insignificant(start, i);
             continue;
         }
 
@@ -1823,7 +2235,9 @@ fn lower_carrier_specifiers_in_module_positions(
             // (Matching INSIDE a longer identifier like `importer`/`fromage` is
             // already prevented by the `is_ident_start`/`is_ident_continue` token
             // boundary; this guard covers the `.`-prefixed member-access case.)
-            let member_access = prev_significant_byte(bytes, start) == Some(b'.');
+            let previous_significant = significant.previous_for_identifier(start);
+            observe_identifier(start, previous_significant);
+            let member_access = previous_significant == Some(b'.');
             if !member_access {
                 match word {
                     "import" => {
@@ -1849,6 +2263,7 @@ fn lower_carrier_specifiers_in_module_positions(
                     _ => {}
                 }
             }
+            significant.consume_identifier(start, i, bytes[i - 1]);
             continue;
         }
 
@@ -1859,10 +2274,11 @@ fn lower_carrier_specifiers_in_module_positions(
             expect = SpecifierExpect::None;
         }
         result.push(b as char);
+        significant.consume_code_byte(i, b);
         i += 1;
     }
 
-    result
+    (result, significant.finish(len))
 }
 
 /// Whether `b` can start a JS/TS identifier-or-keyword token. Word boundaries
@@ -1907,11 +2323,11 @@ fn next_significant_byte(bytes: &[u8], mut i: usize) -> Option<u8> {
     None
 }
 
-/// The last significant code byte strictly BEFORE index `start`, or `None` when
-/// no code-level byte precedes it. Used by the specifier scanner's leading-context
-/// guard to tell a keyword introducer (`import`/`export`/`from` at a
-/// statement/expression position) from a member name (`obj.import(…)`,
-/// `obj?.import(…)`, `obj.from(…)`), whose prior significant byte is `.`.
+/// Test oracle for the last significant code byte strictly BEFORE index
+/// `start`, or `None` when no code-level byte precedes it. Production carries
+/// [`SignificantByteState`] with the forward specifier lexer; this independent
+/// from-byte-zero implementation proves the running value at every identifier
+/// lookup.
 ///
 /// The lexical state at `start` is established by scanning FORWARD from the
 /// beginning of `bytes` with the SAME string / template / block-comment / line-
@@ -1934,6 +2350,7 @@ fn next_significant_byte(bytes: &[u8], mut i: usize) -> Option<u8> {
 /// scanners consistent. Escaped backticks (`` \` ``) inside a template do not close
 /// it (and an escape pair inside a single/double string is consumed), so a string
 /// or template that spans physical lines is tracked across them.
+#[cfg(test)]
 fn prev_significant_byte(bytes: &[u8], start: usize) -> Option<u8> {
     let len = bytes.len();
     let end = start.min(len);
@@ -2025,6 +2442,10 @@ fn prev_significant_byte(bytes: &[u8], start: usize) -> Option<u8> {
     }
     last_significant
 }
+
+#[cfg(test)]
+#[path = "checker_significant_byte_tests.rs"]
+mod checker_significant_byte_tests;
 
 /// The rewrite decision for a single quoted import specifier.
 enum Rewrite {
@@ -2409,6 +2830,41 @@ mod tests {
     use super::*;
     use crate::tsconfig::load_tsconfig;
 
+    /// The ambient-shim inventory carries the `IntrinsicElementAttributes`
+    /// introduce-on-absence augmentation, as its own module carrier built from
+    /// the compiler's constant. The JSDoc-widened JavaScript Options-API stub
+    /// cannot spell `declare module` itself, so the PROGRAM must — the
+    /// semantic consequence of dropping it (the old-Vue OPEN degrade) is
+    /// pinned by the hermetic
+    /// `js_options_jsdoc_widening_is_fail_closed_only_with_the_ambient_augmentation`
+    /// gate in `verter_session`; this unit pins the WIRING that test cannot
+    /// see.
+    ///
+    /// DISCRIMINATING: deleting the `vue-intrinsic-map-augment.d.ts` row from
+    /// `ambient_shim_carriers` fails it.
+    #[test]
+    fn ambient_shims_carry_the_intrinsic_map_augmentation_for_jsdoc_widened_stubs() {
+        let carriers = ambient_shim_carriers(Path::new("/base"));
+        let augment = carriers
+            .iter()
+            .find(|(path, _)| path.ends_with("vue-intrinsic-map-augment.d.ts"))
+            .expect("the ambient shims include the intrinsic-map augmentation carrier");
+        assert!(
+            augment
+                .1
+                .contains(verter_compiler::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION),
+            "the carrier embeds the compiler's augmentation constant, so the two \
+             cannot drift: {}",
+            augment.1
+        );
+        assert!(
+            augment.1.contains("import \"vue\";") && augment.1.contains("export {};"),
+            "the augmentation is a MODULE carrier (import + export) so it augments \
+             the real `vue` instead of REPLACING it: {}",
+            augment.1
+        );
+    }
+
     /// Build a standalone host with each carrier upserted, so `generate_all_tsx`
     /// can thread the real Vue macro semantic bundle (a carrier that is not
     /// indexed yields `Unavailable`).
@@ -2440,15 +2896,21 @@ mod tests {
     const MOCK_LSP_HANDSHAKE_SH: &str = r#"
 for arg in "$@"; do
   if [ "$arg" = "--lsp" ]; then
+    # POSIX-portable carriage return. `$'\r'` is bash/ksh/zsh ANSI-C quoting, NOT
+    # POSIX: macOS `/bin/sh` is bash and expands it, Debian/Ubuntu `/bin/sh` is
+    # dash and does not — there the pattern stays the literal `$\r`, no CR is
+    # stripped, the blank header separator never compares empty, and this loop
+    # consumes the body as headers until the resolver's handshake timeout.
+    cr=$(printf '\r')
     while IFS= read -r line; do
-      line=${line%$'\r'}
+      line=${line%"$cr"}
       len=0
       while [ -n "$line" ]; do
         case "$line" in
           [Cc]ontent-[Ll]ength:*) len=$(printf '%s' "${line#*:}" | tr -d ' ') ;;
         esac
         IFS= read -r line || exit 0
-        line=${line%$'\r'}
+        line=${line%"$cr"}
       done
       [ "$len" -gt 0 ] || continue
       body=$(dd bs=1 count="$len" 2>/dev/null)
@@ -2567,8 +3029,40 @@ if ($Args -contains '--lsp') {
     /// tests drive [`run_declaration_stage`] directly (see
     /// [`run_declaration_only`]), leaving the declaration-stage diagnostics as
     /// the only ones they observe.
+    /// The directory both fixture mocks install into (the resolver's
+    /// project-local `.bin` shim tier).
+    fn mock_bin_dir(project_root: &Path) -> PathBuf {
+        project_root.join("node_modules").join(".bin")
+    }
+
+    /// The on-disk path of the mock installed by [`write_mock_tsc`] /
+    /// [`write_mock_tsc_error_with_emit`] — the resolver's `legacy_bin_shim`
+    /// name (`tsgo` / `tsgo.cmd`).
+    ///
+    /// Declaration-stage fixtures name this path EXPLICITLY through the
+    /// `--tsgo-bin` seam rather than hoping the project-local tier wins the
+    /// ambient resolution. Tier 1 of the shared resolver is the process `PATH`
+    /// (`tsc` first, then `tsgo`) and it OUTRANKS the project-local
+    /// `node_modules` tier, so on any machine carrying a system `tsc` that
+    /// passes the version + [`Capability::Lsp`] smoke — a Linux CI runner with
+    /// TypeScript installed — the ambient binary silently becomes the oracle
+    /// and the fixture asserts against a stranger. Naming the mock explicitly
+    /// makes it the ONLY candidate (`resolve_explicit_engine` empties
+    /// `path_entries` and disables every lower tier), which is test
+    /// hermeticity, not a production tier change: production still resolves
+    /// through `ResolutionRequest::for_environment`.
+    ///
+    /// [`Capability::Lsp`]: verter_tsgo_api::toolchain::validation::Capability
+    fn mock_engine_path(project_root: &Path) -> PathBuf {
+        mock_bin_dir(project_root).join(if cfg!(target_os = "windows") {
+            "tsgo.cmd"
+        } else {
+            "tsgo"
+        })
+    }
+
     fn write_mock_tsc(project_root: &Path, mode: &str) {
-        let bin_dir = project_root.join("node_modules").join(".bin");
+        let bin_dir = mock_bin_dir(project_root);
         fs::create_dir_all(&bin_dir).unwrap();
         fs::write(bin_dir.join("mock-mode.txt"), mode).unwrap();
 
@@ -2710,7 +3204,7 @@ printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc
     /// This simulates real tsc behavior where errors in some files don't prevent
     /// emission of declarations for other (non-erroring) files.
     fn write_mock_tsc_error_with_emit(project_root: &Path, _decl_dir: &Path) {
-        let bin_dir = project_root.join("node_modules").join(".bin");
+        let bin_dir = mock_bin_dir(project_root);
         fs::create_dir_all(&bin_dir).unwrap();
 
         #[cfg(target_os = "windows")]
@@ -2842,6 +3336,189 @@ exit 1
         }
     }
 
+    /// The marker every diagnostic the PATH decoy prints carries. A fixture
+    /// that observes it resolved the AMBIENT `PATH` engine instead of the
+    /// project's own mock.
+    const PATH_DECOY_MARKER: &str = "verter-tsc PATH decoy engine";
+
+    /// Install a hostile ambient-`PATH` engine into `dir` and return its path.
+    ///
+    /// It is deliberately PLAUSIBLE: it answers `--version` with a supported
+    /// tsgo version and completes the `--lsp` handshake with a matching
+    /// `serverInfo`, so it passes the shared resolver's bounded probe + support
+    /// policy + [`Capability::Lsp`] smoke and therefore WINS tier 1. It is
+    /// installed under the resolver's FIRST PATH name (`tsc` / `tsc.cmd`),
+    /// which is exactly the shape of the system `/usr/local/bin/tsc` that
+    /// displaced the project mock on Linux CI. Its `--declaration` behaviour is
+    /// unmistakably wrong (three marker diagnostics, no emit), so any fixture
+    /// that resolves it fails loudly instead of silently asserting against a
+    /// stranger.
+    ///
+    /// [`Capability::Lsp`]: verter_tsgo_api::toolchain::validation::Capability
+    fn write_path_decoy_engine(dir: &Path) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+
+        #[cfg(target_os = "windows")]
+        {
+            let ps1 = dir.join("path-decoy.ps1");
+            fs::write(
+                &ps1,
+                r#"
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+
+if ($Args -contains '--version') {
+    Write-Output 'Version 7.0.2'
+    exit 0
+}
+
+__MOCK_LSP_HANDSHAKE_PS1__
+
+Write-Output "decoy_a.ts(1,1): error TS9001: __PATH_DECOY_MARKER__ was resolved."
+Write-Output "decoy_b.ts(2,2): error TS9002: __PATH_DECOY_MARKER__ was resolved."
+Write-Output "decoy_c.ts(3,3): error TS9003: __PATH_DECOY_MARKER__ was resolved."
+exit 2
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_PS1__", MOCK_LSP_HANDSHAKE_PS1)
+                .replace("__PATH_DECOY_MARKER__", PATH_DECOY_MARKER),
+            )
+            .unwrap();
+            let shim = dir.join("tsc.cmd");
+            fs::write(
+                &shim,
+                "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0path-decoy.ps1\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            )
+            .unwrap();
+            shim
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let script = dir.join("tsc");
+            fs::write(
+                &script,
+                r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "Version 7.0.2"
+    exit 0
+  fi
+done
+
+__MOCK_LSP_HANDSHAKE_SH__
+
+printf "decoy_a.ts(1,1): error TS9001: __PATH_DECOY_MARKER__ was resolved.\n"
+printf "decoy_b.ts(2,2): error TS9002: __PATH_DECOY_MARKER__ was resolved.\n"
+printf "decoy_c.ts(3,3): error TS9003: __PATH_DECOY_MARKER__ was resolved.\n"
+exit 2
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH)
+                .replace("__PATH_DECOY_MARKER__", PATH_DECOY_MARKER),
+            )
+            .unwrap();
+
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+            script
+        }
+    }
+
+    /// Serializes the process-global environment mutation the decoy fixtures
+    /// perform so two of them can never interleave.
+    static PATH_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Makes the decoy directory the AMBIENT engine for the guard's lifetime:
+    /// PREPENDS it to `PATH` and CLEARS `VERTER_TSGO_BIN`. Both are restored on
+    /// drop.
+    ///
+    /// Prepend, never replace: the fixture engines are `/bin/sh` (or
+    /// PowerShell) scripts that call ordinary utilities, so they still need a
+    /// working `PATH`. The canonical gate runs these tests under
+    /// `cargo nextest` (one process per test), so the mutation is additionally
+    /// process-isolated there; the mutex covers the in-process
+    /// `cargo test -p verter_tsc` run.
+    ///
+    /// `VERTER_TSGO_BIN` has to go with it. The instrument check calls
+    /// `resolve_tsgo_engine(.., None)`, which builds its request through
+    /// `ResolutionRequest::for_environment` — and that reads the env override
+    /// as tier 1, ABOVE the `PATH` traversal. A developer with the documented
+    /// override exported would resolve their own engine instead of the decoy
+    /// and get a spurious failure from a fixture that has nothing to do with
+    /// their environment. Only these two channels can out-rank the decoy;
+    /// tiers 3 and 4 (update cache, bundled sidecar) rank below `PATH` and
+    /// cannot displace it.
+    struct PathPrefixGuard {
+        previous_path: Option<std::ffi::OsString>,
+        previous_env_override: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl PathPrefixGuard {
+        fn prepend(dir: &Path) -> Self {
+            use verter_tsgo_api::toolchain::discovery::ENV_OVERRIDE_VAR;
+
+            let lock = PATH_MUTATION_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous_path = std::env::var_os("PATH");
+            let previous_env_override = std::env::var_os(ENV_OVERRIDE_VAR);
+            let mut entries = vec![dir.to_path_buf()];
+            if let Some(existing) = &previous_path {
+                entries.extend(std::env::split_paths(existing));
+            }
+            let joined = std::env::join_paths(entries).expect("a joinable PATH");
+            std::env::set_var("PATH", joined);
+            std::env::remove_var(ENV_OVERRIDE_VAR);
+            Self {
+                previous_path,
+                previous_env_override,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for PathPrefixGuard {
+        fn drop(&mut self) {
+            use verter_tsgo_api::toolchain::discovery::ENV_OVERRIDE_VAR;
+
+            match &self.previous_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match &self.previous_env_override {
+                Some(value) => std::env::set_var(ENV_OVERRIDE_VAR, value),
+                None => std::env::remove_var(ENV_OVERRIDE_VAR),
+            }
+        }
+    }
+
+    /// Assert the ambient resolution the declaration stage USED to perform now
+    /// selects `decoy` — the instrument check for every decoy fixture below.
+    ///
+    /// Without it a green run proves nothing: if the decoy failed to install,
+    /// failed the capability smoke, or lost tier 1 for any reason, the
+    /// "hostile PATH" is not hostile and the assertions that follow are
+    /// vacuous. This checks the FAILING case, not only the passing one.
+    fn assert_path_decoy_wins_ambient_resolution(project_root: &Path, decoy: &Path) {
+        let ambient = resolve_tsgo_engine(
+            project_root,
+            verter_tsgo_api::toolchain::validation::Capability::Lsp,
+            None,
+        )
+        .expect(
+            "the decoy must pass the shared resolver's version + Lsp capability smoke — \
+             otherwise this fixture's PATH is not hostile and discriminates nothing",
+        );
+        let ambient_norm = ambient.to_string_lossy().replace('\\', "/");
+        let decoy_norm = decoy.to_string_lossy().replace('\\', "/");
+        assert_eq!(
+            ambient_norm, decoy_norm,
+            "the PATH decoy must OUTRANK the project-local fixture mock (tier 1 beats \
+             tier 2); ambient resolution picked {ambient_norm}"
+        );
+    }
+
     // ── DISCRIMINATING (B3): a wedged declaration engine (hangs with a
     //    grandchild holding the pipes) fails BOUNDED and leaves NO live
     //    descendant — the invocation is bounded end-to-end with a process-tree
@@ -2876,12 +3553,19 @@ exit 1
         let tsconfig = temp.path().join("tsconfig.json");
         fs::write(&tsconfig, "{}").unwrap();
 
+        // The bound has to outlast the fixture's own startup, not just the
+        // wedge: `/bin/sh` must run, fork `sleep 600`, and write the pid file
+        // before the kill lands, and under the gate's test parallelism a second
+        // is not always enough — the tree then dies before the pid file exists
+        // and the assertion below reads a missing file. Five seconds against a
+        // 600s sleep still proves the bound fires, and the elapsed check keeps
+        // guarding that it fired at all.
         let start = std::time::Instant::now();
         let result = invoke_checker_bounded(
             &script_path,
             &tsconfig,
             &opts,
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
         );
         let err = match result {
             Ok(_) => panic!("a wedged engine must fail the bounded invocation"),
@@ -2897,12 +3581,23 @@ exit 1
             start.elapsed()
         );
 
-        // The pipe-holding grandchild must not survive the tree kill.
-        let pid: u32 = std::fs::read_to_string(&pid_file)
-            .expect("the grandchild registered its pid")
-            .trim()
-            .parse()
-            .expect("a pid");
+        // The pipe-holding grandchild must not survive the tree kill. Poll for
+        // the record: the fixture writes it from a shell that may still be
+        // scheduling when the bound fires.
+        let pid_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let recorded = loop {
+            match std::fs::read_to_string(&pid_file) {
+                Ok(text) if !text.trim().is_empty() => break text,
+                other => {
+                    assert!(
+                        std::time::Instant::now() < pid_deadline,
+                        "the grandchild never registered its pid: {other:?}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        };
+        let pid: u32 = recorded.trim().parse().expect("a pid");
         for _ in 0..100 {
             if !process_alive(pid) {
                 return;
@@ -2927,6 +3622,32 @@ exit 1
         tsconfig_path: &Path,
         opts: &EmitOptions,
     ) -> (Vec<Diagnostic>, Vec<PathBuf>) {
+        let host = declaration_fixture_host(config);
+        // Name the fixture mock EXPLICITLY: `None` here resolves through the
+        // real process environment (`VERTER_TSGO_BIN`, then `PATH`), and PATH
+        // outranks the project-local `.bin` shim the fixture installs — so an
+        // ambient `tsc` becomes the oracle and the assertions below describe a
+        // stranger. See [`mock_engine_path`].
+        let mock = mock_engine_path(&config.root_dir);
+        let (diagnostics, emitted, failures) = run_declaration_stage(
+            &host,
+            config,
+            &config.vue_files,
+            tsconfig_path,
+            opts,
+            Some(mock.as_path()),
+        )
+        .expect("the declaration stage must run against the validating mock checker");
+        assert!(
+            failures.is_empty(),
+            "fixture projection failures: {failures:?}"
+        );
+        (diagnostics, emitted)
+    }
+
+    /// The host every declaration-stage fixture drives: mirrors [`run`]'s
+    /// construction + per-`.vue` upsert.
+    fn declaration_fixture_host(config: &TsConfig) -> VerterHost {
         let host = VerterHost::new_standalone(build_host_config());
         for vue_path in &config.vue_files {
             let source = match fs::read_to_string(vue_path) {
@@ -2942,14 +3663,7 @@ exit 1
                 aliases: Vec::new(),
             });
         }
-        let (diagnostics, emitted, failures) =
-            run_declaration_stage(&host, config, tsconfig_path, opts, None)
-                .expect("the declaration stage must run against the validating mock checker");
-        assert!(
-            failures.is_empty(),
-            "fixture projection failures: {failures:?}"
-        );
-        (diagnostics, emitted)
+        host
     }
 
     fn create_run_fixture(
@@ -3486,13 +4200,19 @@ defineProps<{ value: Unsafe }>()
     fn rewrite_relative_imports_absolutizes_backslash_relative() {
         // `..\x` / `.\x` are the same TS `pathIsRelative` class ([\\/]);
         // the rewritten output is separator-normalized.
-        let code = r#"import type { Foo } from '..\x'"#;
+        //
+        // The backslash is ESCAPED in the source, because that is the only way
+        // a TypeScript string literal can denote it: a bare `'..\x'` is an
+        // invalid escape sequence, not a Windows path. The rewriter reads the
+        // literal's decoded VALUE and re-emits a whole literal, so the escape
+        // round-trips instead of being spliced through.
+        let code = r#"import type { Foo } from '..\\x'"#;
         let result = rewrite_relative_imports(code, Path::new("/project/src"));
         assert!(
             result.contains("'/project/src/../x'"),
             "'..\\x' must absolutize with normalized separators: {result}"
         );
-        let code = r#"import type { Foo } from '.\x'"#;
+        let code = r#"import type { Foo } from '.\\x'"#;
         let result = rewrite_relative_imports(code, Path::new("/project/src"));
         assert!(
             result.contains("'/project/src/x'"),
@@ -4105,13 +4825,14 @@ const ident = KnownComp_vue_thing;
 
     /// LEADING-CONTEXT GUARD, comment-tolerant lookback: the member-access guard
     /// must see the `.` qualifier even when a `//` line comment OR a `/* */` block
-    /// comment sits between the `.` and the `import` member name. `prev_significant_byte`
-    /// skips BOTH comment forms in reverse, so `loader. // note\n import("x")` is
-    /// recognised as a property access (`import` qualified by `.`) and its string
-    /// argument is left verbatim — never routed to the carrier stub. The negative
-    /// control (a genuine `import("x")` whose only preceding token is a line comment
-    /// on its OWN line, with no `.` qualifier) still rewrites, proving the lookback
-    /// did not over-suppress real introducers.
+    /// comment sits between the `.` and the `import` member name. The running
+    /// significant-byte state skips BOTH comment forms, so
+    /// `loader. // note\n import("x")` is recognised as a property access
+    /// (`import` qualified by `.`) and its string argument is left verbatim —
+    /// never routed to the carrier stub. The negative control (a genuine
+    /// `import("x")` whose only preceding token is a line comment on its OWN
+    /// line, with no `.` qualifier) still rewrites, proving the lookback did not
+    /// over-suppress real introducers.
     #[test]
     fn lower_tsc_validation_carrier_specifiers_member_access_lookback_skips_line_comments() {
         let mut map = HashMap::new();
@@ -4919,6 +5640,97 @@ import type { Foo } from './types'"#;
         );
     }
 
+    /// DISCRIMINATING: a hostile ambient `PATH` must not change the
+    /// declaration stage's oracle.
+    ///
+    /// This is the exact shape of the Linux-CI failure: the shared resolver's
+    /// tier 1 is the process `PATH` (`tsc`, then `tsgo`) and it outranks the
+    /// project-local `node_modules/.bin` tier, so a runner carrying a system
+    /// `/usr/local/bin/tsc` that passes the version + `Capability::Lsp` smoke
+    /// silently became the declaration engine — four fixtures then asserted
+    /// against a binary they never installed (`1` expected diagnostic, `4`
+    /// observed). The stage now names the fixture mock through the
+    /// `--tsgo-bin` seam, which empties `path_entries`, so `PATH` cannot
+    /// participate at all.
+    ///
+    /// Fails against the pre-change tree: there `run_declaration_only` passed
+    /// `None` and the decoy — installed first on `PATH` under the resolver's
+    /// first executable name — won, producing three marker diagnostics and no
+    /// emit.
+    #[test]
+    fn hostile_path_decoy_never_displaces_the_declaration_fixture_engine() {
+        let (_temp, config, tsconfig_path, decl_dir) = create_run_fixture("phase-b-fail");
+        let decoy_dir = config.root_dir.join("_path_decoy");
+        let decoy = write_path_decoy_engine(&decoy_dir);
+        let _path = PathPrefixGuard::prepend(&decoy_dir);
+
+        // Instrument check against the FAILING case: prove the decoy really is
+        // selectable and really does outrank the fixture mock. Without this a
+        // green assertion below could mean nothing more than "the decoy never
+        // installed".
+        assert_path_decoy_wins_ambient_resolution(&config.root_dir, &decoy);
+
+        let (diagnostics, emitted_files) = run_declaration_only(
+            &config,
+            &tsconfig_path,
+            &EmitOptions {
+                no_emit: false,
+                declaration: true,
+                declaration_dir: Some(decl_dir.clone()),
+            },
+        );
+
+        // Positive: the fixture mock is still the oracle.
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "the project's own mock must remain the oracle under a hostile PATH: \
+             {diagnostics:?}"
+        );
+        assert_eq!(diagnostics[0].ts_code, 2304);
+        assert!(
+            diagnostics[0].message.contains("MissingType"),
+            "the fixture mock's message must survive: {}",
+            diagnostics[0].message
+        );
+        assert!(
+            diagnostics[0]
+                .file
+                .replace('\\', "/")
+                .ends_with("/src/Test.vue"),
+            "the fixture mock's diagnostic must remap to the vue source: {}",
+            diagnostics[0].file
+        );
+
+        // Negative: nothing the decoy produced may reach the output.
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.message.contains(PATH_DECOY_MARKER)),
+            "no ambient-PATH engine output may reach the reported diagnostics: \
+             {diagnostics:?}"
+        );
+        assert!(
+            emitted_files.is_empty(),
+            "a declaration-phase failure must not report emitted files"
+        );
+    }
+
+    // The explicit-engine fail-closed contract (a `--tsgo-bin` value that does
+    // not exist is a hard, flag-named error and never falls through to a lower
+    // tier) is pinned by `explicit_tsgo_bin_nonexistent_is_a_flag_named_error`
+    // and its two siblings below. Those exercise `resolve_explicit_engine`
+    // directly, which is where the whole contract lives: it empties
+    // `path_entries` and disables every lower tier, so a hostile `PATH` has
+    // nowhere to land BEFORE the declaration stage is reached. A
+    // declaration-stage rerun of the same assertions under a `PATH` decoy adds
+    // no discrimination — it passes identically whether or not the fixtures
+    // name their mock through `--tsgo-bin`, which is the only thing the
+    // declaration-fixture hermeticity change altered.
+    //
+    // `hostile_path_decoy_never_displaces_the_declaration_fixture_engine`
+    // above is the discriminating test for THAT change.
+
     #[test]
     fn run_declaration_phase_success_postprocesses_vue_declarations() {
         let (_temp, config, tsconfig_path, decl_dir) = create_run_fixture("phase-b-success");
@@ -5047,6 +5859,143 @@ const props = defineProps<{ msg: string }>()
         );
     }
 
+    // ── Validation-carrier ScriptKind (JS vs TS) ──────────────────
+
+    /// Drive the REAL producer — [`generate_all_tsx`], the function whose
+    /// output the in-memory `--api` overlay serves — over one SFC and return
+    /// the virtual carrier path it named.
+    fn validation_carrier_path_for(dir: &Path, name: &str, source: &str) -> PathBuf {
+        let vue_path = dir.join(name);
+        fs::write(&vue_path, source).unwrap();
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.clone()),
+                input_id: canonical_id,
+                source: std::sync::Arc::<str>::from(source),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        let generated = generate_all_tsx(&host, std::slice::from_ref(&vue_path), dir)
+            .expect("the validation carrier must be generated");
+        assert_eq!(generated.len(), 1, "one carrier per input SFC");
+        generated.into_iter().next().unwrap().2
+    }
+
+    /// DISCRIMINATING: the validation carrier's extension follows the SFC's
+    /// script language, because TypeScript decides what to typecheck from the
+    /// file's extension/ScriptKind.
+    ///
+    /// `.tsx`/`.ts` are ALWAYS checked, so under `strict`/`noImplicitAny` a
+    /// JavaScript SFC labelled `.tsx` reports TS7006 on every untyped
+    /// parameter — a flood neither `vue-tsc` (with `checkJs` off) nor Verter's
+    /// own LSP produces for the same file. The LSP has always routed through
+    /// `is_jsx` → `carrier_ide_provider_path`; the CLI hardcoded `.tsx`. This
+    /// asserts the two now agree.
+    ///
+    /// Fails against the pre-change tree: there every carrier was named
+    /// `{Component}_{hash}.tsx` regardless of `is_jsx`.
+    #[test]
+    fn validation_carrier_extension_follows_the_sfc_script_language() {
+        let temp = tempfile::TempDir::new().unwrap();
+
+        // Positive: a JS SFC (`<script setup>`, no `lang`) projects `.jsx`.
+        let js = validation_carrier_path_for(
+            temp.path(),
+            "JsSetup.vue",
+            "<script setup>\nfunction bump(step) { return step + 1 }\n</script>\n\
+             <template><button @click=\"bump(1)\">go</button></template>\n",
+        );
+        assert_eq!(
+            js.extension().and_then(|e| e.to_str()),
+            Some("jsx"),
+            "a JavaScript SFC must project a JavaScript carrier: {}",
+            js.display()
+        );
+
+        // Negative: a TS SFC still projects `.tsx` — the fix must not relabel
+        // TypeScript carriers as JavaScript (that would silently DROP every
+        // real TypeScript error under a default tsconfig).
+        let ts = validation_carrier_path_for(
+            temp.path(),
+            "TsSetup.vue",
+            "<script setup lang=\"ts\">\nfunction bump(step: number) { return step + 1 }\n\
+             </script>\n<template><button @click=\"bump(1)\">go</button></template>\n",
+        );
+        assert_eq!(
+            ts.extension().and_then(|e| e.to_str()),
+            Some("tsx"),
+            "a TypeScript SFC must keep its TypeScript carrier: {}",
+            ts.display()
+        );
+
+        // The derivation is the SHARED naming authority, not a CLI-local
+        // heuristic: both names must equal what the LSP would compose for the
+        // same stem and `is_jsx`.
+        for (path, is_jsx) in [(&js, true), (&ts, false)] {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap();
+            let expected = verter_workspace::carrier_ide_provider_path(stem, is_jsx);
+            assert_eq!(
+                path.file_name().and_then(|s| s.to_str()),
+                Some(expected.as_str()),
+                "the CLI must compose the same companion name as the LSP"
+            );
+        }
+    }
+
+    /// A JavaScript carrier is only a legal program root under `allowJs`;
+    /// without it TypeScript rejects the explicitly-listed `.jsx` file
+    /// (TS6054). `checkJs` must NOT be written — it decides whether those
+    /// carriers are typechecked and has to keep coming from the user's own
+    /// tsconfig through `extends`, so a `checkJs: true` project still reports
+    /// real JavaScript errors and a `checkJs: false` one still stays quiet.
+    #[test]
+    fn synthetic_tsconfig_admits_js_carriers_without_deciding_check_js() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let opts = EmitOptions {
+            no_emit: true,
+            declaration: false,
+            declaration_dir: None,
+        };
+
+        let with_js = synthetic_tsconfig_value(
+            "/project/tsconfig.json",
+            &["/project/A_0.jsx".into(), "/project/B_1.tsx".into()],
+            &opts,
+            temp.path(),
+        );
+        assert_eq!(
+            with_js["compilerOptions"]["allowJs"],
+            serde_json::json!(true),
+            "a listed `.jsx` carrier requires allowJs to enter the program"
+        );
+        assert!(
+            with_js["compilerOptions"].get("checkJs").is_none(),
+            "checkJs must stay the user's decision (inherited via `extends`), never \
+             forced by verter-tsc: {}",
+            with_js["compilerOptions"]
+        );
+
+        // Negative: a TypeScript-only carrier set must be byte-for-byte
+        // unchanged — no allowJs, so module resolution cannot start preferring
+        // JavaScript for a project that never asked for it.
+        let ts_only = synthetic_tsconfig_value(
+            "/project/tsconfig.json",
+            &["/project/B_1.tsx".into()],
+            &opts,
+            temp.path(),
+        );
+        assert!(
+            ts_only["compilerOptions"].get("allowJs").is_none(),
+            "a TypeScript-only carrier set must not gain allowJs: {}",
+            ts_only["compilerOptions"]
+        );
+    }
+
     // ── Cross-component type resolution tests ─────────────────────
 
     #[test]
@@ -5131,6 +6080,135 @@ defineProps<{ msg: string }>()
             !stub_content.contains(".vue.ts"),
             "stub should not contain .vue.ts import paths: {stub_content}"
         );
+    }
+
+    /// Drive the REAL producer — [`generate_public_api_stubs`] — over one SFC
+    /// and return the virtual stub path it named.
+    fn public_api_stub_path_for(dir: &Path, name: &str, source: &str) -> PathBuf {
+        let vue_path = dir.join(name);
+        fs::write(&vue_path, source).unwrap();
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.clone()),
+                input_id: canonical_id,
+                source: std::sync::Arc::<str>::from(source),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        let batch = generate_public_api_stubs(&host, std::slice::from_ref(&vue_path), dir);
+        assert!(
+            batch.failures.is_empty(),
+            "projection failures: {:?}",
+            batch.failures
+        );
+        let (mut stub_files, _) = batch.value;
+        assert_eq!(stub_files.len(), 1, "one stub per input SFC");
+        stub_files.remove(0).0
+    }
+
+    /// DISCRIMINATING: the public-API stub's extension follows the language of
+    /// the code the stub CARRIES — the same ScriptKind rule the validation
+    /// carrier follows, reached through the other generated root.
+    ///
+    /// The stub is a program root and its diagnostics are surfaced passthrough,
+    /// so a stub named `.vue.ts` is typechecked as TypeScript whatever its body
+    /// is. The Options-API stub passes the authored `<script>` body through
+    /// verbatim, so for a JavaScript Options-API SFC that root is JavaScript
+    /// wearing a TypeScript label — under `strict` every untyped parameter
+    /// reports TS7006 on a file the project never asked to have checked.
+    ///
+    /// Fails against the pre-change tree: there EVERY stub was named
+    /// `{Component}_{hash}.vue.ts` unconditionally.
+    #[test]
+    fn public_api_stub_extension_follows_the_stub_body_language() {
+        let temp = tempfile::TempDir::new().unwrap();
+
+        // Positive: a JavaScript Options-API `<script>` body is a JavaScript
+        // root and must be labelled `.vue.js`.
+        let js_options = public_api_stub_path_for(
+            temp.path(),
+            "JsOptions.vue",
+            "<script>\nexport default { methods: { bump(step) { return step + 1 } } }\n\
+             </script>\n<template><div/></template>\n",
+        );
+        assert!(
+            js_options
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".vue.js")),
+            "a JavaScript Options-API stub must be labelled JavaScript: {}",
+            js_options.display()
+        );
+
+        // Negative: the same construct under `lang="ts"` keeps `.vue.ts` — the
+        // fix must not relabel TypeScript stubs, which would silently DROP
+        // every real TypeScript error an Options-API component contributes.
+        let ts_options = public_api_stub_path_for(
+            temp.path(),
+            "TsOptions.vue",
+            "<script lang=\"ts\">\nexport default { methods: { bump(step: number) { return step + 1 } } }\n\
+             </script>\n<template><div/></template>\n",
+        );
+        assert!(
+            ts_options
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".vue.ts")),
+            "a TypeScript Options-API stub keeps its TypeScript label: {}",
+            ts_options.display()
+        );
+
+        // Negative, and the reason this is NOT the SFC's script language: a
+        // JavaScript `<script setup>` projects a GENERATED TypeScript
+        // declaration surface. Labelling it `.vue.js` would put `declare` /
+        // type-annotation syntax into a JavaScript root — a syntax error, not
+        // a relaxed check.
+        let js_setup = public_api_stub_path_for(
+            temp.path(),
+            "JsSetup.vue",
+            "<script setup>\nconst props = defineProps({ label: { type: String } })\n\
+             function bump(step) { return step + 1 }\n</script>\n<template><div/></template>\n",
+        );
+        assert!(
+            js_setup
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".vue.ts")),
+            "a JavaScript `<script setup>` still projects a TypeScript stub: {}",
+            js_setup.display()
+        );
+
+        // The JSX axis, which a JavaScript/TypeScript boolean cannot express.
+        // The Options-API stub copies the authored body verbatim, so an
+        // authored `<div/>` needs a JSX-capable ScriptKind: `.vue.jsx` (a
+        // `.js` root cannot parse JSX at all) and `.vue.tsx` (a `.ts` root
+        // parses `<div/>` as a type assertion). Both were unreachable while the
+        // stub label was a boolean.
+        for (source_name, lang, expected) in [
+            ("JsxOptions.vue", "jsx", ".vue.jsx"),
+            ("TsxOptions.vue", "tsx", ".vue.tsx"),
+        ] {
+            let stub = public_api_stub_path_for(
+                temp.path(),
+                source_name,
+                &format!(
+                    "<script lang=\"{lang}\">\nexport default {{ render() {{ return <div/> }} }}\n\
+                     </script>\n<template><div/></template>\n"
+                ),
+            );
+            assert!(
+                stub.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(expected)),
+                "a `lang=\"{lang}\"` Options-API stub must be labelled {expected}: {}",
+                stub.display()
+            );
+        }
     }
 
     #[test]
@@ -5580,5 +6658,492 @@ const props = defineProps<{ msg: string }>()
                 "must not advertise the unreachable `{unreachable}` tier: {msg}"
             );
         }
+    }
+
+    // ── Exec-boundary wiring: no `\\?\` path reaches the external checker ────
+    //
+    // These bind to the THREE production crossings where a canonicalized path
+    // becomes a string the external checker parses: the `--project`/
+    // `--declarationDir` argv, the synthetic tsconfig's `extends`/`files`
+    // spellings, and the diagnostic remap key. Each drives the production
+    // function with an explicitly-constructed verbatim value, because
+    // `canonicalize()` only produces that shape on Windows while what the
+    // boundary must DO with it is host-independent.
+
+    /// The verbatim-UNC form the crate's deleted `strip_unc_prefix` corrupted
+    /// into the relative path `UNC\srv\share\…`.
+    const VERBATIM_UNC_TSCONFIG: &str = r"\\?\UNC\build01\share\ws\tsconfig.json";
+    const VERBATIM_UNC_TSX: &str = r"\\?\UNC\build01\share\ws\a.tsc.tsx";
+
+    fn argv(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn checker_argv_carries_no_verbatim_project_or_declaration_dir() {
+        let opts = EmitOptions {
+            no_emit: false,
+            declaration: true,
+            declaration_dir: Some(PathBuf::from(r"\\?\D:\ws\dist\types")),
+        };
+        let cmd = build_checker_command(
+            Path::new("/opt/tsgo/tsgo"),
+            Path::new(VERBATIM_UNC_TSCONFIG),
+            &opts,
+        );
+        let args = argv(&cmd);
+
+        let project = args
+            .iter()
+            .position(|a| a == "--project")
+            .and_then(|i| args.get(i + 1))
+            .expect("--project is passed");
+        assert_eq!(
+            project, r"\\build01\share\ws\tsconfig.json",
+            "the UNC tsconfig must reach the checker as a real UNC path"
+        );
+        // NEGATIVE: not the naive prefix-strip's relative `UNC\...` spelling.
+        assert_ne!(project, r"UNC\build01\share\ws\tsconfig.json");
+
+        let decl_dir = args
+            .iter()
+            .position(|a| a == "--declarationDir")
+            .and_then(|i| args.get(i + 1))
+            .expect("--declarationDir is passed");
+        assert_eq!(decl_dir, r"D:\ws\dist\types");
+
+        // NEGATIVE: nothing at all in the argv carries a verbatim prefix.
+        for arg in &args {
+            assert!(
+                !arg.starts_with(r"\\?"),
+                "verbatim arg reached the checker: {arg}"
+            );
+        }
+        // POSITIVE control: the rest of the command line is intact.
+        assert!(args.iter().any(|a| a == "--declaration"), "argv = {args:?}");
+    }
+
+    #[test]
+    fn synthetic_tsconfig_spelling_is_a_real_unc_path_in_forward_slash_form() {
+        // The `extends` target and every `files` entry share this one spelling,
+        // so a checker reading the JSON resolves both to the same file.
+        assert_eq!(
+            synthetic_tsconfig_spelling(Path::new(VERBATIM_UNC_TSCONFIG)),
+            "//build01/share/ws/tsconfig.json"
+        );
+        // NEGATIVE: the naive prefix-strip yields a RELATIVE `UNC/...` spelling,
+        // which the checker resolves against its cwd — a different file.
+        assert_ne!(
+            synthetic_tsconfig_spelling(Path::new(VERBATIM_UNC_TSCONFIG)),
+            "UNC/build01/share/ws/tsconfig.json"
+        );
+        assert_eq!(
+            synthetic_tsconfig_spelling(Path::new(r"\\?\D:\ws\a.tsc.tsx")),
+            "D:/ws/a.tsc.tsx"
+        );
+        // A POSIX path is untouched.
+        assert_eq!(
+            synthetic_tsconfig_spelling(Path::new("/repo/ws/a.tsc.tsx")),
+            "/repo/ws/a.tsc.tsx"
+        );
+    }
+
+    #[test]
+    fn diagnostic_remap_key_is_a_real_unc_path_matching_the_spelling_the_checker_was_given() {
+        // The UNC branch, exercised on the PURE derivation. `remap_diagnostics`
+        // resolves the reported path against disk before deriving the key, and
+        // canonicalizing a `\\?\UNC\...` path on Windows attempts a real SMB/DNS
+        // round trip — a non-hermetic test and a latent CI stall. The resolution
+        // is the caller's; this is the derivation, and it is what must agree
+        // with the spelling the checker was handed.
+        assert_eq!(
+            diagnostic_file_key(Path::new(VERBATIM_UNC_TSX)),
+            "//build01/share/ws/a.tsc.tsx"
+        );
+        // The two spellings of one file MUST agree, or every direct lookup on a
+        // UNC checkout misses.
+        assert_eq!(
+            diagnostic_file_key(Path::new(VERBATIM_UNC_TSX)),
+            synthetic_tsconfig_spelling(Path::new(VERBATIM_UNC_TSX)),
+        );
+        // NEGATIVE: the naive prefix-strip's RELATIVE `UNC/...` spelling.
+        assert_ne!(
+            diagnostic_file_key(Path::new(VERBATIM_UNC_TSX)),
+            "UNC/build01/share/ws/a.tsc.tsx"
+        );
+    }
+
+    /// A rooted path on the CURRENT volume whose first component cannot exist.
+    ///
+    /// `remap_diagnostics` canonicalizes every reported path, so the fixture must
+    /// be one `canonicalize()` fails on instantly, everywhere. A drive letter is
+    /// NOT that: on Windows any letter may be a local, `subst`-ed, or
+    /// network-mapped drive, so `Q:` can reach SMB/DNS AND — if it resolves
+    /// through a mapping or junction to a different spelling — make a CORRECT
+    /// direct-lookup implementation false-fail. This form has no drive and no
+    /// UNC authority: on Windows it resolves against the current drive's root, on
+    /// Unix against `/`, and fails with a plain not-found on both without any
+    /// network access.
+    const NO_SUCH_ROOT: &str = "/verter-tsc-no-such-root-9f2c";
+
+    #[test]
+    fn diagnostic_remap_prefers_the_direct_key_over_a_suffix_matchable_decoy() {
+        // The direct lookup must be what resolves the diagnostic. Both entries
+        // below are reachable by the suffix fallback for the SAME reported path
+        // (`file_key.ends_with(k)` holds for the exact key AND for the shortened
+        // one), so a remap that skipped the direct lookup would pick whichever
+        // the HashMap iterated first — the decoy roughly half the time.
+        //
+        // `HashMap::new()` seeds a fresh `RandomState` per instance, so the run
+        // is repeated over fresh maps: with the direct lookup every round is
+        // correct; without it, all 64 rounds agreeing has probability 2^-64.
+        // The imprecision can only ever produce a false PASS on a broken tree,
+        // never a false FAIL on a correct one.
+        let reported = format!("{NO_SUCH_ROOT}/one/ws/a.tsc.tsx");
+        for round in 0..64 {
+            let mut tsx_to_vue = HashMap::new();
+            tsx_to_vue.insert(
+                format!("{NO_SUCH_ROOT}/one/ws/a.tsc.tsx"),
+                (PathBuf::from("/repo/one/a.vue"), String::new()),
+            );
+            tsx_to_vue.insert(
+                "one/ws/a.tsc.tsx".to_string(),
+                (PathBuf::from("/repo/decoy/a.vue"), String::new()),
+            );
+            let out = remap_diagnostics(vec![diag(&reported)], &tsx_to_vue);
+            assert_eq!(out.len(), 1);
+            assert_eq!(
+                out[0].file, "/repo/one/a.vue",
+                "round {round}: the direct key must win over the suffix-matchable decoy"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_remap_distinguishes_two_roots_that_share_a_tail() {
+        // Two DISTINCT files with identical tails. Only an EXACT derived key
+        // tells them apart.
+        let mut tsx_to_vue = HashMap::new();
+        tsx_to_vue.insert(
+            format!("{NO_SUCH_ROOT}/one/ws/a.tsc.tsx"),
+            (PathBuf::from("/repo/one/a.vue"), String::new()),
+        );
+        tsx_to_vue.insert(
+            format!("{NO_SUCH_ROOT}/two/ws/a.tsc.tsx"),
+            (PathBuf::from("/repo/two/a.vue"), String::new()),
+        );
+        for (reported, expected) in [
+            (
+                format!("{NO_SUCH_ROOT}/one/ws/a.tsc.tsx"),
+                "/repo/one/a.vue",
+            ),
+            (
+                format!("{NO_SUCH_ROOT}/two/ws/a.tsc.tsx"),
+                "/repo/two/a.vue",
+            ),
+        ] {
+            let out = remap_diagnostics(vec![diag(&reported)], &tsx_to_vue);
+            assert_eq!(out.len(), 1);
+            assert_eq!(
+                out[0].file, expected,
+                "{reported} remapped to the wrong source"
+            );
+        }
+
+        // NEGATIVE: a reported file with no entry — direct or by suffix — is left
+        // alone rather than attached to an unrelated `.vue`.
+        let orphan = format!("{NO_SUCH_ROOT}/three/ws/b.tsc.tsx");
+        let out = remap_diagnostics(vec![diag(&orphan)], &tsx_to_vue);
+        assert_eq!(out.len(), 1);
+        assert!(
+            !out[0].file.contains(".vue"),
+            "an unmatched file must not be remapped, got {:?}",
+            out[0].file
+        );
+    }
+
+    #[test]
+    fn diagnostic_remap_derives_its_key_through_the_shared_seam() {
+        // WIRING: proves `remap_diagnostics` performs `diagnostic_file_key`'s
+        // transform rather than using the reported string raw. The reported path
+        // carries backslashes, which only the seam rewrites; a remap that
+        // bypassed it would miss the direct key AND fail the suffix fallback.
+        // Still hermetic — the same non-existent rooted path, no drive, no UNC.
+        let reported = format!(r"{NO_SUCH_ROOT}\one\ws\a.tsc.tsx");
+        let mut tsx_to_vue = HashMap::new();
+        tsx_to_vue.insert(
+            diagnostic_file_key(Path::new(&reported)),
+            (PathBuf::from("/repo/one/a.vue"), String::new()),
+        );
+        let out = remap_diagnostics(vec![diag(&reported)], &tsx_to_vue);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].file, "/repo/one/a.vue");
+    }
+
+    /// CHARACTERIZATION of a hazard this branch does NOT fix, recorded so the
+    /// key-derivation work above is understood correctly: when the exact key is
+    /// absent, the suffix fallback attaches the diagnostic to any entry sharing a
+    /// tail — here an unrelated source. That is precisely why the derived key
+    /// must match the spelling the checker was given: the deleted
+    /// `strip_unc_prefix` produced a key the map never contained, so on a UNC
+    /// checkout EVERY diagnostic fell into this fallback. With two tail-sharing
+    /// entries and no exact key the winner additionally depends on HashMap
+    /// iteration order.
+    #[test]
+    fn a_reported_path_with_no_exact_key_suffix_matches_an_unrelated_source() {
+        let mut tsx_to_vue = HashMap::new();
+        tsx_to_vue.insert(
+            "ws/a.tsc.tsx".to_string(),
+            (PathBuf::from("/repo/decoy/a.vue"), String::new()),
+        );
+        // The exact key is NOT in the map.
+        let reported = format!("{NO_SUCH_ROOT}/one/ws/a.tsc.tsx");
+        let out = remap_diagnostics(vec![diag(&reported)], &tsx_to_vue);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].file.contains("decoy"),
+            "documents the fallback's reach, got {:?}",
+            out[0].file
+        );
+    }
+
+    fn diag(file: &str) -> crate::reporter::TscDiagnostic {
+        crate::reporter::TscDiagnostic {
+            file: file.to_string(),
+            line: 1,
+            col: 1,
+            severity: crate::reporter::Severity::Error,
+            ts_code: 2322,
+            message: "Type error".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod authored_literal_survival_tests {
+    use super::*;
+
+    /// A rewriter that locates specifiers by scanning for `import(` / `from `
+    /// cannot tell a specifier from text that merely looks like one — and the
+    /// Options-API stub passes the user's authored script body through
+    /// VERBATIM, so authored text reaches it.
+    ///
+    /// Both halves are load-bearing: the real import MUST be canonicalized (or
+    /// the alias case regresses) and the authored literal MUST survive byte
+    /// for byte (or the user's own `as const` type silently changes).
+    ///
+    /// Mutation recipe: replace the structural inventory in
+    /// `rewrite_import_specifiers` with a `find("import(")` / `find("from ")`
+    /// scan — the literal assertion turns RED while the specifier assertion
+    /// stays green, so only this test discriminates the defect.
+    #[test]
+    fn an_authored_specifier_lookalike_survives_canonicalization() {
+        let code = "import Child from '@/Child.vue'\n\
+             const marker = 'import(\"@/Child.vue\")' as const\n\
+             const alsoMarker = \"from '@/Child.vue'\"\n\
+             export default { components: { Child }, marker, alsoMarker }\n";
+
+        let rewritten = rewrite_import_specifiers(code, |specifier| {
+            assert_eq!(
+                specifier, "@/Child.vue",
+                "only the real import declaration's source may be offered for \
+                 rewriting; an authored literal is not a specifier"
+            );
+            Some("/abs/src/Child.vue".to_string())
+        });
+
+        assert!(
+            rewritten.contains("import Child from '/abs/src/Child.vue'"),
+            "the REAL specifier must be rewritten: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("const marker = 'import(\"@/Child.vue\")' as const"),
+            "the authored literal must survive byte-identical — rewriting it \
+             silently changes the user's `as const` type and the diagnostics \
+             they see: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("const alsoMarker = \"from '@/Child.vue'\""),
+            "and so must one containing the `from` spelling: {rewritten}"
+        );
+    }
+
+    /// The same property through the REAL producer: `generate_options_api_stub`
+    /// preserves the authored body, and the canonicalization pass runs over
+    /// whatever it produced.
+    #[test]
+    fn the_options_api_stub_keeps_its_authored_literal_through_the_rewriter() {
+        // The lookalike is RELATIVE, so it is the `rewrite_relative_imports`
+        // pass — the one every carrier goes through, alias project or not —
+        // that a substring scanner would corrupt here.
+        let sfc = "<script lang=\"ts\">\n\
+             import { defineComponent } from 'vue'\n\
+             const marker = 'import(\"./Child.vue\")' as const\n\
+             const alsoMarker = \"from './Child.vue'\"\n\
+             export default defineComponent({\n\
+               props: { label: { type: String } },\n\
+               marker,\n\
+               alsoMarker,\n\
+             })\n\
+             </script>\n\
+             <template><div>options</div></template>\n";
+        let stub = verter_compiler::tsc::generate_tsc_output(sfc, "Opt")
+            .expect("options-api stub")
+            .code;
+        assert!(
+            stub.contains("const marker = 'import(\"./Child.vue\")' as const"),
+            "precondition: the stub preserves the authored body verbatim, which \
+             is exactly why a text scan over it reaches user code: {stub}"
+        );
+
+        let rewritten = rewrite_relative_imports(&stub, Path::new("/project/src"));
+        assert!(
+            rewritten.contains("const marker = 'import(\"./Child.vue\")' as const"),
+            "the authored literal must survive the relative-import pass — a scan \
+             absolutizes its interior and silently changes the user's `as const` \
+             type: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("const alsoMarker = \"from './Child.vue'\""),
+            "and so must one containing the `from` spelling: {rewritten}"
+        );
+        // POSITIVE control: the pass is not a no-op on this input — the stub's
+        // REAL `vue` import is still visited (and correctly left alone, being
+        // non-relative), and a genuine relative import IS absolutized.
+        let with_real_import = format!("import Sibling from './Sibling.vue'\n{stub}");
+        let rewritten_real = rewrite_relative_imports(&with_real_import, Path::new("/project/src"));
+        assert!(
+            rewritten_real.contains("import Sibling from '/project/src/Sibling.vue'"),
+            "control: a REAL relative specifier in the same source must still be \
+             absolutized, or the assertions above pass because nothing ran: \
+             {rewritten_real}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod selected_project_workspace_tests {
+    use super::*;
+
+    /// Lay out the default Vue + Vite scaffold shape: a root `tsconfig.json`
+    /// and a sibling `tsconfig.app.json`, each mapping the SAME alias to a
+    /// DIFFERENT directory, plus a `vite.config.ts` mapping it to a third.
+    fn scaffold() -> tempfile::TempDir {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        for dir in ["src/fromroot", "src/fromapp", "src/fromvite"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(
+                root.join(dir).join("Child.vue"),
+                "<script setup lang=\"ts\">\ndefineProps<{ label?: string }>()\n</script>\n<template><div>{{ label }}</div></template>\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("tsconfig.json"),
+            "{\"compilerOptions\":{\"baseUrl\":\".\",\"paths\":{\"@/*\":[\"src/fromroot/*\"]}},\"include\":[\"src\"]}",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tsconfig.app.json"),
+            "{\"compilerOptions\":{\"baseUrl\":\".\",\"paths\":{\"@/*\":[\"src/fromapp/*\"]}},\"include\":[\"src\"]}",
+        )
+        .unwrap();
+        // Present and deliberately never consulted on this path.
+        std::fs::write(
+            root.join("vite.config.ts"),
+            "import { defineConfig } from 'vite'\n\
+             export default defineConfig({\n  \
+               resolve: { alias: { '@': new URL('./src/fromvite', import.meta.url).pathname } },\n\
+             })\n",
+        )
+        .unwrap();
+        temp
+    }
+
+    fn resolve_alias_under(root: &Path, selected: &Path) -> Option<String> {
+        let host = VerterHost::new_standalone(build_host_config());
+        install_project_workspace(&host, root, selected);
+        let importer = root.join("src").join("App.vue");
+        let importer_id = importer.to_string_lossy().replace('\\', "/");
+        let source = "<script setup lang=\"ts\">\nimport Child from '@/Child.vue'\n</script>\n<template><Child /></template>\n";
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(importer_id.clone()),
+            input_id: importer_id.clone(),
+            source: std::sync::Arc::<str>::from(source),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        });
+        host.resolve_import(&importer_id, "@/Child.vue")
+    }
+
+    /// `verter-tsc -p tsconfig.app.json` must resolve `@/*` through
+    /// `tsconfig.app.json`.
+    ///
+    /// Discovery cannot answer this: it finds every config under the root and
+    /// then lets precedence — longest root, configured over fallback, then
+    /// alphabetical `tsconfig_path` — pick the owner, with no reference to
+    /// what `-p` named. This is the default Vue 3 + Vite scaffold, so the
+    /// wrong answer is the common case rather than a corner.
+    ///
+    /// Mutation recipe: point `install_project_workspace` back at
+    /// `build_workspace_snapshot(root)` — BOTH legs below resolve into
+    /// `src/fromroot`, so the selected config is ignored in one direction and
+    /// coincidentally right in the other, which is exactly why the test
+    /// asserts both.
+    #[test]
+    fn the_selected_tsconfig_decides_alias_resolution() {
+        let temp = scaffold();
+        let root = temp.path();
+
+        let via_app = resolve_alias_under(root, &root.join("tsconfig.app.json"))
+            .expect("the selected app config resolves the alias");
+        assert!(
+            via_app
+                .replace('\\', "/")
+                .contains("/src/fromapp/Child.vue"),
+            "`-p tsconfig.app.json` must resolve `@/*` through THAT config's \
+             paths, not a sibling's: {via_app}"
+        );
+
+        // The other direction, so the assertion above cannot pass by accident:
+        // selecting the root config resolves into the root config's directory.
+        let via_root = resolve_alias_under(root, &root.join("tsconfig.json"))
+            .expect("the selected root config resolves the alias");
+        assert!(
+            via_root
+                .replace('\\', "/")
+                .contains("/src/fromroot/Child.vue"),
+            "and `-p tsconfig.json` must resolve through ITS paths: {via_root}"
+        );
+        assert_ne!(
+            via_app, via_root,
+            "the two configs map the same alias to different directories, so a \
+             selection-independent answer is the defect"
+        );
+    }
+
+    /// A `vite.config.*` in the project contributes NO alias on this path.
+    ///
+    /// Not a policy switch that could be set wrong: the vite branch lives
+    /// inside `build_workspace_snapshot`'s discovery loop and fires only when
+    /// discovery found no tsconfig at all. `build_selected_project_snapshot`
+    /// performs no discovery and takes no `ViteConfigOptions`, so there is no
+    /// enabled flag to get backwards — which is what the previous revision's
+    /// "vite discovery is left OFF" comment did while passing
+    /// `ViteConfigOptions::default()` (`enabled: true`).
+    #[test]
+    fn a_vite_config_alias_is_never_consulted_for_the_selected_project() {
+        let temp = scaffold();
+        let root = temp.path();
+        let resolved =
+            resolve_alias_under(root, &root.join("tsconfig.app.json")).expect("the alias resolves");
+        assert!(
+            !resolved.replace('\\', "/").contains("/src/fromvite/"),
+            "the vite config maps `@` to a third directory; the selected \
+             project's own `paths` is the only alias authority here: {resolved}"
+        );
     }
 }

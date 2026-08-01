@@ -59,6 +59,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::mapref::entry::Entry as CanonicalKeysEntry;
+use dashmap::mapref::entry::Entry as AugmentationIndexEntry;
 use dashmap::DashMap;
 use smallvec::SmallVec;
 use verter_language::FileLanguage;
@@ -689,20 +690,21 @@ impl FileArtifacts {
 /// - the file's route surface (`shallow_state.has_resolvable_surface()`
 ///   gates whether a `Route` derived fact is emitted at all, and
 ///   `hash_route_surface(&shallow_state)` is the fact's hash content).
-/// - `indexed.import_route_hash` — the content-pinned import-route summary;
-///   included defensively so a route-surface shift always bumps even though
-///   `build` re-resolves the live `ImportRoute` hash at host level.
 /// - `facts` — snapshotted into `file_facts` (`FileFacts` is `PartialEq`).
-/// - the currency stamps (`project_generation` AND `edge_generation`, both
-///   read for any surface the complete `IndexedReady::has_cross_file_edges`
-///   authority judges edge-bearing — shallow-inventory edges and
-///   `import_routes` entries alike) — the base view gates the canonical's
-///   `Route` fact on the STORED artifact's currency
-///   (`indexed_surface_is_current`), so replacing a stamp-stale artifact
-///   with a stamp-fresh one (the edge-refresh republish) changes what a
-///   base snapshot sees even when every surface hash above is identical.
-///   A surface WITHOUT cross-file edges never consults either stamp, so a
-///   byte-identical republish of such a surface stays a literal no-op.
+/// - `indexed.parse_env_hash` — the reuse gate
+///   (`indexed_surface_is_current`) is exactly parse-env equality, so an
+///   artifact built under a different parse environment is a different
+///   answer to "may this be served?" even when every surface hash above
+///   is identical.
+/// - `indexed.built_at_content_generation` — the artifact-only serving
+///   gate (`artifact_only_candidate_is_fresh`) compares it against the
+///   canonical's last recorded content transition, so a fresher stamp
+///   can flip a canonical from EXCLUDED to INCLUDED in the base
+///   snapshot.
+///
+/// There is no route- or edge-currency dimension: `IndexedReady` retains
+/// no resolved target, so a base snapshot's view of a canonical is a
+/// pure function of the by-value dimensions above.
 ///
 /// `parse_stable_hash` and `augmentations` are NOT read by the base view's
 /// per-canonical snapshot maps (the augmentation INDEX is a separate,
@@ -715,20 +717,9 @@ impl FileArtifacts {
 fn base_snapshot_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool {
     let prev_indexed = &prev.indexed;
     let next_indexed = &next.indexed;
-    // Stamp dimensions, gated on where the shared currency predicate
-    // actually reads them (mirrors `indexed_surface_is_current` /
-    // `route_surface_is_edge_current`): BOTH stamps are read for any
-    // surface the complete `IndexedReady::has_cross_file_edges` authority
-    // judges edge-bearing — including import-route-only surfaces whose
-    // edges the shallow component cannot see. A surface without
-    // cross-file edges never consults either stamp, so a byte-identical
-    // republish of such a surface stays a literal no-op.
-    let stamp_equivalent = !next_indexed.has_cross_file_edges()
-        || (prev_indexed.project_generation == next_indexed.project_generation
-            && prev_indexed.edge_generation == next_indexed.edge_generation);
-    stamp_equivalent
-        && prev_indexed.whole_hash == next_indexed.whole_hash
-        && prev_indexed.import_route_hash == next_indexed.import_route_hash
+    prev_indexed.whole_hash == next_indexed.whole_hash
+        && prev_indexed.parse_env_hash == next_indexed.parse_env_hash
+        && prev_indexed.built_at_content_generation == next_indexed.built_at_content_generation
         && prev_indexed.shallow_state.has_resolvable_surface()
             == next_indexed.shallow_state.has_resolvable_surface()
         && crate::resolver_store::hash_route_surface(&prev_indexed.shallow_state)
@@ -823,6 +814,305 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
     counts.values().all(|&c| c == 0)
 }
 
+// ── Membership epochs, roots, and retention leases ──
+
+/// Number of retirements a mutation batch may accumulate before the
+/// store self-triggers a physical reclamation sweep.
+///
+/// Retirement is LOGICAL: the version leaves the current root's
+/// membership but its bytes stay retained until every live root has
+/// moved past it. Without an amortised sweep the retained set would
+/// grow by one version per keystroke, so the store reclaims on its own
+/// schedule (it owns reclamation) rather than waiting for an external
+/// GC request that may never arrive on a pure edit loop.
+const RECLAIM_TRIGGER_RETIREMENTS: u64 = 64;
+
+/// Visibility window of ONE version of one membership entry, expressed
+/// in [`FileArtifactStore`] membership epochs.
+///
+/// A version is born at the epoch its mutation published and is
+/// retired at the epoch that superseded or removed it. A root at
+/// `epoch` sees the version iff `birth <= epoch < retirement`.
+///
+/// Retirement is a LOGICAL removal: it ends the version's visibility
+/// from the CURRENT root while leaving it reachable from every root
+/// captured before the retirement. Physical reclamation is a separate,
+/// root-gated decision ([`FileArtifactStore::reclaim_retired_versions`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VersionSpan {
+    birth: u64,
+    retirement: Option<u64>,
+}
+
+impl VersionSpan {
+    fn born(birth: u64) -> Self {
+        Self {
+            birth,
+            retirement: None,
+        }
+    }
+
+    /// Is this version visible from a root at `epoch`?
+    fn visible_at(&self, epoch: u64) -> bool {
+        self.birth <= epoch
+            && match self.retirement {
+                Some(retirement) => epoch < retirement,
+                None => true,
+            }
+    }
+
+    /// Is this version part of the CURRENT root's membership?
+    fn is_live(&self) -> bool {
+        self.retirement.is_none()
+    }
+}
+
+/// The terminal membership epoch.
+///
+/// The epoch counter is monotonic and never wraps: reaching this value
+/// EXHAUSTS the epoch line. A wrap would invert visibility outright (a
+/// version born "after" a root would compare as born before it), so the
+/// store saturates here instead and every root captured from then on
+/// FAILS CLOSED — it sees no artifact, no canonical→keys membership and
+/// no augmenter set, so every read through it misses and the caller
+/// recomputes against current state. Correctness is preserved; only warm
+/// reuse is lost. At one membership mutation per nanosecond this is
+/// unreachable for ~584 years, but the ordering primitive's correctness
+/// is not a function of how long it takes to break.
+const EXHAUSTED_EPOCH: u64 = u64::MAX;
+
+/// The epochs a reclamation sweep must keep reachable: every live
+/// captured root, plus the STABLE epoch (the epoch the next capture will
+/// take).
+///
+/// This is the COMPLETE reachability rule, and it is per-root, not a
+/// floor. A floor ("keep everything retired above the oldest live root")
+/// over-retains without bound: one stale root pins every LATER version
+/// too, so an edit loop under a single pinned view grows one retained
+/// version per keystroke until the process dies. A root at epoch `E`
+/// needs exactly the version VISIBLE at `E` for each canonical — never
+/// its successors, which `E` can no longer select.
+#[derive(Debug)]
+struct RetentionEpochs {
+    /// The epoch the next [`FileArtifactStore::capture_root`] would
+    /// take. Every future root addresses this epoch or a later one, so a
+    /// version still visible here (or born after it) stays retained.
+    stable: u64,
+    /// Every live captured root's epoch.
+    roots: SmallVec<[u64; 4]>,
+}
+
+impl RetentionEpochs {
+    /// Is this version invisible from EVERY root — the current/next one
+    /// and every live captured one — and therefore physically
+    /// reclaimable?
+    fn reclaimable(&self, span: &VersionSpan) -> bool {
+        match span.retirement {
+            // A live version is part of the current membership.
+            None => false,
+            // Retired at or below the stable epoch: no FUTURE capture can
+            // see it either (captures are monotonic), so the live roots
+            // are the only remaining readers.
+            Some(retirement) => {
+                retirement <= self.stable && !self.roots.iter().any(|&epoch| span.visible_at(epoch))
+            }
+        }
+    }
+}
+
+/// Registry of every LIVE captured [`FileArtifactRoot`] and every
+/// RESERVED-but-unapplied membership epoch.
+///
+/// Two responsibilities, one lock, because a capture must read both in
+/// the same critical section:
+///
+/// 1. **Reachability.** An immutable root must both NAME state and KEEP
+///    it reachable, so the store cannot decide that a retired version is
+///    reclaimable without consulting the roots that still address it.
+/// 2. **Capture atomicity.** A membership mutation RESERVES its epoch
+///    before applying it, and only completes the reservation once the
+///    application has landed. A capture therefore never names an epoch
+///    whose application is still in flight — it takes the newest FULLY
+///    APPLIED epoch instead. Without that, a root captured between the
+///    bump and the apply reads the pre-apply world and then the
+///    post-apply world for the SAME epoch: a value change under a root
+///    documented as immutable.
+///
+/// Owned by [`FileArtifactStore`] — no other layer may decide
+/// reachability.
+///
+/// **Lock rank: LEAF.** It is acquired with no `artifacts` /
+/// `canonical_keys` / `retired_*` shard guard held, and no shard guard is
+/// ever taken while it is held.
+#[derive(Debug, Default)]
+struct LiveRootRegistry {
+    state: parking_lot::Mutex<RootRegistryState>,
+}
+
+/// [`LiveRootRegistry`]'s guarded state.
+#[derive(Debug, Default)]
+struct RootRegistryState {
+    /// `epoch -> number of live roots captured at that epoch`. A
+    /// `BTreeMap` so the oldest live root is the first key (O(log n)),
+    /// never a scan.
+    roots: std::collections::BTreeMap<u64, usize>,
+    /// `epoch -> number of reserved-but-unapplied mutations at that
+    /// epoch`. Its first key bounds the newest fully-applied epoch.
+    in_flight: std::collections::BTreeMap<u64, usize>,
+}
+
+impl RootRegistryState {
+    /// The newest epoch whose application has fully landed.
+    ///
+    /// Every epoch at or below this one is applied: epochs are reserved
+    /// in increasing order, so an unapplied mutation at or below the
+    /// first in-flight epoch would itself be the first in-flight epoch.
+    ///
+    /// Monotonic over time (the counter only grows, and the first
+    /// in-flight key only moves forward), so a future capture never
+    /// addresses an epoch older than the one this returns now.
+    fn stable_epoch(&self, current: u64) -> u64 {
+        match self.in_flight.keys().next().copied() {
+            Some(oldest_in_flight) => oldest_in_flight.saturating_sub(1),
+            None => current,
+        }
+    }
+}
+
+impl LiveRootRegistry {
+    fn release(&self, epoch: u64) {
+        let mut state = self.state.lock();
+        if let std::collections::btree_map::Entry::Occupied(mut slot) = state.roots.entry(epoch) {
+            let count = slot.get_mut();
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                slot.remove();
+            }
+        }
+    }
+
+    /// Release one epoch reservation. Called only from
+    /// [`EpochReservation::drop`].
+    fn complete(&self, epoch: u64) {
+        let mut state = self.state.lock();
+        if let std::collections::btree_map::Entry::Occupied(mut slot) = state.in_flight.entry(epoch)
+        {
+            let count = slot.get_mut();
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                slot.remove();
+            }
+        }
+    }
+}
+
+/// A RESERVED membership epoch, held for exactly as long as the mutation
+/// that reserved it is still applying.
+///
+/// While one of these is alive, [`FileArtifactStore::capture_root`] will
+/// not hand out its epoch — so no root can observe a half-applied
+/// membership transition. Released on drop, including on unwind, so a
+/// panicking mutation cannot freeze the capture epoch forever.
+struct EpochReservation<'a> {
+    registry: &'a LiveRootRegistry,
+    epoch: u64,
+}
+
+impl EpochReservation<'_> {
+    /// The reserved epoch: the birth of what this mutation publishes and
+    /// the retirement of what it supersedes.
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+impl Drop for EpochReservation<'_> {
+    fn drop(&mut self) {
+        self.registry.complete(self.epoch);
+    }
+}
+
+/// An immutable, LEASED root of [`FileArtifactStore`] membership.
+///
+/// Holding a `FileArtifactRoot` does two inseparable things:
+///
+/// 1. it NAMES a membership epoch — every exact artifact key, every
+///    canonical→keys index entry and every augmentation-index entry
+///    that was live at that epoch resolves through it, regardless of
+///    what the current root holds; and
+/// 2. it KEEPS that state reachable — the store may not physically
+///    reclaim any version this root can still see.
+///
+/// Identity without reachability is not a snapshot: a
+/// `(canonical, content_hash)` pair alone can name an artifact the
+/// store has already dropped. The lease closes that gap.
+///
+/// Not `Clone` by design — one value is one registration. Share it by
+/// `Arc` (a `HostStoreView` does exactly that); the registration is
+/// released once, when the last `Arc` drops.
+pub struct FileArtifactRoot {
+    epoch: u64,
+    registry: Arc<LiveRootRegistry>,
+}
+
+impl FileArtifactRoot {
+    /// The membership epoch this root addresses.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Was this root captured after the epoch line was EXHAUSTED?
+    ///
+    /// Such a root addresses no membership at all: every root-relative
+    /// read through it misses, so consumers recompute instead of reading
+    /// a world whose ordering can no longer be expressed. See
+    /// [`EXHAUSTED_EPOCH`].
+    #[must_use]
+    pub fn is_exhausted(&self) -> bool {
+        self.epoch == EXHAUSTED_EPOCH
+    }
+}
+
+impl std::fmt::Debug for FileArtifactRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileArtifactRoot")
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for FileArtifactRoot {
+    fn drop(&mut self) {
+        self.registry.release(self.epoch);
+    }
+}
+
+/// One retired version of an exact artifact key, retained for the roots
+/// that still see it.
+struct RetiredArtifactVersion {
+    span: VersionSpan,
+    payload: Arc<FileArtifacts>,
+}
+
+/// One version of a canonical→keys index membership entry.
+///
+/// The index is versioned alongside the artifacts themselves: a root
+/// enumerating a canonical's keys must see exactly the keys that were
+/// live at its epoch, not the current live set.
+#[derive(Clone)]
+struct CanonicalKeyVersion {
+    key: FileArtifactKey,
+    span: VersionSpan,
+}
+
+/// One version of an augmentation-index entry.
+#[derive(Clone)]
+struct AugmenterVersion {
+    span: VersionSpan,
+    set: Arc<AugmenterSet>,
+}
+
 // ── StoredArtifact ──
 
 /// The `self.artifacts` map value: the shared payload plus the
@@ -843,6 +1133,11 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
 /// floor treats it as new).
 struct StoredArtifact {
     payload: Arc<FileArtifacts>,
+    /// Membership epoch this version was published at. A root captured
+    /// BEFORE the publication (`root.epoch < birth_epoch`) does not see
+    /// this entry even though it occupies the live slot — the root's
+    /// world predates it.
+    birth_epoch: u64,
     /// Warm-hit counter; saturates at `u32::MAX` so long-lived hot
     /// entries do not overflow. Consumed by the LRU floor's promotion
     /// predicate ([`FileArtifactStore::evict_lru_promoted`]).
@@ -854,9 +1149,10 @@ struct StoredArtifact {
 }
 
 impl StoredArtifact {
-    fn new(payload: Arc<FileArtifacts>, tick: u64) -> Self {
+    fn new(payload: Arc<FileArtifacts>, tick: u64, birth_epoch: u64) -> Self {
         Self {
             payload,
+            birth_epoch,
             hits: AtomicU32::new(0),
             last_access_tick: AtomicU64::new(tick),
         }
@@ -911,20 +1207,23 @@ pub struct FileArtifactStore {
     /// instead of scanning the whole store per lookup (that scan is
     /// O(total live entries) per read and dominated warm read profiles).
     ///
-    /// The value is the canonical's full live key SET — there is NO
-    /// at-most-one-base-key invariant to lean on: the legacy
-    /// [`Self::insert`] drains prior versions (so it leaves one base key
-    /// per canonical), but the content-addressed
+    /// The value is the canonical's VERSIONED key membership — there is
+    /// NO at-most-one-base-key invariant to lean on: the legacy
+    /// [`Self::insert`] retires prior versions (so it leaves one LIVE
+    /// base key per canonical), but the content-addressed
     /// [`Self::insert_artifacts`] deliberately lets multiple base-shape
     /// variants of one canonical coexist (the per-canonical retention
     /// sweep exists precisely to cap them), and overlay-scoped keys
-    /// share the canonical besides.
+    /// share the canonical besides. Each entry carries a
+    /// [`VersionSpan`], so a reader at the current root filters to
+    /// [`VersionSpan::is_live`] while a reader at a captured
+    /// [`FileArtifactRoot`] filters to [`VersionSpan::visible_at`].
     ///
     /// Coherence discipline (mutation-site maintained, reader-tolerant):
     ///
     /// - Every `self.artifacts` insert routes through
     ///   [`Self::insert_artifact_entry`] and every removal through the
-    ///   sole chokepoint ([`Self::evict_artifact_keys`]); BOTH hold the
+    ///   sole chokepoint ([`Self::retire_artifact_keys`]); BOTH hold the
     ///   canonical's index-slot entry guard ACROSS the paired map+index
     ///   mutation, so same-canonical mutation pairs serialize on the
     ///   slot guard and the index can never end up permanently missing
@@ -938,7 +1237,54 @@ pub struct FileArtifactStore {
     ///   dangling keys by construction — they try every candidate key
     ///   and skip ones whose exact read misses — so a dangling key
     ///   costs one extra exact lookup, never a wrong result.
-    canonical_keys: DashMap<Arc<str>, SmallVec<[FileArtifactKey; 2]>>,
+    canonical_keys: DashMap<Arc<str>, SmallVec<[CanonicalKeyVersion; 2]>>,
+    /// Retired (logically removed / superseded) artifact versions,
+    /// retained for the [`FileArtifactRoot`]s that still address them.
+    ///
+    /// A key's live version lives in `self.artifacts`; every version
+    /// that key ever displaced or that was retired out of the current
+    /// root lives here, each with a closed [`VersionSpan`]. Spans for
+    /// one key are disjoint, so at most one version in a chain is
+    /// visible from any given epoch.
+    ///
+    /// The chain is drained ONLY by
+    /// [`Self::reclaim_retired_versions`], and only for versions no
+    /// live root can see.
+    retired_artifacts: DashMap<FileArtifactKey, SmallVec<[RetiredArtifactVersion; 1]>>,
+    /// Retired augmentation-index versions — same contract as
+    /// `retired_artifacts`, for the augmentation-index membership
+    /// domain.
+    retired_augmenters: DashMap<AugmentationTargetKey, SmallVec<[AugmenterVersion; 1]>>,
+    /// Monotonic MEMBERSHIP epoch — the identity of the current
+    /// [`FileArtifactRoot`].
+    ///
+    /// Advanced by every mutation that changes membership in any of the
+    /// three versioned domains (exact artifact keys, the canonical→keys
+    /// index, augmentation-index keys). The mutation RESERVES the new
+    /// epoch ([`FileArtifactStore::reserve_membership_epoch`]), stamps it
+    /// as the birth of what it publishes and the retirement of what it
+    /// supersedes, applies the change, and only then releases the
+    /// reservation.
+    ///
+    /// Ordering contract: a capture never names a reserved-but-unapplied
+    /// epoch, so a root addresses only fully-applied membership. A root
+    /// captured at epoch `E` therefore sees the pre-`E+1` world for its
+    /// whole life — never the pre-apply world on one read and the
+    /// post-apply world on the next. Monotonic and saturating: it never
+    /// wraps (see [`EXHAUSTED_EPOCH`]).
+    ///
+    /// Distinct from `artifact_generation`: that counts changes to the
+    /// values a `HostStoreView` snapshots BY VALUE and is a cache
+    /// VALIDITY dimension; this ADDRESSES a snapshot and is never a
+    /// validity oracle.
+    membership_epoch: AtomicU64,
+    /// Every live captured root. The store is the sole authority on
+    /// reachability — see [`LiveRootRegistry`].
+    live_roots: Arc<LiveRootRegistry>,
+    /// Retirements accumulated since the last reclamation sweep; drives
+    /// the amortised self-triggered sweep at
+    /// [`RECLAIM_TRIGGER_RETIREMENTS`].
+    retirements_since_reclaim: AtomicU64,
     /// Global monotonic access-tick source for the per-entry
     /// [`StoredArtifact::last_access_tick`] stamps consumed by
     /// [`Self::evict_lru_promoted`] under explicit memory pressure.
@@ -975,7 +1321,7 @@ pub struct FileArtifactStore {
     /// Populated lazily by the augmentation-stitching pass when
     /// `EffectiveExportSet(specifier)` first requests an inverse lookup.
     /// See `/type-cache-architecture` skill for the populator semantics.
-    augmentation_index: DashMap<AugmentationTargetKey, Arc<AugmenterSet>>,
+    augmentation_index: DashMap<AugmentationTargetKey, AugmenterVersion>,
     /// Test-only host-level audit hook.
     #[cfg(test)]
     test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
@@ -1030,6 +1376,14 @@ impl FileArtifactStore {
         Self {
             artifacts: DashMap::new(),
             canonical_keys: DashMap::new(),
+            retired_artifacts: DashMap::new(),
+            retired_augmenters: DashMap::new(),
+            // Epoch 0 is the empty store: every publication stamps a
+            // birth of at least 1, so a root at epoch 0 sees nothing —
+            // which is exactly the membership an empty store has.
+            membership_epoch: AtomicU64::new(0),
+            live_roots: Arc::new(LiveRootRegistry::default()),
+            retirements_since_reclaim: AtomicU64::new(0),
             access_tick: AtomicU64::new(0),
             live_counter: live,
             stale_sweeps: stale,
@@ -1039,6 +1393,333 @@ impl FileArtifactStore {
             #[cfg(test)]
             test_audit_hook: parking_lot::Mutex::new(None),
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // MVCC membership: epochs, root capture, root-relative reads, and
+    // root-gated physical reclamation.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// The current root's membership epoch.
+    #[must_use]
+    pub fn membership_epoch(&self) -> u64 {
+        self.membership_epoch.load(Ordering::Acquire)
+    }
+
+    /// Reserve the next membership epoch for a mutation that is about to
+    /// apply.
+    ///
+    /// The returned [`EpochReservation`] must stay alive until the
+    /// mutation has fully applied: while it lives, no capture can name
+    /// the reserved epoch, which is what makes the transition atomic with
+    /// respect to [`Self::capture_root`]. See the `membership_epoch`
+    /// field docs.
+    ///
+    /// Saturates at [`EXHAUSTED_EPOCH`] rather than wrapping.
+    fn reserve_membership_epoch(&self) -> EpochReservation<'_> {
+        let mut state = self.live_roots.state.lock();
+        let epoch = self
+            .membership_epoch
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .unwrap_or(EXHAUSTED_EPOCH);
+        self.membership_epoch.store(epoch, Ordering::Release);
+        *state.in_flight.entry(epoch).or_insert(0) += 1;
+        drop(state);
+        EpochReservation {
+            registry: &self.live_roots,
+            epoch,
+        }
+    }
+
+    /// Capture an immutable, LEASED root of the store's current
+    /// membership.
+    ///
+    /// O(1): one mutex acquisition, one scalar read, one counter bump —
+    /// independent of the number of artifacts, canonicals or
+    /// augmentation targets. The returned root both names the epoch and
+    /// keeps every version visible at that epoch physically reachable
+    /// until it drops.
+    ///
+    /// The epoch is read UNDER the registry lock, and
+    /// [`Self::reclaim_retired_versions`] computes its retention epochs
+    /// under the same lock. That total order is what makes a capture
+    /// racing a sweep safe: a capture that registers first is counted in
+    /// the retention set; a capture that registers after the sweep
+    /// necessarily reads the stable epoch the sweep used or a later one,
+    /// and every version the sweep dropped was already invisible from
+    /// that epoch onward.
+    ///
+    /// The captured epoch is the newest FULLY APPLIED one — a mutation
+    /// that has reserved its epoch but not finished applying it holds
+    /// the capture back to its predecessor, so no root can observe a
+    /// half-applied transition (and then observe the other half through
+    /// the same, supposedly immutable, root).
+    #[must_use]
+    pub fn capture_root(&self) -> Arc<FileArtifactRoot> {
+        let epoch = {
+            let mut state = self.live_roots.state.lock();
+            let epoch = state.stable_epoch(self.membership_epoch.load(Ordering::Acquire));
+            *state.roots.entry(epoch).or_insert(0) += 1;
+            epoch
+        };
+        Arc::new(FileArtifactRoot {
+            epoch,
+            registry: Arc::clone(&self.live_roots),
+        })
+    }
+
+    /// Does `root` address THIS store's membership?
+    ///
+    /// A root minted by a different store names an unrelated epoch
+    /// line; reading through it would silently answer from the wrong
+    /// world. Every root-relative accessor fails closed on a foreign
+    /// root rather than guessing.
+    fn owns_root(&self, root: &FileArtifactRoot) -> bool {
+        Arc::ptr_eq(&root.registry, &self.live_roots)
+    }
+
+    /// THE artifact-visibility function: the version of `key` visible
+    /// from a root at `epoch`, or `None` if the key had no version
+    /// then.
+    ///
+    /// Current-epoch reads (`Self::get`, `Self::get_artifacts`, …) are
+    /// the provable specialization of this function at
+    /// `epoch == membership_epoch()`: a live entry's birth is always at
+    /// or below the current epoch, and a retired version's retirement
+    /// is too — so the retired chain can never hold a version visible
+    /// at the current epoch, and probing it would be dead work. The
+    /// equivalence is pinned by
+    /// `file_artifact_store_tests::current_epoch_read_equals_root_relative_read_at_current_epoch`.
+    fn artifact_version_at(&self, key: &FileArtifactKey, epoch: u64) -> Option<Arc<FileArtifacts>> {
+        if let Some(entry) = self.artifacts.get(key) {
+            let stored = entry.value();
+            if stored.birth_epoch <= epoch {
+                return Some(Arc::clone(&stored.payload));
+            }
+        }
+        self.retired_artifacts.get(key).and_then(|chain| {
+            chain
+                .value()
+                .iter()
+                .find(|version| version.span.visible_at(epoch))
+                .map(|version| Arc::clone(&version.payload))
+        })
+    }
+
+    /// Root-relative exact artifact read. The payload stays reachable
+    /// for as long as `root` lives, even after the current root has
+    /// superseded or evicted it.
+    #[must_use]
+    pub fn artifacts_at_root(
+        &self,
+        root: &FileArtifactRoot,
+        key: &FileArtifactKey,
+    ) -> Option<Arc<FileArtifacts>> {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return None;
+        }
+        if !self.owns_root(root) || root.is_exhausted() {
+            return None;
+        }
+        self.artifact_version_at(key, root.epoch)
+    }
+
+    /// Root-relative `IndexedReady` read — [`Self::artifacts_at_root`]
+    /// projected onto the indexed artifact.
+    ///
+    /// Test-only: production reads the whole [`FileArtifacts`] through
+    /// [`Self::artifacts_at_root`] and projects what it needs, so a
+    /// public projection with no production caller would be API surface
+    /// pretending to be capability.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn indexed_at_root(
+        &self,
+        root: &FileArtifactRoot,
+        key: &FileArtifactKey,
+    ) -> Option<Arc<IndexedReady>> {
+        self.artifacts_at_root(root, key)
+            .map(|artifacts| Arc::clone(&artifacts.indexed))
+    }
+
+    /// Root-relative canonical→keys enumeration: exactly the keys that
+    /// were live for `canonical` at `root`'s epoch, deduplicated (a key
+    /// that was retired and later re-published appears once).
+    #[must_use]
+    pub fn artifact_keys_at_root(
+        &self,
+        root: &FileArtifactRoot,
+        canonical: &str,
+    ) -> SmallVec<[FileArtifactKey; 2]> {
+        let mut keys: SmallVec<[FileArtifactKey; 2]> = SmallVec::new();
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return keys;
+        }
+        if !self.owns_root(root) || root.is_exhausted() {
+            return keys;
+        }
+        if let Some(slot) = self.canonical_keys.get(canonical) {
+            for version in slot
+                .value()
+                .iter()
+                .filter(|version| version.span.visible_at(root.epoch))
+            {
+                if !keys.contains(&version.key) {
+                    keys.push(version.key.clone());
+                }
+            }
+        }
+        keys
+    }
+
+    /// Root-relative augmentation-index read.
+    #[must_use]
+    pub fn augmenter_set_at_root(
+        &self,
+        root: &FileArtifactRoot,
+        key: &AugmentationTargetKey,
+    ) -> Option<Arc<AugmenterSet>> {
+        if !self.owns_root(root) || root.is_exhausted() {
+            return None;
+        }
+        let epoch = root.epoch;
+        if let Some(entry) = self.augmentation_index.get(key) {
+            if entry.value().span.birth <= epoch {
+                return Some(Arc::clone(&entry.value().set));
+            }
+        }
+        self.retired_augmenters.get(key).and_then(|chain| {
+            chain
+                .value()
+                .iter()
+                .find(|version| version.span.visible_at(epoch))
+                .map(|version| Arc::clone(&version.set))
+        })
+    }
+
+    /// The epochs a sweep must keep reachable: every live captured root,
+    /// plus the epoch the next capture would take.
+    ///
+    /// Computed under the live-root registry lock together with the
+    /// current epoch, so it is totally ordered against
+    /// [`Self::capture_root`].
+    fn retention_epochs(&self) -> RetentionEpochs {
+        let state = self.live_roots.state.lock();
+        let stable = state.stable_epoch(self.membership_epoch.load(Ordering::Acquire));
+        RetentionEpochs {
+            stable,
+            roots: state.roots.keys().copied().collect(),
+        }
+    }
+
+    /// Physically reclaim every retired version that no root can reach.
+    ///
+    /// **The complete reachability rule:** a version is reclaimable
+    /// only when it is invisible from (a) the current artifact root AND
+    /// (b) every live root captured by a `HostStoreView` / session /
+    /// request. Both halves are read here, from state this store owns.
+    /// No caller may substitute its own reachability judgement — a
+    /// consumer such as `ProjectTypeStore` may REQUEST a sweep, and
+    /// that request carries no reachability information.
+    ///
+    /// Reachability is decided PER ROOT, never by a floor. "Retired
+    /// after the oldest live root" is not the same predicate as
+    /// "visible from some live root": under a floor, one stale root pins
+    /// every version born after it as well, so a pinned view turns an
+    /// edit loop into unbounded growth. A root at epoch `E` selects
+    /// exactly ONE version per membership entry — the one visible at `E`
+    /// — and everything between that version and the current one is
+    /// unreachable from every root.
+    ///
+    /// Returns the number of physically reclaimed versions across all
+    /// three versioned membership domains.
+    pub fn reclaim_retired_versions(&self) -> usize {
+        let retention = self.retention_epochs();
+        self.retirements_since_reclaim.store(0, Ordering::Relaxed);
+        let mut reclaimed = 0usize;
+        self.retired_artifacts.retain(|_key, chain| {
+            let before = chain.len();
+            chain.retain(|version| !retention.reclaimable(&version.span));
+            reclaimed += before - chain.len();
+            !chain.is_empty()
+        });
+        self.retired_augmenters.retain(|_key, chain| {
+            let before = chain.len();
+            chain.retain(|version| !retention.reclaimable(&version.span));
+            reclaimed += before - chain.len();
+            !chain.is_empty()
+        });
+        // The canonical→keys index is versioned membership too: a
+        // retired index version stays enumerable from the roots that
+        // still see it, and is reclaimed under the same rule. A slot that
+        // still has a live key can never empty here (its live version
+        // has no retirement), so an emptied slot is genuinely gone.
+        self.canonical_keys.retain(|_canonical, slot| {
+            let before = slot.len();
+            slot.retain(|version| !retention.reclaimable(&version.span));
+            reclaimed += before - slot.len();
+            !slot.is_empty()
+        });
+        reclaimed
+    }
+
+    /// Amortised self-triggered reclamation. Retirement is logical, so
+    /// without this the retained set grows by one version per publish
+    /// on a pure edit loop.
+    fn note_retirements(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let before = self
+            .retirements_since_reclaim
+            .fetch_add(count as u64, Ordering::Relaxed);
+        if before + count as u64 >= RECLAIM_TRIGGER_RETIREMENTS {
+            let _ = self.reclaim_retired_versions();
+        }
+    }
+
+    /// Number of retired-but-still-retained versions across all three
+    /// versioned membership domains — the measurable half of the
+    /// memory bound `current retained working set + versions reachable
+    /// from live view roots`.
+    #[must_use]
+    pub fn retained_retired_version_count(&self) -> usize {
+        let artifacts: usize = self
+            .retired_artifacts
+            .iter()
+            .map(|entry| entry.value().len())
+            .sum();
+        let augmenters: usize = self
+            .retired_augmenters
+            .iter()
+            .map(|entry| entry.value().len())
+            .sum();
+        let index: usize = self
+            .canonical_keys
+            .iter()
+            .map(|entry| {
+                entry
+                    .value()
+                    .iter()
+                    .filter(|version| !version.span.is_live())
+                    .count()
+            })
+            .sum();
+        artifacts + augmenters + index
+    }
+
+    /// Number of live captured roots currently leasing membership.
+    #[must_use]
+    pub fn live_root_count(&self) -> usize {
+        self.live_roots.state.lock().roots.values().sum()
+    }
+
+    /// Seed the membership epoch. Test-only: the epoch line's terminal
+    /// behaviour is otherwise unreachable in any finite test.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_membership_epoch_for_test(&self, epoch: u64) {
+        self.membership_epoch.store(epoch, Ordering::Release);
     }
 
     /// Current artifact-publication generation. Folded into the
@@ -1179,7 +1860,12 @@ impl FileArtifactStore {
         }
         let mut result: Option<Arc<IndexedReady>> = None;
         if let Some(slot) = self.canonical_keys.get(canonical_id) {
-            for key in slot.value().iter().filter(|key| key.is_base()) {
+            for key in slot
+                .value()
+                .iter()
+                .filter(|version| version.span.is_live() && version.key.is_base())
+                .map(|version| &version.key)
+            {
                 // Exact read; a (benign) dangling index key just misses
                 // and the next candidate is tried.
                 if let Some(entry) = self.artifacts.get(key) {
@@ -1264,35 +1950,129 @@ impl FileArtifactStore {
     /// entry. Lock order: index-slot guard → `self.artifacts` shard —
     /// see the `canonical_keys` field docs for the full coherence
     /// discipline.
+    /// Publishes `payload` at `key` under a freshly advanced membership
+    /// epoch and RETIRES whatever version the key held before, so a root
+    /// captured before this publication keeps reaching the superseded
+    /// payload.
+    ///
+    /// Returns the superseded payload, if any.
     fn insert_artifact_entry(
         &self,
         key: FileArtifactKey,
-        value: StoredArtifact,
-    ) -> Option<StoredArtifact> {
+        payload: Arc<FileArtifacts>,
+        tick: u64,
+    ) -> Option<Arc<FileArtifacts>> {
+        let reservation = self.reserve_membership_epoch();
+        let epoch = reservation.epoch();
         let mut slot = self
             .canonical_keys
             .entry(Arc::clone(&key.canonical))
             .or_default();
-        if !slot.iter().any(|existing| existing == &key) {
-            slot.push(key.clone());
+        // Retain the superseded version for the roots that still address
+        // it — the legacy behaviour dropped it here, which is exactly how
+        // a captured `(canonical, whole_hash)` came to name an artifact
+        // the store had already freed — and retain it BEFORE the live
+        // slot stops holding it (see [`Self::publish_retired_version`]).
+        let displaced_payload = self.publish_retired_version(&key, epoch);
+        if displaced_payload.is_some() {
+            // Close the index membership version this publication
+            // supersedes.
+            for version in slot
+                .iter_mut()
+                .filter(|version| version.span.is_live() && version.key == key)
+            {
+                version.span.retirement = Some(epoch);
+            }
         }
-        self.artifacts.insert(key, value)
+        self.artifacts
+            .insert(key.clone(), StoredArtifact::new(payload, tick, epoch));
+        slot.push(CanonicalKeyVersion {
+            key,
+            span: VersionSpan::born(epoch),
+        });
+        drop(slot);
+        // The transition has landed: release the epoch so captures may
+        // name it, BEFORE the (possibly reclaiming) retirement accounting.
+        drop(reservation);
+        if displaced_payload.is_some() {
+            self.note_retirements(1);
+        }
+        displaced_payload
     }
 
-    /// THE sole artifact-removal chokepoint.
+    /// Copy `key`'s CURRENT live version into the retired chain, closed
+    /// at `epoch`, and return its payload — WITHOUT removing the live
+    /// entry.
     ///
-    /// Every path that drops entries from `self.artifacts` funnels
+    /// **Publish before retract.** A version MOVES between two maps, and
+    /// a root-relative reader consults them in sequence without holding
+    /// either. If the live entry were retracted first, a reader on a root
+    /// captured before `epoch` would find the version in NEITHER map for
+    /// the length of the writer's window and answer `None` — a world no
+    /// epoch ever had, which the per-view memo then freezes (first-writer
+    /// wins) into every request that view serves. Publishing first makes
+    /// the transient window one in which the version is reachable from
+    /// BOTH maps, and both copies are the same `Arc` describing the same
+    /// span, so either read answers identically.
+    ///
+    /// The writer-side slot guard cannot substitute for this: readers do
+    /// not take it, so it orders writers against each other, not the move
+    /// against a read.
+    ///
+    /// Callers must hold the canonical's `canonical_keys` slot guard, so
+    /// the read-then-write pair here is atomic against every other
+    /// same-canonical mutation.
+    fn publish_retired_version(
+        &self,
+        key: &FileArtifactKey,
+        epoch: u64,
+    ) -> Option<Arc<FileArtifacts>> {
+        let (birth, payload) = {
+            let entry = self.artifacts.get(key)?;
+            (
+                entry.value().birth_epoch,
+                Arc::clone(&entry.value().payload),
+            )
+        };
+        self.retired_artifacts
+            .entry(key.clone())
+            .or_default()
+            .push(RetiredArtifactVersion {
+                span: VersionSpan {
+                    birth,
+                    retirement: Some(epoch),
+                },
+                payload: Arc::clone(&payload),
+            });
+        Some(payload)
+    }
+
+    /// THE sole artifact-retirement chokepoint.
+    ///
+    /// Every path that removes entries from `self.artifacts` funnels
     /// through here: the public [`Self::remove`] / [`Self::remove_artifacts`]
-    /// / [`Self::remove_canonical`], the legacy [`Self::insert`]
-    /// prior-version drain, and the internal memory-bound sweeps
-    /// ([`Self::evict_lru_promoted`] + [`Self::enforce_per_canonical_retention`]).
+    /// / [`Self::remove_canonical`] / [`Self::clear_all`], the legacy
+    /// [`Self::insert`] prior-version drain, the internal memory-bound
+    /// sweeps ([`Self::evict_lru_promoted`] +
+    /// [`Self::enforce_per_canonical_retention`]) and the schema-mismatch
+    /// whole-store reset.
     ///
-    /// Removing the entries and invalidating the `augmentation_index`
+    /// Removal here is LOGICAL: the version leaves the CURRENT root's
+    /// membership under a freshly advanced epoch, and its payload moves
+    /// into the retired chain where every root captured before this
+    /// epoch keeps reaching it. Physical reclamation is a separate,
+    /// root-gated decision ([`Self::reclaim_retired_versions`]) — no
+    /// removal path may free bytes a live root can still see. That is
+    /// what makes an immutable root a RETENTION LEASE rather than a
+    /// bare name.
+    ///
+    /// Retiring the entries and invalidating the `augmentation_index`
     /// entries they contributed to is ONE inseparable operation, so it is
-    /// **structurally impossible** to evict an artifact while leaving a
+    /// **structurally impossible** to retire an artifact while leaving a
     /// stale [`AugmenterSet`] behind — closing the augmentation-index
     /// under-invalidation class by construction rather than by enumerating
-    /// callers. The static guard
+    /// callers. Both halves share the SAME epoch, so no root can observe
+    /// the artifacts retired but the index not. The static guard
     /// `artifact_removal_routes_through_single_chokepoint` pins that this
     /// method (and [`Self::drop_artifact_entry`]) is the only `self.artifacts`
     /// removal site.
@@ -1300,62 +2080,105 @@ impl FileArtifactStore {
     /// Counter / audit-event bookkeeping is **caller policy** — an LRU
     /// drop, a replacement drain, and a hard delete attribute
     /// `live_counter` / `stale_sweeps` / structured events differently —
-    /// so this chokepoint touches none of them; it returns the removed
+    /// so this chokepoint touches none of them; it returns the retired
     /// `(key, payload)` pairs and lets the caller account for them.
-    /// Per-entry warm-read bookkeeping (hit counter, access tick) lives
-    /// inside the removed [`StoredArtifact`] value and drops with it —
-    /// an evicted key can never carry a stale hit count into a later
-    /// same-key insert.
+    /// Per-entry warm-read bookkeeping (hit counter, access tick) is
+    /// current-root state and is NOT carried into the retired chain —
+    /// a re-published key starts cold, as before.
     ///
-    /// Invalidation runs ONCE over the union of every removed entry's
+    /// Invalidation runs ONCE over the union of every retired entry's
     /// augmentation facts, after every `self.artifacts` shard guard is
     /// released (all removes complete before the index scan), preserving
     /// the no-shard-guard-across-reentrancy discipline of
     /// [`Self::invalidate_augmentation_index_for_augmenter`].
-    fn evict_artifact_keys(
+    fn retire_artifact_keys(
         &self,
         keys: &[FileArtifactKey],
     ) -> Vec<(FileArtifactKey, Arc<FileArtifacts>)> {
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        let reservation = self.reserve_membership_epoch();
+        let epoch = reservation.epoch();
         let mut removed: Vec<(FileArtifactKey, Arc<FileArtifacts>)> =
             Vec::with_capacity(keys.len());
         let mut removed_augmentations: Vec<ModuleAugmentationFact> = Vec::new();
         for key in keys {
-            // Paired map+index removal under the canonical's index-slot
-            // write guard (same serialization discipline as
+            // Paired map+index retirement under the canonical's
+            // index-slot write guard (same serialization discipline as
             // `insert_artifact_entry`; see the `canonical_keys` field
-            // docs). The key is dropped from the index unconditionally —
-            // under the slot guard, a map miss means the key is genuinely
-            // absent, so a (benign) dangling index key is self-healed
-            // here. A canonical with no slot still attempts the map
-            // remove so the map stays authoritative.
-            let removed_entry = match self.canonical_keys.entry(Arc::clone(&key.canonical)) {
+            // docs). The key's LIVE index version is closed
+            // unconditionally — under the slot guard, a map miss means
+            // the key is genuinely absent, so a (benign) dangling index
+            // key is self-healed here. A canonical with no slot still
+            // attempts the map remove so the map stays authoritative.
+            //
+            // The slot guard is held across BOTH the map removal and the
+            // retired-chain push, exactly as `insert_artifact_entry`
+            // holds it across the insert and the push. Releasing it in
+            // between publishes a torn world: a reader on a root captured
+            // before this epoch would enumerate the key (still visible in
+            // the index) while both the live entry and the retired
+            // version are missing, and — because the per-view memo is
+            // first-writer-wins and shared — would freeze that
+            // never-existed world into every request the view serves.
+            // PUBLISH BEFORE RETRACT: the version reaches the retired
+            // chain first and only then leaves the live map, so a
+            // concurrent root-relative read finds it in BOTH rather than
+            // in NEITHER. See [`Self::publish_retired_version`].
+            let mut retire_live = |key: &FileArtifactKey| {
+                let Some(payload) = self.publish_retired_version(key, epoch) else {
+                    return;
+                };
+                self.artifacts.remove(key);
+                removed_augmentations.extend(payload.augmentations.iter().cloned());
+                removed.push((key.clone(), payload));
+            };
+            match self.canonical_keys.entry(Arc::clone(&key.canonical)) {
                 CanonicalKeysEntry::Occupied(mut slot) => {
-                    let removed_entry = self.artifacts.remove(key);
-                    slot.get_mut().retain(|existing| existing != key);
+                    retire_live(key);
+                    for version in slot
+                        .get_mut()
+                        .iter_mut()
+                        .filter(|version| version.span.is_live() && &version.key == key)
+                    {
+                        version.span.retirement = Some(epoch);
+                    }
+                    // A slot only empties once reclamation has dropped
+                    // every version it held; a retirement leaves the
+                    // closed version behind for the roots that see it.
                     if slot.get().is_empty() {
                         slot.remove();
                     }
-                    removed_entry
                 }
-                CanonicalKeysEntry::Vacant(_) => self.artifacts.remove(key),
-            };
-            if let Some((removed_key, stored)) = removed_entry {
-                removed_augmentations.extend(stored.payload.augmentations.iter().cloned());
-                removed.push((removed_key, stored.payload));
+                CanonicalKeysEntry::Vacant(vacant) => {
+                    // No index slot for this canonical — but the vacant
+                    // entry still holds the shard guard, so the removal
+                    // and the retained push stay serialized against every
+                    // other same-canonical mutation just as the occupied
+                    // arm is. Nothing is inserted: an untracked canonical
+                    // must not gain an empty slot.
+                    retire_live(key);
+                    drop(vacant);
+                }
             }
         }
-        // Demand-driven coherence: every removed augmenter drops every index
+        // Demand-driven coherence: every retired augmenter retires every index
         // entry it contributed to so the next cold-rescan rebuilds without it.
-        self.invalidate_augmentation_index_for_augmenter(&removed_augmentations);
+        // Same epoch as the artifact retirements above — one membership
+        // transition, not two.
+        self.invalidate_augmentation_index_at_epoch(&removed_augmentations, epoch);
+        drop(reservation);
+        self.note_retirements(removed.len());
         removed
     }
 
-    /// Single-key convenience over the [`Self::evict_artifact_keys`]
-    /// chokepoint. Returns the removed payload, or `None` if `key` was
+    /// Single-key convenience over the [`Self::retire_artifact_keys`]
+    /// chokepoint. Returns the retired payload, or `None` if `key` was
     /// absent. The augmentation-index invalidation is performed by the
     /// chokepoint — callers cannot bypass it.
     fn drop_artifact_entry(&self, key: &FileArtifactKey) -> Option<Arc<FileArtifacts>> {
-        self.evict_artifact_keys(std::slice::from_ref(key))
+        self.retire_artifact_keys(std::slice::from_ref(key))
             .into_iter()
             .next()
             .map(|(_, payload)| payload)
@@ -1426,7 +2249,7 @@ impl FileArtifactStore {
         // entries (their embedded hit counters and access ticks go with
         // them) and invalidates the augmentation index the evicted
         // augmenters contributed to.
-        let removed = self.evict_artifact_keys(&drop_keys);
+        let removed = self.retire_artifact_keys(&drop_keys);
         let evicted_any = !removed.is_empty();
         for _ in &removed {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
@@ -1438,13 +2261,23 @@ impl FileArtifactStore {
     }
 
     /// Enforce per-canonical content-hash retention. Keeps at most
-    /// `retention` distinct `FileArtifactKey` variants per
-    /// canonical id; surplus variants are dropped in deterministic
+    /// `retention` distinct LIVE `FileArtifactKey` variants per
+    /// canonical id; surplus variants are RETIRED in deterministic
     /// `content_hash` order (lowest first — see below).
     ///
     /// Setting `retention == usize::MAX` is a no-op. Setting
-    /// `retention == 0` drops every variant beyond the most
+    /// `retention == 0` retires every variant beyond the most
     /// recently inserted (the live counter's "current generation").
+    ///
+    /// **The cap bounds the CURRENT root's membership, never
+    /// reachability.** A fixed cap that physically discarded versions
+    /// would happily free one a live [`FileArtifactRoot`] still
+    /// addresses, breaking the lease the root's holder was promised.
+    /// Retirement here is logical, so a pinned version survives the cap
+    /// and is freed only once [`Self::reclaim_retired_versions`] finds
+    /// no root can see it. The cap therefore stays a bound on the live
+    /// working set, and the retained set is bounded by
+    /// `live working set + versions reachable from live view roots`.
     ///
     /// Binds R22: the cap is a memory bound; correctness is still
     /// owned by fact-validation. Variant ordering uses the entry's
@@ -1478,7 +2311,7 @@ impl FileArtifactStore {
         // entries (embedded warm-read bookkeeping goes with them) and
         // invalidates the augmentation index the evicted augmenters
         // contributed to.
-        let removed = self.evict_artifact_keys(&drop_keys);
+        let removed = self.retire_artifact_keys(&drop_keys);
         let evicted_any = !removed.is_empty();
         for _ in &removed {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
@@ -1522,11 +2355,18 @@ impl FileArtifactStore {
     }
 
     /// Insert or replace the entry for `canonical_id`. Older versions for
-    /// the same canonical are overwritten — the legacy `FileArtifactStore`
-    /// guaranteed exactly one entry per canonical regardless of
-    /// content_hash, so this method preserves that semantics by draining
-    /// every other version of the same canonical before inserting the
-    /// new one.
+    /// the same canonical leave the CURRENT root's membership — the
+    /// legacy `FileArtifactStore` guaranteed exactly one LIVE entry per
+    /// canonical regardless of content_hash, so this method preserves
+    /// that semantics by retiring every other version of the same
+    /// canonical before inserting the new one.
+    ///
+    /// Retirement here is logical. The prior version's payload stays
+    /// reachable from every [`FileArtifactRoot`] captured before this
+    /// publication: physically dropping it — which the legacy drain did
+    /// — is precisely how a `HostStoreView` that had captured
+    /// `(canonical, whole_hash)` ended up naming an artifact the store
+    /// had already freed. See [`Self::retire_artifact_keys`].
     ///
     /// The new content-addressed `insert_artifacts` surface DOES allow
     /// multiple versions to coexist; callers that want that behaviour
@@ -1597,20 +2437,42 @@ impl FileArtifactStore {
         // the prior versions' augmentation-index entries — a content edit
         // that RETARGETS or DROPS an augmentation must clean the PRIOR
         // target's index entry, which the new facts alone would not cover.
+        //
+        // The canonical's prior keys are resolved through the
+        // canonical→keys index (`canonical_keys`), NOT by scanning
+        // `self.artifacts`: a whole-store scan is O(total live entries)
+        // per insert, so every publish into a warm host re-walked the
+        // entire store. The index is maintained by the paired
+        // insert/removal chokepoints and its only failure direction is a
+        // DANGLING key (listed here, absent from the map), so each
+        // candidate is confirmed against `self.artifacts` before it
+        // counts as a prior version — that preserves the scan's exact
+        // result set, which `had_prior` and `prior_base_payload` below
+        // both read as "a LIVE prior entry". Lock order is the
+        // documented one (index-slot guard → `self.artifacts` shard),
+        // matching every other index-backed reader.
         let prior_keys: Vec<FileArtifactKey> = self
-            .artifacts
-            .iter()
-            .filter(|entry| entry.key().canonical.as_ref() == canonical_id.as_ref())
-            .filter(|entry| {
-                // When the current key is a base-equivalent no-op we leave
-                // it in place; do NOT drain it (that would open the absent
-                // window this fix exists to close). Every OTHER prior key
-                // (stale content hashes, overlay-scoped variants) still
-                // drains.
-                !(current_key_is_base_equivalent && entry.key() == &current_key)
+            .canonical_keys
+            .get(canonical_id.as_ref())
+            .map(|slot| {
+                slot.value()
+                    .iter()
+                    // Only the CURRENT root's membership drains; already
+                    // retired versions are retained for the roots that
+                    // still address them and must not be re-retired.
+                    .filter(|version| version.span.is_live())
+                    .map(|version| &version.key)
+                    // When the current key is a base-equivalent no-op we
+                    // leave it in place; do NOT drain it (that would open
+                    // the absent window this fix exists to close). Every
+                    // OTHER prior key (stale content hashes,
+                    // overlay-scoped variants) still drains.
+                    .filter(|key| !(current_key_is_base_equivalent && *key == &current_key))
+                    .filter(|key| self.artifacts.contains_key(*key))
+                    .cloned()
+                    .collect()
             })
-            .map(|entry| entry.key().clone())
-            .collect();
+            .unwrap_or_default();
         let had_prior = !prior_keys.is_empty() || current_key_is_base_equivalent;
         // Capture the prior BASE (base-key) payload BEFORE draining so the
         // bump-iff-actually-changed gate can compare it against the new
@@ -1652,7 +2514,7 @@ impl FileArtifactStore {
         // base-folded bump for this insert is owned by the
         // `snapshot_changed` gate below so an overlay-only / stale-hash
         // drain does not churn the token.
-        let _drained = self.evict_artifact_keys(&prior_keys);
+        let _drained = self.retire_artifact_keys(&prior_keys);
 
         // Bump the base-folded `artifact_generation` ONLY when this insert
         // changes the canonical's base snapshot value. A base-equivalent
@@ -1676,7 +2538,7 @@ impl FileArtifactStore {
         // reader can ever observe it absent. Otherwise insert (fresh content
         // or a base-visible change at the current key).
         if !current_key_is_base_equivalent {
-            self.insert_artifact_entry(current_key, StoredArtifact::new(payload, tick));
+            self.insert_artifact_entry(current_key, payload, tick);
         }
         if snapshot_changed {
             self.bump_artifact_generation();
@@ -1746,7 +2608,7 @@ impl FileArtifactStore {
         // entries (embedded warm-read bookkeeping goes with them) and
         // invalidates the augmentation index the removed augmenters
         // contributed to.
-        let removed = self.evict_artifact_keys(&to_remove);
+        let removed = self.retire_artifact_keys(&to_remove);
         let removed_any = !removed.is_empty();
         for _ in &removed {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
@@ -1777,7 +2639,7 @@ impl FileArtifactStore {
         let payload = Arc::new(FileArtifacts::with_indexed(indexed));
         let key = FileArtifactKey::base(canonical, [0u8; 16]);
         // Tick 0: the synthetic inserter never counted as an access.
-        let prev = self.insert_artifact_entry(key, StoredArtifact::new(payload, 0));
+        let prev = self.insert_artifact_entry(key, payload, 0);
         if prev.is_none() {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
         }
@@ -1893,7 +2755,10 @@ impl FileArtifactStore {
             for key in slot
                 .value()
                 .iter()
-                .filter(|key| key.content_hash == content_hash)
+                .filter(|version| {
+                    version.span.is_live() && version.key.content_hash == content_hash
+                })
+                .map(|version| &version.key)
             {
                 // Exact read; a (benign) dangling index key just misses
                 // and the next candidate is tried.
@@ -1927,7 +2792,12 @@ impl FileArtifactStore {
         }
         let mut matched: Option<Arc<FileArtifacts>> = None;
         if let Some(slot) = self.canonical_keys.get(canonical) {
-            for key in slot.value().iter().filter(|key| key.is_base()) {
+            for key in slot
+                .value()
+                .iter()
+                .filter(|version| version.span.is_live() && version.key.is_base())
+                .map(|version| &version.key)
+            {
                 // Exact read; a (benign) dangling index key just misses
                 // and the next candidate is tried.
                 if let Some(entry) = self.artifacts.get(key) {
@@ -1960,9 +2830,7 @@ impl FileArtifactStore {
         // gate can compare the replaced value against the incoming one without
         // re-fetching from the map.
         let artifacts_for_compare: Arc<FileArtifacts> = Arc::clone(&artifacts);
-        let prev = self
-            .insert_artifact_entry(key, StoredArtifact::new(artifacts, tick))
-            .map(|stored| stored.payload);
+        let prev = self.insert_artifact_entry(key, artifacts, tick);
         // Demand-driven coherence — gated on augmentation-contribution
         // equivalence. A byte-identical reinsert of a module-augmentation file
         // leaves both the augmenter's `ModuleAugmentationFact` set AND its
@@ -2061,7 +2929,7 @@ impl FileArtifactStore {
         if removed.is_some() {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-            // The chokepoint (`drop_artifact_entry` → `evict_artifact_keys`)
+            // The chokepoint (`drop_artifact_entry` → `retire_artifact_keys`)
             // already cleared the per-key hit counter and invalidated the
             // augmentation index. A keyed removal drops a canonical's
             // `IndexedReady` / `FileFacts` / derived hashes that a
@@ -2099,7 +2967,7 @@ impl FileArtifactStore {
         // entries (embedded warm-read bookkeeping goes with them) and
         // invalidates the augmentation index the removed augmenters
         // contributed to.
-        let removed_pairs = self.evict_artifact_keys(&to_remove);
+        let removed_pairs = self.retire_artifact_keys(&to_remove);
         let removed = removed_pairs.len();
         if removed > 0 {
             self.live_counter
@@ -2142,7 +3010,7 @@ impl FileArtifactStore {
             .iter()
             .map(|entry| entry.key().clone())
             .collect();
-        let removed_pairs = self.evict_artifact_keys(&to_remove);
+        let removed_pairs = self.retire_artifact_keys(&to_remove);
         let removed = removed_pairs.len();
         if removed > 0 {
             self.live_counter
@@ -2202,7 +3070,10 @@ impl FileArtifactStore {
             for key in slot
                 .value()
                 .iter()
-                .filter(|key| key.content_hash == content_hash)
+                .filter(|version| {
+                    version.span.is_live() && version.key.content_hash == content_hash
+                })
+                .map(|version| &version.key)
             {
                 if let Some(entry) = self.artifacts.get(key) {
                     visit(key, &entry.value().payload);
@@ -2238,7 +3109,99 @@ impl FileArtifactStore {
     /// Look up the [`AugmenterSet`] for an [`AugmentationTargetKey`].
     #[must_use]
     pub fn get_augmenter_set(&self, key: &AugmentationTargetKey) -> Option<Arc<AugmenterSet>> {
-        self.augmentation_index.get(key).map(|v| v.clone())
+        self.augmentation_index
+            .get(key)
+            .map(|entry| Arc::clone(&entry.value().set))
+    }
+
+    /// THE sole augmentation-index publication combinator.
+    ///
+    /// Publishes `set` at `key` under a freshly advanced membership
+    /// epoch and RETIRES the version it supersedes into the retired
+    /// chain, so a root captured before this publication keeps
+    /// resolving the augmenter set its world had.
+    fn install_augmenter_set(
+        &self,
+        key: AugmentationTargetKey,
+        set: Arc<AugmenterSet>,
+    ) -> Option<Arc<AugmenterSet>> {
+        let reservation = self.reserve_membership_epoch();
+        let epoch = reservation.epoch();
+        let version = AugmenterVersion {
+            span: VersionSpan::born(epoch),
+            set,
+        };
+        // The whole read-retire-publish sequence runs under ONE entry
+        // guard. Two reasons, both load-bearing:
+        //
+        // * ATOMICITY — the displaced value is the caller's "was this
+        //   absent?" signal, and `populate_augmenter_set` bumps the
+        //   artifact generation only on a genuine absent → present
+        //   transition. A separate read-then-insert lets N concurrent
+        //   duplicate populates each observe "absent" and each bump,
+        //   churning the base store-view reuse token.
+        // * ORDERING — publish before retract, as on the artifact path
+        //   (see [`Self::publish_retired_version`]). The superseded
+        //   version reaches the retired chain before the live slot stops
+        //   holding it, so a root-relative reader can never find it in
+        //   neither map.
+        let retired = match self.augmentation_index.entry(key.clone()) {
+            AugmentationIndexEntry::Occupied(mut slot) => {
+                let previous = slot.get();
+                self.retired_augmenters
+                    .entry(key)
+                    .or_default()
+                    .push(AugmenterVersion {
+                        span: VersionSpan {
+                            birth: previous.span.birth,
+                            retirement: Some(epoch),
+                        },
+                        set: Arc::clone(&previous.set),
+                    });
+                Some(slot.insert(version).set)
+            }
+            AugmentationIndexEntry::Vacant(slot) => {
+                slot.insert(version);
+                None
+            }
+        };
+        drop(reservation);
+        if retired.is_some() {
+            self.note_retirements(1);
+        }
+        retired
+    }
+
+    /// THE sole augmentation-index retirement combinator. Logical, like
+    /// every other membership removal: the entries leave the current
+    /// root's membership at `epoch` and stay reachable from every root
+    /// captured before it.
+    fn retire_augmenter_keys(&self, keys: &[AugmentationTargetKey], epoch: u64) -> usize {
+        let mut retired = 0usize;
+        for key in keys {
+            // One entry guard across the retire and the removal — same
+            // atomicity + publish-before-retract contract as
+            // [`Self::install_augmenter_set`].
+            if let AugmentationIndexEntry::Occupied(slot) =
+                self.augmentation_index.entry(key.clone())
+            {
+                let previous = slot.get();
+                self.retired_augmenters
+                    .entry(key.clone())
+                    .or_default()
+                    .push(AugmenterVersion {
+                        span: VersionSpan {
+                            birth: previous.span.birth,
+                            retirement: Some(epoch),
+                        },
+                        set: Arc::clone(&previous.set),
+                    });
+                slot.remove();
+                retired += 1;
+            }
+        }
+        self.note_retirements(retired);
+        retired
     }
 
     /// Install (or replace) the augmenter set under `key`. Used by
@@ -2249,7 +3212,7 @@ impl FileArtifactStore {
         set: Arc<AugmenterSet>,
     ) -> Option<Arc<AugmenterSet>> {
         let new_fingerprint = set.fingerprint;
-        let prev = self.augmentation_index.insert(key, set);
+        let prev = self.install_augmenter_set(key, set);
         // `route_surface_index_fingerprints` is snapshotted BY VALUE on a
         // `HostStoreView`. Bump the base-folded `artifact_generation` ONLY
         // when this populate actually changes the snapshotted fingerprint
@@ -2357,7 +3320,7 @@ impl FileArtifactStore {
         R: Fn(&str, &str) -> Option<Arc<str>>,
     {
         if let Some(existing) = self.augmentation_index.get(key) {
-            return existing.clone();
+            return Arc::clone(&existing.value().set);
         }
 
         // Cold scan — collect (canonical, parse_stable_hash) for
@@ -2421,9 +3384,7 @@ impl FileArtifactStore {
         });
 
         // Insert. Capture prev fingerprint for audit event.
-        let prev = self
-            .augmentation_index
-            .insert(key.clone(), Arc::clone(&set));
+        let prev = self.install_augmenter_set(key.clone(), Arc::clone(&set));
         let prev_fingerprint = prev.as_ref().map(|p| p.fingerprint);
         // `route_surface_index_fingerprints` is snapshotted BY VALUE on a
         // `HostStoreView`, and `artifact_generation` is folded into the
@@ -2457,11 +3418,16 @@ impl FileArtifactStore {
     /// This is the SOLE augmentation-index invalidation primitive. It is the
     /// demand-driven coherence rail for the index: whenever the augmenter
     /// SET changes (a file is published as / edited into / removed as an
-    /// augmenter), every entry the changed facts could touch is DROPPED, and
+    /// augmenter), every entry the changed facts could touch is RETIRED, and
     /// the next [`Self::ensure_augmentation_index_populated`] cold-rescan
     /// rebuilds it from the now-current `artifacts` corpus. There is no eager
     /// in-place rebuild — invalidate-then-lazy-rebuild keeps the index
     /// query-scoped (Build Philosophy) and uniform across populations.
+    ///
+    /// Retirement is logical: a root captured before the invalidation
+    /// keeps resolving the augmenter set its world had, because the
+    /// augmentation-index is versioned membership like the artifacts
+    /// themselves.
     ///
     /// Wired into every artifact-set mutation that changes a file's
     /// augmentation contribution: [`Self::insert`] / [`Self::insert_artifacts`]
@@ -2487,10 +3453,30 @@ impl FileArtifactStore {
     /// off the `augmentation_index` shard guard before any removal, so the
     /// removal loop never holds a guard across a re-entrant store access.
     ///
-    /// Returns the count of entries actually removed.
+    /// Returns the count of entries actually retired.
     pub fn invalidate_augmentation_index_for_augmenter(
         &self,
         augmenter_facts: &[ModuleAugmentationFact],
+    ) -> usize {
+        // A standalone invalidation is one membership transition of its
+        // own. The artifact-retirement chokepoint instead threads ITS
+        // epoch through [`Self::invalidate_augmentation_index_at_epoch`]
+        // so artifacts and index retire together.
+        let reservation = self.reserve_membership_epoch();
+        let epoch = reservation.epoch();
+        let retired = self.invalidate_augmentation_index_at_epoch(augmenter_facts, epoch);
+        drop(reservation);
+        retired
+    }
+
+    /// [`Self::invalidate_augmentation_index_for_augmenter`] under a
+    /// caller-supplied membership epoch — the form the artifact
+    /// retirement chokepoint uses so both halves of one removal share a
+    /// single epoch and no root can observe them split.
+    fn invalidate_augmentation_index_at_epoch(
+        &self,
+        augmenter_facts: &[ModuleAugmentationFact],
+        epoch: u64,
     ) -> usize {
         if augmenter_facts.is_empty() {
             return 0;
@@ -2498,33 +3484,34 @@ impl FileArtifactStore {
         if self.augmentation_index.is_empty() {
             return 0;
         }
-        // Snapshot existing keys off the shard guard before removing entries.
-        let existing_keys: Vec<AugmentationTargetKey> = self
+        // Snapshot existing keys off the shard guard before retiring entries.
+        let retire_keys: Vec<AugmentationTargetKey> = self
             .augmentation_index
             .iter()
             .map(|entry| entry.key().clone())
+            .filter(|key| {
+                augmenter_facts
+                    .iter()
+                    .any(|fact| augmenter_fact_could_contribute(fact, key))
+            })
             .collect();
-        let mut removed = 0usize;
-        for key in existing_keys {
-            let contributes = augmenter_facts
-                .iter()
-                .any(|fact| augmenter_fact_could_contribute(fact, &key));
-            if !contributes {
-                continue;
-            }
-            if self.augmentation_index.remove(&key).is_some() {
-                removed += 1;
-            }
-        }
+        let removed = self.retire_augmenter_keys(&retire_keys, epoch);
         if removed > 0 {
             self.bump_artifact_generation();
         }
         removed
     }
 
-    /// Drop every entry from the augmentation index.
+    /// Retire every entry from the augmentation index.
     pub fn clear_augmentation_index(&self) {
-        self.augmentation_index.clear();
+        let reservation = self.reserve_membership_epoch();
+        let all_keys: Vec<AugmentationTargetKey> = self
+            .augmentation_index
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        self.retire_augmenter_keys(&all_keys, reservation.epoch());
+        drop(reservation);
         self.bump_artifact_generation();
     }
 
@@ -2542,7 +3529,7 @@ impl FileArtifactStore {
     pub fn snapshot_augmentation_index_fingerprints(&self) -> Vec<(AugmentationTargetKey, Hash16)> {
         self.augmentation_index
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().fingerprint))
+            .map(|entry| (entry.key().clone(), entry.value().set.fingerprint))
             .collect()
     }
 
@@ -2596,21 +3583,24 @@ impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {
         if self.schema_version == current {
             return 0;
         }
-        let count = self.artifacts.len();
-        // Whole-store nuke: this is the strongest possible augmentation-index
-        // invalidation — clearing every artifact is paired with clearing the
-        // entire `augmentation_index` in the same step, so no stale
-        // `AugmenterSet` can survive. (The per-key removal chokepoint
-        // `evict_artifact_keys` covers every partial removal; this paired
-        // clear covers the total reset.)
-        //
-        // The canonical→keys index clears FIRST: an insert racing this
-        // reset then leaves at worst a benign DANGLING index key (readers
-        // skip keys whose exact map read misses), never a live map entry
-        // the index is missing. See the `canonical_keys` field docs.
-        self.canonical_keys.clear();
-        self.artifacts.clear();
-        self.augmentation_index.clear();
+        // Whole-store reset. It routes through the SAME retirement
+        // chokepoint as every partial removal rather than clearing the
+        // maps: a schema mismatch changes what the CURRENT root serves,
+        // it does not revoke the lease a live `FileArtifactRoot` already
+        // holds, and physically clearing here would free versions those
+        // roots still address. The chokepoint retires the artifacts and
+        // the augmentation-index rows they contributed to under one
+        // epoch, so no stale `AugmenterSet` survives into the current
+        // root either. `clear_augmentation_index` retires whatever rows
+        // the artifact facts did not cover, making the reset total.
+        let all_keys: Vec<FileArtifactKey> = self
+            .artifacts
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        let count = all_keys.len();
+        let _retired = self.retire_artifact_keys(&all_keys);
+        self.clear_augmentation_index();
         if count > 0 {
             self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);

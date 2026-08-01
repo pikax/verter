@@ -37,6 +37,9 @@ pub(crate) fn vue_macro_output_matches_revision(
 /// [`crate::host_compile::CompileManyTarget::RuntimeRender`] lane: the
 /// assembled `_sfc_main` module bytes, its optional source map, and the
 /// soft (warning-severity) diagnostics of a SUCCESSFUL render.
+///
+/// `host_compile` — the only consumer — is native-only.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct RenderOnlyMain {
     pub(crate) code: Arc<str>,
     pub(crate) source_map: Option<Arc<str>>,
@@ -255,85 +258,91 @@ impl VerterHost {
             return;
         };
 
-        let workspace = self.workspace();
         let mut blocker_ids = std::collections::BTreeSet::new();
-        // Capture-before-resolve: the positive-route stamps below reflect
-        // the file set the resolutions ran under, never a later one (a
-        // mutation racing this hydration leaves the stamps conservatively
-        // stale — a harmless re-resolve, never forged currency).
-        let resolved_at_generation = self.ws().content_generation();
+        let mut pending_routes = Vec::new();
 
         for request in blockers.external_source_requests {
-            let resolved = workspace
-                .resolve_import(
-                    canonical_id,
-                    &request.specifier,
-                    verter_workspace::ResolutionContext {
-                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                        kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
-                    },
-                )
-                .map(|resolution| {
-                    self.cache_positive_import_route_result(
-                        canonical_id,
-                        &request.specifier,
-                        &resolution.source_id,
-                        resolved_at_generation,
+            let resolved = match self.resolve_for_persistent_state(
+                canonical_id,
+                &request.specifier,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
+                },
+            ) {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    let Some(resolution) = admitted.into_result() else {
+                        if request.resolved_canonical_id != canonical_id {
+                            blocker_ids.insert(request.resolved_canonical_id);
+                        }
+                        continue;
+                    };
+                    pending_routes.push((
+                        request.specifier,
+                        resolution.source_id.clone(),
                         verter_workspace::ResolveRequestKind::SfcSrcAttr,
-                    );
+                    ));
                     resolution.source_id
-                })
-                .unwrap_or(request.resolved_canonical_id);
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => return,
+            };
             if resolved != canonical_id {
                 blocker_ids.insert(resolved);
             }
         }
 
         for dep in blockers.macro_type_deps.iter() {
-            let resolved = workspace
-                .resolve_import(
-                    canonical_id,
-                    &dep.import_source,
-                    verter_workspace::ResolutionContext {
-                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                        kind: verter_workspace::ResolveRequestKind::TypeImport,
-                    },
-                )
-                .inspect(|resolution| {
-                    self.cache_positive_import_route_result(
-                        canonical_id,
-                        &dep.import_source,
-                        &resolution.source_id,
-                        resolved_at_generation,
-                        verter_workspace::ResolveRequestKind::TypeImport,
-                    );
-                })
-                .or_else(|| {
-                    workspace
-                        .resolve_import(
+            let type_resolution = self.resolve_for_persistent_state(
+                canonical_id,
+                &dep.import_source,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::TypeImport,
+                },
+            );
+            let resolved = match type_resolution {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    match admitted.into_result() {
+                        Some(resolution) => {
+                            pending_routes.push((
+                                dep.import_source.clone(),
+                                resolution.source_id.clone(),
+                                verter_workspace::ResolveRequestKind::TypeImport,
+                            ));
+                            Some(resolution)
+                        }
+                        None => match self.resolve_for_persistent_state(
                             canonical_id,
                             &dep.import_source,
                             verter_workspace::ResolutionContext {
                                 phase: verter_workspace::ResolvePhase::CodegenBlocker,
                                 kind: verter_workspace::ResolveRequestKind::EsmImport,
                             },
-                        )
-                        .inspect(|resolution| {
-                            self.cache_positive_import_route_result(
-                                canonical_id,
-                                &dep.import_source,
-                                &resolution.source_id,
-                                resolved_at_generation,
-                                verter_workspace::ResolveRequestKind::EsmImport,
-                            );
-                        })
-                })
-                .map(|resolution| resolution.source_id);
+                        ) {
+                            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                                admitted.into_result().inspect(|resolution| {
+                                    pending_routes.push((
+                                        dep.import_source.clone(),
+                                        resolution.source_id.clone(),
+                                        verter_workspace::ResolveRequestKind::EsmImport,
+                                    ));
+                                })
+                            }
+                            verter_workspace::ResolutionPublication::Refused(_) => return,
+                        },
+                    }
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => return,
+            }
+            .map(|resolution| resolution.source_id);
             if let Some(resolved) = resolved.filter(|resolved| resolved != canonical_id) {
                 blocker_ids.insert(resolved);
             }
         }
 
+        for (_specifier, resolved, _kind) in pending_routes {
+            self.record_resolved_dependency_edge(canonical_id, &resolved);
+        }
         for blocker_id in blocker_ids {
             let _ = self.ensure_loaded(&blocker_id);
         }
@@ -417,48 +426,60 @@ impl VerterHost {
         // of route observation (R26).
         note_serve(&self.ensure_indexed_ready_serve(owner_canonical));
 
-        let workspace = self.workspace();
         let mut resolved_deps = std::collections::BTreeSet::<String>::new();
-        // Capture-before-resolve: the positive-route stamps below reflect
-        // the file set the resolutions ran under, never a later one.
-        let resolved_at_generation = self.ws().content_generation();
+        let mut pending_routes = Vec::new();
 
-        // Macro-type deps: TypeImport first, ESM fallback. Cache the
-        // import-route so `resolve_import_source_to_canonical` in
-        // `compile_fact_emission` finds it.
+        // Macro-type deps: TypeImport first, ESM fallback. The resolved
+        // canonical is registered as a dependency edge; the resolution
+        // itself is memoised only by the workspace owner-edge slot.
         for dep in macro_type_deps {
-            let resolved = workspace
-                .resolve_import(
-                    owner_canonical,
-                    &dep.import_source,
-                    verter_workspace::ResolutionContext {
-                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                        kind: verter_workspace::ResolveRequestKind::TypeImport,
-                    },
-                )
-                .map(|resolution| (resolution, verter_workspace::ResolveRequestKind::TypeImport))
-                .or_else(|| {
-                    workspace
-                        .resolve_import(
+            let type_resolution = self.resolve_for_persistent_state(
+                owner_canonical,
+                &dep.import_source,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::TypeImport,
+                },
+            );
+            let resolved = match type_resolution {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    match admitted.into_result() {
+                        Some(resolution) => {
+                            Some((resolution, verter_workspace::ResolveRequestKind::TypeImport))
+                        }
+                        None => match self.resolve_for_persistent_state(
                             owner_canonical,
                             &dep.import_source,
                             verter_workspace::ResolutionContext {
                                 phase: verter_workspace::ResolvePhase::CodegenBlocker,
                                 kind: verter_workspace::ResolveRequestKind::EsmImport,
                             },
-                        )
-                        .map(|resolution| {
-                            (resolution, verter_workspace::ResolveRequestKind::EsmImport)
-                        })
-                });
+                        ) {
+                            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                                admitted.into_result().map(|resolution| {
+                                    (resolution, verter_workspace::ResolveRequestKind::EsmImport)
+                                })
+                            }
+                            verter_workspace::ResolutionPublication::Refused(_) => {
+                                return CompileTierPrefetchObservation {
+                                    fenced_serve_observed: true,
+                                };
+                            }
+                        },
+                    }
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => {
+                    return CompileTierPrefetchObservation {
+                        fenced_serve_observed: true,
+                    };
+                }
+            };
             if let Some((resolution, resolved_kind)) = resolved {
-                self.cache_positive_import_route_result(
-                    owner_canonical,
-                    &dep.import_source,
-                    &resolution.source_id,
-                    resolved_at_generation,
+                pending_routes.push((
+                    dep.import_source.clone(),
+                    resolution.source_id.clone(),
                     resolved_kind,
-                );
+                ));
                 if resolution.source_id != owner_canonical {
                     resolved_deps.insert(resolution.source_id);
                 }
@@ -475,7 +496,7 @@ impl VerterHost {
             } else {
                 verter_workspace::ResolveRequestKind::EsmImport
             };
-            if let Some(resolution) = workspace.resolve_import(
+            match self.resolve_for_persistent_state(
                 owner_canonical,
                 import.source.as_str(),
                 verter_workspace::ResolutionContext {
@@ -483,15 +504,22 @@ impl VerterHost {
                     kind,
                 },
             ) {
-                self.cache_positive_import_route_result(
-                    owner_canonical,
-                    import.source.as_str(),
-                    &resolution.source_id,
-                    resolved_at_generation,
-                    kind,
-                );
-                if resolution.source_id != owner_canonical {
-                    resolved_deps.insert(resolution.source_id);
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    if let Some(resolution) = admitted.into_result() {
+                        pending_routes.push((
+                            import.source.clone(),
+                            resolution.source_id.clone(),
+                            kind,
+                        ));
+                        if resolution.source_id != owner_canonical {
+                            resolved_deps.insert(resolution.source_id);
+                        }
+                    }
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => {
+                    return CompileTierPrefetchObservation {
+                        fenced_serve_observed: true,
+                    };
                 }
             }
         }
@@ -500,82 +528,72 @@ impl VerterHost {
         // a `FileWholeHash` of each external canonical, so each
         // external dep must reach the store before the tracer runs.
         //
-        // Route-source discipline — the per-entry freshness oracle
-        // (`import_route_entry_is_generation_current`) decides whether a
-        // pre-existing route may answer:
-        //
-        // * An UNSTAMPED route is caller-authoritative
-        //   (`set_import_dependencies` — e.g. an aliased `src=`
-        //   (`@/partials/panel.html`) only the embedder's resolver can
-        //   map): served until replaced, never overwritten here.
-        // * A STAMPED route is a host memo this prefetch (or the
-        //   blocker hydration) wrote on an earlier compile: served only
-        //   while its capture-before-resolve stamp matches the live
-        //   `content_generation`. A stale memo means the dependency
-        //   file set moved since the memo resolved — the `SfcSrcAttr`
-        //   resolution may have retargeted — so it is treated as ABSENT
-        //   and re-resolved + re-stamped. Serving it would suppress the
-        //   retarget AND misattribute the compile-tier whole-hash
-        //   observation to the retargeted-away canonical (the merge
-        //   resolves live, the observation resolves through this memo).
-        // * A generation-current known-miss (caller-pushed) keeps the
-        //   parse-time-canonical fallback below; a stale one re-resolves.
-        let live_generation = self.ws().content_generation();
+        // Route-source discipline: `DerivedRawState.import_routes` holds
+        // ONLY caller-supplied authoritative routes
+        // (`set_import_dependencies` — e.g. an aliased `src=`
+        // (`@/partials/panel.html`) only the embedder's resolver can
+        // map). They serve until the caller replaces them and are never
+        // overwritten here; their currency rides the workspace
+        // exact-resolution facts the same push installs. Everything else
+        // resolves through the one owner-edge authority below, whose
+        // warm candidate is reused when its observation set is
+        // unchanged.
         for request in external_requests {
-            let existing_route = self.derived_raw_cache().get(owner_canonical).and_then(|d| {
-                let route = d.import_routes.get(&request.specifier)?;
-                d.import_route_entry_is_generation_current(
-                    &request.specifier,
-                    route,
-                    live_generation,
-                )
-                .then(|| route.clone())
-            });
+            let existing_route = self
+                .derived_raw_cache()
+                .get(owner_canonical)
+                .and_then(|d| d.import_routes.get(&request.specifier).cloned());
             let resolved = if let Some(route) = existing_route {
-                // Generation-current (or caller-authoritative) route: use
-                // its canonical for the indexed-ready prefetch and leave
-                // the entry untouched.
+                // Caller-authoritative route: use its canonical for the
+                // indexed-ready prefetch and leave the entry untouched.
                 route
                     .resolved_canonical_id
                     .clone()
                     .or_else(|| route.effective_target().map(str::to_string))
                     .unwrap_or_else(|| request.resolved_canonical_id.clone())
             } else {
-                // No current route — resolve through the SfcSrcAttr lane
-                // and cache the result (stamped with the pre-resolve
-                // generation capture) so the producer's
-                // `resolve_import_source_to_canonical` finds it. When the
-                // workspace cannot resolve the specifier, the parse-time
-                // canonical answers and is memoized under the same stamp:
-                // the resolution attempt DID run against this file set and
-                // the memo records its fallback decision; any later
-                // file-set move stales the stamp and re-runs the attempt,
-                // so a specifier that becomes resolvable repairs itself.
-                let resolved = workspace
-                    .resolve_import(
-                        owner_canonical,
-                        &request.specifier,
-                        verter_workspace::ResolutionContext {
-                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                            kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
-                        },
-                    )
-                    .map(|resolution| resolution.source_id)
-                    .unwrap_or_else(|| request.resolved_canonical_id.clone());
+                // No caller-supplied route — resolve through the
+                // `SfcSrcAttr` lane. When the workspace cannot resolve
+                // the specifier, the parse-time canonical answers. The
+                // answer is not memoised host-side: the workspace's own
+                // owner-edge candidate slot is the one memo, and a
+                // specifier that becomes resolvable repairs itself
+                // because the appearance advances exactly the
+                // `PathProbe` the miss observed.
+                let resolved = match self.resolve_for_persistent_state(
+                    owner_canonical,
+                    &request.specifier,
+                    verter_workspace::ResolutionContext {
+                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                        kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
+                    },
+                ) {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
+                        .into_result()
+                        .map(|resolution| resolution.source_id)
+                        .unwrap_or_else(|| request.resolved_canonical_id.clone()),
+                    verter_workspace::ResolutionPublication::Refused(_) => {
+                        return CompileTierPrefetchObservation {
+                            fenced_serve_observed: true,
+                        };
+                    }
+                };
                 if !resolved.is_empty() && resolved != owner_canonical {
-                    self.cache_positive_import_route_result(
-                        owner_canonical,
-                        &request.specifier,
-                        &resolved,
-                        resolved_at_generation,
+                    pending_routes.push((
+                        request.specifier.clone(),
+                        resolved.clone(),
                         verter_workspace::ResolveRequestKind::SfcSrcAttr,
-                    );
+                    ));
                 }
                 resolved
             };
             if !resolved.is_empty() && resolved != owner_canonical {
                 resolved_deps.insert(resolved);
             }
+        }
+
+        for (_specifier, resolved, _kind) in pending_routes {
+            self.record_resolved_dependency_edge(owner_canonical, &resolved);
         }
 
         // Drive each resolved dep to IndexedReady so its
@@ -893,6 +911,7 @@ impl VerterHost {
     /// through the SAME shared substrate and host-side `Main` assembly,
     /// without the per-file session-wrapper overhead. `diagnostics` carries
     /// only the soft (warning-severity) diagnostics of a SUCCESSFUL render.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn render_only_main(
         &self,
         canonical_id: &str,
@@ -1123,6 +1142,12 @@ impl VerterHost {
             /// compile slot is stored with the semantic_hash that was
             /// current when we decided to compile.
             semantic_hash: Hash16,
+            /// The full-content identity of that same snapshot. The
+            /// `latest_diagnostics` write is fenced on it: diagnostics
+            /// describe bytes, so any content movement — a style-only edit
+            /// included — makes this compile's set stale for the live
+            /// buffer.
+            whole_hash: Hash16,
             /// The mode classification, computed once from this request's
             /// effective eligibility surface. The classifier is the sole
             /// authority for the mode decision and gates the warm-hit
@@ -1498,6 +1523,7 @@ impl VerterHost {
                     fallback_last_good,
                     meta: effective_meta,
                     semantic_hash: parse.semantic_hash,
+                    whole_hash: parse.whole_hash,
                     classification,
                     content_publish_stamp,
                 }
@@ -1509,6 +1535,7 @@ impl VerterHost {
             fallback_last_good,
             meta,
             semantic_hash: captured_semantic_hash,
+            whole_hash: captured_whole_hash,
             classification,
             content_publish_stamp,
         } = cache_miss;
@@ -1686,7 +1713,12 @@ impl VerterHost {
                 (outputs, diagnostics, false, tsx, tpl, refused)
             }
             Err(diagnostics) => {
-                self.store_latest_diagnostics(&canonical_id, profile_hash, diagnostics.clone());
+                self.store_latest_diagnostics_if_source_unmoved(
+                    &canonical_id,
+                    profile_hash,
+                    captured_whole_hash,
+                    diagnostics.clone(),
+                );
                 let policy = self.config.compile_error_policy;
                 // `fallback_last_good` is session-published output. A
                 // `Stateless` compile bypasses ALL host cache reads —
@@ -1761,12 +1793,15 @@ impl VerterHost {
         // The `latest_diagnostics` + generation bump runs for EVERY mode
         // so compile errors / warnings surface regardless of caching.
         // This is observable diagnostic state, not a compile-output
-        // cache entry.
-        if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
-            cc.latest_diagnostics
-                .insert(profile_hash, diagnostics.clone());
-            cc.diagnostics_generation += 1;
-        }
+        // cache entry — which is exactly why it is fenced on the source
+        // identity these diagnostics were computed from rather than
+        // written blind (see the writer's contract).
+        self.store_latest_diagnostics_if_source_unmoved(
+            &canonical_id,
+            profile_hash,
+            captured_whole_hash,
+            diagnostics.clone(),
+        );
 
         // Test-only seam: the compute→publish window. Fence tests land
         // an env / project mutation here to prove the mode-routed
@@ -2206,6 +2241,7 @@ impl VerterHost {
                     render_seed: Some(crate::framework::api_projector::PublicApiRenderSeed {
                         cold_seed: fixed.cold_seed(),
                         view,
+                        fixed,
                     }),
                 })
             })
@@ -2469,6 +2505,48 @@ impl VerterHost {
         // CLEARS the semantic axis when the set is empty (closes F15).
         self.sync_transitive_macro_type_dependencies(&canonical, &transitive_macro_type_deps);
         let macro_tsc = macro_output.tsc;
+        // The PARENT-FACING half of attribute fallthrough. `$attrs` already
+        // answers what this component may READ; this is what a parent may
+        // PASS, and it is the surface a consumer's `<Child title="…" />` is
+        // checked against. Resolved by the single inheritance resolver
+        // (`verter_session` owns it per the Fallthrough / Root Inheritance
+        // CRITICAL rule) and handed to the compiler as data — the compiler
+        // cannot see the resolver. Every uncertainty projects to "widen
+        // nothing"; see `fallthrough_props`.
+        //
+        // The resolve is PINNED to the batch's captured fixed view when that
+        // capture is still promotion-admissible, so this render takes ZERO
+        // additional store-view reads — the O(1)-batch contract this path
+        // documents. A capture that is no longer admissible falls back to the
+        // resolver's own snapshot rather than validating a warm entry against
+        // a stale view.
+        //
+        // The captured fingerprint travels WITH the view. The executor stamps
+        // that captured value (never a fresh live read) and compares it against
+        // the live fingerprint before promoting, so an import/root edit landing
+        // after the one-shot admissibility precheck makes the result
+        // return-only rather than warming a shared entry computed from an old
+        // route view under new fact hashes.
+        let pinned_view = render_seed
+            .as_ref()
+            .map(|seed| seed.fixed)
+            .filter(|fixed| fixed.payload_promotion_admissible(self))
+            .map(|fixed| {
+                let (view, captured_fingerprint) = fixed.executor_fixed_view();
+                (view, captured_fingerprint, fixed.is_current())
+            });
+        //
+        // Root reachability is a TEMPLATE fact and `AnalysisScope::BUILD` — the
+        // preset both shipping carrier producers run under — carries no
+        // template flag. The resolve opens its own request-scoped demand for
+        // exactly the files it walks; see
+        // `resolve_fallthrough_surface_internal_with_overrides`.
+        let fallthrough_resolution =
+            self.resolve_fallthrough_surface_pinned(&canonical, pinned_view);
+        let fallthrough_props = crate::host_resolve::fallthrough_props::project_fallthrough_props(
+            fallthrough_resolution.as_ref(),
+            &|child_canonical_id| self.owner_import_reference_for(&canonical, child_canonical_id),
+        );
         let tsc_mode = match mode {
             PublicApiMode::Public => verter_compiler::tsc::TscMode::Public,
             PublicApiMode::Testing => verter_compiler::tsc::TscMode::Testing,
@@ -2510,15 +2588,18 @@ impl VerterHost {
                     verter_compiler::tsc::MacroTscInput::NotRequired,
                     verter_compiler::tsc::MacroTscInput::Authoritative,
                 ),
+                &fallthrough_props,
             )?;
-            return Ok(Some(TscResponse {
-                code: Arc::from(tsc_out.code),
-                source_map: if tsc_out.source_map.is_empty() {
+            return Ok(Some(TscResponse::new(
+                Arc::from(tsc_out.code),
+                if tsc_out.source_map.is_empty() {
                     None
                 } else {
                     Some(Arc::from(tsc_out.source_map))
                 },
-            }));
+                tsc_out.dialect,
+                tsc_out.ts_carrier_code.map(Arc::from),
+            )));
         };
 
         let tsc_out = verter_compiler::tsc::generate_tsc_from_state(
@@ -2529,28 +2610,83 @@ impl VerterHost {
                 verter_compiler::tsc::MacroTscInput::NotRequired,
                 verter_compiler::tsc::MacroTscInput::Authoritative,
             ),
+            &fallthrough_props,
         )?;
-        Ok(Some(TscResponse {
-            code: Arc::from(tsc_out.code),
-            source_map: if tsc_out.source_map.is_empty() {
+        Ok(Some(TscResponse::new(
+            Arc::from(tsc_out.code),
+            if tsc_out.source_map.is_empty() {
                 None
             } else {
                 Some(Arc::from(tsc_out.source_map))
             },
-        }))
+            tsc_out.dialect,
+            tsc_out.ts_carrier_code.map(Arc::from),
+        )))
     }
 
-    /// Store diagnostics from a failed compile without triggering recompilation.
-    pub(crate) fn store_latest_diagnostics(
+    /// Store a compile's diagnostics ONLY while the live source is still the
+    /// exact revision that compile read.
+    ///
+    /// `latest_diagnostics` is observable state a reader trusts as describing
+    /// the CURRENT buffer: `get_diagnostics` is a pure cached read, and its LSP
+    /// consumers stamp what they read with the document version they captured.
+    /// An upsert clears the slot precisely because the old diagnostics no
+    /// longer describe the file. So a compile that finishes AFTER a newer edit
+    /// must not write into the state that edit just cleared — v2's parse errors
+    /// landing over v3's cleared slot are then indistinguishable from v3's own,
+    /// and a concurrent publisher that captured v3, read the slot and passed
+    /// its own document-identity fence will publish them stamped `v3`.
+    ///
+    /// This mirrors the `Content`-mode publish decline: compare the live
+    /// identity against the one captured with the compiled bytes and write only
+    /// on a match. `whole_hash` is the right grain — ANY byte moving makes these
+    /// diagnostics describe text no longer in the buffer, including a
+    /// style-only edit that leaves `semantic_hash` alone.
+    ///
+    /// Refusing is safe and never strands a file without diagnostics: every
+    /// path that moves the source also schedules a fresh compile for the
+    /// revision that moved it (the document commit signals the coordinator,
+    /// whose debounced tick compiles), so the newest revision always writes its
+    /// own. A vanished live source declines the same way.
+    ///
+    /// Returns whether the write landed.
+    pub(crate) fn store_latest_diagnostics_if_source_unmoved(
         &self,
         canonical_id: &str,
         profile_hash: u64,
+        compiled_whole_hash: Hash16,
         diagnostics: DiagnosticsSnapshot,
-    ) {
-        if let Some(mut cc) = self.compile_cache().get_mut(canonical_id) {
-            cc.latest_diagnostics.insert(profile_hash, diagnostics);
-            cc.diagnostics_generation += 1;
+    ) -> bool {
+        // The identity check runs INSIDE the compile-cache entry guard, with
+        // the write, and that is what makes it a fence rather than a hint.
+        // Checked before acquiring the entry it would be TOCTOU: this compile
+        // could observe its own revision, the upserting edit could then take
+        // the entry and clear, and this write would land after that clear.
+        //
+        // Holding the entry across both closes it because the two orderings
+        // inside `upsert` are fixed: the scheduler source commits
+        // (`submit_batch_atomic` + `wait_batch`) BEFORE the compile-cache
+        // clear takes this same entry. So under this guard, "the scheduler
+        // still reports the compiled hash" implies the clear for any newer
+        // revision has not run yet — and it necessarily runs after this write,
+        // which erases it. The only other order, the clear having already run,
+        // means the scheduler moved first and the check declines.
+        let Some(mut cc) = self.compile_cache().get_mut(canonical_id) else {
+            return false;
+        };
+        let live_whole_hash = self
+            .scheduler
+            .try_get_source(canonical_id)
+            .and_then(|snap| {
+                snap.downcast_data::<crate::host_executor::HostSourceData>()
+                    .map(|live_hd| live_hd.parse.whole_hash)
+            });
+        if live_whole_hash != Some(compiled_whole_hash) {
+            return false;
         }
+        cc.latest_diagnostics.insert(profile_hash, diagnostics);
+        cc.diagnostics_generation += 1;
+        true
     }
 
     #[allow(clippy::type_complexity)]
@@ -2604,7 +2740,7 @@ impl VerterHost {
                     diagnostics =
                         diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
                             severity: HostSeverity::Error,
-                            code: "HOST_MISSING_EXTERNAL_SOURCE".to_string(),
+                            code: crate::types::HOST_MISSING_EXTERNAL_SOURCE.to_string(),
                             message: format!(
                                 "missing external source '{}' for '{}'",
                                 req.specifier, snapshot.canonical_id
@@ -3053,6 +3189,7 @@ impl VerterHost {
     ///   HostBacked/type-resolution request needs it.
     /// - (f) one request-local runtime macro bundle is produced from TypeInfo;
     ///   the render lane does not retain it or mutate dependency state.
+    #[cfg(not(target_arch = "wasm32"))]
     fn compile_entry_runtime_render(
         &self,
         snapshot: &CompileInput,
@@ -3088,7 +3225,7 @@ impl VerterHost {
                     diagnostics =
                         diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
                             severity: HostSeverity::Error,
-                            code: "HOST_MISSING_EXTERNAL_SOURCE".to_string(),
+                            code: crate::types::HOST_MISSING_EXTERNAL_SOURCE.to_string(),
                             message: format!(
                                 "missing external source '{}' for '{}'",
                                 req.specifier, snapshot.canonical_id

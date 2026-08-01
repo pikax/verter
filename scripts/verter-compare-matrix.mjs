@@ -661,7 +661,7 @@ function runRustComparator(manifestPath, runDir) {
   try {
     const result = spawnSync(
       "cargo",
-      ["run", "-p", "verter_core", "--example", "check_matrix", "--", "--manifest", manifestPath],
+      ["run", "-p", "verter_bench", "--example", "check_matrix", "--", "--manifest", manifestPath],
       {
         cwd: VERTER_ROOT,
         stdio: ["pipe", "pipe", "pipe"],
@@ -836,7 +836,7 @@ function runJsComparator(manifest, runDir) {
         verter_file: verterEntry.captured_file,
         reason: `Verter JS parse failure: ${verterParse.error?.slice(0, 200)}`,
         recommended_test: `Add e2e parity test in codegen.rs`,
-        suspected_files: ["crates/verter_core/src/codegen/vue/template/element.rs"],
+        suspected_files: ["crates/verter_compiler/src/template/code_gen/vdom/element.rs"],
       });
       continue;
     }

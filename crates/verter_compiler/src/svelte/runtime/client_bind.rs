@@ -1,7 +1,7 @@
 //! The DOM-hosted `$.bind_*` EMISSION half of the client backend.
 //!
-//! Extracted from `client.rs` (the file-size guard boundary): these are the
-//! [`ClientEmitter`] methods that emit a Svelte `bind:*` directive's runtime call
+//! This focused sibling contains the [`ClientEmitter`] methods that emit a
+//! Svelte `bind:*` directive's runtime call
 //! text — the inline `bind:this` interleave, the per-host bind PRELUDE cleanup
 //! (`$.remove_input_defaults` / `$.remove_textarea_child` + the `bind:group`
 //! per-input value write), the shape-routed `$.bind_*` dispatch, and the

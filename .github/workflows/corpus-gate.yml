@@ -67,22 +67,17 @@ jobs:
   build:
     name: Build gate binaries (once)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-      - uses: pnpm/action-setup@v4
+          key: build
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Build verter-lsp
@@ -108,8 +103,8 @@ jobs:
         with:
           name: corpus-gate-build
           path: ${{ runner.temp }}/gate-build
-          retention-days: 7
           if-no-files-found: error
+          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # One route per machine. Each job is a SINGLE-ROUTE serial gate on a dedicated
@@ -119,6 +114,7 @@ jobs:
     name: Route ${{ matrix.route }}
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -132,10 +128,10 @@ jobs:
           repository: ${{ inputs.corpus_repo }}
           ref: ${{ inputs.corpus_ref }}
           path: .corpus-gate-corpus
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Download gate binaries
@@ -186,12 +182,13 @@ jobs:
     needs: route
     if: always() && inputs.corpus_repo != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Build DX harness

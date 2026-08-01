@@ -635,6 +635,13 @@ fn all_non_admission_reasons() -> Vec<NonAdmissionReason> {
         NonAdmissionReason::UnresolvedProvenance => (),
         NonAdmissionReason::ComputeFailed => (),
         NonAdmissionReason::PartialResult => (),
+        NonAdmissionReason::ResolutionInaccessiblePath => (),
+        NonAdmissionReason::ResolutionUnknownPath => (),
+        NonAdmissionReason::ResolutionWorldChanged => (),
+        NonAdmissionReason::ResolutionViewSuperseded => (),
+        NonAdmissionReason::ResolutionUntrackedBackend => (),
+        NonAdmissionReason::ResolutionIncompleteProvenance => (),
+        NonAdmissionReason::ResolutionRetryExhausted => (),
     };
     vec![
         NonAdmissionReason::IntrinsicNonCacheable,
@@ -650,6 +657,13 @@ fn all_non_admission_reasons() -> Vec<NonAdmissionReason> {
         NonAdmissionReason::UnresolvedProvenance,
         NonAdmissionReason::ComputeFailed,
         NonAdmissionReason::PartialResult,
+        NonAdmissionReason::ResolutionInaccessiblePath,
+        NonAdmissionReason::ResolutionUnknownPath,
+        NonAdmissionReason::ResolutionWorldChanged,
+        NonAdmissionReason::ResolutionViewSuperseded,
+        NonAdmissionReason::ResolutionUntrackedBackend,
+        NonAdmissionReason::ResolutionIncompleteProvenance,
+        NonAdmissionReason::ResolutionRetryExhausted,
     ]
 }
 

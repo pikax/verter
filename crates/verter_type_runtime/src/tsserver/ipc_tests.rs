@@ -4733,3 +4733,333 @@ async fn project_load_suspension_has_an_absolute_silence_backstop() {
         "a child silent beyond the backstop must restart even if Finish was lost"
     );
 }
+
+// ── The tsserver exec boundary: no `\\?\` verbatim path reaches node ────────
+//
+// These assert against the EXACT `tokio::process::Command`
+// `TsserverTypeProvider::spawn` hands to `.spawn()` — `build_tsserver_command`
+// is that command, and `spawn` adds only stdio/process-tree wiring on top. The
+// verbatim inputs are constructed EXPLICITLY, not read back from
+// `Path::canonicalize()`, because canonicalize only *produces* the `\\?\` form
+// on Windows while what the exec boundary must *do* with it is host-independent.
+//
+// Covered on every host: the argv/env this process would exec. Observable only
+// on Windows: that node then starts (the `EISDIR: lstat 'D:'` from
+// `resolveMainPath` is a Windows-only runtime symptom of the same argv).
+
+/// The verbatim `tsserver.js` from the reported Windows failure — the shape
+/// `discovery::validate_tsserver_candidate`'s `canonicalize()` returns there.
+const VERBATIM_TSSERVER: &str = r"\\?\D:\dev\app\node_modules\typescript\lib\tsserver.js";
+
+/// Build the production command, asserting it was not refused.
+fn built(
+    node_path: &str,
+    tsserver_path: &str,
+    pipe: &str,
+    plugin_path: Option<&str>,
+    carrier_store_dir: Option<&str>,
+) -> tokio::process::Command {
+    build_tsserver_command(
+        node_path,
+        tsserver_path,
+        pipe,
+        plugin_path,
+        carrier_store_dir,
+        false,
+    )
+    .expect("the command must build")
+}
+
+fn command_argv(cmd: &tokio::process::Command) -> Vec<String> {
+    cmd.as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn command_env_value(cmd: &tokio::process::Command, key: &str) -> Option<String> {
+    cmd.as_std()
+        .get_envs()
+        .find_map(|(k, v)| (k == key).then(|| v.map(|v| v.to_string_lossy().into_owned()))?)
+}
+
+#[test]
+fn spawn_command_hands_node_a_non_verbatim_main_script() {
+    let cmd = built(
+        r"\\?\D:\tools\node\node.exe",
+        VERBATIM_TSSERVER,
+        r"C:\Users\dev\AppData\Local\Temp\verter-tsserver-cancel-1-0\c*",
+        Some(r"\\?\D:\dev\app\packages\vue-vscode\node_modules"),
+        Some(r"\\?\D:\dev\app\.verter\carriers"),
+    );
+
+    let argv = command_argv(&cmd);
+
+    // The main script argument — the value node's `resolveMainPath` parses.
+    assert_eq!(
+        argv.first().map(String::as_str),
+        Some(r"D:\dev\app\node_modules\typescript\lib\tsserver.js"),
+        "the tsserver main script must reach node without the \\\\?\\ prefix; argv = {argv:?}"
+    );
+
+    // NEGATIVE: nothing in the whole command line — program, any argument, any
+    // environment value — carries a verbatim prefix into the child.
+    let program = cmd.as_std().get_program().to_string_lossy().into_owned();
+    assert!(
+        !program.starts_with(r"\\?"),
+        "the node program is still verbatim: {program}"
+    );
+    for arg in &argv {
+        assert!(
+            !arg.starts_with(r"\\?"),
+            "a verbatim path reached the child argv: {arg}"
+        );
+    }
+    assert_eq!(
+        command_env_value(&cmd, "VERTER_CARRIER_STORE_DIR").as_deref(),
+        Some(r"D:\dev\app\.verter\carriers"),
+        "the carrier store dir is read by the plugin's node fs — no verbatim prefix"
+    );
+    let probe = argv
+        .iter()
+        .position(|a| a == "--pluginProbeLocations")
+        .and_then(|i| argv.get(i + 1))
+        .cloned()
+        .expect("the plugin probe location is passed");
+    assert_eq!(probe, r"D:\dev\app\packages\vue-vscode\node_modules");
+
+    // POSITIVE control: the rest of the command line is intact — the fix must
+    // not have quietly dropped an argument while sanitising paths.
+    for expected in [
+        "--useSyntaxServer=false",
+        "--disableAutomaticTypingAcquisition",
+        "--cancellationPipeName",
+        "--globalPlugins",
+        "@verter/typescript-plugin",
+        "--allowLocalPluginLoads",
+    ] {
+        assert!(
+            argv.iter().any(|a| a == expected),
+            "{expected} must still be passed; argv = {argv:?}"
+        );
+    }
+}
+
+#[test]
+fn spawn_command_passes_a_posix_main_script_through_byte_for_byte() {
+    // The macOS/Linux production shape: canonicalize() yields a plain absolute
+    // path and the exec boundary must be a no-op on it.
+    let posix = "/repo/node_modules/typescript/lib/tsserver.js";
+    let cmd = built("/usr/bin/node", posix, "/tmp/c*", None, None);
+    let argv = command_argv(&cmd);
+    assert_eq!(argv.first().map(String::as_str), Some(posix));
+    assert_eq!(
+        cmd.as_std().get_program().to_string_lossy(),
+        "/usr/bin/node"
+    );
+    // NEGATIVE: no plugin path ⇒ no plugin arguments fabricated.
+    assert!(
+        !argv.iter().any(|a| a == "--globalPlugins"),
+        "plugin args must not appear without a probe location; argv = {argv:?}"
+    );
+}
+
+#[test]
+fn spawn_command_keeps_the_cancellation_glob_template_untouched() {
+    // The `*` template is not a path. A path simplifier must never rewrite it —
+    // a mangled template silently disarms per-request cancellation.
+    let pipe = r"C:\Users\dev\AppData\Local\Temp\verter-tsserver-cancel-9-3\c*";
+    let cmd = built("node", VERBATIM_TSSERVER, pipe, None, None);
+    let argv = command_argv(&cmd);
+    let passed = argv
+        .iter()
+        .position(|a| a == "--cancellationPipeName")
+        .and_then(|i| argv.get(i + 1))
+        .expect("the cancellation template is passed");
+    assert_eq!(passed, pipe);
+}
+
+#[test]
+fn spawn_command_refuses_an_unsimplifiable_main_script_instead_of_launching_a_dead_command() {
+    // A verbatim main script with no Win32 spelling cannot be handed to node at
+    // all: `resolveMainPath` would throw `EISDIR` and the session would die with
+    // a generic "tsserver failed to start". Fail HERE, before the spawn, with a
+    // message that names the reason.
+    for (script, expected_reason) in [
+        (
+            r"\\?\Volume{9c8f1e2a-0000-0000-0000-100000000000}\ts\lib\tsserver.js",
+            "device namespace",
+        ),
+        (r"\\?\D:\ws\NUL\tsserver.js", "reserved Windows device name"),
+        // Server with no share: `\\build01` names no directory.
+        (r"\\?\UNC\build01", "no share"),
+        // Over MAX_PATH — only the verbatim form can name it.
+        (
+            r"\\?\D:\ws\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tsserver.js",
+            "MAX_PATH",
+        ),
+    ] {
+        let error = build_tsserver_command("node", script, "/tmp/c*", None, None, false)
+            .expect_err("an unsimplifiable main script must not build a command");
+        let message = error.to_string();
+        assert!(
+            message.contains(script),
+            "the message must name the path: {message}"
+        );
+        assert!(
+            message.contains(expected_reason),
+            "the message must name the refusal reason ({expected_reason}): {message}"
+        );
+        // NEGATIVE: the refusal is actionable, not just a rejection.
+        assert!(
+            message.contains("typescript.tsdk"),
+            "the message must tell the user what to do: {message}"
+        );
+    }
+}
+
+#[test]
+fn spawn_command_never_refuses_on_the_plugin_probe_location() {
+    // TypeScript PRESERVES a namespaced `//?/…` probe path through
+    // `combinePaths`, `getEncodedRootLength` (root `//?/`), the ancestor walk and
+    // Node10 resolution, so an unrepresentable probe path may still load the
+    // plugin. And if it does not, tsserver still serves every plain `.ts` file:
+    // refusing would turn a degraded session into no session at all. Unlike the
+    // main script — where node provably exits and there is nothing left to
+    // degrade — the probe path is best-effort in EVERY class the simplifier
+    // refuses. The full trace is on `build_tsserver_command`.
+    for probe in [
+        r"\\?\Volume{9c8f1e2a-0000-0000-0000-100000000000}\ext\node_modules",
+        r"\\?\D:\ext\NUL\node_modules",
+        r"\\?\UNC\build01",
+        r"\\?\D:",
+        &format!(r"\\?\D:\{}\node_modules", "d".repeat(300)),
+    ] {
+        let built = build_tsserver_command(
+            "node",
+            r"D:\dev\app\node_modules\typescript\lib\tsserver.js",
+            "/tmp/c*",
+            Some(probe),
+            None,
+            false,
+        );
+        let cmd = built.unwrap_or_else(|e| {
+            panic!("a probe location must never refuse the session ({probe}): {e}")
+        });
+        // Passed through UNCHANGED rather than rewritten to a different
+        // directory — the never-corrupt contract still holds.
+        let argv = command_argv(&cmd);
+        let passed = argv
+            .iter()
+            .position(|a| a == "--pluginProbeLocations")
+            .and_then(|i| argv.get(i + 1))
+            .expect("the probe location is still passed");
+        assert_eq!(
+            passed, probe,
+            "an unsimplifiable probe path must pass through as-is"
+        );
+    }
+}
+
+#[test]
+fn spawn_command_simplifies_a_verbatim_plugin_probe_location() {
+    let cmd = built(
+        "node",
+        r"D:\dev\app\node_modules\typescript\lib\tsserver.js",
+        "/tmp/c*",
+        Some(r"\\?\UNC\build01\share\ext\node_modules"),
+        None,
+    );
+    let argv = command_argv(&cmd);
+    let probe = argv
+        .iter()
+        .position(|a| a == "--pluginProbeLocations")
+        .and_then(|i| argv.get(i + 1))
+        .expect("the probe location is passed");
+    assert_eq!(probe, r"\\build01\share\ext\node_modules");
+    // NEGATIVE: not the naive prefix-strip's relative `UNC\...`, which TypeScript
+    // would resolve against its own cwd and silently fail to find the plugin.
+    assert_ne!(probe, r"UNC\build01\share\ext\node_modules");
+}
+
+#[test]
+fn spawn_command_builds_for_every_main_script_the_simplifier_accepts() {
+    // The refusal must be exactly the simplifier's refusal — a builder that
+    // rejected MORE would take working installs offline.
+    for script in [
+        VERBATIM_TSSERVER,
+        r"D:\dev\app\node_modules\typescript\lib\tsserver.js",
+        r"\\?\UNC\build01\ts\lib\tsserver.js",
+        "/repo/node_modules/typescript/lib/tsserver.js",
+    ] {
+        assert!(
+            build_tsserver_command("node", script, "/tmp/c*", None, None, false).is_ok(),
+            "{script} is representable and must build"
+        );
+    }
+    // The node program and the carrier-store dir are consumed by APIs that DO
+    // accept the verbatim form (`CreateProcessW`; node `fs`), so an
+    // unrepresentable one there must still build — refusing would kill a session
+    // the OS would have started.
+    assert!(
+        build_tsserver_command(
+            r"\\?\Volume{0}\node.exe",
+            "/repo/node_modules/typescript/lib/tsserver.js",
+            "/tmp/c*",
+            None,
+            Some(r"\\?\Volume{0}\carriers"),
+            false,
+        )
+        .is_ok(),
+        "only the module-resolved values are fatal"
+    );
+}
+
+#[test]
+fn spawn_command_simplifies_a_verbatim_unc_install() {
+    // A tsserver on a network share canonicalizes to `\\?\UNC\…` on Windows. The
+    // Win32 form is `\\server\share\…`, NOT the naive prefix-strip's relative
+    // `UNC\server\share\…`.
+    let cmd = built(
+        "node",
+        r"\\?\UNC\build01\ts\node_modules\typescript\lib\tsserver.js",
+        "/tmp/c*",
+        None,
+        None,
+    );
+    assert_eq!(
+        command_argv(&cmd).first().map(String::as_str),
+        Some(r"\\build01\ts\node_modules\typescript\lib\tsserver.js")
+    );
+}
+
+#[test]
+fn inlay_hint_decoder_returns_byte_offsets_and_fails_closed_without_content() {
+    let content = "é\nconst answer = 42;\n";
+    let hint = serde_json::json!({
+        "text": ": number",
+        "position": { "line": 2, "offset": 13 },
+        "kind": "Type",
+        "whitespaceBefore": true,
+    });
+
+    let parsed = parse_tsserver_inlay_hint(&hint, Some(content)).expect("valid hint");
+    assert_eq!(
+        parsed.position, 15,
+        "line/offset is UTF-16 while the provider contract requires bytes"
+    );
+    assert_eq!(parsed.label, ": number");
+    assert!(matches!(parsed.kind, Some(InlayHintKind::Type)));
+    assert_eq!(parsed.padding_left, Some(true));
+
+    assert!(
+        parse_tsserver_inlay_hint(&hint, None).is_none(),
+        "without the target text a packed line/offset sentinel would be misread as bytes"
+    );
+    let out_of_range = serde_json::json!({
+        "text": ": number",
+        "position": { "line": 200, "offset": 1 },
+        "kind": "Type",
+    });
+    assert!(parse_tsserver_inlay_hint(&out_of_range, Some(content)).is_none());
+}

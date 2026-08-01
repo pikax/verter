@@ -502,7 +502,7 @@ function armedLine(controlDir: string): string {
 
 /** The extension's dual-written `[buildServerOptions]` line with the argv JSON-encoded. */
 function buildServerOptionsLine(argv: string[]): string {
-  return `[INFO] [buildServerOptions] typeProvider=tsgo, tsdk=C:\\ext\\ts (bundled), args=${JSON.stringify(
+  return `[INFO] [buildServerOptions] typeProvider=tsgo, tsdk=C:\\ext\\ts, args=${JSON.stringify(
     argv,
   )}`;
 }

@@ -7,8 +7,8 @@
 //!
 //! The per-arm FACT + TAG formulas live ONCE in the [`summary`] constructor
 //! layer; both `RaisedShapeAlg` and `RaisedFactsAlg` build their per-arm values
-//! through it, so the two can never drift (parity is structural). Split from the
-//! parent for file-size; the fold + the algebra trait + the interned term live
+//! through it, so the two can never drift (parity is structural). The node-domain
+//! algebras stay separate while the fold, algebra trait, and interned term remain
 //! in the parent `shape_engine` module.
 
 use std::sync::Arc;

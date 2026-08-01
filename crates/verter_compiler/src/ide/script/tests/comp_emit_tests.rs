@@ -71,7 +71,7 @@ const el = ref()
 }
 
 #[test]
-fn comp_function_generic() {
+fn comp_function_captures_outer_generic() {
     let (code, _, _tc) = gen_tsx_script_full(
         r#"<script setup lang="ts" generic="T">
 import { ref } from 'vue'
@@ -81,9 +81,20 @@ const msg = {} as T
 <template><div ref="el">{{ msg }}</div></template>"#,
     );
     assert!(
-        code.contains("function ___VERTER___Comp") && code.contains("<T>()"),
-        "Comp function should have generics in code: {}",
-        code
+        code.contains("function ___VERTER___TemplateBindingFN<T>()"),
+        "outer wrapper should retain the component generic: {code}"
+    );
+    let comp_line = code
+        .lines()
+        .find(|line| line.contains("function ___VERTER___Comp"))
+        .expect("nested Comp helper");
+    assert!(
+        comp_line.ends_with("() {"),
+        "nested Comp should capture the outer generic scope: {comp_line}"
+    );
+    assert!(
+        !comp_line.contains("<T>"),
+        "nested Comp must not redeclare an unused generic: {comp_line}"
     );
 }
 
@@ -107,7 +118,7 @@ const el = ref<HTMLDivElement>()
 }
 
 #[test]
-fn get_root_component_generic() {
+fn get_root_component_captures_outer_generic() {
     let (code, _, _tc) = gen_tsx_script_full(
         r#"<script setup lang="ts" generic="T extends string">
 import { ref } from 'vue'
@@ -117,9 +128,16 @@ const msg = {} as T
 <template><div ref="el">{{ msg }}</div></template>"#,
     );
     assert!(
-        code.contains("function ___VERTER___getRootComponent<T extends string>()"),
-        "getRootComponent should have generics in code: {}",
-        code
+        code.contains("function ___VERTER___TemplateBindingFN<T extends string>()"),
+        "outer wrapper should retain the constrained component generic: {code}"
+    );
+    assert!(
+        code.contains("function ___VERTER___getRootComponent()"),
+        "getRootComponent should capture the outer generic scope: {code}"
+    );
+    assert!(
+        !code.contains("function ___VERTER___getRootComponent<T extends string>()"),
+        "getRootComponent must not redeclare the component generic: {code}"
     );
 }
 

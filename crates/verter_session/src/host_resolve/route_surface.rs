@@ -2,7 +2,8 @@
 //! dependency-source readers.
 //!
 //! Owns:
-//! - `route_surface_is_edge_current` — the shared edge-currency oracle.
+//! - `indexed_surface_is_current` — the shared parse-env reuse gate.
+//! - `direct_import_canonicals` — the owner's resolved first-level deps.
 //! - `resolve_prepared_decl_target` /
 //!   `resolve_decl_in_scope_with_reexport_chain` (test-only) — host-state
 //!   helpers that consult the prepared-decl bundles.
@@ -18,80 +19,67 @@ use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
 
 impl VerterHost {
-    /// The COMPLETE reuse gate for an `IndexedReady` surface: the
-    /// edge-currency oracle ([`Self::route_surface_is_edge_current`])
-    /// PLUS the `project_generation` stamp for any surface with
-    /// cross-file edges PLUS the owner's `parse_env_hash` (the R21 parse
-    /// dimension) once the project graph has moved. Route-resolution
-    /// mutations (`configure_projects` / `set_exact_resolutions` /
-    /// `configure_resolver`) bump `project_generation` without bumping
-    /// `content_generation`; a content-current artifact whose edges were
-    /// resolved under the old project graph fails here and routes
-    /// through the edge-refresh materialise (payload reused, route
-    /// surface rebuilt — parse env permitting; see
-    /// `ensure_indexed_ready_serve`'s refresh decision). A surface with NO
-    /// cross-file edges is insensitive to route mutations and reuses on
-    /// edge currency — but its parse/env payloads are reusable only
-    /// while the owner's parse environment is unchanged, so a stale
-    /// project stamp demands parse-env equality before the
-    /// route-insensitive reuse applies. Every parse-env-moving mutation
-    /// bumps `project_generation` (config/workspace mutations), so a
-    /// CURRENT project stamp proves the parse env has not moved and the
-    /// per-canonical env lookup is skipped on the hot warm path.
+    /// The COMPLETE reuse gate for a published `IndexedReady` surface:
+    /// the owner's `parse_env_hash` (the R21 parse dimension) still
+    /// equals the environment the artifact was parsed under.
+    ///
+    /// That is the whole gate. `IndexedReady` is a content-addressed
+    /// PARSE artifact — authored import/export syntax, specifiers,
+    /// shallow declarations, locators, parse-domain facts — so nothing
+    /// on it is dependency-set derived and no route-resolution mutation
+    /// (`configure_projects` / `set_exact_resolutions` /
+    /// `configure_resolver`) can stale it. The edge-currency oracle this
+    /// gate used to compose (a global `content_generation` equality over
+    /// baked cross-file targets, plus a `project_generation` stamp) is
+    /// deleted with the baked targets it guarded: resolution currency is
+    /// a resolve-domain answer carried by the owner's import-route
+    /// resolution witness and validated against a store view's captured
+    /// immutable resolution world.
+    ///
+    /// A moved parse environment still routes the artifact through the
+    /// FULL re-materialise (re-parse), because its `framework_parse` /
+    /// `shallow_state` / `decl_bodies` were produced under the old one.
     pub(crate) fn indexed_surface_is_current(
         &self,
         canonical_id: &str,
         indexed: &crate::project_type_store::IndexedReady,
     ) -> bool {
-        if !self.route_surface_is_edge_current(indexed) {
-            return false;
-        }
-        if indexed.project_generation == self.project_type_store.current_project_generation() {
-            return true;
-        }
-        !indexed.has_cross_file_edges()
-            && self.host_view_env_hashes_for(canonical_id).parse_env_hash == indexed.parse_env_hash
+        self.host_view_env_hashes_for(canonical_id).parse_env_hash == indexed.parse_env_hash
     }
 
-    /// The single edge-currency oracle for ANY route surface — base and
-    /// session-overlay `IndexedReady` artifacts alike.
+    /// The owner's DIRECT import targets — every authored import
+    /// specifier on the owner's shallow surface, resolved through the
+    /// shared route-edge policy.
     ///
-    /// EVERY cross-file edge — a wildcard `export *`, a named reexport, a
-    /// plain import target, AND a resolved `import_routes` entry (the
-    /// external `src=` class, caller-pushed route snapshots) — bakes its
-    /// target `canonical_id` at the workspace generation when the edge was
-    /// resolved (`edge_generation`). Those baked canonicals depend on the
-    /// DEPENDENCY file set, not the owner's own content, so a
-    /// content-pinned surface whose owner content is unchanged can still
-    /// hold a STALE edge after a dependency appears or retargets (e.g. a
-    /// `.js` edge whose `.d.ts` companion later appears, or a
-    /// directory-index edge a more-specific file shadows): the file set
-    /// changed and `content_generation` advanced.
+    /// The shallow inventory is PARSE domain: it names specifiers, never
+    /// targets. Consumers that need the resolved first-level dependency
+    /// set (the component-meta footprint file-role classifier) demand it
+    /// here, through the one resolution authority, instead of reading a
+    /// target baked into a content-addressed artifact — a baked target
+    /// goes stale whenever the dependency file set moves while the
+    /// owner's own bytes stay put.
     ///
-    /// The edge inventory consulted here is the COMPLETE
-    /// [`crate::project_type_store::IndexedReady::has_cross_file_edges`]
-    /// authority — the shallow-inventory component alone
-    /// (`has_shallow_cross_file_edges`) is blind to import-route-only
-    /// artifacts, whose only baked targets live in `import_routes`; judging
-    /// on the component would keep such a surface "current" forever across
-    /// `content_generation` moves and stale-serve route facts and compile
-    /// slots after retargets. The oracle therefore takes the artifact, not
-    /// a bare shallow state.
-    ///
-    /// A surface is edge-current iff it carries no cross-file edges (nothing
-    /// dependency-set-derived to go stale) OR its `edge_generation` still
-    /// matches the live workspace `content_generation`. Every `Route`-fact
-    /// producer/validator and the materializer-reuse gates route a surface
-    /// through THIS predicate so a non-edge-current surface is never
-    /// produced, served, or reused. The check is a cheap per-read stamp
-    /// compare; the real work happens once, in the edge-refresh materialise
-    /// (route surface rebuilt from the retained content payload — no
-    /// re-read, no re-parse) that an edge-stale surface routes through.
-    pub(crate) fn route_surface_is_edge_current(
+    /// A specifier that does not resolve, or whose resolution is
+    /// refused, contributes nothing.
+    pub(crate) fn direct_import_canonicals(
         &self,
-        indexed: &crate::project_type_store::IndexedReady,
-    ) -> bool {
-        !indexed.has_cross_file_edges() || indexed.edge_generation == self.ws().content_generation()
+        canonical_id: &str,
+    ) -> rustc_hash::FxHashSet<String> {
+        let Some(state) = self.shallow_file_state(canonical_id) else {
+            return rustc_hash::FxHashSet::default();
+        };
+        state
+            .import_targets
+            .values()
+            .filter_map(|target| {
+                match self.resolve_route_edge_canonical(canonical_id, &target.source_specifier) {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                        admitted.into_result()
+                    }
+                    verter_workspace::ResolutionPublication::Refused(_) => None,
+                }
+            })
+            .collect()
     }
 
     /// host-level prepared-decl barrel routing

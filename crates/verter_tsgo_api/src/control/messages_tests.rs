@@ -131,6 +131,10 @@ fn wait_initialized_result_round_trips_and_is_camel_case() {
         observed_initialize_id: serde_json::json!(7),
         root_uri: Some("file:///w".to_string()),
         workspace_folders: Some(serde_json::json!([{ "uri": "file:///w", "name": "w" }])),
+        semantic_tokens_legend: Some(serde_json::json!({
+            "tokenTypes": ["namespace"],
+            "tokenModifiers": ["declaration"],
+        })),
     };
     round_trip(&result);
     let obj = serde_json::to_value(&result).unwrap();
@@ -139,6 +143,23 @@ fn wait_initialized_result_round_trips_and_is_camel_case() {
     assert!(obj.contains_key("observedInitializeId"));
     assert!(obj.contains_key("rootUri"));
     assert!(obj.contains_key("workspaceFolders"));
+    assert!(obj.contains_key("semanticTokensLegend"));
+}
+
+/// Wire compat with shims that predate the legend field: a payload WITHOUT
+/// `semanticTokensLegend` still deserializes (the field defaults to `None`, and
+/// the downstream remap fails closed rather than erroring the handshake).
+#[test]
+fn wait_initialized_result_tolerates_a_legendless_shim_payload() {
+    let legacy = serde_json::json!({
+        "serverInfoVersion": "7.0.1-rc",
+        "observedInitializeId": 7,
+        "rootUri": "file:///w",
+        "workspaceFolders": null,
+    });
+    let parsed: WaitInitializedResult =
+        serde_json::from_value(legacy).expect("legacy payload must parse");
+    assert_eq!(parsed.semantic_tokens_legend, None);
 }
 
 #[test]

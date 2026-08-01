@@ -1,0 +1,47 @@
+{
+  "name": "@verter/binary-launcher",
+  "version": "0.0.1-beta.3",
+  "description": "Shared platform resolution for Verter's per-platform binary packages",
+  "keywords": [
+    "binary",
+    "launcher",
+    "platform",
+    "verter"
+  ],
+  "homepage": "https://verterjs.dev/",
+  "license": "MIT",
+  "author": "pikax",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "files": [
+    "cli.js",
+    "cli.d.ts",
+    "index.js",
+    "index.d.ts"
+  ],
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./cli": {
+      "types": "./cli.d.ts",
+      "default": "./cli.js"
+    }
+  },
+  "scripts": {
+    "build": "echo 'no build step — plain CommonJS'",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "vitest": "^4.1.7"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,243 @@
+import { strict as assert } from "node:assert";
+import { pollBudget } from "./timeouts";
+import * as path from "node:path";
+import * as vscode from "vscode";
+
+import { getCompletions, sleep } from "../helpers";
+
+/**
+ * A completion probe: a caret position reached the way a user reaches it, plus the
+ * three-part expectation the coordinator asked every completion case to report —
+ * what IS offered, what is MISSING that should be there, and what is WRONGLY offered.
+ *
+ * ## Why the typing matters
+ *
+ * Completion invoked BY TYPING a trigger character and completion requested at a
+ * prepared offset are different requests: the first arrives with
+ * `CompletionTriggerKind.TriggerCharacter` and the typed character, against a document
+ * that CONTAINS that character. A probe therefore inserts {@link typed} into the
+ * document through a real edit before asking, and passes {@link triggerCharacter} so
+ * providers observe the trigger kind a keystroke produces.
+ *
+ * ## The boundary, stated rather than implied
+ *
+ * VS Code exposes no API to read the suggest widget, so a test cannot observe what the
+ * user literally SEES. The closest faithful substitute is the request the widget itself
+ * issues, against post-typing document text — that is what this runs. It does NOT cover
+ * the widget's own filtering, sorting, or its decision to open at all. A regression that
+ * only changes ranking, or that stops the widget auto-opening while leaving the provider
+ * answer intact, still passes here.
+ */
+export interface CompletionProbe {
+  /** Capability-id segment; also the label in the report. */
+  readonly id: string;
+  /** Workspace-relative file the probe runs in. */
+  readonly file: string;
+  /**
+   * A UNIQUE substring; the caret lands at its END. Uniqueness is asserted, so a
+   * fixture edit that duplicates the anchor fails loudly instead of silently probing
+   * the wrong position.
+   */
+  readonly caretAfter: string;
+  /** Text typed at the caret before asking. Empty means an explicit invoke. */
+  readonly typed: string;
+  /** The character providers should see as the trigger; omit for an explicit invoke. */
+  readonly triggerCharacter?: string;
+  /** A short description of what a user is doing here, used in failure output. */
+  readonly gesture: string;
+}
+
+/** The three-part expectation for a probe. */
+export interface CompletionExpectation {
+  /** Labels that MUST be offered. Missing ones are the "missing" half of the report. */
+  readonly mustOffer: readonly string[];
+  /**
+   * Labels that must NOT be offered. A completion list containing a stale or invented
+   * name is worse than an empty one, because the user acts on it.
+   */
+  readonly mustNotOffer: readonly string[];
+  /**
+   * Labels from a DIFFERENT source that must survive alongside the ones under test.
+   * This is the displacement control: adding a source must not evict the existing one.
+   */
+  readonly mustNotDisplace: readonly string[];
+}
+
+function workspaceRoot(): string {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  assert.ok(root, "completion contract requires one workspace root");
+  return root;
+}
+
+async function openProbeFile(relative: string): Promise<vscode.TextDocument> {
+  const uri = vscode.Uri.file(path.normalize(path.join(workspaceRoot(), relative)));
+  const doc = await vscode.workspace.openTextDocument(uri);
+  await vscode.window.showTextDocument(doc);
+  return doc;
+}
+
+function completionLabel(item: vscode.CompletionItem): string {
+  return typeof item.label === "string" ? item.label : item.label.label;
+}
+
+/** The observed result of one probe. */
+export interface ProbeObservation {
+  readonly id: string;
+  readonly labels: string[];
+  /** The document text around the caret at request time, for failure output. */
+  readonly context: string;
+}
+
+/**
+ * Drive one probe against real post-typing text and return every offered label.
+ *
+ * The inserted text is ALWAYS reverted, including on failure, so probes cannot leak
+ * state into one another or into the rest of the contract.
+ */
+export async function observeCompletion(probe: CompletionProbe): Promise<ProbeObservation> {
+  const doc = await openProbeFile(probe.file);
+  const text = doc.getText();
+  const first = text.indexOf(probe.caretAfter);
+  assert.notEqual(first, -1, `probe ${probe.id}: anchor not found: ${probe.caretAfter}`);
+  assert.equal(
+    text.indexOf(probe.caretAfter, first + 1),
+    -1,
+    `probe ${probe.id}: anchor is not unique: ${probe.caretAfter}`,
+  );
+
+  const caretOffset = first + probe.caretAfter.length;
+  const caret = doc.positionAt(caretOffset);
+  let inserted = false;
+  try {
+    if (probe.typed.length > 0) {
+      const edit = new vscode.WorkspaceEdit();
+      edit.insert(doc.uri, caret, probe.typed);
+      assert.equal(
+        await vscode.workspace.applyEdit(edit),
+        true,
+        `probe ${probe.id}: could not type ${JSON.stringify(probe.typed)}`,
+      );
+      inserted = true;
+      // Let the server observe the change before the request; the completion answer
+      // must reflect the typed character, not the pre-typing buffer.
+      await sleep(150);
+    }
+
+    const requestPosition = doc.positionAt(caretOffset + probe.typed.length);
+    // Sample until the answer QUIESCES — two consecutive identical label sets — so a
+    // probe cannot read a half-synced server that has not yet attached the semantic
+    // source for the character just typed.
+    //
+    // Deliberately settle-based, never expectation-based: this waits for the answer to
+    // STOP CHANGING, not for the answer the test wants. A stable wrong answer settles
+    // immediately and still fails, so this cannot become retry-to-green.
+    const deadline = Date.now() + pollBudget("completionContractSettle");
+    let previous: string | undefined;
+    let labels: string[] = [];
+    for (;;) {
+      const list = await getCompletions(doc.uri, requestPosition, probe.triggerCharacter);
+      labels = (list?.items ?? []).map(completionLabel);
+      const fingerprint = `${labels.length}:${[...labels].sort().join("\u0000")}`;
+      if (previous === fingerprint || Date.now() >= deadline) break;
+      previous = fingerprint;
+      await sleep(250);
+    }
+    const lineText = doc.lineAt(requestPosition.line).text;
+    return { id: probe.id, labels, context: lineText.trim() };
+  } finally {
+    if (inserted) {
+      const undo = new vscode.WorkspaceEdit();
+      undo.delete(
+        doc.uri,
+        new vscode.Range(caret, doc.positionAt(caretOffset + probe.typed.length)),
+      );
+      assert.equal(
+        await vscode.workspace.applyEdit(undo),
+        true,
+        `probe ${probe.id}: could not revert the typed text`,
+      );
+    }
+  }
+}
+
+/** Render the three-part report the coordinator asked for. */
+export function completionReport(
+  probe: CompletionProbe,
+  observation: ProbeObservation,
+  expectation: CompletionExpectation,
+): string {
+  const offered = new Set(observation.labels);
+  const missing = expectation.mustOffer.filter((label) => !offered.has(label));
+  const wrong = expectation.mustNotOffer.filter((label) => offered.has(label));
+  const displaced = expectation.mustNotDisplace.filter((label) => !offered.has(label));
+  const sample = observation.labels.slice(0, 40).join(", ");
+  return (
+    `probe ${probe.id} (${probe.gesture}) at \`${observation.context}\`\n` +
+    `    offered  ${observation.labels.length}: ${sample}${observation.labels.length > 40 ? ", …" : ""}\n` +
+    `    missing  ${missing.length ? missing.join(", ") : "none"}\n` +
+    `    wrong    ${wrong.length ? wrong.join(", ") : "none"}\n` +
+    `    displaced ${displaced.length ? displaced.join(", ") : "none"}`
+  );
+}
+
+/**
+ * Assert a probe's three-part expectation.
+ *
+ * An EMPTY list is reported as its own failure mode: "correctly empty" and "silently
+ * gave up" are different outcomes and an assertion that tolerates `[]` is how a dead
+ * completion source reads as green.
+ */
+export async function assertCompletionProbe(
+  probe: CompletionProbe,
+  expectation: CompletionExpectation,
+): Promise<void> {
+  const observation = await observeCompletion(probe);
+  const report = completionReport(probe, observation, expectation);
+
+  assert.ok(
+    observation.labels.length > 0,
+    `probe ${probe.id} returned NO completions at all — the source gave up rather than ` +
+      `answering emptily on purpose.\n${report}`,
+  );
+
+  const offered = new Set(observation.labels);
+  assert.deepEqual(
+    expectation.mustOffer.filter((label) => !offered.has(label)),
+    [],
+    `completion is MISSING required entries.\n${report}`,
+  );
+  assert.deepEqual(
+    expectation.mustNotOffer.filter((label) => offered.has(label)),
+    [],
+    `completion offered WRONG entries — a user will act on these.\n${report}`,
+  );
+  assert.deepEqual(
+    expectation.mustNotDisplace.filter((label) => !offered.has(label)),
+    [],
+    `a completion source DISPLACED an existing one.\n${report}`,
+  );
+}
+
+/**
+ * Assert that every probe answers at all, and log the full three-part report for each.
+ *
+ * This is the survey control: it fails the moment ANY probed gesture stops producing
+ * completions, which is the failure mode a per-label assertion cannot see (a source that
+ * returns nothing has no labels to be wrong about).
+ */
+export async function assertEveryProbeAnswers(probes: readonly CompletionProbe[]): Promise<void> {
+  const silent: string[] = [];
+  for (const probe of probes) {
+    const observation = await observeCompletion(probe);
+    console.log(
+      `    ${completionReport(probe, observation, { mustOffer: [], mustNotOffer: [], mustNotDisplace: [] })}`,
+    );
+    if (observation.labels.length === 0) silent.push(`${probe.id} (${probe.gesture})`);
+  }
+  assert.deepEqual(
+    silent,
+    [],
+    `completion produced NOTHING for these gestures — each is a source that gave up, ` +
+      `not a source that is correctly empty: ${silent.join("; ")}`,
+  );
+}

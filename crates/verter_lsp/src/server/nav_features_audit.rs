@@ -35,11 +35,11 @@ pub(super) async fn handle_hover_with_audit(
         .uri
         .clone();
     let position = params.text_document_position_params.position;
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::Hover,
-        canonical_id,
+        target_identity,
         Some(position),
         async move { handle_hover(server, params).await },
         |payload, value| {
@@ -58,11 +58,11 @@ pub(super) async fn handle_completion_with_audit(
     let host = server.documents.host_arc();
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::Completion,
-        canonical_id,
+        target_identity,
         Some(position),
         async move { handle_completion(server, params).await },
         |payload, value| {
@@ -92,11 +92,11 @@ pub(super) async fn handle_goto_definition_with_audit(
         .uri
         .clone();
     let position = params.text_document_position_params.position;
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::GotoDefinition,
-        canonical_id,
+        target_identity,
         Some(position),
         async move { handle_goto_definition(server, params).await },
         |payload, value| {
@@ -122,11 +122,11 @@ pub(super) async fn handle_references_with_audit(
     let host = server.documents.host_arc();
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::References,
-        canonical_id,
+        target_identity,
         Some(position),
         async move { handle_references(server, params).await },
         |payload, value| {
@@ -148,11 +148,11 @@ pub(super) async fn handle_rename_with_audit(
     let host = server.documents.host_arc();
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::Rename,
-        canonical_id,
+        target_identity,
         Some(position),
         async move { handle_rename(server, params).await },
         |payload, value| {

@@ -75,8 +75,8 @@ These colors are theme-aware and have separate defaults for dark, light, high co
 
 | Setting                             | Type                                                                                     | Default         | Description                                                                             |
 | ----------------------------------- | ---------------------------------------------------------------------------------------- | --------------- | --------------------------------------------------------------------------------------- |
-| `verter.mcp.enabled`                | `boolean`                                                                                | `true`          | Start an HTTP MCP endpoint alongside the LSP, providing Vue analysis tools to AI agents |
-| `verter.mcp.port`                   | `number`                                                                                 | `6772`          | Port for the MCP HTTP endpoint. Set to `0` for auto-assign.                             |
+| `verter.mcp.enabled`                | `boolean`                                                                                | `true`          | Spawn the standalone `verter-mcp` HTTP server alongside the LSP, providing Vue analysis tools to AI agents |
+| `verter.mcp.port`                   | `number`                                                                                 | `0`             | Port for the MCP HTTP endpoint. `0` (the default) auto-assigns a free port, which is then registered with VS Code's MCP provider API and mirrored into `.mcp.json`. |
 | `verter.mcp.lintPreset`             | `"essential"` \| `"recommended"` \| `"all"` \| `"performance"` \| `"a11y"` \| `"strict"` | `"recommended"` | Lint preset for the MCP server's diagnostic tools                                       |
 | `verter.mcp.claudeCodeNotification` | `boolean`                                                                                | `true`          | Show a notification when Claude Code is detected with MCP setup instructions            |
 
@@ -97,8 +97,24 @@ See [MCP Server](/editor/mcp-server) for details on setup and available tools.
 | `shared-tsgo` | Prefer the exact editor-owned Native Preview Program; activate managed TSGO only after an observed attach failure |
 | `tsgo`        | Uses a separately managed TSGO process (operator override, native Go binary)                                    |
 | `tsserver`    | Uses workspace TypeScript version (tsserver)                                                                    |
-| `extension`   | Hosts the TypeScript language service in the extension process (experimental)                                  |
+| `extension`   | Hosts the TypeScript language service in the extension process (experimental). Resolution is per project: each project is served from the TypeScript it installed, so a monorepo package with its own version uses that version. "Installed" means the project's own `node_modules` chain and nothing else — unlike `tsserver` below, this mode has no global tier, so a TypeScript reachable only through `NODE_PATH` or a legacy global folder is a compiler the project never chose and is not used. There is no bundled fallback either — a project with no resolvable TypeScript, one whose install carries no `lib.*.d.ts` default libraries, or one on the native (7.x/tsgo) TypeScript this in-process service cannot drive, is not served, and Verter tells you what to install or which provider to pick. Sibling projects keep working |
 | `off`         | Disables TypeScript type checking (verter-only mode)                                                            |
+
+### `verter.typescript.tsdk` and TypeScript discovery
+
+Leave `verter.typescript.tsdk` empty and the language server discovers TypeScript
+itself: the project-local install first (walking up from the owning project),
+then the configured `tsdk`, then a global install — refusing any candidate that
+ships no `lib.*.d.ts` default libraries, and failing with an actionable error
+when nothing resolves.
+
+The extension no longer passes its own TypeScript as a default `--tsdk`. That
+copy was a complete, library-carrying install and did serve correctly, so this is
+a deliberate, bounded behaviour change rather than the removal of a broken path:
+it was a compiler the project never chose, silently pinned to whatever version
+the extension happened to ship. The one workspace shape affected is a project
+with **neither** a local **nor** a global TypeScript — previously served by the
+extension's copy, now told to install one or set `verter.typescript.tsdk`.
 
 ::: warning TSGO Limitation
 TSGO has a known limitation: **re-exported `.vue` components** (e.g., barrel files like `export { default as MyComp } from './MyComp.vue'`) may lose their typing when imported in another SFC. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found. If you experience missing types with TSGO, switch to `tsserver`.

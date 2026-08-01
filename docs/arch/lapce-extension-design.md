@@ -57,7 +57,7 @@ Key API (verbatim signatures from [docs.rs `PluginServerRpcHandler`](https://doc
 ### 2.2 The `volt.toml` manifest
 
 ```toml
-name = "verter"
+name = "verter-volt"
 version = "0.1.0"
 author = "Verter authors"
 display-name = "Verter (Vue / Svelte)"
@@ -287,7 +287,9 @@ This section is the original decomposition plan. **Landed today (v0 interim):** 
 ## 6. Build / CI integration
 
 - **Local build:** new root `package.json` script `build:lapce` → ensures the `wasm32-wasip1` target, runs `cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release`, copies the `.wasm` into `extensions/lapce/bin/`. It is **not** added to the default `pnpm build` chain (it is an independent editor artifact, not a dependency of the core build), but is available and CI-gated.
-- **CI (`.github/workflows/lapce.yml`, LANDED):** a `lapce` workflow with a **3-OS matrix** (`ubuntu-latest`, `macos-latest`, `windows-latest`) per the cross-platform CRITICAL rule, with `shell: bash` on every run step so the Windows runner uses Git-bash. On **all three** OSes it: installs the `wasm32-wasip1` target, builds the volt (`cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release`), runs the host-target `cargo test`, and runs `cargo clippy --target wasm32-wasip1 -- -D warnings` + `cargo fmt --check`. The portability rule mandates the build + host launch surface pass on macOS, Windows, AND Linux, so the build-smoke runs on all three host OSes (not a single Linux runner).
+- **CI (the `editor-lapce` job in `.github/workflows/ci.yml`, LANDED):** a single Linux job that installs the `wasm32-wasip1` target, builds the volt (`cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release`), runs the host-target `cargo test`, runs `cargo clippy --target wasm32-wasip1 -- -D warnings` + `cargo fmt --check`, and drives the production launch plan against the shared `verter-lsp` binary built once by `build-editor-lsp`. **Linux-only verification.** This previously was a standalone `lapce.yml` with a 3-OS matrix that rebuilt `verter-lsp --release` itself on every run. Both `ci.yml` (per PR) and `release.yml` (per tag) now run the volt build, host-target tests, clippy and rustfmt on `ubuntu-latest` ONLY. macOS and Windows runners bill at 10x and 2x, and these legs verify rather than ship, so the cost is not justified — the matrix entries are left commented in `release.yml` to restore.
+
+**Coverage note:** the volt build and host launch surface are no longer exercised on macOS or Windows, so the Cross-Platform Portability CRITICAL rule is NOT discharged for this extension by CI. Two things bound the risk: the volt itself targets `wasm32-wasip1`, a host-independent cross-compile whose output does not vary by build host; and `verter-lsp` is still built natively on macOS and Windows by `build-lsp` for the shipped binaries, so the server users actually launch is still proven to compile on those platforms. What is unproven is the volt's own build and host-target unit suite off Linux.
 - **Release (ROADMAP, gated on §8 — not landed):** a future matrix job builds `verter-lsp` for `{x86_64,aarch64} × {apple-darwin, pc-windows-msvc, unknown-linux-musl}`, emits checksums, uploads as GitHub Release assets; a follow-up job stamps the future managed-download manifest (`extensions/lapce/src/manifest.rs`, which does not exist in v0) with URLs+hashes, rebuilds the volt, and runs `volts publish`.
 - The existing workspace gate (`cargo nextest run --workspace` + `cargo test -p verter_session --tests`) is **unaffected** because the volt crate is excluded from the workspace (§4.1). v0 makes **no** server-side change, so there is nothing for the workspace gate to additionally cover; the volt's own gate is the `lapce` CI workflow. (The roadmap L3 handshake, when it lands, would be exercised by the existing `crates/verter_lsp/tests/` suite the workspace gate already covers.)
 

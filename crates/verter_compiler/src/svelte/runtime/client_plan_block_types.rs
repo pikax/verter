@@ -1,7 +1,7 @@
 //! The CONTROL-FLOW block + block-local declaration / `{@debug}` carriers of
 //! the narrow client plan (`{#if}`/`{#each}`/`{#await}`/`{#key}` heads, the
-//! `{@const}` / declaration-tag declarations, the debug entries) — extracted
-//! from `client_plan_types` under the file-size guard. Every head expression
+//! `{@const}` / declaration-tag declarations, the debug entries), kept separate
+//! from `client_plan_types` so the control-flow vocabulary stays focused. Every head expression
 //! is a PREPARED authored value (see
 //! [`super::client_legacy_value::PreparedTemplateValue`]); the emitters
 //! serialize the carriers and never re-derive a wrap.

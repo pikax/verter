@@ -1,12 +1,17 @@
 import { defineComponent } from "vue"
+type __Verter_RootElementAttrs<Tag extends string> = Tag extends keyof import("vue").IntrinsicElementAttributes ? import("vue").IntrinsicElementAttributes[Tag] : {}
+declare module "vue" {
+  interface IntrinsicElementAttributes {}
+}
+type __Verter_DataAttrs = { [Key in `data-${string}`]?: unknown }
 type __OmitNew<T> = { [K in keyof T]: T[K] }
 
 const __comp = defineComponent({
 })
 
 declare const Generics: __OmitNew<typeof __comp> & {
-  new<T>(props?: import("vue").PublicProps & { items: T[]; selected: T }): {
-    $props: import("vue").PublicProps & { items: T[]; selected: T },
+  new<T>(props?: import("vue").PublicProps & { items: T[]; selected: T } & Omit<__Verter_RootElementAttrs<"div">, "class" | "style" | keyof import("vue").PublicProps | keyof ({ items: T[]; selected: T })> & __Verter_DataAttrs): {
+    $props: import("vue").PublicProps & { items: T[]; selected: T } & Omit<__Verter_RootElementAttrs<"div">, "class" | "style" | keyof import("vue").PublicProps | keyof ({ items: T[]; selected: T })> & __Verter_DataAttrs,
     $emit: (event: string, ...args: unknown[]) => void,
     $data: {},
     $attrs: import("vue").HTMLAttributes,
@@ -14,4 +19,4 @@ declare const Generics: __OmitNew<typeof __comp> & {
   }
 }
 export default Generics
-//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovR2VuZXJpY3MudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCIgZ2VuZXJpYz1cIlRcIj5cbmRlZmluZVByb3BzPHsgaXRlbXM6IFRbXTsgc2VsZWN0ZWQ6IFQgfT4oKVxuPC9zY3JpcHQ+XG48dGVtcGxhdGU+PGRpdiAvPjwvdGVtcGxhdGU+XG4iXSwibWFwcGluZ3MiOiJBO0E7QTtBO0E7O0E7QSw2Q0FDWSxFQUFFLFlBQVksYTtBLHdDQUFkLEVBQUUsWUFBWSxhO0EsVywyQztBO0E7QTtBO0E7QSJ9
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovR2VuZXJpY3MudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCIgZ2VuZXJpYz1cIlRcIj5cbmRlZmluZVByb3BzPHsgaXRlbXM6IFRbXTsgc2VsZWN0ZWQ6IFQgfT4oKVxuPC9zY3JpcHQ+XG48dGVtcGxhdGU+PGRpdiAvPjwvdGVtcGxhdGU+XG4iXSwibWFwcGluZ3MiOiJBO0E7QTs7O0E7QTtBO0E7QTs7QTtBLDZDQUNZLEVBQUUsWUFBWSxhLEcsc0o7QSx3Q0FBZCxFQUFFLFlBQVksYSxHLHNKO0EsVywyQztBO0E7QTtBO0E7QSJ9

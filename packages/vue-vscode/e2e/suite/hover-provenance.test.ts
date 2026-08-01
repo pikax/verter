@@ -1,19 +1,19 @@
 import { expect } from "chai";
 import * as vscode from "vscode";
+import { pollBudget, sequenceParent } from "../lib/timeouts";
 import {
   FIXTURE_NAME,
   findPosition,
   getAppVuePath,
   hoverText,
+  logMark,
   measureHover,
   openReadyCached,
+  readTestLog,
   sleep,
 } from "../helpers";
 
 /**
- * Hover-provenance E2E smoke test. Plan §3 Commit 9 (F7 squash):
- * "E2E under `test:e2e`, NOT part of CLAUDE gate; manual verification".
- *
  * The enrichment itself is expensive (the LSP runs an
  * `AuditedRequest` through the full semantic pipeline on a
  * background task), so the first hover returns the legacy payload.
@@ -24,33 +24,59 @@ import {
  *
  * 1. Opens the fixture `App.vue` and waits for the LSP to settle.
  * 2. Flips `verter.hover.provenance` → `true`.
- * 3. Requests a hover on a binding twice; the second hover should
+ * 3. Requires the configuration-driven restart to initialize the replacement
+ *    server with provenance enabled.
+ * 4. Requests a hover on a binding twice; the second hover should
  *    either carry the enriched markdown section OR (on slower
  *    machines / cold caches) degrade gracefully to the legacy
  *    payload without throwing.
- * 4. Asserts the hover response is well-formed regardless of which
+ * 5. Asserts the hover response is well-formed regardless of which
  *    branch the LSP chose.
  *
- * This is a smoke test — NOT a gate. It confirms the setting
- * plumbing, the hover round-trip, and the absence of crashes. Full
+ * The restart assertion enforces the client setting plumbing. Full
  * provenance-output validation lives in the Rust unit tests under
  * `crates/verter_lsp/src/features/hover_provenance.rs`.
  */
 suite(`Hover Provenance [${FIXTURE_NAME}]`, function () {
   let doc: vscode.TextDocument;
+  let provenanceWasEnabled = false;
+
+  async function waitForRestartLog(mark: number, expected: string): Promise<void> {
+    const deadline = Date.now() + pollBudget("hoverProvenanceRestart");
+    while (Date.now() < deadline) {
+      const restartedLog = readTestLog().slice(mark);
+      if (restartedLog.includes(expected) && restartedLog.includes("Verter ready")) {
+        return;
+      }
+      await sleep(200);
+    }
+    const restartedLog = readTestLog().slice(mark);
+    expect(restartedLog, `replacement server should log "${expected}"`).to.include(expected);
+    expect(restartedLog, "replacement server should publish readiness").to.include("Verter ready");
+  }
 
   suiteSetup(async function () {
-    this.timeout(60_000);
+    this.timeout(sequenceParent("hoverProvenanceSetup"));
     doc = await openReadyCached(getAppVuePath());
+    const config = vscode.workspace.getConfiguration("verter.hover");
+    if (config.get<boolean>("provenance", false)) {
+      const mark = logMark();
+      await config.update("provenance", undefined, vscode.ConfigurationTarget.Workspace);
+      await waitForRestartLog(mark, "hover provenance: disabled (default)");
+    }
   });
 
   suiteTeardown(async function () {
+    if (!provenanceWasEnabled) return;
     const config = vscode.workspace.getConfiguration("verter.hover");
+    const mark = logMark();
     await config.update("provenance", undefined, vscode.ConfigurationTarget.Workspace);
+    await waitForRestartLog(mark, "hover provenance: disabled (default)");
+    provenanceWasEnabled = false;
   });
 
-  test("provenance setting toggles enriched hover without crashing", async function () {
-    this.timeout(60_000);
+  test("restart adopts the changed provenance setting and hover remains typed", async function () {
+    this.timeout(sequenceParent("hoverProvenanceRestartRoundTrip"));
 
     // Locate a simple template binding position.
     const pos = findPosition(doc, "{{ count }}", 3);
@@ -61,13 +87,13 @@ suite(`Hover Provenance [${FIXTURE_NAME}]`, function () {
 
     // Enable the provenance opt-in via the workspace configuration.
     const config = vscode.workspace.getConfiguration("verter.hover");
+    const mark = logMark();
     await config.update("provenance", true, vscode.ConfigurationTarget.Workspace);
-    // Give the LSP a moment to observe the configuration change.
-    await sleep(200);
+    provenanceWasEnabled = true;
+    await waitForRestartLog(mark, "hover provenance: enabled");
 
-    // First hover — legacy payload expected (per plan §3 Commit 9
-    // "legacy payload immediately; background task to compute the
-    // enriched payload").
+    // The first request returns the legacy payload while enrichment is computed
+    // in the background.
     const first = await measureHover(doc.uri, pos);
     expect(first.hovers.length, "first hover should produce a payload").to.be.greaterThan(0);
 

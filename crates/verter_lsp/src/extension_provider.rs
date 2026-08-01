@@ -9,81 +9,31 @@
 //! Uses tsserver command format so all existing response parsers work unchanged.
 
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, OnceCell};
 
-use crate::server::{TsQuery, TsQueryParams};
+use crate::server::TsQueryParams;
 use crate::tsserver::ipc::{
     assemble_signature_label, build_completion_entry_details_request, build_entry_names_entry,
-    byte_offset_to_tsserver_pos, combined_code_fix_args,
+    byte_offset_to_tsserver_absolute_offset, byte_offset_to_tsserver_pos, combined_code_fix_args,
     completion_entry_details_to_resolve_result, concat_display_parts, dedup_error_codes,
     enrich_completion_with_entry_details, format_quickinfo_hover, merge_diagnostic_sets,
     parse_tsserver_code_action, parse_tsserver_combined_code_fix, parse_tsserver_completion,
-    parse_tsserver_diagnostic, parse_tsserver_location, parse_tsserver_rename_span,
-    stamp_tsserver_completion_offset,
+    parse_tsserver_diagnostic, parse_tsserver_inlay_hint, parse_tsserver_location,
+    parse_tsserver_rename_span, stamp_tsserver_completion_offset,
 };
 use crate::type_provider::protocol::*;
-use crate::type_provider::traits::{ProviderFuture, TypeProvider};
+use crate::type_provider::traits::{ConfiguredOwnerAuthority, ProviderFuture, TypeProvider};
 
-/// Transport seam for the `$/verter/tsQuery` server→client request.
-///
-/// `ExtensionTypeProvider` talks to the VS Code extension host over a single
-/// raw `command + arguments → JSON body` choke point. In production that body
-/// is delivered over a concrete `tower_lsp_server::Client`
-/// ([`LspTsQueryTransport`]); tests inject a scripted in-memory transport so the
-/// provider's completion / resolve / diagnostics request envelopes can be
-/// driven headlessly, without a live extension-host `Client`.
-///
-/// This is a TRANSPORT abstraction only — it carries the typed `command`/
-/// `arguments` envelope and returns the raw response body. It does NOT resolve
-/// types, parse responses, or duplicate any of the provider's
-/// tsserver-family mapping (`parse_tsserver_completion`,
-/// `completion_entry_details_to_resolve_result`, `merge_diagnostic_sets`, …)
-/// which remain the single shared owner in `verter_type_runtime::tsserver::ipc`.
-///
-/// The trait is statically dispatched (generic injection, no `dyn`,
-/// no `async_trait`, no boxed future) so the production path stays
-/// zero-overhead.
-pub trait TsQueryTransport: Send + Sync {
-    /// Send one `$/verter/tsQuery` request and return its raw JSON response body.
-    fn ts_query(
-        &self,
-        params: TsQueryParams,
-    ) -> impl Future<Output = Result<serde_json::Value, TypeProviderError>> + Send + '_;
-}
+#[path = "extension_provider_binding.rs"]
+mod binding;
+#[path = "extension_provider_transport.rs"]
+mod transport;
 
-/// Production [`TsQueryTransport`] — forwards each `$/verter/tsQuery` over the
-/// deferred extension-host LSP `Client`.
-pub struct LspTsQueryTransport {
-    /// Deferred LSP client — populated during `LspService::build()`.
-    client: Arc<OnceCell<tower_lsp_server::Client>>,
-}
+pub use transport::{LspTsQueryTransport, TsQueryTransport};
 
-impl TsQueryTransport for LspTsQueryTransport {
-    // The trait declares an explicit `+ Send` return bound (load-bearing: the
-    // future is awaited from `Send` provider methods and downstream
-    // `ProviderFuture`s). `async fn` in a trait impl cannot express that bound,
-    // so the explicit `impl Future + Send` form stays — clippy's `async fn`
-    // suggestion would drop the requirement.
-    #[allow(clippy::manual_async_fn)]
-    fn ts_query(
-        &self,
-        params: TsQueryParams,
-    ) -> impl Future<Output = Result<serde_json::Value, TypeProviderError>> + Send + '_ {
-        async move {
-            let client = self
-                .client
-                .get()
-                .ok_or_else(|| TypeProviderError::new("LSP client not yet initialized"))?;
-            client
-                .send_request::<TsQuery>(params)
-                .await
-                .map_err(|e| TypeProviderError::new(format!("tsQuery failed: {e}")))
-        }
-    }
-}
+use binding::FileProjectBinding;
 
 /// A `TypeProvider` that delegates to the VS Code extension's in-process
 /// TypeScript language service via `$/verter/tsQuery` server→client requests.
@@ -102,6 +52,10 @@ pub struct ExtensionTypeProvider<T = LspTsQueryTransport> {
     workspace_root: String,
     /// Per-project roots for per-file `projectRootPath` matching.
     project_roots: Arc<parking_lot::RwLock<Vec<String>>>,
+    /// The configured-project ownership authority, installed by init once the
+    /// exact workspace snapshot is built. Until then only the editor's
+    /// workspace folders are known.
+    ownership: Arc<parking_lot::RwLock<Option<Arc<dyn ConfiguredOwnerAuthority>>>>,
 }
 
 impl ExtensionTypeProvider<LspTsQueryTransport> {
@@ -121,6 +75,7 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
             opened_files: Arc::new(Mutex::new(HashSet::new())),
             workspace_root: verter_span::path::canonicalize_path(workspace_root),
             project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            ownership: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -149,11 +104,6 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
     pub(crate) fn contents_handle_for_test(&self) -> Arc<Mutex<HashMap<String, Arc<str>>>> {
         Arc::clone(&self.contents)
     }
-
-    fn project_root_for(&self, file: &str) -> String {
-        let roots = self.project_roots.read();
-        verter_span::path::longest_project_root(file, &roots, &self.workspace_root).to_string()
-    }
 }
 
 impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
@@ -170,8 +120,12 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         let content = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
-        let project_root = self.project_root_for(&file);
+        let declared = self.declared_project_for(&file);
         Box::pin(async move {
+            // Fail closed BEFORE recording the file as open: an unowned file has
+            // no project, so nothing may be declared for it and no later query
+            // may believe it is live in one.
+            let (project_root, project_config) = declared?;
             contents_cache
                 .lock()
                 .await
@@ -187,6 +141,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         else if file.ends_with(".js") { "JS" }
                         else { "TS" },
                     "projectRootPath": project_root,
+                    "projectConfigPath": project_config,
                 }),
             )
             .await?;
@@ -209,8 +164,9 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         let content = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
-        let project_root = self.project_root_for(&file);
+        let declared = self.declared_project_for(&file);
         Box::pin(async move {
+            let (project_root, project_config) = declared?;
             let old_line_count = {
                 let cache = contents_cache.lock().await;
                 cache.get(&file).map(|c| c.lines().count() as u32 + 1)
@@ -252,6 +208,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                                     else if file.ends_with(".js") { "JS" }
                                     else { "TS" },
                                 "projectRootPath": project_root,
+                                "projectConfigPath": project_config,
                             }]
                         }),
                     )
@@ -270,6 +227,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                             else if file.ends_with(".js") { "JS" }
                             else { "TS" },
                         "projectRootPath": project_root,
+                        "projectConfigPath": project_config,
                     }),
                 )
                 .await?;
@@ -413,7 +371,16 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         .collect::<Vec<_>>();
                     Ok(enriched)
                 }
-                Err(_) => Ok(items.to_vec()),
+                // A failed enrichment is NOT "these items have no details". The
+                // list was produced by whichever project owned the file when
+                // `completionInfo` ran, and this request can land after the file
+                // has been re-declared to another project (an ownership
+                // authority arriving mid-session, a config change, a resync).
+                // Returning the original items then serves the FORMER owner's
+                // answer under the current binding — a cross-project stale
+                // result, and the refusal that should have disabled the feature
+                // disappears. Propagate it.
+                Err(e) => Err(e),
             }
         })
     }
@@ -468,10 +435,13 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         range_end: None,
                     }))
                 }
-                Err(e) => {
-                    tracing::warn!("extension quickinfo error for {file}: {e}");
-                    Ok(None)
-                }
+                // A refused project is not "no hover here". The extension host
+                // throws when it cannot serve the file's project (no workspace
+                // TypeScript, or a library-less one), and that refusal is the
+                // provider's fail-closed contract — swallowing it into `None`
+                // makes a disabled provider indistinguishable from a position
+                // with nothing to say.
+                Err(e) => Err(e),
             }
         })
     }
@@ -537,7 +507,12 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         .unwrap_or_default();
                     Ok(merge_diagnostic_sets(semantic, syntactic, suggestion))
                 }
-                Err(_) => Ok(vec![]),
+                // The SEMANTIC pass gates the pull (the syntactic/suggestion
+                // passes above degrade independently). Its failure is a refusal
+                // to serve, not a clean bill of health — reporting zero
+                // diagnostics for a project the host refused is the worst
+                // possible silent wrong answer.
+                Err(e) => Err(e),
             }
         })
     }
@@ -899,7 +874,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         active_parameter: active_param,
                     }))
                 }
-                Err(_) => Ok(None),
+                Err(e) => Err(e),
             }
         })
     }
@@ -948,7 +923,12 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
             let raw_fixes = match result {
                 Ok(body) => body.as_array().cloned().unwrap_or_default(),
-                Err(_) => return Ok(vec![]),
+                // `getCodeFixes` is the PRIMARY query for this feature (the
+                // per-`fixId` combined follow-ups below are the secondary pass and
+                // degrade on their own). A refused project answered as an empty
+                // fix list is an empty lightbulb where the user's quick fix should
+                // be — the refusal reads as "nothing is available here".
+                Err(e) => return Err(e),
             };
 
             // Snapshot ONLY the files these single-fix actions target, then release the lock BEFORE
@@ -1057,26 +1037,24 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         .cloned()
                         .unwrap_or_default();
 
-                    let mut tokens = Vec::new();
-                    let mut i = 0;
-                    while i + 2 < spans.len() {
-                        let start = spans[i].as_u64().unwrap_or(0) as u32;
-                        let length = spans[i + 1].as_u64().unwrap_or(0) as u32;
-                        let classification = spans[i + 2].as_u64().unwrap_or(0) as u32;
-                        let token_type = classification & 0xFF;
-                        let token_modifiers = (classification >> 8) & 0xFF;
-                        tokens.push(SemanticToken {
-                            start,
-                            length,
-                            token_type,
-                            token_modifiers,
-                        });
-                        i += 3;
-                    }
-
-                    Ok(tokens)
+                    // Same span payload as the managed tsserver lane: `"2020"`
+                    // packed classification triplets (the extension host's
+                    // bridge accepts the line/offset REQUEST shape and calls
+                    // `getEncodedSemanticClassifications` itself, but the
+                    // RESPONSE spans are the language service's raw UTF-16
+                    // offsets either way). The shared owner
+                    // (`verter_type_runtime::semantic_tokens`) decodes, remaps
+                    // into Verter's published legend space (unmappable
+                    // classifications drop their span, fail closed), and
+                    // converts the offsets to bytes through the cached text.
+                    Ok(
+                        verter_type_runtime::semantic_tokens::map_classified_spans_2020(
+                            &spans,
+                            Some(&content),
+                        ),
+                    )
                 }
-                Err(_) => Ok(vec![]),
+                Err(e) => Err(e),
             }
         })
     }
@@ -1155,7 +1133,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
                     Ok(highlights)
                 }
-                Err(_) => Ok(vec![]),
+                Err(e) => Err(e),
             }
         })
     }
@@ -1169,15 +1147,24 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         let file = Self::normalize_path(path);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (sl, _sc, el, _ec) = {
+            let (start, length, content_snapshot) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&file) {
                     Some(c) => {
-                        let (sl, sc) = byte_offset_to_tsserver_pos(c, start_offset);
-                        let (el, ec) = byte_offset_to_tsserver_pos(c, end_offset);
-                        (sl, sc, el, ec)
+                        let Some(start) = byte_offset_to_tsserver_absolute_offset(c, start_offset)
+                        else {
+                            return Ok(vec![]);
+                        };
+                        let Some(end) = byte_offset_to_tsserver_absolute_offset(c, end_offset)
+                        else {
+                            return Ok(vec![]);
+                        };
+                        let Some(length) = end.checked_sub(start) else {
+                            return Ok(vec![]);
+                        };
+                        (start, length, Some(Arc::clone(c)))
                     }
-                    None => (1, start_offset + 1, 1, end_offset + 1),
+                    None => return Ok(vec![]),
                 }
             };
 
@@ -1186,8 +1173,8 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     "provideInlayHints",
                     serde_json::json!({
                         "file": file,
-                        "start": sl,
-                        "length": (el.saturating_sub(sl) + 1) * 200,
+                        "start": start,
+                        "length": length,
                     }),
                 )
                 .await;
@@ -1199,33 +1186,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         .map(|arr| {
                             arr.iter()
                                 .filter_map(|hint| {
-                                    let text = hint.get("text")?.as_str()?.to_string();
-                                    let pos = hint.get("position")?;
-                                    let hl = pos.get("line")?.as_u64()? as u32;
-                                    let ho = pos.get("offset")?.as_u64()? as u32;
-
-                                    let kind_str =
-                                        hint.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                                    let kind = match kind_str {
-                                        "Type" => Some(InlayHintKind::Type),
-                                        "Parameter" => Some(InlayHintKind::Parameter),
-                                        _ => None,
-                                    };
-
-                                    let position = ((hl.saturating_sub(1)) << 16)
-                                        | ((ho.saturating_sub(1)) & 0xFFFF);
-
-                                    Some(InlayHint {
-                                        position,
-                                        label: text,
-                                        kind,
-                                        padding_left: hint
-                                            .get("whitespaceBefore")
-                                            .and_then(|v| v.as_bool()),
-                                        padding_right: hint
-                                            .get("whitespaceAfter")
-                                            .and_then(|v| v.as_bool()),
-                                    })
+                                    parse_tsserver_inlay_hint(hint, content_snapshot.as_deref())
                                 })
                                 .collect()
                         })
@@ -1233,7 +1194,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
                     Ok(hints)
                 }
-                Err(_) => Ok(vec![]),
+                Err(e) => Err(e),
             }
         })
     }
@@ -1376,6 +1337,95 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             roots.sort_by_key(|r| std::cmp::Reverse(r.len()));
 
             Ok(())
+        })
+    }
+
+    fn set_project_ownership(&self, authority: Arc<dyn ConfiguredOwnerAuthority>) {
+        *self.ownership.write() = Some(authority);
+    }
+
+    /// Re-declare every live file against the CURRENT ownership authority.
+    ///
+    /// Init opens files as soon as the editor does, but publishes the exact
+    /// workspace snapshot — and with it the configured-owner authority — later.
+    /// Everything opened in between carries the bootstrap FOLDER identity, which
+    /// for a nested package names the wrong project entirely: the extension host
+    /// then resolves that package's TypeScript from the workspace folder and
+    /// reports the package's own install absent.
+    ///
+    /// Nothing else repairs that binding. An ordinary `update_file` on an
+    /// already-open file sends `changedFiles`, which carries no root and no
+    /// config, so it cannot move a file between projects however many edits
+    /// follow. Inheriting the trait's no-op therefore leaves every
+    /// bootstrap-opened file mis-bound for the life of the window — which is why
+    /// `background_init` calls this immediately after installing the authority.
+    ///
+    /// A file the authority now places in NO configured project is CLOSED and
+    /// left closed: `NoProject` is terminal, and re-opening it would re-assert a
+    /// project that does not exist. Per-file failures do not abort the sweep —
+    /// one refused project must not leave every remaining file bound to the
+    /// bootstrap folder — but the first error is returned once the sweep is done.
+    fn resync_open_files(&self) -> ProviderFuture<'_, ()> {
+        Box::pin(async move {
+            // Deterministic order, and no lock held across an await.
+            let mut files: Vec<String> = self.opened_files.lock().await.iter().cloned().collect();
+            files.sort();
+
+            let mut first_error: Option<TypeProviderError> = None;
+            let mut record = |result: Result<serde_json::Value, TypeProviderError>| {
+                if let Err(e) = result {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+            };
+
+            for file in files {
+                let content = self.contents.lock().await.get(&file).cloned();
+                let Some(content) = content else {
+                    // Open with no cached buffer: nothing authoritative to
+                    // re-declare, and a re-open would have to invent content.
+                    continue;
+                };
+                let binding = self.project_binding_for(&file);
+
+                record(
+                    self.query("close", serde_json::json!({ "file": file }))
+                        .await,
+                );
+
+                let (project_root, project_config) = match binding {
+                    FileProjectBinding::Configured { root, config } => (root, Some(config)),
+                    FileProjectBinding::Bootstrap { root } => (root, None),
+                    FileProjectBinding::Unowned => {
+                        self.opened_files.lock().await.remove(&file);
+                        self.contents.lock().await.remove(&file);
+                        continue;
+                    }
+                };
+
+                record(
+                    self.query(
+                        "open",
+                        serde_json::json!({
+                            "file": file,
+                            "fileContent": content.as_ref(),
+                            "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                                else if file.ends_with(".jsx") { "JSX" }
+                                else if file.ends_with(".js") { "JS" }
+                                else { "TS" },
+                            "projectRootPath": project_root,
+                            "projectConfigPath": project_config,
+                        }),
+                    )
+                    .await,
+                );
+            }
+
+            match first_error {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
         })
     }
 }

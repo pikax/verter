@@ -1,13 +1,25 @@
-export type E2eTypeProviderRoute = "tsserver" | "tsgo" | "shared-tsgo" | "editor-tsserver";
+export type E2eTypeProviderRoute =
+  | "tsserver"
+  | "tsgo"
+  | "shared-tsgo"
+  | "editor-tsserver"
+  | "extension";
 
 export interface E2eTypeProviderAttestation {
   publicKind: "tsgo" | "tsserver" | "editor-tsserver";
   reason?: string;
-  route: "tsserver" | "managed-tsgo" | "shared-tsgo" | "editor-tsserver";
+  route: "tsserver" | "managed-tsgo" | "shared-tsgo" | "editor-tsserver" | "extension";
 }
 
 const STATUS_PATTERN =
   /Type provider status:\s+(tsgo|tsserver|editor-tsserver|none)(?: \((.+?)\))?/g;
+/**
+ * The TOPOLOGY line — which engine is actually serving, as distinct from the
+ * `kind` line's behavioural family. The extension-hosted service is a `tsserver`
+ * KIND (it speaks the tsserver command family) but a different ENGINE, so `kind`
+ * alone cannot tell an extension run from a workspace-tsserver run.
+ */
+const TOPOLOGY_PATTERN = /Type provider topology:\s+(\S+)/g;
 const SHARED_ARMED_PATTERN = /\[shared-tsgo\] armed:[^\n]*\bcontrolDir=/;
 const SHARED_SERVED_PATTERN =
   /editor-owned tsgo served carrier (?:feature|diagnostics); managed fallback remained cold/;
@@ -59,6 +71,26 @@ export function attestE2eTypeProviderLog(
   // with distinct topologies, so each rail is held to the one it asked for.
   // Accepting the editor plugin for a `tsserver` run is what let a tier that
   // served nothing pass as "the workspace tsserver".
+  // The extension-hosted service reports the tsserver KIND (same command
+  // family) on a distinct TOPOLOGY. Requiring both is what stops a run that
+  // silently fell back to the workspace tsserver from passing as the
+  // extension-hosted acceptance.
+  if (requested === "extension") {
+    if (publicKind !== "tsserver") {
+      throw new Error(
+        `Requested extension-hosted TypeScript, but the public provider status reported ${publicKind}`,
+      );
+    }
+    const topologies = Array.from(log.matchAll(TOPOLOGY_PATTERN));
+    const topology = topologies[topologies.length - 1]?.[1];
+    if (topology !== "extension-hosted") {
+      throw new Error(
+        `Requested extension-hosted TypeScript, but the reported topology was ${topology ?? "unreported"}`,
+      );
+    }
+    return { publicKind, reason, route: "extension" };
+  }
+
   if (requested === "tsserver" || requested === "editor-tsserver") {
     if (publicKind !== requested) {
       throw new Error(

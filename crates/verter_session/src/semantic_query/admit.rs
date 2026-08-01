@@ -40,7 +40,7 @@
 //! (The taint PRODUCERS that emit non-`Clean` taint are §18.4; the gate here
 //! is implemented and unit-tested.)
 
-use crate::fact_signature_helpers::ReadSetSignature;
+use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt as _};
 use crate::semantic_query::{BrokenInputClass, ResultTaint};
 
 /// The §18.2 cache-admission disposition for an error-tolerant result.
@@ -124,7 +124,7 @@ pub fn admit_decision(taint: ResultTaint, sig: &ReadSetSignature) -> Admission {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{DerivedFactKind, FactVersionRef, ResolveImportsFactRef};
+    use crate::resolver_core::{FactVersionRef, ResolveImportsFactRef};
     use std::sync::Arc;
     use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
 
@@ -133,16 +133,15 @@ mod tests {
     }
 
     fn import_route_fact() -> FactVersionRef {
-        FactVersionRef::DerivedFactHash {
-            canonical_id: "/missing.ts".to_string(),
-            kind: DerivedFactKind::ImportRoute,
-            hash: [7u8; 16],
-        }
+        // The import-route rooting rail is a REAL resolve-domain
+        // resolution witness (a forged one is impossible by design —
+        // `ResolutionFactRef`'s fields are sealed to `verter_workspace`).
+        crate::fact_signature_helpers::resolution_witness_fact_for_tests()
     }
 
     fn negative_resolved_import_fact() -> FactVersionRef {
         use verter_semantic::facts::registry::InternedSpecifier;
-        FactVersionRef::ResolveImports(ResolveImportsFactRef {
+        FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
             canonical_id: "/importer.ts".to_string(),
             key: FactKey::ResolvedImportClause {
                 specifier: InternedSpecifier::from("./missing"),

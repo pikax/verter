@@ -1575,7 +1575,7 @@ defineProps<SourceProps>()
         "Source.ts exports an interface — must have resolvable surface",
     );
     assert!(
-        source_indexed.route_hash.is_some(),
+        source_indexed.route_surface_hash().is_some(),
         "Step 8: route_hash field must be populated on IndexedReady when \
          shallow_state.has_resolvable_surface() is true. Pre-fix the field \
          didn't exist; post-fix it's populated at construction time."
@@ -1640,7 +1640,7 @@ defineProps<SourceProps>()
         .indexed()
         .get_any("/src/Source.ts")
         .expect("Source.ts must be indexed after dependency-walk")
-        .route_hash
+        .route_surface_hash()
         .expect("Source.ts has resolvable surface — route_hash must be Some");
 
     // Mutate the dep's source so the shallow surface changes. The
@@ -1671,7 +1671,7 @@ export interface SourceProps {
         .indexed()
         .get_any("/src/Source.ts")
         .expect("Source.ts must be re-indexed after upsert")
-        .route_hash
+        .route_surface_hash()
         .expect("post-mutation Source.ts has resolvable surface — route_hash must be Some");
 
     assert_ne!(

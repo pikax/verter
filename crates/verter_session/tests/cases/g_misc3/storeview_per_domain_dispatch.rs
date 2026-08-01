@@ -106,7 +106,7 @@ fn parse_fact() -> FactVersionRef {
 }
 
 fn resolve_imports_fact() -> FactVersionRef {
-    FactVersionRef::ResolveImports(ResolveImportsFactRef {
+    FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
         canonical_id: "/a.ts".into(),
         key: FactKey::ResolvedImportClause {
             specifier: "./theme".into(),

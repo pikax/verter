@@ -163,10 +163,12 @@ pub fn hover_at_position(
             return sfc_tag_name_hover(&blocks[block_index].tag_name).map(|h| h.into());
         }
         SfcCursorContext::RootLevel => {
-            // Vue template markup the depth-ignorant SFC scanner leaves in a
-            // dead zone (a nested `</template>` closes the scanned block
-            // early). The typed element tree is the authority for what is
-            // still template markup (D6); Svelte has no element IR here.
+            // Vue template markup the SFC scanner can leave in a dead zone on
+            // MALFORMED input: with the outer close missing, the scanner's
+            // depth-balanced walk fails closed to the first-close boundary, so
+            // markup after a nested `</template>` falls outside the block. The
+            // typed element tree is the authority for what is still template
+            // markup (D6); Svelte has no element IR here.
             if let Some(template) = analysis.and_then(|a| a.template.as_deref()) {
                 if template
                     .elements
@@ -1335,7 +1337,8 @@ fn slot_attribute_hover_target(
 /// (D3): the slot's defineSlots signature — name, slot-props payload, return
 /// type — resolved with Vue's kebab↔camel equivalence (`#my-slot` → `mySlot`).
 /// Falls back to the child's template-defined slot names (untyped). A slot the
-/// child never declared yields `None` (fail-closed — no fabrication).
+/// child never declared yields `None`; the caller may retain source-derived
+/// syntax documentation, but must not fabricate a child signature.
 pub fn build_child_slot_hover(
     vue_attr: &str,
     slot_name: &str,

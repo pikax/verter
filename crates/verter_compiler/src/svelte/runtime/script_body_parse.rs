@@ -3,9 +3,8 @@
 //!
 //! Owns [`script_body_fails_to_parse`]: the per-grammar OXC body reparse (plain
 //! `<script>` = module JS, `lang="ts"` = TS) plus the module-scope duplicate-binding
-//! early error OXC's parser defers to its binder but Acorn raises at parse. Extracted
-//! from `official_reject.rs` (the file-size guard boundary); the gate's probe loop is
-//! the sole consumer.
+//! early error OXC's parser defers to its binder but Acorn raises at parse. This
+//! focused parser module has the gate's probe loop as its sole consumer.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Program, Statement};

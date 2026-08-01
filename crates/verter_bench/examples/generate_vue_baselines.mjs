@@ -4,9 +4,9 @@
  * Compiles template strings using Vue's official compiler (@vue/compiler-sfc)
  * and outputs the render function code as JSON baselines.
  *
- * Usage: node crates/verter_core/examples/generate_vue_baselines.mjs
+ * Usage: node crates/verter_bench/examples/generate_vue_baselines.mjs
  *
- * Output: crates/verter_core/examples/codegen/generated/vue_baselines.json
+ * Output: crates/verter_bench/examples/codegen/generated/vue_baselines.json
  *
  * Requires: @vue/compiler-sfc (already in root package.json)
  */

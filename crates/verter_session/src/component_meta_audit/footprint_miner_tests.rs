@@ -2,8 +2,8 @@
 //! `AccumulatorState` + [`SemanticGraphStore`] → [`RequestFootprintAudit`]
 //! conversion, with the content-only structural fingerprint at its core.
 //!
-//! Extracted from the inline `#[cfg(test)] mod tests` to keep the production
-//! module within the per-file line budget; the assertions are unchanged.
+//! Kept in a sibling so the production miner and its tests remain independently
+//! readable.
 
 use super::*;
 use crate::component_meta_audit::accumulator::{DerivationEdgeRaw, RequestFootprintAccumulator};

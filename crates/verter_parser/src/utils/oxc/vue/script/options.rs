@@ -157,6 +157,9 @@ fn record_function_declaration<'a>(declaration: &'a Function<'a>, items: &mut Ve
             name_span: Some(Span::from(id.span)),
             kind,
             is_ref_like: false,
+            // The Options-API path never projects a `defineExpose` surface, so
+            // no consumer of these rows reads a call shape.
+            callable: None,
         }));
     }
 }
@@ -172,6 +175,7 @@ fn record_class_declaration<'a>(declaration: &'a Class<'a>, items: &mut Vec<Scri
             name_span: Some(Span::from(id.span)),
             kind: DeclarationKind::Class,
             is_ref_like: false,
+            callable: None,
         }));
     }
 }
@@ -587,6 +591,7 @@ fn collect_declarations_from_pattern<'a>(
                 name_span: Some(Span::from(id.span)),
                 kind,
                 is_ref_like: false,
+                callable: None,
             }));
         }
         BindingPattern::ObjectPattern(obj) => {

@@ -923,7 +923,6 @@ struct ExternalSymbolRefShape {
     local_name: String,
     source_specifier: String,
     imported_name: String,
-    canonical_id: Option<std::sync::Arc<str>>,
     route: RouteDemand,
 }
 
@@ -932,7 +931,6 @@ fn sample_external_route_ref() -> ExternalRouteRefFact {
         local_name: "Foo".to_string(),
         source_specifier: "./types".to_string(),
         imported_name: "FooProps".to_string(),
-        canonical_id: Some(std::sync::Arc::from("/ws/types.ts")),
         route: RouteDemand::pick(["a", "b"]),
     }
 }
@@ -947,20 +945,17 @@ fn route_demand_facts_round_trip_and_reconstruct_external_symbol_ref_shape() {
         local_name,
         source_specifier,
         imported_name,
-        canonical_id,
         route,
     } = ext.clone();
     let reconstructed = ExternalSymbolRefShape {
         local_name,
         source_specifier,
         imported_name,
-        canonical_id,
         route,
     };
     assert_eq!(reconstructed.local_name, "Foo");
     assert_eq!(reconstructed.source_specifier, "./types");
     assert_eq!(reconstructed.imported_name, "FooProps");
-    assert_eq!(reconstructed.canonical_id.as_deref(), Some("/ws/types.ts"));
     assert_eq!(reconstructed.route, RouteDemand::pick(["a", "b"]));
 
     // `RouteDemand`'s four arms are each a distinct route kind. A bare name

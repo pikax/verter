@@ -38,7 +38,26 @@ pub fn host_public_api_result_to_ffi(
     match result {
         Ok(value) => FfiPublicApiResult {
             value: value.map(|response| FfiTscResponse {
-                code: response.code.to_string(),
+                // The FFI wire carries no dialect: every FFI consumer (the
+                // tsserver-plugin mirror host, the playground carrier store)
+                // stores this surface at a fixed TypeScript-labeled path
+                // (`.verter.ts`), so the wire's `code` IS the TS-labeled
+                // rendering. A consumer that wants the dialect-labeled
+                // JavaScript rendering (verter-tsc) consumes the host
+                // `TscResponse` directly, not this wire.
+                //
+                // COMPAT: this is a SEMANTIC change to the EXISTING `code`
+                // field, not a new field — `FfiTscResponse` stays
+                // `{code, source_map}` and no NAPI/WASM/TS mirror changed
+                // shape (the Typeinfo Wire Contract does not apply; that rule
+                // governs the typeinfo.proto oneofs). An off-tree FFI consumer
+                // that previously received a widened-JS-Options SFC's
+                // dialect-labeled rendering (before the widening: the
+                // un-widened JavaScript body) now receives the TypeScript
+                // rendering of the SAME surface under the same key — correct
+                // for the fixed `.ts`-shaped paths every known consumer uses,
+                // and the reason this comment exists for any unknown one.
+                code: response.ts_labeled_code().to_string(),
                 source_map: response.source_map.map(|map| map.to_string()),
             }),
             error: None,

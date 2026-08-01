@@ -2,8 +2,8 @@
 //! ([`super::plan`]) consumes — the `$state.snapshot` callee matcher, the
 //! TS-only-syntax detector, the assignment-operator tables, and the `$$props`
 //! member-access / JS-string-literal rendering. Split out of `plan.rs` so the
-//! two-pass core stays under the file-size guard; these are pure, self-contained
-//! functions with no collector state.
+//! two-pass core remains focused; these are pure, self-contained functions with
+//! no collector state.
 
 use oxc_ast::ast::{AssignmentOperator, CallExpression, Expression};
 use oxc_ast_visit::{walk, Visit};

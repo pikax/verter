@@ -36,27 +36,33 @@ const Comp = defineComponent({
 });
 
 // v-slot on components: callback receives the instance, may return slots
-<Comp
-  v-slot={(c) => {
-    // c is the component instance (inferred)
-    c.$slots.default({ msg: "hello" });
-    return { default: ({ msg }: { msg: string }) => <div>{msg}</div> };
-  }}
-/>
+const withSlot = (
+  <Comp
+    v-slot={(c) => {
+      // c is the component instance (inferred)
+      c.$slots.default({ msg: "hello" });
+      return { default: ({ msg }: { msg: string }) => <div>{msg}</div> };
+    }}
+  />
+);
 
 // v-slot on elements: callback receives the correct element instance
-<input v-slot={(el) => { /* el: HTMLInputElement */ el.value; }} />
+const withElementSlot = (
+  <input v-slot={(el) => { /* el: HTMLInputElement */ el.value; }} />
+);
 
 // Lifecycle attributes: typed VNode, instance available via ctx.proxy
-<Comp
-  onVue:mounted={(vnode) => {
-    vnode.ctx.proxy.id; // string
-  }}
-  onVue:before-update={(current, old) => {
-    current.ctx.proxy.id;
-    old.ctx.proxy.id;
-  }}
-/>
+const withLifecycle = (
+  <Comp
+    onVue:mounted={(vnode) => {
+      vnode.ctx.proxy.id; // string
+    }}
+    onVue:before-update={(current, old) => {
+      current.ctx.proxy.id;
+      old.ctx.proxy.id;
+    }}
+  />
+);
 ```
 
 ## Regenerating HTML attribute mappings

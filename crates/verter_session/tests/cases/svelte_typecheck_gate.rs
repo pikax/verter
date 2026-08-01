@@ -378,7 +378,8 @@ fn public_carrier_resolves_local_props_interface_through_deep_barrels() {
         .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("project Svelte declaration carrier")
-        .code;
+        .ts_labeled_code()
+        .clone();
     let generic_canonical = "/GenericProps.svelte";
     let _ = host
         .upsert(UpsertRequest {
@@ -400,7 +401,8 @@ fn public_carrier_resolves_local_props_interface_through_deep_barrels() {
         .get_public_api_with_mode(generic_canonical, PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("project generic-argument Svelte declaration carrier")
-        .code;
+        .ts_labeled_code()
+        .clone();
 
     let js_canonical = "/JsProps.svelte";
     let _ = host
@@ -423,7 +425,8 @@ fn public_carrier_resolves_local_props_interface_through_deep_barrels() {
         .get_public_api_with_mode(js_canonical, PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("project JavaScript/JSDoc Svelte declaration carrier")
-        .code;
+        .ts_labeled_code()
+        .clone();
 
     let consumer = r#"import { GenericProps, JsProps, LocalProps } from './public';
 import type { ComponentProps } from 'svelte';
@@ -1121,7 +1124,8 @@ let { items, select }: { items: T[]; select: (item: T) => void } = $props();
         .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("generic Svelte declaration carrier")
-        .code;
+        .ts_labeled_code()
+        .clone();
     assert!(
         declaration.contains("<T extends { id: string }>")
             && declaration.contains("import(\"svelte\").Component<")
@@ -1205,7 +1209,8 @@ void value; void fixed; void row; void onsave;
         .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("native Svelte declaration")
-        .code;
+        .ts_labeled_code()
+        .clone();
     let consumer = r#"import NativeSurface from './NativeSurface.svelte.verter';
 import type { Component, ComponentProps, Snippet } from 'svelte';
 
@@ -1276,7 +1281,8 @@ export { publicCount };
         .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("runes state declaration")
-        .code;
+        .ts_labeled_code()
+        .clone();
 
     let consumer = r#"import RunesState from './RunesState.svelte.verter';
 import type { Component } from 'svelte';

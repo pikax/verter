@@ -568,6 +568,8 @@ fn map_one(
         col: col_out,
         severity,
         ts_code: d.code,
+        // Relayed from the TypeScript engine: it owns the code.
+        verter_code: None,
         message: d.text.clone(),
     }))
 }

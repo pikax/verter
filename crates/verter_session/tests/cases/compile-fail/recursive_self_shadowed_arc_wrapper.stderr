@@ -1,15 +1,15 @@
-error[E0277]: the trait bound `shadow::Arc<[Recipe]>: NoTypeExprWitness` is not satisfied
+error[E0277]: the trait bound `shadow::Arc<[Recipe]>: verter_no_typeexpr::__private::NoTypeExprWitness` is not satisfied
   --> tests/cases/compile-fail/recursive_self_shadowed_arc_wrapper.rs:25:10
    |
 25 | #[derive(verter_no_typeexpr::NoTypeExpr)]
    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-help: the trait `NoTypeExprWitness` is not implemented for `shadow::Arc<[Recipe]>`
+help: the trait `verter_no_typeexpr::__private::NoTypeExprWitness` is not implemented for `shadow::Arc<[Recipe]>`
   --> tests/cases/compile-fail/recursive_self_shadowed_arc_wrapper.rs:19:5
    |
 19 |     pub struct Arc<T: ?Sized> {
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
-   = help: the following other types implement trait `NoTypeExprWitness`:
+   = help: the following other types implement trait `verter_no_typeexpr::__private::NoTypeExprWitness`:
              ()
              (A, B)
              (A, B, C)
@@ -19,5 +19,4 @@ help: the trait `NoTypeExprWitness` is not implemented for `shadow::Arc<[Recipe]
              AnalyzedMacroFact
              AnalyzedMacroKindFact
            and $N others
-   = help: see issue #48214
    = note: this error originates in the derive macro `verter_no_typeexpr::NoTypeExpr` (in Nightly builds, run with -Z macro-backtrace for more info)

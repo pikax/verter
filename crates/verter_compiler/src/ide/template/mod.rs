@@ -27,14 +27,16 @@ pub mod von;
 use oxc_allocator::Allocator;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use verter_span::{SourceByteOffset, SourceByteRange};
+use verter_span::{GeneratedByteLen, SourceByteOffset, SourceByteRange};
 
 use crate::ast::types::{
     AstNodeKind, CommentNode, ConditionalChain, ElementNode, ElementNodeConditionKind,
     InterpolationNode, TagType, TextNode,
 };
 use crate::ide::condition::{self, ConditionScope};
-use crate::ide::template::emit::{emit_op, emit_synthesized_shorthand_value, EmitOp, EmitText};
+use crate::ide::template::emit::{
+    emit_expr_plan, emit_op, emit_synthesized_shorthand_value, EmitOp, EmitText,
+};
 use crate::template::code_gen::binding::{BindingResolver, BindingType};
 use crate::template::code_gen::expression::{
     build_prefixed_expr_segments, resolve_simple_expr_segments,
@@ -630,25 +632,14 @@ fn walk_element<'a, 'alloc>(
         ctx.options.is_jsx,
     );
 
-    // Emit v-directive callback prop for collected custom directives (TS mode only)
+    // Emit v-directive callback prop for collected custom directives (TS mode only).
+    //
+    // The payload is RELOCATED here (the authored attributes were deleted by
+    // `process_element_props`), so it is lowered as an ordered run of interleaved
+    // mapped / unmapped inserts anchored at the tag close — never one flat
+    // `prepend_alloc`, which would leave every authored token inside it unmapped
+    // and every diagnostic, hover and definition on it dead.
     if !collected_directives.is_empty() {
-        use std::fmt::Write;
-        let mut directive_prop = String::from(
-            " v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;",
-        );
-        for d in &collected_directives {
-            write!(
-                directive_prop,
-                "___VERTER___runCustomDirective(___VERTER___directiveElement,{reference})(___VERTER___directiveElement,{value},{arg},{mods});",
-                reference = d.reference,
-                value = d.value,
-                arg = d.arg,
-                mods = d.modifiers,
-            )
-            .expect("write to String is infallible");
-        }
-        directive_prop.push_str("}}");
-
         // Insert just before the tag close: before `/>` for self-closing, before `>` otherwise
         let is_self_closing =
             ctx.source.as_bytes().get(el.tag_open.end as usize - 2) == Some(&b'/');
@@ -657,7 +648,55 @@ fn walk_element<'a, 'alloc>(
         } else {
             el.tag_open.end - 1
         };
-        ctx.out.prepend_alloc(insert_pos, &directive_prop);
+        let at = SourceByteOffset(insert_pos);
+
+        // The callback parameter carries an explicit annotation: the synthetic
+        // `v-directive` prop supplies no contextual type, so an unannotated
+        // parameter raises TS7006 under `noImplicitAny` on EVERY custom directive,
+        // valid ones included. `any` is what the parameter already resolved to
+        // implicitly, so the annotation changes no inference — it only stops the
+        // spurious diagnostic.
+        emit_op(
+            ctx.out,
+            &EmitOp::InsertUnmapped {
+                at,
+                text: EmitText::Static(
+                    " v-directive={(___VERTER___slotInstance: any)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;",
+                ),
+            },
+        );
+        for d in &collected_directives {
+            for piece in &d.pieces {
+                match piece {
+                    props::DirectivePiece::Syn(text) => emit_op(
+                        ctx.out,
+                        &EmitOp::InsertUnmapped {
+                            at,
+                            text: EmitText::Borrowed(text),
+                        },
+                    ),
+                    props::DirectivePiece::Mapped { text, source_start } => emit_op(
+                        ctx.out,
+                        &EmitOp::InsertMapped {
+                            at,
+                            text: EmitText::Borrowed(text),
+                            source_start: *source_start,
+                            content_offset: GeneratedByteLen(0),
+                        },
+                    ),
+                    props::DirectivePiece::Expr(plan) => {
+                        emit_expr_plan(ctx.out, plan, emit::Placement::Relocated { at }, ctx.source)
+                    }
+                }
+            }
+        }
+        emit_op(
+            ctx.out,
+            &EmitOp::InsertUnmapped {
+                at,
+                text: EmitText::Static("}}"),
+            },
+        );
     }
 
     // Process v-show

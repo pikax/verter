@@ -8,6 +8,20 @@ use super::*;
 const VPATH: &str = "/src/Child.vue.ts";
 const CANONICAL: &str = "/src/Child.vue";
 
+/// The projected provider surface for `generated`, produced by the projection
+/// owner exactly as production produces it.
+fn prepared(generated: &str) -> crate::carrier_provider_projection::PreparedCarrierProviderContent {
+    crate::carrier_provider_projection::expect_admitted(
+        crate::carrier_provider_projection::prepare_carrier_provider_imports(
+            None,
+            CANONICAL,
+            generated,
+            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        ),
+        "no workspace resolution is needed",
+    )
+}
+
 fn record_surface(provider_content: &str, carrier_source: &str) -> RecordSurface {
     RecordSurface::carrier_api_legacy(
         VPATH.to_string(),
@@ -433,22 +447,21 @@ fn carrier_companions_record_every_role_and_advance_version_on_content_change() 
     let api_path = "/src/Child.vue.verter.ts";
     let make = |ide_code: &str, api_code: &str| {
         vec![
-            CarrierCompanion {
-                provider_uri: StdArc::from(ide_path),
-                content: StdArc::from(ide_code),
-                map_json: None,
-                role: SnapshotRole::CarrierIde,
-                script_kind: ScriptKind::Tsx,
-                version: 0,
-            },
-            CarrierCompanion {
-                provider_uri: StdArc::from(api_path),
-                content: StdArc::from(api_code),
-                map_json: None,
-                role: SnapshotRole::CarrierApi,
-                script_kind: ScriptKind::Ts,
-                version: 0,
-            },
+            CarrierCompanion::carrier_ide_from_generated(
+                StdArc::from(ide_path),
+                CANONICAL,
+                ide_code,
+                None,
+                ScriptKind::Tsx,
+                0,
+            ),
+            CarrierCompanion::verbatim(
+                StdArc::from(api_path),
+                StdArc::from(api_code),
+                None,
+                SnapshotRole::CarrierApi,
+                ScriptKind::Ts,
+            ),
         ]
     };
 
@@ -517,8 +530,7 @@ fn record_carrier_companion_surface_returns_linearized_record_generation() {
         &host,
         CANONICAL,
         ide_path,
-        ProviderSurfaceKind::CarrierIde,
-        "export default {}; /* v1 */\n",
+        RecordedProviderSurface::CarrierIde(&prepared("export default {}; /* v1 */\n")),
         None,
     );
     let g2 = record_carrier_companion_surface(
@@ -527,8 +539,7 @@ fn record_carrier_companion_surface_returns_linearized_record_generation() {
         &host,
         CANONICAL,
         ide_path,
-        ProviderSurfaceKind::CarrierIde,
-        "export default {}; /* v2 CHANGED */\n",
+        RecordedProviderSurface::CarrierIde(&prepared("export default {}; /* v2 CHANGED */\n")),
         None,
     );
 
@@ -558,8 +569,7 @@ fn record_carrier_companion_surface_returns_linearized_record_generation() {
         &host,
         "/src/Never.vue",
         "/src/Never.vue.tsx",
-        ProviderSurfaceKind::CarrierIde,
-        "export default {}\n",
+        RecordedProviderSurface::CarrierIde(&prepared("export default {}\n")),
         None,
     );
     assert_eq!(

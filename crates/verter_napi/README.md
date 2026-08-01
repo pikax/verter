@@ -159,7 +159,8 @@ All compile entry points accept `input` as `string | Buffer`.
 
 ### Prerequisites
 
-- Rust toolchain (stable)
+- Rust toolchain via [rustup](https://rustup.rs/) — the version is pinned in
+  `rust-toolchain.toml` and installed on the first `cargo` invocation in the repo
 - Node.js (for NAPI-RS build tools)
 
 ### Building the Native Binary

@@ -92,6 +92,59 @@
 //      Default stall 12m (--stall). On stall: reap + sweep; exit 125.
 //   7. Spotlight marker (macOS): a <runnerTarget>/.metadata_never_index file is written so Spotlight does
 //      not index the build tree (a harmless no-op file on Linux/Windows).
+//   8. Terminal-outcome accounting: a test that did not PASS fails the gate and is NAMED, whatever its
+//      outcome class. nextest reports several non-`FAIL` terminal outcomes — `N timed out`, `N exec
+//      failed`, a crash status (SIGABRT/SIGSEGV/LEAK-FAIL/…) — and reports a cancelled or interrupted run
+//      as `A/B tests run`, meaning B-A selected tests NEVER EXECUTED. None of those are in nextest's
+//      `failed` count, so the verdict is derived from `runCount - passed` (label-independent: an outcome
+//      class this gate has never heard of still lands there) plus the unrun count. A run whose only
+//      problem is a timeout is a FAIL, never a PASS: a timed-out test has not passed, it has not even
+//      finished.
+//      TRUST MODEL. The verdict rests on nextest's own counts, not on the names: `runCount - passed`
+//      cannot be lowered by anything a test prints, whereas the status lines share a stream with
+//      captured test output and are forgeable. Naming is therefore advisory and the count is
+//      authoritative; the one route from `failures exist in the log` to a green verdict is the
+//      tolerance allowlist, so tolerance is refused outright whenever a failure was superseded by a
+//      pass. Residual, named rather than claimed away: no text-level rule can fully separate runner
+//      output from test output on a shared stream - see GI-19 in docs/arch/gate-integrity-ledger.md.
+//      NAMING, and its honest limit. Failing tests are listed by name with their status, including the
+//      compound (`FAIL + LEAK`) and retried (`TRY 3 FAIL`, `TRY 3 FL+LK`) status fields, with the LAST
+//      status per test deciding — so a flaky test that failed attempt 1 and passed attempt 2 is not a
+//      failure, and three attempts of one test are one failure. But naming is best-effort where the
+//      VERDICT is not: a status spelling the parser does not recognise is not named, and surfaces through
+//      the unaccounted tripwire as `<run exit N; unaccounted failure(s) …>` instead. That still FAILS the
+//      gate — no silent pass — it just costs the operator the test's name. The recognised vocabulary is
+//      pinned in `NEXTEST_FAILURE_STATUSES` + `classifyNextestStatusField` from nextest's own status
+//      literals; widen it there, and only there, if a future nextest adds a spelling.
+//
+// BUILD-PREREQUISITE PREFLIGHT (gate mode only; runs FIRST, before everything below)
+//   Parts of the Rust suite load artifacts CARGO DOES NOT BUILD. The real-provider suites spawn the pinned
+//   `tsserver` with `--globalPlugins @verter/typescript-plugin --pluginProbeLocations
+//   packages/vue-vscode/node_modules`; that probe dir is a pnpm symlink to `packages/typescript-plugin`,
+//   whose `main` is `dist/index.js` — a `tsc -b` OUTPUT that `pnpm install` does NOT produce. With the
+//   symlink present but the `dist` absent, tsserver loads no plugin, cannot resolve `.vue`/`.svelte`
+//   carriers, and ~64 `*_tsserver` tests fail with `TS2307: Cannot find module './Comp.vue' or its
+//   corresponding type declarations.` — sixty-four opaque failures that read exactly like a compiler
+//   regression. CLAUDE.md's "Verification Must Prove Execution (MANDATORY)" requires a gate to prove
+//   "required source, build, and fixture prerequisites matched the tested tree"; a gate that cannot tell
+//   "the code is broken" from "an artifact was never built" fails that rule.
+//   So as its FIRST step — before the freshness preflight, before cargo, before any test — the gate LOADS
+//   that plugin entry in a child process (`require()` of the probe directory, exactly what tsserver
+//   resolves) and, on any load failure, FAILS CLOSED with exit 127 naming the probe target, the load
+//   error, the producing packages and the exact producer command (marker: `BUILD-PREREQUISITE MISSING`).
+//   A REAL LOAD, not a list of files to stat: the entry eagerly requires its emitted helpers and
+//   `@verter/language-shared`'s entry re-exports a dozen emitted siblings, so a stat list mirrors the emit
+//   graph and drifts — a tree with both `index.js` files present and one helper missing satisfies every
+//   stat and still throws inside tsserver. The load proves the transitive closure RESOLVES; it does NOT
+//   prove freshness, and a stale-but-loadable dist is a separate, deliberately out-of-scope problem.
+//   It does NOT build the artifacts (the verdict must not depend on a mutation the gate performed) and
+//   does NOT skip the affected tests (with no install at all those tests SKIP, the silent-pass half of the
+//   same rule). It precedes the freshness preflight because that preflight's `pnpm install` is precisely
+//   what converts the silent-skip state into the 64-failure state. `--prepare` is exempt: it builds the
+//   archive and runs no test.
+//   Two workspace packages produce the closure: the plugin, and `@verter/language-shared`.
+//   `@verter/native` is deliberately NOT among them (the plugin's `"files": ["src/index.ts"]` excludes
+//   `src/tsc/`, its only consumer), so the gate never demands a `napi build --release`.
 //
 // FRESHNESS-TOOLING PREFLIGHT + VERDICT-GATED TOLERANCE (gate mode only)
 //   The two `typeinfo_proto_ts_freshness` byte-equality tests regenerate the committed TS proto bindings
@@ -159,7 +212,8 @@
 //   124 TIMEOUT       (whole-gate wallclock deadline tripped)
 //   125 STALL         (no progress within the stall window)
 //   126 LOCK-REFUSED  (another gate holds the single-flight mutex and is alive / lock uninspectable)
-//   127 USAGE/SETUP   (bad arguments, repo root not found, archive/list setup failure)
+//   127 USAGE/SETUP   (bad arguments, repo root not found, a MISSING BUILD PREREQUISITE, archive/list
+//                      setup failure)
 //
 // ENV VARS HONORED
 //   VERTER_GATE_LOCK / MOM_GATE_LOCK   lockdir path (default: OS temp dir keyed by repo realpath)
@@ -168,6 +222,7 @@
 //     runner-owned dir.
 //   (No environment variable can divert this CLI to a non-gate success path.)
 
+import { readdirSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   // exit-code constants (EXIT_STALL is mapped inside mapStepReason, not referenced directly here)
@@ -197,6 +252,9 @@ import {
   mapStepReason,
   analyzeNextestSurface,
   analyzeLibtestSurface,
+  // build-prerequisite preflight (the non-cargo artifacts the suite loads from disk)
+  checkBuildPrerequisites,
+  probeBudgetMs,
   // freshness-tooling preflight (verdict-gating authority)
   preflightFreshnessTooling,
   pnpmInstallCommand,
@@ -219,6 +277,187 @@ import {
 } from "./gate-internals.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+
+const OVERSIZE_SOURCE_LINE_LIMIT = 1500;
+const OVERSIZE_SOURCE_EXEMPTIONS = new Set([
+  "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_query_specs.rs",
+  "crates/verter_session/src/host_manage/prepared_decl.rs",
+  "crates/verter_compiler/src/compile/template_data.rs",
+  "crates/verter_compiler/src/svelte/runtime/entity_table.rs",
+  "crates/verter_compiler/src/svelte/runtime/diff_oracle_divergences.rs",
+  "crates/verter_compiler/src/svelte/runtime/expr.rs",
+  "crates/verter_compiler/src/svelte/parser/tokenizer.rs",
+  "crates/verter_compiler/src/ide/template/mod.rs",
+  "crates/verter_compiler/src/template/code_gen/ssr/mod.rs",
+  "crates/verter_compiler/src/template/code_gen/vapor/mod.rs",
+  "crates/verter_compiler/src/template/code_gen/vdom/element.rs",
+  "crates/verter_compiler/src/template/code_gen/vdom/slots.rs",
+  "crates/verter_compiler/src/tsc/script.rs",
+  "crates/verter_ffi/src/convert.rs",
+  "crates/verter_lsp/src/config.rs",
+  "crates/verter_lsp/src/features/completion.rs",
+  "crates/verter_lsp/src/server/sync_orchestration.rs",
+  "crates/verter_lsp/src/workspace_scanner.rs",
+  "crates/verter_mcp/src/server.rs",
+  "crates/verter_napi/src/lib.rs",
+  "crates/verter_parser/src/parser/mod.rs",
+  "crates/verter_parser/src/tokenizer/byte.rs",
+  "crates/verter_parser/src/utils/oxc/bindings/helpers.rs",
+  "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
+  "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
+  "crates/verter_protocol/src/component_meta.rs",
+  "crates/verter_scheduler/src/scheduler.rs",
+  "crates/verter_scheduler/src/dag.rs",
+  "crates/verter_semantic/src/analysis/build.rs",
+  "crates/verter_semantic/src/analysis/component_meta.rs",
+  "crates/verter_semantic/src/analysis/html_intrinsics_data.rs",
+  "crates/verter_semantic/src/analysis/macros.rs",
+  "crates/verter_semantic/src/analysis/style.rs",
+  "crates/verter_semantic/src/analysis/template.rs",
+  "crates/verter_semantic/src/analysis/type_eval_build.rs",
+  "crates/verter_semantic/src/analysis/type_solver/prepared.rs",
+  "crates/verter_semantic/src/analysis/types.rs",
+  "crates/verter_session/src/component_meta_audit/mod.rs",
+  "crates/verter_session/src/component_meta_caches.rs",
+  "crates/verter_session/src/component_meta_materialize.rs",
+  "crates/verter_session/src/file_artifact_store.rs",
+  "crates/verter_session/src/host_manage.rs",
+  "crates/verter_session/src/host_manage/analysis_io.rs",
+  "crates/verter_session/src/host_manage/component_meta_extract.rs",
+  "crates/verter_session/src/host_manage/component_meta_methods.rs",
+  "crates/verter_session/src/host_resolve.rs",
+  "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
+  "crates/verter_session/src/resolver_core/mod.rs",
+  "crates/verter_session/src/resolver_store.rs",
+  "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+  "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+  "crates/verter_session/src/meta_resolve/projectors/mod.rs",
+  "crates/verter_session/src/parse.rs",
+  "crates/verter_session/src/request_context.rs",
+  "crates/verter_session/src/project_semantic_dispatch/build.rs",
+  "crates/verter_session/src/project_semantic_dispatch/lower.rs",
+  "crates/verter_session/src/project_semantic_dispatch/mod.rs",
+  "crates/verter_session/src/project_semantic_dispatch/raise.rs",
+  "crates/verter_session/src/project_type_store.rs",
+  "crates/verter_session/src/decl_body_memo.rs",
+  "crates/verter_session/src/host_manage/eval_env.rs",
+  "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
+  "crates/verter_type_expr/src/facts.rs",
+  "crates/verter_session/src/resolver_core/component_meta.rs",
+  "crates/verter_session/src/resolver_core/component_meta_registry.rs",
+  "crates/verter_session/src/resolver_core/external_type_frontier.rs",
+  "crates/verter_session/src/resolver_core/fallthrough.rs",
+  "crates/verter_session/src/resolver_core/shallow_file_state.rs",
+  "crates/verter_session/src/semantic_query.rs",
+  "crates/verter_session/src/semantic_query_memo/mod.rs",
+  "crates/verter_session/src/semantic_query_memo/arena.rs",
+  "crates/verter_session/src/semantic_query_memo/derivation.rs",
+  "crates/verter_session/src/semantic_query_memo/family.rs",
+  "crates/verter_session/src/semantic_query_memo/inflight.rs",
+  "crates/verter_session/src/semantic_query_memo/interner.rs",
+  "crates/verter_session/src/semantic_query_memo/stats.rs",
+  "crates/verter_session/src/semantic_query_memo/tests.rs",
+  "crates/verter_session/src/types.rs",
+  "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_catalog.rs",
+  "crates/verter_tsc/src/checker.rs",
+  "crates/verter_type_runtime/src/tsgo/ipc.rs",
+  "crates/verter_type_runtime/src/tsserver/ipc.rs",
+  "crates/verter_workspace/src/resolver.rs",
+  "crates/verter_session/src/project_semantic_dispatch/walk.rs",
+  "crates/verter_wasm/src/lib.rs",
+]);
+
+function countSourceLines(source) {
+  if (source.length === 0) return 0;
+  let lines = source.endsWith("\n") ? 0 : 1;
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) === 10) lines++;
+  }
+  return lines;
+}
+
+function directoryIdentity(abs, entry) {
+  if (entry && !entry.isDirectory() && !entry.isSymbolicLink()) return null;
+  try {
+    if (!statSync(abs).isDirectory()) return null;
+    return realpathSync(abs);
+  } catch {
+    return null;
+  }
+}
+
+function collectOversizeProductionSources(repoRoot) {
+  const violations = [];
+  const stack = [];
+  const cratesRoot = join(repoRoot, "crates");
+
+  for (const crateEntry of readdirSync(cratesRoot, { withFileTypes: true })) {
+    const crateAbs = join(cratesRoot, crateEntry.name);
+    if (directoryIdentity(crateAbs, crateEntry) === null) continue;
+    const rel = `crates/${crateEntry.name}/src`;
+    const abs = join(crateAbs, "src");
+    if (!existsSync(abs)) continue;
+    const identity = directoryIdentity(abs);
+    if (identity !== null) stack.push({ abs, rel, ancestors: new Set([identity]) });
+  }
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(current.abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const abs = join(current.abs, entry.name);
+      const rel = `${current.rel}/${entry.name}`;
+      const identity = directoryIdentity(abs, entry);
+      if (identity !== null) {
+        if (["tests", "benches", "examples", "target"].includes(entry.name)) continue;
+        // Branch-local identities stop symlink cycles without suppressing a distinct alias path.
+        if (current.ancestors.has(identity)) continue;
+        const ancestors = new Set(current.ancestors);
+        ancestors.add(identity);
+        stack.push({ abs, rel, ancestors });
+        continue;
+      }
+      if (!entry.name.endsWith(".rs")) continue;
+      if (entry.name === "tests.rs" || entry.name.endsWith("_tests.rs")) continue;
+      let source;
+      try {
+        source = readFileSync(abs, "utf8");
+      } catch {
+        continue;
+      }
+      const lines = countSourceLines(source);
+      if (lines > OVERSIZE_SOURCE_LINE_LIMIT && !OVERSIZE_SOURCE_EXEMPTIONS.has(rel)) {
+        violations.push([rel, lines]);
+      }
+    }
+  }
+
+  violations.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return violations;
+}
+
+function reportOversizeProductionSources(repoRoot) {
+  let violations;
+  try {
+    violations = collectOversizeProductionSources(repoRoot);
+  } catch (error) {
+    warn(`oversize-source advisory could not scan the production tree: ${error.message}`);
+    return;
+  }
+  if (violations.length === 0) return;
+
+  const rows = violations.map(([rel, lines]) => `${rel} (${lines} lines)`).join("\n  ");
+  warn(
+    `Oversize source advisory: production source files exceed ${OVERSIZE_SOURCE_LINE_LIMIT} lines\n` +
+      `without an explicit exemption:\n  ${rows}\n\n` +
+      "File size is advisory and does not affect the gate verdict.",
+  );
+}
 
 // ----------------------------------------------------------------------------------------------------
 // Argument parsing. The production CLI accepts ONLY the real-gate flags + --prepare + --help. There is NO
@@ -376,6 +615,8 @@ async function main() {
     err(`could not determine repo root (git rev-parse failed from ${SCRIPT_DIR})`);
     process.exit(EXIT_USAGE);
   }
+
+  reportOversizeProductionSources(repoRealpath);
 
   const runnerTarget = opts.targetDir
     ? isAbsolute(opts.targetDir)
@@ -740,6 +981,7 @@ async function runVueMacroOracleChecks(ctx) {
 
 // ----------------------------------------------------------------------------------------------------
 // runGate: the full canonical gate.
+//   0. Verify the non-cargo BUILD PREREQUISITES the suite loads from disk.
 //   1. Verify the pinned Vue macro oracle and its extractor.
 //   2. archive (build ONCE) + list (parse rust-suites).
 //   3. SURFACE 1 — nextest run from the archive (process isolation).
@@ -749,6 +991,39 @@ async function runVueMacroOracleChecks(ctx) {
 // ----------------------------------------------------------------------------------------------------
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
+
+  // ---------- BUILD-PREREQUISITE PREFLIGHT (the FIRST step of the gate) ----------
+  // Parts of the suite load artifacts cargo does not build: the real-provider suites spawn the pinned
+  // tsserver with `--globalPlugins @verter/typescript-plugin`, whose entry is a `tsc -b` output that
+  // `pnpm install` does NOT produce. Without it tsserver resolves no carrier and ~64 `*_tsserver` tests
+  // fail with `TS2307: Cannot find module './Comp.vue'` — indistinguishable, from the gate's output, from
+  // a real compiler regression.
+  //
+  // The oracle is a REAL LOAD of that plugin entry in a child process, NOT a list of files to stat: the
+  // entry eagerly requires its emitted helpers and `@verter/language-shared`'s entry re-exports a dozen
+  // emitted siblings, so a stat list is a mirror of the emit graph that drifts (both `index.js` present +
+  // one helper missing passes every stat and still throws inside tsserver). It proves resolvability, NOT
+  // freshness — a stale-but-loadable dist is a separate, deliberately out-of-scope problem.
+  //
+  // Ordering: this is the first step of the gate proper. It runs BEFORE `preflightFreshnessTooling` ON
+  // PURPOSE — that preflight may `pnpm install`, and the install is exactly what converts the SILENT-SKIP
+  // state (no node_modules ⇒ no tsserver ⇒ the affected tests skip ⇒ a green gate that proved nothing)
+  // into the LOUD-FAILURE state. Checking first catches both with one actionable message. (The mutex,
+  // the runner target dir and the whole-gate deadline are established by `main` before runGate is
+  // entered; this precedes every install, every cargo step and every test, not every statement.)
+  // See `checkBuildPrerequisites` for why the gate refuses to build or to skip.
+  // The probe is bounded by the GATE's remaining wallclock, not by its own constant: it runs with the
+  // single-flight mutex held, so a probe that could outlive `--timeout` would hold the lock past the
+  // deadline that is supposed to release it.
+  const prerequisites = checkBuildPrerequisites({
+    repoRoot: repoRealpath,
+    timeoutMs: probeBudgetMs(deadlineMs, nowMs()),
+  });
+  if (!prerequisites.ok) {
+    for (const line of prerequisites.lines) err(line);
+    return EXIT_USAGE;
+  }
+  log(`build-prerequisite preflight: SATISFIED — ${prerequisites.target} loaded`);
 
   // ---------- FRESHNESS-TOOLING PREFLIGHT (verdict-gating authority) ----------
   // BEFORE the archive build (and inside the held mutex + containment model), self-ensure the typeinfo
@@ -901,14 +1176,19 @@ async function runGate(opts, ctx) {
   }
   const nextestText = runRes.stdout + "\n" + runRes.stderr;
   // SURFACE-1 verdict via the shared analyzer (the same code the self-test drives in-process). It consults
-  // the run exit code + the summary `failed` total, NOT just the `FAIL [` lines, so a crash
-  // (SIGABRT/SIGSEGV/LEAK/TIMEOUT/…) or a setup/harness error in ANY crate fails the gate.
+  // the run exit code + the summary's run-but-did-not-pass total (`runCount - passed`), NOT just the
+  // `FAIL [` lines, so a crash (SIGABRT/SIGSEGV/LEAK-FAIL/…), a TIMEOUT, an `exec failed`, a cancelled run
+  // that left tests unexecuted, or a setup/harness error in ANY crate fails the gate — and each such test
+  // is NAMED in the verdict, not folded into an opaque "unaccounted" line.
   const s1 = analyzeNextestSurface(nextestText, runRes.code, freshnessToleranceAllowed);
   for (const f of s1.failures) failures.push(f);
   if (s1.toleratedCount > 0) toleratedOccurred = true;
   log(
     `SURFACE 1 done in ${Math.round(runRes.durationMs / 1000)}s: ` +
-      `${s1.summary.passed} passed, ${s1.summary.failed} failed ` +
+      `${s1.summary.runCount}${s1.summary.unrun > 0 ? `/${s1.summary.initialCount}` : ""} run, ` +
+      `${s1.summary.passed} passed, ${s1.summary.nonPassed} did not pass ` +
+      `(${s1.summary.failed} failed, ${s1.summary.timedOut} timed out, ${s1.summary.execFailed} exec failed` +
+      `${s1.summary.unrun > 0 ? `, ${s1.summary.unrun} NEVER RAN` : ""}) ` +
       `(${s1.namedCount} named, ${s1.toleratedCount} tolerated), ${s1.summary.skipped} skipped; ` +
       `run exit ${runRes.code}`,
   );

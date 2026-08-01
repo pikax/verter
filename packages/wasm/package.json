@@ -1,6 +1,6 @@
 {
   "name": "@verter/wasm",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "WASM bindings for Verter's Vue and experimental Svelte compiler host",
   "keywords": [
     "compiler",
@@ -53,6 +53,6 @@
     "vitest": "^4.1.7"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

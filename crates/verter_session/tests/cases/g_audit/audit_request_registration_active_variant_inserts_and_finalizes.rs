@@ -67,6 +67,9 @@ fn active_registration_appears_in_active_requests_until_finalize_then_publishes_
     let record = RequestAuditRecord {
         request_id: 7777,
         canonical_id: "/probe.vue".to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            "/probe.vue".to_string(),
+        )),
         kind: RequestKind::ComponentMeta,
         parent_request_id: None,
         from_cache: false,

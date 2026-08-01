@@ -55,6 +55,7 @@ jobs:
   check-trigger:
     name: Check Trigger
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     if: github.event_name == 'issue_comment'
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
@@ -131,6 +132,7 @@ jobs:
   setup:
     name: Setup Verter
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     if: |
       always() &&
       (github.event_name != 'issue_comment' || 
@@ -164,18 +166,18 @@ jobs:
 
       - name: Setup pnpm
         if: steps.source.outputs.source == 'artifact'
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
         if: steps.source.outputs.source == 'artifact'
         uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
 
       - name: Install Rust
         if: steps.source.outputs.source == 'artifact'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Cache Rust dependencies
         if: steps.source.outputs.source == 'artifact'
@@ -426,14 +428,14 @@ jobs:
 
       - name: Setup pnpm
         if: matrix.project.package-manager == 'pnpm'
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
 
       - name: Configure hoist pattern for Verter
         if: matrix.project.package-manager == 'pnpm'
@@ -1128,6 +1130,7 @@ jobs:
   summary:
     name: Generate Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [test-project]
     if: always()
     steps:

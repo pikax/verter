@@ -62,14 +62,33 @@ describe("recordsToQuickPickItems", () => {
     ]);
   });
 
-  it("sets canonical_id as the detail line", () => {
+  it("uses legacy canonical_id when an older record has no target_identity", () => {
     const items = recordsToQuickPickItems([rec({ canonical_id: "/foo.vue" })]);
     expect(items[0]!.detail).toBe("/foo.vue");
   });
 
-  it("falls back to '(no canonical id)' when canonical_id is empty", () => {
-    // Discriminating: some kinds (e.g. some MCP tool calls) leave
-    // canonical_id empty. The UI must not show a blank detail line.
+  it("preserves a raw unregistered URI even when legacy canonical_id is empty", () => {
+    const rawUri = "file:///workspace/A.vue";
+    const items = recordsToQuickPickItems([
+      rec({
+        canonical_id: "",
+        target_identity: { kind: "UnregisteredUri", value: rawUri },
+      }),
+    ]);
+    expect(items[0]!.detail).toBe(rawUri);
+  });
+
+  it("labels NotApplicable separately from an unregistered target", () => {
+    const items = recordsToQuickPickItems([
+      rec({
+        canonical_id: "",
+        target_identity: { kind: "NotApplicable" },
+      }),
+    ]);
+    expect(items[0]!.detail).toBe("(no single target)");
+  });
+
+  it("falls back to '(no canonical id)' for an older empty record", () => {
     const items = recordsToQuickPickItems([rec({ canonical_id: "" })]);
     expect(items[0]!.detail).toBe("(no canonical id)");
   });

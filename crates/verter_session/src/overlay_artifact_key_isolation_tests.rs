@@ -55,7 +55,7 @@ use crate::{HostConfig, UpsertRequest, VerterHost};
 /// Base owner SFC-free `.ts` file. It imports `./helper`, which is NOT
 /// upserted into the workspace — so the base `ensure_indexed_ready`
 /// cannot resolve the specifier, while a session that overlays
-/// `/helper.ts` can.
+/// `/workspace/helper.ts` can.
 const OWNER_SOURCE: &str = "import { helper } from './helper';\nexport const owner = helper;\n";
 
 /// Overlay-only dependency body. Present ONLY as a session overlay.
@@ -63,44 +63,76 @@ const HELPER_SOURCE: &str = "export const helper = 1;\n";
 
 fn host_with_owner() -> (Arc<VerterHost>, [u8; 16]) {
     let host = VerterHost::new_standalone(HostConfig::default());
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
     let _ = host
         .upsert(UpsertRequest {
-            canonical_id: Some("/owner.ts".to_string()),
-            input_id: "/owner.ts".to_string(),
+            canonical_id: Some("/workspace/owner.ts".to_string()),
+            input_id: "/workspace/owner.ts".to_string(),
             source: Arc::from(OWNER_SOURCE),
             file_language: crate::LanguageRegistry::global()
-                .classify_static("/owner.ts")
+                .classify_static("/workspace/owner.ts")
                 .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("owner upsert succeeds");
+    if let verter_workspace::ResolutionPublication::Refused(refusal) = host
+        .resolve_for_persistent_state(
+            "/workspace/owner.ts",
+            "./helper",
+            verter_workspace::ResolutionContext {
+                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                kind: verter_workspace::ResolveRequestKind::EsmImport,
+            },
+        )
+    {
+        panic!(
+            "fixture project must admit the witnessed miss: {:?}",
+            refusal.reason()
+        );
+    }
     let host = Arc::new(host);
     let base = host
-        .ensure_indexed_ready("/owner.ts")
+        .ensure_indexed_ready("/workspace/owner.ts")
         .expect("base IndexedReady materialises");
     (host, base.whole_hash)
 }
 
-/// Build an `OverlaidView` that overlays `/owner.ts` **byte-identically**
+/// Build an `OverlaidView` that overlays `/workspace/owner.ts` **byte-identically**
 /// (overlay hash == base hash) and overlays the overlay-only
-/// `/helper.ts`.
+/// `/workspace/helper.ts`.
 fn byte_identical_overlay_view(host: &Arc<VerterHost>) -> OverlaidView {
     let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
     // Byte-identical overlay of the base owner — the LSB
     // "opened-but-unmodified file" case.
-    overlays.insert("/owner.ts".to_string(), Arc::from(OWNER_SOURCE));
+    overlays.insert("/workspace/owner.ts".to_string(), Arc::from(OWNER_SOURCE));
     // Overlay-only dependency — no disk / workspace presence.
-    overlays.insert("/helper.ts".to_string(), Arc::from(HELPER_SOURCE));
+    overlays.insert("/workspace/helper.ts".to_string(), Arc::from(HELPER_SOURCE));
     OverlaidView::new(Arc::clone(host), overlays)
 }
 
-/// The `resolved_canonical_id` the artifact recorded for the `./helper`
-/// specifier, or `None` when the route is unresolved / absent.
-fn helper_route(indexed: &crate::project_type_store::IndexedReady) -> Option<String> {
+/// The AUTHORED `./helper` import specifier the artifact publishes, or
+/// `None` when the surface does not name it.
+///
+/// The artifact records no RESOLVED target, so the payload channel
+/// through which an overlay materialisation could once poison a base
+/// artifact (an overlay-only route baked into the base key's slot) no
+/// longer exists. What remains
+/// observable, and is asserted below, is that the two key slots stay
+/// distinct and that the overlay artifact carries NO session-scoped
+/// state for a byte-identical overlay.
+fn helper_specifier(indexed: &crate::project_type_store::IndexedReady) -> Option<String> {
     indexed
-        .import_routes
-        .get("./helper")
-        .and_then(|resolution| resolution.resolved_canonical_id.clone())
+        .shallow_state
+        .import_targets
+        .values()
+        .find(|target| target.source_specifier == "./helper")
+        .map(|target| target.source_specifier.clone())
 }
 
 #[test]
@@ -112,8 +144,8 @@ fn byte_identical_overlay_hash_equals_base_hash_fixture_invariant() {
     let (host, base_hash) = host_with_owner();
     let view = byte_identical_overlay_view(&host);
     let overlay_hash = view
-        .overlay_content_hash_for("/owner.ts")
-        .expect("the view carries an explicit overlay for /owner.ts");
+        .overlay_content_hash_for("/workspace/owner.ts")
+        .expect("the view carries an explicit overlay for /workspace/owner.ts");
     assert_eq!(
         overlay_hash, base_hash,
         "fixture invariant: a byte-identical overlay must hash to the base hash — \
@@ -122,7 +154,7 @@ fn byte_identical_overlay_hash_equals_base_hash_fixture_invariant() {
     // And the discriminator is non-zero, so an `overlay_scoped` key can
     // never alias the base key (`parse_env_hash = [0u8; 16]`).
     let discriminator = view
-        .overlay_artifact_discriminator("/owner.ts")
+        .overlay_artifact_discriminator("/workspace/owner.ts")
         .expect("an overlaid canonical has an overlay-artifact discriminator");
     assert_ne!(
         discriminator, [0u8; 16],
@@ -148,28 +180,36 @@ fn overlay_materialized_first_does_not_poison_base_artifact_routes() {
     // Materialise the overlay candidate first. The materialiser
     // derives the overlay source + content hash from the view itself.
     let overlay_indexed = host
-        .materialize_overlay_indexed_ready_with_view("/owner.ts", &view)
+        .materialize_overlay_indexed_ready_with_view("/workspace/owner.ts", &view)
         .expect("overlay IndexedReady materialises");
     assert_eq!(
-        helper_route(&overlay_indexed).as_deref(),
-        Some("/helper.ts"),
-        "fixture invariant: the overlay materialiser resolves `./helper` to the \
-         overlay-only `/helper.ts` (this is the session-specific route)",
+        helper_specifier(&overlay_indexed).as_deref(),
+        Some("./helper"),
+        "fixture invariant: the overlay artifact publishes the owner's authored \
+         `./helper` specifier",
+    );
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./helper"),
+        None,
+        "fixture invariant: the base workspace has no `/helper.ts`, so the \
+         session-only target is genuinely base-invisible",
     );
 
     // Now read the BASE artifact through the base-only path.
     let base_indexed = host
-        .ensure_indexed_ready("/owner.ts")
+        .ensure_indexed_ready("/workspace/owner.ts")
         .expect("base IndexedReady is available");
     assert_eq!(
-        helper_route(&base_indexed),
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./helper"),
         None,
-        "BASE-ARTIFACT POISONING: the base `ensure_indexed_ready` read returned an \
-         artifact whose `./helper` route resolves to the overlay-only `/helper.ts`. \
-         The base workspace has no `/helper.ts`, so the base artifact's route MUST \
-         stay unresolved — a resolved route means the overlay candidate collided \
-         onto the base `FileArtifactKey::base` slot. The overlay-scoped key \
-         dimension keeps the two artifacts isolated.",
+        "BASE-ARTIFACT POISONING: a base read must never observe the session's \
+         overlay-only target. The artifact records no resolved route at all, so \
+         the only channel is the live resolution — which is base-scoped.",
+    );
+    assert!(
+        !Arc::ptr_eq(&overlay_indexed, &base_indexed),
+        "the overlay candidate must not occupy the base `FileArtifactKey::base` \
+         slot — the overlay-scoped key dimension keeps the two entries distinct",
     );
 }
 
@@ -189,31 +229,32 @@ fn base_materialized_first_does_not_starve_overlay_artifact_routes() {
     // Base artifact already materialised by `host_with_owner`; assert
     // its `./helper` route is unresolved (the control).
     let base_indexed = host
-        .ensure_indexed_ready("/owner.ts")
+        .ensure_indexed_ready("/workspace/owner.ts")
         .expect("base IndexedReady is available");
     assert_eq!(
-        helper_route(&base_indexed),
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./helper"),
         None,
-        "control: the base artifact's `./helper` route is unresolved (no \
-         `/helper.ts` in the base workspace)",
+        "control: `./helper` is unresolved in the base workspace (no `/helper.ts`)",
     );
 
     // Now materialise the overlay candidate. The materialiser derives
     // the overlay source + content hash from the view itself.
     let view = byte_identical_overlay_view(&host);
     let overlay_indexed = host
-        .materialize_overlay_indexed_ready_with_view("/owner.ts", &view)
+        .materialize_overlay_indexed_ready_with_view("/workspace/owner.ts", &view)
         .expect("overlay IndexedReady materialises");
 
     assert_eq!(
-        helper_route(&overlay_indexed).as_deref(),
-        Some("/helper.ts"),
-        "OVERLAY ROUTE STARVATION: the overlay materialiser returned an artifact \
-         whose `./helper` route is unresolved. The session overlays `/helper.ts`, \
-         so the overlay artifact's route MUST resolve to it — an unresolved route \
-         means the overlay materialiser's fast path hit the base artifact under a \
-         colliding `FileArtifactKey::base` slot instead of materialising the \
-         session's own candidate. The overlay-scoped key keeps them isolated.",
+        helper_specifier(&overlay_indexed).as_deref(),
+        Some("./helper"),
+        "the overlay materialiser must produce the session's OWN candidate",
+    );
+    assert!(
+        !Arc::ptr_eq(&overlay_indexed, &base_indexed),
+        "OVERLAY STARVATION: the overlay materialiser returned the BASE artifact \
+         instead of materialising the session's own candidate — its fast path hit \
+         a colliding `FileArtifactKey::base` slot. The overlay-scoped key keeps \
+         them isolated.",
     );
 }
 
@@ -227,15 +268,15 @@ fn base_and_overlay_artifacts_coexist_under_distinct_keys() {
     let (host, base_hash) = host_with_owner();
     let view = byte_identical_overlay_view(&host);
     let overlay_hash = view
-        .overlay_content_hash_for("/owner.ts")
+        .overlay_content_hash_for("/workspace/owner.ts")
         .expect("overlay hash present");
     let discriminator = view
-        .overlay_artifact_discriminator("/owner.ts")
+        .overlay_artifact_discriminator("/workspace/owner.ts")
         .expect("overlay discriminator present");
     // The materialiser derives the overlay source + content hash from
     // the view itself.
     let _ = host
-        .materialize_overlay_indexed_ready_with_view("/owner.ts", &view)
+        .materialize_overlay_indexed_ready_with_view("/workspace/owner.ts", &view)
         .expect("overlay IndexedReady materialises");
 
     // The base base-key read returns the base artifact: `./helper`
@@ -243,13 +284,12 @@ fn base_and_overlay_artifacts_coexist_under_distinct_keys() {
     let base_via_base_key = host
         .project_type_store()
         .indexed()
-        .get("/owner.ts", base_hash)
+        .get("/workspace/owner.ts", base_hash)
         .expect("base artifact present under the base key");
     assert_eq!(
-        helper_route(&base_via_base_key),
-        None,
-        "the base-key read MUST return the base artifact (unresolved `./helper`) — \
-         the overlay candidate must not occupy the base slot",
+        helper_specifier(&base_via_base_key).as_deref(),
+        Some("./helper"),
+        "the base-key read MUST return an artifact for the owner",
     );
 
     // The overlay-scoped read returns the overlay artifact: `./helper`
@@ -257,13 +297,13 @@ fn base_and_overlay_artifacts_coexist_under_distinct_keys() {
     let overlay_via_scoped = host
         .project_type_store()
         .indexed()
-        .get_overlay_scoped("/owner.ts", overlay_hash, discriminator)
+        .get_overlay_scoped("/workspace/owner.ts", overlay_hash, discriminator)
         .expect("overlay artifact present under the overlay-scoped key");
     assert_eq!(
-        helper_route(&overlay_via_scoped).as_deref(),
-        Some("/helper.ts"),
-        "the overlay-scoped read MUST return the overlay artifact (resolved \
-         `./helper`) — both artifacts coexist as distinct candidates",
+        helper_specifier(&overlay_via_scoped).as_deref(),
+        Some("./helper"),
+        "the overlay-scoped read MUST return the overlay artifact — both \
+         artifacts coexist as distinct candidates",
     );
 
     // The two artifacts are genuinely different objects.

@@ -264,6 +264,9 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
     let record = RequestAuditRecord {
         request_id: 42,
         canonical_id: "/a.vue".into(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            "/a.vue".into(),
+        )),
         kind: RequestKind::ComponentMeta,
         parent_request_id: None,
         timings: RequestTimingAudit::default(),
@@ -406,6 +409,9 @@ fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
         let record = RequestAuditRecord {
             request_id: 1,
             canonical_id: "/a.vue".into(),
+            target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+                "/a.vue".into(),
+            )),
             kind: RequestKind::ComponentMeta,
             parent_request_id: None,
             timings: RequestTimingAudit::default(),
@@ -586,6 +592,9 @@ fn json_emission_round_trips_structurally_equivalent_to_rust() {
     let original = RequestAuditRecord {
         request_id: 9_007_199_254_740_993, // 2^53 + 1 — JS Number would lose precision here
         canonical_id: "/Widget.vue".to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            "/Widget.vue".to_string(),
+        )),
         kind: RequestKind::ComponentMeta,
         parent_request_id: None,
         timings: RequestTimingAudit {

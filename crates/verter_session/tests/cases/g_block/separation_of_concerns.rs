@@ -17,8 +17,8 @@
 
 use std::path::PathBuf;
 
-/// Parse `fact_signature_helpers.rs`'s `ReadSetSignature` struct via
-/// `syn::parse_file` and assert it has EXACTLY two fields named
+/// Parse `verter_workspace`'s `fact_cache.rs` `ReadSetSignature`
+/// struct via `syn::parse_file` and assert it has EXACTLY two fields named
 /// `facts` and `overflowed`. There MUST NOT be a
 /// `validated_at_generation` field on the carrier — that is the
 /// `CacheEntry<V>` responsibility, not the signature's.
@@ -28,10 +28,13 @@ use std::path::PathBuf;
 #[test]
 fn regression_guard_read_set_signature_has_no_generation_field() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/ directory")
+        .join("verter_workspace")
         .join("src")
-        .join("fact_signature_helpers.rs");
-    let src = std::fs::read_to_string(&path).expect("read fact_signature_helpers.rs");
-    let parsed = syn::parse_file(&src).expect("syn parse fact_signature_helpers.rs");
+        .join("fact_cache.rs");
+    let src = std::fs::read_to_string(&path).expect("read fact_cache.rs");
+    let parsed = syn::parse_file(&src).expect("syn parse fact_cache.rs");
 
     let mut found = false;
     for item in &parsed.items {
@@ -67,7 +70,7 @@ fn regression_guard_read_set_signature_has_no_generation_field() {
     }
     assert!(
         found,
-        "ReadSetSignature struct MUST be declared in fact_signature_helpers.rs"
+        "ReadSetSignature struct MUST be declared in verter_workspace's fact_cache.rs"
     );
 }
 

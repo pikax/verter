@@ -1,16 +1,29 @@
 import { strict as assert } from "node:assert";
+import { pollBudget } from "./timeouts";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
 import { assertSafeComponentHoverCarrier } from "./componentHoverContract";
+import { assertCompletionProbe, assertEveryProbeAnswers } from "./completionContract";
 
-import { ensureTypeProviderSynced, sleep, waitForDiagnosticsSettled } from "../helpers";
+import {
+  ensureTypeProviderSynced,
+  logMark,
+  sleep,
+  waitForDiagnosticsSettled,
+  withFrontierDiagnosis,
+} from "../helpers";
 import type {
   ContractAnchor,
   FrameworkContractDescriptor,
   LocalCarrierCase,
 } from "../frameworks/types";
-import { frameworkContractId, type FrameworkContractCapability } from "./frameworkContractManifest";
+import {
+  completionContractId,
+  frameworkContractId,
+  FRAMEWORK_ASSERTED_COMPLETIONS,
+  type FrameworkContractCapability,
+} from "./frameworkContractManifest";
 import { VIRTUAL_CARRIER_PATTERN } from "./virtualCarrier";
 
 const WARM_DEFINITION_SAMPLE_COUNT = 5;
@@ -78,7 +91,7 @@ async function poll<T>(
   label: string,
   request: () => Promise<T>,
   ready: (value: T) => boolean,
-  timeoutMs = 10_000,
+  timeoutMs = pollBudget("frameworkContractSettle"),
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let latest = await request();
@@ -289,20 +302,33 @@ async function locationKeys(
 
 async function assertReferences(local: LocalCarrierCase): Promise<void> {
   const doc = await openWorkspaceFile(local.declaration.file);
-  const refs = await poll(
-    `references ${local.file}`,
-    async () =>
-      (await vscode.commands.executeCommand<vscode.Location[]>(
-        "vscode.executeReferenceProvider",
-        doc.uri,
-        anchorPosition(doc, local.declaration),
-      )) ?? [],
-    (result) => result.length >= local.allReferences.length,
-  );
+  const mark = logMark();
+  let refs: vscode.Location[];
+  try {
+    refs = await poll(
+      `references ${local.file}`,
+      async () =>
+        (await vscode.commands.executeCommand<vscode.Location[]>(
+          "vscode.executeReferenceProvider",
+          doc.uri,
+          anchorPosition(doc, local.declaration),
+        )) ?? [],
+      (result) => result.length >= local.allReferences.length,
+    );
+  } catch (error) {
+    throw new Error(withFrontierDiagnosis(mark, String(error)));
+  }
   assertNoVirtualLocations(refs, "references");
+  const actual = await locationKeys(refs, local.declaration.token);
+  const expected = expectedAnchorKeys(local.allReferences);
   assert.deepEqual(
-    await locationKeys(refs, local.declaration.token),
-    expectedAnchorKeys(local.allReferences),
+    actual,
+    expected,
+    withFrontierDiagnosis(
+      mark,
+      `references from ${local.declaration.file}#${local.declaration.token} did not cover the ` +
+        `exact semantic set; got ${actual.length}, expected ${expected.length}`,
+    ),
   );
 }
 
@@ -320,18 +346,39 @@ async function assertAndApplyRename(
 ): Promise<void> {
   assert.equal(newName.length, origin.token.length, "contract rename keeps offsets stable");
   const originDoc = await openWorkspaceFile(origin.file);
-  const result = await vscode.commands.executeCommand<vscode.WorkspaceEdit>(
-    "vscode.executeDocumentRenameProvider",
-    originDoc.uri,
-    anchorPosition(originDoc, origin),
-    newName,
+  const mark = logMark();
+  // A rename that fails closed REJECTS ("No result…") rather than returning an empty edit,
+  // so the rejection — not an assertion — is what surfaces. Diagnose it here or the single
+  // most important fail-closed path in the contract reports as an opaque provider error.
+  let result: vscode.WorkspaceEdit;
+  try {
+    result = await vscode.commands.executeCommand<vscode.WorkspaceEdit>(
+      "vscode.executeDocumentRenameProvider",
+      originDoc.uri,
+      anchorPosition(originDoc, origin),
+      newName,
+    );
+  } catch (error) {
+    throw new Error(
+      withFrontierDiagnosis(
+        mark,
+        `rename from ${origin.file}#${origin.token} was refused: ${String(error)}`,
+      ),
+    );
+  }
+  assert.ok(
+    result,
+    withFrontierDiagnosis(mark, `rename from ${origin.file}#${origin.token} returned no edit`),
   );
-  assert.ok(result, `rename from ${origin.file}#${origin.token} returned no edit`);
   const edits = workspaceEditLocations(result);
   assert.equal(
     edits.length,
     local.allReferences.length,
-    "rename must cover the exact semantic set",
+    withFrontierDiagnosis(
+      mark,
+      `rename from ${origin.file}#${origin.token} must cover the exact semantic set ` +
+        `(${local.allReferences.map((anchor) => `${anchor.file}#${anchor.occurrence ?? 0}`).join(", ")})`,
+    ),
   );
   assertNoVirtualLocations(
     edits.map(({ uri, edit }) => new vscode.Location(uri, edit.range)),
@@ -473,6 +520,17 @@ async function assertTypedComponentHover(
   assertSafeComponentHoverCarrier(text);
 }
 
+/**
+ * Exercise the jump ctrl/cmd+click dispatches, from a markup position.
+ *
+ * SCOPE, stated rather than implied: VS Code exposes no test API for the modifier-hover
+ * that renders the ctrl+click UNDERLINE, so this covers the second half of the gesture —
+ * the `editor.action.revealDefinition` command the click itself runs, driven through a real
+ * editor with a real selection — and NOT the link-decoration half. A regression that kills
+ * only the underline while leaving the jump intact still passes here. Closing that half
+ * needs an editor-level link-decoration probe; until then this test is deliberately not
+ * evidence for "ctrl+click works", only for "the jump ctrl+click performs works".
+ */
 async function assertCtrlClick(local: LocalCarrierCase): Promise<void> {
   const doc = await openWorkspaceFile(local.markupUse.file);
   const editor = await vscode.window.showTextDocument(doc);
@@ -596,5 +654,53 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
       assertCleanFileDiagnostics(descriptor.publicTypeConsumer),
     );
     test(id("ctrl-click.markup-to-script"), () => assertCtrlClick(descriptor.ts));
+
+    // ── Event-handler expression region ──────────────────────────────────────
+    // The cases above all anchor on an interpolation. These anchor on a binding whose
+    // ONLY markup use is inside an event-handler expression value, so a surface that
+    // lowers interpolations but not handler expressions fails here and only here.
+    test(id("ts.definition.event-handler-to-script"), () =>
+      assertDefinitionTargetsExactAnchorStable(
+        descriptor.eventHandler.markupUse,
+        descriptor.eventHandler.declaration,
+      ),
+    );
+    test(id("ts.references.event-handler"), () => assertReferences(descriptor.eventHandler));
+    test(id("ts.rename.from-event-handler"), () =>
+      assertAndApplyRename(
+        descriptor.eventHandler,
+        descriptor.eventHandler.markupUse,
+        "renderThing",
+      ),
+    );
+    test(id("ts.hover.event-handler"), () => assertTypedHover(descriptor.eventHandler));
+    test(id("ctrl-click.event-handler-to-script"), () => assertCtrlClick(descriptor.eventHandler));
+
+    // ── Completion, at the moment of typing ──────────────────────────────────
+    test(id("completion.probe-file.clean-diagnostics"), () =>
+      assertCleanFileDiagnostics(descriptor.completionProbeFile),
+    );
+    test(id("completion.answers-every-gesture"), async function () {
+      this.timeout(60_000);
+      await assertEveryProbeAnswers(descriptor.completionProbes);
+    });
+
+    // Per-gesture content. The manifest and the descriptor must agree exactly, so a
+    // gesture cannot leave the required set by quietly losing its expectation.
+    const assertedIds = Object.keys(descriptor.assertedCompletions).sort();
+    const declaredIds = [...FRAMEWORK_ASSERTED_COMPLETIONS[descriptor.framework]].sort();
+    assert.deepEqual(
+      assertedIds,
+      declaredIds,
+      `${descriptor.framework}: asserted-completion inventory drifted from the manifest`,
+    );
+    for (const probeId of declaredIds) {
+      const probe = descriptor.completionProbes.find((candidate) => candidate.id === probeId);
+      assert.ok(probe, `${descriptor.framework}: asserted completion ${probeId} has no probe`);
+      const expectation = descriptor.assertedCompletions[probeId];
+      test(completionContractId(descriptor.framework, probeId), () =>
+        assertCompletionProbe(probe, expectation),
+      );
+    }
   });
 }

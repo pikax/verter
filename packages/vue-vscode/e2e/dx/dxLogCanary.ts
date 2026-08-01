@@ -9,10 +9,10 @@
  *
  * FORCING (deterministic, provider-independent): the canary launch pins
  * `verter.mcp.enabled=true` and `verter.typeProvider=off`, so `buildServerOptions`
- * passes `--mcp-port=0` and `--type-provider=off` to the server (extension.ts:1053/1061)
+ * passes `--mcp-port=0` and `--type-provider=off` to the server (extension.ts:1735/1739)
  * and logs those exact args through the hooked `log.info` `[buildServerOptions]` line
- * (extension.ts:1066). The server then emits an UNCONDITIONAL MCP-deprecation
- * `tracing::warn!` whenever `--mcp-port` is present (crates/verter_lsp/src/main.rs:63) —
+ * (extension.ts:1748). The server then emits an UNCONDITIONAL MCP-deprecation
+ * `tracing::warn!` whenever `--mcp-port` is present (crates/verter_lsp/src/main.rs:100) —
  * to stderr, the same capture surface as every other server WARN. No global-TypeScript
  * fallthrough or provider-unavailability is involved.
  *
@@ -31,7 +31,7 @@
 /** The type provider the canary pins; `--type-provider=off` proves provider discovery is not the trigger. */
 export const CANARY_TYPE_PROVIDER = "off" as const;
 
-/** Substring of the server's MCP-deprecation WARN (crates/verter_lsp/src/main.rs:63). */
+/** Substring of the server's MCP-deprecation WARN (crates/verter_lsp/src/main.rs:100). */
 export const CANARY_WARN_NEEDLES = ["--mcp-port is no longer honoured by verter-lsp"] as const;
 
 /**

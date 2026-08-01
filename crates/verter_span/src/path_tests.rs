@@ -331,8 +331,56 @@ fn fs_paths_equal_under_folds_iff_case_insensitive() {
     // Slash normalization is unconditional (backslash vs forward-slash, any host).
     assert!(fs_paths_equal_under(r"C:\ws\A.ts", "c:/ws/A.ts", true));
     assert!(fs_paths_equal_under(r"C:\ws\A.ts", "C:/ws/A.ts", false));
+    // The DRIVE fold is unconditional too — `canonicalize_path` lowercases the drive
+    // letter on every host, so a drive-case divergence is the same file even under
+    // the case-SENSITIVE policy. Slash-only normalization made this pair compare
+    // unequal on Linux while `InjectedPathKey` keyed it equal.
+    assert!(fs_paths_equal_under(r"C:\ws\A.ts", "c:/ws/A.ts", false));
+    // Extended-length prefix and trailing slash are likewise folded on every host.
+    assert!(fs_paths_equal_under(r"\\?\C:\ws\A.ts", "c:/ws/A.ts", false));
+    assert!(fs_paths_equal_under("/ws/src/", "/ws/src", false));
     // Distinct basenames never match, regardless of the case policy.
     assert!(!fs_paths_equal_under("/ws/src/A.ts", "/ws/src/B.ts", true));
+    // NEGATIVE: canonicalizing must not make the case-sensitive branch permissive —
+    // a non-drive case variant stays DISTINCT.
+    assert!(!fs_paths_equal_under("/ws/src/A.ts", "/ws/src/a.ts", false));
+    assert!(!fs_paths_equal_under(r"C:\ws\A.ts", "c:/ws/a.ts", false));
+}
+
+/// The agreement invariant, proven on EVERY host under BOTH policy values:
+/// `InjectedPathKey` equality and `fs_paths_equal` are the same relation, because
+/// both derive from the one shared `canonicalize_path` normalization.
+///
+/// Discriminating: with the pre-fix slash-only comparison core, every drive-case /
+/// extended-prefix / trailing-slash row below disagrees under `case_insensitive =
+/// false` (the key folds, the predicate does not). The case-insensitive branch
+/// agreed by accident — `eq_ignore_ascii_case` folds the drive letter too — which is
+/// exactly why this class of bug reached CI as a Linux-only failure.
+#[test]
+fn key_equality_and_fs_paths_equal_are_the_same_relation_under_both_policies() {
+    // (left, right) pairs spanning every normalization axis plus genuine distinctness.
+    let pairs = [
+        (r"C:\proj\Foo.vue.tsx", "c:/proj/Foo.vue.tsx"),
+        (r"C:\ws\A.ts", "c:/ws/A.ts"),
+        (r"\\?\C:\ws\A.ts", "c:/ws/A.ts"),
+        ("/ws/src/", "/ws/src"),
+        ("/ws/src/A.ts", "/ws/src/a.ts"),
+        ("c:/proj/FOO.vue.tsx", "c:/proj/foo.vue.tsx"),
+        ("/ws/src/A.ts", "/ws/src/B.ts"),
+        ("c:/a/Foo.vue.tsx", "d:/a/Foo.vue.tsx"),
+    ];
+    for case_insensitive in [true, false] {
+        for (left, right) in pairs {
+            let keys_equal = injected_key_under(left, case_insensitive)
+                == injected_key_under(right, case_insensitive);
+            let paths_equal = fs_paths_equal_under(left, right, case_insensitive);
+            assert_eq!(
+                keys_equal, paths_equal,
+                "InjectedPathKey equality must equal fs_paths_equal for \
+                 ({left:?}, {right:?}) under case_insensitive={case_insensitive}"
+            );
+        }
+    }
 }
 
 /// Discriminating macOS-membership witness, runnable on EVERY host: the bug was the
@@ -453,4 +501,365 @@ fn injected_path_key_matches_fs_policy_and_is_hashable() {
         fs_paths_equal("c:/proj/FOO.vue.tsx", "c:/proj/foo.vue.tsx"),
         "InjectedPathKey equality must agree with fs_paths_equal on this host"
     );
+}
+
+// ── simplify_verbatim_path: the EXEC-boundary transform ─────────────────────
+//
+// Every case below constructs the `\\?\` input EXPLICITLY as a string rather
+// than calling `canonicalize()`, so the rule is exercised identically on macOS,
+// Linux, and Windows. `canonicalize()` only *produces* this shape on Windows;
+// what the shape must *become* is a host-independent fact, and that is what the
+// production exec boundary depends on.
+
+#[test]
+fn verbatim_disk_prefix_is_stripped() {
+    assert_eq!(
+        simplify_verbatim_path_str(r"\\?\D:\dev\app\node_modules\typescript\lib\tsserver.js"),
+        r"D:\dev\app\node_modules\typescript\lib\tsserver.js"
+    );
+    // NEGATIVE: the prefix that kills node's `resolveMainPath` is gone, and the
+    // drive was not eaten along with it (the `EISDIR: lstat 'D:'` shape).
+    let out = simplify_verbatim_path_str(r"\\?\D:\dev\app\tsserver.js");
+    assert!(
+        !out.starts_with(r"\\?"),
+        "no verbatim prefix survives: {out}"
+    );
+    assert!(out.starts_with(r"D:\"), "the drive root survives: {out}");
+}
+
+#[test]
+fn verbatim_unc_prefix_becomes_a_plain_unc_path() {
+    assert_eq!(
+        simplify_verbatim_path_str(r"\\?\UNC\build01\share\ws\tsserver.js"),
+        r"\\build01\share\ws\tsserver.js"
+    );
+    // NEGATIVE: the naive `strip_prefix(r"\\?\")` answer is a RELATIVE path
+    // beginning with a literal `UNC` directory — a silent corruption.
+    assert_ne!(
+        simplify_verbatim_path_str(r"\\?\UNC\build01\share\ws\tsserver.js"),
+        r"UNC\build01\share\ws\tsserver.js"
+    );
+}
+
+#[test]
+fn already_simple_and_posix_paths_are_returned_untouched_and_borrowed() {
+    for path in [
+        r"D:\dev\app\tsserver.js",
+        r"\\build01\share\ws\tsserver.js",
+        "/usr/local/lib/node_modules/typescript/lib/tsserver.js",
+        "relative/tsserver.js",
+        "",
+    ] {
+        let out = simplify_verbatim_path_str(path);
+        assert_eq!(out, path, "{path} must be unchanged");
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "{path} needs no allocation"
+        );
+    }
+}
+
+#[test]
+fn unsimplifiable_verbatim_paths_are_left_verbatim_never_corrupted() {
+    // A device-namespace verbatim path has no Win32 spelling at all.
+    let volume = r"\\?\Volume{9c8f1e2a-0000-0000-0000-100000000000}\ws\tsserver.js";
+    assert_eq!(simplify_verbatim_path_str(volume), volume);
+
+    // Win32 TRIMS a trailing dot/space, so the simplified form would name a
+    // different file (or none).
+    let trailing_dot = r"\\?\D:\ws\odd.\tsserver.js";
+    assert_eq!(simplify_verbatim_path_str(trailing_dot), trailing_dot);
+    let trailing_space = r"\\?\D:\ws\odd \tsserver.js";
+    assert_eq!(simplify_verbatim_path_str(trailing_space), trailing_space);
+
+    // Win32 RESOLVES `.`/`..`; verbatim keeps them literal.
+    let dotdot = r"\\?\D:\ws\..\tsserver.js";
+    assert_eq!(simplify_verbatim_path_str(dotdot), dotdot);
+
+    // A reserved DOS device name in any component.
+    let device = r"\\?\D:\ws\NUL\tsserver.js";
+    assert_eq!(simplify_verbatim_path_str(device), device);
+    let device_ext = r"\\?\D:\ws\com1.js";
+    assert_eq!(simplify_verbatim_path_str(device_ext), device_ext);
+
+    // `/` is a literal filename character under the verbatim prefix.
+    let literal_slash = r"\\?\D:\ws\a/b\tsserver.js";
+    assert_eq!(simplify_verbatim_path_str(literal_slash), literal_slash);
+
+    // Longer than MAX_PATH: only the verbatim form can name it.
+    let long = format!(r"\\?\D:\{}\tsserver.js", "d".repeat(300));
+    assert_eq!(simplify_verbatim_path_str(&long), long);
+
+    // NEGATIVE: none of the refusals silently produced a different path.
+    for input in [volume, trailing_dot, dotdot, device, literal_slash] {
+        assert!(
+            matches!(simplify_verbatim_path_str(input), Cow::Borrowed(_)),
+            "{input} must be returned as-is, not rewritten"
+        );
+    }
+}
+
+#[test]
+fn simplify_is_idempotent_and_agrees_across_the_str_and_path_apis() {
+    for input in [
+        r"\\?\D:\ws\tsserver.js",
+        r"\\?\UNC\srv\share\tsserver.js",
+        r"\\?\Volume{0}\ws\tsserver.js",
+        "/usr/lib/tsserver.js",
+    ] {
+        let once = simplify_verbatim_path_str(input).into_owned();
+        assert_eq!(
+            simplify_verbatim_path_str(&once),
+            once,
+            "{input} must be a fixed point after one pass"
+        );
+        assert_eq!(
+            simplify_verbatim_path(std::path::Path::new(input)),
+            std::path::Path::new(&once),
+            "the Path API must agree with the str API for {input}"
+        );
+    }
+}
+
+#[test]
+fn simplify_does_not_canonicalize_case_or_separators() {
+    // The exec boundary is NOT the canonical-ID boundary: the drive keeps its
+    // case and the separators stay native. (`canonicalize_path` owns that, and
+    // conflating the two would change cache-key identity.)
+    assert_eq!(
+        simplify_verbatim_path_str(r"\\?\D:\Dev\App.vue"),
+        r"D:\Dev\App.vue"
+    );
+    assert_ne!(
+        simplify_verbatim_path_str(r"\\?\D:\Dev\App.vue"),
+        "d:/Dev/App.vue"
+    );
+}
+
+// ── MAX_PATH is a CHARACTER limit, not a UTF-8 byte limit ───────────────────
+
+#[test]
+fn a_non_ascii_path_under_the_character_limit_still_simplifies() {
+    // Win32 measures `MAX_PATH` in UTF-16 code units, not UTF-8 bytes. A path
+    // of ~130 accented characters is comfortably legal on Windows while being
+    // over 260 UTF-8 bytes. Refusing it would hand node the untouched `\\?\`
+    // argument — the very `EISDIR` outage this helper exists to prevent — for
+    // every user with a non-ASCII install path.
+    let dir = "é".repeat(130);
+    let input = format!(r"\\?\D:\{dir}\x.js");
+    let expected = format!(r"D:\{dir}\x.js");
+    assert!(
+        expected.len() > 260,
+        "the fixture must exceed the BYTE limit to discriminate ({} bytes)",
+        expected.len()
+    );
+    assert!(
+        expected.chars().map(char::len_utf16).sum::<usize>() < 260,
+        "the fixture must be under the real CHARACTER limit"
+    );
+    assert_eq!(simplify_verbatim_path_str(&input), expected);
+}
+
+#[test]
+fn over_the_character_limit_is_still_refused_and_the_boundary_is_utf16() {
+    // Just over: 256 units of directory + `D:\` + `\x` = 261 units.
+    let long = format!(r"\\?\D:\{}\x", "é".repeat(256));
+    assert_eq!(
+        simplify_verbatim_path_str(&long),
+        long,
+        "261 units must refuse"
+    );
+    // Just under: 254 units of directory ⇒ 259 units total.
+    let ok = format!(r"\\?\D:\{}\x", "é".repeat(254));
+    assert_eq!(
+        simplify_verbatim_path_str(&ok),
+        format!(r"D:\{}\x", "é".repeat(254)),
+        "259 units must simplify"
+    );
+    // A surrogate pair counts as TWO UTF-16 units even though it is one char.
+    let astral = format!(r"\\?\D:\{}\x", "𝄞".repeat(128));
+    assert_eq!(
+        simplify_verbatim_path_str(&astral),
+        astral,
+        "128 astral chars are 256 UTF-16 units — over the limit with the root"
+    );
+}
+
+// ── Reserved device names, including the superscript COM/LPT forms ──────────
+
+#[test]
+fn superscript_com_and_lpt_device_components_are_refused() {
+    // Windows reserves COM¹/COM²/COM³ and LPT¹/LPT²/LPT³ alongside COM1–COM9.
+    // Stripping the prefix off a path containing one would rewrite it to a
+    // DIFFERENT target (the device), breaking the never-corrupt contract.
+    for name in [
+        "COM\u{b9}",
+        "COM\u{b2}",
+        "COM\u{b3}",
+        "LPT\u{b9}",
+        "LPT\u{b2}",
+        "LPT\u{b3}",
+    ] {
+        let input = format!(r"\\?\D:\ws\{name}\tsserver.js");
+        assert_eq!(
+            simplify_verbatim_path_str(&input),
+            input,
+            "{name} is a reserved device component"
+        );
+        let with_ext = format!(r"\\?\D:\ws\{}.js", name.to_lowercase());
+        assert_eq!(
+            simplify_verbatim_path_str(&with_ext),
+            with_ext,
+            "{name}.js resolves to the device too"
+        );
+    }
+    // NEGATIVE: the ASCII-digit neighbours and lookalikes stay ordinary names.
+    for ordinary in ["COM0", "COM10", "COMx", "console", "lptop"] {
+        let input = format!(r"\\?\D:\ws\{ordinary}\tsserver.js");
+        assert_eq!(
+            simplify_verbatim_path_str(&input),
+            format!(r"D:\ws\{ordinary}\tsserver.js"),
+            "{ordinary} is not a device name"
+        );
+    }
+}
+
+#[test]
+fn reserved_device_classification_is_shared_and_discriminates() {
+    for reserved in [
+        &b"NUL"[..],
+        b"nul",
+        b"nul.txt",
+        b"Nul.tar.gz",
+        b"COM1",
+        b"lpt9.log",
+        b"CONIN$",
+        b"conin$",
+        b"CONOUT$.txt",
+        b"CON",
+        b"prn",
+        b"AUX",
+    ] {
+        assert!(
+            is_reserved_device_name(reserved),
+            "{:?}",
+            String::from_utf8_lossy(reserved)
+        );
+    }
+    for superscript in ["COM\u{b9}", "com\u{b2}", "LPT\u{b3}", "lpt\u{b9}.log"] {
+        assert!(
+            is_reserved_device_name(superscript.as_bytes()),
+            "{superscript} is reserved"
+        );
+    }
+    for ordinary in [
+        &b"conin"[..],
+        b"CONOUT",
+        b"conout$x",
+        b"COM0",
+        b"COM10",
+        b"console",
+        b"nullable.rs",
+        b"aux_data",
+        b"COM",
+        b"LPT",
+    ] {
+        assert!(
+            !is_reserved_device_name(ordinary),
+            "{:?}",
+            String::from_utf8_lossy(ordinary)
+        );
+    }
+}
+
+// ── The literal grammar must refuse drive-relative and incomplete-UNC bodies ─
+
+#[test]
+fn a_bare_drive_verbatim_body_is_refused_because_it_is_drive_relative() {
+    // `D:` without a separator is DRIVE-RELATIVE under Win32 — it resolves
+    // against drive D's current directory, a different target every time.
+    assert_eq!(simplify_verbatim_path_str(r"\\?\D:"), r"\\?\D:");
+    // The drive ROOT is fully qualified and must still simplify.
+    assert_eq!(simplify_verbatim_path_str(r"\\?\D:\"), r"D:\");
+    assert_eq!(simplify_verbatim_path_str(r"\\?\D:\x"), r"D:\x");
+}
+
+#[test]
+fn an_incomplete_unc_body_is_refused() {
+    // `\\server` alone names no share, so it is not a usable Win32 path.
+    assert_eq!(simplify_verbatim_path_str(r"\\?\UNC\srv"), r"\\?\UNC\srv");
+    assert_eq!(simplify_verbatim_path_str(r"\\?\UNC\srv\"), r"\\?\UNC\srv\");
+    assert_eq!(simplify_verbatim_path_str(r"\\?\UNC\"), r"\\?\UNC\");
+    // Server + share IS complete.
+    assert_eq!(
+        simplify_verbatim_path_str(r"\\?\UNC\srv\share"),
+        r"\\srv\share"
+    );
+    assert_eq!(
+        simplify_verbatim_path_str(r"\\?\UNC\srv\share\x.js"),
+        r"\\srv\share\x.js"
+    );
+}
+
+// ── The refusal reason is reportable, not silent ────────────────────────────
+
+#[test]
+fn verbatim_refusal_names_the_reason_and_is_none_when_simplification_succeeds() {
+    use crate::path::VerbatimRefusal;
+
+    assert_eq!(verbatim_refusal(r"\\?\D:\ws\tsserver.js"), None);
+    assert_eq!(verbatim_refusal("/usr/lib/tsserver.js"), None);
+    assert_eq!(verbatim_refusal(r"D:\ws\tsserver.js"), None);
+
+    assert_eq!(
+        verbatim_refusal(r"\\?\Volume{0}\ws\x.js"),
+        Some(VerbatimRefusal::DeviceNamespace)
+    );
+    assert_eq!(
+        verbatim_refusal(r"\\?\D:"),
+        Some(VerbatimRefusal::DriveRelative)
+    );
+    assert_eq!(
+        verbatim_refusal(r"\\?\UNC\srv"),
+        Some(VerbatimRefusal::IncompleteUnc)
+    );
+    assert!(matches!(
+        verbatim_refusal(&format!(r"\\?\D:\{}\x", "d".repeat(300))),
+        Some(VerbatimRefusal::TooLong { .. })
+    ));
+    assert!(matches!(
+        verbatim_refusal(r"\\?\D:\ws\NUL\x.js"),
+        Some(VerbatimRefusal::Component { .. })
+    ));
+
+    // The rendered message names the offending detail — it is user-visible.
+    let rendered = verbatim_refusal(r"\\?\D:\ws\NUL\x.js").unwrap().to_string();
+    assert!(
+        rendered.contains("NUL"),
+        "the message must name the component: {rendered}"
+    );
+    assert!(
+        rendered.contains("device"),
+        "the message must say WHY: {rendered}"
+    );
+
+    // Refusal and simplification are the SAME decision — never disagree.
+    for input in [
+        r"\\?\D:\ws\x.js",
+        r"\\?\D:",
+        r"\\?\UNC\srv",
+        r"\\?\UNC\srv\share\x",
+        r"\\?\Volume{0}\x",
+        r"\\?\D:\ws\NUL\x.js",
+        r"/usr/lib/x.js",
+    ] {
+        let changed = matches!(simplify_verbatim_path_str(input), Cow::Owned(_));
+        let refused = verbatim_refusal(input).is_some();
+        assert!(!(changed && refused), "{input}: simplified AND refused");
+        assert_eq!(
+            refused,
+            input.starts_with(r"\\?\") && !changed,
+            "{input}: refusal must be exactly 'verbatim and not simplified'"
+        );
+    }
 }

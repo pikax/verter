@@ -671,6 +671,63 @@ fn legacy_insert_does_not_bump_on_noop_replace() {
     );
 }
 
+/// The legacy `insert` prior-version drain resolves the canonical's
+/// prior keys through the canonical→keys index rather than scanning the
+/// whole store. This pins the result set that derivation must produce —
+/// it is a behaviour-PRESERVATION guard for that refactor, not a
+/// characterization of a behaviour change (it passes against both the
+/// scan and the index derivation, and fails against an index derivation
+/// that keys the wrong canonical, forgets the base-equivalent
+/// exclusion, or misses a live stale version).
+#[test]
+fn legacy_insert_drains_only_its_own_canonicals_prior_versions() {
+    let store = FileArtifactStore::new();
+    // Unrelated canonicals: none of these may be touched by an insert
+    // targeting a different canonical.
+    for i in 0u8..8 {
+        store.insert(
+            Arc::from(format!("/other{i}.ts").as_str()),
+            synth_indexed(0x10 + i),
+        );
+    }
+    let target: Arc<str> = Arc::from("/target.ts");
+    store.insert(Arc::clone(&target), synth_indexed(0x33));
+    assert_eq!(store.len(), 9);
+
+    // A content change drains exactly the prior version of THIS canonical.
+    store.insert(Arc::clone(&target), synth_indexed(0x44));
+    assert_eq!(
+        store.len(),
+        9,
+        "the legacy surface keeps exactly one entry per canonical"
+    );
+    assert!(
+        store.get("/target.ts", [0x33u8; 16]).is_none(),
+        "the stale prior version MUST be drained"
+    );
+    assert!(store.get("/target.ts", [0x44u8; 16]).is_some());
+    for i in 0u8..8 {
+        assert!(
+            store
+                .get(&format!("/other{i}.ts"), [0x10 + i; 16])
+                .is_some(),
+            "an insert on /target.ts MUST NOT drain /other{i}.ts"
+        );
+    }
+
+    // A base-equivalent re-insert leaves the current entry IN PLACE — it
+    // is never drained and re-inserted (that would open an absent window).
+    let before = store.artifact_generation();
+    store.insert(Arc::clone(&target), synth_indexed(0x44));
+    assert_eq!(
+        before,
+        store.artifact_generation(),
+        "a base-equivalent re-insert is a literal no-op"
+    );
+    assert!(store.get("/target.ts", [0x44u8; 16]).is_some());
+    assert_eq!(store.len(), 9);
+}
+
 #[test]
 fn legacy_insert_bumps_on_content_change() {
     // No-under-bump arm for the legacy surface: a content change MUST bump.
@@ -1914,4 +1971,678 @@ fn artifact_count_and_source_bytes_agrees_with_snapshot_artifacts() {
         .sum();
     assert_eq!(bytes, expected, "same byte formula as the Vec oracle");
     assert!(bytes > 0, "canonical path bytes must be counted");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// MVCC membership: roots as retention leases.
+//
+// The invariant under test: an immutable root must both NAME state and
+// KEEP it reachable. Every test below would pass against a store that
+// merely stamped epochs and kept freeing bytes, EXCEPT for the
+// reachability assertions — those are what discriminate a lease from a
+// name.
+// ─────────────────────────────────────────────────────────────────────
+
+/// THE defect: a captured root must still reach an artifact version the
+/// current root has superseded.
+///
+/// The legacy `insert` drained every prior version of a canonical the
+/// moment a new content hash landed, so a `HostStoreView` that had
+/// captured `(canonical, whole_hash)` named an artifact the store had
+/// already freed — content-addressing established identity, never
+/// lifetime.
+#[test]
+fn captured_root_still_reaches_superseded_artifact_version() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/edited.ts");
+    let v1_hash = [1u8; 16];
+    let v2_hash = [2u8; 16];
+    let v1_key = FileArtifactKey::base(Arc::clone(&canonical), v1_hash);
+
+    store.insert(Arc::clone(&canonical), synth_indexed(1));
+    let root = store.capture_root();
+    assert!(
+        store.indexed_at_root(&root, &v1_key).is_some(),
+        "the root must see the version live at capture time"
+    );
+
+    // Supersede: a new content version drains the prior one out of the
+    // CURRENT root's membership.
+    store.insert(Arc::clone(&canonical), synth_indexed(2));
+
+    assert!(
+        store.get(&canonical, v1_hash).is_none(),
+        "the CURRENT root must no longer serve the superseded version"
+    );
+    assert!(
+        store.get(&canonical, v2_hash).is_some(),
+        "the CURRENT root must serve the new version"
+    );
+    let through_root = store
+        .indexed_at_root(&root, &v1_key)
+        .expect("the captured root MUST still reach its own world's artifact");
+    assert_eq!(
+        through_root.whole_hash, v1_hash,
+        "the root must resolve the version IT captured, not the current one"
+    );
+    // …and the root must NOT see a version born after it.
+    assert!(
+        store
+            .indexed_at_root(
+                &root,
+                &FileArtifactKey::base(Arc::clone(&canonical), v2_hash)
+            )
+            .is_none(),
+        "a root must never see a version published after its capture"
+    );
+}
+
+/// The canonical→keys index is versioned membership too: a root
+/// enumerating a canonical sees exactly the keys live at its epoch.
+#[test]
+fn captured_root_enumerates_its_own_canonical_key_membership() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/enum.ts");
+    let v1_key = FileArtifactKey::base(Arc::clone(&canonical), [1u8; 16]);
+    let v2_key = FileArtifactKey::base(Arc::clone(&canonical), [2u8; 16]);
+
+    store.insert_artifacts(v1_key.clone(), synth_artifacts(0x11));
+    let root = store.capture_root();
+    store.insert_artifacts(v2_key.clone(), synth_artifacts(0x22));
+
+    let at_root = store.artifact_keys_at_root(&root, &canonical);
+    assert_eq!(
+        at_root.as_slice(),
+        std::slice::from_ref(&v1_key),
+        "the root enumerates its own epoch's key membership, not the current one"
+    );
+    let current = store.capture_root();
+    let at_current = store.artifact_keys_at_root(&current, &canonical);
+    assert_eq!(
+        at_current.len(),
+        2,
+        "the current root sees both coexisting content variants"
+    );
+    assert!(at_current.contains(&v1_key) && at_current.contains(&v2_key));
+}
+
+/// The per-canonical cap bounds the CURRENT root's membership. It must
+/// never discard a version a live root still addresses — the `:1430`
+/// unsoundness: a fixed cap that physically dropped surplus variants
+/// freed pinned state.
+#[test]
+fn per_canonical_cap_does_not_discard_a_pinned_version() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/capped.ts");
+    let keys: Vec<FileArtifactKey> = (1u8..=3)
+        .map(|marker| FileArtifactKey::base(Arc::clone(&canonical), [marker; 16]))
+        .collect();
+    for (index, key) in keys.iter().enumerate() {
+        store.insert_artifacts(key.clone(), synth_artifacts(0x10 + index as u8));
+    }
+    assert_eq!(store.len(), 3, "three coexisting content variants");
+
+    let root = store.capture_root();
+    // Cap to one live variant: the two lowest content hashes go.
+    store.enforce_per_canonical_retention(1);
+    assert_eq!(store.len(), 1, "the cap bounds the LIVE working set");
+    assert!(
+        store.get_artifacts(&keys[0]).is_none(),
+        "the capped variant must leave the CURRENT root's membership"
+    );
+
+    for key in &keys {
+        assert!(
+            store.artifacts_at_root(&root, key).is_some(),
+            "the cap must not discard {key:?} — a live root still addresses it"
+        );
+    }
+    // Even an explicit reclamation request cannot free a pinned version.
+    assert_eq!(
+        store.reclaim_retired_versions(),
+        0,
+        "reclamation must free nothing while a root still sees every retired version"
+    );
+    for key in &keys {
+        assert!(
+            store.artifacts_at_root(&root, key).is_some(),
+            "a reclamation request is not a reachability decision"
+        );
+    }
+}
+
+/// Retention is not "never free": once no live root can see a retired
+/// version, its bytes are reclaimed.
+#[test]
+fn unreachable_retired_version_is_reclaimed_once_no_root_sees_it() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/reclaimed.ts");
+    let v1_key = FileArtifactKey::base(Arc::clone(&canonical), [1u8; 16]);
+
+    store.insert(Arc::clone(&canonical), synth_indexed(1));
+    let root = store.capture_root();
+    store.insert(Arc::clone(&canonical), synth_indexed(2));
+
+    assert_eq!(
+        store.retained_retired_version_count(),
+        2,
+        "the superseded artifact version AND its index membership version are retained"
+    );
+    assert_eq!(
+        store.reclaim_retired_versions(),
+        0,
+        "nothing is reclaimable while the root lives"
+    );
+
+    drop(root);
+    assert_eq!(store.live_root_count(), 0, "the lease is released on drop");
+    let reclaimed = store.reclaim_retired_versions();
+    assert_eq!(
+        reclaimed, 2,
+        "both retired versions are freed once no root can reach them"
+    );
+    assert_eq!(
+        store.retained_retired_version_count(),
+        0,
+        "nothing retired remains retained"
+    );
+    // A root captured now addresses only the current world.
+    let fresh = store.capture_root();
+    assert!(
+        store.artifacts_at_root(&fresh, &v1_key).is_none(),
+        "a root captured after reclamation never saw the freed version"
+    );
+    assert!(
+        store
+            .artifacts_at_root(
+                &fresh,
+                &FileArtifactKey::base(Arc::clone(&canonical), [2u8; 16])
+            )
+            .is_some(),
+        "the current version stays reachable"
+    );
+}
+
+/// A root released while ANOTHER root still pins an older epoch must not
+/// let the floor advance past the older root — the floor is the MINIMUM
+/// over live roots, not the most recent one.
+#[test]
+fn reclamation_floor_is_the_oldest_live_root_not_the_newest() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/two-roots.ts");
+    let v1_key = FileArtifactKey::base(Arc::clone(&canonical), [1u8; 16]);
+
+    store.insert(Arc::clone(&canonical), synth_indexed(1));
+    let old_root = store.capture_root();
+    store.insert(Arc::clone(&canonical), synth_indexed(2));
+    let new_root = store.capture_root();
+
+    assert!(store.artifacts_at_root(&new_root, &v1_key).is_none());
+    drop(new_root);
+    assert_eq!(
+        store.reclaim_retired_versions(),
+        0,
+        "the newer root's release must not advance the floor past the older root"
+    );
+    assert!(
+        store.artifacts_at_root(&old_root, &v1_key).is_some(),
+        "the older root's world survives the newer root's release"
+    );
+}
+
+/// A hard removal is a retirement too — an evicted canonical stays
+/// reachable from the roots captured before the eviction.
+#[test]
+fn captured_root_still_reaches_an_evicted_canonical() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/evicted.ts");
+    let key = FileArtifactKey::base(Arc::clone(&canonical), [7u8; 16]);
+    store.insert_artifacts(key.clone(), synth_artifacts(0x77));
+
+    let root = store.capture_root();
+    assert_eq!(store.remove_canonical(&canonical), 1);
+    assert!(
+        store.get_artifacts(&key).is_none(),
+        "the current root no longer serves the evicted canonical"
+    );
+    assert!(
+        store.artifacts_at_root(&root, &key).is_some(),
+        "the captured root keeps reaching the evicted artifact"
+    );
+}
+
+/// The augmentation index is versioned membership: a root keeps
+/// resolving the augmenter set its world had after an invalidation
+/// retired it.
+#[test]
+fn captured_root_still_reaches_a_retired_augmenter_set() {
+    use smallvec::{smallvec, SmallVec};
+    use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+
+    use super::{AugmenterEntry, AugmenterSet, ModuleAugmentationFact};
+
+    let store = FileArtifactStore::new();
+    let target = relative_dep_target_key();
+    let set = Arc::new(AugmenterSet {
+        entries: smallvec![AugmenterEntry {
+            artifact_key: FileArtifactKey::base(Arc::from("/src/aug.ts"), [9u8; 16]),
+            parse_stable_hash: [3u8; 16],
+        }] as SmallVec<[AugmenterEntry; 2]>,
+        fingerprint: [0xaa; 16],
+    });
+    store.populate_augmenter_set(target.clone(), Arc::clone(&set));
+
+    let root = store.capture_root();
+    assert_eq!(
+        store
+            .get_augmenter_set(&target)
+            .expect("populated")
+            .fingerprint,
+        [0xaa; 16]
+    );
+
+    // Retire it through the sole invalidation primitive.
+    let retired = store.invalidate_augmentation_index_for_augmenter(&[ModuleAugmentationFact {
+        specifier: InternedSpecifier::from(".."),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        augmented_name: InternedName::from("Augmented"),
+        space: SymbolSpace::Type,
+        augmented_member_shape_fingerprint: [0u8; 16],
+    }]);
+    assert_eq!(retired, 1, "the matching index entry must retire");
+    assert!(
+        store.get_augmenter_set(&target).is_none(),
+        "the current root no longer serves the retired augmenter set"
+    );
+    assert_eq!(
+        store
+            .augmenter_set_at_root(&root, &target)
+            .expect("the captured root keeps its augmenter set")
+            .fingerprint,
+        [0xaa; 16]
+    );
+
+    drop(root);
+    assert!(
+        store.reclaim_retired_versions() >= 1,
+        "the retired augmenter version is freed once no root sees it"
+    );
+}
+
+/// A root minted by a DIFFERENT store names an unrelated epoch line.
+/// Every root-relative accessor fails closed rather than answering out
+/// of the wrong world.
+#[test]
+fn foreign_root_reads_fail_closed() {
+    let store_a = FileArtifactStore::new();
+    let store_b = FileArtifactStore::new();
+    let key = FileArtifactKey::base(Arc::from("/shared-path.ts"), [5u8; 16]);
+    store_a.insert_artifacts(key.clone(), synth_artifacts(0x55));
+    store_b.insert_artifacts(key.clone(), synth_artifacts(0x55));
+
+    let foreign = store_b.capture_root();
+    assert!(
+        store_a.artifacts_at_root(&foreign, &key).is_none(),
+        "a foreign root must never resolve through this store"
+    );
+    assert!(
+        store_a
+            .artifact_keys_at_root(&foreign, "/shared-path.ts")
+            .is_empty(),
+        "a foreign root enumerates nothing"
+    );
+    let own = store_a.capture_root();
+    assert!(
+        store_a.artifacts_at_root(&own, &key).is_some(),
+        "the store's own root still resolves"
+    );
+}
+
+/// Current-epoch reads are the provable SPECIALIZATION of the
+/// root-relative visibility function at the current epoch — one
+/// semantics, not two. Pinned across all three states a key can be in:
+/// live, retired, and never-present.
+#[test]
+fn current_epoch_read_equals_root_relative_read_at_current_epoch() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/equiv.ts");
+    let live_key = FileArtifactKey::base(Arc::clone(&canonical), [1u8; 16]);
+    let retired_key = FileArtifactKey::base(Arc::clone(&canonical), [2u8; 16]);
+    let absent_key = FileArtifactKey::base(Arc::clone(&canonical), [3u8; 16]);
+
+    store.insert_artifacts(retired_key.clone(), synth_artifacts(0x22));
+    store.insert_artifacts(live_key.clone(), synth_artifacts(0x11));
+    let pinning_root = store.capture_root();
+    store.remove_artifacts(&retired_key);
+
+    // `capture_root()` at the current epoch is exactly the current
+    // world; reading through it must agree with the direct reads.
+    let current = store.capture_root();
+    for key in [&live_key, &retired_key, &absent_key] {
+        let direct = store.get_artifacts(key);
+        let through_root = store.artifacts_at_root(&current, key);
+        assert_eq!(
+            direct.is_some(),
+            through_root.is_some(),
+            "current-epoch read and root-relative read at the current epoch must agree for {key:?}"
+        );
+        if let (Some(direct), Some(through_root)) = (direct, through_root) {
+            assert!(Arc::ptr_eq(&direct, &through_root));
+        }
+    }
+    // …and the retired key IS still reachable from the older root, so
+    // the agreement above is not vacuous.
+    assert!(
+        store
+            .artifacts_at_root(&pinning_root, &retired_key)
+            .is_some(),
+        "the retired version must be reachable from the root captured before it retired"
+    );
+}
+
+/// The store self-triggers reclamation on a pure edit loop, so a
+/// root-free host does not accumulate one retained version per publish.
+#[test]
+fn edit_loop_without_live_roots_does_not_accumulate_retained_versions() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/hot.ts");
+    for marker in 0u8..200 {
+        store.insert(Arc::clone(&canonical), synth_indexed(marker));
+    }
+    assert_eq!(store.len(), 1, "one live version per canonical");
+    // Each publish retires one artifact version plus its canonical→keys
+    // index version, and the amortised sweep fires every
+    // `RECLAIM_TRIGGER_RETIREMENTS` retirements — so the retained set can
+    // never exceed twice the trigger, whatever the edit count. Without
+    // the sweep the loop would retain ~2 per edit and grow without bound.
+    let retained = store.retained_retired_version_count();
+    assert!(
+        retained <= 2 * 64,
+        "the amortised sweep must bound the retained set on a root-free edit loop \
+         (retained = {retained})"
+    );
+    assert_eq!(
+        store.live_root_count(),
+        0,
+        "no lease was taken during the edit loop"
+    );
+}
+
+/// The live→retired migration must be ATOMIC with respect to a reader on
+/// a captured root: a key that is still enumerable from a root must
+/// always resolve to a version from that root's world.
+///
+/// The defect this characterizes is a publication gap, not a reclamation
+/// bug. Retirement closes the key's index version and removes the live
+/// entry, then re-publishes the payload into the retired chain. While
+/// those two halves were not under one guard, a reader on a root captured
+/// BEFORE the retirement could observe the key (its index version is
+/// still visible at that epoch) with neither a live entry nor a retired
+/// version behind it — a world no epoch ever had.
+///
+/// It is CONCURRENT by necessity. Every other retention test is
+/// capture → mutate → read on one thread, and on one thread the gap has
+/// always closed by the time the read happens; the tear exists only
+/// inside the writer's window.
+#[test]
+fn a_retiring_key_is_never_enumerable_without_a_resolvable_version() {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Barrier;
+
+    const ROUNDS: usize = 256;
+    const READERS: usize = 2;
+    const PROBES: usize = 512;
+
+    let store = Arc::new(FileArtifactStore::new());
+    let canonical: Arc<str> = Arc::from("/raced.ts");
+    let torn = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(READERS + 1));
+
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let store = Arc::clone(&store);
+            let canonical = Arc::clone(&canonical);
+            let torn = Arc::clone(&torn);
+            let observed = Arc::clone(&observed);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    // A: this round's key is live.
+                    barrier.wait();
+                    let root = store.capture_root();
+                    // B: the root is captured; the writer now retires.
+                    barrier.wait();
+                    for _ in 0..PROBES {
+                        for key in store.artifact_keys_at_root(&root, &canonical) {
+                            observed.fetch_add(1, AtomicOrdering::Relaxed);
+                            if store.artifacts_at_root(&root, &key).is_none() {
+                                torn.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+
+    for round in 0..ROUNDS {
+        let key = FileArtifactKey::base(Arc::clone(&canonical), [round as u8; 16]);
+        store.insert_artifacts(key.clone(), synth_artifacts(round as u8));
+        barrier.wait(); // A
+        barrier.wait(); // B
+        store.remove_artifacts(&key);
+    }
+    for reader in readers {
+        reader.join().expect("reader thread must not panic");
+    }
+
+    // Anti-vacuity: the readers really did read through the roots.
+    assert!(
+        observed.load(AtomicOrdering::Relaxed) > 0,
+        "the probe must actually enumerate keys through the captured roots"
+    );
+    assert_eq!(
+        torn.load(AtomicOrdering::Relaxed),
+        0,
+        "a key enumerable from a captured root MUST resolve to a version of \
+         that root's world — the retirement's index close and retired-chain \
+         publication are one atomic step, never two"
+    );
+}
+
+/// A captured root is IMMUTABLE: the same key must resolve to the same
+/// version through it for the root's whole life.
+///
+/// Reserve-then-apply without a capture fence breaks that. A capture
+/// landing between the epoch bump and its application registers at the
+/// NEW epoch and reads the PRE-apply world for it; once the application
+/// lands, the same root reads the POST-apply world for the same epoch.
+/// The root's answer changed under it, which is precisely what an
+/// immutable snapshot may not do.
+#[test]
+fn a_captured_root_answer_never_changes_under_a_concurrent_mutation() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+
+    const ROUNDS: usize = 4_000;
+
+    let store = Arc::new(FileArtifactStore::new());
+    let canonical: Arc<str> = Arc::from("/mutating.ts");
+    let key = FileArtifactKey::base(Arc::clone(&canonical), [9u8; 16]);
+    store.insert_artifacts(key.clone(), synth_artifacts(0x01));
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let changed = Arc::new(AtomicUsize::new(0));
+    let sampled = Arc::new(AtomicUsize::new(0));
+
+    let reader = {
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        let stop = Arc::clone(&stop);
+        let changed = Arc::clone(&changed);
+        let sampled = Arc::clone(&sampled);
+        std::thread::spawn(move || {
+            while !stop.load(AtomicOrdering::Relaxed) {
+                let root = store.capture_root();
+                let first = store.artifacts_at_root(&root, &key);
+                let second = store.artifacts_at_root(&root, &key);
+                sampled.fetch_add(1, AtomicOrdering::Relaxed);
+                let same = match (first, second) {
+                    (Some(first), Some(second)) => Arc::ptr_eq(&first, &second),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !same {
+                    changed.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+            }
+        })
+    };
+
+    for marker in 0..ROUNDS {
+        store.insert_artifacts(key.clone(), synth_artifacts((marker % 251) as u8));
+    }
+    stop.store(true, AtomicOrdering::Relaxed);
+    reader.join().expect("reader thread must not panic");
+
+    assert!(
+        sampled.load(AtomicOrdering::Relaxed) > 0,
+        "the reader must actually sample roots"
+    );
+    assert_eq!(
+        changed.load(AtomicOrdering::Relaxed),
+        0,
+        "a captured root must resolve one key to ONE version for its whole \
+         life — a capture may never name an epoch whose application is still \
+         in flight"
+    );
+}
+
+/// The epoch counter saturates instead of wrapping, and a root captured
+/// on the exhausted line FAILS CLOSED.
+///
+/// Wrapping is the unacceptable outcome: at `u64::MAX` a version born
+/// "after" a root would be born at epoch 0 and compare as born BEFORE it,
+/// inverting visibility for every subsequent read. Saturating keeps the
+/// ordering primitive total; the exhausted root then answers nothing, so
+/// every read misses and recomputes.
+#[test]
+fn the_membership_epoch_saturates_and_the_exhausted_root_fails_closed() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/exhausted.ts");
+    let key = FileArtifactKey::base(Arc::clone(&canonical), [4u8; 16]);
+
+    store.seed_membership_epoch_for_test(u64::MAX - 2);
+    store.insert_artifacts(key.clone(), synth_artifacts(0x44));
+    let usable = store.capture_root();
+    assert!(!usable.is_exhausted());
+    assert!(
+        store.artifacts_at_root(&usable, &key).is_some(),
+        "the last usable epochs still address membership normally"
+    );
+
+    // Two more mutations take the counter to the terminal epoch.
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::clone(&canonical), [5u8; 16]),
+        synth_artifacts(0x55),
+    );
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::clone(&canonical), [6u8; 16]),
+        synth_artifacts(0x66),
+    );
+    assert_eq!(
+        store.membership_epoch(),
+        u64::MAX,
+        "the counter saturates at the terminal epoch — it never wraps"
+    );
+
+    // A further mutation must neither wrap nor panic.
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::clone(&canonical), [7u8; 16]),
+        synth_artifacts(0x77),
+    );
+    assert_eq!(
+        store.membership_epoch(),
+        u64::MAX,
+        "publication past the terminal epoch stays saturated"
+    );
+
+    let exhausted = store.capture_root();
+    assert!(exhausted.is_exhausted());
+    assert!(
+        store.artifacts_at_root(&exhausted, &key).is_none(),
+        "an exhausted root addresses no artifact — it fails closed rather \
+         than serving a world whose ordering it cannot express"
+    );
+    assert!(
+        store
+            .artifact_keys_at_root(&exhausted, &canonical)
+            .is_empty(),
+        "an exhausted root enumerates no canonical→keys membership"
+    );
+    // The current-epoch read surface is unaffected: only ROOTS fail closed.
+    assert!(
+        store.get_artifacts(&key).is_some(),
+        "the live store keeps serving current-epoch reads"
+    );
+}
+
+/// Retention is per LIVE ROOT, not a floor: a root pins exactly the
+/// version IT can select, never that version's successors.
+///
+/// A floor rule ("retain everything retired above the oldest live root")
+/// makes one stale root pin the entire future: every later version stays
+/// retained even though no root can ever select it. Under a pinned view
+/// an edit loop then grows without bound.
+#[test]
+fn one_pinned_root_does_not_retain_the_versions_born_after_it() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/pinned.ts");
+
+    store.insert(Arc::clone(&canonical), synth_indexed(0));
+    // ONE root, held for the whole loop.
+    let pinned = store.capture_root();
+    let pinned_key = FileArtifactKey::base(Arc::clone(&canonical), [0u8; 16]);
+
+    for marker in 1u8..=200 {
+        store.insert(Arc::clone(&canonical), synth_indexed(marker));
+    }
+    store.reclaim_retired_versions();
+
+    let retained = store.retained_retired_version_count();
+    assert!(
+        retained <= 8,
+        "a pinned root retains its OWN version, not every version born after \
+         it — 200 edits retained {retained}"
+    );
+    assert!(
+        store.artifacts_at_root(&pinned, &pinned_key).is_some(),
+        "the pinned root must still reach the version it addresses"
+    );
+    // The intermediate versions are genuinely gone from every root.
+    for marker in 1u8..200 {
+        assert!(
+            store
+                .artifacts_at_root(
+                    &pinned,
+                    &FileArtifactKey::base(Arc::clone(&canonical), [marker; 16])
+                )
+                .is_none(),
+            "a version born after the pinned root is invisible from it",
+        );
+    }
+    assert!(
+        store
+            .get_artifacts(&FileArtifactKey::base(Arc::clone(&canonical), [200u8; 16]))
+            .is_some(),
+        "the current version is untouched"
+    );
+
+    drop(pinned);
+    store.reclaim_retired_versions();
+    assert_eq!(
+        store.retained_retired_version_count(),
+        0,
+        "once the last root drops, the retained set drains completely"
+    );
 }

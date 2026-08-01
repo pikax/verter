@@ -206,30 +206,225 @@ pub fn merge_references(
 
 // ── Rename merge ────────────────────────────────────────────────────
 
-/// Merge verter rename edits with TypeProvider rename locations.
+/// Why the rename merge could not turn a provider location into a source edit.
+///
+/// Every variant is a FAIL-CLOSED outcome: the merge would have had to fabricate
+/// a range to emit anything, and a fabricated rename range WRITES the new name
+/// somewhere the provider never pointed at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameDropReason {
+    /// A carrier IDE (`{carrier}.tsx`/`.jsx`) target whose offsets no strict
+    /// mapper could bridge: a current-file offset inside synthetic generated
+    /// code, or a FOREIGN companion with no pinned surface for this request (an
+    /// uncaptured path, a superseded generation, or a live buffer that no longer
+    /// byte-matches the captured source).
+    CarrierIdeUnmapped,
+    /// A VOUCHED carrier PUBLIC-API surface whose offsets did not map onto the
+    /// carrier source through that surface's own CodeTransform source map.
+    CarrierApiUnmapped,
+    /// A KNOWN virtual carrier PUBLIC-API surface with no safe mapping — its
+    /// offsets index virtual content, so nothing may be written from them.
+    CarrierApiVirtual,
+    /// The emitted path normalized onto a carrier source that no in-context
+    /// source map bridges, so its offsets index neither file.
+    CarrierPathNotBridged,
+    /// A path whose own source could not be read, or whose offsets fall outside
+    /// it.
+    TargetSourceUnreadable,
+    /// The path could not be expressed as a `file:` URI.
+    PathNotAUri,
+}
+
+/// A provider rename location that produced NO edit in the emitted transaction.
+///
+/// Carries the location's own identity (not an index into the input, and not a
+/// count) so a caller can name what it is refusing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedRenameLocation {
+    pub path: String,
+    pub start: u32,
+    pub end: u32,
+    pub reason: RenameDropReason,
+}
+
+/// The complete result of a rename merge: the transaction, PLUS every provider
+/// location the merge could not turn into an edit in it.
+///
+/// The two fields are produced together and are exhaustive over the input: each
+/// provider location either has an edit covering its mapped range in `edit`, or
+/// appears in `dropped`. `dropped` is therefore per-location PROVENANCE, never a
+/// count comparison — an emitted-edit total can coincide with the input total for
+/// unrelated reasons (the start-slot dedup below collapses two locations onto one
+/// edit), so a count could not tell a complete transaction from a partial one.
+#[derive(Debug, Default)]
+pub struct RenameMergeOutcome {
+    /// The canonicalized transaction, or `None` when no edit survived.
+    pub edit: Option<WorkspaceEdit>,
+    /// Locations with no edit in `edit`. A non-empty `dropped` means the emitted
+    /// transaction is a PARTIAL rename: the provider named an occurrence that
+    /// will keep referencing the old name. A caller that ships user-visible edits
+    /// must fail the whole rename closed rather than emit the remainder.
+    pub dropped: Vec<DroppedRenameLocation>,
+}
+
+/// Resolve ONE provider rename location to the `(uri, range)` its edit belongs
+/// at, or the reason no edit can be produced for it.
+///
+/// This is the single classification point for the rename merge, so a location
+/// can never leave the loop without either an edit target or a recorded drop
+/// reason. The route split mirrors the references / code-action merges:
+///
+/// 1. A CURRENT-companion result an editor-owned TypeScript plugin already
+///    remapped onto the visible carrier indexes the captured carrier bytes, so
+///    the request's pinned carrier line index resolves it directly. A miss here
+///    is NOT a drop — the location simply is not pre-remapped, and falls through
+///    to the classified routes below.
+/// 2. A carrier IDE target (`{carrier}.tsx`/`.jsx`) maps its TSX byte offsets
+///    back through the single shared strict mapper
+///    ([`resolve_carrier_ide_range_strict`]): the in-context mapper for the
+///    queried file, the external resolver for a FOREIGN companion. A foreign
+///    target with no resolver context is DROPPED, never mapped through the
+///    current request's source map — those offsets index a different file.
+/// 3. A carrier PUBLIC-API target (`{carrier}.verter.ts`) is classified by the
+///    `external_api_resolver`'s 3-state [`ApiSurfaceResolution`], which is
+///    identity-gated against the pinned virtual-API set. A bare `Option` could
+///    not distinguish "not a virtual surface" from "a known virtual surface we
+///    can no longer map", and the second case falling through to the real-file
+///    route would edit a same-named REAL file with VIRTUAL offsets and corrupt
+///    it. `Vouched` maps through that surface's own CodeTransform source map;
+///    `VirtualDrop` drops; `NotVirtual` edits the real file in place.
+/// 4. Every other target's offsets are REAL byte offsets into that file: read its
+///    own source through the host VFS and convert them. A path normalization that
+///    rewrote the URI to a carrier source no source map bridges drops.
+///
+/// FAIL CLOSED throughout. A `Range::default()` rename edit is the worst possible
+/// fallback — it writes the new name at line 0 of the wrong file.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one location's classification needs the current TSX path, mapper, indexes, IDE+API resolvers, encoding, and VFS reader"
+)]
+fn resolve_rename_location_target(
+    loc: &RenameLocation,
+    current_tsx_path: &str,
+    tsx_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_line_index: &LineIndex,
+    external_resolver: Option<ExternalIdeResolver<'_>>,
+    external_api_resolver: Option<ExternalApiResolver<'_>>,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
+    negotiated_encoding: &PositionEncodingKind,
+    source_reader: ExternalSourceReader<'_>,
+) -> Result<(Uri, Range), RenameDropReason> {
+    if let Some(resolved) = resolve_pre_remapped_current_carrier_range(
+        &loc.path,
+        loc.start,
+        loc.end,
+        current_tsx_path,
+        carrier_line_index,
+        carrier_source_exists,
+    ) {
+        return Ok(resolved);
+    }
+
+    if is_carrier_ide_path(&loc.path) {
+        let range = resolve_carrier_ide_range_strict(
+            &loc.path,
+            loc.start,
+            loc.end,
+            current_tsx_path,
+            tsx_line_index,
+            mapper,
+            carrier_line_index,
+            external_resolver,
+        )
+        .ok_or(RenameDropReason::CarrierIdeUnmapped)?;
+        let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
+        let uri = path_to_uri(carrier_path).ok_or(RenameDropReason::PathNotAUri)?;
+        return Ok((uri, range));
+    }
+
+    if is_carrier_api_path(&loc.path, carrier_source_exists) {
+        return match external_api_resolver
+            .map(|resolver| resolver(&loc.path))
+            .unwrap_or(ApiSurfaceResolution::NotVirtual)
+        {
+            ApiSurfaceResolution::Vouched(ctx) => {
+                // The negotiated carrier index is mandatory — it re-emits the
+                // UTF-16 source-map result in the negotiated encoding.
+                let range = ctx
+                    .carrier_negotiated_line_index
+                    .as_ref()
+                    .and_then(|neg| {
+                        api_surface_range_to_carrier_range(
+                            loc.start,
+                            loc.end,
+                            &ctx.tsx_line_index,
+                            &ctx.mapper,
+                            &ctx.carrier_line_index,
+                            neg,
+                        )
+                    })
+                    .ok_or(RenameDropReason::CarrierApiUnmapped)?;
+                let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
+                let uri = path_to_uri(carrier_path).ok_or(RenameDropReason::PathNotAUri)?;
+                Ok((uri, range))
+            }
+            ApiSurfaceResolution::VirtualDrop => Err(RenameDropReason::CarrierApiVirtual),
+            ApiSurfaceResolution::NotVirtual => {
+                let range = resolve_external_target_range(
+                    &loc.path,
+                    loc.start,
+                    loc.end,
+                    negotiated_encoding.clone(),
+                    source_reader,
+                )
+                .ok_or(RenameDropReason::TargetSourceUnreadable)?;
+                let uri = path_to_uri(&loc.path).ok_or(RenameDropReason::PathNotAUri)?;
+                Ok((uri, range))
+            }
+        };
+    }
+
+    let normalized = normalize_carrier_path(&loc.path, carrier_source_exists);
+    if normalized != loc.path {
+        return Err(RenameDropReason::CarrierPathNotBridged);
+    }
+    let uri = path_to_uri(normalized).ok_or(RenameDropReason::PathNotAUri)?;
+    let range = resolve_external_target_range(
+        &loc.path,
+        loc.start,
+        loc.end,
+        negotiated_encoding.clone(),
+        source_reader,
+    )
+    .ok_or(RenameDropReason::TargetSourceUnreadable)?;
+    Ok((uri, range))
+}
+
+/// Merge verter rename edits with TypeProvider rename locations, reporting every
+/// location that produced NO edit.
 ///
 /// Strategy:
 /// - Start with verter's same-file WorkspaceEdit.
-/// - Add TypeProvider's cross-file rename locations as additional TextEdits.
-/// - A current-companion result already mapped by an editor-owned plugin onto
-///   the visible carrier uses the pinned current carrier line index directly.
-/// - A carrier IDE target (`{carrier}.tsx`/`.jsx`) maps its TSX byte offsets back to the carrier
-///   source through the single shared strict mapper ([`resolve_carrier_ide_range_strict`]): the
-///   in-context mapper for the queried file, the external resolver for a foreign component (a
-///   foreign target is DROPPED on a resolver miss, never line-0'd through the current sourcemap).
-/// - A carrier PUBLIC-API target (`{carrier}.ts`) — the surface where an imported component's
-///   `defineProps<{ … }>` props are lifted into the `$props` / `new(props?)` declaration — maps its
-///   API-surface byte offsets back to the carrier source through that surface's own CodeTransform
-///   sourcemap (the `external_api_resolver`). This is THE common cross-file `.vue` prop-rename case:
-///   tsserver reports the renamed prop against the child component's `{carrier}.ts`, and without
-///   this branch the edit was dropped by carrier-path normalization → the rename touched only the
-///   queried file (an incomplete rename = dangling references).
-/// - Every other target's `start`/`end` are REAL byte offsets into that file: read its own source
-///   through the host VFS (`source_reader`) and convert to a line:col `Range` in the negotiated
-///   `encoding`, exactly as the definition / references merges do.
-/// - FAIL CLOSED: when the source / offsets cannot be resolved (or normalization rewrote the URI
-///   to a carrier source no sourcemap bridges), DROP the edit. A `Range::default()` rename edit is
-///   especially dangerous — it would write the new name at line 0 of the wrong file and CORRUPT it.
+/// - Classify each TypeProvider location through the single
+///   [`resolve_rename_location_target`] point, which documents the four routes
+///   (pre-remapped current carrier, carrier IDE, carrier PUBLIC-API, real file)
+///   and their fail-closed boundaries.
+/// - A resolved location's edit is upserted at its mapped `(uri, range)`.
+/// - An UNRESOLVABLE location is recorded in
+///   [`RenameMergeOutcome::dropped`] with its reason. It is not silently
+///   discarded: the remaining edits are a PARTIAL rename, and only the caller
+///   knows whether it is about to hand them to an editor.
+///
+/// Dedup is by `(uri, range.start)`: a location whose mapped start slot already
+/// carries an edit is COVERED by that edit and is NOT a drop. That start-slot
+/// rule is the long-standing merge contract the rename-synthesis path relies on
+/// (see `inject_synthesized_carrier_rename_location`), which is also why the drop
+/// signal is per-location provenance rather than an edit count — two locations
+/// legitimately collapse onto one edit.
+///
+/// FAIL CLOSED throughout: a `Range::default()` rename edit would write the new
+/// name at line 0 of the wrong file and CORRUPT it.
 #[allow(clippy::mutable_key_type)]
 #[expect(
     clippy::too_many_arguments,
@@ -248,7 +443,7 @@ pub fn merge_rename_locations(
     carrier_source_exists: &dyn Fn(&str) -> bool,
     negotiated_encoding: PositionEncodingKind,
     source_reader: ExternalSourceReader<'_>,
-) -> Option<WorkspaceEdit> {
+) -> RenameMergeOutcome {
     let mut edit = verter_edit.unwrap_or_else(|| WorkspaceEdit {
         changes: Some(std::collections::HashMap::new()),
         ..Default::default()
@@ -258,173 +453,39 @@ pub fn merge_rename_locations(
         .changes
         .get_or_insert_with(std::collections::HashMap::new);
 
-    for loc in &type_locations {
-        if let Some((uri, range)) = resolve_pre_remapped_current_carrier_range(
-            &loc.path,
-            loc.start,
-            loc.end,
-            current_tsx_path,
-            carrier_line_index,
-            carrier_source_exists,
-        ) {
-            let edits = changes.entry(uri).or_default();
-            if !edits
-                .iter()
-                .any(|existing| existing.range.start == range.start)
-            {
-                edits.push(TextEdit {
-                    range,
-                    new_text: new_name.to_string(),
-                });
-            }
-            continue;
-        }
+    let mut dropped: Vec<DroppedRenameLocation> = Vec::new();
 
-        // FAIL CLOSED: a carrier-IDE mapping failure DROPS the rename edit — a `Range::default()`
-        // rename edit would write the new name at line 0 of the wrong file and CORRUPT it. Routes
-        // through the single shared strict mapper, split by canonical identity: the CURRENT request's
-        // TSX uses the in-context mapper; a FOREIGN carrier `.tsx` requires its own context via the
-        // external resolver and is DROPPED on a miss — never mapped through the current sourcemap.
-        if is_carrier_ide_path(&loc.path) {
-            let Some(range) = resolve_carrier_ide_range_strict(
-                &loc.path,
-                loc.start,
-                loc.end,
-                current_tsx_path,
-                tsx_line_index,
-                mapper,
-                carrier_line_index,
-                external_resolver,
-            ) else {
-                continue;
-            };
-            let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
-            if let Some(uri) = path_to_uri(carrier_path) {
+    for loc in &type_locations {
+        match resolve_rename_location_target(
+            loc,
+            current_tsx_path,
+            tsx_line_index,
+            mapper,
+            carrier_line_index,
+            external_resolver,
+            external_api_resolver,
+            carrier_source_exists,
+            &negotiated_encoding,
+            source_reader,
+        ) {
+            Ok((uri, range)) => {
                 let edits = changes.entry(uri).or_default();
-                let dup = edits.iter().any(|e| e.range.start == range.start);
-                if !dup {
+                if !edits
+                    .iter()
+                    .any(|existing| existing.range.start == range.start)
+                {
                     edits.push(TextEdit {
                         range,
                         new_text: new_name.to_string(),
                     });
                 }
             }
-            continue;
-        }
-
-        // Carrier PUBLIC-API target (`{carrier}.ts`, e.g. `Child.vue.ts`): tsserver reports a
-        // cross-file Vue prop rename against the imported component's macro-derived public-API
-        // surface, whose offsets must map back onto the `.vue` source through that surface's
-        // CodeTransform source map.
-        //
-        // Classification is the resolver's job, not the suffix's. The `external_api_resolver` is
-        // identity-gated against the IN-MEMORY synced-virtual-API set and returns a 3-state
-        // [`ApiSurfaceResolution`]; the suffix predicate only decides whether to CONSULT it.
-        // A bare `Option` could not distinguish "not a virtual surface" from "a known virtual
-        // surface we can no longer map" — and the second case, falling through to the real-file
-        // branch below, would edit a same-named real file with VIRTUAL offsets and corrupt it.
-        // The three outcomes:
-        //
-        //   1. `Vouched(ctx)` → map the API-surface offsets onto the `.vue` carrier via the API
-        //      source map (UTF-16 lookup re-emitted in the negotiated encoding). A vouched surface
-        //      whose offsets fail to map is DROPPED (fail closed) — never line-0'd into the `.vue`.
-        //   2. `VirtualDrop` → a known virtual surface whose generation was superseded/retired or
-        //      whose snapshot has no source map: its offsets index VIRTUAL content, so DROP (fail
-        //      closed). NEVER reach the real-file branch (that is the corruption guard).
-        //   3. `NotVirtual` → not a virtual surface; the offsets index this exact path's REAL file
-        //      (a hand-written `Child.vue.ts` next to `Child.vue`): edit it IN PLACE (read its own
-        //      source). Nothing is mapped into the `.vue`. A path with no real backing file then
-        //      reads back `None` and the edit is dropped (fail closed).
-        if is_carrier_api_path(&loc.path, carrier_source_exists) {
-            match external_api_resolver
-                .map(|resolver| resolver(&loc.path))
-                .unwrap_or(ApiSurfaceResolution::NotVirtual)
-            {
-                ApiSurfaceResolution::Vouched(ctx) => {
-                    // Outcome 1: vouched virtual surface. The negotiated carrier index is mandatory
-                    // — it re-emits the UTF-16 source-map result in the negotiated encoding.
-                    if let Some(range) =
-                        ctx.carrier_negotiated_line_index.as_ref().and_then(|neg| {
-                            api_surface_range_to_carrier_range(
-                                loc.start,
-                                loc.end,
-                                &ctx.tsx_line_index,
-                                &ctx.mapper,
-                                &ctx.carrier_line_index,
-                                neg,
-                            )
-                        })
-                    {
-                        let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
-                        if let Some(uri) = path_to_uri(carrier_path) {
-                            let edits = changes.entry(uri).or_default();
-                            let dup = edits.iter().any(|e| e.range.start == range.start);
-                            if !dup {
-                                edits.push(TextEdit {
-                                    range,
-                                    new_text: new_name.to_string(),
-                                });
-                            }
-                        }
-                    }
-                    // Vouched-but-unmappable falls through here → DROP (fail closed).
-                }
-                ApiSurfaceResolution::VirtualDrop => {
-                    // Outcome 2: known virtual surface, no safe mapping → DROP. Crucially do NOT
-                    // fall through to the real-file branch: the offsets are virtual and a
-                    // same-named real file at this path would be corrupted.
-                }
-                ApiSurfaceResolution::NotVirtual => {
-                    // Outcome 3: not the virtual surface. If a REAL file backs this exact path, the
-                    // offsets index IT: edit it in place (never map into the `.vue`). Otherwise the
-                    // readback returns `None` and the edit is dropped (fail closed).
-                    if let Some(range) = resolve_external_target_range(
-                        &loc.path,
-                        loc.start,
-                        loc.end,
-                        negotiated_encoding.clone(),
-                        source_reader,
-                    ) {
-                        if let Some(uri) = path_to_uri(&loc.path) {
-                            let edits = changes.entry(uri).or_default();
-                            let dup = edits.iter().any(|e| e.range.start == range.start);
-                            if !dup {
-                                edits.push(TextEdit {
-                                    range,
-                                    new_text: new_name.to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        // Every other target: read its own source and convert the byte offsets, fail closed.
-        let normalized = normalize_carrier_path(&loc.path, carrier_source_exists);
-        if normalized != loc.path {
-            continue;
-        }
-        let Some(uri) = path_to_uri(normalized) else {
-            continue;
-        };
-        let Some(range) = resolve_external_target_range(
-            &loc.path,
-            loc.start,
-            loc.end,
-            negotiated_encoding.clone(),
-            source_reader,
-        ) else {
-            continue;
-        };
-        let edits = changes.entry(uri).or_default();
-        let dup = edits.iter().any(|e| e.range.start == range.start);
-        if !dup {
-            edits.push(TextEdit {
-                range,
-                new_text: new_name.to_string(),
-            });
+            Err(reason) => dropped.push(DroppedRenameLocation {
+                path: loc.path.clone(),
+                start: loc.start,
+                end: loc.end,
+                reason,
+            }),
         }
     }
 
@@ -441,8 +502,7 @@ pub fn merge_rename_locations(
         .as_ref(),
     );
 
-    // Return None if no edits
-    if edit
+    let edit = if edit
         .changes
         .as_ref()
         .is_none_or(std::collections::HashMap::is_empty)
@@ -450,7 +510,8 @@ pub fn merge_rename_locations(
         None
     } else {
         Some(edit)
-    }
+    };
+    RenameMergeOutcome { edit, dropped }
 }
 
 /// Canonicalize a rename transaction at its public boundary.

@@ -25,13 +25,13 @@ The official VS Code extension for Verter — an experimental Vue compiler and l
 Search for **Verter** in the VS Code Extensions panel, or install from the command line:
 
 ```bash
-code --install-extension verter.vscode
+code --install-extension verter.verter-vscode
 ```
 
 ### From Source
 
 ```bash
-pnpm --filter vscode package
+pnpm --filter verter-vscode package
 # Produces a .vsix file in packages/vue-vscode/
 code --install-extension packages/vue-vscode/verter-vscode-*.vsix
 ```
@@ -58,13 +58,11 @@ graph TD
     EXT["verter-vscode<br/><i>VS Code extension</i>"]
     LSP["verter-lsp<br/><i>Rust LSP binary (stdio)</i>"]
     TSP["@verter/typescript-plugin<br/><i>.vue import resolution</i>"]
-    OXC["@verter/oxc-bindings<br/><i>OXC binary management</i>"]
     LSH["@verter/language-shared<br/><i>Shared protocol types</i>"]
     VLC["vscode-languageclient<br/><i>LSP client library</i>"]
 
     EXT --> LSP
     EXT --> TSP
-    EXT --> OXC
     EXT --> LSH
     EXT --> VLC
 ```
@@ -163,10 +161,10 @@ This is useful for debugging type issues, understanding how Verter transforms yo
 pnpm build
 
 # Build only the extension
-pnpm --filter vscode build
+pnpm --filter verter-vscode build
 
 # Watch mode for iterative development
-pnpm --filter vscode watch
+pnpm --filter verter-vscode watch
 ```
 
 ### Debugging
@@ -182,17 +180,17 @@ Alternatively, use `pnpm dev-extension` to build the LSP binary and watch-build 
 
 ```bash
 # Produce a .vsix file for distribution
-pnpm --filter vscode package
+pnpm --filter verter-vscode package
 ```
 
 ### Benchmarking
 
 ```bash
 # Cold-start typed completion benchmark
-pnpm --filter vscode benchmark:startup
+pnpm --filter verter-vscode benchmark:startup
 
 # Steady-state script completion benchmark (tsserver, multi-run JSON summary)
-pnpm --filter vscode benchmark:completion
+pnpm --filter verter-vscode benchmark:completion
 ```
 
 The completion benchmark writes per-run and summary JSON files under
@@ -213,7 +211,6 @@ The completion benchmark writes per-run and summary JSON files under
 | `verter-lsp` (Rust binary)  | LSP server providing completions, diagnostics, hover, go-to-definition (stdio) |
 | `@verter/language-shared`   | Shared custom protocol types between extension and LSP binary                  |
 | `@verter/typescript-plugin` | TypeScript plugin for `.vue` import resolution in TS/JS files                  |
-| `@verter/oxc-bindings`      | Platform-specific OXC parser binary management                                 |
 | `vscode-languageclient`     | VS Code LSP client library                                                     |
 
 ## License

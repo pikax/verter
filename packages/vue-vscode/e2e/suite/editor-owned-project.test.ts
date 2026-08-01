@@ -1,4 +1,5 @@
 import * as assert from "assert";
+import { pollBudget, sequenceParent } from "../lib/timeouts";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -58,6 +59,8 @@ if (FIXTURE_NAME === FIXTURE) {
     let consumerDiagnostics: vscode.Diagnostic[];
 
     suiteSetup(async function () {
+      // Three waits in series under ONE hook deadline (`POLL_SEQUENCES`).
+      this.timeout(sequenceParent("editorOwnedProjectSetup"));
       assert.ok(
         TYPE_PROVIDER && REQUIRED_PROVIDERS.has(TYPE_PROVIDER),
         `The ${FIXTURE} acceptance must run with editor-tsserver or shared-tsgo, got ${TYPE_PROVIDER ?? "none"}`,
@@ -65,16 +68,16 @@ if (FIXTURE_NAME === FIXTURE) {
 
       compDocument = await openVueFile("src/Comp.vue");
       await waitForDiagnostics(compDocument.uri, {
-        timeoutMs: 30_000,
+        timeoutMs: pollBudget("editorOwnedDiagnostics"),
         predicate: (diagnostic) => diagnosticCode(diagnostic) === 2322,
       });
       compDiagnostics = await waitForDiagnosticsSettled(compDocument.uri, {
-        timeoutMs: 10_000,
+        timeoutMs: pollBudget("editorOwnedSettle"),
         stableMs: 800,
       });
       consumerDocument = await openVueFile("src/Consumer.ts");
       consumerDiagnostics = await waitForDiagnosticsSettled(consumerDocument.uri, {
-        timeoutMs: 10_000,
+        timeoutMs: pollBudget("editorOwnedSettle"),
         stableMs: 800,
       });
     });
@@ -127,6 +130,8 @@ if (FIXTURE_NAME === FIXTURE) {
     });
 
     test("provides Vue JSX intrinsics without project jsxImportSource", async function () {
+      // Declared so the deadline is this sequence's, not one inherited by coincidence.
+      this.timeout(sequenceParent("editorOwnedJsxEnvironment"));
       const tsconfig = JSON.parse(
         fs.readFileSync(path.join(workspaceRoot(), "tsconfig.json"), "utf8"),
       ) as { compilerOptions?: { jsxImportSource?: unknown } };
@@ -138,7 +143,7 @@ if (FIXTURE_NAME === FIXTURE) {
 
       const document = await openVueFile("src/App.vue");
       const diagnostics = await waitForDiagnosticsSettled(document.uri, {
-        timeoutMs: 20_000,
+        timeoutMs: pollBudget("editorOwnedJsxSettle"),
         stableMs: 800,
       });
       const errors = diagnostics.filter(
@@ -152,6 +157,9 @@ if (FIXTURE_NAME === FIXTURE) {
     });
 
     test("maps configured-project diagnostics and exposes the real component surface", async function () {
+      // Two carrier hovers in series (`POLL_SEQUENCES`), so the deadline is the
+      // sequence's, declared rather than inherited by coincidence.
+      this.timeout(sequenceParent("editorOwnedCarrierHovers"));
       const ts2322 = compDiagnostics.filter((diagnostic) => diagnosticCode(diagnostic) === 2322);
       assert.strictEqual(
         ts2322.length,
@@ -321,7 +329,7 @@ async function waitForHover(
   uri: vscode.Uri,
   position: vscode.Position,
   predicate: (text: string) => boolean,
-  timeoutMs = 20_000,
+  timeoutMs = pollBudget("editorOwnedProjectHover"),
 ): Promise<{ hovers: vscode.Hover[]; text: string }> {
   const started = Date.now();
   let latest = "";

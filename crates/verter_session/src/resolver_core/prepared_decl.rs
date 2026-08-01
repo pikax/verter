@@ -1261,11 +1261,7 @@ pub fn build_prepared_decl_bundle(
     // Build import bindings from the authoritative owner-qualified import
     // table. One binding per exact `(owner, local-name)` key.
     for (local_key, target) in state.owner_import_targets.iter() {
-        let resolved_id = if target.canonical_id.is_empty() {
-            dep_edges.get(&target.source_specifier).cloned()
-        } else {
-            Some(target.canonical_id.clone())
-        };
+        let resolved_id = dep_edges.get(&target.source_specifier).cloned();
         if let Some(resolved_id) = resolved_id {
             owner_scopes
                 .entry(local_key.owner)

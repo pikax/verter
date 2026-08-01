@@ -1028,9 +1028,15 @@ async fn known_good_script_setup_hover_resolves_through_tsgo_on_emitted_tsx() {
         ..ToolRoot::default()
     };
     let root_str = root.to_string_lossy().to_string();
-    let plan = match resolve(ProviderName::Tsgo, &tool_root, &root_str, true)
-        .await
-        .expect("tsgo resolves with an explicit bin")
+    let plan = match resolve(
+        &NativeFs::new(),
+        ProviderName::Tsgo,
+        &tool_root,
+        &root_str,
+        true,
+    )
+    .await
+    .expect("tsgo resolves with an explicit bin")
     {
         Resolution::Ready { plan, .. } => plan,
         Resolution::Skipped { reason } => panic!("tsgo unexpectedly skipped: {reason}"),
@@ -1121,9 +1127,15 @@ async fn provider_resolves_barrel_reexport_through_rewritten_twin() {
         ..ToolRoot::default()
     };
     let root_str = root.to_string_lossy().to_string();
-    let plan = match resolve(ProviderName::Tsgo, &tool_root, &root_str, true)
-        .await
-        .expect("tsgo resolves with an explicit bin")
+    let plan = match resolve(
+        &NativeFs::new(),
+        ProviderName::Tsgo,
+        &tool_root,
+        &root_str,
+        true,
+    )
+    .await
+    .expect("tsgo resolves with an explicit bin")
     {
         Resolution::Ready { plan, .. } => plan,
         Resolution::Skipped { reason } => panic!("tsgo unexpectedly skipped: {reason}"),

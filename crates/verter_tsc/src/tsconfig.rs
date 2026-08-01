@@ -6,10 +6,14 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-/// Strip the Windows `\\?\` extended-length path prefix.
-///
-/// `std::fs::canonicalize()` on Windows returns paths prefixed with `\\?\`,
-/// which breaks external tools (cmd.exe, tsc) and causes path comparison issues.
+// The Windows extended-length (`\\?\`) prefix `std::fs::canonicalize()` returns
+// breaks every external tool that parses the path itself (cmd.exe, tsc, node).
+// Stripping it is owned by `verter_span::path` for the whole workspace — this
+// crate had its own copy, which turned `\\?\UNC\server\share\x` into the
+// RELATIVE path `UNC\server\share\x` and could rewrite a verbatim path Win32
+// cannot express at all.
+pub(crate) use verter_span::path::simplify_verbatim_path;
+
 /// Return the parent directory of `path`, falling back to `"."` when
 /// `Path::parent()` returns an empty path (which happens for bare filenames
 /// like `"tsconfig.json"` — `parent()` yields `Some("")`, not `None`).
@@ -17,15 +21,6 @@ fn safe_parent(path: &Path) -> &Path {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
-    }
-}
-
-pub(crate) fn strip_unc_prefix(p: &Path) -> PathBuf {
-    let s = p.to_string_lossy();
-    if let Some(stripped) = s.strip_prefix(r"\\?\") {
-        PathBuf::from(stripped)
-    } else {
-        p.to_path_buf()
     }
 }
 
@@ -105,7 +100,7 @@ fn resolve_output_dirs(tsconfig_path: &Path, depth: usize) -> ResolvedOutputDirs
 
     let config_dir = safe_parent(tsconfig_path)
         .canonicalize()
-        .map(|p| strip_unc_prefix(&p))
+        .map(|p| simplify_verbatim_path(&p).into_owned())
         .unwrap_or_else(|_| safe_parent(tsconfig_path).to_path_buf());
 
     // Start with values inherited from parent (if extends is set).
@@ -176,11 +171,12 @@ pub fn load_tsconfig(tsconfig_path: &Path) -> Result<TsConfig, String> {
 
     load_tsconfig_recursive(tsconfig_path, &mut vue_files, &mut ts_files, &mut seen, 0)?;
 
-    let root_dir = strip_unc_prefix(
+    let root_dir = simplify_verbatim_path(
         &safe_parent(tsconfig_path)
             .canonicalize()
             .map_err(|e| format!("cannot resolve tsconfig directory: {e}"))?,
-    );
+    )
+    .into_owned();
 
     // Resolve output directories through the extends chain.
     let output_dirs = resolve_output_dirs(tsconfig_path, 0);
@@ -205,11 +201,12 @@ fn load_tsconfig_recursive(
         return Ok(()); // guard against circular references
     }
 
-    let root_dir = strip_unc_prefix(
+    let root_dir = simplify_verbatim_path(
         &safe_parent(tsconfig_path)
             .canonicalize()
             .map_err(|e| format!("cannot resolve tsconfig directory: {e}"))?,
-    );
+    )
+    .into_owned();
 
     let raw = match load_raw_tsconfig(tsconfig_path) {
         Ok(r) => r,
@@ -245,7 +242,7 @@ fn load_tsconfig_recursive(
     for file in &raw.files {
         let p = root_dir.join(file);
         if p.exists() {
-            let canon = strip_unc_prefix(&p.canonicalize().unwrap_or(p));
+            let canon = simplify_verbatim_path(&p.canonicalize().unwrap_or(p)).into_owned();
             if seen.insert(canon.clone()) {
                 classify_file(&canon, vue_files, ts_files);
             }
@@ -338,9 +335,10 @@ fn load_tsconfig_recursive(
                     Some(_) | None => true, // No extension filter — include all classifiable files.
                 };
                 if include {
-                    let canon = strip_unc_prefix(
+                    let canon = simplify_verbatim_path(
                         &path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
-                    );
+                    )
+                    .into_owned();
                     if seen.insert(canon.clone()) {
                         classify_file(&canon, vue_files, ts_files);
                     }
@@ -635,19 +633,8 @@ mod tests {
         );
     }
 
-    // ── strip_unc_prefix ───────────────────────────────────────────
-
-    #[test]
-    fn strip_unc_prefix_windows_path() {
-        let p = Path::new(r"\\?\D:\dev\project");
-        assert_eq!(strip_unc_prefix(p), PathBuf::from(r"D:\dev\project"));
-    }
-
-    #[test]
-    fn strip_unc_prefix_noop_on_normal_path() {
-        let p = Path::new("/home/user/project");
-        assert_eq!(strip_unc_prefix(p), PathBuf::from("/home/user/project"));
-    }
+    // (`simplify_verbatim_path` is owned and covered by `verter_span::path` —
+    // disk form, UNC form, POSIX passthrough, and the un-simplifiable cases.)
 
     // ── glob_dir_prefix ────────────────────────────────────────────
 
@@ -732,7 +719,8 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("src")).unwrap();
 
         let config = load_tsconfig(&tsconfig).unwrap();
-        let expected = strip_unc_prefix(&temp.path().canonicalize().unwrap()).join("dist/types");
+        let expected =
+            simplify_verbatim_path(&temp.path().canonicalize().unwrap()).join("dist/types");
         assert_eq!(
             config.declaration_dir.as_deref(),
             Some(expected.as_path()),
@@ -760,7 +748,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("src")).unwrap();
 
         let config = load_tsconfig(&tsconfig).unwrap();
-        let expected = strip_unc_prefix(&temp.path().canonicalize().unwrap()).join("dist");
+        let expected = simplify_verbatim_path(&temp.path().canonicalize().unwrap()).join("dist");
         assert_eq!(
             config.out_dir.as_deref(),
             Some(expected.as_path()),
@@ -788,7 +776,7 @@ mod tests {
         .unwrap();
 
         let config = load_tsconfig(&tsconfig).unwrap();
-        let expected = strip_unc_prefix(&sub.canonicalize().unwrap()).join("types");
+        let expected = simplify_verbatim_path(&sub.canonicalize().unwrap()).join("types");
         assert_eq!(
             config.declaration_dir.as_deref(),
             Some(expected.as_path()),
@@ -823,7 +811,7 @@ mod tests {
 
         let config = load_tsconfig(&root.join("tsconfig.json")).unwrap();
         // Should inherit from base — resolved relative to base's directory
-        let expected = strip_unc_prefix(&root.canonicalize().unwrap()).join("dist/types");
+        let expected = simplify_verbatim_path(&root.canonicalize().unwrap()).join("dist/types");
         assert_eq!(
             config.declaration_dir.as_deref(),
             Some(expected.as_path()),
@@ -856,14 +844,16 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
 
         let config = load_tsconfig(&root.join("tsconfig.json")).unwrap();
-        let expected = strip_unc_prefix(&root.canonicalize().unwrap()).join("dist/child-types");
+        let expected =
+            simplify_verbatim_path(&root.canonicalize().unwrap()).join("dist/child-types");
         assert_eq!(
             config.declaration_dir.as_deref(),
             Some(expected.as_path()),
             "child declarationDir should override inherited value"
         );
         // Negative: should not have the base's path
-        let base_path = strip_unc_prefix(&root.canonicalize().unwrap()).join("dist/base-types");
+        let base_path =
+            simplify_verbatim_path(&root.canonicalize().unwrap()).join("dist/base-types");
         assert_ne!(
             config.declaration_dir.as_deref(),
             Some(base_path.as_path()),
@@ -913,7 +903,7 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
 
         let config = load_tsconfig(&root.join("tsconfig.json")).unwrap();
-        let expected = strip_unc_prefix(&root.canonicalize().unwrap()).join("dist");
+        let expected = simplify_verbatim_path(&root.canonicalize().unwrap()).join("dist");
         assert_eq!(
             config.out_dir.as_deref(),
             Some(expected.as_path()),

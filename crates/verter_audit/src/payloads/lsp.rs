@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::payloads::tags::LspMethodTag;
+use crate::RequestTargetIdentity;
 
 /// LSP request payload.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
@@ -38,8 +39,18 @@ pub struct LspRequestPayload {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "audit.generated.ts")]
 pub struct PositionInfo {
-    /// Canonical id of the file.
+    /// Legacy canonical-id projection retained for wire compatibility.
+    ///
+    /// New consumers must use [`Self::target_identity`] to distinguish an
+    /// unregistered request URI from a position that is not applicable.
     pub canonical_id: String,
+    /// Tagged identity of the document that owns this editor position.
+    ///
+    /// New producers always emit `Some`; `None` is reserved for payloads
+    /// serialized before this additive field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target_identity: Option<RequestTargetIdentity>,
     /// Zero-based line.
     pub line: u32,
     /// Zero-based character offset within the line.

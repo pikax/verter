@@ -2780,25 +2780,21 @@ const count = 42
     );
 }
 
-/// @ai-generated - Template analysis not populated when scope excludes template flags
-#[test]
-fn template_analysis_none_when_scope_excludes_template() {
-    use verter_semantic::analysis::AnalysisScope;
-
-    // BUILD scope does NOT include template flags
-    let host = VerterHost::new_standalone(HostConfig {
-        analysis_scope: Some(AnalysisScope::BUILD),
-        ..HostConfig::default()
-    });
-
-    let sfc = r#"<script setup lang="ts">
+const SCOPE_PROBE_SFC: &str = r#"<script setup lang="ts">
 const msg = "hello"
 </script>
 <template>
   <div>{{ msg }}</div>
 </template>"#;
 
-    let _ = upsert_vue(&host, "Comp.vue", sfc);
+fn scope_probe_analysis(
+    scope: verter_semantic::analysis::AnalysisScope,
+) -> verter_session::FileAnalysisSnapshot {
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_scope: Some(scope),
+        ..HostConfig::default()
+    });
+    let _ = upsert_vue(&host, "Comp.vue", SCOPE_PROBE_SFC);
     let _ = host
         .get_virtual_file(VirtualQuery {
             raw_id: Some("Comp.vue?vue&type=template".to_string()),
@@ -2807,11 +2803,74 @@ const msg = "hello"
             compile_profile: profile_dev(),
         })
         .unwrap();
+    host.get_analysis("Comp.vue").unwrap()
+}
 
-    let analysis = host.get_analysis("Comp.vue").unwrap();
+/// @ai-generated - Template analysis not populated when scope excludes template flags
+#[test]
+fn template_analysis_none_when_scope_excludes_template() {
+    use verter_semantic::analysis::AnalysisScope;
+
+    // BUILD scope does NOT include template flags.
     assert!(
-        analysis.template.is_none(),
+        !AnalysisScope::BUILD.needs_template_analysis(),
+        "BUILD must stay template-free: a template flag here materialises the \
+         WHOLE template snapshot for every carrier file this scope analyses"
+    );
+    assert!(
+        scope_probe_analysis(AnalysisScope::BUILD)
+            .template
+            .is_none(),
         "template analysis should NOT be populated when BUILD scope is used"
+    );
+}
+
+/// The discriminating pair for the ON-DEMAND root-reachability mechanism.
+///
+/// `BUILD` leaves `get_analysis().template` unpopulated (the test above), and
+/// yet the public-API carrier rendered under that very same host is STILL
+/// widened with the resolved root element's props type. That is only possible
+/// because the public-API path opens a request-scoped template demand around
+/// its fallthrough resolve instead of the scope preset carrying a template bit
+/// for every consumer.
+///
+/// Both halves are load-bearing. Without the `is_none()` half, restoring
+/// `TPL_COMPONENTS` to `BUILD` would pass this test; without the widening half,
+/// deleting the demand scope would pass it.
+#[test]
+fn public_api_widens_under_build_scope_without_a_scope_wide_template_walk() {
+    use verter_semantic::analysis::AnalysisScope;
+
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_scope: Some(AnalysisScope::BUILD),
+        ..HostConfig::default()
+    });
+    let _ = upsert_vue(&host, "Comp.vue", SCOPE_PROBE_SFC);
+
+    // FIRST: a plain analysis read walks NO template. Ordered before the
+    // public-API render deliberately — the on-demand walk persists its result
+    // into the shared raw-template slot, so a later read would legitimately see
+    // it and this half would stop discriminating.
+    assert!(
+        host.get_analysis("Comp.vue")
+            .expect("analysis")
+            .template
+            .is_none(),
+        "the demand is REQUEST-SCOPED to the public-API path: a plain \
+         `get_analysis` under BUILD must report no template snapshot, or the \
+         scope preset has silently regained a template bit"
+    );
+
+    let code = host
+        .get_public_api("Comp.vue")
+        .expect("no projection error")
+        .expect("a stub")
+        .ts_labeled_code()
+        .to_string();
+    assert!(
+        code.contains("__Verter_RootElementAttrs<\"div\">"),
+        "the public-API carrier must be widened with the resolved root element \
+         even though the analysis scope carries no template flag:\n{code}"
     );
 }
 

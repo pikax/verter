@@ -18,6 +18,7 @@ import {
 const ROOT = resolve(import.meta.dirname, "../..");
 
 const EXPECTED_NPM = [
+  "@verter/binary-launcher",
   "@verter/component-meta",
   "@verter/language-shared",
   "@verter/native",
@@ -30,6 +31,8 @@ const EXPECTED_NPM = [
   "@verter/typescript-plugin",
   "@verter/unplugin",
   "@verter/wasm",
+  "verter-lsp",
+  "verter-mcp",
   "verter-tsc",
 ];
 
@@ -41,19 +44,28 @@ test("derived npm set equals the expected product closure minus marketplace-only
     "@verter/component-meta",
     "@verter/unplugin",
     "@verter/nuxt",
+    "verter-lsp",
+    "verter-mcp",
     "verter-tsc",
-    "vscode",
+    "verter-vscode",
   ]);
-  assert.deepEqual(MARKETPLACE_ONLY, ["vscode"]);
+  assert.deepEqual(MARKETPLACE_ONLY, ["verter-vscode"]);
 });
 
-// @verter/oxc-bindings is published on npm from an earlier release but is
-// deliberately NOT a product root: it is an internal binding package, not part
-// of the shipped surface, so it stops being republished from here on.
-test("oxc-bindings is not published", () => {
+// The binary families ship their servers/bindings as per-platform packages the
+// launcher resolves at runtime. A family whose npm/<platform> dirs are missing
+// from the platform set installs a launcher with no binary behind it.
+test("every binary family's platform dirs are in the platform publish set", () => {
   const set = computePublishSet();
-  assert.ok(!set.npm.includes("@verter/oxc-bindings"));
-  assert.ok(!set.order.includes("@verter/oxc-bindings"));
+  const dirs = set.platform.map((dir) => dir.split("\\").join("/"));
+  for (const family of ["native", "verter-lsp", "verter-mcp", "verter-tsc"]) {
+    const familyDirs = dirs.filter((dir) => dir.startsWith(`packages/${family}/npm/`));
+    assert.equal(
+      familyDirs.length,
+      7,
+      `expected 7 platform dirs for ${family}, got ${familyDirs.length}: ${familyDirs.join(", ")}`,
+    );
+  }
 });
 
 test("every runtime workspace dependency of every published package is itself published", () => {
@@ -82,9 +94,9 @@ test("every runtime workspace dependency of every published package is itself pu
 
 test("verter-vscode is not in the npm set", () => {
   const set = computePublishSet();
-  assert.ok(!set.npm.includes("vscode"));
-  assert.ok(!set.order.includes("vscode"));
-  assert.ok(set.marketplaceOnly.includes("vscode"));
+  assert.ok(!set.npm.includes("verter-vscode"));
+  assert.ok(!set.order.includes("verter-vscode"));
+  assert.ok(set.marketplaceOnly.includes("verter-vscode"));
 });
 
 test("a private package in the closure throws", () => {

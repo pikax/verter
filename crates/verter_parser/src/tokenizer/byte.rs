@@ -97,6 +97,18 @@ pub fn tokenize_sfc_with_delimiters(
     tokenizer.run();
 }
 
+/// The Vue SFC root-block raw-text rule, shared between this tokenizer and any
+/// consumer that must agree with it (e.g. the LSP's SFC block scanner): at the
+/// ROOT of a Vue SFC only `<template>` hosts markup — `<script>`, `<style>`,
+/// and every custom block (`<docs>`, `<i18n>`, …) are raw text (RCDATA), so
+/// their content is never parsed as HTML and the FIRST same-name close ends
+/// the block. This is the exact rule `check_and_setup_rcdata` applies in
+/// [`tokenize_sfc`] mode; keeping consumers on this one predicate prevents the
+/// scanner and the parser from diverging on which blocks nest.
+pub fn vue_sfc_root_block_is_raw_text(tag_name: &[u8]) -> bool {
+    !tag_name.eq_ignore_ascii_case(b"template")
+}
+
 struct Tokenizer<'a, F: FnMut(Event<'static>)> {
     input: &'a [u8],
 
@@ -849,10 +861,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
             self.current_sequence = TEXTAREA_END;
             self.rcdata_custom_seq_len = 0;
             self.sequence_index = 0;
-        } else if self.sfc_mode
-            && self.sfc_depth == 0
-            && !tag_name.eq_ignore_ascii_case(b"template")
-        {
+        } else if self.sfc_mode && self.sfc_depth == 0 && vue_sfc_root_block_is_raw_text(tag_name) {
             // SFC custom block (e.g., <docs>, <i18n>): enter RCDATA so content
             // is not parsed as HTML. Build dynamic closing sequence `</tagname`.
             let seq_len = 2 + tag_name.len(); // "</".len() + tag_name.len()

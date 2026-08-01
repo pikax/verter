@@ -17,6 +17,11 @@ describe("File", () => {
       expect(file.code).toBe("");
     });
 
+    // The literal is EXHAUSTIVE on purpose: `toEqual` fails on an unexpected key
+    // as well as a missing one, so a field added to `CompiledFile` without a
+    // default lands here rather than reaching the UI as `undefined`. Adding the
+    // field to this literal is the intended way to satisfy it — never widening
+    // the assertion to a subset match.
     it("initializes compiled with empty defaults", () => {
       const file = new File("App.vue");
       expect(file.compiled).toEqual({
@@ -28,7 +33,9 @@ describe("File", () => {
         templateCode: "",
         verterSourceMap: "",
         tscCode: "",
+        publicApiOutcome: { kind: "absent" },
         declCode: "",
+        declarationOutcome: { kind: "absent" },
         declSourceMap: "",
         ssrCode: "",
         errors: [],

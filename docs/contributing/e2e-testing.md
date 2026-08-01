@@ -84,14 +84,16 @@ for their own smoke suites without reclassifying Verter notifications as standar
 
 ```bash
 # Rebuild the LSP + extension + E2E bundle, then run a single fixture/provider
-E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter vscode test:e2e
+E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter verter-vscode test:e2e
 ```
 
-`pnpm --filter vscode test:e2e` now prepares the Rust binary, extension bundle, and compiled E2E tests before launching VS Code. Use `pnpm --filter vscode test:e2e:run` only when artifacts are already prepared, such as in CI.
+`pnpm --filter verter-vscode test:e2e` now prepares the Rust binary, extension bundle, and compiled E2E tests before launching VS Code. Use `pnpm --filter verter-vscode test:e2e:run` only when artifacts are already prepared, such as in CI.
 
 The `E2E_FIXTURE` environment variable selects which test workspace to open. `E2E_TYPE_PROVIDER`
 selects the provider under test (`tsserver`, `tsgo`, or, for relay-enabled fixtures,
-`shared-tsgo`). Available fixtures include:
+`shared-tsgo`). Both are checked against the canonical route inventory before anything builds a
+path from them, so an unknown fixture — or a fixture/provider pair that is not a real route —
+fails immediately rather than resolving to some other directory. Available fixtures include:
 
 - `single-project` — Standard Vue project with tsconfig
 - `monorepo` — pnpm workspace with cross-package imports
@@ -115,7 +117,7 @@ This prepares the artifacts once, then iterates over every fixture/provider comb
 ### Specific fixture via runTests.ts
 
 ```bash
-pnpm --filter vscode test:e2e:matrix -- --fixture=monorepo@tsgo
+pnpm --filter verter-vscode test:e2e:matrix -- --fixture=monorepo@tsgo
 ```
 
 ### From the monorepo root
@@ -261,7 +263,33 @@ On Windows, a running `.exe` is locked by the OS. The test runner copies the bin
 
 ### Fixture dependencies missing
 
-Fixtures with `package.json` need `node_modules/vue` installed for proper type resolution. The test runner automatically runs `npm install --no-package-lock --ignore-scripts` in fixtures before launching VS Code. If you still see type resolution issues, manually run `npm install` in the fixture directory.
+Fixtures with `package.json` need `node_modules/vue` installed for proper type resolution. Every launcher installs them before starting VS Code, and it decides by PROVENANCE rather than by whether `node_modules/` exists: an install records a stamp covering the manifest bytes and a fingerprint of the tree it produced, so an edited `package.json` — or a package added inside `node_modules` without touching the manifest — reinstalls. A tree merely being there is not evidence it came from the manifest you are testing.
+
+### A fixture's node_modules was quarantined
+
+A tree the harness cannot prove it produced (unstamped, legacy-stamped, or altered since it was stamped) is **moved**, never deleted. The run prints the absolute recovery path. This happens once per fixture the first time you run after this change, and again if you edit a fixture's `node_modules` by hand.
+
+Quarantines live in `.verter-e2e-quarantine/` at the repository root, which is gitignored, and are removed only when you ask:
+
+```bash
+pnpm --filter verter-vscode test:e2e:fixtures:clean-quarantine
+```
+
+Inside the repository because the move is a `rename` and a rename cannot cross filesystems: anchored anywhere else, whether it works at all is a property of your machine's disk layout. It is also outside every fixture workspace, and not subject to the OS sweeping your temp directory. `git clean -xdf` removes it like any other untracked directory.
+
+`VERTER_E2E_FIXTURE_QUARANTINE_DIR` puts them somewhere else; it must be on the repository's filesystem. The cleanup command only removes directories the harness marked as its own, so pointing that variable at a directory you care about does not turn the command into a delete-everything sweep — it reports what it left alone. To iterate against a tree you arranged yourself, `VERTER_E2E_ADOPT_FIXTURE_DEPS=<fixture>` uses it as-is without installing or stamping and prints a `NON-HERMETIC` banner; it names one fixture at a time and CI rejects it. It still recovers a `node_modules.verter-rollback-*` a killed run left inside the fixture: that is a previous tree rather than the one you arranged, and TypeScript's default `exclude` matches the literal name `node_modules`, so leaving it there puts the whole thing in the fixture's program.
+
+### The run refuses instead of installing
+
+The harness stops rather than guess when it cannot tell what a tree is, or when an install cannot succeed. The message names the cause and the file:
+
+- a `file:`/`link:` dependency whose target is not on this machine — `ecosystem-parity` declares `"verter": "file:../../../../../../verter-release-clean"`, a sibling checkout most machines do not have. Check it out, or point the dependency somewhere real.
+- an install stamp in this format whose digests are unusable — delete or repair it to say what the tree is.
+- `node_modules` that is a symlink rather than a directory.
+- a quarantine move that failed (see the filesystem note above).
+- a fixture dependency lock that could not be created. Installs are serialised through a lock file published with `link`; where a filesystem has no hard links an exclusive create takes over, but only where that is positively established. A link failure that is transient or that a probe cannot explain is retried and then refuses, naming the errno — the fallback is not atomic on NFSv3, so an unexplained failure is not treated as permission to use it. If your filesystem really has no hard links and says so with an errno the harness does not recognise, report it, or point `TMPDIR`/`TEMP` at one that does.
+
+An `npm install` failure is fatal and carries npm's own output; it is not warned past, because a fixture nobody finished assembling produces results about nothing.
 
 ### Decoration state command returns undefined
 

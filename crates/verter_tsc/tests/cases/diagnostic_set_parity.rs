@@ -9,9 +9,9 @@
 //!   - an ADDED diagnostic (extra tuple OR raised count)     -> RED;
 //!   - a CHANGED diagnostic (different code / line / col)     -> RED.
 //!
-//! Multiplicity is pinned (a `BTreeMap<key, count>`, not a `BTreeSet`): dropping 2
-//! of 3 duplicate diagnostics at the same `(file,line,col,code)` MUST fail, so the
-//! current 70 raw diagnostics are asserted, not a deduped 67.
+//! Multiplicity is pinned (a `BTreeMap<key, count>`, not a `BTreeSet`), so the
+//! current 67 raw diagnostics are asserted without silently deduplicating any
+//! future same-key diagnostics.
 //!
 //! WHY THIS EXISTS (the parity oracle): the perf campaign (see
 //! `docs/arch/host-mode-perf-design.md` §3/§4) will run verter-tsc as a Batch host
@@ -67,8 +67,7 @@ use std::process::Command;
 // Captured from the current `verter-tsc` run over
 // `crates/verter_tsc/tests/cases/fixtures/diagnostics/`. Tuple =
 // `(fixture_relative_path, line, col, ts_code, count, stable_message_substring)`.
-// `count` pins multiplicity (raw total = 73; two keys repeat:
-// `src/DirectiveErrors.vue(1,1) TS7006` x3, `src/GenericComp.vue(1,1) TS6196` x2).
+// `count` pins multiplicity (raw total = 67).
 // The final entry is the whole-program non-root diagnostic in `src/nonRootBad.ts` (the
 // old per-root loop dropped it; the whole-program call surfaces it).
 // Regenerate ONLY when the pinned pipeline output legitimately changes (a later
@@ -84,15 +83,41 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     ("src/CrossComponentErrors.vue", 9, 1, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/CrossComponentErrors.vue", 13, 7, 2322, 1, "'\"unknown\"' is not assignable to type 'Status'"),
     ("src/CrossComponentErrors.vue", 16, 7, 2322, 1, "'number' is not assignable to type 'string'"),
-    ("src/DirectiveErrors.vue", 1, 1, 7006, 3, "Parameter '___VERTER___slotInstance' implicitly has an 'any' type"),
-    ("src/DirectiveErrors.vue", 1, 1, 2345, 1, "'number' is not assignable to parameter of type 'string'"),
-    ("src/DirectiveErrors.vue", 1, 1, 2353, 1, "'\"green\"' does not exist in type"),
+    // CUSTOM-DIRECTIVE IDE PAYLOAD — these five tuples are the CARRIER-POSITION
+    // rail, and their coordinates are the assertion, not incidental detail:
+    //   * The synthetic `v-directive` callback parameter now carries an explicit
+    //     annotation, so the three `Parameter '___VERTER___slotInstance' implicitly
+    //     has an 'any' type` TS7006 diagnostics (one per directive use, all homed at
+    //     the unmappable `(1,1)` fallback) are GONE. A re-appearing TS7006 here is a
+    //     regression: it is a diagnostic about compiler-synthesized scaffolding that
+    //     no author can act on.
+    //   * The invalid-modifier TS2353 lands on the AUTHORED modifier
+    //     (`v-color.green`, line 13 col 17), not the `(1,1)` source-map-gap
+    //     fallback. The generated key is BARE for an identifier-shaped modifier, so
+    //     TypeScript's property-name anchor is the mapped modifier token itself —
+    //     which is why the message pins `'green'` and not the quoted `'"green"'`.
+    //   * The value-type TS2345 lands on the AUTHORED value expression
+    //     (`v-color.blue="123"`, line 14 col 23).
+    //   * The invalid-ARGUMENT TS2345 lands on the AUTHORED argument
+    //     (`v-theme:badarg`, line 18 col 16 — the `:` the generated string
+    //     literal's opening quote stands for, because TypeScript spans an
+    //     argument-type diagnostic over the WHOLE quoted literal). It exists at all
+    //     only because the directive type's `Arg` parameter is carried into the
+    //     generated `runCustomDirective` signature; a run with no TS2345 on line 18
+    //     means the `Arg` parameter was dropped again.
+    //   * The invalid-modifier TS2353s still land on their authored modifiers when
+    //     an ARGUMENT is present too (line 19 col 20 bare, line 20 col 19 quoted —
+    //     the quoted key's range starts on the authored `.`).
+    // Any of these drifting back to `(1,1)` means the custom-directive payload
+    // stopped mapping its authored tokens and every IDE feature on it fails closed.
+    ("src/DirectiveErrors.vue", 13, 17, 2353, 1, "'green' does not exist in type"),
+    ("src/DirectiveErrors.vue", 14, 23, 2345, 1, "'number' is not assignable to parameter of type 'string'"),
+    ("src/DirectiveErrors.vue", 18, 16, 2345, 1, "'\"badarg\"' is not assignable to parameter of type"),
+    ("src/DirectiveErrors.vue", 19, 20, 2353, 1, "'badmod' does not exist in type"),
+    ("src/DirectiveErrors.vue", 20, 19, 2353, 1, "does not exist in type"),
     ("src/EmitErrors.vue", 8, 1, 2769, 1, "No overload matches this call"),
     ("src/EmitErrors.vue", 10, 1, 2769, 1, "No overload matches this call"),
     ("src/EmitErrors.vue", 12, 1, 2769, 1, "No overload matches this call"),
-    ("src/GenericComp.vue", 1, 1, 2314, 1, "Generic type '___VERTER___Attrs' requires 1 type argument"),
-    ("src/GenericComp.vue", 1, 1, 2315, 1, "Type '___VERTER___attributes' is not generic"),
-    ("src/GenericComp.vue", 1, 1, 6196, 2, "'T' is declared but never used"),
     ("src/GenericErrors.vue", 6, 1, 2322, 1, "'string' is not assignable to type 'User[]'"),
     ("src/GenericErrors.vue", 7, 1, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/GenericErrors.vue", 8, 1, 2322, 1, "'boolean' is not assignable to type 'number'"),
@@ -106,14 +131,16 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     ("src/ImportErrors.vue", 11, 1, 2322, 1, "'boolean' is not assignable to type 'string'"),
     ("src/ImportErrors.vue", 12, 1, 2322, 1, "'string' is not assignable to type 'number'"),
     // Generated public-API stub diagnostics (hash + per-run temp dir stripped).
-    ("OptionsApiAdvanced.vue.ts", 25, 13, 2322, 1, "'number' is not assignable to type 'string'"),
-    ("src/OptionsApiAdvanced.vue", 1, 1, 6196, 1, "'___VERTER___attributes' is declared but never used"),
+    // The line numbers include the attribute-fallthrough widening the
+    // Options-API stub generator now emits (the three helper declarations plus
+    // the widened `declare const` replacing the bare pass-through export), which
+    // is why they sit five lines below the authored error.
+    ("OptionsApiAdvanced.vue.ts", 30, 13, 2322, 1, "'number' is not assignable to type 'string'"),
     ("src/OptionsApiAdvanced.vue", 26, 1, 2322, 1, "'number' is not assignable to type 'string'"),
     // The numeric prop on line 5 is valid. Vue slot-body isolation removes the
     // former foreign-React `children` diagnostic, leaving only the real bad value.
     ("src/OptionsApiConsumer.vue", 6, 24, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("OptionsApiErrors.vue.ts", 21, 13, 2322, 1, "'string' is not assignable to type 'number'"),
-    ("src/OptionsApiErrors.vue", 1, 1, 6196, 1, "'___VERTER___attributes' is declared but never used"),
+    ("OptionsApiErrors.vue.ts", 26, 13, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/OptionsApiErrors.vue", 22, 1, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/PropErrors.vue", 6, 1, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/PropErrors.vue", 7, 1, 2322, 1, "'number' is not assignable to type 'string'"),
@@ -164,13 +191,14 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
 /// intentional-error fixture always yields diagnostics, so the code is pinned at 1.
 const EXPECTED_EXIT_CODE: i32 = 1;
 
-/// Fixtures that must carry ZERO diagnostics in the current pipeline. Empirically
-/// derived (every file absent from `EXPECTED`). NOTE: `src/GenericComp.vue` is NOT
-/// clean — it currently emits TS2315 + TS6196 (a pre-existing generic-attrs
-/// codegen artifact, pinned in `EXPECTED`), so it is deliberately excluded here.
+/// Fixtures that must carry ZERO diagnostics in the current pipeline. Files in
+/// this list assert absence directly rather than pinning compiler-originated
+/// diagnostics as expected behavior.
 const CLEAN_SFCS: &[&str] = &[
     "src/BaseButton.vue",
+    "src/GenericComp.vue",
     "src/GenericList.vue",
+    "src/OptionsApiClean.vue",
     "src/StatusBadge.vue",
     "src/types.ts",
     // NonRootImport.vue is itself clean — its only role is to pull the erroring
@@ -472,8 +500,8 @@ fn verter_tsc_diagnostic_set_parity() {
         .collect();
 
     // MULTISET equality over `(file, line, col, ts_code)` WITH per-key count. A
-    // `BTreeSet` would dedup multiplicity (dropping 2 of 3 duplicate TS7006 stays
-    // green); the count map pins the exact 70 raw diagnostics.
+    // A `BTreeSet` would dedup multiplicity; the count map pins the exact 67 raw
+    // diagnostics and remains sensitive to any future same-key duplicates.
     type Key = (String, u32, u32, u32);
     let mut actual_counts: BTreeMap<Key, usize> = BTreeMap::new();
     for (f, l, c, code, _) in &actual {
@@ -508,10 +536,8 @@ fn verter_tsc_diagnostic_set_parity() {
     // PER-OCCURRENCE message-shape check: at every pinned key the COUNT of live
     // diagnostics whose message contains the stable substring must EQUAL the key's
     // pinned `count` — `matched == count`, NOT `.any()` (some-match). This is the
-    // multiplicity↔message COUPLING: for a duplicate key (count N>1 — the two such
-    // keys, `DirectiveErrors.vue(1,1) TS7006` ×3 and `GenericComp.vue(1,1) TS6196`
-    // ×2, each carry N IDENTICAL messages, empirically verified) it pins ALL N
-    // occurrences, so if ANY single one of the N drifts (its message loses the
+    // multiplicity↔message COUPLING: for any duplicate key (count N>1) it pins ALL
+    // N occurrences, so if ANY single one of the N drifts (its message loses the
     // substring while the other N-1 keep it ⇒ matched == N-1) the check goes RED.
     // A bare `.any()` would stay green on that partial drift (one surviving match is
     // enough), a false-green this coupling closes. Together with the multiset count

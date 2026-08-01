@@ -69,6 +69,43 @@ describe("E2E type-provider attestation", () => {
     ).toThrow(/reported tsserver/);
   });
 
+  it("accepts the extension-hosted route only on its own topology", () => {
+    // The extension-hosted service reports the tsserver KIND, so the kind line
+    // alone cannot tell it apart from a run that fell back to the workspace
+    // tsserver. The topology line is the discriminator, and a run missing it —
+    // or reporting the workspace engine — must not attest as `extension`.
+    const served =
+      "Type provider status: tsserver (extension-hosted TypeScript language service (Experiment E))\n" +
+      "Type provider topology: extension-hosted";
+    expect(attestE2eTypeProviderLog(served, "extension")).toEqual({
+      publicKind: "tsserver",
+      reason: "extension-hosted TypeScript language service (Experiment E",
+      route: "extension",
+    });
+
+    expect(() =>
+      attestE2eTypeProviderLog(
+        "Type provider status: tsserver (workspace TypeScript 5.9.2)\n" +
+          "Type provider topology: project-tsserver",
+        "extension",
+      ),
+    ).toThrow(/topology was project-tsserver/);
+
+    expect(() =>
+      attestE2eTypeProviderLog(
+        "Type provider status: tsserver (workspace TypeScript 5.9.2)",
+        "extension",
+      ),
+    ).toThrow(/topology was unreported/);
+
+    expect(() =>
+      attestE2eTypeProviderLog(
+        "Type provider status: none (no workspace TypeScript resolved)",
+        "extension",
+      ),
+    ).toThrow(/reported none/);
+  });
+
   it("requires an actual shared feature result and rejects every managed fallback signal", () => {
     expect(() =>
       assertSharedTsgoServedWithoutFallback(

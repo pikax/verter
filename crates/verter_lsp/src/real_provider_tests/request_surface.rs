@@ -70,8 +70,7 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
 
         // Wait for provider warmup.
-        if !session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "action.disabled", 7, "disabled").await {
             return;
         }
 
@@ -79,11 +78,17 @@ real_provider_test!(
         // `{{ count }}` serves provider-derived items.
         let pos = session.find_position(&uri, "{{ count }}", 3);
         let baseline = completion_items(session, &uri, pos).await;
-        if !baseline.iter().any(is_provider_item) {
-            // The provider surfaced nothing at this position in this
-            // environment — the torn-vs-dropped distinction below would be
-            // vacuous, so skip rather than over-fire.
-            eprintln!("skipping: provider surfaced no items at the probe position");
+        if !baseline.iter().any(is_provider_item)
+            && session.allow_empty_result_skip(
+                "the provider surfaced no items at the probe position, so the \
+                 torn-vs-dropped distinction below would be vacuous",
+            )
+        {
+            // Off require-mode only: the degradation is RECORDED on the session,
+            // so the end-of-body receipt reports SKIPPED-WARMUP rather than
+            // attesting assertions that never ran. Under require-mode the helper
+            // panics — a controlled fixture that surfaces nothing is a genuine
+            // provider/materialization regression.
             return;
         }
 

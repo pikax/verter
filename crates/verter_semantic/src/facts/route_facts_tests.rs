@@ -43,7 +43,6 @@ use crate::facts::SymbolSpace;
 struct MockImport {
     specifier: String,
     imported_name: String,
-    canonical_id: Option<String>,
 }
 
 /// The mock file: ordered decls (name → contributor bodies) + import table.
@@ -66,13 +65,12 @@ impl MockFile {
         self
     }
 
-    fn import(mut self, local: &str, specifier: &str, imported: &str, canonical: &str) -> Self {
+    fn import(mut self, local: &str, specifier: &str, imported: &str) -> Self {
         self.imports.insert(
             local.to_string(),
             MockImport {
                 specifier: specifier.to_string(),
                 imported_name: imported.to_string(),
-                canonical_id: (!canonical.is_empty()).then(|| canonical.to_string()),
             },
         );
         self
@@ -95,7 +93,6 @@ impl MockFile {
             local_name: local.to_string(),
             source_specifier: import.specifier.clone(),
             imported_name: import.imported_name.clone(),
-            canonical_id: import.canonical_id.as_deref().map(Arc::from),
             route,
         })
     }
@@ -139,7 +136,6 @@ impl MockFile {
                 local_name: dep_name.clone(),
                 source_specifier: import.specifier.clone(),
                 imported_name: import.imported_name.clone(),
-                canonical_id: import.canonical_id.as_deref().map(Arc::from),
                 route: RouteDemand::Whole,
             });
         }
@@ -163,7 +159,6 @@ impl RouteFactLens for MockFile {
         Some(ImportRouteTarget {
             source_specifier: Arc::from(import.specifier.as_str()),
             imported_name: Arc::from(import.imported_name.as_str()),
-            canonical_id: import.canonical_id.as_deref().map(Arc::from),
         })
     }
     fn has_type_symbol(&self, name: &str) -> bool {
@@ -1424,18 +1419,11 @@ fn assert_parity(
     golden_result
 }
 
-fn ext(
-    local: &str,
-    specifier: &str,
-    imported: &str,
-    canonical: Option<&str>,
-    route: RouteDemand,
-) -> ExternalRouteRefFact {
+fn ext(local: &str, specifier: &str, imported: &str, route: RouteDemand) -> ExternalRouteRefFact {
     ExternalRouteRefFact {
         local_name: local.to_string(),
         source_specifier: specifier.to_string(),
         imported_name: imported.to_string(),
-        canonical_id: canonical.map(Arc::from),
         route,
     }
 }
@@ -1500,8 +1488,8 @@ fn parity_whole_alias_chain_and_callable_param() {
     // V1 load-bearing: `type Props = Base & { m(p: Imported): void };
     // type Base = Imported2` — the alias hop AND the callable param both emit.
     let state = MockFile::default()
-        .import("Imported", "./a", "Imported", "/ws/a.ts")
-        .import("Imported2", "./b", "Imported2", "/ws/b.ts")
+        .import("Imported", "./a", "Imported")
+        .import("Imported2", "./b", "Imported2")
         .decl(
             "Props",
             TypeExpr::intersection(vec![
@@ -1518,20 +1506,8 @@ fn parity_whole_alias_chain_and_callable_param() {
     assert_eq!(
         result.unresolved_external,
         vec![
-            ext(
-                "Imported2",
-                "./b",
-                "Imported2",
-                Some("/ws/b.ts"),
-                RouteDemand::Whole
-            ),
-            ext(
-                "Imported",
-                "./a",
-                "Imported",
-                Some("/ws/a.ts"),
-                RouteDemand::Whole
-            ),
+            ext("Imported2", "./b", "Imported2", RouteDemand::Whole),
+            ext("Imported", "./a", "Imported", RouteDemand::Whole),
         ]
     );
 }
@@ -1541,25 +1517,19 @@ fn parity_leaf_property_trio() {
     // (a) `type D = B; type B = { y: Pick<Q,'a'> }` → B followed at Root:
     // the object descends, the leaf utility STILL emits.
     let state_a = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl("D", TypeExpr::named("B"))
         .decl("B", obj(vec![("y", pick_of(TypeExpr::named("Q"), &["a"]))]));
     let result_a = assert_parity(&state_a, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         result_a.unresolved_external,
-        vec![ext(
-            "Q",
-            "./q",
-            "Q",
-            Some("/ws/q.ts"),
-            RouteDemand::pick(["a"])
-        )]
+        vec![ext("Q", "./q", "Q", RouteDemand::pick(["a"]))]
     );
 
     // (b) `type D = { x: B }; type B = { y: Pick<Q,'a'> }` → B followed at
     // LeafProperty: the object top STOPS — Q is NOT reached.
     let state_b = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl("D", obj(vec![("x", TypeExpr::named("B"))]))
         .decl("B", obj(vec![("y", pick_of(TypeExpr::named("Q"), &["a"]))]));
     let result_b = assert_parity(&state_b, "D", &RouteDemand::Whole, BUDGET);
@@ -1569,19 +1539,13 @@ fn parity_leaf_property_trio() {
     // (c) `type D = { x: B }; type B = Pick<Q,'a'>` → the TOP-LEVEL utility
     // is context-independent: Q IS reached even under the leaf follow.
     let state_c = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl("D", obj(vec![("x", TypeExpr::named("B"))]))
         .decl("B", pick_of(TypeExpr::named("Q"), &["a"]));
     let result_c = assert_parity(&state_c, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         result_c.unresolved_external,
-        vec![ext(
-            "Q",
-            "./q",
-            "Q",
-            Some("/ws/q.ts"),
-            RouteDemand::pick(["a"])
-        )]
+        vec![ext("Q", "./q", "Q", RouteDemand::pick(["a"]))]
     );
 }
 
@@ -1591,7 +1555,7 @@ fn parity_guarded_emitting_only_carriers() {
     // Partial-family gate requires a non-leaf context: nothing under a leaf
     // follow.
     let state_d = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl("D", obj(vec![("x", TypeExpr::named("B"))]))
         .decl(
             "B",
@@ -1602,7 +1566,7 @@ fn parity_guarded_emitting_only_carriers() {
 
     // (e) same B followed at Root → the guarded utility emits.
     let state_e = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl("D", TypeExpr::named("B"))
         .decl(
             "B",
@@ -1611,19 +1575,13 @@ fn parity_guarded_emitting_only_carriers() {
     let result_e = assert_parity(&state_e, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         result_e.unresolved_external,
-        vec![ext(
-            "Q",
-            "./q",
-            "Q",
-            Some("/ws/q.ts"),
-            RouteDemand::pick(["a"])
-        )]
+        vec![ext("Q", "./q", "Q", RouteDemand::pick(["a"]))]
     );
 
     // (f) `type B = { m(p: Q): void }` under a leaf follow: the object top
     // stops BEFORE the callable param.
     let state_f = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl("D", obj(vec![("x", TypeExpr::named("B"))]))
         .decl(
             "B",
@@ -1637,8 +1595,8 @@ fn parity_guarded_emitting_only_carriers() {
     // (g) `type B = Pick<R,'b'> & { z: Q }` under a leaf follow: the
     // transparent intersection arm's utility emits, the object arm stops.
     let state_g = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
-        .import("R", "./r", "R", "/ws/r.ts")
+        .import("Q", "./q", "Q")
+        .import("R", "./r", "R")
         .decl("D", obj(vec![("x", TypeExpr::named("B"))]))
         .decl(
             "B",
@@ -1650,13 +1608,7 @@ fn parity_guarded_emitting_only_carriers() {
     let result_g = assert_parity(&state_g, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         result_g.unresolved_external,
-        vec![ext(
-            "R",
-            "./r",
-            "R",
-            Some("/ws/r.ts"),
-            RouteDemand::pick(["b"])
-        )]
+        vec![ext("R", "./r", "R", RouteDemand::pick(["b"]))]
     );
 }
 
@@ -1666,7 +1618,7 @@ fn parity_first_visit_context_order() {
     // arm precedes the bare ref in source order), so the later Root reach is
     // visited-skipped and Q never emits...
     let state_leaf_first = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl(
             "D",
             TypeExpr::intersection(vec![
@@ -1680,7 +1632,7 @@ fn parity_first_visit_context_order() {
 
     // ...while `type D = B & { x: B }` reaches B at Root first → Q emits.
     let state_root_first = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl(
             "D",
             TypeExpr::intersection(vec![
@@ -1692,13 +1644,7 @@ fn parity_first_visit_context_order() {
     let result_root_first = assert_parity(&state_root_first, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         result_root_first.unresolved_external,
-        vec![ext(
-            "Q",
-            "./q",
-            "Q",
-            Some("/ws/q.ts"),
-            RouteDemand::pick(["a"])
-        )]
+        vec![ext("Q", "./q", "Q", RouteDemand::pick(["a"]))]
     );
 }
 
@@ -1706,7 +1652,7 @@ fn parity_first_visit_context_order() {
 fn parity_member_path_nested_and_imported_tail_with_canonical() {
     // Exact nested terminal: `A['a']['b']` over `type A = { a: { b: Imported } }`.
     let state = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl(
             "A",
             obj(vec![("a", obj(vec![("b", TypeExpr::named("Imported"))]))]),
@@ -1715,18 +1661,12 @@ fn parity_member_path_nested_and_imported_tail_with_canonical() {
     let result = assert_parity(&state, "A", &route, BUDGET);
     assert_eq!(
         result.unresolved_external,
-        vec![ext(
-            "Imported",
-            "./dep",
-            "Imported",
-            Some("/ws/dep.ts"),
-            RouteDemand::Whole
-        )]
+        vec![ext("Imported", "./dep", "Imported", RouteDemand::Whole)]
     );
 
     // Cross-decl forward: `type A = { a: B }; type B = { b: Imported }`.
     let state_fwd = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl("A", obj(vec![("a", TypeExpr::named("B"))]))
         .decl("B", obj(vec![("b", TypeExpr::named("Imported"))]));
     assert_parity(&state_fwd, "A", &route, BUDGET);
@@ -1734,18 +1674,12 @@ fn parity_member_path_nested_and_imported_tail_with_canonical() {
     // Imported tail with canonical id: `type A = { a: ImpB }` queried
     // `[a,b]` forwards `MemberPath([b])` INTO the import.
     let state_tail = MockFile::default()
-        .import("ImpB", "./ext", "B", "/ws/ext.ts")
+        .import("ImpB", "./ext", "B")
         .decl("A", obj(vec![("a", TypeExpr::named("ImpB"))]));
     let result_tail = assert_parity(&state_tail, "A", &route, BUDGET);
     assert_eq!(
         result_tail.unresolved_external,
-        vec![ext(
-            "ImpB",
-            "./ext",
-            "B",
-            Some("/ws/ext.ts"),
-            RouteDemand::member_path(["b"])
-        )]
+        vec![ext("ImpB", "./ext", "B", RouteDemand::member_path(["b"]))]
     );
 }
 
@@ -1754,7 +1688,7 @@ fn parity_union_terminal_misses_deeper_path() {
     // `{ primary: Alpha | Beta }` queried `[primary,label]` = legacy MISS
     // (the flat prefix+append template would wrongly forward both arms).
     let state = MockFile::default()
-        .import("ImportedA", "./a", "ImportedA", "/ws/a.ts")
+        .import("ImportedA", "./a", "ImportedA")
         .decl(
             "Props",
             obj(vec![(
@@ -1789,7 +1723,7 @@ fn parity_union_terminal_misses_deeper_path() {
 #[test]
 fn parity_pick_omit_and_depless_members() {
     let state = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl(
             "P",
             obj(vec![
@@ -1804,13 +1738,7 @@ fn parity_pick_omit_and_depless_members() {
     let picked = assert_parity(&state, "P", &RouteDemand::pick(["x"]), BUDGET);
     assert_eq!(
         picked.unresolved_external,
-        vec![ext(
-            "Imported",
-            "./dep",
-            "Imported",
-            Some("/ws/dep.ts"),
-            RouteDemand::Whole
-        )]
+        vec![ext("Imported", "./dep", "Imported", RouteDemand::Whole)]
     );
 
     // Dep-less member: found, empty closure.
@@ -1822,13 +1750,7 @@ fn parity_pick_omit_and_depless_members() {
     let omitted = assert_parity(&state, "P", &RouteDemand::omit(["x", "y"]), BUDGET);
     assert_eq!(
         omitted.unresolved_external,
-        vec![ext(
-            "Imported",
-            "./dep",
-            "Imported",
-            Some("/ws/dep.ts"),
-            RouteDemand::Whole
-        )]
+        vec![ext("Imported", "./dep", "Imported", RouteDemand::Whole)]
     );
 
     // Omit of everything: minimal resolved closure.
@@ -1841,7 +1763,7 @@ fn parity_pick_omit_and_depless_members() {
 fn parity_nested_index_routes() {
     // Whole-route through `Imported['a']['b']`: path-precise MemberPath.
     let state = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl(
             "D",
             indexed(
@@ -1856,14 +1778,13 @@ fn parity_nested_index_routes() {
             "Imported",
             "./dep",
             "Imported",
-            Some("/ws/dep.ts"),
             RouteDemand::member_path(["a", "b"])
         )]
     );
 
     // Multi-key index over a bare base → Pick.
     let state_pick = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl(
             "D",
             indexed(
@@ -1881,7 +1802,6 @@ fn parity_nested_index_routes() {
             "Imported",
             "./dep",
             "Imported",
-            Some("/ws/dep.ts"),
             RouteDemand::pick(["a", "b"])
         )]
     );
@@ -1889,7 +1809,7 @@ fn parity_nested_index_routes() {
     // Local base with whole-route seed imports SURVIVES a leaf follow (the
     // ungated indexed route resets the seed follow to Root).
     let state_leaf = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl("D", obj(vec![("x", TypeExpr::named("B"))]))
         .decl(
             "B",
@@ -1899,13 +1819,7 @@ fn parity_nested_index_routes() {
     let result_leaf = assert_parity(&state_leaf, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         result_leaf.unresolved_external,
-        vec![ext(
-            "Imported",
-            "./dep",
-            "Imported",
-            Some("/ws/dep.ts"),
-            RouteDemand::Whole
-        )]
+        vec![ext("Imported", "./dep", "Imported", RouteDemand::Whole)]
     );
 }
 
@@ -1913,7 +1827,7 @@ fn parity_nested_index_routes() {
 fn parity_cross_decl_pick_follow_slot() {
     // V3: `Pick<Imported, LocalKeys>` with a literal-union local alias.
     let state = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl(
             "D",
             TypeExpr::named_with_args(
@@ -1935,14 +1849,13 @@ fn parity_cross_decl_pick_follow_slot() {
             "Imported",
             "./dep",
             "Imported",
-            Some("/ws/dep.ts"),
             RouteDemand::pick(["a", "b"])
         )]
     );
 
     // Chained alias: `type LocalKeys = K2; type K2 = 'a'`.
     let state_chain = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl(
             "D",
             TypeExpr::named_with_args(
@@ -1959,14 +1872,13 @@ fn parity_cross_decl_pick_follow_slot() {
             "Imported",
             "./dep",
             "Imported",
-            Some("/ws/dep.ts"),
             RouteDemand::pick(["a"])
         )]
     );
 
     // Non-literal key source fails CLOSED on both pipelines.
     let state_open = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl(
             "D",
             TypeExpr::named_with_args(
@@ -1983,7 +1895,7 @@ fn parity_cross_decl_pick_follow_slot() {
 
     // Self-referential alias terminates (the extraction cycle guard).
     let state_cycle = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl(
             "D",
             TypeExpr::named_with_args(
@@ -2001,8 +1913,8 @@ fn parity_userland_pick_empty_keys_fallback() {
     // Literal-empty keys (`keyof`-shaped) with a USERLAND local `Pick` decl:
     // the utility fall-through follows the userland decl whole.
     let state = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
-        .import("Imported2", "./b", "Imported2", "/ws/b.ts")
+        .import("Q", "./q", "Q")
+        .import("Imported2", "./b", "Imported2")
         .decl(
             "D",
             TypeExpr::named_with_args(
@@ -2017,20 +1929,14 @@ fn parity_userland_pick_empty_keys_fallback() {
     let result = assert_parity(&state, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         result.unresolved_external,
-        vec![ext(
-            "Imported2",
-            "./b",
-            "Imported2",
-            Some("/ws/b.ts"),
-            RouteDemand::Whole
-        )]
+        vec![ext("Imported2", "./b", "Imported2", RouteDemand::Whole)]
     );
 
     // The DEFERRED-empty variant: the key alias resolves to no literal keys
     // downstream → the stored fallback follows the userland decl.
     let state_deferred = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
-        .import("Imported2", "./b", "Imported2", "/ws/b.ts")
+        .import("Q", "./q", "Q")
+        .import("Imported2", "./b", "Imported2")
         .decl(
             "D",
             TypeExpr::named_with_args(
@@ -2043,13 +1949,7 @@ fn parity_userland_pick_empty_keys_fallback() {
     let deferred = assert_parity(&state_deferred, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         deferred.unresolved_external,
-        vec![ext(
-            "Imported2",
-            "./b",
-            "Imported2",
-            Some("/ws/b.ts"),
-            RouteDemand::Whole
-        )]
+        vec![ext("Imported2", "./b", "Imported2", RouteDemand::Whole)]
     );
 }
 
@@ -2059,8 +1959,8 @@ fn deferred_key_source_unavailable_fails_closed_not_wrong_route() {
     //  type D = Pick<Imported, LocalKeys>` — the deferred edge carries BOTH a
     // key-source recipe AND the userland empty-keys fallback.
     let state = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
-        .import("Imported2", "./b", "Imported2", "/ws/b.ts")
+        .import("Imported", "./dep", "Imported")
+        .import("Imported2", "./b", "Imported2")
         .decl(
             "D",
             TypeExpr::named_with_args(
@@ -2080,7 +1980,6 @@ fn deferred_key_source_unavailable_fails_closed_not_wrong_route() {
             "Imported",
             "./dep",
             "Imported",
-            Some("/ws/dep.ts"),
             RouteDemand::pick(["a"])
         )]
     );
@@ -2196,8 +2095,8 @@ fn produce_key_source_fact_open_or_merged_shapes_have_no_finite_keys() {
 #[test]
 fn deferred_key_source_merged_alias_resolves_to_zero_keys_fallback() {
     let state = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
-        .import("Imported2", "./b", "Imported2", "/ws/b.ts")
+        .import("Imported", "./dep", "Imported")
+        .import("Imported2", "./b", "Imported2")
         .decl(
             "D",
             TypeExpr::named_with_args(
@@ -2225,13 +2124,7 @@ fn deferred_key_source_merged_alias_resolves_to_zero_keys_fallback() {
     );
     assert_eq!(
         result.unresolved_external,
-        vec![ext(
-            "Imported2",
-            "./b",
-            "Imported2",
-            Some("/ws/b.ts"),
-            RouteDemand::Whole
-        )],
+        vec![ext("Imported2", "./b", "Imported2", RouteDemand::Whole)],
         "zero keys is DECIDED: the legacy empty-keys fall-through follows the userland Pick decl"
     );
 }
@@ -2250,7 +2143,7 @@ fn deferred_key_source_merged_alias_resolves_to_zero_keys_fallback() {
 fn characterize_composite_key_alias_under_production_vs_legacy() {
     // `type K = 'a' | 'b'; type D = Pick<Q, K | 'c'>` with Q imported.
     let state = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl(
             "D",
             TypeExpr::named_with_args(
@@ -2273,13 +2166,7 @@ fn characterize_composite_key_alias_under_production_vs_legacy() {
     let golden_result = golden::run(&state, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         golden_result.unresolved_external,
-        vec![ext(
-            "Q",
-            "./q",
-            "Q",
-            Some("/ws/q.ts"),
-            RouteDemand::pick(["a", "b", "c"])
-        )]
+        vec![ext("Q", "./q", "Q", RouteDemand::pick(["a", "b", "c"]))]
     );
 
     // The fact pipeline deliberately under-produces: poisoned key extraction
@@ -2295,7 +2182,7 @@ fn characterize_composite_key_alias_under_production_vs_legacy() {
 
     // Two local aliases in the composite land in the same class.
     let state_two = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl(
             "D",
             TypeExpr::named_with_args(
@@ -2311,13 +2198,7 @@ fn characterize_composite_key_alias_under_production_vs_legacy() {
     let golden_two = golden::run(&state_two, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         golden_two.unresolved_external,
-        vec![ext(
-            "Q",
-            "./q",
-            "Q",
-            Some("/ws/q.ts"),
-            RouteDemand::pick(["a", "b"])
-        )]
+        vec![ext("Q", "./q", "Q", RouteDemand::pick(["a", "b"]))]
     );
     let new_two = route_closure_over_facts(&state_two, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(new_two.unresolved_external, Vec::new());
@@ -2328,7 +2209,7 @@ fn characterize_composite_key_alias_under_production_vs_legacy() {
 fn parity_budget_exceeded_and_cycles() {
     // A long alias chain under a tiny budget trips identically (status AND
     // the partial external set).
-    let mut state = MockFile::default().import("Imported", "./dep", "Imported", "/ws/dep.ts");
+    let mut state = MockFile::default().import("Imported", "./dep", "Imported");
     for i in 0..10 {
         let next = if i == 9 {
             TypeExpr::named("Imported")
@@ -2342,7 +2223,7 @@ fn parity_budget_exceeded_and_cycles() {
 
     // Same-file cycle terminates and still emits the reachable utility.
     let state_cycle = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl("A", TypeExpr::named("B"))
         .decl(
             "B",
@@ -2354,13 +2235,7 @@ fn parity_budget_exceeded_and_cycles() {
     let cyclic = assert_parity(&state_cycle, "A", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         cyclic.unresolved_external,
-        vec![ext(
-            "Q",
-            "./q",
-            "Q",
-            Some("/ws/q.ts"),
-            RouteDemand::pick(["a"])
-        )]
+        vec![ext("Q", "./q", "Q", RouteDemand::pick(["a"]))]
     );
 }
 
@@ -2370,8 +2245,8 @@ fn parity_merged_decl_flattened_walk_and_first_contributor_member_precedence() {
     // intersection ref is DROPPED (merged lookup semantics), the callable
     // param emits.
     let state = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
-        .import("Base", "./base", "Base", "/ws/base.ts")
+        .import("Q", "./q", "Q")
+        .import("Base", "./base", "Base")
         .merged_decl(
             "M",
             vec![
@@ -2389,14 +2264,14 @@ fn parity_merged_decl_flattened_walk_and_first_contributor_member_precedence() {
     // vanished in the flatten, `a: Q` is leaf-gated.
     assert_eq!(
         result.unresolved_external,
-        vec![ext("Q", "./q", "Q", Some("/ws/q.ts"), RouteDemand::Whole)]
+        vec![ext("Q", "./q", "Q", RouteDemand::Whole)]
     );
 
     // Member edges fold with FIRST-contributor precedence (the CURRENT
     // ordered-contributor extractor, NOT the pre-slot single-body one).
     let state_members = MockFile::default()
-        .import("First", "./f", "First", "/ws/f.ts")
-        .import("Second", "./s", "Second", "/ws/s.ts")
+        .import("First", "./f", "First")
+        .import("Second", "./s", "Second")
         .merged_decl(
             "M",
             vec![
@@ -2407,13 +2282,7 @@ fn parity_merged_decl_flattened_walk_and_first_contributor_member_precedence() {
     let picked = assert_parity(&state_members, "M", &RouteDemand::pick(["a"]), BUDGET);
     assert_eq!(
         picked.unresolved_external,
-        vec![ext(
-            "First",
-            "./f",
-            "First",
-            Some("/ws/f.ts"),
-            RouteDemand::Whole
-        )]
+        vec![ext("First", "./f", "First", RouteDemand::Whole)]
     );
 }
 
@@ -2421,41 +2290,31 @@ fn parity_merged_decl_flattened_walk_and_first_contributor_member_precedence() {
 fn parity_route_merge_across_sites() {
     // Two utility routes to the SAME import merge (key union) in insertion
     // order — the accumulator contract.
-    let state = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
-        .decl(
-            "D",
-            TypeExpr::union(vec![
-                pick_of(TypeExpr::named("Q"), &["a"]),
-                pick_of(TypeExpr::named("Q"), &["b"]),
-            ]),
-        );
+    let state = MockFile::default().import("Q", "./q", "Q").decl(
+        "D",
+        TypeExpr::union(vec![
+            pick_of(TypeExpr::named("Q"), &["a"]),
+            pick_of(TypeExpr::named("Q"), &["b"]),
+        ]),
+    );
     let result = assert_parity(&state, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         result.unresolved_external,
-        vec![ext(
-            "Q",
-            "./q",
-            "Q",
-            Some("/ws/q.ts"),
-            RouteDemand::pick(["a", "b"])
-        )]
+        vec![ext("Q", "./q", "Q", RouteDemand::pick(["a", "b"]))]
     );
 
     // A Whole reach widens the merged route to Whole.
-    let state_widen = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
-        .decl(
-            "D",
-            TypeExpr::union(vec![
-                pick_of(TypeExpr::named("Q"), &["a"]),
-                TypeExpr::named("Q"),
-            ]),
-        );
+    let state_widen = MockFile::default().import("Q", "./q", "Q").decl(
+        "D",
+        TypeExpr::union(vec![
+            pick_of(TypeExpr::named("Q"), &["a"]),
+            TypeExpr::named("Q"),
+        ]),
+    );
     let widened = assert_parity(&state_widen, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         widened.unresolved_external,
-        vec![ext("Q", "./q", "Q", Some("/ws/q.ts"), RouteDemand::Whole)]
+        vec![ext("Q", "./q", "Q", RouteDemand::Whole)]
     );
 }
 
@@ -2467,22 +2326,16 @@ fn parity_typeof_import_gating() {
         type_args: Vec::new(),
     });
     let state_root = MockFile::default()
-        .import("importedValue", "./v", "value", "/ws/v.ts")
+        .import("importedValue", "./v", "value")
         .decl("D", typeof_expr.clone());
     let rooted = assert_parity(&state_root, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         rooted.unresolved_external,
-        vec![ext(
-            "importedValue",
-            "./v",
-            "value",
-            Some("/ws/v.ts"),
-            RouteDemand::Whole
-        )]
+        vec![ext("importedValue", "./v", "value", RouteDemand::Whole)]
     );
 
     let state_leaf = MockFile::default()
-        .import("importedValue", "./v", "value", "/ws/v.ts")
+        .import("importedValue", "./v", "value")
         .decl("D", obj(vec![("x", TypeExpr::named("B"))]))
         .decl("B", typeof_expr);
     let leafed = assert_parity(&state_leaf, "D", &RouteDemand::Whole, BUDGET);
@@ -2493,18 +2346,12 @@ fn parity_typeof_import_gating() {
 fn parity_missing_local_and_plain_local_closure() {
     // The plain local closure (empty MemberPath) and its missing-symbol arm.
     let state = MockFile::default()
-        .import("Imported", "./dep", "Imported", "/ws/dep.ts")
+        .import("Imported", "./dep", "Imported")
         .decl("A", TypeExpr::named("Imported"));
     let plain = assert_parity(&state, "A", &RouteDemand::MemberPath(Arc::from([])), BUDGET);
     assert_eq!(
         plain.unresolved_external,
-        vec![ext(
-            "Imported",
-            "./dep",
-            "Imported",
-            Some("/ws/dep.ts"),
-            RouteDemand::Whole
-        )]
+        vec![ext("Imported", "./dep", "Imported", RouteDemand::Whole)]
     );
 
     let golden_missing = golden::local_closure(&state, "NotThere", BUDGET);
@@ -2529,7 +2376,7 @@ fn parity_missing_local_and_plain_local_closure() {
 /// Trio case (b)'s state: B guarded behind an object property.
 fn trio_b_state() -> MockFile {
     MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl("D", obj(vec![("x", TypeExpr::named("B"))]))
         .decl("B", obj(vec![("y", pick_of(TypeExpr::named("Q"), &["a"]))]))
 }
@@ -2621,7 +2468,7 @@ fn discrimination_flipping_route_diverges_from_golden() {
     // Trio (c): flip B's External route Pick → Whole. Byte-parity fails on
     // the route field.
     let state = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
+        .import("Q", "./q", "Q")
         .decl("D", TypeExpr::named("B"))
         .decl("B", pick_of(TypeExpr::named("Q"), &["a"]));
     let golden_result = golden::run(&state, "D", &RouteDemand::Whole, BUDGET);
@@ -2666,7 +2513,7 @@ fn discrimination_flipping_route_diverges_from_golden() {
 fn discrimination_dropping_seed_path_segment_diverges_from_golden() {
     // Truncate the forward edge's consumed prefix: the tail mis-forwards.
     let state = MockFile::default()
-        .import("ImpB", "./ext", "B", "/ws/ext.ts")
+        .import("ImpB", "./ext", "B")
         .decl("A", obj(vec![("a", TypeExpr::named("ImpB"))]));
     let route = RouteDemand::member_path(["a", "b"]);
     let golden_result = golden::run(&state, "A", &route, BUDGET);
@@ -2706,15 +2553,13 @@ fn discrimination_accumulator_merges_same_target_routes() {
     // The closure MERGES same-(specifier, imported_name) refs by route union
     // in first-insertion order — a merge-dropping implementation would emit
     // two entries.
-    let state = MockFile::default()
-        .import("Q", "./q", "Q", "/ws/q.ts")
-        .decl(
-            "D",
-            TypeExpr::union(vec![
-                pick_of(TypeExpr::named("Q"), &["a"]),
-                pick_of(TypeExpr::named("Q"), &["b"]),
-            ]),
-        );
+    let state = MockFile::default().import("Q", "./q", "Q").decl(
+        "D",
+        TypeExpr::union(vec![
+            pick_of(TypeExpr::named("Q"), &["a"]),
+            pick_of(TypeExpr::named("Q"), &["b"]),
+        ]),
+    );
     let result = route_closure_over_facts(&state, "D", &RouteDemand::Whole, BUDGET);
     assert_eq!(
         result.unresolved_external.len(),

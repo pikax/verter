@@ -27,15 +27,176 @@ ONE wake + ONE `submit_count` bump, and a source-updating batch
 supersedes every file's old generation atomically. Both paths share one
 admission core — `prepare_request` (pre-lock: tombstone gate + node
 ensure, cloning the `FileNode` `Arc` out of the `nodes` DashMap BEFORE
-locking, the AB-BA-safe DAG-first ordering), `admit_prepared_under_lock`
+locking, the AB-BA-safe DAG-first ordering; it CREATES a missing node but
+never re-homes one, carrying the resolved language forward as
+`PreparedRequest.requested_language` instead), `admit_prepared_under_lock`
 (sole place a request bumps generation, runs the supersede sweep,
-registers the waiter, admits work), and an `AdmissionPostWork`
+registers the waiter, admits work — including the LANGUAGE RE-HOME, which
+advances a published file's generation and therefore must be atomic with
+its sweep; it re-resolves the live `FileNode` first, because the `Arc`
+captured during preparation may already be detached by a concurrent
+re-home), and an `AdmissionPostWork`
 accumulator firing deferred dedup callbacks + clearing auto-ingest
 tracking AFTER the lock releases. `SchedulerDag::register_request`
 returns `Option<DedupJoinerEvent>` (fired post-unlock via
 `DedupJoinerEvent::fire`) instead of invoking `on_dedup_joiner` under the
 DAG lock — the callback may re-enter the scheduler, so it must not run
-while admission holds the mutex. `BatchHandle` carries one
+while admission holds the mutex.
+
+**The test for "by construction" is an enumeration, not an intuition.**
+The one structural claim in this area that held — `submit` being the sole
+admission primitive — held only because every writer of `by_identity` was
+enumerated repository-wide and exactly one insert was found. Two sibling
+claims made from intuition rather than enumeration ("no public API
+widening", "the captured node is unusable by construction") were both
+FALSE: the first because `pub mod dag` re-exports the module, the second
+because a leading underscore suppresses a lint and is not access control.
+Before writing "by construction", enumerate.
+
+**Retirement is structural, not per-site (READ THIS FIRST).** Three
+review rounds each found the same defect through a different door — a
+stage completion, a pending-Artifact admission, `remove()` — because each
+admission site had to remember to gate itself. It is now a property of
+the primitives instead:
+
+- `SchedulerDag` keeps a per-canonical **retirement floor**. Everything
+  below the floor is retired and can never be admitted again. The floor
+  only ever advances.
+- `SchedulerDag::submit` is the ONE admission primitive (the sole
+  `by_identity` insert) and consults the floor as its first statement,
+  returning `Option<SubmissionToken>`. A retired admission is refused BY
+  CONSTRUCTION — no caller can bypass or forget it, and a new admission
+  site inherits the guarantee for free. `None` is a refusal, not an
+  error; production callers must handle it (tests use `submit_expect`).
+- `retire_generations_below(canonical, floor)` is the ONE retirement
+  primitive: it installs the forward floor AND does the backward sweep —
+  file waiter groups, admitted nodes, blocker records, terminal-failure
+  records — in a single lock-held step, so the two halves cannot drift.
+  `supersede_old_file_generations` delegates to it; `remove()` calls it
+  in the SAME hold as its cancel sweep (its floor is `last_gen + 1`,
+  which still permits a re-added file, since `create_node` starts above
+  the same recorded generation floor).
+- It performs ONE fan-out covering every consumer kind, sweeping the dep
+  index by canonical + generation. Cancelling nodes only reaches
+  consumers whose dep was actually ADMITTED, and `signal_file_failed`
+  only drains file waiter groups — so an owner gated on `dep:Analysis-G`
+  while `dep:Source-G` was still running, where no `Analysis-G` node ever
+  existed, used to park forever. Sweeping the dep index reaches it
+  regardless of which stage it named or whether that stage was admitted.
+
+The per-site gates below are still correct and still carry their own
+tests, but they are now defence in depth rather than the only thing
+standing between a retired generation and an admission.
+
+**KNOWN OPEN RESIDUAL — `remove()` is not atomic across `nodes` and the
+DAG.** Between `remove()`'s cancellation sweep and its `nodes.remove()`,
+an admission can take the DAG lock, observe the node STILL PUBLISHED at
+the same incarnation, pass the crossing gate below, bump to `G+1`, and be
+admitted — because `G+1` is exactly the retirement floor and the test is
+`<`. That identity is never cancelled; a later dequeue reserves capacity,
+finds no `FileNode`, and skips without cancelling ⇒ **a leaked admission
+permit in RELEASE builds.** In DEBUG builds the skip's `debug_assert`
+fires FIRST, so what you actually meet is a PANIC, not a leak — if you
+are debugging that assertion, this is the residual, not a new defect. The
+waiter IS woken by `signal_file_shutdown` either way, so this is a
+capacity leak / assertion panic, never a hang. It is a strict subset of a window already
+present before the surrounding fixes landed, which is why it was landed
+rather than held.
+
+Do NOT close this with another per-window gate at an admission site —
+four review rounds of evidence say that closes one instant and reveals
+the next. It closes at the lifecycle-unification cutover:
+[`docs/arch/scheduler-lifecycle-unification-plan.md`](../../../docs/arch/scheduler-lifecycle-unification-plan.md),
+debt row `SCHED-UNIFY-LIFECYCLE-ATOMICITY`, ruling
+`GB4-S0-DEFER-2026-07-26`, acceptance `SCHED-UNIFY-A1`. The generating
+condition is that `Scheduler.nodes` and `SchedulerDag` are two
+authorities with INDEPENDENT transition points; every independent
+transition point is a window.
+
+Also carried there, and unseen by either review seat: the reset/clear-all
+path at `scheduler.rs:2040-2050` has the identical split-phase shape
+(`nodes.remove` outside the DAG lock, lock taken after). It may be
+self-healing via the subsequent `dag.clear()`, but the shape is the same
+and UNIFY subsumes it.
+
+**The floor is necessary but NOT sufficient — liveness is the other
+half.** `prepare_request` runs OUTSIDE `dag.lock()`, so a prepared
+request can cross a retirement boundary before it is admitted: a
+concurrent `remove()` installs the floor, cancels the DAG and deletes the
+`FileNode` in the gap, leaving the captured `Arc` DETACHED. The floor
+cannot catch that on its own — bumping a detached node lands its
+generation exactly ON the removal floor (`last_gen + 1`), which `submit`
+admits because a legitimate re-add arrives at exactly the same value.
+Generation cannot separate them; only liveness can. So
+`admit_prepared_under_lock` opens with a CROSSING GATE, before any
+publication: the live `FileNode` must exist AND its
+`incarnation_id()` must equal `PreparedRequest.prepared_incarnation`,
+otherwise the sender is terminalized (`Shutdown` when the file is gone,
+`Superseded` when a different incarnation is published) and nothing is
+registered or admitted. Registration precedes admission, so a refused
+`submit` must also terminalize: an ignored `None` leaves a waiter group
+parked on work no producer will ever run
+(`signal_file_shutdown_at`).
+
+That is the same carried-witness rule the completion path uses, applied
+to the other direction. Both directions cross the lock boundary carrying
+captured authority state; both must revalidate against the live map
+before publishing. Treat them as one rule with two members, not two
+rules.
+
+**Generation-advance rule (both directions).** A generation advance and
+its supersede sweep are ONE critical section under `dag.lock()`
+(`invalidate`, `close_file`, `admit_prepared_under_lock` including the
+language re-home). That covers the sweep direction only: the sweep is
+purely BACKWARD-LOOKING and can never retire an identity admitted after
+it ran. So admission of DERIVED work needs the matching forward gate.
+`handle_stage_complete` checks on entry, then runs `extract_deps`
+UNLOCKED — a real window in which an invalidate can retire the
+generation. So the ONLY thing outside the lock is that executor call
+(pure computation, unbounded host cost). Everything the Source completion
+publishes AND everything it CONSUMES — forward edges, the destructive
+deferred-blocker drain, dependency auto-ingest + admission, the Artifact
+blocker registry write, the Analysis admission, `complete(Source-G)` —
+happens under ONE `dag.lock()` hold gated on `stage_completion_is_current`.
+Consumption matters as much as publication: a stale completion draining a
+LATER generation's deferred blockers discards them and lets that
+generation's Artifact work run ungated, and stale forward edges persist
+because later extraction unions rather than replaces.
+
+The gate is **incarnation + generation + generation-coherent committed
+Source snapshot**. The incarnation is `FileNode::incarnation_id()`, a
+process-unique monotonic id, and it MUST be carried from dispatch on
+`Submission::StageComplete { incarnation }`. Re-deriving it by map lookup
+compares the live node with itself and passes vacuously — two node
+objects for the same canonical can sit at the SAME generation, so the
+generation check cannot catch a replacement either. Analysis is admitted
+BEFORE `complete(Source-G)` so the file is never briefly without a live
+stage identity (a concurrent dead-producer classification would read that
+as a Source-failed corpse). On refusal it publishes and consumes NOTHING
+and calls `refuse_stale_stage_completion`, which cancels the dequeued
+identity idempotently — safe against a later generation because
+`WorkNodeIdentity::FileStage` carries the generation — signals the
+retired generation's waiter groups so a refusal can never strand a
+request (a no-op when a sweep already drained them), requeues stranded
+waiters after the lock drops, bumps `stale_completion_refusals`, and only
+THEN `debug_assert!`s.
+
+The same single-hold rule applies one stage down:
+`admit_pending_artifacts` holds ONE lock across the profile snapshot and
+every admission it drives, plus a liveness pre-check. Snapshotting,
+releasing, then re-locking per profile let an invalidate bump and sweep
+in the gap, admitting Artifact-G after the sweep.
+
+Node creation must be an atomic ENSURE, never a replace: auto-ingest uses
+`nodes.entry(..).or_insert_with(..)`, not `contains_key` + `insert`. The
+check-then-act form let a concurrent creator's FileNode be replaced at
+the same generation, orphaning the incarnation already-dispatched work
+ran against.
+
+Without these gates the stale identity is admitted and later skipped on
+the dispatch-time generation-mismatch arm, which never releases the
+capacity reservation parked at dispatch, so the DAG ledger — the sole
+admission gate — leaks capacity on every race. `BatchHandle` carries one
 `CompletionHandle` per input in submission order; `wait_batch(&self,
 &BatchHandle)` returns results in INPUT order and never surfaces a
 partial set. Pump discipline is preserved throughout: dispatch / wait /
@@ -667,6 +828,60 @@ DAG contract:
 Under Block 7, `submit_batch(reqs: Vec<Request>)` becomes a thin shim
 constructing a no-edge `CacheNodeDag` and calling `submit_dag`. On the
 current tree it loops over `submit_request` (see the surface table below).
+
+## MVCC source root (`source_root.rs`)
+
+`Scheduler.nodes` is EXECUTION state only: a `FileNode` holds its
+CURRENT `ArcSwap` snapshots, `bump_generation` makes the prior source
+immediately unreachable, and `node_ids()` is a full map walk. Beside it
+the scheduler owns `SchedulerSourceDirectory` — the epoch-indexed MVCC
+authority for what `try_get_source` LOGICALLY answers.
+
+```text
+SchedulerSourceRoot { visible_epoch, root_lease }
+canonical -> version history of
+    { epoch, incarnation, generation, Present(whole_hash) | Absent }
+```
+
+| Surface | Contract |
+|---|---|
+| `Scheduler::capture_source_root() -> Arc<SchedulerSourceRoot>` | O(1) in file count: one publication-lock acquisition, one scalar read, one lease bump. Measured 37 ns @250 files, 33 ns @3,000 (release). |
+| `SchedulerSourceRoot::lookup(canonical) -> SourceStateAt` | AS-OF, sealed to the root's epoch. `Unknown` / `Absent{incarnation,generation}` / `Present{…, whole_hash, semantic_hash}`. The root exposes NO path to the live directory. |
+| `SchedulerSourceDirectory::publish_transition(f)` | Runs the node mutation AND the version append under ONE publication hold. |
+| `SchedulerSourceDirectory::reclaim_superseded_versions()` | Root-gated GC; floor = oldest LIVE captured root capped by the current epoch. |
+
+Rules:
+
+- **Publication is atomic with the lifecycle transition.** The node
+  mutation happens INSIDE the `publish_transition` closure and
+  `capture_root` takes the same lock, so a capture is totally ordered
+  against every transition — never a torn `(node moved, root did not)`
+  pair. Publishing sites: `invalidate`, `close_file`, `remove`, `reset`
+  (ONE epoch for all removed members), the `handle_new_request`
+  source-update bump and language-replacement, and the Source-stage
+  commit in `execute_source_stage`. Node CREATION publishes nothing —
+  a fresh node has no source and an untracked canonical already reads
+  `Unknown`.
+- **The epoch ADDRESSES a snapshot, never validates a cache.** It is
+  not a `StoreViewValidationToken` dimension and must not become one.
+- **A root is a RETENTION LEASE.** GC may free a version only once it
+  is invisible from the current root AND from every live captured root
+  — the same reachability discipline `FileArtifactStore` applies to
+  artifact versions. `HostStoreView` captures one in its pre-build read
+  window and retains it by `Arc`.
+- **Lock rank:** `SchedulerDag` (outer) > source-root publication >
+  `nodes` / `versions` DashMap shards (inner). A publication may take a
+  DashMap shard; nothing takes the publication lock while holding one,
+  and nothing takes the DAG lock while holding the publication lock.
+- Write-path cost: one publication is 53-59 ns (release), taking
+  end-to-end `Scheduler::invalidate` from 53 ns to 103 ns.
+
+Contract tests: `crates/verter_scheduler/src/source_root_tests.rs`
+(as-of sealing, atomic publication, lease-gated reclamation, O(1)
+capture) and `crates/verter_session/src/source_root_retention_tests.rs`
+(the `HostStoreView` lease at the host boundary). Normative text:
+`docs/arch/path-precise-resolution-currency.md` → "An immutable root is
+also a retention lease".
 
 ## Scheduler surface (current → Block 7 planned)
 

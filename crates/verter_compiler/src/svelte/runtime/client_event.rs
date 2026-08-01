@@ -1,5 +1,5 @@
 //! The regular-element event-registration emission half of the Svelte client
-//! emitter, extracted from `client.rs` to keep it under the file-size guard.
+//! emitter, kept separate from `client.rs` so each emission responsibility stays focused.
 //!
 //! These free functions render the official `svelte/internal/client` event shape
 //! from the narrow [`EventEmit`] substrate: [`render_event_registration`] emits the

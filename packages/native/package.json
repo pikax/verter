@@ -1,6 +1,6 @@
 {
   "name": "@verter/native",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "Native Node.js bindings for Verter's Vue and experimental Svelte compiler host",
   "keywords": [
     "bindings",
@@ -78,6 +78,6 @@
     ]
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

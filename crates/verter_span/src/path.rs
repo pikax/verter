@@ -15,6 +15,324 @@
 //!   unchanged).
 
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
+
+// ── Windows extended-length ("verbatim") path simplification ────────────────
+//
+// `Path::canonicalize()` on Windows returns an extended-length path:
+// `\\?\D:\dir\file.js`, or `\\?\UNC\server\share\file.js` for a network path.
+// That form is correct for the Win32 file APIs and is load-bearing wherever a
+// path may exceed `MAX_PATH`, but it is NOT a portable process argument: a
+// child that parses the argument with its own path logic (node's
+// `resolveMainPath`, `cmd.exe`, tsc) does not understand the `\\?\` prefix. Node
+// degenerates `\\?\D:\...` to `lstat('D:')` and dies with `EISDIR` before the
+// script ever runs.
+//
+// So the canonical path stays canonical for filesystem work and identity, and
+// the verbatim prefix is stripped at the EXEC boundary — the one place the value
+// stops being a path we open and becomes a string another program parses.
+
+/// The Windows extended-length prefix, disk form: `\\?\D:\…`.
+const VERBATIM_PREFIX: &str = r"\\?\";
+
+/// The Windows extended-length prefix, UNC form: `\\?\UNC\server\share\…`.
+const VERBATIM_UNC_PREFIX: &str = r"\\?\UNC\";
+
+/// Windows `MAX_PATH`, measured in **UTF-16 code units** — Win32's own unit, and
+/// the limit counts the terminating NUL, so a usable path must be strictly
+/// shorter. NOT a UTF-8 byte count: `é` is one code unit but two bytes, so a
+/// byte-length test would refuse ~130 accented characters as "too long" and hand
+/// the child the untouched verbatim path — reproducing the very failure this
+/// module prevents. (Per-component length is volume-specific and a separate
+/// concern; it is deliberately not checked here.)
+const WIN32_MAX_PATH: usize = 260;
+
+/// Length of `s` in UTF-16 code units — what Win32 measures a path in.
+fn utf16_len(s: &str) -> usize {
+    s.chars().map(char::len_utf16).sum()
+}
+
+/// Whether a path component names a reserved Windows device, comparing the
+/// component's STEM (everything before the FIRST `.`) case-insensitively:
+/// `NUL`, `nul.txt`, and `Nul.tar.gz` are all reserved. Covers `CON`, `PRN`,
+/// `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, the superscript-digit forms
+/// `COM¹`/`COM²`/`COM³` and `LPT¹`/`LPT²`/`LPT³` that Windows reserves
+/// alongside them, and the console devices `CONIN$`/`CONOUT$` (reserved WITH the
+/// `$` only — bare `CONIN`/`CONOUT` are ordinary names).
+///
+/// Takes bytes so the exec-boundary simplifier here and the tracked-path
+/// portability guard (which enumerates raw `git ls-files -z` output) share ONE
+/// classification. They previously kept two hand-written lists, and the drift
+/// between them is exactly how the superscript forms went missing.
+#[must_use]
+pub fn is_reserved_device_name(component: &[u8]) -> bool {
+    let stem = component.split(|&b| b == b'.').next().unwrap_or(component);
+    let upper: Vec<u8> = stem.iter().map(|b| b.to_ascii_uppercase()).collect();
+    match upper.as_slice() {
+        b"CON" | b"PRN" | b"AUX" | b"NUL" | b"CONIN$" | b"CONOUT$" => true,
+        [b'C', b'O', b'M', d] | [b'L', b'P', b'T', d] => (b'1'..=b'9').contains(d),
+        // `¹` U+00B9, `²` U+00B2, `³` U+00B3 — two UTF-8 bytes each, both
+        // outside ASCII so the uppercase fold above leaves them untouched.
+        [b'C', b'O', b'M', 0xC2, d] | [b'L', b'P', b'T', 0xC2, d] => {
+            matches!(d, 0xB9 | 0xB2 | 0xB3)
+        }
+        _ => false,
+    }
+}
+
+/// Why a verbatim path has no equivalent normal Win32 spelling, and so must be
+/// left verbatim rather than rewritten to a different target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerbatimRefusal {
+    /// `\\?\Volume{…}` and other device-namespace names: no drive/UNC spelling.
+    DeviceNamespace,
+    /// A bare `\\?\X:` with no separator. `X:` alone is DRIVE-RELATIVE under
+    /// Win32 — it resolves against that drive's current directory.
+    DriveRelative,
+    /// `\\?\UNC\server` with no share component: `\\server` names no share.
+    IncompleteUnc,
+    /// Longer than [`WIN32_MAX_PATH`]; only the verbatim form can name it.
+    TooLong {
+        /// Length of the would-be simplified path in UTF-16 code units.
+        utf16_units: usize,
+    },
+    /// Under the verbatim prefix `/` is an ordinary filename character; under a
+    /// normal Win32 path it is a separator, so simplifying changes the meaning.
+    LiteralForwardSlash,
+    /// One component would not survive Win32 normalization intact.
+    Component {
+        /// The offending component, as authored.
+        component: String,
+        /// What Win32 would do to it.
+        reason: ComponentRefusal,
+    },
+}
+
+/// What Win32 path normalization would do to a single component that makes it
+/// unsafe to drop the verbatim prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentRefusal {
+    /// An interior `\\`: Win32 collapses the empty component.
+    Empty,
+    /// `.` or `..`: Win32 resolves them, verbatim keeps them literal.
+    DotSegment,
+    /// A trailing `.` or space: Win32 trims it, naming a different file.
+    TrailingDotOrSpace,
+    /// A character Win32 forbids in a path component.
+    ForbiddenCharacter,
+    /// A reserved device name — the path would resolve to the device.
+    ReservedDeviceName,
+}
+
+impl std::fmt::Display for ComponentRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "is empty (Windows collapses it)",
+            Self::DotSegment => {
+                "is a `.`/`..` segment (Windows resolves it, the verbatim form does not)"
+            }
+            Self::TrailingDotOrSpace => {
+                "ends with a dot or space (Windows trims it, naming a different file)"
+            }
+            Self::ForbiddenCharacter => "contains a character Windows forbids in a path",
+            Self::ReservedDeviceName => "is a reserved Windows device name",
+        })
+    }
+}
+
+impl std::fmt::Display for VerbatimRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeviceNamespace => f.write_str(
+                "it names the Windows device namespace, which has no drive-letter or UNC spelling",
+            ),
+            Self::DriveRelative => f.write_str(
+                "it is a bare drive with no separator, which Windows resolves relative to that \
+                 drive's current directory rather than its root",
+            ),
+            Self::IncompleteUnc => {
+                f.write_str("its UNC body names a server but no share, so it names no directory")
+            }
+            Self::TooLong { utf16_units } => write!(
+                f,
+                "it is {utf16_units} characters long, over the Windows MAX_PATH limit of \
+                 {WIN32_MAX_PATH}"
+            ),
+            Self::LiteralForwardSlash => f.write_str(
+                "it contains a `/`, which is an ordinary filename character in the extended-length \
+                 form but a separator in a normal Windows path",
+            ),
+            Self::Component { component, reason } => {
+                write!(f, "its component `{component}` {reason}")
+            }
+        }
+    }
+}
+
+/// The one decision [`simplify_verbatim_path_str`] and [`verbatim_refusal`]
+/// share, so the two can never disagree about a path.
+enum VerbatimClass {
+    /// Not an extended-length path — nothing to do.
+    NotVerbatim,
+    /// The equivalent normal Win32 path.
+    Simplified(String),
+    /// Verbatim, with no safe Win32 equivalent.
+    Refused(VerbatimRefusal),
+}
+
+/// Strip the Windows extended-length (`\\?\`) prefix from a path that is about
+/// to become a **child-process argument or environment value**.
+///
+/// - `\\?\D:\dir\file` → `D:\dir\file` (verbatim-disk)
+/// - `\\?\UNC\server\share\file` → `\\server\share\file` (verbatim-UNC)
+/// - anything else — an already-simple Win32 path, a POSIX path, a verbatim path
+///   with no Win32 equivalent — is returned UNCHANGED.
+///
+/// A verbatim path whose Win32 form would denote a DIFFERENT file (or no file)
+/// is deliberately left verbatim rather than corrupted; [`VerbatimRefusal`]
+/// enumerates every such case, and [`verbatim_refusal`] reports which one
+/// applied so a caller can fail with an actionable message instead of handing a
+/// child a path it cannot open. Handing the child a *wrong* path is worse than
+/// handing it the verbatim one — it fails loudly instead of reading someone
+/// else's file.
+///
+/// **This transform is host-independent by construction** and is NOT built on
+/// [`std::path::Prefix`]. `Prefix` is produced by the host's path parser, so on
+/// macOS/Linux `Path::new(r"\\?\D:\x")` has no prefix at all and a `Prefix`-based
+/// implementation would compile to an unobservable no-op that no non-Windows gate
+/// run could discriminate. Deciding on the literal prefix — exactly as
+/// [`canonicalize_path`] already lowercases a Windows drive letter on every host —
+/// keeps the rule testable everywhere it must hold.
+///
+/// Identity/equality semantics are untouched: this is not a canonical-ID
+/// normalizer ([`canonicalize_path`] is), it changes no separators and no casing.
+pub fn simplify_verbatim_path_str(raw: &str) -> Cow<'_, str> {
+    match classify_verbatim(raw) {
+        VerbatimClass::Simplified(simplified) => Cow::Owned(simplified),
+        VerbatimClass::NotVerbatim | VerbatimClass::Refused(_) => Cow::Borrowed(raw),
+    }
+}
+
+/// `Some(reason)` exactly when `raw` is an extended-length path that
+/// [`simplify_verbatim_path_str`] REFUSES to simplify; `None` when it is not
+/// verbatim at all, or when simplification succeeds.
+///
+/// A caller that must hand the path to a program which cannot parse the `\\?\`
+/// prefix should fail on `Some` with the rendered reason rather than launching a
+/// command that is known to die.
+#[must_use]
+pub fn verbatim_refusal(raw: &str) -> Option<VerbatimRefusal> {
+    match classify_verbatim(raw) {
+        VerbatimClass::Refused(reason) => Some(reason),
+        VerbatimClass::NotVerbatim | VerbatimClass::Simplified(_) => None,
+    }
+}
+
+/// [`simplify_verbatim_path_str`] over a [`Path`]. Borrows when nothing changes,
+/// which is every POSIX path and every already-simple Windows path.
+///
+/// A path whose bytes are not valid UTF-8 (a Windows unpaired surrogate) is
+/// returned unchanged — the safe direction: unsimplified still opens the right
+/// file, a mangled path does not.
+pub fn simplify_verbatim_path(path: &Path) -> Cow<'_, Path> {
+    match path.to_str() {
+        Some(raw) => match simplify_verbatim_path_str(raw) {
+            Cow::Borrowed(_) => Cow::Borrowed(path),
+            Cow::Owned(simplified) => Cow::Owned(PathBuf::from(simplified)),
+        },
+        None => Cow::Borrowed(path),
+    }
+}
+
+fn classify_verbatim(raw: &str) -> VerbatimClass {
+    // UNC form FIRST — `\\?\UNC\` also matches the shorter `\\?\` prefix.
+    if let Some(body) = raw.strip_prefix(VERBATIM_UNC_PREFIX) {
+        // `\\server\share\…`. Server AND share must both be present: `\\server`
+        // alone names no directory, so it is not a usable Win32 path.
+        let mut parts = body.split('\\');
+        let server = parts.next().unwrap_or_default();
+        let share = parts.next().unwrap_or_default();
+        if server.is_empty() || share.is_empty() {
+            return VerbatimClass::Refused(VerbatimRefusal::IncompleteUnc);
+        }
+        return finish(format!(r"\\{body}"), body);
+    }
+
+    let Some(body) = raw.strip_prefix(VERBATIM_PREFIX) else {
+        return VerbatimClass::NotVerbatim;
+    };
+
+    // Only the DISK form has a Win32 equivalent. `\\?\Volume{…}` and other
+    // device-namespace names do not.
+    let bytes = body.as_bytes();
+    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+        return VerbatimClass::Refused(VerbatimRefusal::DeviceNamespace);
+    }
+    match bytes.get(2) {
+        // `\\?\D:` — `D:` alone is drive-RELATIVE, not the drive root.
+        None => VerbatimClass::Refused(VerbatimRefusal::DriveRelative),
+        Some(b'\\') => finish(body.to_string(), &body[2..]),
+        Some(_) => VerbatimClass::Refused(VerbatimRefusal::DeviceNamespace),
+    }
+}
+
+/// Validate `tail` (the part below the root) and length-check the assembled
+/// `simplified` path.
+fn finish(simplified: String, tail: &str) -> VerbatimClass {
+    if let Some(reason) = tail_refusal(tail) {
+        return VerbatimClass::Refused(reason);
+    }
+    let units = utf16_len(&simplified);
+    if units >= WIN32_MAX_PATH {
+        return VerbatimClass::Refused(VerbatimRefusal::TooLong { utf16_units: units });
+    }
+    VerbatimClass::Simplified(simplified)
+}
+
+/// The first reason (if any) that a path tail would not survive Win32
+/// normalization intact. `tail` is backslash-separated, with an optional leading
+/// and/or trailing separator.
+fn tail_refusal(tail: &str) -> Option<VerbatimRefusal> {
+    if tail.contains('/') {
+        return Some(VerbatimRefusal::LiteralForwardSlash);
+    }
+    let trimmed = tail.strip_prefix('\\').unwrap_or(tail);
+    let trimmed = trimmed.strip_suffix('\\').unwrap_or(trimmed);
+    if trimmed.is_empty() {
+        // A bare root (`D:\`, or `\\server\share`) — nothing below it to check.
+        return None;
+    }
+    trimmed.split('\\').find_map(|component| {
+        component_refusal(component).map(|reason| VerbatimRefusal::Component {
+            component: component.to_string(),
+            reason,
+        })
+    })
+}
+
+/// Why ONE path component would not mean the same thing without the verbatim
+/// prefix, or `None` when it survives Win32 normalization unchanged.
+fn component_refusal(component: &str) -> Option<ComponentRefusal> {
+    if component.is_empty() {
+        return Some(ComponentRefusal::Empty);
+    }
+    if component == "." || component == ".." {
+        return Some(ComponentRefusal::DotSegment);
+    }
+    if component.ends_with('.') || component.ends_with(' ') {
+        return Some(ComponentRefusal::TrailingDotOrSpace);
+    }
+    if component
+        .chars()
+        .any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || (c as u32) < 0x20)
+    {
+        return Some(ComponentRefusal::ForbiddenCharacter);
+    }
+    if is_reserved_device_name(component.as_bytes()) {
+        return Some(ComponentRefusal::ReservedDeviceName);
+    }
+    None
+}
 
 /// Whether `s` ends with a trailing `/` that should be stripped — i.e. it is
 /// not the filesystem root `/` and not a Windows drive-root `x:/`.
@@ -131,11 +449,21 @@ pub fn fs_paths_equal(a: &str, b: &str) -> bool {
 }
 
 /// The pure FS-identity comparison core, parameterized by the case-sensitivity bit
-/// so it is host-independent (and unit-testable on every platform). Slash-normalizes
-/// both sides, then folds ASCII case iff `case_insensitive`.
+/// so it is host-independent (and unit-testable on every platform). Applies the ONE
+/// shared normalization ([`canonicalize_path_cow`]), then folds ASCII case iff
+/// `case_insensitive`.
+///
+/// Normalizing through [`canonicalize_path_cow`] rather than an ad-hoc slash replace
+/// is what keeps this predicate in lockstep with [`InjectedPathKey`], which derives
+/// its key the same way. A partial normalization here (slash-only) made the two
+/// disagree on a case-SENSITIVE host for every input differing in drive case,
+/// extended-length prefix, or trailing slash: the unconditional drive fold lives in
+/// `canonicalize_path`, so `C:\ws\A.ts` and `c:/ws/A.ts` keyed equal while this
+/// predicate called them distinct. The case-insensitive branch masked it, which is
+/// why only Linux saw it.
 fn fs_paths_equal_under(a: &str, b: &str, case_insensitive: bool) -> bool {
-    let a = a.replace('\\', "/");
-    let b = b.replace('\\', "/");
+    let a = canonicalize_path_cow(a);
+    let b = canonicalize_path_cow(b);
     if case_insensitive {
         a.eq_ignore_ascii_case(&b)
     } else {

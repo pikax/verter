@@ -3,8 +3,8 @@
 //! [`singleflight`](super::singleflight) owns the winner/joiner state
 //! machine; this module owns the two map-mutating tails the winner runs
 //! once a cold build is `Cacheable`, plus the warm-hit / joiner-fork
-//! removal tail. Splitting them out keeps the state-machine file under
-//! the line budget while colocating the publish-side bookkeeping
+//! removal tail. Keeping them separate leaves the state machine focused while
+//! colocating the publish-side bookkeeping
 //! (`removal_cleanup` / `post_publish` symmetry, the per-map-key
 //! linearization) in one place.
 //!

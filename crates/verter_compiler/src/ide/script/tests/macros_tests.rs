@@ -217,7 +217,7 @@ const attrs = useAttrs()
 }
 
 #[test]
-fn bare_use_attrs_with_generics_includes_names() {
+fn bare_use_attrs_with_generics_uses_local_alias() {
     let (code, _, _tc) = gen_tsx_script_full(
         r#"<script setup lang="ts" generic="T">
 const attrs = useAttrs()
@@ -225,10 +225,15 @@ defineProps<{ items: T[] }>()
 </script>
 <template><div>hello</div></template>"#,
     );
-    // Positive: cast should include generic name bracket
+    // Positive: the local alias captures the outer generic scope.
     assert!(
-        code.contains("useAttrs() as unknown as ___VERTER___Attrs<T>"),
-        "bare useAttrs() with generics should include <T> in cast: {}",
+        code.contains("useAttrs() as unknown as ___VERTER___Attrs"),
+        "bare useAttrs() should use the local attrs alias: {}",
+        code
+    );
+    assert!(
+        !code.contains("useAttrs() as unknown as ___VERTER___Attrs<T>"),
+        "bare useAttrs() must not apply a type argument to the local alias: {}",
         code
     );
 }

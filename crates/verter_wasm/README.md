@@ -108,8 +108,9 @@ All types use `#[serde(rename_all = "camelCase")]` for JavaScript-friendly field
 
 ### Prerequisites
 
-- Rust toolchain (stable)
-- `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`)
+- Rust toolchain via [rustup](https://rustup.rs/) — `rust-toolchain.toml` pins the compiler
+  version and the `wasm32-unknown-unknown` target, and rustup installs both on the first
+  `cargo` invocation in the repo. No `rustup target add` step is needed.
 - `wasm-bindgen` CLI (`cargo install wasm-bindgen-cli --version 0.2.122 --locked`)
 
 ### Building the WASM Module

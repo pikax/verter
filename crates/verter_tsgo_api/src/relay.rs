@@ -600,6 +600,13 @@ pub struct InitializedWitness {
     pub root_uri: Option<String>,
     /// The `workspaceFolders` the editor sent in `initialize`, if any.
     pub workspace_folders: Option<serde_json::Value>,
+    /// The `capabilities.semanticTokensProvider.legend` the SERVER advertised
+    /// in the `initialize` response (`None` when absent). The engine's
+    /// semantic-token indices are only meaningful against this legend, and a
+    /// non-owning attach never re-`initialize`s the editor-owned engine — so
+    /// this in-band capture is the ONLY place the legend can be observed for
+    /// the shared lane's name-remap into Verter's published legend.
+    pub semantic_tokens_legend: Option<serde_json::Value>,
 }
 
 /// The editor→server pump's capture of the `initialize` REQUEST — the half of
@@ -1197,6 +1204,12 @@ async fn server_to_editor_pump<R, W>(
                             .and_then(|s| s.get("version"))
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
+                        let semantic_tokens_legend = msg
+                            .get("result")
+                            .and_then(|r| r.get("capabilities"))
+                            .and_then(|c| c.get("semanticTokensProvider"))
+                            .and_then(|p| p.get("legend"))
+                            .cloned();
                         let request = {
                             let slot = match initialize_capture.lock() {
                                 Ok(guard) => guard,
@@ -1216,6 +1229,7 @@ async fn server_to_editor_pump<R, W>(
                             workspace_folders: request
                                 .as_ref()
                                 .and_then(|r| r.workspace_folders.clone()),
+                            semantic_tokens_legend,
                         };
                         // Publish only the FIRST observed handshake (a benign
                         // no-op if a later spurious `initialize` response

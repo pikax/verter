@@ -13,8 +13,7 @@ real_provider_test!(
         let uri = session.open_fixture_file("packages/app/src/App.vue").await;
         let _shared = session.open_fixture_file("packages/shared/src/SharedComp.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 
@@ -64,8 +63,7 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
         let _mycomp = session.open_fixture_file("src/components/MyComp.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 
@@ -249,8 +247,7 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
         let _mycomp = session.open_fixture_file("src/MyComp.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 
@@ -272,8 +269,7 @@ real_provider_test!(
     async fn run(session) {
         let uri = session.open_fixture_file("App.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 
@@ -295,8 +291,7 @@ real_provider_test!(
     async fn run(session) {
         let uri = session.open_fixture_file("App.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 
@@ -314,8 +309,7 @@ real_provider_test!(
     async fn run(session) {
         let uri = session.open_fixture_file("App.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 

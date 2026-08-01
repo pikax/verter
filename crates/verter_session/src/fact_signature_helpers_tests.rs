@@ -1,8 +1,8 @@
 //! `#[cfg(test)]` coverage for the [`crate::fact_signature_helpers`] fact-based
 //! validation substrate — the `ReadSetSignature` unit tests, the source-env
-//! observation tests, and the tracer-CACHEABILITY boundary tests. Extracted to a
-//! sibling `_tests.rs` (excluded from the oversize-files guard) so the production
-//! module stays under the line cap. The module is a descendant of
+//! observation tests, and the tracer-CACHEABILITY boundary tests. They live in a
+//! sibling `_tests.rs` so the production substrate and its tests remain independently
+//! readable. The module is a descendant of
 //! `fact_signature_helpers`, so `super::` reaches its private items.
 
 use super::*;
@@ -88,7 +88,7 @@ mod read_set_signature_unit_tests {
             fact_filewhole("/wholehash.ts", 1),
             fact_derived("/derived.ts", 2),
             fact_parse("/parse.ts", 3),
-            FactVersionRef::ResolveImports(crate::resolver_core::ResolveImportsFactRef {
+            FactVersionRef::ResolveImports(crate::resolver_core::ResolveImportsFactRef::Semantic {
                 canonical_id: "/resolve.ts".to_string(),
                 key: FactKey::SyntacticExportSet,
                 lane: FactLane::Semantic,

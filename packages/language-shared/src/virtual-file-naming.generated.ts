@@ -61,7 +61,7 @@ export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = 
     ide: { kind: "jsxConditional", jsx: ".jsx", nonJsx: ".tsx" },
     importSurface: { kind: "suffix", suffix: ".verter.ts" },
     testingApiSuffix: ".__verter_test.ts",
-    sidecarSuffixes: [],
+    sidecarSuffixes: [".tsx.__verter_types.d.ts", ".jsx.__verter_types.d.ts"],
     declarationSurface: { kind: "extensionMiddleTs" },
   },
   FRAMEWORK_TAG_SVELTE: {
@@ -69,7 +69,7 @@ export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = 
     ide: { kind: "jsxConditional", jsx: ".jsx", nonJsx: ".tsx" },
     importSurface: { kind: "suffix", suffix: ".verter.ts" },
     testingApiSuffix: null,
-    sidecarSuffixes: [],
+    sidecarSuffixes: [".tsx.__verter_types.d.ts", ".jsx.__verter_types.d.ts"],
     declarationSurface: { kind: "extensionMiddleTs" },
   },
   SVELTE_RUNE_MODULE: {

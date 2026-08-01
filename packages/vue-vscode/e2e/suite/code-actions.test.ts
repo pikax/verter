@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import { pollBudget } from "../lib/timeouts";
 import * as vscode from "vscode";
 import {
   ensureFixtureWarm,
@@ -35,7 +36,7 @@ suite(`Code Actions [${FIXTURE_NAME}]`, function () {
             isCodeAction(item) && item.kind?.value?.startsWith("source.organizeImports"),
         ),
       stableMs: 500,
-      timeoutMs: 20_000,
+      timeoutMs: pollBudget("waitForCodeActionsMatching"),
       intervalMs: 150,
     });
 
@@ -80,7 +81,7 @@ suite(`Code Actions [${FIXTURE_NAME}]`, function () {
         return kinds.has("source") && kinds.has("quickfix");
       },
       stableMs: 500,
-      timeoutMs: 20_000,
+      timeoutMs: pollBudget("waitForCodeActionsMatching"),
       intervalMs: 150,
     });
 

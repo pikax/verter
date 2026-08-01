@@ -1,6 +1,6 @@
 //! Standalone structural element-query helpers for the default-deny client syntax
-//! classifier, extracted from `client_surface.rs` to keep it under the file-size
-//! guard.
+//! classifier, kept separate from `client_surface.rs` so pure queries and
+//! classification remain focused.
 //!
 //! These are the small pure structural queries the classifier runs over the typed IR:
 //! namespace derivation ([`element_own_namespace`]) and the attribute / directive

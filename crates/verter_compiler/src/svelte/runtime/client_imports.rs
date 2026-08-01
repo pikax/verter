@@ -7,8 +7,8 @@
 //! BOTH the instance `<script>` and `<script module>` slots, with
 //! `with { … }` import attributes preserved. Classification (the OXC walk building
 //! these carriers) lives in [`super::client_surface_imports`]; the two-slot module
-//! emission lives in [`super::client_module_frame`]. Extracted from
-//! `client_plan_types.rs` to keep that file under the file-size guard.
+//! emission lives in [`super::client_module_frame`]. The vocabulary stays separate
+//! from `client_plan_types.rs` so both modules remain focused.
 
 use verter_span::Span;
 

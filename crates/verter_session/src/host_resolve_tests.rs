@@ -49,6 +49,7 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
         })
         .unwrap();
 }
+
 /// A completely EMPTY .vue file (0 bytes — e.g. motion-vue's playground
 /// Home.vue) is a valid empty component. The host must serve a Main virtual
 /// node exporting `defineComponent({ __name })` with an empty public surface
@@ -143,7 +144,7 @@ fn public_api_code(host: &VerterHost, canonical_id: &str) -> String {
     host.get_public_api(canonical_id)
         .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
-        .code
+        .dialect_labeled_code()
         .to_string()
 }
 
@@ -151,7 +152,7 @@ fn public_api_code_with_mode(host: &VerterHost, canonical_id: &str, mode: Public
     host.get_public_api_with_mode(canonical_id, mode, None)
         .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
-        .code
+        .dialect_labeled_code()
         .to_string()
 }
 
@@ -164,7 +165,7 @@ fn public_api_code_with_profile(
     host.get_public_api_with_mode(canonical_id, mode, Some(profile))
         .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
-        .code
+        .dialect_labeled_code()
         .to_string()
 }
 
@@ -1696,7 +1697,7 @@ fn public_api_with_profile_uses_override_script_state_for_imported_macro_type_de
         .expect("profile-aware compile should succeed even with dependency override");
 
     assert!(
-        raw.contains("new(props?: import(\"vue\").PublicProps & Props)"),
+        raw.contains("new(props?: import(\"vue\").PublicProps & Props & Omit<"),
         "raw public api should still resolve successfully against the dependency's raw script state: {raw}"
     );
     assert!(
@@ -1777,7 +1778,8 @@ defineEmits<{ (e: 'click'): void }>()
         .expect("second projection")
         .expect("second call");
     assert_eq!(
-        api1.code, api2.code,
+        api1.dialect_labeled_code(),
+        api2.dialect_labeled_code(),
         "two consecutive calls must produce identical code"
     );
 }
@@ -3636,6 +3638,104 @@ fn bump_diagnostics_generation_increments_without_recompile() {
     );
 }
 
+/// `evict` clears a file's stored diagnostics without moving any document
+/// version, so it must ADVANCE the epoch consumers revalidate against —
+/// otherwise a result derived from the pre-evict diagnostics keeps validating
+/// against a post-evict read and is served as fresh.
+///
+/// The epoch itself stays readable across the eviction: reporting `None` there
+/// while the stored counter kept advancing made an advance invisible, so a
+/// sample taken before one and a sample taken after it were the same value.
+/// The eviction gate belongs on the diagnostics PAYLOAD, which keeps it.
+#[test]
+fn evict_advances_the_diagnostics_epoch_whose_diagnostics_it_clears() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst a = 1\n</script>\n<template><div>{{ a }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    let _ = host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some("/src/Comp.vue".to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile(),
+    });
+    let before = host.get_diagnostics_generation("/src/Comp.vue");
+    assert!(
+        before.is_some(),
+        "fixture: a compiled file must have a recorded epoch"
+    );
+    assert!(
+        host.get_diagnostics("/src/Comp.vue", &profile()).is_some(),
+        "fixture: the compile must have stored diagnostics for evict to clear"
+    );
+
+    host.evict("/src/Comp.vue");
+
+    let after = host.get_diagnostics_generation("/src/Comp.vue");
+    assert!(
+        after > before,
+        "evict clears `latest_diagnostics` with no document-version change — \
+         exactly what the epoch signals — so it must advance it: read \
+         {before:?} before the evict and {after:?} after"
+    );
+    assert!(
+        host.get_diagnostics("/src/Comp.vue", &profile()).is_none(),
+        "the eviction gate stays on the diagnostics PAYLOAD: an evicted file \
+         serves no stored diagnostics"
+    );
+}
+
+/// The diagnostics epoch is a FENCE — a consumer samples it, stamps the
+/// sample into a derived cache entry, and later re-validates that entry
+/// against a fresh sample — so an advance must be OBSERVABLE for every
+/// canonical the host knows, not only for one that happens to carry a
+/// `ProfileState` row.
+///
+/// The row is created lazily (compilation, dependency ingress) and dropped
+/// wholesale by the authority-reset cascade that `set_workspace` and `close`
+/// run, which explicitly RETAINS scheduler sources — "scheduler-tracked
+/// canonicals rebuild on demand from their retained scheduler sources".
+/// That leaves a host-known file with no row, and the LSP keeps its documents
+/// open across a workspace change. Advancing only an existing row made the
+/// call a silent no-op there: the epoch reads the same before the advance and
+/// after it, so nothing a consumer stamped beforehand can be told apart from
+/// something computed afterwards.
+#[test]
+fn bump_diagnostics_generation_is_observable_for_a_known_file_whose_row_a_reset_dropped() {
+    let host = strict_host();
+    upsert_non_sfc(&host, "/src/dep.ts", "export const a = 1\n");
+    assert!(
+        host.get_diagnostics_generation("/src/dep.ts").is_some(),
+        "fixture: an upserted file must have a recorded epoch to begin with"
+    );
+
+    // The AUTHORITY-RESET cascade `set_workspace` / `close` run: every
+    // per-canonical compile row drops, the scheduler source is retained.
+    host.project_type_store()
+        .bump_project_generation_and_evict();
+    let after_reset = host.get_diagnostics_generation("/src/dep.ts");
+    assert_eq!(
+        after_reset, None,
+        "fixture: the authority reset must drop the compile row — without \
+         that this test is not exercising the row-less state at all"
+    );
+
+    host.bump_diagnostics_generation("/src/dep.ts");
+
+    let after_bump = host.get_diagnostics_generation("/src/dep.ts");
+    assert!(
+        after_bump.is_some(),
+        "a diagnostics-epoch advance on a file the host still knows must be \
+         observable: it read {after_reset:?} before the advance and \
+         {after_bump:?} after, so a consumer that sampled the epoch before \
+         the advance cannot tell its stamp is stale"
+    );
+    assert_ne!(
+        after_bump, after_reset,
+        "the advance must move the epoch off the value a pre-advance sample \
+         recorded"
+    );
+}
+
 #[test]
 fn bump_diagnostics_generation_is_noop_for_missing_file() {
     let host = strict_host();
@@ -4843,11 +4943,20 @@ fn direct_compiler_public_api_for(
         },
     )
     .expect("direct compiler extraction");
+    // The direct control must be handed the SAME resolver-owned inputs the
+    // production path threads, or this equivalence assertion would silently
+    // pin the fallthrough half as absent instead of comparing producers.
+    let resolution = host.resolve_fallthrough_surface(canonical_id);
+    let fallthrough = crate::host_resolve::fallthrough_props::project_fallthrough_props(
+        resolution.as_ref(),
+        &|child_canonical_id| host.owner_import_reference_for(canonical_id, child_canonical_id),
+    );
     verter_compiler::tsc::generate_tsc_from_state(
         &extracted,
         component_name,
         mode,
         verter_compiler::tsc::MacroTscInput::Authoritative(bundle.as_ref()),
+        &fallthrough,
     )
     .expect("direct compiler projection")
 }
@@ -4958,7 +5067,7 @@ fn public_api_carrier_goldens_match_direct_structured_projection() {
             verter_compiler::tsc::TscMode::Public,
         );
         assert_eq!(
-            projected.code.as_ref(),
+            projected.dialect_labeled_code().as_ref(),
             direct.code,
             "{canonical_id} registry code must equal the direct compiler"
         );
@@ -4974,9 +5083,9 @@ fn public_api_carrier_goldens_match_direct_structured_projection() {
 
         match canonical_id {
             "/proj/Accent.vue" => {
-                assert!(direct
-                    .code
-                    .contains(r#"$props: import("vue").PublicProps & {}"#));
+                assert!(direct.code.contains(
+                    r#"$props: import("vue").PublicProps & Omit<__Verter_RootElementAttrs<"div">, "class" | "style" | keyof import("vue").PublicProps>"#
+                ));
                 assert!(!direct.code.contains("accent:"));
             }
             "/proj/WithDefaults.vue" => assert!(direct.code.contains(
@@ -4986,7 +5095,7 @@ fn public_api_carrier_goldens_match_direct_structured_projection() {
                 .code
                 .contains("default(props: { item: number }): any")),
             "/proj/Generics.vue" => assert!(direct.code.contains(
-                r#"new<T>(props?: import("vue").PublicProps & { items: T[]; selected: T })"#
+                r#"new<T>(props?: import("vue").PublicProps & { items: T[]; selected: T } & Omit<"#
             )),
             "/proj/Child.vue" => {
                 assert!(direct
@@ -5012,13 +5121,13 @@ fn public_api_carrier_goldens_match_direct_structured_projection() {
     }
 }
 
-const PUBLIC_API_PUBLIC_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\nimport type { CapProps } from './cap-types'\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  }\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiJBO0E7QSwyQztBO0E7QTs7QTtBLDBDQUdZLFE7QSx3Q0FBQSxRO0EsVywyQztBO0E7QTtBO0E7QSJ9\n";
+const PUBLIC_API_PUBLIC_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __Verter_RootElementAttrs<Tag extends string> = Tag extends keyof import(\"vue\").IntrinsicElementAttributes ? import(\"vue\").IntrinsicElementAttributes[Tag] : {}\ndeclare module \"vue\" {\n  interface IntrinsicElementAttributes {}\n}\ntype __Verter_DataAttrs = { [Key in `data-${string}`]?: unknown }\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\nimport type { CapProps } from './cap-types'\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps & Omit<__Verter_RootElementAttrs<\"div\">, \"class\" | \"style\" | keyof import(\"vue\").PublicProps | keyof (CapProps)> & __Verter_DataAttrs): {\n    $props: import(\"vue\").PublicProps & CapProps & Omit<__Verter_RootElementAttrs<\"div\">, \"class\" | \"style\" | keyof import(\"vue\").PublicProps | keyof (CapProps)> & __Verter_DataAttrs,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  }\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiJBO0E7QTs7O0E7QTtBLDJDO0E7QTtBOztBO0EsMENBR1ksUSxHLG1JO0Esd0NBQUEsUSxHLG1JO0EsVywyQztBO0E7QTtBO0E7QSJ9\n";
 
-const PUBLIC_API_PUBLIC_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"A;A;A,2C;A;A;A;;A;A,0CAGY,Q;A,wCAAA,Q;A,W,2C;A;A;A;A;A;A\"}";
+const PUBLIC_API_PUBLIC_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"A;A;A;;;A;A;A,2C;A;A;A;;A;A,0CAGY,Q,G,mI;A,wCAAA,Q,G,mI;A,W,2C;A;A;A;A;A;A\"}";
 
-const PUBLIC_API_TESTING_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\ntype __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\ntype __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\ndeclare function defineProps<TypeProps>(): TypeProps\ndeclare function defineProps<RuntimeProps extends Record<string, any>>(props: RuntimeProps): import(\"vue\").ExtractPropTypes<RuntimeProps>\ndeclare function defineProps<PropName extends string>(props: readonly PropName[]): Record<PropName, unknown>\ndeclare function defineEmits<TypeEmits extends ((...args: any[]) => any) | Record<string, any>>(): __Verter_EmitFn<TypeEmits>\ndeclare function defineEmits<Named extends string>(names: readonly Named[]): __Verter_EmitFn<Record<Named, unknown[]>>\ndeclare function defineEmits<ObjectEmits extends Record<string, any>>(options: ObjectEmits): __Verter_EmitFn<ObjectEmits>\ndeclare function defineExpose<Exposed extends Record<string, any> = Record<string, never>>(exposed?: Exposed): void\ndeclare function defineOptions(options: Record<string, unknown>): void\ndeclare function defineSlots<Slots extends Record<string, any>>(): Slots\ndeclare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\ndeclare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\ndeclare const label: string\ndeclare const n: number\n\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n\ntype __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{\n  count: typeof count;\n}>\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  } & __Verter_TestBindings\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiJBO0E7QTtBO0E7Ozs7Ozs7Ozs7O0EsY0FHWSxLLEUsTTtBLGNBQUEsQyxFLE07QTs7OztBO0E7QSxFQUROLEssUyxLO0E7O0E7QTs7QTtBLDBDQUNNLFE7QSx3Q0FBQSxRO0EsVywyQztBO0E7QTtBO0E7QSJ9\n";
+const PUBLIC_API_TESTING_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\ntype __Verter_RootElementAttrs<Tag extends string> = Tag extends keyof import(\"vue\").IntrinsicElementAttributes ? import(\"vue\").IntrinsicElementAttributes[Tag] : {}\ndeclare module \"vue\" {\n  interface IntrinsicElementAttributes {}\n}\ntype __Verter_DataAttrs = { [Key in `data-${string}`]?: unknown }\ntype __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\ntype __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\ndeclare function defineProps<TypeProps>(): TypeProps\ndeclare function defineProps<RuntimeProps extends Record<string, any>>(props: RuntimeProps): import(\"vue\").ExtractPropTypes<RuntimeProps>\ndeclare function defineProps<PropName extends string>(props: readonly PropName[]): Record<PropName, unknown>\ndeclare function defineEmits<TypeEmits extends ((...args: any[]) => any) | Record<string, any>>(): __Verter_EmitFn<TypeEmits>\ndeclare function defineEmits<Named extends string>(names: readonly Named[]): __Verter_EmitFn<Record<Named, unknown[]>>\ndeclare function defineEmits<ObjectEmits extends Record<string, any>>(options: ObjectEmits): __Verter_EmitFn<ObjectEmits>\ndeclare function defineExpose<Exposed extends Record<string, any> = Record<string, never>>(exposed?: Exposed): void\ndeclare function defineOptions(options: Record<string, unknown>): void\ndeclare function defineSlots<Slots extends Record<string, any>>(): Slots\ndeclare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\ndeclare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\ndeclare const label: string\ndeclare const n: number\n\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n\ntype __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{\n  count: typeof count;\n}>\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps & Omit<__Verter_RootElementAttrs<\"div\">, \"class\" | \"style\" | keyof import(\"vue\").PublicProps | keyof (CapProps)> & __Verter_DataAttrs): {\n    $props: import(\"vue\").PublicProps & CapProps & Omit<__Verter_RootElementAttrs<\"div\">, \"class\" | \"style\" | keyof import(\"vue\").PublicProps | keyof (CapProps)> & __Verter_DataAttrs,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  } & __Verter_TestBindings\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiJBO0E7QTtBOzs7QTtBO0E7QTs7Ozs7Ozs7Ozs7QSxjQUdZLEssRSxNO0EsY0FBQSxDLEUsTTtBOzs7O0E7QTtBLEVBRE4sSyxTLEs7QTs7QTtBOztBO0EsMENBQ00sUSxHLG1JO0Esd0NBQUEsUSxHLG1JO0EsVywyQztBO0E7QTtBO0E7QSJ9\n";
 
-const PUBLIC_API_TESTING_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"A;A;A;A;A;;;;;;;;;;;A,cAGY,K,E,M;A,cAAA,C,E,M;A;;;;A;A;A,EADN,K,S,K;A;;A;A;;A;A,0CACM,Q;A,wCAAA,Q;A,W,2C;A;A;A;A;A;A\"}";
+const PUBLIC_API_TESTING_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"A;A;A;A;;;A;A;A;A;;;;;;;;;;;A,cAGY,K,E,M;A,cAAA,C,E,M;A;;;;A;A;A,EADN,K,S,K;A;;A;A;;A;A,0CACM,Q,G,mI;A,wCAAA,Q,G,mI;A,W,2C;A;A;A;A;A;A\"}";
 
 /// Mutation recipe: bypass the registry projector or alter one compiler-owned
 /// generated byte/map segment. The direct-producer equivalence assertion or
@@ -5032,7 +5141,7 @@ fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
         .expect("public-mode api output");
     let direct = direct_compiler_public_api(&host, verter_compiler::tsc::TscMode::Public);
     assert_eq!(
-        r.code.as_ref(),
+        r.dialect_labeled_code().as_ref(),
         direct.code,
         "registry projection must be byte-identical to the direct compiler producer"
     );
@@ -5042,7 +5151,7 @@ fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
         "registry source map must be byte-identical to the direct compiler producer"
     );
     assert_eq!(
-        r.code.as_ref(),
+        r.dialect_labeled_code().as_ref(),
         PUBLIC_API_PUBLIC_CODE_PIN,
         "public-mode rendered TSX must stay byte-identical through projector dispatch"
     );
@@ -5065,7 +5174,7 @@ fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
         .expect("testing-mode api output");
     let direct = direct_compiler_public_api(&host, verter_compiler::tsc::TscMode::Testing);
     assert_eq!(
-        r.code.as_ref(),
+        r.dialect_labeled_code().as_ref(),
         direct.code,
         "registry projection must be byte-identical to the direct compiler producer"
     );
@@ -5075,7 +5184,7 @@ fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
         "registry source map must be byte-identical to the direct compiler producer"
     );
     assert_eq!(
-        r.code.as_ref(),
+        r.dialect_labeled_code().as_ref(),
         PUBLIC_API_TESTING_CODE_PIN,
         "testing-mode rendered TSX must stay byte-identical through projector dispatch"
     );
@@ -5106,7 +5215,7 @@ fn public_api_declaration_mode_is_declaration_safe_through_projector_dispatch() 
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Declaration, None)
         .expect("declaration-mode projection")
         .expect("declaration-mode api output")
-        .code
+        .dialect_labeled_code()
         .to_string();
 
     // NEGATIVE: no runtime / value tokens.
@@ -5151,7 +5260,7 @@ fn public_api_declaration_mode_is_declaration_safe_through_projector_dispatch() 
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Public, None)
         .expect("public-mode projection")
         .expect("public-mode api output")
-        .code
+        .dialect_labeled_code()
         .to_string();
     assert!(
         public.contains("const __comp = defineComponent"),
@@ -5286,8 +5395,8 @@ fn public_api_through_alias_is_byte_identical_to_canonical() {
             .unwrap_or_else(|error| panic!("alias projection failed for {mode:?}: {error}"))
             .unwrap_or_else(|| panic!("alias request must render for {mode:?}"));
         assert_eq!(
-            via_alias.code.as_ref(),
-            via_canonical.code.as_ref(),
+            via_alias.dialect_labeled_code().as_ref(),
+            via_canonical.dialect_labeled_code().as_ref(),
             "alias request must produce byte-identical TSX to the canonical for {mode:?}"
         );
         assert_eq!(
@@ -6289,4 +6398,867 @@ fn extract_vue_script_content_handles_adjacent_close_and_template() {
             "{label}: template markup must not leak into script content, got:\n{content}"
         );
     }
+}
+
+// ── Attribute fallthrough on the parent-facing props type ────────────
+//
+// https://github.com/pikax/verter/issues/97
+//
+// Vue forwards every undeclared attribute onto a component's single root
+// element through `$attrs`, so a parent may legitimately pass it. `$attrs`
+// answers what the component may READ; these pin what a parent may PASS —
+// the `new(props?: …)` construct signature (the surface a JSX/TSX
+// `<Child …/>` check reports against) and the `$props` instance member.
+// Both are rendered by `render_full_props_type`, so both are asserted: a fix
+// applied to only one would leave the two disagreeing.
+
+/// The `new(props?: …)` construct-signature line of the generated stub.
+fn stub_ctor_line(code: &str) -> &str {
+    code.lines()
+        .find(|line| line.trim_start().starts_with("new(") || line.contains("new<"))
+        .unwrap_or_else(|| panic!("no `new(...)` line in generated stub:\n{code}"))
+}
+
+/// The `$props:` instance-member line of the generated stub.
+fn stub_props_line(code: &str) -> &str {
+    code.lines()
+        .find(|line| line.trim_start().starts_with("$props:"))
+        .unwrap_or_else(|| panic!("no `$props:` line in generated stub:\n{code}"))
+}
+
+const FALLTHROUGH_CHILD_DIV_ROOT: &str = "<script setup lang=\"ts\">\ndefineProps<{ label: string }>()\n</script>\n<template><div>{{ label }}</div></template>";
+
+/// A single native `<div>` root widens BOTH parent-facing sites with that
+/// element's own props type, and excludes the declared props structurally.
+#[test]
+fn native_root_widens_both_parent_facing_props_sites() {
+    let host = strict_host();
+    upsert_vue(&host, "/src/Child.vue", FALLTHROUGH_CHILD_DIV_ROOT);
+
+    let code = public_api_code(&host, "/src/Child.vue");
+    let ctor = stub_ctor_line(&code);
+    let props = stub_props_line(&code);
+
+    for (label, line) in [("new(props?: …)", ctor), ("$props", props)] {
+        assert!(
+            line.contains("__Verter_RootElementAttrs<\"div\">"),
+            "{label} must widen with the resolved root element's own props type; got:\n{line}\n\
+             --- full stub ---\n{code}"
+        );
+        assert!(
+            line.contains("keyof ({ label: string })"),
+            "{label} must exclude the declared props by `keyof` — a declared prop \
+             sharing a name with an HTML attribute (`{{ id: number }}` against \
+             `id?: string`) would otherwise intersect to `never` and turn this \
+             widening into a NEW false positive; got:\n{line}"
+        );
+        assert!(
+            line.contains("\"class\" | \"style\""),
+            "{label} must exclude class/style from the widening — they reach a \
+             component through AllowedComponentProps and must not depend on \
+             inheritance; got:\n{line}"
+        );
+    }
+
+    // The widened arm is the element's REAL member-typed props type, never an
+    // index signature — that is what keeps an unknown attribute an error.
+    assert!(
+        !code.contains("Record<string, unknown>") && !code.contains("[key: string]"),
+        "the widened surface must never be an index signature:\n{code}"
+    );
+    assert!(
+        code.contains(
+            "type __Verter_RootElementAttrs<Tag extends string> = Tag extends keyof import(\"vue\").IntrinsicElementAttributes"
+        ),
+        "the helper must resolve the tag through Vue's own IntrinsicElementAttributes \
+         map and degrade to `{{}}` for a tag Vue does not publish:\n{code}"
+    );
+}
+
+/// `inheritAttrs: false` ⇒ no inherited surface. NEGATIVE half.
+#[test]
+fn inherit_attrs_false_leaves_parent_facing_props_unwidened() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/NoInherit.vue",
+        "<script setup lang=\"ts\">\ndefineOptions({ inheritAttrs: false })\ndefineProps<{ label: string }>()\n</script>\n<template><div>{{ label }}</div></template>",
+    );
+
+    let code = public_api_code(&host, "/src/NoInherit.vue");
+    assert!(
+        !code.contains("__Verter_RootElementAttrs"),
+        "`inheritAttrs: false` means NO inherited surface — the parent-facing \
+         props type must not be widened at all:\n{code}"
+    );
+    assert!(
+        stub_ctor_line(&code).contains("{ label: string }"),
+        "the declared props must still be there:\n{code}"
+    );
+}
+
+/// A fragment / multi-root template has no single root to inherit into.
+/// NEGATIVE half.
+#[test]
+fn fragment_root_leaves_parent_facing_props_unwidened() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Frag.vue",
+        "<script setup lang=\"ts\">\ndefineProps<{ label: string }>()\n</script>\n<template><div/><span/></template>",
+    );
+
+    let code = public_api_code(&host, "/src/Frag.vue");
+    assert!(
+        !code.contains("__Verter_RootElementAttrs"),
+        "a multi-root component inherits nothing; Vue warns at runtime:\n{code}"
+    );
+}
+
+/// Recursive propagation: the root is a COMPONENT whose own root is a native
+/// `<div>`. BOTH channels must reach the parent-facing surface — the terminal
+/// element AND the root component's own declared props.
+///
+/// The child's declared `label` is deliberately NOT supplied by the wrapper's
+/// template: that is exactly issue #97's shape. `<Wrap label="x"/>` reaches
+/// `Child` at runtime through `$attrs`, so it must type-check, and the
+/// Verter-owned lint (reading the SAME resolver's `accepted_props`) already
+/// accepts it. A carrier that named only the terminal `<div>` made the two
+/// consumers of one resolver disagree.
+#[test]
+fn component_root_propagates_both_the_terminal_element_and_the_child_declared_props() {
+    let host = strict_host();
+    upsert_vue(&host, "/src/Child.vue", FALLTHROUGH_CHILD_DIV_ROOT);
+    upsert_vue(
+        &host,
+        "/src/Wrap.vue",
+        "<script setup lang=\"ts\">\nimport Child from './Child.vue'\n</script>\n<template><Child /></template>",
+    );
+
+    let code = public_api_code(&host, "/src/Wrap.vue");
+    let ctor = stub_ctor_line(&code);
+    assert!(
+        ctor.contains("__Verter_RootElementAttrs<\"div\">"),
+        "attributes forwarded through a component root reach the terminal native \
+         element and must be accepted there:\n{code}"
+    );
+    assert!(
+        ctor.contains(
+            "__Verter_InheritedComponentProps<typeof import(\"./Child.vue\")[\"default\"], \"label\">"
+        ),
+        "the ROOT COMPONENT's own declared `label` consumes a forwarded attribute \
+         before any element is involved — the resolver already computes it, and \
+         discarding it makes the carrier reject what the Verter lint accepts:\n{code}"
+    );
+    // The two channels are OVERLAID, never intersected. A key the child
+    // declares is consumed there and never reaches the element, so the element
+    // arm must not also constrain it — intersecting collapses any shared name
+    // (`title: number` under a `<div>` root) to `never`.
+    assert!(
+        ctor.contains(
+            "__Verter_FallthroughOverlay<__Verter_RootElementAttrs<\"div\">, \
+             __Verter_InheritedComponentProps<"
+        ),
+        "the element channel must be OVERLAID by the child's declared props, \
+         not intersected with them:\n{code}"
+    );
+    assert!(
+        !ctor.contains("__Verter_RootElementAttrs<\"div\"> & __Verter_InheritedComponentProps"),
+        "a bare `&` between the two channels is the `never`-collision defect:\n{code}"
+    );
+
+    // The child is named through the OWNER's own import specifier, so it
+    // resolves exactly where the owner's own import already resolves — and the
+    // member TYPES come from the child's carrier, never re-spelled here.
+    assert!(
+        !code.contains("\"label\"?:") && !code.contains("label?: string"),
+        "the inherited prop must be a REFERENCE to the child's own type, not a \
+         re-rendered member whose names would resolve in the child's file scope:\n{code}"
+    );
+}
+
+/// The child's root is another COMPONENT that inherits nothing of its own
+/// (`inheritAttrs: false`), so no element is reachable — but the leaf's DECLARED
+/// prop still consumes a forwarded attribute. The resolver marks this branch
+/// `Resolved`; the carrier used to discard the whole thing and reject
+/// `<Wrap tone="red"/>`, which Vue accepts.
+#[test]
+fn component_terminal_chain_still_accepts_the_leaf_declared_props() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Leaf.vue",
+        "<script setup lang=\"ts\">\ndefineOptions({ inheritAttrs: false })\ndefineProps<{ tone: string }>()\n</script>\n<template><div v-bind=\"$attrs\">{{ tone }}</div></template>",
+    );
+    upsert_vue(
+        &host,
+        "/src/Wrap.vue",
+        "<script setup lang=\"ts\">\nimport Leaf from './Leaf.vue'\n</script>\n<template><Leaf /></template>",
+    );
+
+    let code = public_api_code(&host, "/src/Wrap.vue");
+    assert!(
+        stub_ctor_line(&code).contains(
+            "__Verter_InheritedComponentProps<typeof import(\"./Leaf.vue\")[\"default\"], \"tone\">"
+        ),
+        "`tone` is Leaf's OWN declared prop; it is consumed as a prop before \
+         Leaf's inheritance flag is even relevant:\n{code}"
+    );
+    assert!(
+        !code.contains("__Verter_RootElementAttrs"),
+        "Leaf reaches no element (inheritAttrs: false), so NO element attribute \
+         may enter through this branch — that half must stay fail-closed:\n{code}"
+    );
+}
+
+/// A self-referential root is a cycle; the resolver reports the branch
+/// unresolved and unresolved must fail toward NOT widening. NEGATIVE half —
+/// an unresolved branch that silently widened would be an unbounded false
+/// negative.
+#[test]
+fn root_cycle_leaves_parent_facing_props_unwidened() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Loop.vue",
+        "<script setup lang=\"ts\">\nimport Other from './Other.vue'\n</script>\n<template><Other /></template>",
+    );
+    upsert_vue(
+        &host,
+        "/src/Other.vue",
+        "<script setup lang=\"ts\">\nimport Loop from './Loop.vue'\ndefineProps<{ tone?: string }>()\n</script>\n<template><Loop /></template>",
+    );
+
+    let code = public_api_code(&host, "/src/Loop.vue");
+    // The blanket assertion: NO fallthrough construct of any kind. Naming one
+    // helper at a time is what let the component channel through — a new
+    // channel, or the overlay helper, would be invisible to a per-helper list.
+    assert!(
+        !code.contains("__Verter_"),
+        "a root cycle is an unresolved branch and must widen NOTHING — no \
+         element channel, no component channel, no helper at all:\n{code}"
+    );
+    assert!(
+        !code.contains("__Verter_RootElementAttrs"),
+        "a root cycle is an unresolved branch and must not widen:\n{code}"
+    );
+    // The COMPONENT channel is the one a cycle can make self-referential:
+    // `Loop`'s carrier naming `Other`'s carrier naming `Loop`'s is an infinite
+    // type. Checking only the native helper's absence lets that through — the
+    // cycle branch reaches no element, so the native helper would be absent
+    // even if the component channel were emitted.
+    assert!(
+        !code.contains("__Verter_InheritedComponentProps"),
+        "a root cycle must not emit the COMPONENT channel either — that is the \
+         channel a cycle makes self-referential, and it is the one the native \
+         assertion above cannot see:\n{code}"
+    );
+    assert!(
+        !code.contains("import(\"./Other.vue\")"),
+        "the cycle's carrier must not reference its partner's carrier at all:\n{code}"
+    );
+}
+
+/// The owner reaches its root child through a BARREL re-export, so the resolved
+/// child canonical is not the module the owner imports and the member is not
+/// `default`.
+///
+/// Recovering only the module (or assuming `default`) reads a member that does
+/// not exist and degrades the whole channel to `{}` — silently, which is the
+/// worst outcome, because the carrier still LOOKS widened.
+#[test]
+fn barrel_imported_root_component_is_named_by_its_real_namespace_member() {
+    let host = strict_host();
+    upsert_vue(&host, "/src/Child.vue", FALLTHROUGH_CHILD_DIV_ROOT);
+    upsert_non_sfc(
+        &host,
+        "/src/barrel.ts",
+        "export { default as Child } from './Child.vue'\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/Wrap.vue",
+        "<script setup lang=\"ts\">\nimport { Child } from './barrel'\n</script>\n<template><Child /></template>",
+    );
+
+    let code = public_api_code(&host, "/src/Wrap.vue");
+    let ctor = stub_ctor_line(&code);
+    assert!(
+        ctor.contains(
+            "__Verter_InheritedComponentProps<typeof import(\"./barrel\")[\"Child\"], \"label\">"
+        ),
+        "the recovery must invert the resolver's ACTUAL walk — the owner's own \
+         specifier AND the namespace member it binds — not the child's canonical \
+         with a fabricated `default`:\n{code}"
+    );
+    assert!(
+        !ctor.contains("import(\"./barrel\")[\"default\"]")
+            && !ctor.contains("import(\"./barrel\").default"),
+        "`./barrel` has no `default` export; naming one degrades the channel to \
+         `{{}}` without any diagnostic:\n{code}"
+    );
+}
+
+/// A root component the owner reaches through NO importable binding cannot be
+/// named by the carrier. The arm must then contribute NOTHING — not "the
+/// element channel only", which reads as a working widening while rejecting
+/// exactly the props the resolver proved reach the child.
+#[test]
+fn an_unnameable_root_component_zeroes_its_whole_arm() {
+    use verter_compiler::tsc::{FallthroughArm, FallthroughPropsProjection};
+    use verter_semantic::analysis::component_meta::{
+        AcceptedSurfaceCompleteness, BranchStatus, FallthroughBranch, FallthroughPropEntry,
+        FallthroughSurface, InheritedSource, ResolvedRootStep,
+    };
+
+    let branch = FallthroughBranch {
+        branch_key: "0".to_string(),
+        condition_text: None,
+        props: vec![FallthroughPropEntry {
+            name: "label".to_string(),
+            type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+            type_source_scope: None,
+            raw_type: None,
+            sources: vec![InheritedSource::Component {
+                canonical_id: "/src/Child.vue".to_string(),
+            }],
+        }],
+        events: Vec::new(),
+        root_chain: vec![
+            ResolvedRootStep::Component {
+                canonical_id: "/src/Child.vue".to_string(),
+                component_name: "Child".to_string(),
+            },
+            ResolvedRootStep::NativeTag {
+                tag: "div".to_string(),
+            },
+        ],
+        status: BranchStatus::Resolved,
+    };
+    let resolution = crate::types::FallthroughResolution {
+        accepted_props: Vec::new(),
+        accepted_events: Vec::new(),
+        accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface: FallthroughSurface::Branches {
+            branches: vec![branch],
+        },
+        fact_versions: Vec::new(),
+    };
+
+    // CONTROL: with a recoverable reference the SAME branch projects both
+    // channels. Without it, the assertion below would hold for any reason at
+    // all — an empty prop set, a mis-shaped chain, a dropped branch.
+    let nameable = crate::host_resolve::fallthrough_props::project_fallthrough_props(
+        Some(&resolution),
+        &|_| Some(("./Child.vue".to_string(), "default".to_string())),
+    );
+    assert_eq!(
+        nameable.arms,
+        vec![FallthroughArm {
+            root_tag: Some("div".to_string()),
+            root_component_props: Some(verter_compiler::tsc::InheritedComponentProps {
+                module_specifier: "./Child.vue".to_string(),
+                export_name: "default".to_string(),
+                prop_names: vec!["label".to_string()],
+            }),
+        }],
+        "control: a nameable root component projects BOTH channels"
+    );
+
+    let unnameable = crate::host_resolve::fallthrough_props::project_fallthrough_props(
+        Some(&resolution),
+        &|_| None,
+    );
+    assert_eq!(
+        unnameable,
+        FallthroughPropsProjection::none(),
+        "an unnameable root component must zero its whole arm — keeping the \
+         element channel would publish a surface that reads as widened while \
+         rejecting the child's declared props, and that channel could no longer \
+         subtract the child's keys either"
+    );
+}
+
+/// The widening must not vary with the analysis scope: the LSP projection lane
+/// and `verter-tsc` both render this carrier under `AnalysisScope::BUILD`, and
+/// a fix visible only under a full scope would reach neither shipping producer.
+#[test]
+fn parent_facing_widening_is_identical_under_the_batch_typecheck_scope() {
+    let full = strict_host();
+    upsert_vue(&full, "/src/Child.vue", FALLTHROUGH_CHILD_DIV_ROOT);
+    let full_code = public_api_code(&full, "/src/Child.vue");
+
+    let batch = VerterHost::new_standalone(HostConfig::batch_typecheck());
+    upsert_vue(&batch, "/src/Child.vue", FALLTHROUGH_CHILD_DIV_ROOT);
+    let batch_code = batch
+        .get_public_api_batch(&["/src/Child.vue"])
+        .into_iter()
+        .next()
+        .expect("one slot")
+        .expect("no projection error")
+        .expect("a stub")
+        .ts_labeled_code()
+        .to_string();
+
+    assert!(
+        batch_code.contains("__Verter_RootElementAttrs<\"div\">"),
+        "the batch-typecheck scope (verter-tsc, and the LSP projection lane) must \
+         see the same fallthrough surface:\n{batch_code}"
+    );
+    assert_eq!(
+        batch_code, full_code,
+        "carrier bytes must not depend on the analysis scope"
+    );
+}
+
+/// The `$attrs:` instance-member line of the generated stub.
+fn stub_attrs_line(code: &str) -> &str {
+    code.lines()
+        .find(|line| line.trim_start().starts_with("$attrs:"))
+        .unwrap_or_else(|| panic!("no `$attrs:` line in generated stub:\n{code}"))
+}
+
+/// The explicitly-typed attrs surface (`<script setup attrs="…">`) and the
+/// resolved fallthrough widening are SEPARATE surfaces and must compose without
+/// interfering.
+///
+/// `attrs="…"` answers the READ question — what may this component pull out of
+/// its own `$attrs`. The widening answers the WRITE question — what may a
+/// PARENT pass. This pins that the widening neither overwrites, suppresses, nor
+/// duplicates the explicit declaration.
+///
+/// It ALSO records the current shape of the boundary: the explicit attrs type
+/// does NOT enter the parent-facing surface. Under `inheritAttrs: false` the
+/// component's parent-facing surface stays exactly its declared props even when
+/// the author has typed an attrs surface.
+#[test]
+fn explicit_attrs_surface_and_the_fallthrough_widening_do_not_interfere() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Native.vue",
+        "<script setup lang=\"ts\" attrs=\"{ 'data-kind'?: string }\">\ndefineProps<{ label: string }>()\n</script>\n<template><div>{{ label }}</div></template>",
+    );
+
+    let code = public_api_code(&host, "/src/Native.vue");
+    assert!(
+        stub_attrs_line(&code).contains("data-kind"),
+        "the explicitly declared attrs surface must be honoured — the widening \
+         must not overwrite `$attrs` with the default HTMLAttributes:\n{code}"
+    );
+    let ctor = stub_ctor_line(&code);
+    assert!(
+        ctor.contains("__Verter_RootElementAttrs<\"div\">"),
+        "a native root still widens the parent-facing surface alongside an \
+         explicit attrs declaration:\n{code}"
+    );
+    assert_eq!(
+        ctor.matches("data-kind").count(),
+        0,
+        "the explicit attrs type answers the READ question only; it is NOT \
+         double-applied onto the parent-facing surface:\n{code}"
+    );
+
+    // `inheritAttrs: false` + an explicit attrs surface: the component still
+    // types its own `$attrs` exactly as declared, and its parent-facing surface
+    // stays its declared props. The widening does not suppress the declaration,
+    // and the declaration does not resurrect a parent-facing surface.
+    upsert_vue(
+        &host,
+        "/src/NoInherit.vue",
+        "<script setup lang=\"ts\" attrs=\"{ 'data-kind'?: string }\">\ndefineOptions({ inheritAttrs: false })\ndefineProps<{ label: string }>()\n</script>\n<template><div>{{ label }}</div></template>",
+    );
+    let no_inherit = public_api_code(&host, "/src/NoInherit.vue");
+    assert!(
+        stub_attrs_line(&no_inherit).contains("data-kind"),
+        "`inheritAttrs: false` must not suppress the author's explicit attrs \
+         declaration:\n{no_inherit}"
+    );
+    assert!(
+        !no_inherit.contains("__Verter_RootElementAttrs"),
+        "`inheritAttrs: false` still means NO inherited parent-facing surface, \
+         explicit attrs declaration or not:\n{no_inherit}"
+    );
+    assert_eq!(
+        stub_ctor_line(&no_inherit).matches("data-kind").count(),
+        0,
+        "the explicit attrs surface does not reach the parent-facing props type: \
+         declaring `$attrs` types what the component READS, not what a parent \
+         may PASS:\n{no_inherit}"
+    );
+}
+
+/// A conditional root with a DISCRIMINATING prop — the `asInput` case.
+///
+/// What the parent-facing surface is, exactly: the UNION of the two branches'
+/// element props types — the Fallthrough / Root Inheritance rule's "conditional
+/// branches ⇒ exact union", rendered literally. Exactly one branch renders, so
+/// an attribute has to be valid for the branch it lands in, not for both at
+/// once.
+///
+/// An INTERSECTION also happens to accept the union of member NAMES (every
+/// intrinsic member is optional), which is why an arm-count assertion cannot
+/// tell the two compositions apart. It differs on member TYPES: two branches
+/// that type one name differently intersect to `never`, rejecting a value that
+/// is valid on either branch. The assertions below therefore pin the operator,
+/// not the count.
+///
+/// What it is NOT: a generic discriminated on `asInput`. Verter DOES emit a
+/// conditional-root generic — `___VERTER___getRootComponent<T_asInput extends
+/// …>` on the IDE TSX path (see
+/// `conditional_root_narrowing_emits_the_discriminating_generic_on_the_ide_path`)
+/// — but that generic types the component's OWN `$attrs` READ surface, its sole
+/// consumer instantiates it at the default argument (which distributes to both
+/// branches anyway), and it is behind the experimental
+/// `conditional_root_narrowing` flag. Nothing correlates the parent-facing
+/// WRITE surface with the prop's value today, so `<Cond :asInput="false"
+/// checked />` type-checks even though `checked` reaches a `<div>` at runtime.
+/// That is a known, bounded false negative of the union rule, recorded here
+/// rather than left to be rediscovered.
+#[test]
+fn conditional_root_widens_with_the_exact_union_of_both_branch_elements() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Cond.vue",
+        "<script setup lang=\"ts\">\ndefineProps<{ asInput: boolean }>()\n</script>\n<template><input v-if=\"asInput\"><div v-else>fallback</div></template>",
+    );
+
+    let code = public_api_code(&host, "/src/Cond.vue");
+    let ctor = stub_ctor_line(&code);
+    // The exact composition, in branch order. This is the assertion the
+    // arm-count check below cannot make: `&` between the arms passes a count
+    // check identically and is the defect.
+    assert!(
+        ctor.contains(
+            "(Omit<__Verter_RootElementAttrs<\"input\">, \"class\" | \"style\" | \
+             keyof import(\"vue\").PublicProps | keyof ({ asInput: boolean })> & \
+             __Verter_DataAttrs | Omit<__Verter_RootElementAttrs<\"div\">, \"class\" | \
+             \"style\" | keyof import(\"vue\").PublicProps | \
+             keyof ({ asInput: boolean })> & __Verter_DataAttrs)"
+        ),
+        "the branches must compose as an exact UNION, parenthesised so the \
+         caller can splice it into its own `&` chain:\n{code}"
+    );
+    assert!(
+        !ctor.contains("__Verter_RootElementAttrs<\"input\"> & __Verter_RootElementAttrs<\"div\">")
+            && !ctor.contains("keyof ({ asInput: boolean })> & __Verter_DataAttrs & Omit<"),
+        "arms must NOT be intersected: a name two branches type differently \
+         collapses to `never`, so a value valid on either branch is rejected on \
+         both:\n{code}"
+    );
+    assert!(
+        ctor.contains("keyof ({ asInput: boolean })"),
+        "the discriminating prop is DECLARED, so it is excluded from the \
+         widening structurally — otherwise `asInput` would intersect with any \
+         same-named element member:\n{code}"
+    );
+    // The `keyof` subtraction is per ARM, never once around the union: `keyof`
+    // of a union is the INTERSECTION of its members' keys, so one `Omit`
+    // wrapping the union would narrow the surface to the shared keys only.
+    assert_eq!(
+        ctor.matches("keyof ({ asInput: boolean })").count(),
+        2,
+        "each arm carries its own `Omit`; a single `Omit` around the union \
+         silently collapses the surface to the branches' shared keys:\n{code}"
+    );
+    // NEGATIVE: no branch is dropped, and no branch is turned into a
+    // prop-discriminated conditional at this surface. A projection that emitted
+    // only one arm would silently reject the other branch's attributes.
+    assert_eq!(
+        ctor.matches("__Verter_RootElementAttrs<").count(),
+        2,
+        "exactly two arms — one per branch; a dropped arm is a false positive \
+         and a fabricated one is a false negative:\n{code}"
+    );
+    assert!(
+        !ctor.contains("extends true ?") && !ctor.contains("T_asInput"),
+        "the parent-facing surface carries NO prop-discriminated conditional \
+         today; if one is ever added, this test is the place that says so:\n{code}"
+    );
+}
+
+/// Every generation path that produces a PARENT-FACING carrier must carry the
+/// widening. Three of them returned before it was ever applied:
+/// `generate_options_api_stub` (Options API / `defineComponent`),
+/// `generate_empty_stub` (scriptless), and `generate_declaration_empty_stub`.
+///
+/// Left unwidened, those carriers do not merely lose their own fallthrough
+/// surface — they break the widening's TRANSITIVITY. An ancestor's component
+/// channel reads its root child's `$props` off the child's carrier, so
+/// `A → B(Options API) → C` silently rejects a prop `C` declares.
+#[test]
+fn options_api_and_scriptless_carriers_carry_the_widening() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Opt.vue",
+        "<script lang=\"ts\">\nimport { defineComponent } from 'vue'\nexport default defineComponent({\n  props: { declared: { type: String, required: false } },\n})\n</script>\n<template><div/></template>",
+    );
+    upsert_vue(&host, "/src/Bare.vue", "<template><a/></template>");
+
+    let options = public_api_code(&host, "/src/Opt.vue");
+    assert!(
+        options.contains("__Verter_RootElementAttrs<\"div\">"),
+        "an Options-API carrier's parent-facing surface must be widened with \
+         its resolved root element:\n{options}"
+    );
+    assert!(
+        options.contains("InstanceType<typeof __Verter_ComponentOptions>[\"$props\"]"),
+        "the widening must PRESERVE the Options-API component's own declared \
+         props, not replace its construct signature with a fallthrough-only \
+         one:\n{options}"
+    );
+    // The exclusion operand is the RAW `$props`. What that operand must be is
+    // a TYPE-LEVEL question, not a spelling one, and it is decided against a
+    // real engine by
+    // `augmented_custom_props_are_not_re_constrained_by_the_inherited_element`
+    // (`tests/cases/vue_macro_tsc_typecheck_gate.rs`), which type-checks the
+    // outcome under an augmented `ComponentCustomProps`. This assertion only
+    // pins that the operand is not silently narrowed back to the component's
+    // own declarations, which is the shape that reintroduces the collision.
+    assert!(
+        options.contains("keyof (InstanceType<typeof __Verter_ComponentOptions>[\"$props\"])")
+            && !options.contains("keyof import(\"vue\").PublicProps>)"),
+        "the Options-API stub must subtract `keyof` of the RAW `$props` — that \
+         is the set of names the props type already constrains, and it is what \
+         carries a project's augmented `ComponentCustomProps` members:\n{options}"
+    );
+    // BOTH parent-facing sites. Vue's JSX reads the INSTANCE's `$props`, so a
+    // widening applied only to the construct-signature parameter changes
+    // nothing a consumer sees.
+    assert!(
+        options.contains("$props: InstanceType<typeof __Verter_ComponentOptions>[\"$props\"] & Omit<__Verter_RootElementAttrs<\"div\">"),
+        "the instance `$props` member is the site a `<Comp …/>` check actually \
+         reads (`JSX.ElementAttributesProperty`); widening only the constructor \
+         parameter is invisible:\n{options}"
+    );
+    assert!(
+        !options.contains("export default defineComponent"),
+        "the authored default export must be rebound to a local so the widened \
+         view can be the module's default:\n{options}"
+    );
+
+    // DECLARATION mode has its OWN empty-stub generator
+    // (`generate_declaration_empty_stub`) — a `.d.ts`-legal pure-type carrier
+    // with no runtime `defineComponent(…)` call. It is a THIRD code path, not a
+    // mode switch on the runtime one, so a public-mode assertion says nothing
+    // about it: reverting its widening alone leaves every other case green.
+    let declaration = public_api_code_with_mode(&host, "/src/Bare.vue", PublicApiMode::Declaration);
+    assert!(
+        declaration.contains("__Verter_RootElementAttrs<\"a\">"),
+        "the declaration-only empty stub is parent-facing too and must be \
+         widened with its resolved root element:\n{declaration}"
+    );
+    assert!(
+        declaration.contains(
+            "$props: InstanceType<import(\"vue\").DefineComponent<{}, {}, any>>[\"$props\"]"
+        ),
+        "and it must widen the INSTANCE `$props` member, the site a `<Comp …/>` \
+         check actually reads:\n{declaration}"
+    );
+    // DECLARATION-SAFETY, the property that makes this a separate generator:
+    // no runtime value may appear. `__OmitNew` and the widened `declare const`
+    // are pure type constructs.
+    assert!(
+        !declaration.contains("import { defineComponent }")
+            && !declaration.contains("const __comp ="),
+        "a declaration-mode carrier must stay `.d.ts`-legal — no value import, \
+         no runtime `defineComponent(…)` call, no `__comp` binding:\n{declaration}"
+    );
+
+    let bare = public_api_code(&host, "/src/Bare.vue");
+    assert!(
+        bare.contains("__Verter_RootElementAttrs<\"a\">"),
+        "a scriptless carrier is parent-facing too, and its root element is \
+         resolved exactly the same way:\n{bare}"
+    );
+    assert!(
+        bare.contains("InstanceType<typeof __comp>"),
+        "the scriptless stub keeps its component identity; only the \
+         parent-facing props type is widened:\n{bare}"
+    );
+
+    // NEGATIVE: a carrier the resolver widens NOTHING for stays byte-identical
+    // to the un-widened stub — no helper, no `__OmitNew`, no construct
+    // signature. Without this half, "always widen" would pass the assertions
+    // above.
+    upsert_vue(&host, "/src/Frag.vue", "<template><div/><span/></template>");
+    let fragment = public_api_code(&host, "/src/Frag.vue");
+    assert!(
+        !fragment.contains("__Verter_RootElementAttrs")
+            && !fragment.contains("__OmitNew")
+            && fragment.contains("declare const Frag: typeof __comp"),
+        "a multi-root carrier inherits nothing, so its stub must stay exactly \
+         the un-widened one:\n{fragment}"
+    );
+}
+
+/// The transitive chain the Options-API gap broke: `A → B(Options API) → C`.
+///
+/// `A`'s component channel names `B`'s carrier and asks it for `leafProp` —
+/// a prop declared by `C`, two hops down. That only resolves because `B`'s
+/// Options-API carrier is itself widened, so `leafProp` is a member of `B`'s
+/// `$props`. The `verter_tsc` fixture
+/// `AcceptLeafPropThroughOptionsApiMiddle.vue` type-checks the same chain
+/// against a real engine.
+#[test]
+fn multi_hop_chain_through_an_options_api_middle_reaches_the_leaf_prop() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Leaf.vue",
+        "<script setup lang=\"ts\">\ndefineProps<{ leafProp?: number }>()\n</script>\n<template><div>{{ leafProp }}</div></template>",
+    );
+    upsert_vue(
+        &host,
+        "/src/Middle.vue",
+        "<script lang=\"ts\">\nimport { defineComponent } from 'vue'\nimport Leaf from './Leaf.vue'\nexport default defineComponent({ components: { Leaf } })\n</script>\n<template><Leaf/></template>",
+    );
+    upsert_vue(
+        &host,
+        "/src/Top.vue",
+        "<script setup lang=\"ts\">\nimport Middle from './Middle.vue'\n</script>\n<template><Middle/></template>",
+    );
+
+    // The MIDDLE carrier is the load-bearing half: it must expose `leafProp` on
+    // its own parent-facing surface, or the top's reference resolves to nothing.
+    let middle = public_api_code(&host, "/src/Middle.vue");
+    assert!(
+        middle.contains(
+            "__Verter_InheritedComponentProps<typeof import(\"./Leaf.vue\")[\"default\"], \"leafProp\">"
+        ),
+        "the Options-API middle must carry its own root child's declared props, \
+         or the chain is severed at this hop:\n{middle}"
+    );
+
+    let top = public_api_code(&host, "/src/Top.vue");
+    assert!(
+        top.contains(
+            "__Verter_InheritedComponentProps<typeof import(\"./Middle.vue\")[\"default\"], \"leafProp\">"
+        ),
+        "the top names only its DIRECT root child and asks it for `leafProp`; \
+         the deeper hop is TypeScript's to follow:\n{top}"
+    );
+}
+
+/// A namespace-member root (`import * as Ns; <Ns.Child/>`) is NOT supported,
+/// and fails closed with a typed reason rather than silently.
+///
+/// The drop happens UPSTREAM of anything the fallthrough projection owns.
+/// `template_convert::convert_raw_to_analysis` attaches an import source by
+/// matching the COMPLETE tag against an import's local name
+/// (`template_convert.rs`: `name == &c.tag_name || *name == pascal_tag`), and
+/// `Ns.Child` never equals `Ns`. So the usage reaches the resolver with
+/// `import_source: None`, the resolver classifies the root target
+/// `UnresolvedRootTargetReason::UnresolvedImport`, and one unresolved branch
+/// zeroes the whole projection. `owner_import_reference_for`'s namespace skip
+/// is a CONSEQUENCE of that, not the cause: the recovery is never reached for
+/// this shape, so removing the skip would change nothing.
+///
+/// Supporting it means splitting the qualifier in template conversion and
+/// teaching child resolution to take a namespace MEMBER — both in the shared
+/// contract every `TemplateComponentUsage` consumer reads (component-meta, the
+/// `verter/unknown-prop` lint, diagnostics), not in this projection. It is
+/// recorded as unsupported rather than attempted here.
+///
+/// This test is a CHARACTERIZATION: it must be updated, not deleted, the day
+/// the shape is supported. Its control half is what keeps it honest — the same
+/// barrel, the same child, imported as a NAMED binding, DOES widen, so a
+/// regression that broke barrel imports generally could not hide here.
+#[test]
+fn a_namespace_member_root_fails_closed_with_a_typed_unresolved_reason() {
+    use verter_semantic::analysis::component_meta::{
+        BranchStatus, FallthroughSurface, ResolvedRootStep, UnresolvedBranchReason,
+        UnresolvedRootTargetReason,
+    };
+
+    let host = strict_host();
+    upsert_vue(&host, "/src/Child.vue", FALLTHROUGH_CHILD_DIV_ROOT);
+    upsert_non_sfc(
+        &host,
+        "/src/barrel.ts",
+        "export { default as Child } from './Child.vue'\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/NamespaceWrap.vue",
+        "<script setup lang=\"ts\">\nimport * as Ns from './barrel'\n</script>\n<template><Ns.Child /></template>",
+    );
+
+    // The template usage carries NO import source — the upstream cause.
+    let analysis = host
+        .get_analysis("/src/NamespaceWrap.vue")
+        .expect("analysis");
+    let usage = analysis
+        .template
+        .as_ref()
+        .and_then(|template| template.components.first())
+        .expect("the namespace-member usage is recorded");
+    assert_eq!(usage.name, "Ns.Child");
+    assert!(
+        usage.import_source.is_none(),
+        "the COMPLETE tag is matched against import locals, so `Ns.Child` \
+         attaches no source; that is where support would have to start"
+    );
+
+    // The resolver says so in its own vocabulary, rather than reporting a
+    // resolved branch that inherits nothing.
+    let resolution = host
+        .resolve_fallthrough_surface("/src/NamespaceWrap.vue")
+        .expect("a resolution");
+    let FallthroughSurface::Branches { branches } = &resolution.fallthrough_surface else {
+        panic!(
+            "expected a branch surface, got {:?}",
+            resolution.fallthrough_surface
+        );
+    };
+    assert_eq!(branches.len(), 1);
+    assert!(
+        matches!(
+            branches[0].status,
+            BranchStatus::Unresolved {
+                reason: UnresolvedBranchReason::RootTarget {
+                    reason: UnresolvedRootTargetReason::UnresolvedImport
+                }
+            }
+        ),
+        "the branch must be UNRESOLVED with the typed import reason, never a \
+         resolved branch that quietly contributes nothing: {:?}",
+        branches[0].status
+    );
+    assert!(
+        matches!(
+            branches[0].root_chain.first(),
+            Some(ResolvedRootStep::Unresolved { .. })
+        ),
+        "and its root chain must record the unresolved target: {:?}",
+        branches[0].root_chain
+    );
+
+    // Fail CLOSED: an unresolved branch widens nothing at all — a false
+    // positive on a forwarded attribute, never a false negative.
+    let code = public_api_code(&host, "/src/NamespaceWrap.vue");
+    assert!(
+        !code.contains("__Verter_"),
+        "an unresolved root target must widen nothing — no element channel, no \
+         component channel, no helper:\n{code}"
+    );
+
+    // CONTROL: the same barrel and the same child, reached through a NAMED
+    // import, DO widen. Without this the assertions above would pass equally
+    // if barrel imports had regressed wholesale.
+    upsert_vue(
+        &host,
+        "/src/NamedWrap.vue",
+        "<script setup lang=\"ts\">\nimport { Child } from './barrel'\n</script>\n<template><Child /></template>",
+    );
+    let control = public_api_code(&host, "/src/NamedWrap.vue");
+    assert!(
+        control.contains(
+            "__Verter_InheritedComponentProps<typeof import(\"./barrel\")[\"Child\"], \"label\">"
+        ),
+        "control: the NAMED spelling of the same import resolves and widens, so \
+         the namespace result above is about the namespace shape only:\n{control}"
+    );
 }

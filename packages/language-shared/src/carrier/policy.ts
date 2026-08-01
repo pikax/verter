@@ -1,5 +1,6 @@
 import { VIRTUAL_FILE_NAMING, type VirtualPathPolicy } from "../virtual-file-naming.generated";
-import { normalizePath } from "./naming";
+import { normalizePath, toImportSurfaceFileName } from "./naming";
+import type { CarrierStoreReader } from "./store";
 
 // The carrier script-kind / root-membership POLICY — the single shared answer
 // to "what ScriptKind does a generated carrier file get" and "how does it
@@ -152,4 +153,98 @@ export function scriptKindForCarrier<T>(fileName: string, ts: CarrierTsFacade<T>
  */
 export function carrierRootMembership(fileName: string): CarrierRootMembership | null {
   return carrierVirtualRuleFor(fileName)?.membership ?? null;
+}
+
+// ── the ordinary-import target ────────────────────────────────────────────
+
+/** Why an ordinary carrier import resolves to no Verter-owned surface. */
+export type CarrierImportAbstainReason =
+  /** `source` is not a component carrier (a plain module, a generated virtual, a rune module). */
+  | "notCarrier"
+  /** The owning project does not (yet) own the carrier's import surface. */
+  | "unowned";
+
+/**
+ * Where an ORDINARY module import of a carrier source resolves.
+ * `resolve` carries the manifest-owned provider path; `abstain` means the host
+ * must fall through to TypeScript's own resolution.
+ */
+export type CarrierImportTarget =
+  | { readonly kind: "resolve"; readonly provider: string }
+  | { readonly kind: "abstain"; readonly reason: CarrierImportAbstainReason };
+
+/**
+ * The owned-set slice [`resolveCarrierImportTarget`] consults. `canonicalPath`
+ * is the host's filesystem identity policy (Windows drive-letter case,
+ * NTFS/APFS folding); a reader that omits it gets exact normalized comparison.
+ */
+export type CarrierImportOwnershipReader = Pick<
+  CarrierStoreReader,
+  "ownedSourceFor" | "canonicalPath"
+>;
+
+/**
+ * The SINGLE policy answer to "what does `import X from './Comp.vue'` resolve
+ * to" — ONE target for EVERY host that serves carriers through a
+ * `resolveModuleNameLiterals` override (the Node tsserver plugin and the
+ * browser/WASM in-context service), and identical for every component adapter
+ * (Vue and Svelte read the same descriptor row; there is no per-framework
+ * branch).
+ *
+ * There is deliberately no per-host mode. A host that rewrites the specifier
+ * itself can name any published surface, so "which one" is a POLICY question
+ * with one answer, not a capability question with several. The engine that does
+ * NOT get a say is native tsgo, which has no host plugin and finds the
+ * `importDriven` declaration carrier (`Comp.d.vue.ts`) through its own
+ * basename-append probe — that path never reaches this function, so it must not
+ * shape it.
+ *
+ * Three rules, all fail-closed:
+ *
+ * 1. **The target is the descriptor-generated import surface, or nothing.** The
+ *    candidate path comes from [`toImportSurfaceFileName`] (the `importSurface`
+ *    column) — never a literal. So an ordinary import can NEVER be handed the
+ *    IDE `CarrierIde` companion: the JSX/TSX editor surface whose `.tsx`
+ *    extension makes TypeScript demand `--jsx` from the consuming project, and
+ *    whose template lowering is an editing artifact rather than the component's
+ *    public contract. A JavaScript-authored carrier (published as `.jsx` for the
+ *    editor) still resolves to the one TypeScript import surface.
+ * 2. **The owning project must OWN that exact surface.** The store is consulted
+ *    for a `CarrierApi` row, and its `provider_uri` must BE the derived path.
+ *    The reader contract matches a query against either `source_uri` or
+ *    `provider_uri`, so a row reachable by the derived spelling could otherwise
+ *    redirect an import to an unrelated provider — including a JSX one.
+ * 3. **Anything else abstains.** A fabricated path the project does not own
+ *    would resolve to a file nothing can serve — a sticky `TS2307` — so an
+ *    unowned carrier lets TypeScript's own answer stand until publication
+ *    advances.
+ *
+ * Readiness is deliberately NOT decided here: ownership is a manifest fact,
+ * while "is the content published yet" is the caller's concern (the plugin's
+ * bounded cold read; the in-context host's ready check).
+ *
+ * The returned provider is the MANIFEST-owned identity (not the caller's
+ * spelling of the source path), because the store, content reads and
+ * ready-version bookkeeping all key on the path the publisher wrote.
+ */
+export function resolveCarrierImportTarget(
+  reader: CarrierImportOwnershipReader,
+  sourcePath: string,
+): CarrierImportTarget {
+  const surface = toImportSurfaceFileName(sourcePath);
+  if (surface === null) {
+    return { kind: "abstain", reason: "notCarrier" };
+  }
+  const owned = reader.ownedSourceFor(surface);
+  if (owned === undefined || owned.role !== "CarrierApi") {
+    return { kind: "abstain", reason: "unowned" };
+  }
+  const provider = normalizePath(owned.provider_uri);
+  // Compared through the HOST's identity policy, so a case-insensitive host
+  // still matches a drive-case/separator variant of the same published path.
+  const identity = (p: string) => reader.canonicalPath?.(p) ?? normalizePath(p);
+  if (identity(provider) !== identity(surface)) {
+    return { kind: "abstain", reason: "unowned" };
+  }
+  return { kind: "resolve", provider };
 }

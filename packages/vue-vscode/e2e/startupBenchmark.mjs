@@ -4,6 +4,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { downloadAndUnzipVSCode, runTests } from "@vscode/test-electron";
 
+const { prepareFixtureWorkspace } = await import("../out-test/e2e/lib/fixtureDeps.js");
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const extensionDevelopmentPath = path.resolve(__dirname, "..");
 const extensionTestsPath = path.resolve(
@@ -32,7 +34,15 @@ main().catch((error) => {
 async function main() {
   fs.mkdirSync(resultsDir, { recursive: true });
 
-  const fixtureDir = path.resolve(__dirname, "fixtures", fixtureName);
+  // The SHARED preparation. `@vscode/test-electron` is used directly here, and
+  // it does not read `.vscode-test.mjs`, so nothing checked what was in this
+  // fixture's `node_modules` before it was measured — a stale dependency shows
+  // up on this surface as a performance number rather than a failure.
+  const { workspace: fixtureDir, decision } = prepareFixtureWorkspace(
+    path.resolve(__dirname, "fixtures"),
+    { rawFixture: fixtureName },
+  );
+  console.log(`Fixture dependencies: ${decision.reason}`);
   const workspaceFile = createWorkspaceOverlay(fixtureDir);
   const fileToOpen = path.join(fixtureDir, appVueRelativePath);
   const vscodeExecutablePath = await downloadAndUnzipVSCode("stable");

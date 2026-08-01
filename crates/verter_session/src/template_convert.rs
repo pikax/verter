@@ -50,15 +50,7 @@ impl<'a> UnusedDeclarationContext<'a> {
         let use_slots_called = vue_api_calls
             .iter()
             .any(|call| matches!(call.api, VueApiClassification::UseSlots));
-        let props_binding = macros
-            .iter()
-            .find(|m| {
-                matches!(
-                    m.kind,
-                    AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
-                )
-            })
-            .and_then(|m| m.binding_name.as_deref());
+        let props_binding = verter_semantic::analysis::props_root_binding(macros);
         let props_root_used_in_style = props_binding.is_some_and(|name| {
             bindings
                 .iter()
@@ -669,16 +661,7 @@ fn populate_unused_declaration_facts(
         };
 
     // ── Props ──
-    let props_root = ctx
-        .macros
-        .iter()
-        .find(|m| {
-            matches!(
-                m.kind,
-                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
-            )
-        })
-        .and_then(|m| m.binding_name.as_deref());
+    let props_root = verter_semantic::analysis::props_root_binding(ctx.macros);
     let props_root_template = match props_root {
         Some(root) => bounded_member_reads(tpl, root),
         None => Some(FxHashSet::default()),

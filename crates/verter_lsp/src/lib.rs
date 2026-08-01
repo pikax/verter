@@ -78,6 +78,7 @@ pub mod carrier_cache;
 mod carrier_provider_projection;
 pub mod carrier_registry;
 pub mod config;
+pub mod configured_owner;
 pub mod css;
 pub mod documents;
 pub mod editor_tsserver;

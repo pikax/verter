@@ -23,9 +23,16 @@ servers. It ships **no grammar of its own** and attaches to Lapce's `vue` /
    rustup target add wasm32-wasip1
    ```
 
-2. **A built `verter-lsp` binary.** v0 does **not** auto-download it (managed
-   download is a roadmap item — see [Troubleshooting](#troubleshooting)). Build
-   it from the repo root:
+2. **A `verter-lsp` binary.** v0 does **not** auto-download it (managed download
+   is a roadmap item — see [Troubleshooting](#troubleshooting)). Install it from
+   npm:
+
+   ```bash
+   pnpm add -D verter-lsp
+   npx verter-lsp --print-server-path   # the absolute path for the config below
+   ```
+
+   Or build it from the repo root:
 
    ```bash
    cargo build -p verter_lsp --release
@@ -70,7 +77,7 @@ unpacked volt folder into Lapce's plugins directory. The folder must contain the
 `volt.toml` manifest plus the built wasm at the path the manifest names:
 
 ```
-<plugins>/verter/
+<plugins>/verter-volt/
 ├── volt.toml
 └── bin/
     └── verter-lapce.wasm
@@ -83,7 +90,7 @@ the volt folder**, so this exact layout is required.
 
 From the repo root, run the cross-platform helper — it builds the wasm, finds
 your OS's Lapce plugins directory, copies `volt.toml` + the wasm into
-`<plugins>/verter/`, and prints the exact `lsp.serverPath` snippet (with the
+`<plugins>/verter-volt/`, and prints the exact `lsp.serverPath` snippet (with the
 absolute `verter-lsp` path filled in) for you to paste into your Lapce settings:
 
 ```bash
@@ -121,21 +128,24 @@ The channel segment varies by the Lapce build you run — `Lapce-Stable`,
 find it on any platform: in Lapce, open the command palette and run **"Open
 Plugins Directory"**.
 
-Create `<plugins>/verter/`, then copy `extensions/lapce/volt.toml` and
+Create `<plugins>/verter-volt/`, then copy `extensions/lapce/volt.toml` and
 `extensions/lapce/bin/verter-lapce.wasm` (preserving the `bin/` subfolder) into
 it. Restart Lapce or reload plugins.
 
 ## Required config
 
-Lapce surfaces the volt's `[config."…"]` keys as settings you set under the
-`volt.verter` namespace; the volt forwards them to `verter-lsp` as nested
-`initializationOptions`. The **simplest correct setup** points the volt at your
-built binary with an absolute path:
+Lapce looks up plugin settings by the volt's `name` field (`verter-volt` from
+`volt.toml`) as a **top-level** table in `settings.toml` — e.g. `[verter-volt]`.
+(A nested path like `[volt.verter-volt]` does **not** match Lapce's lookup, which
+is keyed on `meta.name` alone.) Dotted keys from `[config."a.b"]` are unflattened
+into nested `initializationOptions` (`options["a"]["b"]`) before they reach the
+wasm plugin. The **simplest correct setup** points the volt at your built binary
+with an absolute path:
 
 ```toml
 # Lapce settings (settings.toml) — Verter volt configuration
 
-[volt.verter]
+[verter-volt]
 # Highest-precedence discovery: an explicit, ABSOLUTE verter-lsp path. Use the
 # binary you built with `cargo build -p verter_lsp --release`.
 # Windows: use the .exe and forward slashes, e.g. "C:/dev/verter/target/release/verter-lsp.exe"
@@ -153,7 +163,7 @@ Instead of an absolute path, you can opt into PATH discovery. Leave
 **opt-in** so a stale binary on `PATH` can't silently break version coupling):
 
 ```toml
-[volt.verter]
+[verter-volt]
 "lsp.serverSource" = "path"   # look up `verter-lsp` (or verter-lsp.exe) on PATH
 "typeProvider" = "tsgo"
 ```
@@ -164,7 +174,7 @@ These map directly to the server's `initializationOptions` (the same parity set
 every Verter editor client ships). All are optional; defaults shown:
 
 ```toml
-[volt.verter]
+[verter-volt]
 "lint.enabled" = false               # enable Verter lint diagnostics
 "lint.preset" = "recommended"        # essential | recommended | all | performance | a11y | strict
 "inlayHints.enabled" = true

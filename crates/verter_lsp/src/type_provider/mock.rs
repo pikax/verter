@@ -167,6 +167,15 @@ mod inner {
         /// recovery contract: a failed provider hover must resync+retry,
         /// never vanish silently.
         fail_next_hovers: usize,
+        /// As `fail_next_hovers`, for `get_definition`: while > 0, each call
+        /// RECORDS itself and returns `Err` (a transient provider/transport
+        /// failure), decrementing the counter. Pins the definition handler's
+        /// resync+retry-once recovery — the same no-silent-empty contract
+        /// hover holds, without which a member-position CTRL+CLICK vanishes
+        /// while hover at the same cursor recovers.
+        fail_next_definitions: usize,
+        /// As `fail_next_definitions`, for `get_type_definition`.
+        fail_next_type_definitions: usize,
         /// When `true`, `get_definition` RECORDS its call and then returns a
         /// future that NEVER resolves, simulating a wedged type provider (a
         /// managed tsgo stuck in a busy dispatch loop). Drives the handler
@@ -245,6 +254,28 @@ mod inner {
             std::sync::Arc<tokio::sync::Notify>,
             std::sync::Arc<tokio::sync::Notify>,
         )>,
+        /// One-shot async gate for `get_rename_locations`, used to move project
+        /// ownership after rename admission while the provider response is still
+        /// in flight.
+        #[allow(clippy::type_complexity)]
+        rename_block: Option<(
+            String,
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+        /// One-shot async gate for `configure_paths`, used to hold background
+        /// initialization after it installs a rebuilt ownership authority but
+        /// before it publishes the rebuilt workspace root.
+        #[allow(clippy::type_complexity)]
+        configure_paths_block: Option<(
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+        /// The configured-owner authority most recently installed by background
+        /// initialization. Tests query it to prove the provider has crossed the
+        /// ownership transition while the published root is deliberately held old.
+        project_ownership:
+            Option<std::sync::Arc<dyn verter_type_runtime::traits::ConfiguredOwnerAuthority>>,
         /// Test seam: when set to `Some((path, callback))`, the FIRST `open_file`
         /// whose path equals `path` RECORDS its call, takes the callback (one-shot)
         /// and RUNS it synchronously — after releasing the state lock and before
@@ -303,6 +334,22 @@ mod inner {
         pub fn fail_next_hovers(&self, count: usize) {
             let mut state = self.state.lock().unwrap();
             state.fail_next_hovers = count;
+        }
+
+        /// Script the next `count` `get_definition` calls to fail with `Err`
+        /// (transient provider/transport failure) before normal responses
+        /// resume.
+        pub fn fail_next_definitions(&self, count: usize) {
+            let mut state = self.state.lock().unwrap();
+            state.fail_next_definitions = count;
+        }
+
+        /// Script the next `count` `get_type_definition` calls to fail with
+        /// `Err` (transient provider/transport failure) before normal
+        /// responses resume.
+        pub fn fail_next_type_definitions(&self, count: usize) {
+            let mut state = self.state.lock().unwrap();
+            state.fail_next_type_definitions = count;
         }
 
         /// Make every subsequent `get_definition` RECORD its call and then hang
@@ -613,6 +660,51 @@ mod inner {
             self.state.lock().unwrap().completion_block =
                 Some((path.to_string(), arrived.clone(), release.clone()));
             (arrived, release)
+        }
+
+        /// Pause the next `get_rename_locations` for `path`, signalling
+        /// `arrived` before awaiting `release`.
+        pub fn block_get_rename_locations(
+            &self,
+            path: &str,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().rename_block =
+                Some((path.to_string(), arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        /// Pause the next `configure_paths`, signalling `arrived` before awaiting
+        /// `release`. Background init installs provider ownership before this
+        /// call, while publishing the rebuilt root after it.
+        pub fn block_configure_paths(
+            &self,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().configure_paths_block =
+                Some((arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        /// Query the provider's currently installed ownership authority.
+        pub fn configured_owner(
+            &self,
+            canonical_id: &str,
+        ) -> Option<verter_type_runtime::traits::ProjectOwnership> {
+            self.state
+                .lock()
+                .unwrap()
+                .project_ownership
+                .as_ref()
+                .map(|authority| authority.configured_owner(canonical_id))
         }
     }
 
@@ -1152,12 +1244,18 @@ mod inner {
         }
 
         fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-            let (result, on_query, hang) = {
+            let (result, on_query, fail, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetDefinition {
                     path: path.to_string(),
                     offset,
                 });
+                let fail = if state.fail_next_definitions > 0 {
+                    state.fail_next_definitions -= 1;
+                    true
+                } else {
+                    false
+                };
                 let result = state
                     .definition_responses
                     .iter()
@@ -1170,7 +1268,7 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query, state.hang_definition)
+                (result, on_query, fail, state.hang_definition)
             };
             if hang {
                 // A wedged provider: never resolves. The handler must fail closed
@@ -1182,7 +1280,14 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move { Ok(result) })
+            Box::pin(async move {
+                if fail {
+                    return Err(TypeProviderError::new(
+                        "scripted transient definition failure".to_string(),
+                    ));
+                }
+                Ok(result)
+            })
         }
 
         fn get_type_definition(
@@ -1195,13 +1300,26 @@ mod inner {
                 path: path.to_string(),
                 offset,
             });
+            let fail = if state.fail_next_type_definitions > 0 {
+                state.fail_next_type_definitions -= 1;
+                true
+            } else {
+                false
+            };
             let result = state
                 .type_definition_responses
                 .iter()
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, locs)| locs.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            Box::pin(async move {
+                if fail {
+                    return Err(TypeProviderError::new(
+                        "scripted transient type-definition failure".to_string(),
+                    ));
+                }
+                Ok(result)
+            })
         }
 
         fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
@@ -1238,18 +1356,34 @@ mod inner {
             path: &str,
             offset: u32,
         ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-            let mut state = self.state.lock().unwrap();
-            state.calls.push(MockCall::GetRenameLocations {
-                path: path.to_string(),
-                offset,
-            });
-            let result = state
-                .rename_responses
-                .iter()
-                .find(|(p, o, _)| p == path && *o == offset)
-                .map(|(_, _, locs)| locs.clone())
-                .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            let (result, block) = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::GetRenameLocations {
+                    path: path.to_string(),
+                    offset,
+                });
+                let result = state
+                    .rename_responses
+                    .iter()
+                    .find(|(p, o, _)| p == path && *o == offset)
+                    .map(|(_, _, locs)| locs.clone())
+                    .unwrap_or_default();
+                let block = match &state.rename_block {
+                    Some((armed_path, _, _)) if armed_path == path => state
+                        .rename_block
+                        .take()
+                        .map(|(_, arrived, release)| (arrived, release)),
+                    _ => None,
+                };
+                (result, block)
+            };
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                Ok(result)
+            })
         }
 
         fn get_signature_help(
@@ -1389,12 +1523,21 @@ mod inner {
             base_url: &str,
             paths: serde_json::Value,
         ) -> ProviderFuture<'_, ()> {
-            let mut state = self.state.lock().unwrap();
-            state.calls.push(MockCall::ConfigurePaths {
-                base_url: base_url.to_string(),
-                paths,
-            });
-            Box::pin(async { Ok(()) })
+            let block = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::ConfigurePaths {
+                    base_url: base_url.to_string(),
+                    paths,
+                });
+                state.configure_paths_block.take()
+            };
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                Ok(())
+            })
         }
 
         fn update_workspace_folders(
@@ -1407,6 +1550,18 @@ mod inner {
                 .calls
                 .push(MockCall::UpdateWorkspaceFolders { added, removed });
             Box::pin(async { Ok(()) })
+        }
+
+        fn set_project_ownership(
+            &self,
+            authority: std::sync::Arc<dyn verter_type_runtime::traits::ConfiguredOwnerAuthority>,
+        ) {
+            // Test-only divergence from production: this stores the assigned
+            // authority only for `configured_owner` assertions. Mock opens,
+            // updates, and queries never consult it, and the inherited
+            // `resync_open_files` is a no-op, so this provider cannot model
+            // per-file project rebinding after an ownership change.
+            self.state.lock().unwrap().project_ownership = Some(authority);
         }
     }
 }

@@ -8,16 +8,21 @@ Guide for setting up Rust development for Verter.
 
 ## Prerequisites
 
-- **Rust stable toolchain** via [rustup](https://rustup.rs/)
-- **WASM target** for browser builds: `rustup target add wasm32-unknown-unknown`
+- **[rustup](https://rustup.rs/)**. Do not install a toolchain by hand: `rust-toolchain.toml`
+  pins the exact compiler version, plus `rustfmt`, `clippy`, and the
+  `wasm32-unknown-unknown` target, and rustup installs all of them the first time you run
+  `cargo` in the repo. The pin exists because ~27 trybuild `.stderr` fixtures byte-pin
+  rustc's own diagnostic text; building on any other version reports failures that are not
+  yours.
 - **wasm-bindgen CLI** for WASM glue generation: `cargo install wasm-bindgen-cli --version 0.2.122 --locked`
 
-Verify your installation:
+Verify your installation — `rustc` must report the version in `rust-toolchain.toml`:
 
 ```bash
 rustc --version
 cargo --version
-wasm-bindgen --version   # only needed for WASM builds
+rustup show active-toolchain   # should say "overridden by .../rust-toolchain.toml"
+wasm-bindgen --version         # only needed for WASM builds
 ```
 
 ## Project Structure

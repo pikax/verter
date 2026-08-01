@@ -405,23 +405,17 @@ impl VerterHost {
                 if ctx.footprint_capture {
                     if let Some(acc) = ctx.audit_accumulator.as_ref() {
                         let state = acc.drain();
-                        // Direct imports of the entry: extract from
-                        // the entry's shallow surface so the file-
-                        // role classifier can distinguish first-level
-                        // imports (`DirectImport`) from deeper-closure
-                        // files (`TransitiveImport`). When the shallow
-                        // surface is not yet available (rare cold
-                        // path), the empty set falls back to
-                        // `DirectImport` for every non-Entry file.
-                        let direct_imports: rustc_hash::FxHashSet<String> = self
-                            .shallow_file_state(ctx.canonical_id.as_ref())
-                            .map(|sfs| {
-                                sfs.import_targets
-                                    .values()
-                                    .map(|t| t.canonical_id.clone())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                        // Direct imports of the entry: the entry's
+                        // AUTHORED specifiers resolved through the one
+                        // route-edge authority, so the file-role
+                        // classifier can distinguish first-level imports
+                        // (`DirectImport`) from deeper-closure files
+                        // (`TransitiveImport`). When the shallow surface
+                        // is not yet available (rare cold path), the
+                        // empty set falls back to `DirectImport` for
+                        // every non-Entry file.
+                        let direct_imports =
+                            self.direct_import_canonicals(ctx.canonical_id.as_ref());
                         let files = crate::component_meta_audit::build_file_audit_vec(
                             &state,
                             ctx.canonical_id.as_ref(),
@@ -755,7 +749,7 @@ impl VerterHost {
             let mut snapshot = (*facts.snapshot).clone();
             self.resolve_snapshot_imports(canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
-            if self.config.effective_scope().needs_template_analysis() {
+            if self.template_analysis_required() {
                 // Template inputs from the overlay artifact's OWN
                 // source + SFC parse — the same content the snapshot
                 // above was built from, so the template derives from
@@ -2364,7 +2358,7 @@ impl VerterHost {
                 let mut snapshot = snapshot;
                 self.resolve_snapshot_imports(canonical, &mut snapshot);
                 self.enrich_destructured_bindings(&mut snapshot);
-                if self.config.effective_scope().needs_template_analysis() {
+                if self.template_analysis_required() {
                     // Thread the inputs joined at the snapshot's own
                     // generation — never a second independent scheduler
                     // consult. A torn join (the source moved between
@@ -2398,7 +2392,7 @@ impl VerterHost {
         let mut snapshot = (*facts.snapshot).clone();
         self.resolve_snapshot_imports(canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
-        if self.config.effective_scope().needs_template_analysis() {
+        if self.template_analysis_required() {
             // Thread the artifact's own base-authoritative source +
             // SFC parse: the snapshot above came from this artifact,
             // so the template derives from the SAME content — and an
@@ -3060,16 +3054,25 @@ impl VerterHost {
             }
         }
 
-        for kind in [
-            crate::resolver_core::DerivedFactKind::Route,
-            crate::resolver_core::DerivedFactKind::ImportRoute,
-        ] {
-            if let Some(hash) = self.current_derived_fact_hash(canonical, kind) {
-                let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
-                    canonical_id: canonical.to_string(),
-                    kind,
-                    hash,
-                };
+        let kind = crate::resolver_core::DerivedFactKind::Route;
+        if let Some(hash) = self.current_derived_fact_hash(canonical, kind) {
+            let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id: canonical.to_string(),
+                kind,
+                hash,
+            };
+            if seen.insert(fact.clone()) {
+                facts.push(fact);
+            }
+        }
+
+        // The owner's import-route dependency is the resolve-domain
+        // RESOLUTION WITNESS, not a derived hash: resolving the owner's
+        // authored specifiers fans the sealed transactions' observations
+        // (and returns them here) so a known-miss specifier's later
+        // appearance invalidates this capture.
+        if let Some(witness) = self.owner_import_route_witness(canonical) {
+            for fact in witness {
                 if seen.insert(fact.clone()) {
                     facts.push(fact);
                 }
@@ -3104,33 +3107,23 @@ impl VerterHost {
                 //   always captured alongside and covers invalidation
                 //   until the canonical's first traversal materialises
                 //   its route surface.
-                // - STALE surface (edge generation / project stamp
-                //   moved, or only a non-current content candidate
-                //   exists) → `None`, so a dependent entry rooted on the
-                //   stale `Route` fact fails warm validation and
-                //   recomputes against the live state — without this
-                //   read rebuilding anything itself.
+                // - STALE surface (parse env moved, or only a
+                //   non-current content candidate exists) → `None`, so a
+                //   dependent entry rooted on the stale `Route` fact
+                //   fails warm validation and recomputes against the live
+                //   state — without this read rebuilding anything itself.
                 //
                 // The lookup is content-pinned: a permissive `get_any`
-                // would let a stale `IndexedReady` surface its old
-                // `route_hash` as the "current" Route fact, confirming a
-                // stale dependent cache entry as valid.
+                // would let a stale `IndexedReady` surface its old route
+                // digest as the "current" Route fact, confirming a stale
+                // dependent cache entry as valid.
                 let indexed = self.observe_content_pinned_indexed(canonical_id)?;
                 if !self.indexed_surface_is_current(canonical_id, &indexed) {
                     return None;
                 }
-                indexed.route_hash
-            }
-            crate::resolver_core::DerivedFactKind::ImportRoute => {
-                // Read-only: ImportRoute fact capture must not promote a
-                // shallow-only tracked dependency into full IndexedReady.
-                self.current_cached_import_route_hash(canonical_id)
+                indexed.route_surface_hash()
             }
         }
-    }
-
-    pub(crate) fn current_cached_import_route_hash(&self, canonical_id: &str) -> Option<Hash16> {
-        self.generation_current_import_route_hash(canonical_id)
     }
 }
 

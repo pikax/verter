@@ -62,7 +62,11 @@ ws.configureProjects([
   {
     root: "/project",
     workspaceRoot: "/project",
-    compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } },
+    compilerOptions: {
+      baseUrl: ".",
+      // NOTE: an ordered array of { pattern, targets } — not a tsconfig-style object map.
+      paths: [{ pattern: "@/*", targets: ["src/*"] }],
+    },
   },
 ]);
 ```
@@ -73,7 +77,8 @@ Creates a `VerterHost` backed by a workspace. The workspace handles all file acc
 
 ```ts
 const ws = new Workspace(['/path/to/project'])
-ws.configureProjects([...]) // configure first
+// configure first
+ws.configureProjects([{ root: '/path/to/project', workspaceRoot: '/path/to/project' }])
 const host = VerterHost.withWorkspace({ devMode: true }, ws)
 ```
 

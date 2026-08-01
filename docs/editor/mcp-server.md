@@ -4,83 +4,119 @@ Verter includes a built-in [Model Context Protocol (MCP)](https://modelcontextpr
 
 ## How It Works
 
-The MCP server runs as an HTTP endpoint embedded directly in the LSP process. It shares the same `VerterHost` instance, so AI agents get access to:
+The MCP server is a standalone binary, `verter-mcp`, that an agent launches in
+its own process. It builds a `VerterHost` over the project root it is given, so
+agents get:
 
-- All parsed and analyzed `.vue` files (no duplicate loading)
-- Full cross-file type resolution via TSGO
+- Parsing and analysis of every `.vue` and `.svelte` file under the project root
+- Full cross-file type resolution
 - Diagnostic results and lint rules
 - Code actions and quick fixes
 
 ```
-verter-lsp process
-├── LSP (stdio) ← VS Code
-└── MCP (HTTP :6772) ← Claude Code / AI agents
+verter-mcp process
+└── MCP (stdio by default, HTTP optional) ← Claude Code / AI agents
 ```
 
-## Enabling
+::: warning The LSP no longer hosts MCP in-process
+Earlier versions ran the MCP server as an HTTP endpoint inside the `verter-lsp`
+process, and the VS Code extension started it via `--mcp-port`. That embedding
+was removed: `verter-lsp` parses `--mcp-port` only to warn that the standalone
+binary owns MCP now.
 
-The MCP server is **enabled by default**. When the VS Code extension starts the LSP, it automatically starts the MCP HTTP endpoint on port `6772`.
+In VS Code, the `verter.mcp.*` settings drive the standalone binary instead:
+when `verter.mcp.enabled` (the default), the extension spawns `verter-mcp
+--transport http` with an auto-assigned port, registers the endpoint with
+VS Code's MCP provider API (so Copilot Chat discovers it), and updates the
+port of an existing `verter` entry in the workspace's `.mcp.json` for Claude
+Code CLI. Outside VS Code, launch `verter-mcp` from your agent's MCP config as
+shown below.
+:::
 
-### Settings
+## Install
 
-| Setting                             | Default         | Description                                        |
-| ----------------------------------- | --------------- | -------------------------------------------------- |
-| `verter.mcp.enabled`                | `true`          | Start the MCP HTTP endpoint alongside the LSP      |
-| `verter.mcp.port`                   | `6772`          | Port for the MCP HTTP endpoint (0 for auto-assign) |
-| `verter.mcp.lintPreset`             | `"recommended"` | Lint preset for MCP diagnostic tools               |
-| `verter.mcp.claudeCodeNotification` | `true`          | Show notification when Claude Code is detected     |
+```bash
+pnpm add -D verter-mcp
+```
 
-To disable:
+The `verter-mcp` package is a launcher: the native server ships in a
+per-platform optional dependency (`@verter/mcp-<platform>`) and your package
+manager installs only the one matching your OS, architecture and libc. Supported
+platforms are macOS x64/arm64, Linux x64/arm64 (glibc and musl) and Windows x64.
 
-```json
-{
-  "verter.mcp.enabled": false
-}
+Installing it as a project dev dependency pins the server version alongside the
+rest of your Verter tooling. `npx verter-mcp --print-server-path` prints the
+absolute path of the native binary for clients that want to spawn it directly.
+
+## Running it
+
+Stdio is the default transport, which is what local agents use:
+
+```bash
+npx verter-mcp --project-root .
+```
+
+For a remote agent, serve it over HTTP instead:
+
+```bash
+npx verter-mcp --transport http --port 6772 --project-root .
 ```
 
 ## Claude Code Setup
 
-### Automatic Detection
-
-When the Verter extension detects Claude Code is installed (`~/.claude/` directory exists), it shows a notification offering to configure MCP automatically.
-
-Clicking **"Setup Now"** creates or updates `.mcp.json` in your workspace root:
+Add `verter-mcp` to `.mcp.json` in your workspace root:
 
 ```json
 {
   "mcpServers": {
     "verter": {
-      "url": "http://localhost:6772/mcp"
+      "command": "npx",
+      "args": ["-y", "verter-mcp", "--project-root", "."]
     }
   }
 }
 ```
 
-### Manual Setup
+With `verter-mcp` installed as a project dev dependency you can point at the
+local launcher instead, which avoids `npx` resolution entirely:
 
-Run the command **"Verter: Setup MCP for Claude Code"** from the command palette (`Ctrl+Shift+P`), or manually create `.mcp.json` in your workspace root with the config above.
+```json
+{
+  "mcpServers": {
+    "verter": {
+      "command": "./node_modules/.bin/verter-mcp",
+      "args": ["--project-root", "."]
+    }
+  }
+}
+```
 
 After configuring, restart Claude Code to activate the MCP connection.
 
-### Command
+::: tip The extension's setup command writes the live HTTP endpoint
+The **"Verter: Setup MCP for Claude Code"** command
+(`verter.setupMcpForClaudeCode`) writes the running standalone server's
+actual `http://127.0.0.1:<port>/mcp` endpoint. When nothing is running yet
+(for example, no `.vue`/`.svelte` file has been opened), the command starts
+the server and waits for its bound port; if the server cannot become ready —
+or `verter.mcp.enabled` is off — the command explains why and writes
+nothing, rather than persisting a dead endpoint. The `command` forms above
+remain the right choice for agents that should own the server process
+themselves (stdio transport).
+:::
 
-| Command                   | ID                             |
-| ------------------------- | ------------------------------ |
-| Setup MCP for Claude Code | `verter.setupMcpForClaudeCode` |
+## Without npm
 
-## Standalone Usage
-
-The standalone `verter-mcp` binary is also available for use without VS Code:
+If you would rather not install from npm, download the `verter-mcp-<platform>`
+binary from a [GitHub release](https://github.com/pikax/verter/releases), or
+build it from a checkout:
 
 ```bash
-# stdio transport (for local agents)
-verter-mcp --project-root /path/to/project
-
-# HTTP transport (for remote agents)
-verter-mcp --transport http --port 6772 --project-root /path/to/project
+cargo build -p verter_mcp --bin verter-mcp --release
 ```
 
-The standalone binary creates its own `VerterHost` and does not share data with the LSP. For the best experience, use the embedded MCP server via the VS Code extension.
+The binary creates its own `VerterHost` over `--project-root` and does not share
+state with a running LSP process.
 
 ## Available Tools
 

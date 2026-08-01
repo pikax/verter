@@ -102,21 +102,46 @@ fn only_the_explicit_editor_tsserver_route_adopts_the_plugin_attestation() {
 
 #[test]
 fn editor_tsserver_topology_owns_no_semantic_child() {
-    let topology =
+    let selection =
         editor_tsserver_topology(&verter_lsp::editor_tsserver::EditorTsserverAttestation {
             pid: 4242,
             projects: vec!["C:/workspace/tsconfig.json".into()],
         });
 
-    assert!(topology.0.is_none());
-    assert_eq!(topology.1, TypeProviderKind::EditorTsserver);
+    assert!(selection.provider.is_none());
+    assert_eq!(selection.kind, TypeProviderKind::EditorTsserver);
     // The status surface must NAME this topology, not just its engine family.
-    assert_eq!(topology.2, TypeProviderTopology::EditorTsserver);
-    assert_eq!(topology.2.wire(), "editor-tsserver");
-    assert!(topology
-        .3
+    assert_eq!(selection.topology, TypeProviderTopology::EditorTsserver);
+    assert_eq!(selection.topology.wire(), "editor-tsserver");
+    assert!(selection
+        .reason
         .as_deref()
         .is_some_and(|reason| reason.contains("4242")));
+}
+
+/// A route that installs NO provider must not advertise an engine.
+///
+/// Every no-engine route in `create_type_provider` / `managed_fallback_topology`
+/// funnels through this one constructor, so the kind the editor sees can never
+/// drift into naming an engine family, a wiring topology, or a
+/// served-with-warning advisory for an engine that is not there — while the
+/// caller's reason is still carried through verbatim.
+#[test]
+fn a_route_with_no_engine_advertises_no_engine() {
+    let selection = TypeProviderSelection::verter_only("tsserver failed to start: ENOENT");
+
+    assert!(selection.provider.is_none());
+    assert_eq!(selection.kind, TypeProviderKind::None);
+    assert_eq!(selection.topology, TypeProviderTopology::None);
+    assert_eq!(
+        selection.reason.as_deref(),
+        Some("tsserver failed to start: ENOENT"),
+        "the caller's diagnosis reaches the editor unchanged"
+    );
+    assert!(
+        selection.advisory.is_none(),
+        "a served-with-warning advisory describes an ACTIVE engine; there is none here"
+    );
 }
 
 // ── DISCRIMINATING (H9): the configured-project admission gate runs BEFORE
@@ -191,9 +216,55 @@ async fn configless_workspace_performs_zero_candidate_spawns() {
 async fn configured_workspace_admits_then_spawns() {
     let (_temp, root, log) = plant_canary_engine(true);
     let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
-    // The canary exits 1 on every invocation, so resolution ultimately
-    // fails — but the spawn must have HAPPENED (after admission).
-    let _ = try_spawn_tsgo(&root.to_string_lossy(), &client_cell).await;
+    // The claim under test is about the ORDER of admission and resolution, so the
+    // ambient environment must not decide the outcome. Derived from the real
+    // environment the search space would be whatever engine the host installs: a
+    // working `VERTER_TSGO_BIN`/`PATH` tsgo wins tier 1, the canary is never
+    // reached, and the assertions below silently degrade into "this machine has no
+    // usable tsgo" — true on a bare checkout, false on a machine (or a CI image)
+    // that installs one. So the request is INJECTED, pinning every candidate source
+    // that is named EXPLICITLY: no tier-1 engine (no override, empty `PATH`), no
+    // update cache (tier 3), no bundled sidecar (tier 4).
+    //
+    // Tier 2 is NOT pinned, and cannot be. It is the tier this test exists to
+    // exercise, and `project_root` enables the whole tier: `enumerate_candidates`
+    // walks `root.ancestors()` up to `/` with no depth bound, so a `node_modules`
+    // ABOVE the TempDir contributes candidates too (see the tier-2 arm in
+    // `verter_tsgo_api::toolchain::discovery`). `ResolutionRequest` carries no field
+    // that bounds that walk; `project_root: None` would disable tier 2 outright,
+    // deleting the subject of the test.
+    //
+    // So this is hermetic against the ambient ENVIRONMENT, not against the temp
+    // directory's LOCATION. If it fails here and nowhere else, look for a real tsgo
+    // under a `node_modules` in an ancestor of `$TMPDIR`: the canary is enumerated
+    // first (it is `root`'s own `node_modules`) and still spawns, but the ancestor
+    // engine then validates and resolution returns `Ok`. GitHub Actions runs with
+    // `TMPDIR=/tmp`, which has no such ancestor.
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest {
+        requirement: verter_tsgo_api::toolchain::validation::Capability::Api,
+        project_root: Some(root.clone()),
+        env_override: None,
+        path_entries: Vec::new(),
+        cache_root: None,
+        host_exe: None,
+    };
+    let result =
+        try_spawn_tsgo_with_request(&root.to_string_lossy(), &client_cell, Some(request)).await;
+    // The two assertions below fail on different worlds. `log.exists()` is the
+    // primary claim — admission passed and the resolver THEN spawned — and it
+    // already catches a tier-1 leak by itself: a leaked engine validates before
+    // tier 2 is reached, so the canary never runs and the log is absent. `is_err()`
+    // is supplementary there. Its UNIQUE value is the tier-2 residual described
+    // above, where the canary does spawn (log present) and an ancestor engine
+    // validates anyway — the one world in which this assertion fires alone.
+    assert!(
+        result.is_err(),
+        "the canary exits 1 on every invocation and tiers 1/3/4 are empty, so no candidate \
+         this test NAMED can validate and resolution must FAIL. An `Ok` means something else \
+         validated: either the injected request was ignored and the ambient environment leaked \
+         back in, or a real tsgo sits in a `node_modules` above $TMPDIR that tier 2's unbounded \
+         ancestor walk reached"
+    );
     assert!(
         log.exists(),
         "a configured workspace passes admission and the resolver then spawns candidates"
@@ -304,6 +375,145 @@ fn tsserver_route_fails_closed_when_no_project_resolves_typescript() {
     }
 }
 
+/// The DEFAULT `auto` path without an editor rendezvous does not go through
+/// `tsserver_route_decision` at all — it goes through `probe_managed_engine`,
+/// which copied only `probe.servable` and DROPPED `probe.refusals`, so an
+/// install refused for a nameable reason reached `show_message` as a bare "no
+/// workspace tsserver" with no path, no reason, and no action.
+///
+/// Driven through `probe_managed_engine` itself, not a hand-built facts struct:
+/// the defect was in the fact CONSTRUCTION, so a test that builds the facts
+/// cannot see it.
+#[test]
+fn the_managed_route_names_why_no_tsserver_could_be_served() {
+    let tmp = tempfile::tempdir().unwrap();
+    let package = tmp.path().join("packages/app");
+    plant_configured_project(&package);
+    // A library-less install: present, so it is a real CANDIDATE, but refused —
+    // the same rejection channel an unnameable extended-length install uses.
+    let lib = package.join("node_modules/typescript/lib");
+    fs::create_dir_all(&lib).unwrap();
+    fs::write(lib.join("tsserver.js"), "// launcher").unwrap();
+    fs::write(
+        package.join("node_modules/typescript/package.json"),
+        r#"{ "name": "typescript", "version": "6.0.2" }"#,
+    )
+    .unwrap();
+
+    let root = tmp.path().to_string_lossy().into_owned();
+    // The ancestor walk escapes the tempdir and this machine may supply a tsgo
+    // binary, so only assert when the workspace genuinely reaches the
+    // no-engine arm this defect lives in.
+    let probe = project_router::probe_workspace_tsserver(&root, None);
+    if probe.servable.is_some() || probe.refusals.is_empty() {
+        return;
+    }
+    let ManagedEngineChoice::None { reason } = probe_managed_engine(&root, None) else {
+        return;
+    };
+
+    // `reason` is what reaches `show_message` as
+    // "Verter: No TypeScript type provider available ({reason})."
+    assert!(
+        reason.contains("refusing library-less TypeScript install"),
+        "the managed-route warning names WHY no tsserver could be served: {reason}"
+    );
+    assert!(
+        reason.contains("typescript.tsdk"),
+        "the managed-route warning names the action: {reason}"
+    );
+    // NEGATIVE: it must no longer stop at the bare absence claim.
+    assert!(
+        reason.contains("no workspace tsserver —"),
+        "the refusal must be appended to the absence clause, not replace it: {reason}"
+    );
+}
+
+/// NEGATIVE CONTROL: a workspace that simply has no TypeScript installed must
+/// keep the plain message — a refusal clause is only correct when something was
+/// actually refused.
+#[test]
+fn the_managed_route_stays_plain_when_nothing_was_refused() {
+    let choice = choose_managed_engine(&ManagedEngineFacts {
+        workspace_root: "d:/ws".to_string(),
+        has_configured_project: true,
+        tsgo_candidate: None,
+        tsgo_notes: Vec::new(),
+        tsserver: None,
+        tsserver_refusal: None,
+        node: Some("/usr/bin/node".to_string()),
+    });
+    let ManagedEngineChoice::None { reason } = choice else {
+        panic!("no tsgo and no tsserver supplies no managed engine");
+    };
+    assert!(reason.contains("no workspace tsserver"), "{reason}");
+    assert!(
+        !reason.contains("typescript.tsdk"),
+        "an absent install must not claim something was refused: {reason}"
+    );
+}
+
+/// The refusal a Windows install that node cannot EXECUTE must carry all the way
+/// to the user. `verter_type_runtime` proves the discovery error renders the
+/// path, the reason, and the action; this pins the REST of the rail — the exact
+/// string `client.show_message(WARNING, ...)` receives at startup.
+///
+/// Without this the refusal is real but invisible: the router propagates it,
+/// then `sync_orchestration`'s diagnostics path logs and drops it and
+/// `nav_features`' completion path logs and falls back, so every TypeScript
+/// feature goes dark with nothing said.
+#[test]
+fn an_unexecutable_install_refusal_reaches_the_startup_warning() {
+    // What `probe_project_dirs` pushes for a project whose every candidate was
+    // refused: `format!("{project_dir}: {discovery_error}")`.
+    let discovery_error = verter_type_runtime::discovery::TsserverDiscoveryError {
+        rejections: vec![verter_type_runtime::discovery::TsserverCandidateRejection {
+            path: std::path::PathBuf::from(
+                r"\\?\D:\ws\NUL\node_modules\typescript\lib\tsserver.js",
+            ),
+            reason: "this install resolves to an extended-length Windows path that node \
+                     cannot execute: its component `NUL` is a reserved Windows device name"
+                .to_string(),
+        }],
+    };
+    let probe = project_router::WorkspaceTsserverProbe {
+        servable: None,
+        lowest_servable_version: None,
+        native_family_only: None,
+        refusals: vec![format!("d:/ws/packages/app: {discovery_error}")],
+    };
+
+    let Err(error) = tsserver_route_decision("d:/ws", &probe) else {
+        panic!("a workspace whose only install cannot be executed must not claim the route");
+    };
+    // `tsserver_error_message` is what `lifecycle` interpolates into
+    // "Verter: No TypeScript type provider available ({r})." and shows as a
+    // WARNING, and what rides the `TypeProviderStatus` notification's `reason`.
+    let shown = tsserver_error_message(&error);
+    assert!(
+        shown.contains(r"\\?\D:\ws\NUL\node_modules\typescript\lib\tsserver.js"),
+        "the startup warning names the offending install: {shown}"
+    );
+    assert!(
+        shown.contains("node \ncannot execute") || shown.contains("cannot execute"),
+        "the startup warning says WHY: {shown}"
+    );
+    assert!(
+        shown.contains("reserved Windows device name"),
+        "the startup warning names the specific refusal: {shown}"
+    );
+    assert!(
+        shown.contains("typescript.tsdk"),
+        "the startup warning names the action: {shown}"
+    );
+    // NEGATIVE: this must not be reported as the TS7 native-family
+    // reclassification, which silently switches route instead of warning.
+    assert!(
+        !matches!(error, TsserverSpawnError::NativeFamily { .. }),
+        "an unexecutable install is a refusal, not a route reclassification"
+    );
+}
+
 // ── W5/FIX-4 + FIX-3: the managed fallback is CAPABILITY-driven, and it
 //    never claims a provider it cannot obtain. `choose_managed_engine` is
 //    the pure decision the IO probe feeds; every arm below is a state a
@@ -321,6 +531,7 @@ fn facts(
         tsgo_candidate: tsgo_candidate.map(str::to_string),
         tsgo_notes: Vec::new(),
         tsserver: tsserver.map(str::to_string),
+        tsserver_refusal: None,
         node: node.map(str::to_string),
     }
 }

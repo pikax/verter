@@ -1,4 +1,6 @@
 import { expect } from "chai";
+import { sequenceParent } from "../lib/timeouts";
+import { pollBudget } from "../lib/timeouts";
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
@@ -84,7 +86,7 @@ const result = externalHelper()
 
       // Open the Vue file — the TS import should resolve
       const doc = await openVueFile("src/ExternalImporter.vue");
-      await waitForFileReady(doc, { timeoutMs: 15_000 });
+      await waitForFileReady(doc, { timeoutMs: pollBudget("externalFileChangeSettle") });
 
       // Hover on `externalHelper` should show function signature
       const pos = findPosition(doc, "externalHelper", 0);
@@ -111,6 +113,8 @@ const result = externalHelper()
   // ── Update: modify .vue file on disk ──────────────────────────
 
   test("external .vue dependency modification triggers re-index", async function () {
+    // Watcher notice then diagnostics settle, in series (`POLL_SEQUENCES`).
+    this.timeout(sequenceParent("externalFileChangeRoundTrip"));
     // Skip: file watcher → re-index → re-diagnose chain is inherently timing-dependent
     return this.skip();
     if (!isSingleProject) {
@@ -136,7 +140,9 @@ import ExternalChild from './ExternalChild.vue'
       await waitForExternalChange();
 
       // Open parent — should have no errors (msg prop is provided)
-      const doc = await openAndReady("src/ExternalParent.vue", { timeoutMs: 15_000 });
+      const doc = await openAndReady("src/ExternalParent.vue", {
+        timeoutMs: pollBudget("externalFileChangeSettle"),
+      });
       const baseline = vscode.languages.getDiagnostics(doc.uri);
       const baselineErrors = baseline.filter((d) => d.severity === vscode.DiagnosticSeverity.Error);
 
@@ -156,7 +162,7 @@ defineProps<{ msg: string; count: number }>()
       const doc2 = await openVueFile("src/ExternalParent.vue");
       // Wait for diagnostics to update with the new prop requirement
       const diags = await waitForDiagnostics(doc2.uri, {
-        timeoutMs: 15_000,
+        timeoutMs: pollBudget("externalFileChangeSettle"),
         predicate: (d) =>
           d.message.toLowerCase().includes("count") || d.message.toLowerCase().includes("missing"),
       });
@@ -184,6 +190,8 @@ defineProps<{ msg: string; count: number }>()
   // ── Delete: remove .ts file from disk ─────────────────────────
 
   test("external .ts file deletion causes import errors", async function () {
+    // Same two-wait round trip as the modification case.
+    this.timeout(sequenceParent("externalFileChangeRoundTrip"));
     // Skip: file watcher → re-index → re-diagnose chain is inherently timing-dependent
     return this.skip();
     if (!isSingleProject) {
@@ -206,7 +214,9 @@ const val = MAGIC
       await waitForExternalChange();
 
       // Open vue file — should resolve fine initially
-      const doc = await openAndReady("src/TempImporter.vue", { timeoutMs: 15_000 });
+      const doc = await openAndReady("src/TempImporter.vue", {
+        timeoutMs: pollBudget("externalFileChangeSettle"),
+      });
       await vscode.commands.executeCommand("workbench.action.closeAllEditors");
 
       // Delete the TS file on disk
@@ -216,7 +226,7 @@ const val = MAGIC
       // Re-open — should now have module-not-found errors
       const doc2 = await openVueFile("src/TempImporter.vue");
       const diags = await waitForDiagnostics(doc2.uri, {
-        timeoutMs: 15_000,
+        timeoutMs: pollBudget("externalFileChangeSettle"),
         predicate: (d) =>
           d.message.includes("Cannot find module") || d.message.includes("tempUtil"),
       });

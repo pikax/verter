@@ -7,8 +7,7 @@
 //! declared (setup-scope) variable breaks at runtime — the official compiler
 //! rejects the SFC. This is COMPILER-LEVEL binding/syntax validation over the
 //! prepared setup parse (no type resolution involved). Split out of
-//! `compile::mod` so the orchestrator stays under the `no_oversize_files`
-//! guard.
+//! `compile::mod` to keep the orchestrator a readable size.
 
 use oxc_ast::ast::{BindingPattern, Expression, ObjectPropertyKind, PropertyKey, Statement};
 use rustc_hash::{FxHashMap, FxHashSet};

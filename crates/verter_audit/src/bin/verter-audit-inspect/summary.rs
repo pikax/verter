@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use verter_audit::batch::{AuditRecordSource, BatchAuditAggregator};
 use verter_audit::payloads::tags::BundlerKindTag;
-use verter_audit::record::{RequestAuditRecord, RequestKind};
+use verter_audit::record::{RequestAuditRecord, RequestKind, RequestTargetIdentity};
 use verter_audit::BundlerBatchPayload;
 
 use crate::io::{load_records_from_dir, LoadedRecord};
@@ -137,13 +137,28 @@ fn render_text(out: &mut impl Write, dir: &Path, payload: &BundlerBatchPayload) 
     for (idx, slow) in payload.slowest_5.iter().enumerate() {
         let _ = writeln!(
             out,
-            "    {}. request_id={} duration_ms={:.3} kind={} canonical={}",
+            "    {}. request_id={} duration_ms={:.3} kind={} target={}",
             idx + 1,
             slow.request_id,
             slow.duration_ms,
             kind_label(&slow.kind),
-            slow.canonical_id
+            target_label(slow.target_identity.as_ref(), &slow.canonical_id)
         );
+    }
+}
+
+/// Render the additive tagged target identity, falling back to the legacy
+/// canonical-id projection only for records that genuinely predate the tag.
+pub(crate) fn target_label<'a>(
+    target_identity: Option<&'a RequestTargetIdentity>,
+    legacy_canonical_id: &'a str,
+) -> &'a str {
+    match target_identity {
+        Some(RequestTargetIdentity::RegisteredCanonical(canonical_id)) => canonical_id,
+        Some(RequestTargetIdentity::UnregisteredUri(uri)) => uri,
+        Some(RequestTargetIdentity::NotApplicable) => "(no single target)",
+        None if legacy_canonical_id.is_empty() => "(no canonical id)",
+        None => legacy_canonical_id,
     }
 }
 

@@ -540,11 +540,25 @@ checklist in the README, not an automated gate (mirrors the Lapce/neovim posture
 
 ## 7. CI
 
-`.github/workflows/zed.yml` runs a 3-OS matrix (ubuntu/macos/windows, `shell: bash`,
-`dtolnay/rust-toolchain@stable` with `targets: wasm32-wasip2` + clippy/rustfmt): the
-`wasm32-wasip2` release build, the host-target unit tests, `cargo clippy --target
-wasm32-wasip2 -- -D warnings`, and `cargo fmt --check`. The Linux lane additionally runs the
-production-plan semantic smoke. Real-Zed UI loading remains manual because Zed has no
+The `editor-zed` job in `.github/workflows/ci.yml` (`dtolnay/rust-toolchain@1.97.1` with
+`targets: wasm32-wasip2` + clippy/rustfmt) runs the `wasm32-wasip2` release build, the
+host-target unit tests, `cargo clippy --target wasm32-wasip2 -- -D warnings`, `cargo fmt
+--check`, and the production-plan semantic smoke against the shared `verter-lsp` binary
+produced once by the `build-editor-lsp` job.
+
+**Linux-only verification.** This lane previously lived in a standalone `zed.yml` running a
+3-OS matrix (ubuntu/macos/windows) that built `verter-lsp --release` itself on every run.
+Both `ci.yml` (per PR) and `release.yml` (per tag) now run the `wasm32-wasip2` build,
+host-target tests, clippy and rustfmt on `ubuntu-latest` ONLY. macOS and Windows runners
+bill at 10x and 2x and these legs verify rather than ship, so the cost is not justified; the
+matrix entries are left commented in `release.yml` to restore.
+
+**Coverage note:** the extension build and host-target launch surface are no longer
+exercised on macOS or Windows, so the Cross-Platform Portability CRITICAL rule is NOT
+discharged for this extension by CI. The `wasm32-wasip2` target is a host-independent
+cross-compile, so the shipped artifact does not vary by build host, and the wasip1/wasip2
+mismatch this build catches is target-related rather than host-related — it is still caught
+on Linux. `verter-lsp` itself is still built natively on macOS and Windows by `build-lsp`. Real-Zed UI loading remains manual because Zed has no
 headless extension-host harness; the neutral-client lane is documented as a shipping-plan
 contract, not as GUI automation.
 

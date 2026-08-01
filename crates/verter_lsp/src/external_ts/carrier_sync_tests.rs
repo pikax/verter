@@ -34,8 +34,8 @@ use verter_workspace::workspace_snapshot::{
 
 use crate::external_ts::tsserver_backend::TsserverEngineBackend;
 use crate::external_ts::{
-    default_carrier_store_host_version, CarrierCompanion, CarrierPublishCoordinator,
-    CarrierPublishStore, ReconcileOutcome, ReconcileReason,
+    carrier_store_dir_for, default_carrier_store_host_version, CarrierCompanion,
+    CarrierPublishCoordinator, CarrierPublishStore, Manifest, ReconcileOutcome, ReconcileReason,
 };
 use crate::project_resolver::{IdeProjectConfig, NativeProjectResolver};
 use crate::provider_surface_store::ProviderSurfaceStore;
@@ -55,6 +55,9 @@ fn owned_carrier_state() -> ProviderSyncState {
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     }
 }
 
@@ -211,6 +214,134 @@ fn commit_carrier_provider_state_admits_a_matching_owner_receipt() {
     );
 }
 
+/// The API companion path is the fixed `.verter.ts` — TypeScript-labeled
+/// whatever the SFC's dialect — so the gateway must publish the TS-labeled
+/// rendering. A widened JavaScript Options-API stub's `code` spells its
+/// fallthrough widening in JSDoc, which a `.ts` ScriptKind silently ignores:
+/// publishing `code` there would lose the widening for exactly the carrier the
+/// split exists for.
+///
+/// DISCRIMINATING: making `build_carrier_companions` select the DIALECT
+/// rendering (`dialect_labeled_code`, the only other reachable channel — the
+/// raw fields are private) flips the first assertion; dropping the `None`
+/// fallback of `ts_labeled_code` would flip the second. The publish-point SET
+/// is guarded structurally, not per-site: no publisher can reach an unlabeled
+/// raw `code` field at all.
+#[test]
+fn api_companion_publishes_the_ts_labeled_rendering() {
+    let state = owned_carrier_state();
+
+    // A widened JavaScript Options-API surface: JSDoc rendering in `code`,
+    // ordinary TypeScript rendering in `ts_carrier_code`.
+    let split = verter_session::TscResponse::new(
+        Arc::from("/** @type {__OmitNew<typeof __Verter_ComponentOptions>} */\n"),
+        None,
+        verter_compiler::tsc::SfcScriptDialect::JavaScript,
+        Some(Arc::from(
+            "declare const App: unknown\nexport default App\n",
+        )),
+    );
+    let companions = build_carrier_companions(
+        &state,
+        None,
+        Some(&split),
+        None,
+        "/workspace/src/App.vue",
+        None,
+    )
+    .expect("API-only companion batch");
+    let api = companions
+        .iter()
+        .find(|companion| companion.role == SnapshotRole::CarrierApi)
+        .expect("an api_path + api response must publish an API companion");
+    assert_eq!(
+        &**api.content(),
+        "declare const App: unknown\nexport default App\n",
+        "the `.verter.ts` companion carries the TS-labeled rendering, never the \
+         JSDoc one"
+    );
+
+    // Control: a surface with no distinct TS rendering publishes `code` itself.
+    let unsplit = verter_session::TscResponse::new(
+        Arc::from("declare const App: number\nexport default App\n"),
+        None,
+        verter_compiler::tsc::SfcScriptDialect::TypeScript,
+        None,
+    );
+    let companions = build_carrier_companions(
+        &state,
+        None,
+        Some(&unsplit),
+        None,
+        "/workspace/src/App.vue",
+        None,
+    )
+    .expect("API-only companion batch");
+    let api = companions
+        .iter()
+        .find(|companion| companion.role == SnapshotRole::CarrierApi)
+        .expect("an api_path + api response must publish an API companion");
+    assert_eq!(
+        &**api.content(),
+        "declare const App: number\nexport default App\n",
+        "without a split, the companion carries `code` unchanged"
+    );
+}
+
+/// Carrier projection is itself provider publication: a useful live-disk
+/// target cannot be allowed to select the bytes of an IDE companion unless the
+/// resolution transaction admitted it.
+#[test]
+fn carrier_companion_refuses_return_only_projection() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().to_string_lossy().replace('\\', "/");
+    let canonical_id = format!("{root}/App.vue");
+    let dependency = format!("{root}/Child.vue");
+    std::fs::write(&dependency, "<script>export const child = true;</script>")
+        .expect("write carrier dependency");
+    let workspace =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions {
+            roots: vec![root],
+            eager_preload: false,
+        });
+    let mut state = owned_carrier_state();
+    state.ide_path = Some(format!("{canonical_id}.tsx"));
+    state.api_path = Some(format!("{canonical_id}.verter.ts"));
+    let ide = verter_session::IdeResponse {
+        code: Arc::from("import Child from './Child.vue'; void Child;\n"),
+        source_map: None,
+        is_jsx: false,
+        destructured_block: None,
+    };
+    let api = verter_session::TscResponse::new(
+        Arc::from("declare const App: unknown;\nexport default App;\n"),
+        None,
+        verter_compiler::tsc::SfcScriptDialect::TypeScript,
+        None,
+    );
+
+    let companions = build_carrier_companions(
+        &state,
+        Some(&ide),
+        Some(&api),
+        Some(&workspace),
+        &canonical_id,
+        None,
+    );
+
+    assert!(
+        matches!(
+            companions,
+            Err(CarrierCompanionBuildError::ResolutionRefused(_))
+        ),
+        "a refusal while preparing the later IDE constituent must remain distinct \
+         from a genuine empty batch and prevent partial provider publication"
+    );
+
+    // Mutation recipe: return the already-built API vector when IDE projection
+    // refuses. The assertion observes that partial batch.
+}
+
 /// A `CarrierCompanion` for the IDE role at `uri` carrying `content` + optional map.
 fn ide_companion(
     uri: &str,
@@ -218,14 +349,14 @@ fn ide_companion(
     map_json: Option<&str>,
     version: u64,
 ) -> CarrierCompanion {
-    CarrierCompanion {
-        provider_uri: Arc::from(uri),
-        content: Arc::from(content),
-        map_json: map_json.map(Arc::from),
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
+    CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(uri),
+        "/workspace/src/App.vue",
+        content,
+        map_json.map(Arc::from),
+        verter_session::external_ts::ScriptKind::Tsx,
         version,
-    }
+    )
 }
 
 #[test]
@@ -295,6 +426,152 @@ fn commit_stamps_committed_ide_surface_and_gates_uncommitted_capture() {
     assert!(
         !committed.authorizes_carrier_ide_capture(stamp.content_hash, [9u8; 16]),
         "a surface whose source-map differs from the committed stamp must be refused"
+    );
+}
+
+/// The recorded IDE surface and the receipt-stamped committed surface are ONE
+/// identity, so the committed-surface gate can never refuse a freshly published
+/// carrier.
+///
+/// A carrier whose IDE TSX imports another carrier is projected before it reaches
+/// the provider. When a recorder stamped the RAW compiler bytes while the receipt
+/// attested the PROJECTED ones, `authorizes_carrier_ide_capture` refused
+/// permanently: the provider was never queried and every provider-backed feature
+/// fell back to Verter-native results. The two producers now carry the same
+/// indivisible value, so the identity holds by construction.
+#[test]
+fn recorded_ide_surface_hash_equals_the_receipt_stamped_committed_surface() {
+    let canonical = "/workspace/src/App.vue";
+    let ide_path = "/workspace/src/App.vue.tsx";
+    // The projection only bites when the generated buffer imports a carrier —
+    // exactly the population that failed.
+    let compiler_bytes = "import Child from './Child.vue';\nexport default {}; void Child;\n";
+    // A token on the generated import line, so a provider position to the RIGHT
+    // of the rewritten specifier has something to map back through.
+    let carrier_source =
+        "<script setup lang=\"ts\">\nimport Child from './Child.vue';\n</script>\n";
+    let map_json = {
+        let generated_semicolon = compiler_bytes.lines().next().unwrap().len() as u32 - 1;
+        let carrier_semicolon = carrier_source.lines().nth(1).unwrap().len() as u32 - 1;
+        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+        let source_id = builder.set_source_and_content("App.vue", carrier_source);
+        builder.add_token(0, 0, 1, 0, Some(source_id), None);
+        builder.add_token(
+            0,
+            generated_semicolon,
+            1,
+            carrier_semicolon,
+            Some(source_id),
+            None,
+        );
+        builder.into_sourcemap().to_json_string()
+    };
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(carrier_source),
+        file_language: FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let store = ProviderSurfaceStore::new();
+
+    // The publish path's companion: bytes + projection, prepared once.
+    let mut companions = vec![CarrierCompanion::carrier_ide(
+        Arc::from(ide_path),
+        crate::carrier_provider_projection::expect_admitted(
+            crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                None,
+                canonical,
+                compiler_bytes,
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            ),
+            "no workspace resolution is needed",
+        ),
+        Some(Arc::from(map_json.as_str())),
+        verter_session::external_ts::ScriptKind::Tsx,
+    )];
+    assert_ne!(
+        companions[0].content().as_ref(),
+        compiler_bytes,
+        "the fixture must actually exercise the projection, or the identity is vacuous"
+    );
+
+    crate::provider_surface_store::record_and_version_carrier_companions(
+        &store,
+        None,
+        &host,
+        canonical,
+        &mut companions,
+    );
+
+    let receipt = PendingProviderReady::authorize(
+        &test_binding("/workspace/tsconfig.json"),
+        1,
+        0,
+        "tsserver",
+        &companions,
+    )
+    .confirm_opened(&[ProviderPathKind::Ide]);
+
+    let states = DashMap::new();
+    commit_carrier_provider_state(&states, canonical, owned_carrier_state(), &receipt);
+    let committed = states
+        .get(canonical)
+        .map(|entry| entry.clone())
+        .expect("the receipt-gated commit installs the owned state");
+    let stamp = committed
+        .committed_ide_surface
+        .clone()
+        .expect("the commit stamps the published IDE surface identity");
+
+    let snapshot = store
+        .current_snapshot(ide_path)
+        .expect("the publish records a CarrierIde surface");
+    let recorded =
+        crate::provider_surface_store::ContentHash::of(&snapshot.provider_content).to_hash16();
+
+    assert_eq!(
+        recorded, stamp.content_hash,
+        "the recorded surface and the receipt stamp MUST be the same bytes"
+    );
+    assert_ne!(
+        recorded,
+        crate::provider_surface_store::ContentHash::of(compiler_bytes).to_hash16(),
+        "neither producer may fall back to the raw compiler bytes for a projected carrier"
+    );
+    assert!(
+        committed.authorizes_carrier_ide_capture(recorded, snapshot.stamp.map_hash),
+        "the committed-surface gate must authorize the surface this publish just \
+         recorded — refusing it strands the source with no provider results at all"
+    );
+
+    // The mapper half. A provider position to the RIGHT of a rewritten specifier
+    // sits at a shifted column, so mapping it back must subtract the rewrite
+    // delta before consulting the compiler map. Recording the projected bytes
+    // WITHOUT their mapper leaves this position mapping to the wrong source
+    // column — invisible to any query on another line, which is exactly why it
+    // needs its own assertion here.
+    let mapper = snapshot
+        .source_map
+        .as_ref()
+        .expect("the recorded surface carries a provider mapper");
+    let provider_line = companions[0].content().lines().next().unwrap().to_owned();
+    let generated_line = compiler_bytes.lines().next().unwrap();
+    let delta = provider_line.len() - generated_line.len();
+    assert!(delta > 0, "the rewrite must lengthen the import line");
+    let semicolon = provider_line.len() as u32 - 1;
+    assert_eq!(
+        mapper
+            .tsx_to_carrier(verter_span::TsPosition::new(0, semicolon))
+            .expect("a post-rewrite provider position maps back to the carrier")
+            .pos
+            .character,
+        semicolon - delta as u32,
+        "the recorded mapper must undo the rewrite shift; recording the projected \
+         bytes with no mapper (or a mapper for different bytes) lands this position \
+         {delta} columns to the right of its true source"
     );
 }
 
@@ -446,14 +723,14 @@ fn api_only_commit_preserves_prior_committed_ide_surface_stamp() {
         .expect("the first (full) commit stamps the IDE surface");
 
     // An api-only refresh: the receipt attests only an API companion (no IDE companion).
-    let api_companion = CarrierCompanion {
-        provider_uri: Arc::from("/workspace/src/App.vue.verter.ts"),
-        content: Arc::from("API V2\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierApi,
-        script_kind: verter_session::external_ts::ScriptKind::Ts,
-        version: 2,
-    };
+    let mut api_companion = CarrierCompanion::verbatim(
+        Arc::from("/workspace/src/App.vue.verter.ts"),
+        Arc::from("API V2\n"),
+        None,
+        verter_session::external_ts::SnapshotRole::CarrierApi,
+        verter_session::external_ts::ScriptKind::Ts,
+    );
+    api_companion.version = 2;
     let receipt2 = PendingProviderReady::authorize(&binding, 2, 0, "tsgo", &[api_companion])
         .confirm_opened(&[ProviderPathKind::Api]);
     commit_carrier_provider_state(
@@ -637,14 +914,14 @@ fn partial_open_api_ok_ide_fail_preserves_prior_live_ide_stamp_and_capture() {
     // 2. A NEWER pass (the higher source counter): the API buffer opened, the IDE buffer FAILED. The pending
     //    carries BOTH a new IDE companion (V2) and an API companion, but only the API opened,
     //    so `confirm_opened(&[Api])` attests ONLY the API companion.
-    let api_companion = CarrierCompanion {
-        provider_uri: Arc::from("/workspace/src/App.vue.verter.ts"),
-        content: Arc::from("API V2\n"),
-        map_json: None,
-        role: SnapshotRole::CarrierApi,
-        script_kind: verter_session::external_ts::ScriptKind::Ts,
-        version: 2,
-    };
+    let mut api_companion = CarrierCompanion::verbatim(
+        Arc::from("/workspace/src/App.vue.verter.ts"),
+        Arc::from("API V2\n"),
+        None,
+        SnapshotRole::CarrierApi,
+        verter_session::external_ts::ScriptKind::Ts,
+    );
+    api_companion.version = 2;
     let r2 = PendingProviderReady::authorize(
         &test_binding_gen(tsconfig, 5),
         2,
@@ -691,8 +968,8 @@ fn terminal_retract_classification_gates_unresolved_on_success() {
     // A TERMINAL owner-loss (NoProject/Ambiguous) may report the terminal `Unresolved`
     // — which the call site treats as "retracted, clear local state and stop retrying" —
     // ONLY after the store tombstone SUCCEEDED. An ERRORED retract must classify as
-    // `RetryPending` (the gateway returns `Pending`: preserve local state + retry), so a
-    // failed cross-process retract never masquerades as a completed one.
+    // `RetryPending` (the gateway returns `RetractFailed`: preserve local state + retry),
+    // so a failed cross-process retract never masquerades as a completed one.
     //
     // DISCRIMINATING: the pre-fix behaviour ("always Unresolved on a terminal, even when
     // the retract errored") corresponds to classifying `Err` as `Tombstoned`, which
@@ -766,6 +1043,19 @@ fn carrier_close_target_returns_companion_paths_owner_independent() {
     );
 }
 
+/// The synthetic workspace root for a store-isolating test, built from the three
+/// disambiguators a concurrent test run varies over.
+///
+/// `pid` is the load-bearing one. This suite runs one test per PROCESS, so the
+/// per-process counter in [`unique_ws_root`] reads 0 in every process and disambiguates
+/// nothing across them, and `SystemTime::now()` is only MICROSECOND-resolution on
+/// macOS. Without the process identity the root collides whenever two test processes
+/// reach it inside the same microsecond, which aliases both onto ONE on-disk carrier
+/// store and one `manifest.json`.
+fn ws_root_for(pid: u32, nanos: u128, n: u64) -> String {
+    format!("d:/verter_carrier_sync_compilefail_{pid}_{nanos}_{n}/ws")
+}
+
 /// A unique, already-canonical (lowercase drive, forward slashes) workspace root, so
 /// the on-disk carrier store dir is isolated per run.
 fn unique_ws_root() -> String {
@@ -776,7 +1066,139 @@ fn unique_ws_root() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("d:/verter_carrier_sync_compilefail_{nanos}_{n}/ws")
+    ws_root_for(std::process::id(), nanos, n)
+}
+
+/// Read the manifest of the carrier store this suite's backend writes for `ws_root`,
+/// STRICTLY: `Ok(None)` ONLY when the manifest genuinely does not exist, and `Err` for
+/// every other failure.
+///
+/// The oracle must NOT read through [`CarrierPublishStore::current_manifest`]. That
+/// reader deliberately reports a fresh EMPTY manifest for an unreadable or unparseable
+/// one — correct for a read-only diagnostics view, but underneath a readiness assertion
+/// it launders "the store could not be read" into "the carrier is not advertised". THREE
+/// tests in this file corrupt a manifest on purpose ([`break_carrier_store_writes`]), so
+/// that laundering is exactly what must not reach an assertion.
+fn read_store_manifest_strict(ws_root: &str) -> Result<Option<Manifest>, String> {
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
+    let path = store.manifest_path();
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
+            .map(Some)
+            .map_err(|e| {
+                format!(
+                    "carrier manifest at {} is present but unparseable: {e}",
+                    path.display()
+                )
+            }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "carrier manifest at {} is unreadable: {e} (kind={:?}, errno={:?})",
+            path.display(),
+            e.kind(),
+            e.raw_os_error()
+        )),
+    }
+}
+
+/// The synthetic workspace root this suite derives must be unique across concurrent
+/// PROCESSES, not merely within one process.
+///
+/// This suite runs one test per PROCESS, so the per-process `COUNTER` in
+/// [`unique_ws_root`] reads 0 in every process and disambiguates nothing across them,
+/// and `SystemTime::now()` is only MICROSECOND-resolution on macOS. A root built from
+/// the clock and that counter alone ALIASES two test processes that reach it inside the
+/// same microsecond onto ONE on-disk carrier store.
+///
+/// This suite is the MOST exposed of the two that shared this shape: EIGHT tests derive
+/// a root from this helper (28 pairwise collision opportunities per run), and THREE of
+/// them deliberately write a CORRUPT manifest into their store via
+/// [`break_carrier_store_writes`]. A corrupt shared manifest makes the strict
+/// `read_manifest` propagate, so `publish_batch` fails, so the membership commit fails,
+/// so a sibling's reconcile decision is NOT `Published` — which is exactly how
+/// `multi_claimant_carrier_sync_serves_under_single_default_owner` and
+/// `owned_carrier_compile_to_empty_propagates_a_failed_retract_instead_of_pending`
+/// failed under full-workspace load.
+#[test]
+fn synthetic_ws_root_is_unique_across_processes_not_only_within_one() {
+    // Same microsecond AND same per-process counter — exactly what two concurrent
+    // one-test-per-process runs observe. Only the process identity differs.
+    const SAME_MICROSECOND: u128 = 1_785_068_278_682_867_000;
+    let a = ws_root_for(4242, SAME_MICROSECOND, 0);
+    let b = ws_root_for(4243, SAME_MICROSECOND, 0);
+    assert_ne!(
+        a, b,
+        "two test PROCESSES deriving a root in the same microsecond must not get the \
+         SAME workspace root (the per-process counter reads 0 in both)"
+    );
+
+    // The consequence that actually bites: the derived on-disk store dirs must differ,
+    // or both processes read-modify-write ONE manifest.json.
+    let host = default_carrier_store_host_version();
+    assert_ne!(
+        carrier_store_dir_for(host, &a),
+        carrier_store_dir_for(host, &b),
+        "distinct test processes must resolve DISTINCT carrier-store dirs; an aliased \
+         dir means two processes share one manifest"
+    );
+
+    // The within-process disambiguator must still work.
+    assert_ne!(
+        ws_root_for(4242, SAME_MICROSECOND, 0),
+        ws_root_for(4242, SAME_MICROSECOND, 1),
+        "two roots taken inside one microsecond by ONE process must still differ"
+    );
+
+    // And the live derivation must actually vary the process identity in.
+    let live = unique_ws_root();
+    assert!(
+        live.starts_with(&format!(
+            "d:/verter_carrier_sync_compilefail_{}_",
+            std::process::id()
+        )),
+        "unique_ws_root must carry this process's identity; got {live}"
+    );
+}
+
+/// The store oracle must surface an unreadable / unparseable manifest as a FAILURE,
+/// never launder it into "the carrier is not advertised".
+///
+/// [`CarrierPublishStore::current_manifest`] deliberately reports a fresh EMPTY manifest
+/// for a corrupt one — correct for a read-only diagnostics view (it never writes, so
+/// there is nothing to clobber), but WRONG underneath [`carrier_ready_in_store`]:
+/// THREE tests in this very file corrupt a manifest on purpose, so a laundered read
+/// turns "the store could not be read" into "the carrier is not ready" and the
+/// assertion blames the wrong thing.
+#[test]
+fn store_oracle_reports_a_corrupt_manifest_as_a_failure_not_as_absence() {
+    let corrupt_root = unique_ws_root();
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &corrupt_root);
+    std::fs::create_dir_all(store.workspace_dir()).expect("create the store dir");
+    std::fs::write(store.manifest_path(), b"{ this manifest is truncated")
+        .expect("write a corrupt manifest");
+
+    // Pin the fail-open behaviour of the diagnostics reader the oracle must NOT inherit.
+    assert!(
+        store.current_manifest().projects.is_empty(),
+        "the diagnostics reader is fail-open by design; this pins what the oracle must \
+         not inherit"
+    );
+
+    let detail = read_store_manifest_strict(&corrupt_root).expect_err(
+        "a present-but-corrupt manifest must be an ERROR from the oracle's reader, never \
+         an empty manifest that reads as the carrier not being ready",
+    );
+    assert!(
+        detail.contains("unparseable"),
+        "the error must name the actual cause; got {detail:?}"
+    );
+
+    // A genuinely absent manifest stays distinguishable from a corrupt one.
+    let absent_root = unique_ws_root();
+    assert!(
+        matches!(read_store_manifest_strict(&absent_root), Ok(None)),
+        "a store that was never published must read as Ok(None), not as an error"
+    );
 }
 
 /// A `WorkspaceSnapshot` with ONE configured project owning `src/**/*` (so a `.vue`
@@ -823,11 +1245,66 @@ fn project_binding_snapshot(ws_root: &str, tsconfig: &str) -> WorkspaceSnapshot 
     build_workspace_snapshot_simple(vec![project], SnapshotGeneration(1))
 }
 
+/// The SAME workspace with the SAME configured project, except its `include` no longer
+/// covers `src/**` — so the carrier's authoritative ownership resolution is the terminal
+/// `NoProject` (the owner-loss transition).
+fn no_owner_snapshot(ws_root: &str, tsconfig: &str) -> WorkspaceSnapshot {
+    let ws = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![ws_root.to_string()],
+        default_resolve_extensions: None,
+    });
+    ws.inject_file(
+        tsconfig.to_string(),
+        Arc::<str>::from(r#"{ "include": ["elsewhere/**/*"] }"#),
+    );
+    ws.inject_file(
+        format!("{ws_root}/src/Comp.vue"),
+        Arc::<str>::from("<template></template>"),
+    );
+
+    let root = CanonicalPath::new(ws_root);
+    let raw_membership = load_project_membership(&ws, tsconfig);
+    let compiler_options = load_compiler_options(&ws, tsconfig);
+    let supported = supported_extensions_for(&compiler_options);
+    let spec = membership_to_spec(&root, &raw_membership, &supported);
+    let references = load_project_references(&ws, tsconfig)
+        .into_iter()
+        .map(|r| CanonicalPath::new(&r))
+        .collect();
+    let project = OwnershipProject {
+        id: ProjectId(0),
+        root: root.clone(),
+        workspace_root: CanonicalPath::new(ws_root),
+        payload: ProjectPayload::Configured {
+            tsconfig_path: CanonicalPath::new(tsconfig),
+            membership: ConfiguredMembership {
+                spec,
+                materialized_files: Default::default(),
+            },
+            compiler_options,
+            references,
+            workspace_aliases: Vec::new(),
+        },
+    };
+    build_workspace_snapshot_simple(vec![project], SnapshotGeneration(2))
+}
+
 /// Whether `provider` is still in the project's `ready_files` set (the cross-process
 /// advertised surface the plugin's `getExternalFiles` serves).
 fn carrier_ready_in_store(ws_root: &str, tsconfig: &str, provider: &str) -> bool {
-    let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
-    let manifest = store.current_manifest();
+    let manifest = match read_store_manifest_strict(ws_root) {
+        Ok(Some(manifest)) => manifest,
+        // No manifest at all ⇒ genuinely nothing published for this workspace.
+        Ok(None) => return false,
+        // A store FAILURE is not a carrier absence — surface the real cause instead of
+        // letting a readiness assertion report a misleading "not advertised". No test
+        // reads this oracle AFTER its own `break_carrier_store_writes`, so a failure
+        // here means the store was damaged by something OTHER than this test.
+        Err(detail) => panic!(
+            "the carrier-store oracle must surface a store failure rather than report \
+             the carrier unadvertised: {detail}"
+        ),
+    };
     manifest
         .projects
         .get(tsconfig)
@@ -866,14 +1343,14 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
 
     // 1. Publish the carrier under its configured owner (a non-empty companion set)
     //    through the single membership entry — it enters the store's `ready_files`.
-    let companion = CarrierCompanion {
-        provider_uri: Arc::from(provider.as_str()),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 1,
-    };
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
     let published = coord
         .reconcile_membership(
             &host,
@@ -914,6 +1391,7 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
         provider_sync_states: &states,
         provider_surfaces: &surfaces,
         documents: None,
+        project_sync: None,
         canonical_id: &source,
         is_jsx: false,
         ide: None,
@@ -943,6 +1421,356 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
         !carrier_ready_in_store(&ws_root, &tsconfig, &provider),
         "an owned carrier that compiled to EMPTY companions MUST be retracted from the \
          store's ready_files (so the plugin stops advertising it); the stale row lingered"
+    );
+}
+
+/// Corrupt the on-disk manifest for `ws_root`'s store so EVERY subsequent store
+/// read-modify-write FAILS (`read_manifest` propagates a parse error on a
+/// present-but-unparseable manifest rather than clobbering it). This is the portable
+/// stand-in for the IO-failure class a real retract hits (a full disk being the cheapest
+/// reproducer) — it needs no permission games and behaves identically on macOS, Windows
+/// and Linux.
+fn break_carrier_store_writes(ws_root: &str) {
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
+    std::fs::write(store.manifest_path(), b"{ this manifest is not valid json")
+        .expect("the store dir exists after the initial publish");
+}
+
+/// A FAILED store retract must be PROPAGATED, not swallowed: when an owned carrier
+/// compiles to an EMPTY companion set and its `ReconcileReason::CompileFailed` retract
+/// ERRORS, the carrier is STILL advertised in the cross-process store the
+/// `@verter/typescript-plugin` reads, so the pass must NOT settle as the clean
+/// `SettleClass::Pending` ("nothing was advertised this pass"). It settles as the distinct
+/// fail-closed `SettleClass::RetractFailed`.
+///
+/// RED before the fix: the empty-companions branch logged the `Err` through
+/// `tracing::warn!`, DISCARDED it, and returned `CarrierNotOwned::pending()` — making a
+/// live stale advertisement indistinguishable from a clean retract.
+#[tokio::test]
+async fn owned_carrier_compile_to_empty_propagates_a_failed_retract_instead_of_pending() {
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let provider = format!("{ws_root}/src/Comp.vue.tsx");
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        project_binding_snapshot(&ws_root, &tsconfig),
+    )));
+
+    // 1. Publish the carrier under its configured owner so a stale `ready_files` row
+    //    EXISTS to be retracted.
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
+    let published = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![companion],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("the initial publish under a configured owner succeeds");
+    assert!(
+        matches!(published, ReconcileOutcome::Advertised { .. }),
+        "the initial publish resolves to a configured owner ⇒ advertised, got {published:?}"
+    );
+    assert!(
+        carrier_ready_in_store(&ws_root, &tsconfig, &provider),
+        "the carrier must be advertised in the store's ready_files after the initial publish"
+    );
+
+    // 2. Break the store so the compile-to-empty retract CANNOT reach its tombstone.
+    break_carrier_store_writes(&ws_root);
+
+    // 3. The owned source now compiles to NOTHING: the gateway drives the
+    //    `CompileFailed` retract, which FAILS against the broken store.
+    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: false,
+        }),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+    let CarrierSyncDecision::NotOwned(not_owned) = decision else {
+        panic!("an owned compile-to-empty pass advertises nothing this pass (NotOwned)");
+    };
+
+    // The FAILED retract is propagated as its own class — never the clean `Pending`,
+    // whose contract is that nothing is advertised for the source.
+    let requeue = dashmap::DashSet::new();
+    let class = admission.settle(not_owned, &source, Some(&requeue));
+    assert_eq!(
+        class,
+        SettleClass::RetractFailed,
+        "a FAILED compile-failed retract must propagate as RetractFailed, not be swallowed \
+         into the clean Pending class (the carrier is still advertised cross-process)"
+    );
+    assert_ne!(
+        class,
+        SettleClass::Pending,
+        "Pending asserts nothing is advertised — a failed retract must not claim that"
+    );
+    // Fail-closed disposition is unchanged: the source is REQUEUED (the retract is
+    // re-attempted) and local state is preserved (no as-if-retracted buffer conversion).
+    assert!(
+        requeue.contains(&source),
+        "a failed retract must keep the carrier queued so the retract is re-attempted"
+    );
+    assert!(
+        !class.runs_buffer_cleanup(),
+        "a failed retract must NOT clear local state as-if-retracted"
+    );
+}
+
+/// The bootstrap-DEFER branch is the third site of the same class. It threads the
+/// caller's `reason` into the reconciler, and a CALLER-AUTHORITATIVE terminal reason
+/// (`Deleted` / `CompileFailed` / `ConflictRemoved`) short-circuits to a RETRACT even
+/// under a cold `NotReady` resolution. When that retract ERRORS the pass must NOT settle
+/// as `NotReady`: `NotReady` runs the editor-liveness buffer conversion
+/// (`runs_buffer_cleanup()`), so a closed document's local state would be cleared
+/// as-if-retracted while the cross-process store still advertises the carrier.
+///
+/// RED before the fix: the branch logged the `Err` and returned
+/// `CarrierNotOwned::not_ready()`.
+#[tokio::test]
+async fn cold_bootstrap_defer_propagates_a_failed_retract_instead_of_not_ready() {
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let provider = format!("{ws_root}/src/Comp.vue.tsx");
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        project_binding_snapshot(&ws_root, &tsconfig),
+    )));
+
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
+    let published = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![companion],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("the initial publish under a configured owner succeeds");
+    assert!(
+        matches!(published, ReconcileOutcome::Advertised { .. }),
+        "the initial publish resolves to a configured owner ⇒ advertised, got {published:?}"
+    );
+    break_carrier_store_writes(&ws_root);
+
+    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        // Cold ownership ⇒ the bootstrap-defer branch.
+        ownership_ready: false,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: false,
+        }),
+        admission: &admission,
+        // A caller-authoritative terminal reason: the reconciler retracts even under a
+        // cold resolution, so the deferring branch really does drive a store retract.
+        reason: ReconcileReason::CompileFailed,
+    })
+    .await;
+    let CarrierSyncDecision::NotOwned(not_owned) = decision else {
+        panic!("a cold bootstrap pass advertises nothing (NotOwned)");
+    };
+    let class = admission.settle(not_owned, &source, None);
+    assert_eq!(
+        class,
+        SettleClass::RetractFailed,
+        "a FAILED retract driven from the bootstrap-defer branch must propagate as \
+         RetractFailed"
+    );
+    assert!(
+        !class.runs_buffer_cleanup(),
+        "a failed retract must NOT clear local state as-if-retracted (the NotReady class \
+         would have)"
+    );
+}
+
+/// The TERMINAL owner-loss branch is the same class of site: when its store retract
+/// ERRORS the carrier is still advertised, so the pass must settle as `RetractFailed`
+/// (never the terminal `Unresolved`, and no longer the clean `Pending`).
+#[tokio::test]
+async fn terminal_owner_loss_propagates_a_failed_retract_instead_of_pending() {
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let provider = format!("{ws_root}/src/Comp.vue.tsx");
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        project_binding_snapshot(&ws_root, &tsconfig),
+    )));
+
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
+    let published = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![companion],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("the initial publish under a configured owner succeeds");
+    assert!(
+        matches!(published, ReconcileOutcome::Advertised { .. }),
+        "the initial publish resolves to a configured owner ⇒ advertised, got {published:?}"
+    );
+    assert!(
+        carrier_ready_in_store(&ws_root, &tsconfig, &provider),
+        "the carrier must be advertised before the owner loss"
+    );
+
+    // The owner is LOST: republish a snapshot whose only configured project no longer
+    // includes the carrier ⇒ the authoritative resolution is the terminal `NoProject`.
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(no_owner_snapshot(
+        &ws_root, &tsconfig,
+    ))));
+    break_carrier_store_writes(&ws_root);
+
+    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: false,
+        }),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+    let CarrierSyncDecision::NotOwned(not_owned) = decision else {
+        panic!("a terminal owner loss advertises nothing (NotOwned)");
+    };
+    let class = admission.settle(not_owned, &source, None);
+    assert_eq!(
+        class,
+        SettleClass::RetractFailed,
+        "a FAILED owner-loss retract must propagate as RetractFailed"
+    );
+    assert_ne!(
+        class,
+        SettleClass::Unresolved,
+        "a failed retract must never masquerade as a completed terminal retract"
     );
 }
 
@@ -999,6 +1827,7 @@ async fn managed_tsgo_reconcile_publishes_editor_membership_and_keeps_direct_ope
         provider_sync_states: &states,
         provider_surfaces: &surfaces,
         documents: None,
+        project_sync: None,
         canonical_id: &source,
         is_jsx: ide.is_jsx,
         ide: Some(&ide),
@@ -1332,6 +2161,7 @@ async fn multi_claimant_carrier_sync_serves_under_single_default_owner() {
         provider_sync_states: &states,
         provider_surfaces: &surfaces,
         documents: None,
+        project_sync: None,
         canonical_id: &source,
         is_jsx: ide.is_jsx,
         ide: Some(&ide),
@@ -1451,6 +2281,7 @@ async fn unowned_carrier_sync_is_terminal_unresolved_no_provider() {
         provider_sync_states: &states,
         provider_surfaces: &surfaces,
         documents: None,
+        project_sync: None,
         canonical_id: &source,
         is_jsx: false,
         ide: None,
@@ -1526,14 +2357,14 @@ async fn readiness_receipt_never_precedes_store_publication() {
 
     // Publish the owned carrier through the single membership entry with a non-empty
     // companion ⇒ Advertised (carries the readiness receipt).
-    let companion = CarrierCompanion {
-        provider_uri: Arc::from(provider.as_str()),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 7,
-    };
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        7,
+    );
     let published = coord
         .reconcile_membership(
             &host,

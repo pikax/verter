@@ -31,7 +31,7 @@ mod span_transform;
 
 /// Depth-safe iterative `Drop` + byte-identical-to-derive iterative
 /// `Hash` for [`TypeExpr`] (orphan-rule-permitted in this crate-local
-/// module; kept out of the crate root for file-size hygiene).
+/// implementation module).
 mod recursive_traversal;
 
 /// Stack-safe TypeScript display projection for complete [`TypeExpr`] values.
@@ -41,8 +41,7 @@ pub use display::{render_type_expr_display, RenderedTypeExpr, TypeExprDisplayErr
 /// Hand-rolled JSON (de)serialisation for [`TypeExpr`]: the
 /// [`serde::Serialize`]/[`serde::Deserialize`] impls,
 /// [`TypeExpr::to_json_value`], and [`type_expr_from_json`]
-/// (orphan-rule-permitted in this crate-local module; kept out of the
-/// crate root for file-size hygiene).
+/// (orphan-rule-permitted in this crate-local implementation module).
 mod type_expr_json;
 pub use type_expr_json::type_expr_from_json;
 

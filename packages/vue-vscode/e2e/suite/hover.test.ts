@@ -12,6 +12,7 @@ import {
   findNthPosition,
   hoverText,
   waitForHoverMatching,
+  sequenceParent,
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
@@ -27,7 +28,17 @@ function expectNoHoverDegrade(content: string, messagePrefix: string): void {
 suite(`Hover [${FIXTURE_NAME}]`, function () {
   let doc: vscode.TextDocument;
 
+  // This suite runs on the `verter-native-semantics` server profile, declared in
+  // `lib/serverProfiles.ts` and given its own launch by the runner. Several cases
+  // below assert Verter's SOURCE-OWNED hover affordances — the `@click` event
+  // label, the `.prevent` modifier, the slot outlet — which the IDE codegen
+  // deletes or renames on its way to TSX, so no TypeScript provider can ever
+  // describe them. That lane is a documented opt-in and ships OFF, so asserting
+  // it on the default configuration asserts a capability the product does not
+  // claim there. `native-hover-default.test.ts` pins what the DEFAULT does at the
+  // same anchors, so neither side of that boundary can move unseen.
   suiteSetup(async function () {
+    this.timeout(120_000);
     doc = await openReadyCached(getAppVuePath());
   });
 
@@ -309,6 +320,8 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover on slot outlet tag stays meaningful", async function () {
+    // Opens a second carrier, waits on it, reopens this suite's document.
+    this.timeout(sequenceParent("hoverSlotOutletRoundTrip"));
     if (FIXTURE_NAME !== "single-project") {
       console.log("    N/A");
       return;
@@ -322,9 +335,18 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const { hovers, latencyMs } = await measureHover(myCompDoc.uri, pos);
-    getTimer().recordHover("slot outlet tag", latencyMs);
-    console.log(`    Hover on <slot>: ${latencyMs}ms, ${hovers.length} result(s)`);
+    // The native contribution rides `verter.analysis.enabled`, whose own setting
+    // description calls it an ISOLATED BACKGROUND lane — so it lands after the
+    // document is otherwise ready (measured: provider `any` at 36ms, the slot
+    // outlet description at ~2.6s). `measureHover` stops at the first non-empty
+    // result, which is the provider's, so waiting for the property under test is
+    // the only way to observe the lane at all. A genuine absence still fails:
+    // this returns the last result seen and the assertions below run on it.
+    const hovers = await waitForHoverMatching(myCompDoc.uri, pos, {
+      predicate: (candidates) =>
+        candidates.length > 0 && /\bslot\b/i.test(hoverText(candidates[0])),
+    });
+    console.log(`    Hover on <slot>: ${hovers.length} result(s)`);
 
     expect(hovers.length, "slot outlet hover should exist").to.be.greaterThan(0);
     expect(hovers[0].contents.length, "slot outlet hover should have content").to.be.greaterThan(0);
@@ -350,9 +372,12 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
-    getTimer().recordHover("#header (slot consumer)", latencyMs);
-    console.log(`    Hover on #header: ${latencyMs}ms, ${hovers.length} result(s)`);
+    // Same background lane as the slot outlet above.
+    const hovers = await waitForHoverMatching(doc.uri, pos, {
+      predicate: (candidates) =>
+        candidates.length > 0 && /\bslot\b/i.test(hoverText(candidates[0])),
+    });
+    console.log(`    Hover on #header: ${hovers.length} result(s)`);
 
     expect(hovers.length, "slot consumer hover should exist").to.be.greaterThan(0);
     expect(hovers[0].contents.length, "slot consumer hover should have content").to.be.greaterThan(
@@ -365,6 +390,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover on slot name attribute value stays meaningful", async function () {
+    this.timeout(sequenceParent("hoverSlotNameRoundTrip"));
     if (FIXTURE_NAME !== "single-project") {
       console.log("    N/A");
       return;
@@ -545,6 +571,7 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
   });
 
   test("hover on v-slot local and member are typed", async function () {
+    this.timeout(sequenceParent("hoverVSlotLocalsAndMembers"));
     if (!TYPE_PROVIDER) return this.skip();
     if (FIXTURE_NAME !== "single-project") {
       console.log("    N/A");

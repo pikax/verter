@@ -276,8 +276,8 @@ Closed-contract rules:
 - **One audited wire entry, validation-first.** `VerterHost::resolve_framework_surface_with_audit(TypeInfoGraphRequest)` is the SOLE entry for the `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation. It runs `validate_type_info_graph_request` FIRST (op/payload-arm match, schema echo, the nested framework-surface validator) — a malformed envelope returns the typed wire `error` arm BEFORE any registry lookup or semantic dispatch. A bare-inner-request entry is forbidden. The operation rides the EXISTING typeinfo graph envelope, and its current `FrameworkSurfacePayload`/embedded-`SemanticTypeGraph` shape is PROVISIONAL — an interim wire pinned today, NOT a permanent "no schema change" guarantee. The hard gate `S5.B11/B12 → U8` was landed ahead of order, so U8 still OWES the retag of `FrameworkSurfacePayload.graph` to a `TypeInfoGraphPayload` carrier, the `SemanticTypeGraph.schema_version` bump, and reserving the old field per the Typeinfo Wire Contract (CRITICAL) above; until U8 lands this wire stays pinned but is not final. Guard `framework_surface_wire_executor_validates_first`.
 - **Registry dispatch, no privileged framework branch.** The executor interns `selector.framework_adapter_id`, looks up the registry (unknown id ⇒ typed `MalformedPayload`, NO new error variant), and dispatches to the adapter. Every wire `FrameworkTag` maps to a registered adapter OR an explicit `TagDisposition` row (`DeferredVertical` / `OutOfScope`); a tag's existence is NOT a support guarantee — support is asserted only by a registered adapter and surfaced per-request via `FrameworkSurfaceKindStatus`. Guard `framework_registry_complete` (+ the `framework_surface_executor` integration suite).
 - **Closed plan/resolve/result vocabulary.** The adapter PLANS demands (`plan_surfaces` ⇒ closed 4-variant `PlannedDemand` — `MacroPayload` / `PathProjection` / `ShallowSurface` plus the Svelte arm `SvelteSurface`; no `Custom`/`Raw` arm, no source text / OXC handles / raw `SemanticQueryKey`s) and NORMALIZES resolved data (`normalize`); it holds NO resolve entry point. The executor resolves each `PlannedDemand` through the module-private `ExecutorResolveCtx` (EXHAUSTIVE match, no wildcard) THROUGH the one shared type-resolution engine — it plans, dispatches, and encodes; it is never a second resolver. Per-kind status maps DIRECTLY onto `SUPPORTED`/`PARTIAL`/`UNSUPPORTED` via the typed `ResolvedOutcome` (a supported-empty kind stays distinct from an unsupported kind). The first `SemanticTypeGraph` encoder (`graph_export`) is a pure ZERO-DISPATCH shallow projection of resolved data — named refs mint `GraphSymbolNode` + `GraphReference{symbol_id}`, structural unencodables degrade to `GraphOpaque`, never a fabricated ref and never a re-resolution.
-- **Facts/carrier-only adapter ctx.** `FrameworkAdapterCtx` exposes EXACTLY two ops — `carrier_for::<T>` (the adapter's typed parse carrier, `None` for a carrier-less adapter — never a forged token) and `script_facts_for::<T>` (resolved script facts on demand). It never resolves types, indexes a file, runs OXC, calls `ProjectSemanticDispatch`, or reads a `StoreView`. Guard `framework_adapter_ctx_closed_surface`.
-- **Two-pass script-fact seam.** The syntax-capture half (`verter_semantic::analysis::framework_facts`) captures candidates from the live OXC program — SYNTAX-ONLY (may touch OXC + `lower_ts_type`, MUST NOT resolve imports or read capability bits; guard `script_fact_capture_is_syntax_only`). The resolved-validation half (`framework/script_facts`) drives provider `validate` on demand over neutral resolved-import + capability data, content-addresses candidates, and publishes resolved facts under a fact-rail + strict-same-generation gate with `SignatureAdmission::Cacheable`-only publication (overflow ⇒ `ReturnOnly`, no warm). An EMPTY active-provider set is byte-identical zero-cost (Vue does NOT move onto the seam). The `ActiveProviderIndex` is the shared gate authority. Guard `script_fact_providers_zero_cost_on_miss`. The framework-surface result caches (`FrameworkSurfaceStore` / `FrameworkScriptCaches`) are fact-validated today but live on the framework registry rows, NOT the single `ProjectTypeStore` — they are PROVISIONAL off-store caches to be consolidated onto `ProjectTypeStore` (and given true singleflight) at U10.
+- **Facts/carrier-only adapter ctx.** `FrameworkAdapterCtx` exposes EXACTLY two ops — `carrier_for::<T>` (the adapter's typed parse carrier, `None` for a carrier-less adapter — never a forged token) and `script_facts_for::<T>` (resolved script-fact evidence on demand: exact, partial, unavailable, or not applicable). It never resolves types, indexes a file, runs OXC, calls `ProjectSemanticDispatch`, or reads a `StoreView`. Guard `framework_adapter_ctx_closed_surface`.
+- **Two-pass script-fact seam.** The syntax-capture half (`verter_semantic::analysis::framework_facts`) captures candidates from the live OXC program — SYNTAX-ONLY (may touch OXC + `lower_ts_type`, MUST NOT resolve imports or read capability bits; guard `script_fact_capture_is_syntax_only`). The session mints an exact candidate inventory, including exact-empty, only when its capture parse completes without syntax diagnostics; a recovered parse yields positive-only candidate observations, returns partial evidence, and never warms either script-fact store. Cache absence means “not computed.” The resolved-validation half (`framework/script_facts`) drives provider `validate` on demand over neutral resolved-import + capability data and preserves exact (including exact-empty), partial, unavailable, and not-applicable evidence. Resolved-fact publication accepts only producer-minted exact evidence under the fact-rail + strict-same-generation gate with `SignatureAdmission::Cacheable`-only publication (overflow ⇒ `ReturnOnly`, no warm); partial/unavailable results remain cold. Partial payloads have no whole-payload accessor: Svelte consumers can visit explicitly named conservative positive observations, while a resolution-only partial can separately expose its producer-proven exact syntax facet. Svelte facts keep syntax-owned facts (including sealed `ExactSveltePropsCalls`) separate from resolution-owned `Snippet`/dispatcher provenance, so resolution failure cannot erase exact script geometry. An EMPTY active-provider set is byte-identical zero-cost (Vue does NOT move onto the seam). The `ActiveProviderIndex` is the shared gate authority. Guard `script_fact_providers_zero_cost_on_miss`. The framework-surface result caches (`FrameworkSurfaceStore` / `FrameworkScriptCaches`) are fact-validated today but live on the framework registry rows, NOT the single `ProjectTypeStore` — they are PROVISIONAL off-store caches to be consolidated onto `ProjectTypeStore` (and given true singleflight) at U10.
 - **Parse-domain component-default synth.** `ComponentDefaultSynth` synthesises a component's default-export value symbol from PARSE-DOMAIN inputs only (macros + syntax-capture candidates); it never names the resolved-validation fact types. Registry-dispatched at the shallow-analysis injection points by the file's resolved language. Guard `component_default_synth_parse_domain_only`.
 - **Generated virtual-file naming is descriptor-owned.** The `VirtualFileNaming` column is the single authority for an adapter's IDE / API / testing-API / sidecar suffixes; the committed TS mirror (`packages/language-shared/src/virtual-file-naming.generated.ts`) is rendered from it and byte-pinned. Guard `virtual_file_naming_ts_freshness`.
 - **No re-export shim for relocated Vue resolution.** The Vue resolution bodies relocated to `framework_surface::vue_exec`; `typeinfo/adapters/vue/{public_type,surface,store}.rs` are DELETED with no re-export shim or alias under `adapters::vue`, and `VueShallowMetadataStore` / `VueMacroDtoKey` are retired. Guards `vue_relocation_no_shim` + `retired_symbols_absent_from_production_source`.
@@ -355,16 +355,54 @@ cargo test --package verter_compiler test_name   # Specific Rust test
 cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncated output
 ```
 
+**Oversize-source advisory:** `scripts/gate.mjs` scans production Rust sources and warns for each
+non-exempt file above 1,500 lines as `path (N lines)`. File size is informational and never affects the
+gate verdict.
+
+**Build-prerequisite preflight (fail-closed, the gate's FIRST step).** Parts of the Rust suite load
+artifacts cargo does not build: the real-provider suites spawn the pinned tsserver with `--globalPlugins
+@verter/typescript-plugin --pluginProbeLocations packages/vue-vscode/node_modules`, a pnpm symlink to
+`packages/typescript-plugin` whose `main` is `dist/index.js` — a `tsc -b` OUTPUT that `pnpm install` does
+NOT produce. With the symlink present but the dist absent, tsserver loads no plugin and ~64 `*_tsserver`
+tests fail with `TS2307: Cannot find module './Comp.vue'`, indistinguishable from a compiler regression.
+So before the freshness preflight, before cargo, and before any test, `gate.mjs` **loads** that plugin
+entry in a child process (`require()` of the probe directory, exactly what tsserver resolves) and on any
+load failure FAILS CLOSED (exit 127, marker `BUILD-PREREQUISITE MISSING`) naming the probe target, the
+load error, the producing packages, and the producer command. The oracle is a real load, not a list of
+files to stat: the entry eagerly requires its emitted helpers and `@verter/language-shared`'s entry
+re-exports a dozen emitted siblings, so a stat list mirrors the emit graph and drifts — both `index.js`
+present with one helper missing passes every stat and still throws inside tsserver. The probe runs under
+**tsserver's** environment, not the gate's — it strips the `CHILD_PROCESS_ENV_DENYLIST` the tsserver
+launcher strips, read out of `crates/verter_type_runtime/src/tsserver/ipc.rs` so the two cannot drift,
+because otherwise a `NODE_OPTIONS` preload can forge a status-0 load — and its timeout is a hard `SIGKILL`
+bounded by the gate's own remaining deadline, since `spawnSync`'s default SIGTERM is trappable and a
+trapping child both hangs the gate (with the single-flight mutex held) and returns a false positive.
+Failure classes are typed (`reason`), so only `module-not-found` may ever be read as "never built". It
+proves the closure **resolves**, not that it is **fresh**; a stale-but-loadable dist is a separate,
+deliberately out-of-scope problem. It never builds the artifacts (the verdict must not depend on a mutation the gate performed) and
+never skips the affected tests (with no install at all those tests SKIP and the gate goes green while
+proving nothing). Produce them with `pnpm --filter @verter/language-shared --filter
+@verter/typescript-plugin build` — deliberately NOT `pnpm build` and NOT `--filter
+@verter/typescript-plugin...` (the trailing ellipsis pulls in `@verter/native`'s `napi build --release`).
+`--prepare` is exempt; it runs no test. `(GB9)` in `scripts/gate-selftest.mjs` proves the discrimination in
+six directions against the real production CLI on a synthetic miniature of the package graph.
+
 ### End-of-change Checks
 
 Run after **every** change. Verter's crates are highly interconnected — a change in one crate frequently breaks tests in dependent crates. Always run the full workspace suite:
 
 ```bash
 node scripts/gate.mjs 2>&1 | tee /tmp/test-output.txt   # CANONICAL Rust gate — single-compile archive; runs BOTH surfaces (nextest process-isolation + direct in-process verter_session) with zero second-compile. Run with `node_modules` present so the freshness-tooling preflight is a no-op and the `cases::typeinfo_proto_ts_freshness::*` byte-pin runs GENUINELY: with the tooling present a freshness failure is a HARD gate failure (exit 1, a real stale-binding regression to regenerate + commit), NOT tolerated. On a buf-less runner (pnpm not resolvable AND `buf` not resolvable) the Rust byte-pin SKIPS and PASSES, so the gate reports an ordinary PASS — the verdict-gated tolerance flips ON there only as a latent safety net (PASS-WITH-TOLERATED appears solely if the pair somehow emitted a tolerated FAIL despite `buf` being absent, which the skip does not). `oxfmt` absence never grants tolerance (with `buf` present a missing `oxfmt` is a LOUD setup failure); a deterministic install failure (frozen-lockfile mismatch) fails loud as setup (exit 127) when an install is attempted (both shims already present ⇒ no install runs).
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
+cargo check --workspace --release   # The gate builds DEBUG only. `debug_assert!` gates on `cfg!` — a RUNTIME constant — so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. Nothing else in the normal loop compiles the release cfg.
+cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings   # Host clippy cannot see target-gated code. The wasm32 artifact is what the playground and `@verter/wasm` consumers run. The `wasm32-wasip1`/`wasip2` clippy jobs cover the SEPARATE lapce/zed manifests, not this one.
 cargo fmt --all --check
 pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this); also what the gate's preflight runs to make the freshness byte-pin run genuinely
 ```
+
+Confirm `cargo clippy --version` reports the `rust-toolchain.toml`-pinned version before
+trusting any of the three lint/check results — a clippy run on a different toolchain is not
+evidence about the one CI uses.
 
 - Corpus audit-test regenerator (run after audit-record schema or fixture changes; idempotent): `node scripts/gen-corpus-audit-tests.mjs`
 
@@ -532,8 +570,8 @@ not a committed implementation language for those paths.
   repo-owned command wrappers (`*.sh`/`*.bash`/`*.ps1`/`*.cmd`/`*.bat`). Thin shell/PowerShell/cmd wrappers
   are allowed as command-entry shims but must not invoke Python; Node/TS tool scripts must not spawn Python
   transitively.
-- New or ported repo-owned tooling lands as a Rust bin (e.g. the `gen-typeinfo-manifest` cargo bin, the
-  xtask `check-four-mode-terminology` bin) or a Node script — never a committed Python script.
+- New or ported repo-owned tooling lands as a Rust bin (e.g. the `gen-typeinfo-manifest` cargo bin) or a
+  Node script — never a committed Python script.
 - Agents may use Python transiently and locally for ad-hoc analysis, but such use is never committed and
   never on a gate/build/CI/test path.
 - Committing repo-owned Python is allowed only if it is 100% necessary AND neither Rust nor JS/Node can do

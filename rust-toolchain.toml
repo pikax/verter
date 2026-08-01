@@ -1,3 +1,47 @@
+# EXACT-PINNED, deliberately. Not a floating `stable`.
+#
+# The repo byte-pins rustc's own diagnostic text in 27 trybuild `.stderr`
+# fixtures (`crates/*/tests/**/*.stderr`). Those fixtures are a function of the
+# compiler version: a rustc release that rewords one note or renumbers one span
+# turns every affected fixture red, and re-blessing them against whichever rustc
+# the contributor happens to have installed makes CI fail instead. Nothing else
+# in the tree binds the fixtures to a compiler, so this file is that binding.
+#
+# rustup's toolchain-file override outranks `rustup default`, so this pin wins
+# over whatever a CI action installed as the default toolchain.
+#
+# KEEP IN SYNC: `.github/workflows/*.yml` reference `dtolnay/rust-toolchain@<ver>`
+# with this same version. That action does NOT read this file — it installs the
+# toolchain named by its `@ref` and then `rustup default`s it. The `targets:` and
+# `components:` it installs land on THAT toolchain, not on the one this file
+# selects, so a drifted ref means `cargo build --target <t>` fails with a missing
+# `std` for the pinned toolchain (the release cross-compile matrix in
+# `release.yml` installs `${{ matrix.target }}` this way). Bump both together.
+#
+# ONE-TIME CI COST, on this pin and on every future bump. `Swatinem/rust-cache@v2`
+# hashes `rustc -vV` for the ACTIVE toolchain PLUS one per line of `rustup
+# toolchain list --quiet` — not just the active one. GitHub runners preinstall
+# `stable`, so installing a named version makes that list two entries where it was
+# one. The versions collect into a `Set<RustVersion>` of freshly-parsed objects,
+# which dedupes by REFERENCE, not by value: `stable` and `1.97.1` resolving to the
+# identical compiler does NOT collapse them, and the same version string is folded
+# into the digest twice. That digest is part of `restoreKey`, the prefix the cache
+# falls back to, so the exact key and the fallback miss together.
+#
+# Consequence: the first run after this lands cold-builds cargo in EVERY Rust job.
+# It self-heals from the second run — the new key is stable. A green-but-slow CI
+# run right after a toolchain bump is this, not a regression to investigate.
 [toolchain]
-channel = "stable"
+channel = "1.97.1"
 components = ["rustfmt", "clippy"]
+# Targets are PER-TOOLCHAIN, and rustup treats `stable` and `1.97.1` as two
+# different toolchain identities even while they are the same compiler. Anyone
+# who had `wasm32-unknown-unknown` on `stable` does NOT have it on the pin, and
+# `pnpm build:wasm` (part of `pnpm build`) then dies with `E0463: can't find
+# crate for std`. Listing it here makes rustup install it with the toolchain.
+#
+# `wasm32-wasip1` / `wasm32-wasip2` are deliberately NOT listed: they build the
+# separate `extensions/lapce` and `extensions/zed` manifests, which are not
+# workspace members and not part of `pnpm build`. CI installs those two through
+# the action, onto this same pinned toolchain.
+targets = ["wasm32-unknown-unknown"]

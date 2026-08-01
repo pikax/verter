@@ -120,6 +120,11 @@ mod nav_features;
 // prepare_rename, rename.
 mod nav_features_css;
 mod nav_features_navigation;
+mod provider_recovery;
+// The single rename-plan owner (admission + ONE cursor classification) that
+// BOTH `rename_prepare::handle_prepare_rename` and
+// `nav_features_navigation::handle_rename` consume.
+mod rename_plan;
 mod rename_prepare;
 
 #[cfg(test)]
@@ -152,10 +157,13 @@ pub use self::protocol_types::*;
 pub(crate) mod server_utils;
 use self::server_utils::*;
 pub(crate) use self::server_utils::{
-    attr_name_match_rank, carrier_language_for, compute_verter_diagnostics_for_with_views,
-    is_default_export_component_carrier, prepare_non_carrier_provider_sync,
-    select_best_ranked_candidate, self_file_language_for, sync_self_file_shadow_state,
-    to_pascal_case,
+    attr_name_match_rank, carrier_language_for, is_default_export_component_carrier,
+    prepare_non_carrier_provider_sync, select_best_ranked_candidate, self_file_language_for,
+    sync_self_file_shadow_state, to_pascal_case, verter_owned_diagnostics,
+};
+#[cfg(test)]
+pub(crate) use self::server_utils::{
+    document_diagnostics_for_test, CARRIER_PROVIDER_UNAVAILABLE_CODE,
 };
 
 #[path = "../background_drain.rs"]
@@ -181,8 +189,16 @@ pub(crate) use self::background_drain_decl_closure::{carrier_dependency_ids, Dec
 ///
 /// Preserves the `.resolver` field access pattern so callers don't need deep changes.
 #[derive(Debug, Clone)]
+pub(crate) struct PublishedResolutionView {
+    pub(crate) workspace: Arc<verter_workspace::FilesystemWorkspace>,
+    pub(crate) published: Arc<verter_workspace::PublishedRoot>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct PublishedResolverSnapshot {
     pub(crate) resolver: crate::project_resolver::NativeProjectResolver,
+    /// Exact Engine-backed workspace publication paired with `resolver`.
+    pub(crate) resolution_view: Option<PublishedResolutionView>,
     /// `true` after `background_init` publishes a real snapshot with the
     /// full project graph. `false` during bootstrap (empty resolver).
     pub(crate) ownership_ready: bool,
@@ -246,6 +262,10 @@ pub(crate) struct ResolvedComponentDocument {
 struct IdeSyncRepairLane {
     mutex: tokio::sync::Mutex<()>,
     generation: std::sync::atomic::AtomicU64,
+    /// Advances once an admitted projection-less repair has attempted its
+    /// compile. Waiters that observed the prior value join that attempt; a
+    /// later request observes the new value and may retry transient failure.
+    repair_sequence: std::sync::atomic::AtomicU64,
     retired: std::sync::atomic::AtomicBool,
 }
 
@@ -254,6 +274,7 @@ impl IdeSyncRepairLane {
         Self {
             mutex: tokio::sync::Mutex::new(()),
             generation: std::sync::atomic::AtomicU64::new(generation),
+            repair_sequence: std::sync::atomic::AtomicU64::new(0),
             retired: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -281,6 +302,18 @@ impl IdeSyncRepairLease {
 
     fn lane(&self) -> &Arc<IdeSyncRepairLane> {
         &self.lane
+    }
+
+    fn repair_sequence(&self) -> u64 {
+        self.lane
+            .repair_sequence
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn complete_repair_attempt(&self) {
+        self.lane
+            .repair_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -464,9 +497,23 @@ pub struct ServerCore {
     #[cfg(test)]
     ide_sync_before_lease_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
     #[cfg(test)]
-    ide_sync_after_lease_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    ide_sync_after_lease_pauses: parking_lot::Mutex<std::collections::VecDeque<IdeSyncPausePoint>>,
     #[cfg(test)]
     ide_sync_close_after_lock_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    /// Pause point BETWEEN the repair's compile and every consumer of the
+    /// response it retains — the window in which a `didChange` can commit a
+    /// different carrier source while the repair still holds the previous
+    /// revision's provider bytes and mapper.
+    #[cfg(test)]
+    ide_sync_after_recompile_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    /// Pause after the retained-source check and immediately before provider
+    /// sync consumes the retained bytes.
+    #[cfg(test)]
+    ide_sync_before_provider_write_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    /// Pause after the retained-source check and immediately before the
+    /// provider-surface store records the retained bytes and map.
+    #[cfg(test)]
+    ide_sync_before_surface_record_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
     /// Canonical IDs needing **deferred API/.vue.ts sync** + owner-aware reconciliation.
     /// Set by did_change and by the interactive path (when API is deferred).
     /// Cleared by the coordinator's debounced sync after a resolver snapshot exists.
@@ -515,6 +562,10 @@ pub struct ServerCore {
     /// init task. Background tasks check this before committing results to discard
     /// stale work when a newer init supersedes them.
     init_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Generation fence joining the provider's configured-owner authority to the
+    /// atomically published workspace root. Provider-backed consumers capture a
+    /// witness before awaiting and revalidate it before using the response.
+    ownership_generation_fence: Arc<crate::configured_owner::OwnershipGenerationFence>,
     /// Actual MCP HTTP port (already bound). Sent to the extension during `initialized()`.
     mcp_port: Option<u16>,
     /// Selection provenance, or why no provider could be started. Sent via
@@ -788,6 +839,8 @@ impl VerterLanguageServer {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         lane.generation
             .store(generation, std::sync::atomic::Ordering::Release);
+        lane.repair_sequence
+            .store(0, std::sync::atomic::Ordering::Release);
         lane.retired
             .store(false, std::sync::atomic::Ordering::Release);
         self.ide_sync_repair_locks
@@ -852,7 +905,16 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        Self::pause_next_ide_sync_at(&self.ide_sync_after_lease_pause, canonical_id)
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        self.ide_sync_after_lease_pauses
+            .lock()
+            .push_back(IdeSyncPausePoint {
+                canonical_id: canonical_id.to_string(),
+                arrived: Arc::clone(&arrived),
+                release: Arc::clone(&release),
+            });
+        (arrived, release)
     }
 
     #[cfg(test)]
@@ -861,6 +923,30 @@ impl VerterLanguageServer {
         canonical_id: &str,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
         Self::pause_next_ide_sync_at(&self.ide_sync_close_after_lock_pause, canonical_id)
+    }
+
+    #[cfg(test)]
+    fn pause_next_ide_sync_after_recompile(
+        &self,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        Self::pause_next_ide_sync_at(&self.ide_sync_after_recompile_pause, canonical_id)
+    }
+
+    #[cfg(test)]
+    fn pause_next_ide_sync_before_provider_write(
+        &self,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        Self::pause_next_ide_sync_at(&self.ide_sync_before_provider_write_pause, canonical_id)
+    }
+
+    #[cfg(test)]
+    fn pause_next_ide_sync_before_surface_record(
+        &self,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        Self::pause_next_ide_sync_at(&self.ide_sync_before_surface_record_pause, canonical_id)
     }
 
     #[cfg(test)]
@@ -885,12 +971,39 @@ impl VerterLanguageServer {
 
     #[cfg(test)]
     async fn maybe_pause_ide_sync_after_lease(&self, canonical_id: &str) {
-        Self::maybe_pause_ide_sync_at(&self.ide_sync_after_lease_pause, canonical_id).await;
+        let pause = {
+            let mut pauses = self.ide_sync_after_lease_pauses.lock();
+            pauses
+                .iter()
+                .position(|pause| pause.canonical_id == canonical_id)
+                .and_then(|index| pauses.remove(index))
+        };
+        if let Some(pause) = pause {
+            pause.arrived.notify_one();
+            pause.release.notified().await;
+        }
     }
 
     #[cfg(test)]
     async fn maybe_pause_ide_sync_close_after_lock(&self, canonical_id: &str) {
         Self::maybe_pause_ide_sync_at(&self.ide_sync_close_after_lock_pause, canonical_id).await;
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_ide_sync_after_recompile(&self, canonical_id: &str) {
+        Self::maybe_pause_ide_sync_at(&self.ide_sync_after_recompile_pause, canonical_id).await;
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_ide_sync_before_provider_write(&self, canonical_id: &str) {
+        Self::maybe_pause_ide_sync_at(&self.ide_sync_before_provider_write_pause, canonical_id)
+            .await;
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_ide_sync_before_surface_record(&self, canonical_id: &str) {
+        Self::maybe_pause_ide_sync_at(&self.ide_sync_before_surface_record_pause, canonical_id)
+            .await;
     }
 
     #[cfg(test)]
@@ -1046,9 +1159,15 @@ impl VerterLanguageServer {
             #[cfg(test)]
             ide_sync_before_lease_pause: parking_lot::Mutex::new(None),
             #[cfg(test)]
-            ide_sync_after_lease_pause: parking_lot::Mutex::new(None),
+            ide_sync_after_lease_pauses: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             #[cfg(test)]
             ide_sync_close_after_lock_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            ide_sync_after_recompile_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            ide_sync_before_provider_write_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            ide_sync_before_surface_record_pause: parking_lot::Mutex::new(None),
             needs_deferred_sync,
             pending_snapshot_provider_sync,
             sync_coordinator,
@@ -1062,6 +1181,9 @@ impl VerterLanguageServer {
             completion_final_snapshot_pause: parking_lot::Mutex::new(None),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            ownership_generation_fence: Arc::new(
+                crate::configured_owner::OwnershipGenerationFence::default(),
+            ),
             mcp_port: config.mcp_port,
             type_provider_reason: config.type_provider_reason,
             type_provider_advisory: config.type_provider_advisory,
@@ -1114,11 +1236,14 @@ impl VerterLanguageServer {
     /// push (didChange) and pull (textDocument/diagnostic) paths request diagnostics.
     fn compute_verter_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
         let vfs_ws = self.vfs_workspace.read();
-        compute_verter_diagnostics_for_with_views(
+        let canonical_id = crate::documents::uri_to_canonical_id(uri);
+        verter_owned_diagnostics(
             &self.documents,
             uri,
+            &canonical_id,
             &self.cached_verter_diags,
             vfs_ws.as_deref(),
+            self.project_sync.as_ref(),
         )
     }
 }
@@ -1162,6 +1287,15 @@ impl VerterLanguageServer {
         workspace: Arc<verter_workspace::FilesystemWorkspace>,
     ) {
         *self.vfs_workspace.write() = Some(workspace);
+    }
+
+    /// Install a completed production-shaped workspace publication into both
+    /// the server and its host (test harness access).
+    pub(crate) fn swap_vfs_workspace_for_test(
+        &self,
+        workspace: Arc<verter_workspace::FilesystemWorkspace>,
+    ) {
+        self.swap_vfs_workspace(workspace);
     }
 
     /// RAW (unmerged) provider code actions for a carrier URI + range + editor diagnostics — the

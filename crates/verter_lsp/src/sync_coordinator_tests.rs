@@ -1,7 +1,7 @@
 //! Unit tests for [`crate::sync_coordinator`] coordinator behavior.
 //!
 //! Extracted from the inline `#[cfg(test)] mod tests` in `sync_coordinator.rs` to
-//! keep the production source under the file-size guard (`no_oversize_files`).
+//! keep the production source small and readable.
 //! Wired back as a `#[cfg(test)] #[path = "sync_coordinator_tests.rs"] mod tests;`
 //! child of `sync_coordinator`, so `use super::*` resolves to its items.
 
@@ -57,6 +57,7 @@ async fn sync_coordinator_coalesces_rapid_changes() {
         handle.signal(
             "C:/project/src/App.vue".to_string(),
             format!("file:///C:/project/src/App.vue?v={version}"),
+            std::time::Instant::now(),
         );
     }
 
@@ -70,39 +71,6 @@ async fn sync_coordinator_coalesces_rapid_changes() {
     assert_eq!(
         pending.get("C:/project/src/App.vue").map(String::as_str),
         Some("file:///C:/project/src/App.vue?v=9")
-    );
-}
-
-#[tokio::test]
-async fn coordinator_debounces_to_single_sync() {
-    // Test the actual debounce logic using an in-process coordinator.
-    // We use a mock deps that tracks sync calls via a shared counter.
-
-    let debounce = Duration::from_millis(DEBOUNCE_MS);
-
-    // Simulate: 10 signals at 10ms intervals for the same file
-    let mut last_change = Instant::now();
-    for _ in 0..10 {
-        last_change = Instant::now();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    // At this point, the last change was just now.
-    // The debounce should NOT have fired yet.
-    let elapsed = Instant::now().duration_since(last_change);
-    assert!(
-        elapsed < debounce,
-        "debounce should not fire during rapid changes (elapsed: {:?})",
-        elapsed
-    );
-
-    // Wait for the debounce interval to pass
-    tokio::time::sleep(debounce).await;
-    let elapsed = Instant::now().duration_since(last_change);
-    assert!(
-        elapsed >= debounce,
-        "debounce should fire after silence (elapsed: {:?})",
-        elapsed
     );
 }
 
@@ -652,6 +620,9 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -766,7 +737,7 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
             &deps.documents,
             deps.project_sync.as_ref().expect("test deps carry a sync"),
             &deps.provider_sync_states,
-            None,
+            &|| None,
             &uri,
             canonical_id,
             &file_language,
@@ -1207,6 +1178,9 @@ defineProps<{ msg: string }>()
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(canonical_id.to_string(), prior_state.clone());
 
@@ -1537,14 +1511,18 @@ async fn make_carrier_diagnostics_fixture() -> (
         .get(&canonical_id)
         .and_then(|state| state.ide_path.clone())
         .expect("the owner-resolved sync must commit an IDE path");
-    let profile = documents.tsx_profile.read().clone();
-    let ide = host
-        .get_ide(&canonical_id, &profile)
-        .expect("IDE output should exist");
-    let diag_start = ide
-        .code
+    // A provider reports offsets into the buffer IT holds, not into the raw
+    // compiler output: the carrier projection rewrites import specifiers, so the
+    // two buffers diverge from the first rewritten import onward. Seed the mock
+    // where a real engine would answer — inside the recorded provider surface.
+    let recorded = documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("a successful sync records the provider surface it delivered");
+    let diag_start = recorded
+        .provider_content
         .find("const msg")
-        .expect("script statement present in IDE output")
+        .expect("script statement present in the provider buffer")
         + "const ".len();
     provider.set_diagnostics(
         &ide_path,
@@ -1922,7 +1900,7 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
             &deps.documents,
             deps.project_sync.as_ref().expect("test deps carry a sync"),
             &deps.provider_sync_states,
-            None,
+            &|| None,
             &uri,
             canonical_id,
             &file_language,
@@ -2040,7 +2018,11 @@ async fn provider_less_coordinator_still_publishes_verter_owned_diagnostics() {
     };
 
     let handle = spawn_sync_coordinator(deps);
-    handle.signal(canonical_id.clone(), uri.as_str().to_string());
+    handle.signal(
+        canonical_id.clone(),
+        uri.as_str().to_string(),
+        std::time::Instant::now(),
+    );
 
     // Debounce is 300ms; poll for the publish's recomputed verter cache entry.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -2146,5 +2128,2327 @@ async fn semantic_completion_republishes_without_provider_file_sync() {
     assert_eq!(
         documents.get_canonical_id(&uri).as_deref(),
         Some(canonical_id.as_str())
+    );
+}
+
+/// Deps for a verter-only (no in-process provider) coordinator publish.
+fn verter_only_deps(documents: Arc<DocumentRegistry>) -> SyncCoordinatorDeps {
+    SyncCoordinatorDeps {
+        documents,
+        project_sync: None,
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::None,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    }
+}
+
+/// Install a `svelte` package at `<root>/node_modules/svelte`.
+fn install_svelte_at(root: &std::path::Path, manifest: &str) {
+    let dir = root.join("node_modules/svelte");
+    std::fs::create_dir_all(&dir).expect("svelte package dir");
+    std::fs::write(dir.join("package.json"), manifest).expect("manifest");
+    std::fs::write(dir.join("index.d.ts"), "export type S = 1;\n").expect("index");
+    std::fs::write(dir.join("elements.d.ts"), "export interface E {}\n").expect("elements");
+}
+
+const USABLE_SVELTE: &str = r#"{"name":"svelte","version":"5.56.3","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#;
+const UNUSABLE_SVELTE: &str = r#"{"name":"svelte","version":"5.56.3","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"}}}"#;
+
+/// `did_open` and `did_change` both route through this coordinator, and this is
+/// the set it hands the client. An unusable `svelte` install must be explained
+/// on BOTH — a user who never edits the file still needs to know why every
+/// type-aware feature is dark.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_publishes_the_svelte_install_diagnostic_on_open_and_on_change() {
+    let tmp = tempfile::tempdir().expect("workspace");
+    install_svelte_at(tmp.path(), UNUSABLE_SVELTE);
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let canonical_id = src_dir
+        .join("App.svelte")
+        .to_string_lossy()
+        .replace('\\', "/");
+    std::fs::write(&canonical_id, "<div>hi</div>").expect("component");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri = crate::uri::path_to_file_uri(&canonical_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: "<div>hi</div>".to_string(),
+    });
+    let deps = verter_only_deps(Arc::clone(&documents));
+
+    let on_open = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    let has_unusable = |diags: &[Diagnostic]| {
+        diags.iter().any(|d| {
+            matches!(&d.code, Some(NumberOrString::String(code))
+                if code == crate::svelte_assets::SVELTE_PACKAGE_UNUSABLE_CODE)
+        })
+    };
+    assert!(
+        has_unusable(&on_open),
+        "an unusable svelte install must be explained on did_open, got {on_open:?}"
+    );
+
+    // The same document after an edit — the debounced change publish must not
+    // drop the category.
+    let _ = documents.did_change(&uri, 2, "<div>edited</div>");
+    let on_change = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    assert!(
+        has_unusable(&on_change),
+        "the diagnostic must survive did_change, got {on_change:?}"
+    );
+}
+
+/// The negative control: a healthy install publishes NO install diagnostic on
+/// the same path. Without it the test above would pass for a coordinator that
+/// warns unconditionally.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_stays_silent_for_a_usable_svelte_install() {
+    let tmp = tempfile::tempdir().expect("workspace");
+    install_svelte_at(tmp.path(), USABLE_SVELTE);
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let canonical_id = src_dir
+        .join("App.svelte")
+        .to_string_lossy()
+        .replace('\\', "/");
+    std::fs::write(&canonical_id, "<div>hi</div>").expect("component");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri = crate::uri::path_to_file_uri(&canonical_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: "<div>hi</div>".to_string(),
+    });
+    let deps = verter_only_deps(documents);
+
+    let diags = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    assert!(
+        !diags
+            .iter()
+            .any(|d| matches!(&d.code, Some(NumberOrString::String(code))
+            if code == crate::svelte_assets::SVELTE_PACKAGE_UNUSABLE_CODE
+                || code == crate::svelte_assets::SVELTE_PACKAGE_MISSING_CODE)),
+        "a usable install must publish no svelte install diagnostic, got {diags:?}"
+    );
+}
+
+/// The user-visible half of the fail-closed contract: when a carrier's provider
+/// surface cannot be prepared at all, the coordinator PUBLISHES the reason.
+///
+/// This is the reachability the internal ledger alone cannot prove. A first-open
+/// preparation failure never commits a provider path for the document, so any
+/// lookup keyed on committed provider state finds nothing and the user is left
+/// with a silently dark file and a log line.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_publishes_carrier_provider_unavailable_for_an_unpreparable_carrier() {
+    let owner = tempfile::tempdir().expect("workspace");
+    install_svelte_at(owner.path(), USABLE_SVELTE);
+    let src_dir = owner.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let canonical_id = src_dir
+        .join("Component.svelte")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let provider_path = format!("{canonical_id}.tsx");
+    std::fs::write(&canonical_id, "<div>hi</div>").expect("component");
+    let generated = "/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n";
+
+    let sync = ProjectSync::new_with_kind(
+        Arc::new(MockTypeProvider::new()),
+        ProjectSyncMode::FullProject,
+        crate::TypeProviderKind::Tsgo,
+    );
+
+    // Block the owner-bound asset directory with a FILE so materialization hits
+    // a real, unmodellable I/O failure.
+    let asset_dir = crate::svelte_assets::owner_asset_dir_for_test(&provider_path, generated)
+        .expect("a usable owner has an owner-bound asset directory");
+    let _ = std::fs::remove_dir_all(&asset_dir);
+    std::fs::create_dir_all(asset_dir.parent().expect("owners dir")).expect("owners dir");
+    std::fs::write(&asset_dir, b"not a directory").expect("block the asset directory");
+    struct Unblock(std::path::PathBuf);
+    impl Drop for Unblock {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let unblock = Unblock(asset_dir);
+
+    // Production ordering: the coordinator syncs the carrier, then publishes.
+    // NOTHING is committed to `provider_sync_states` — exactly the first-open
+    // shape in which the failure must still be findable.
+    assert!(
+        sync.carrier_provider_surface(&provider_path, generated)
+            .is_none(),
+        "an unmodellable buffer must fail closed"
+    );
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri = crate::uri::path_to_file_uri(&canonical_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: "<div>hi</div>".to_string(),
+    });
+    let mut deps = verter_only_deps(Arc::clone(&documents));
+    deps.project_sync = Some(sync.clone());
+
+    let diags = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    let unavailable = |diags: &[Diagnostic]| {
+        diags.iter().any(|d| {
+            matches!(&d.code, Some(NumberOrString::String(code))
+                if code == crate::server::CARRIER_PROVIDER_UNAVAILABLE_CODE)
+        })
+    };
+    assert!(
+        unavailable(&diags),
+        "a carrier whose provider surface cannot be prepared must be EXPLAINED to \
+         the user, not only logged; got {diags:?}"
+    );
+
+    // Recovery: once preparation succeeds the explanation must disappear, or it
+    // becomes a permanent false alarm.
+    drop(unblock);
+    assert!(
+        sync.carrier_provider_surface(&provider_path, generated)
+            .is_some(),
+        "a repaired environment prepares again"
+    );
+    let recovered = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    assert!(
+        !unavailable(&recovered),
+        "the explanation must clear once the surface can be prepared, got {recovered:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Reproduction: https://github.com/pikax/verter/issues/96
+//
+// `coordinator_loop` stamps the start of a signal's debounce quiet window with
+// `Instant::now()` taken at the moment it DRAINS the inbox (the
+// `wake = wake_rx.recv()` arm of the select), not at the moment
+// `SyncCoordinatorHandle::signal` deposited that signal. Every millisecond a
+// signal spends waiting in the inbox — because `did_change` handlers are
+// serialized on `did_change_mutex` and each one commits its document before it
+// signals, and because the coordinator's own `sync_file(..).await` is inline in
+// the loop and blocks the drain — is therefore charged to the user as fresh
+// quiet time, and the full 300ms window restarts from zero no matter how long
+// the file has actually been quiet.
+//
+// These tests are deliberately structured so that NO assertion depends on how
+// fast this machine is:
+//
+//   * The stall is produced by `std::thread::sleep` on the single-threaded test
+//     runtime. That blocks the one worker thread, so the spawned coordinator
+//     task provably cannot be polled during it — the drain is late by
+//     construction, not by scheduling luck.
+//   * The failing assertion is "a file quiet for 4x the debounce interval was
+//     NOT dispatched on the coordinator's first look". On `main` this cannot
+//     pass: the drain schedules `sleep_until(drain_instant + 300ms)`, which is
+//     300ms in the future. Machine load can only push that later.
+//   * The passing direction is equally robust: once the window is measured from
+//     signal receipt, the file's window has demonstrably elapsed (real time
+//     only ever grows), so it dispatches on the first look.
+
+/// Build the minimum deps for driving a real `coordinator_loop` with no
+/// provider I/O at all. `project_sync: None` makes `sync_file` return at its
+/// first line — so nothing calls `tokio::task::block_in_place`, which would
+/// panic on the current-thread runtime these tests need — and
+/// `type_provider: None` keeps the publish half out of the picture.
+///
+/// The observable is `needs_provider_sync`: the coordinator's deadline arm
+/// removes the canonical id from that set exactly when the debounce fires for
+/// it, so membership is a precise "has this file been dispatched yet" probe.
+fn debounce_probe_deps() -> (SyncCoordinatorDeps, Arc<DashSet<String>>) {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let needs_provider_sync = Arc::new(DashSet::new());
+    let deps = SyncCoordinatorDeps {
+        documents,
+        project_sync: None,
+        needs_provider_sync: Arc::clone(&needs_provider_sync),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+    (deps, needs_provider_sync)
+}
+
+/// A settle budget far below `DEBOUNCE_MS`, so letting the coordinator run can
+/// never be mistaken for the debounce elapsing.
+const SETTLE_MS: u64 = 20;
+
+/// Hand the runtime to the coordinator long enough for it to drain its inbox
+/// and re-arm its timer. The `sleep` parks the time driver (a `yield_now` loop
+/// alone never does, so an already-elapsed `sleep_until` would not fire); the
+/// yields then let the loop run its remaining iterations.
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(SETTLE_MS)).await;
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// REPRODUCES https://github.com/pikax/verter/issues/96.
+///
+/// EXPECTED TO FAIL on `main`. It passes once the quiet window is measured
+/// from the instant `signal()` deposited the signal instead of the instant the
+/// coordinator got around to draining it.
+///
+/// `App.vue` is signalled and then sits in the inbox for 4x the debounce
+/// interval while the runtime thread is blocked — exactly the shape of the
+/// `did_change` backlog in the issue, where 50 serialized handlers push the
+/// coordinator's first look seconds past the last keystroke. By the time the
+/// coordinator looks, the file has been quiet for far longer than the quiet
+/// window, so the sync is already overdue and must fire on that first look.
+#[tokio::test]
+async fn debounce_window_restarts_at_inbox_drain_instead_of_signal_receipt() {
+    let (deps, needs_provider_sync) = debounce_probe_deps();
+    let quiet_id = "/workspace/src/App.vue".to_string();
+    let just_typed_id = "/workspace/src/Sidebar.vue".to_string();
+    needs_provider_sync.insert(quiet_id.clone());
+    needs_provider_sync.insert(just_typed_id.clone());
+
+    let handle = spawn_sync_coordinator(deps);
+
+    // The keystroke for App.vue lands here. Nothing has awaited yet, so the
+    // spawned coordinator task has not been polled and the signal is sitting
+    // in the inbox, unseen.
+    let signalled_at = Instant::now();
+    handle.signal(
+        quiet_id.clone(),
+        "file:///workspace/src/App.vue".to_string(),
+        signalled_at,
+    );
+
+    // The backlog. `std::thread::sleep` on the current-thread runtime blocks
+    // the ONE worker, so the coordinator provably cannot drain during it.
+    let backlog = Duration::from_millis(DEBOUNCE_MS * 4);
+    std::thread::sleep(backlog);
+    let inbox_wait = signalled_at.elapsed();
+    assert!(
+        inbox_wait >= backlog,
+        "test setup: the signal must have waited at least {backlog:?} in the inbox, waited {inbox_wait:?}"
+    );
+
+    // A second file is signalled immediately before the drain. It has NOT been
+    // quiet and must still be debounced — it is what keeps the fix honest.
+    handle.signal(
+        just_typed_id.clone(),
+        "file:///workspace/src/Sidebar.vue".to_string(),
+        std::time::Instant::now(),
+    );
+
+    // Hand the coordinator the thread. Both signals drain in one batch.
+    settle().await;
+
+    assert!(
+        !needs_provider_sync.contains(&quiet_id),
+        "issue #96: {quiet_id} was signalled {inbox_wait:?} ago — {}x the \
+         {DEBOUNCE_MS}ms debounce interval — and has been quiet that entire \
+         time, so its sync is overdue and must fire on the coordinator's first \
+         look at the inbox. It has not fired. The coordinator stamped the quiet \
+         window with the instant it DRAINED the inbox instead of the instant \
+         the signal was received, discarding the {inbox_wait:?} the signal \
+         already waited and restarting the full {DEBOUNCE_MS}ms wait.",
+        inbox_wait.as_millis() / u128::from(DEBOUNCE_MS)
+    );
+    assert!(
+        needs_provider_sync.contains(&just_typed_id),
+        "{just_typed_id} was signalled immediately before the drain and has not \
+         been quiet for {DEBOUNCE_MS}ms — measuring the window from signal \
+         receipt must not turn the debounce into an unconditional immediate \
+         dispatch"
+    );
+}
+
+/// Positive control for the fix to #96: the debounce must still debounce.
+/// Passes on `main` and must keep passing after the fix — it is what fails if
+/// the fix degenerates into "dispatch on every drain".
+#[tokio::test]
+async fn debounce_still_waits_for_quiet_before_dispatching() {
+    let (deps, needs_provider_sync) = debounce_probe_deps();
+    let canonical_id = "/workspace/src/App.vue".to_string();
+    needs_provider_sync.insert(canonical_id.clone());
+
+    let handle = spawn_sync_coordinator(deps);
+    handle.signal(
+        canonical_id.clone(),
+        "file:///workspace/src/App.vue".to_string(),
+        std::time::Instant::now(),
+    );
+
+    // Well inside the quiet window.
+    settle().await;
+    assert!(
+        needs_provider_sync.contains(&canonical_id),
+        "a file quiet for only ~{SETTLE_MS}ms must not have synced yet — the \
+         {DEBOUNCE_MS}ms debounce is what stops rapid typing from flooding the \
+         type provider"
+    );
+
+    // Past it. `tokio::time::sleep` (not `std::thread::sleep`) so the
+    // coordinator keeps the thread and its timer can fire.
+    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
+    settle().await;
+    assert!(
+        !needs_provider_sync.contains(&canonical_id),
+        "a file quiet for longer than {DEBOUNCE_MS}ms must have synced"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The other half of the fix for https://github.com/pikax/verter/issues/96.
+//
+// Measuring the quiet window from RECEIPT is what makes an overdue sync fire
+// promptly, but on its own it converts the stall into a flood: with 50
+// `did_change` handlers serialized behind the global commit mutex, each one
+// deposits a signal whose receipt instant is ALREADY older than the debounce,
+// so the coordinator would dispatch once per handler — one provider sync per
+// keystroke, exactly what `sync_coordinator`'s module documentation says the
+// debounce exists to prevent.
+//
+// A change is therefore not merely "signalled at time T": it is IN FLIGHT from
+// the moment its handler is entered until that handler is done. A document with
+// a change in flight is not quiet, whatever its last receipt says.
+
+/// The coordinator PARKS on a gated canonical id — it arms no timer for it at
+/// all — so the ticket release is the only thing that can wake it. A handler
+/// that returns WITHOUT signalling (a virtual document, a style-only edit) must
+/// therefore still wake it, or an already-overdue sync waits forever.
+#[tokio::test]
+async fn releasing_a_ticket_without_signalling_wakes_the_gated_coordinator() {
+    let (deps, needs_provider_sync) = debounce_probe_deps();
+    let canonical_id = "/workspace/src/App.vue".to_string();
+    needs_provider_sync.insert(canonical_id.clone());
+
+    let handle = spawn_sync_coordinator(deps);
+    let signalled_at = Instant::now();
+    handle.signal(
+        canonical_id.clone(),
+        "file:///workspace/src/App.vue".to_string(),
+        signalled_at,
+    );
+
+    // Make the receipt genuinely overdue. `std::thread::sleep` on the
+    // single-threaded runtime blocks the one worker, so the coordinator provably
+    // cannot look at the inbox during it.
+    std::thread::sleep(Duration::from_millis(DEBOUNCE_MS * 4));
+
+    // A later change arrives and takes a ticket, then its handler returns
+    // without ever signalling.
+    let ticket = handle.change_received(canonical_id.clone());
+    settle().await;
+    assert!(
+        needs_provider_sync.contains(&canonical_id),
+        "a document with a change in flight is not quiet, however overdue its \
+         last receipt is — dispatching here is the per-keystroke sync flood"
+    );
+
+    drop(ticket);
+    settle().await;
+    assert!(
+        !needs_provider_sync.contains(&canonical_id),
+        "releasing the last in-flight ticket must wake the coordinator: it holds \
+         no armed timer for a gated canonical id, so without that wake the \
+         overdue sync never fires at all"
+    );
+}
+
+/// Count the provider file-sync calls a dispatched `sync_file` delivered for
+/// the carrier `canonical_id`. Derived from the mock's recorded call log, never
+/// assumed.
+///
+/// Matched by prefix because a carrier's provider companions live in the
+/// source's own namespace (`{canonical}.tsx`, `{carrier}.ts`), so the prefix
+/// names exactly this carrier's surfaces and nothing else.
+fn provider_syncs_for(provider: &MockTypeProvider, canonical_id: &str) -> usize {
+    provider
+        .calls()
+        .iter()
+        .filter(|call| match call {
+            MockCall::OpenFile { path, .. }
+            | MockCall::OpenFileBackground { path, .. }
+            | MockCall::LoadFile { path, .. }
+            | MockCall::UpdateFile { path, .. } => path.starts_with(canonical_id),
+            _ => false,
+        })
+        .count()
+}
+
+/// PROPERTY (b) for https://github.com/pikax/verter/issues/96: a backlog of
+/// received changes still collapses to ONE provider sync.
+///
+/// This is what fails if the receipt-time window ships without the in-flight
+/// gate. Each handler in a backlog deposits a signal whose receipt is already
+/// older than the debounce, so an ungated coordinator dispatches on its very
+/// next look — once per handler, for the whole backlog, each dispatch
+/// compiling and pushing a fresh TSX buffer.
+///
+/// No assertion is a wall-clock threshold, and none is a hardcoded count:
+///
+///   * The per-dispatch cost is MEASURED first, from a single change, as a
+///     pre/post delta on the mock's recorded call log.
+///   * The burst assertion is `== that measured unit`. A storm shows up as
+///     dispatches DURING the burst, which are already counted before the final
+///     wait begins — so waiting longer can only make a storm more visible,
+///     never less.
+///   * `Sidebar.vue` is an UNGATED document with an equally overdue receipt. It
+///     must sync during the burst, which is what proves the coordinator was
+///     awake and dispatching the whole time — so `App.vue` staying at zero is
+///     the gate working, not the coordinator merely never being scheduled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backlog_of_received_changes_still_collapses_to_one_provider_sync() {
+    let (documents, _states, provider, canonical_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let revision = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">\nconst msg = '{marker}'\n</script>\n\
+             <template><div>{{{{ msg }}}}</div></template>\n"
+        )
+    };
+
+    // The ungated liveness control: a second open carrier under the same
+    // workspace root, so it resolves the same owner and takes the same
+    // `sync_file` path.
+    let control_uri: Uri = "file:///workspace/src/Sidebar.vue"
+        .parse()
+        .expect("control uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: control_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: revision("sidebar"),
+    });
+    let control_id = documents
+        .get_canonical_id(&control_uri)
+        .expect("the control document must be open");
+
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+
+    // The control's receipt, taken here so it ages by REAL elapsed time across
+    // the calibration below. `Instant::now() - d` would be simpler but panics on
+    // underflow on a machine that booted moments ago.
+    let control_received_at = Instant::now();
+
+    // ---- Calibrate: what does ONE dispatched sync of this document cost?
+    let baseline = provider_syncs_for(&provider, &canonical_id);
+    needs_provider_sync.insert(canonical_id.clone());
+    {
+        let change = handle.change_received(canonical_id.clone());
+        let _ = documents.did_change(&uri, 2, &revision("v2"));
+        change.signal(uri.as_str().to_string());
+    }
+    let unit = wait_for_provider_syncs(&provider, &canonical_id, baseline + 1).await - baseline;
+    assert!(
+        unit > 0,
+        "calibration must observe a real dispatch, otherwise the burst assertion \
+         below compares zero against zero and cannot fail"
+    );
+
+    // ---- The backlog. Every handler is entered (ticket taken) before any of
+    // them finishes, which is the shape a typing burst produces: the tickets
+    // are the changes the server has RECEIVED and not yet processed.
+    const BURST: usize = 12;
+    let burst_baseline = provider_syncs_for(&provider, &canonical_id);
+    let control_baseline = provider_syncs_for(&provider, &control_id);
+    let mut tickets: Vec<ChangeInFlight> = (0..BURST)
+        .map(|_| handle.change_received(canonical_id.clone()))
+        .collect();
+
+    // The ungated control is signalled with an equally overdue receipt. The
+    // calibration above sleeps for at least `DEBOUNCE_MS * 2` inside
+    // `wait_for_provider_syncs`, so this receipt is already expired; load can
+    // only make it more so.
+    let control_age = control_received_at.elapsed();
+    assert!(
+        control_age >= Duration::from_millis(DEBOUNCE_MS),
+        "test setup: the control's receipt must already be overdue, aged {control_age:?}"
+    );
+    needs_provider_sync.insert(control_id.clone());
+    handle.signal(
+        control_id.clone(),
+        control_uri.as_str().to_string(),
+        control_received_at,
+    );
+
+    // Each handler commits and signals in turn, yielding the runtime in between
+    // exactly as a serialized backlog does.
+    for (index, ticket) in tickets.iter().enumerate() {
+        let version = 3 + index as i32;
+        needs_provider_sync.insert(canonical_id.clone());
+        let _ = documents.did_change(&uri, version, &revision(&format!("v{version}")));
+        ticket.signal(uri.as_str().to_string());
+        settle().await;
+    }
+
+    let control_during_burst =
+        wait_for_provider_syncs(&provider, &control_id, control_baseline + 1).await
+            - control_baseline;
+    assert!(
+        control_during_burst > 0,
+        "the ungated control must sync while the backlog is in flight — without \
+         it, App.vue's zero below would prove nothing about the gate"
+    );
+    let during_burst = provider_syncs_for(&provider, &canonical_id) - burst_baseline;
+    assert_eq!(
+        during_burst, 0,
+        "no sync may dispatch for a document whose changes are still in flight. \
+         {during_burst} dispatched: measuring the quiet window from receipt \
+         without the in-flight gate makes every backlogged handler's already-\
+         expired receipt fire its own sync — one provider sync per keystroke"
+    );
+
+    // ---- The backlog drains. Exactly one sync, for the newest revision.
+    tickets.clear();
+    let after_burst = wait_for_provider_syncs(&provider, &canonical_id, burst_baseline + unit)
+        .await
+        - burst_baseline;
+    assert_eq!(
+        after_burst, unit,
+        "a backlog of {BURST} received changes must cost exactly what ONE change \
+         costs ({unit} provider file-sync call(s)), not {BURST}x it"
+    );
+    assert!(
+        documents
+            .host()
+            .get_ide(&canonical_id, &documents.tsx_profile.read())
+            .is_some_and(|ide| ide.code.contains(&format!("'v{}'", 2 + BURST))),
+        "the one sync that does run must carry the NEWEST revision — coalescing \
+         that publishes a superseded buffer is worse than the flood it replaced"
+    );
+}
+
+/// Poll until `provider` has recorded at least `want` file-sync calls for
+/// `canonical_id`, then keep watching for a further debounce interval so an extra
+/// dispatch cannot hide behind the return. Bounded by a generous deadline; a
+/// caller asserts on the returned count, never on how long this took.
+async fn wait_for_provider_syncs(
+    provider: &MockTypeProvider,
+    canonical_id: &str,
+    want: usize,
+) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while provider_syncs_for(provider, canonical_id) < want && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 2)).await;
+    settle().await;
+    provider_syncs_for(provider, canonical_id)
+}
+
+/// LSP notification handlers are dispatched concurrently, so an OLDER change
+/// can deposit its signal after a newer one has already deposited its own. The
+/// quiet window must take the LATEST receipt, never simply the last deposit —
+/// otherwise a straggler walks the window backwards into the past and fires a
+/// sync while the user is still typing, which is the flood the debounce exists
+/// to prevent.
+///
+/// Both coalescing points are covered: the inbox (`signal`, when the two
+/// deposits land between the same pair of drains) and the coordinator's pending
+/// map (the drain arm, when they land in different drains).
+#[tokio::test]
+async fn a_late_arriving_older_receipt_does_not_walk_the_quiet_window_backwards() {
+    let (deps, needs_provider_sync) = debounce_probe_deps();
+    let same_drain = "/workspace/src/SameDrain.vue".to_string();
+    let later_drain = "/workspace/src/LaterDrain.vue".to_string();
+    needs_provider_sync.insert(same_drain.clone());
+    needs_provider_sync.insert(later_drain.clone());
+
+    // An instant that is genuinely older than the debounce window. The blocking
+    // sleep runs before the coordinator is spawned, so nothing is starved.
+    let stale = Instant::now();
+    std::thread::sleep(Duration::from_millis(DEBOUNCE_MS * 4));
+
+    let handle = spawn_sync_coordinator(deps);
+
+    // Case A — both deposits land before the coordinator's first drain, so the
+    // INBOX coalesces them.
+    handle.signal(
+        same_drain.clone(),
+        "file:///workspace/src/SameDrain.vue".to_string(),
+        Instant::now(),
+    );
+    handle.signal(
+        same_drain.clone(),
+        "file:///workspace/src/SameDrain.vue".to_string(),
+        stale,
+    );
+
+    // Case B — the newer deposit is drained first, so the coordinator's PENDING
+    // map is what has to reject the straggler.
+    handle.signal(
+        later_drain.clone(),
+        "file:///workspace/src/LaterDrain.vue".to_string(),
+        Instant::now(),
+    );
+    settle().await;
+    handle.signal(
+        later_drain.clone(),
+        "file:///workspace/src/LaterDrain.vue".to_string(),
+        stale,
+    );
+    settle().await;
+
+    assert!(
+        needs_provider_sync.contains(&same_drain),
+        "the inbox must keep the LATEST receipt: a straggler carrying a receipt \
+         {}x the {DEBOUNCE_MS}ms window old must not restart the window in the \
+         past and dispatch a sync the user's newest keystroke has not earned",
+        (DEBOUNCE_MS * 4) / DEBOUNCE_MS
+    );
+    assert!(
+        needs_provider_sync.contains(&later_drain),
+        "the coordinator's pending map must keep the LATEST receipt for the same \
+         reason — the straggler arrived in a later drain, but it is still older"
+    );
+}
+
+/// A carrier whose open-time compile FAILED has no provider projection, and a
+/// document with no projection fails closed on every capture
+/// (`capture_provider_request_surface` returns `None`) until a repair path
+/// compiles one.
+///
+/// The document commit deliberately does not compile — doing so per keystroke is
+/// https://github.com/pikax/verter/issues/96, and a compile that FAILS installs
+/// no projection, so "compile until one exists" never terminates on a file being
+/// typed. The interactive repair heals a projection-less carrier on the next
+/// provider-backed request (attempt-bounded), but only when a request arrives;
+/// the debounced coordinator is the request-INDEPENDENT recovery, compiling the
+/// IDE surface once per quiet window.
+///
+/// Drives the real `sync_file`, so it fails if the install is not wired into it —
+/// not merely if the method is wrong.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_coordinator_installs_a_projection_the_failed_open_compile_never_built() {
+    let (documents, _states, _provider, _canonical_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/Recovered.vue".parse().expect("uri");
+
+    // Open malformed: no IDE surface, so no projection.
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst broken = (((\n".to_string(),
+    });
+    let recovered_id = documents
+        .get_canonical_id(&uri)
+        .expect("the open document has a canonical id");
+    assert!(
+        documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less, or \
+         this test exercises nothing"
+    );
+
+    // The user fixes it. The commit stores the text and compiles nothing, so the
+    // document is STILL projection-less — the state the coordinator must recover.
+    let _ = documents.did_change(
+        &uri,
+        2,
+        "<script setup lang=\"ts\">\nconst fixed = 1\n</script>\n\
+         <template><div>{{ fixed }}</div></template>\n",
+    );
+    assert!(
+        documents.get_projection(&uri).is_none(),
+        "the commit must not have compiled — if it did, this asserts nothing about \
+         the coordinator and the per-keystroke compile is back"
+    );
+
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    await_projection_via_coordinator(
+        deps,
+        &needs_provider_sync,
+        &documents,
+        &recovered_id,
+        &uri,
+        "failed open compile",
+    )
+    .await;
+}
+
+/// Recovery must not depend on the provider-sync arm being reachable.
+///
+/// `sync_file` returns early on a provider-less route (`project_sync: None`) and
+/// again before a resolver snapshot is published — the ordinary state of a
+/// workspace that is still settling, and of every editor-owned-tsserver /
+/// verter-only session. A carrier whose open-time compile failed has no provider
+/// projection and the commit never compiles one. The interactive repair heals it
+/// only when a provider-backed request arrives (and a provider-less route has no
+/// provider to ask), so if the debounced tick also skips it the document is
+/// stranded with NO IDE features at all — worse than the latency bug this
+/// change is about.
+///
+/// Both early-return paths are covered here because they are different gates:
+/// the previous fixture always supplied a provider AND a published VFS, so it
+/// could not reach either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projectionless_carrier_recovers_without_a_provider_or_a_snapshot() {
+    let fixed = "<script setup lang=\"ts\">\nconst fixed = 1\n</script>\n\
+                 <template><div>{{ fixed }}</div></template>\n";
+
+    for (case, deps_for) in [
+        (
+            "no provider (project_sync: None)",
+            0usize, // provider-less: deps built below with project_sync None
+        ),
+        ("no published resolver snapshot", 1usize),
+    ] {
+        let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+            HostConfig::default(),
+        ))));
+        let uri: Uri = "file:///workspace/src/Stranded.vue".parse().expect("uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<script setup lang=\"ts\">\nconst broken = (((\n".to_string(),
+        });
+        let canonical_id = documents
+            .get_canonical_id(&uri)
+            .expect("the open document has a canonical id");
+        assert!(
+            documents.get_projection(&uri).is_none(),
+            "{case} precondition: the malformed open must leave the carrier \
+             projection-less"
+        );
+
+        // The user fixes the file. The commit stores text and compiles nothing.
+        let _ = documents.did_change(&uri, 2, fixed);
+        assert!(
+            documents.get_projection(&uri).is_none(),
+            "{case}: the commit must not compile — if it did, the per-keystroke \
+             compile is back and this asserts nothing about recovery"
+        );
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let mut deps = SyncCoordinatorDeps {
+            documents: Arc::clone(&documents),
+            project_sync: None,
+            needs_provider_sync: Arc::new(DashSet::new()),
+            pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+            client: make_test_client(),
+            type_provider: None,
+            cached_verter_diags: Arc::new(DashMap::new()),
+            position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+            provider_sync_states: Arc::new(DashMap::new()),
+            // No published resolver snapshot for EITHER case; the second case
+            // additionally has a provider, so it reaches the snapshot gate.
+            vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+            type_provider_kind: crate::TypeProviderKind::Tsgo,
+            carrier_publish_coordinator: None,
+            carrier_transaction_coordinator: std::sync::Arc::new(
+                crate::external_ts::CarrierTransactionCoordinator::new(),
+            ),
+        };
+        if deps_for == 1 {
+            deps.project_sync = Some(ProjectSync::new(
+                provider.clone(),
+                ProjectSyncMode::FullProject,
+            ));
+        }
+
+        let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+        await_projection_via_coordinator(
+            deps,
+            &needs_provider_sync,
+            &documents,
+            &canonical_id,
+            &uri,
+            case,
+        )
+        .await;
+    }
+}
+
+/// Drive the REAL coordinator for one settled revision and wait for the
+/// document's provider projection to appear.
+///
+/// The refresh belongs to the tick, not to `sync_file`, so a recovery test has
+/// to go through the tick to exercise it — which is also the wiring that would
+/// break if a future change stopped arming it.
+async fn await_projection_via_coordinator(
+    deps: SyncCoordinatorDeps,
+    needs_provider_sync: &Arc<DashSet<String>>,
+    documents: &Arc<DocumentRegistry>,
+    canonical_id: &str,
+    uri: &Uri,
+    case: &str,
+) {
+    let handle = spawn_sync_coordinator(deps);
+    needs_provider_sync.insert(canonical_id.to_string());
+    handle.signal(
+        canonical_id.to_string(),
+        uri.as_str().to_string(),
+        Instant::now(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while documents.get_projection(uri).is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "{case}: the debounced tick must install the projection the failed open \
+             never built; without it the document fails closed downstream forever"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Build a provider-less coordinator (`project_sync: None`, `type_provider:
+/// None`) — the shipping default: `--type-provider=editor-tsserver` installs no
+/// LOCAL provider (`editor_tsserver_topology` returns `provider: None`), and
+/// `--type-provider=off` is the same code path.
+fn make_provider_less_deps(documents: &Arc<DocumentRegistry>) -> SyncCoordinatorDeps {
+    SyncCoordinatorDeps {
+        documents: Arc::clone(documents),
+        project_sync: None,
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    }
+}
+
+/// A Vue SFC whose template is either well-formed or carries a close tag that
+/// closed no open element — a template parse error Verter reports on its OWN,
+/// with no type provider involved.
+fn vue_carrier_source(broken: bool) -> String {
+    let rows: String = (0..8)
+        .map(|i| format!("    <div>{{{{ {i} }}}}</div>\n"))
+        .collect();
+    let bad = if broken {
+        "    <div><span></div>\n"
+    } else {
+        ""
+    };
+    format!(
+        "<script setup lang=\"ts\">\nconst a = 1\n</script>\n\n\
+         <template>\n  <section>\n{rows}{bad}  </section>\n</template>\n"
+    )
+}
+
+/// A Svelte component whose markup is either well-formed or carries a close tag
+/// that closed no open element (Verter's `element_invalid_closing_tag`, the
+/// Svelte analogue of Vue's "Invalid end tag.").
+///
+/// Svelte is first-class on this path: the debounced refresh is carrier-
+/// agnostic, so it must recover Svelte exactly as it recovers Vue.
+fn svelte_carrier_source(broken: bool) -> String {
+    let rows: String = (0..8).map(|i| format!("  <div>{i}</div>\n")).collect();
+    let bad = if broken { "</span>\n" } else { "" };
+    format!("<script lang=\"ts\">\n  const a = 1;\n</script>\n\n{rows}{bad}")
+}
+
+/// The diagnostic codes each carrier's BROKEN revision must produce — the
+/// Verter-owned parse errors for a close tag that closed no open element.
+///
+/// Named codes, not counts: a count assertion passes for any unrelated set of
+/// the same size, and it was exactly a count-shaped observation ("diagnostics
+/// are there") that let this regression ship.
+const VUE_BROKEN_CODE: &str = "XInvalidEndTag";
+const SVELTE_BROKEN_CODE: &str = "svelte-official-reject-element-invalid-closing-tag";
+
+/// Every diagnostic in `diagnostics` as `(code, range)`, sorted — a stable,
+/// order-independent identity for a published set.
+///
+/// Codes AND ranges, never a count: a count passes for any unrelated set of the
+/// same size, and it was exactly a count-shaped observation ("diagnostics are
+/// there") that let this regression ship. The range half is compared against
+/// what the SAME revision produces when opened, so it pins that the debounced
+/// refresh maps positions exactly as the open path does — without asserting a
+/// property a carrier does not have today (Svelte's structural-reject
+/// diagnostics carry a collapsed 0:0 span at the producer, on the open path
+/// too; Vue's carry real spans).
+fn diagnostic_identities(diagnostics: &[Diagnostic]) -> Vec<(String, u32, u32, u32, u32)> {
+    let mut identities: Vec<(String, u32, u32, u32, u32)> = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let code = match diagnostic.code.as_ref() {
+                Some(NumberOrString::String(code)) => code.clone(),
+                Some(NumberOrString::Number(code)) => code.to_string(),
+                None => String::new(),
+            };
+            (
+                code,
+                diagnostic.range.start.line,
+                diagnostic.range.start.character,
+                diagnostic.range.end.line,
+                diagnostic.range.end.character,
+            )
+        })
+        .collect();
+    identities.sort();
+    identities
+}
+
+/// Just the codes, for the preconditions.
+fn codes_of(identities: &[(String, u32, u32, u32, u32)]) -> Vec<String> {
+    let mut codes: Vec<String> = identities.iter().map(|(code, ..)| code.clone()).collect();
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+/// Verter's OWN diagnostics must keep tracking the document after an edit on a
+/// provider-less route — the shipping `--type-provider=editor-tsserver` default,
+/// where `project_sync` is `None`.
+///
+/// The regression (a live one, on `main`): the document commit deliberately
+/// stopped compiling (issue #96), and the host's `upsert` clears
+/// `latest_diagnostics`, so after an edit `get_diagnostics` — documented as NOT
+/// triggering compilation — answers an empty snapshot. The one debounced path
+/// that recompiles, `sync_file`, reached its `ensure_ide_compiled` only AFTER
+/// `let Some(project_sync) = … else { return }`. So on a provider-less route
+/// nothing ever recompiled and the diagnostics went EMPTY and never came back:
+/// the identical broken text yields errors when OPENED and none when the same
+/// breakage arrives as an edit.
+///
+/// This drives the REAL coordinator: a spawned `spawn_sync_coordinator` loop,
+/// fed exactly what `handle_did_change` feeds it — a `needs_provider_sync`
+/// insert plus a `signal` — and observed through the publish path's own diagnostic
+/// cache. Calling `sync_file` directly would leave production's
+/// `requires_sync && needs_provider_sync` dispatch gate uncovered, and a future
+/// "skip `sync_file` when `project_sync` is None" optimisation would then
+/// re-break the shipping VS Code route with this test still green.
+///
+/// It asserts the diagnostic CODES for each revision, against the codes that
+/// same revision produces when OPENED — the control that showed the diagnostics
+/// went empty rather than stale. The repair legs are what make it discriminating
+/// in both directions: a "fix" that merely stopped clearing diagnostics would
+/// pass the broken legs and fail the repaired ones.
+#[tokio::test(flavor = "multi_thread")]
+async fn verter_diagnostics_track_edits_on_a_provider_less_route() {
+    for (carrier, uri_str, language_id, source, broken_code) in [
+        (
+            "vue",
+            "file:///workspace/src/Cycle.vue",
+            "vue",
+            vue_carrier_source as fn(bool) -> String,
+            VUE_BROKEN_CODE,
+        ),
+        (
+            "svelte",
+            "file:///workspace/src/Cycle.svelte",
+            "svelte",
+            svelte_carrier_source as fn(bool) -> String,
+            SVELTE_BROKEN_CODE,
+        ),
+    ] {
+        let when_opened_valid = identities_when_opened(uri_str, language_id, &source(false)).await;
+        let when_opened_broken = identities_when_opened(uri_str, language_id, &source(true)).await;
+        assert!(
+            !codes_of(&when_opened_valid).contains(&broken_code.to_string()),
+            "{carrier} precondition: the valid revision must NOT report {broken_code} \
+             when opened (got {:?})",
+            codes_of(&when_opened_valid)
+        );
+        assert!(
+            codes_of(&when_opened_broken).contains(&broken_code.to_string()),
+            "{carrier} precondition: the broken revision must report {broken_code} \
+             when opened (got {:?}) — if it does not, the rest of this test proves \
+             nothing",
+            codes_of(&when_opened_broken)
+        );
+
+        let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+            HostConfig::default(),
+        ))));
+        let uri: Uri = uri_str.parse().expect("uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: language_id.to_string(),
+            version: 1,
+            text: source(true),
+        });
+        let canonical_id = documents
+            .get_canonical_id(&uri)
+            .expect("the open document has a canonical id");
+
+        // The real coordinator, wired exactly as the server wires it on a
+        // provider-less route.
+        let needs_provider_sync = Arc::new(DashSet::new());
+        let cached_verter_diags = Arc::new(DashMap::new());
+        let mut deps = make_provider_less_deps(&documents);
+        deps.needs_provider_sync = Arc::clone(&needs_provider_sync);
+        deps.cached_verter_diags = Arc::clone(&cached_verter_diags);
+        // A read-only twin of the coordinator's own dependencies, so the
+        // assertion reads the COMPLETE Verter-owned set through the same
+        // function the open-side control uses. The coordinator's diagnostic
+        // cache holds only the version-cached DOCUMENT half; the state-derived
+        // categories (`verter(project)` ownership, the Svelte install check)
+        // are recomputed on every publish and never enter it.
+        let observer = deps.clone();
+        let handle = spawn_sync_coordinator(deps);
+
+        // Repair, break, repair, break. Each leg is one edit announced to the
+        // coordinator the way `handle_did_change` announces it, then a wait for
+        // the publish path's own recomputation for THAT document version.
+        for (version, broken) in [(2, false), (3, true), (4, false), (5, true)] {
+            let _ = documents.did_change(&uri, version, &source(broken));
+            needs_provider_sync.insert(canonical_id.clone());
+            handle.signal(
+                canonical_id.clone(),
+                uri.as_str().to_string(),
+                Instant::now(),
+            );
+
+            await_publish_for_version(&cached_verter_diags, uri.as_str(), version, carrier).await;
+            let published =
+                diagnostic_identities(&compute_verter_diagnostics(&observer, &canonical_id, &uri));
+            let expected = if broken {
+                &when_opened_broken
+            } else {
+                &when_opened_valid
+            };
+            assert_eq!(
+                &published, expected,
+                "{carrier} v{version} (broken={broken}): the debounced coordinator must \
+                 publish exactly what OPENING this same revision publishes. Anything \
+                 else is the #96 regression: after the first edit the diagnostics went \
+                 empty and never returned, because the only debounced recompile sat \
+                 behind the `project_sync` gate on a route that has no provider"
+            );
+        }
+    }
+}
+
+/// The Verter-owned diagnostics a revision produces when it is OPENED, as
+/// `(code, range)`, in a fresh registry. `did_open` compiles; the document
+/// commit deliberately does not, which is the whole asymmetry under test.
+async fn identities_when_opened(
+    uri_str: &str,
+    language_id: &str,
+    text: &str,
+) -> Vec<(String, u32, u32, u32, u32)> {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let uri: Uri = uri_str.parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: language_id.to_string(),
+        version: 1,
+        text: text.to_string(),
+    });
+    let canonical_id = documents
+        .get_canonical_id(&uri)
+        .expect("the open document has a canonical id");
+    let deps = make_provider_less_deps(&documents);
+    diagnostic_identities(&compute_verter_diagnostics(&deps, &canonical_id, &uri))
+}
+
+/// Wait for the coordinator's publish path to recompute THIS document version.
+///
+/// The cache entry is written by the publish path itself and is stamped with the
+/// document version it was computed for, so waiting on `version` observes the
+/// real debounced publish rather than sleeping for one. The caller then compares
+/// the complete Verter-owned set, ranges included, against the open-path control.
+async fn await_publish_for_version(
+    cached_verter_diags: &DashMap<String, crate::server::CachedVerterDiagEntry>,
+    uri_str: &str,
+    version: i32,
+    carrier: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(entry) = cached_verter_diags.get(uri_str) {
+            if entry.0 == version {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{carrier}: the coordinator never published diagnostics for v{version}; \
+             cached entry: {:?}",
+            cached_verter_diags.get(uri_str).map(|entry| entry.0)
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// An edit followed by a CLOSE before the quiet window elapses must not make
+/// the debounced tick reach into the host for the file at all.
+///
+/// `did_change` leaves a pending coordinator signal behind and `did_close` does
+/// not cancel it, so the tick still runs for a canonical id whose document is
+/// gone and whose host source the close EVICTED. An ungated refresh then calls
+/// `ensure_loaded`, which for an evicted canonical is no longer a cache lookup:
+/// it submits a load that RESURRECTS the file from disk and pulls its
+/// dependency closure in, to compile a buffer nobody is looking at — and the
+/// publication that follows finds no document and drops the result anyway.
+/// Pure waste, on the shared coordinator actor, ahead of every other file's
+/// tick.
+///
+/// Driven through the real spawned coordinator, so it covers the wiring and not
+/// just the helper. Measured on `ensure_loaded_calls` rather than on the compile
+/// rail: the resurrect IS the load, and asserting the load never happens holds
+/// whether or not the reloaded file would go on to compile (in a fixture with no
+/// file on disk it would not, which makes a compile-count assertion vacuous
+/// here).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_documents_pending_tick_never_reaches_into_the_host() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/Closed.vue".parse().expect("uri");
+    let needs_provider_sync = Arc::new(DashSet::new());
+    let mut deps = make_provider_less_deps(&documents);
+    deps.needs_provider_sync = Arc::clone(&needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: vue_carrier_source(false),
+    });
+    let canonical_id = documents
+        .get_canonical_id(&uri)
+        .expect("the open document has a canonical id");
+
+    // The user edits, then closes the tab before the debounce fires. The close
+    // evicts the host source exactly as `handle_did_close` does — and, exactly
+    // as `handle_did_close` does, it leaves the signal in place.
+    let _ = documents.did_change(&uri, 2, &vue_carrier_source(true));
+    needs_provider_sync.insert(canonical_id.clone());
+    handle.signal(
+        canonical_id.clone(),
+        uri.as_str().to_string(),
+        Instant::now(),
+    );
+    documents.did_close(&uri);
+    host.evict(&canonical_id);
+
+    let before = host.provenance_snapshot().ensure_loaded_calls;
+    // Well past the debounce, so the tick has certainly run.
+    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 4)).await;
+    let loads = host.provenance_snapshot().ensure_loaded_calls - before;
+
+    assert_eq!(
+        loads, 0,
+        "the tick for a CLOSED document asked the host to load it {loads} time(s): \
+         for an evicted canonical that is a disk reload plus dependency prefetch, \
+         done for a buffer that no longer exists"
+    );
+
+    // Positive control: the identical tick for an OPEN document DOES load and
+    // DOES compile. Without this the zero above passes for a refresh that never
+    // runs at all — which is the regression this branch exists to fix.
+    let open_uri: Uri = "file:///workspace/src/Open.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: open_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: vue_carrier_source(false),
+    });
+    let open_id = documents
+        .get_canonical_id(&open_uri)
+        .expect("the open document has a canonical id");
+    let _ = documents.did_change(&open_uri, 2, &vue_carrier_source(true));
+    let before_open = host.provenance_snapshot();
+    needs_provider_sync.insert(open_id.clone());
+    handle.signal(
+        open_id.clone(),
+        open_uri.as_str().to_string(),
+        Instant::now(),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let now = host.provenance_snapshot();
+        if now.ensure_loaded_calls > before_open.ensure_loaded_calls
+            && now.compile_cold_runs > before_open.compile_cold_runs
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the tick for an OPEN document must still reach the host AND compile — \
+             otherwise the closed-file zero above is vacuous and Verter's own \
+             diagnostics never refresh"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+// ─── Cross-file republish: a child's settled edit re-arms its open parents ───
+
+/// A child whose single declared prop is `prop`.
+fn child_declaring_prop(prop: &str) -> String {
+    format!(
+        "<script setup lang=\"ts\">\ndefineProps<{{ {prop}: string }}>()\n</script>\n\
+         <template><div>{{{{ {prop} }}}}</div></template>\n"
+    )
+}
+
+/// A parent that passes `label` to the imported child. Valid while the child
+/// declares `label`; a `verter/unknown-prop` the moment the child renames it.
+const PARENT_PASSING_LABEL: &str = "<script setup lang=\"ts\">\n\
+     import Child from './Child.vue'\n\
+     </script>\n\
+     <template><Child label=\"x\" /></template>\n";
+
+/// The Verter-owned diagnostics `PARENT_PASSING_LABEL` produces when it is
+/// OPENED against `child_source` — the fixture control. A fresh registry per
+/// call, so nothing leaks between the control and the coordinator run.
+async fn parent_diagnostics_when_opened_against(child_source: &str) -> Vec<Diagnostic> {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let child_uri: Uri = "file:///workspace/src/Child.vue".parse().expect("uri");
+    let parent_uri: Uri = "file:///workspace/src/Parent.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri,
+        language_id: "vue".to_string(),
+        version: 1,
+        text: child_source.to_string(),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: PARENT_PASSING_LABEL.to_string(),
+    });
+    let deps = verter_only_deps(Arc::clone(&documents));
+    compute_verter_diagnostics(&deps, "/workspace/src/Parent.vue", &parent_uri)
+}
+
+/// Wait until the coordinator's publish path has recomputed the PARENT's
+/// diagnostics into a set satisfying `satisfied`, and return that set.
+///
+/// The cache entry is written only by the publish path itself (nothing else in
+/// these tests computes the parent), so observing it observes a real debounced
+/// republish of the parent — the same observation rail
+/// `await_publish_for_version` uses, keyed on content rather than version
+/// because a cross-file republish does not move the parent's version.
+async fn await_parent_republish_with(
+    cached_verter_diags: &DashMap<String, crate::server::CachedVerterDiagEntry>,
+    parent_uri: &str,
+    what: &str,
+    satisfied: impl Fn(&[Diagnostic]) -> bool,
+) -> Vec<Diagnostic> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(entry) = cached_verter_diags.get(parent_uri) {
+            if satisfied(&entry.2) {
+                return entry.2.clone();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the coordinator never republished the parent's diagnostics: {what}; \
+             the parent's cached entry is now {:?}",
+            cached_verter_diags
+                .get(parent_uri)
+                .map(|entry| (entry.0, entry.2.clone()))
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Editing a CHILD component must make its OPEN parents re-report diagnostics.
+///
+/// The regression (a live one, on `main`): a child edit clears only the
+/// child's own `latest_diagnostics` (host upsert), signals only the child's
+/// canonical (the `did_change` handler), and the debounced tick compiles,
+/// syncs, and publishes ONLY pending keys — so a parent whose usage of the
+/// child just became wrong keeps whatever the editor last showed, forever.
+/// The reverse import graph the workspace maintains for exactly this
+/// ("LSP affected-files reporting + diagnostics", R22) had zero production
+/// call sites in `verter_lsp`.
+///
+/// Drives the REAL spawned coordinator, fed exactly what `handle_did_change`
+/// feeds it — a `needs_provider_sync` insert plus a `signal` for the CHILD
+/// only; the parent is never signalled, never edited, never touched. Asserts
+/// the parent's published CONTENT (`verter/unknown-prop`, the prop and
+/// component names, the range over the parent's own template), not merely that
+/// a publish occurred.
+///
+/// Three legs make it discriminating in both directions:
+/// - controls: the parent OPENED against each child revision proves the
+///   fixture itself discriminates (no unknown-prop against v1, unknown-prop
+///   against the rename) — without this a green means nothing;
+/// - appear: after the child's prop rename settles, the parent republishes
+///   WITH the diagnostic;
+/// - clear: after the child restores the prop, the parent republishes WITHOUT
+///   it — a fix that arms once but never clears would pass the appear leg and
+///   fail here.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_childs_settled_edit_republishes_each_open_parents_diagnostics() {
+    fn unknown_label_prop(diags: &[Diagnostic]) -> Option<&Diagnostic> {
+        diags.iter().find(|d| {
+            matches!(&d.code, Some(NumberOrString::String(code)) if code == "verter/unknown-prop")
+                && d.message.contains("'label'")
+                && d.message.contains("<Child>")
+        })
+    }
+
+    // ── Controls: the fixture must discriminate on its own. ──
+    let against_original =
+        parent_diagnostics_when_opened_against(&child_declaring_prop("label")).await;
+    assert!(
+        unknown_label_prop(&against_original).is_none(),
+        "control: the parent opened against the ORIGINAL child must not report \
+         an unknown `label` prop, got {against_original:?}"
+    );
+    let against_renamed =
+        parent_diagnostics_when_opened_against(&child_declaring_prop("title")).await;
+    let control_diag = unknown_label_prop(&against_renamed)
+        .unwrap_or_else(|| {
+            panic!(
+                "control: the parent opened against the RENAMED child must report \
+                 `verter/unknown-prop` for `label` — if it does not, the rest of \
+                 this test proves nothing (got {against_renamed:?})"
+            )
+        })
+        .clone();
+
+    // ── The scenario under test: both files open, the CHILD is edited. ──
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let child_uri: Uri = "file:///workspace/src/Child.vue".parse().expect("uri");
+    let parent_uri: Uri = "file:///workspace/src/Parent.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: child_declaring_prop("label"),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: PARENT_PASSING_LABEL.to_string(),
+    });
+    let child_id = documents
+        .get_canonical_id(&child_uri)
+        .expect("open child has a canonical id");
+    let parent_id = documents
+        .get_canonical_id(&parent_uri)
+        .expect("open parent has a canonical id");
+
+    // Fixture precondition: the upsert-recorded parsed edges alone must make
+    // the parent reachable from the child on the workspace's reverse import
+    // graph — the graph production populates on every open/edit.
+    let importers = documents
+        .host()
+        .workspace_read()
+        .affected_canonicals(&child_id);
+    assert!(
+        importers.contains(&parent_id),
+        "fixture precondition: `affected_canonicals({child_id})` must contain the \
+         open parent {parent_id}, got {importers:?}"
+    );
+
+    let deps = verter_only_deps(Arc::clone(&documents));
+    let observer = deps.clone();
+    let handle = spawn_sync_coordinator(deps);
+
+    // ── Appear: rename the child's prop; announce the CHILD only, exactly as
+    // `handle_did_change` announces it. ──
+    let _ = documents.did_change(&child_uri, 2, &child_declaring_prop("title"));
+    observer.needs_provider_sync.insert(child_id.clone());
+    handle.signal(
+        child_id.clone(),
+        child_uri.as_str().to_string(),
+        Instant::now(),
+    );
+
+    let republished = await_parent_republish_with(
+        &observer.cached_verter_diags,
+        parent_uri.as_str(),
+        "the child renamed its prop, so the parent's `label` usage became an \
+         unknown prop — the parent must re-report it",
+        |diags| unknown_label_prop(diags).is_some(),
+    )
+    .await;
+    let republished_diag = unknown_label_prop(&republished)
+        .expect("the awaited set satisfied the predicate")
+        .clone();
+    assert_eq!(
+        (republished_diag.range, republished_diag.severity),
+        (control_diag.range, control_diag.severity),
+        "the republished parent diagnostic must carry the same range and severity \
+         as the one the open-path control produces for the identical state"
+    );
+
+    // ── Clear: restore the child's prop; the parent must republish WITHOUT the
+    // diagnostic. ──
+    let _ = documents.did_change(&child_uri, 3, &child_declaring_prop("label"));
+    observer.needs_provider_sync.insert(child_id.clone());
+    handle.signal(
+        child_id.clone(),
+        child_uri.as_str().to_string(),
+        Instant::now(),
+    );
+
+    await_parent_republish_with(
+        &observer.cached_verter_diags,
+        parent_uri.as_str(),
+        "the child restored its prop, so the parent's stale `verter/unknown-prop` \
+         must clear",
+        |diags| unknown_label_prop(diags).is_none(),
+    )
+    .await;
+}
+
+/// Svelte is first-class on the cross-file republish path, and the fan-out is
+/// bounded by the debounce, never per keystroke.
+///
+/// Provider-backed (mock tsgo): the parent's committed provider surface is
+/// seeded with a sentinel type diagnostic, and a burst of CHILD keystrokes is
+/// announced exactly as `handle_did_change` announces them. The parent's
+/// republish is observed on the provider's own rail — a fresh
+/// `get_diagnostics` pull for the PARENT's committed surface, which can only
+/// happen through the parent's publish path — and the pull COUNT is the storm
+/// bound: five keystrokes coalesce into one settled child window, so the
+/// parent republishes once (two at most under pathological scheduling), never
+/// once per keystroke. The content control pins that the pulled sentinel maps
+/// back into the parent's own source through the exact merge the debounced
+/// publish runs (`compute_merged_diagnostics`, the sanctioned compute/publish
+/// split — the coordinator otherwise pushes to a socket a test cannot read).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_svelte_childs_settled_edit_republishes_the_open_parent_bounded_by_the_debounce() {
+    use crate::type_provider::protocol::{TypeDiagnostic, TypeDiagnosticSeverity};
+
+    let tmp = tempfile::tempdir().expect("workspace");
+    install_svelte_at(tmp.path(), USABLE_SVELTE);
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let root = tmp.path().to_string_lossy().replace('\\', "/");
+
+    let child_canonical = src_dir
+        .join("Child.svelte")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let parent_canonical = src_dir
+        .join("Parent.svelte")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let child_source = |n: usize| {
+        format!(
+            "<script lang=\"ts\">\n  export let label{n}: string;\n</script>\n\
+             <div>{{label{n}}}</div>\n"
+        )
+    };
+    let parent_source = "<script lang=\"ts\">\n  import Child from './Child.svelte';\n\
+         </script>\n<Child label0=\"x\" />\n";
+    std::fs::write(&child_canonical, child_source(0)).expect("child on disk");
+    std::fs::write(&parent_canonical, parent_source).expect("parent on disk");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let child_uri = crate::uri::path_to_file_uri(&child_canonical).expect("child uri");
+    let parent_uri = crate::uri::path_to_file_uri(&parent_canonical).expect("parent uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: child_source(0),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: parent_source.to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: Some(ProjectSync::new_with_kind(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+            crate::TypeProviderKind::Tsgo,
+        )),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: Some(provider.clone()),
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+            &root,
+            Some(&format!("{root}/tsconfig.json")),
+        )),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    // Commit the PARENT's provider surface once — the open-time sync the
+    // server performs — so the debounced republish has a committed surface to
+    // pull provider diagnostics for.
+    sync_file(&deps, &parent_canonical, parent_uri.as_str()).await;
+    let parent_ide_path = deps
+        .provider_sync_states
+        .get(&parent_canonical)
+        .and_then(|state| state.ide_path.clone())
+        .expect("the owner-resolved parent sync must commit an IDE path");
+
+    let recorded = documents
+        .provider_surfaces()
+        .current_snapshot(&parent_ide_path)
+        .expect("a successful sync records the provider surface it delivered");
+    let at = recorded
+        .provider_content
+        .find("label0")
+        .expect("the child usage's attribute is present in the parent's provider buffer");
+    provider.set_diagnostics(
+        &parent_ide_path,
+        vec![TypeDiagnostic {
+            message: "SVELTE_PARENT_SENTINEL".to_string(),
+            severity: TypeDiagnosticSeverity::Error,
+            start: at as u32,
+            end: (at + 5) as u32,
+            code: Some("2322".to_string()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        }],
+    );
+
+    // Content control: the parent's publish-path merge maps the sentinel back
+    // into the parent's `.svelte` source.
+    let merged = compute_merged_diagnostics(&deps, &parent_canonical, &parent_uri).await;
+    assert!(
+        merged.iter().any(|d| d.message == "SVELTE_PARENT_SENTINEL"),
+        "content control: the parent's merge must serve the provider sentinel \
+         mapped into the parent source, got {merged:?}"
+    );
+
+    // Fixture precondition: the reverse import graph reaches the parent from
+    // the child for `.svelte` carriers too.
+    let importers = host.workspace_read().affected_canonicals(&child_canonical);
+    assert!(
+        importers.contains(&parent_canonical),
+        "fixture precondition: `affected_canonicals({child_canonical})` must \
+         contain the open Svelte parent {parent_canonical}, got {importers:?}"
+    );
+
+    provider.clear_calls();
+    let observer = deps.clone();
+    let handle = spawn_sync_coordinator(deps);
+
+    // A burst of child keystrokes inside one quiet window, each announced
+    // exactly as `handle_did_change` announces it.
+    const KEYSTROKES: usize = 5;
+    for i in 1..=KEYSTROKES {
+        let _ = documents.did_change(&child_uri, 1 + i as i32, &child_source(i));
+        observer.needs_provider_sync.insert(child_canonical.clone());
+        handle.signal(
+            child_canonical.clone(),
+            child_uri.as_str().to_string(),
+            Instant::now(),
+        );
+    }
+
+    // The parent must republish: a fresh provider pull for the PARENT's own
+    // committed surface, reachable only through the parent's publish path.
+    let parent_pulls = |provider: &MockTypeProvider| {
+        provider
+            .calls()
+            .iter()
+            .filter(
+                |call| matches!(call, MockCall::GetDiagnostics { path } if path == &parent_ide_path),
+            )
+            .count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while parent_pulls(&provider) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the coordinator never republished the Svelte parent after the \
+             child's settled edit — no fresh provider pull for {parent_ide_path}; \
+             provider calls: {:?}",
+            provider.calls()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // Bounded fan-out: give any storm time to surface, then count. Five
+    // keystrokes must coalesce — not one parent republish per keystroke.
+    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 4)).await;
+    let pulls = parent_pulls(&provider);
+    assert!(
+        (1..=2).contains(&pulls),
+        "the parent republished {pulls} times for {KEYSTROKES} child keystrokes — \
+         the re-arm must ride the debounced settle (once per quiet window, twice \
+         at most under pathological scheduling), never the per-keystroke path"
+    );
+}
+
+/// Does the set contain the parent's `verter/unknown-prop` for `label`?
+fn has_unknown_label_prop(diags: &[Diagnostic]) -> bool {
+    diags.iter().any(|d| {
+        matches!(&d.code, Some(NumberOrString::String(code)) if code == "verter/unknown-prop")
+            && d.message.contains("'label'")
+    })
+}
+
+/// The diagnostics-epoch value a fresh read of `uri` would validate against.
+fn live_epoch(documents: &DocumentRegistry, canonical_id: &str) -> Option<u64> {
+    documents.host().get_diagnostics_generation(canonical_id)
+}
+
+/// The cache entry a computation that ENTERED before the arm eventually
+/// writes: the document version and epoch it snapshotted at entry, and the
+/// diagnostics it derived from the pre-edit world.
+fn snapshot_entry(
+    cached_verter_diags: &DashMap<String, crate::server::CachedVerterDiagEntry>,
+    uri: &Uri,
+    what: &str,
+) -> crate::server::CachedVerterDiagEntry {
+    let entry = cached_verter_diags
+        .get(uri.as_str())
+        .unwrap_or_else(|| panic!("{what}: the compute must warm the cache entry"));
+    (entry.0, entry.1, entry.2.clone())
+}
+
+/// A parent diagnostic computation already IN FLIGHT when the child's settled
+/// edit arms the parent must never have its result served after the arm.
+///
+/// The race (found in review; worse than the bug the arming fixed, because it
+/// republishes WRONG diagnostics rather than none): the arm's cache-entry
+/// removal fences nothing that is already running —
+/// 1. a parent computation begins and captures PRE-edit child state;
+/// 2. the child's settled edit arms the parent and drops its cache entry;
+/// 3. the old computation finishes and lands its write AFTER the drop (the
+///    unconditional insert at the end of the document-half compute in
+///    `server_utils.rs`);
+/// 4. the armed pass reads the cache: the parent's document version and host
+///    diagnostics epoch both still match — warm hit;
+/// 5. the parent republishes pre-edit diagnostics as fresh, and nothing ever
+///    invalidates them again.
+///
+/// The fence under test: arming ADVANCES the parent's host diagnostics epoch —
+/// the value every computation snapshots at entry, stamps into its write, and
+/// every read re-validates against. A computation that began before the arm
+/// carries a pre-arm stamp, so no post-arm read can ever be satisfied by it —
+/// read-side authoritative, no writer coordination.
+///
+/// Why the removal alone was not enough, measured on this very fixture: the
+/// parent's epoch next moves at the ARMED TICK, one full debounce window after
+/// the arm, when `refresh_carrier_ide_surface`'s cold recompile stores
+/// diagnostics — and only IF that recompile is cold, which is an accident of
+/// compile-fact granularity, not a designed fence. Until then the slot
+/// validates a pre-arm stamp: for ~one debounce window every read — the pull
+/// `textDocument/diagnostic` path shares this exact cache — serves the
+/// in-flight computation's pre-edit result as fresh.
+///
+/// Two legs, each unconditional and each discriminating a different mechanism:
+///
+/// - **the fence** runs the arm DIRECTLY, with no coordinator spawned and
+///   nothing else able to touch the parent's slot. That ordering is the
+///   finding's exact interleaving, produced by construction rather than by
+///   winning a race against a debounce window: the plant lands after the arm
+///   because the test puts it there. It is also the only form in which the
+///   assertion is about the ARM: driven through the coordinator, an accidental
+///   cold recompile advances the epoch too, so a green would not distinguish
+///   the fence from a compile that happened to bump the same counter;
+/// - **the armed republish** runs the REAL coordinator over a parent whose
+///   slot already holds a stale entry stamped with the LIVE epoch, so the only
+///   thing that can dislodge it is the arm the child's settle owes. Nothing is
+///   spawned until the plant is in place, so the ordering needs no polling.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_inflight_parent_computation_never_satisfies_a_read_after_the_arm() {
+    // ── Control: fresh content is reachable at all. ──
+    let against_renamed =
+        parent_diagnostics_when_opened_against(&child_declaring_prop("title")).await;
+    assert!(
+        has_unknown_label_prop(&against_renamed),
+        "control: the parent opened against the RENAMED child must report \
+         `verter/unknown-prop` for `label`, got {against_renamed:?}"
+    );
+
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let child_uri: Uri = "file:///workspace/src/Child.vue".parse().expect("uri");
+    let parent_uri: Uri = "file:///workspace/src/Parent.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: child_declaring_prop("label"),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: PARENT_PASSING_LABEL.to_string(),
+    });
+    let child_id = documents
+        .get_canonical_id(&child_uri)
+        .expect("open child has a canonical id");
+    let parent_id = documents
+        .get_canonical_id(&parent_uri)
+        .expect("open parent has a canonical id");
+
+    let deps = verter_only_deps(Arc::clone(&documents));
+    let observer = deps.clone();
+
+    // The pre-arm computation, run to completion through the REAL compute
+    // path. Its cache write is byte-identical to what an in-flight computation
+    // that began before the arm eventually lands: the parent's version, the
+    // parent's PRE-arm host diagnostics epoch (both snapshotted at compute
+    // entry), and diagnostics derived from the pre-edit child.
+    let _ = compute_verter_diagnostics(&observer, &parent_id, &parent_uri);
+    let stale_entry = snapshot_entry(
+        &observer.cached_verter_diags,
+        &parent_uri,
+        "the pre-edit parent compute",
+    );
+    assert!(
+        !has_unknown_label_prop(&stale_entry.2),
+        "control: the pre-edit parent set must NOT contain the unknown-prop — \
+         otherwise stale and fresh are indistinguishable and this test proves \
+         nothing, got {:?}",
+        stale_entry.2
+    );
+
+    // ── The child's edit, landed in the host exactly as `handle_did_change`
+    // lands it. It moves the CHILD's epoch and the CHILD's document version;
+    // it moves neither of the parent's, which is precisely why the parent's
+    // slot still validates and why the arm owes the fence. ──
+    let _ = documents.did_change(&child_uri, 2, &child_declaring_prop("title"));
+    assert_eq!(
+        live_epoch(&documents, &parent_id),
+        stale_entry.1,
+        "fixture: a child edit must leave the PARENT's epoch where the \
+         in-flight computation sampled it — if the edit moved it on its own \
+         the arm's advance would not be what this test observes"
+    );
+
+    // ── Leg 1: the arm, run directly, with nothing else in the process able
+    // to touch the parent's slot or its epoch. ──
+    let mut pending: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
+    arm_open_importer_republish(&observer, std::slice::from_ref(&child_id), &mut pending);
+    assert!(
+        pending.contains_key(&parent_id),
+        "fixture: the child's settled edit must arm the open parent — \
+         armed: {:?}",
+        pending.keys().collect::<Vec<_>>()
+    );
+
+    // Land the in-flight computation's late write AFTER the arm: the same key,
+    // the same value shape, the same shared map as the racing writer.
+    observer
+        .cached_verter_diags
+        .insert(parent_uri.as_str().to_string(), stale_entry.clone());
+
+    // The invariant, on the same validating read every publisher and the pull
+    // `textDocument/diagnostic` path use: a computation that began before the
+    // arm can never satisfy a read that happens after it. Un-fenced, this read
+    // warm-hits the late write — the parent's document version and its host
+    // diagnostics epoch both still match — and serves the pre-edit set as
+    // fresh.
+    let served = compute_verter_diagnostics(&observer, &parent_id, &parent_uri);
+    assert!(
+        has_unknown_label_prop(&served),
+        "a post-arm read was satisfied by the in-flight pre-edit computation's \
+         late write — the parent would serve stale diagnostics as fresh. The \
+         plant was stamped {:?} and the live epoch is {:?}; served: {served:?}",
+        stale_entry.1,
+        live_epoch(&documents, &parent_id)
+    );
+
+    // ── Leg 2: the finding's step 4→5 end to end. The parent's slot is
+    // primed with a stale entry stamped with the LIVE epoch — an entry that
+    // validates, so only the arm the child's settle owes can dislodge it —
+    // and the coordinator is spawned only after the plant is in place, so no
+    // polling is needed to establish the ordering. The child then RESTORES
+    // `label`, making post-edit content lack the unknown-prop the plant
+    // carries: discriminable in the opposite direction. ──
+    let primed: crate::server::CachedVerterDiagEntry = (
+        stale_entry.0,
+        live_epoch(&documents, &parent_id),
+        served.clone(),
+    );
+    assert!(
+        has_unknown_label_prop(&primed.2),
+        "fixture: the primed entry must carry the title-world unknown-prop so \
+         the post-edit republish is distinguishable from it"
+    );
+    observer
+        .cached_verter_diags
+        .insert(parent_uri.as_str().to_string(), primed);
+
+    let handle = spawn_sync_coordinator(deps);
+    let _ = documents.did_change(&child_uri, 3, &child_declaring_prop("label"));
+    observer.needs_provider_sync.insert(child_id.clone());
+    handle.signal(
+        child_id.clone(),
+        child_uri.as_str().to_string(),
+        Instant::now(),
+    );
+
+    await_parent_republish_with(
+        &observer.cached_verter_diags,
+        parent_uri.as_str(),
+        "the armed republish must replace a stale-but-validating entry with \
+         post-edit content (the restored `label` clears the unknown-prop)",
+        |diags| !has_unknown_label_prop(diags),
+    )
+    .await;
+}
+
+/// Grandparent that only knows the middle parent — never imports the child.
+/// Its own diagnostics need not move on a child prop rename; arming is
+/// observed via epoch advance / cache drop, not content.
+const GRANDPARENT_USING_PARENT: &str = "<script setup lang=\"ts\">\n\
+     import Parent from './Parent.vue'\n\
+     </script>\n\
+     <template><Parent /></template>\n";
+
+/// Depth fixture that the shallow one-parent tests cannot pin:
+/// `Grandparent → Parent → Child`, plus a closed direct importer of Child.
+///
+/// The prior tests each use one direct open importer. They pass even if the
+/// implementation armed only direct reverse deps, armed closed documents, or
+/// marked armed parents `requires_sync: true` (which would cascade). There is
+/// no grandparent, so no-cascade is never discriminated.
+///
+/// Every arming property is pinned on ONE direct call to the arm, with no
+/// coordinator spawned — so the armed SET, the epoch advances, and the shape
+/// of each armed signal are exact values, not a race against a debounce
+/// window:
+/// 1. **Transitive open**: the armed set is EXACTLY the two open importers.
+///    The grandparent is reached through the `affected_canonicals` closure
+///    even though it does not import the child directly; direct-only arming
+///    would leave it out.
+/// 2. **Open-only**: the closed direct importer sits in the reverse closure
+///    and is absent from the armed set — its pre-warmed cache entry and host
+///    epoch both survive byte-identical.
+/// 3. **No cascade**: every armed signal carries `requires_sync: false`, and
+///    the tick appends to `settled_edits` — the list this arm consumes — only
+///    for a signal whose `requires_sync` is set (`sync_coordinator.rs`, the
+///    `if signal.requires_sync` push). An armed republish therefore cannot
+///    re-enter the arm as an edit, so it cannot arm the armed file's own
+///    importers. This is the mechanism itself, asserted as a value; the
+///    superseded form counted epoch advances after a wall-clock quiescence
+///    wait, which cannot distinguish "no cascade" from "the cascade's advance
+///    lands after the test stopped looking".
+/// 4. **Exactly one advance per armed file**, counted with nothing else
+///    running.
+///
+/// A final leg drives the REAL coordinator to pin that the same arm publishes
+/// the direct parent's post-edit content, observed on content rather than on
+/// a timer.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_importer_arming_reaches_transitive_open_only_without_cascade() {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let child_uri: Uri = "file:///workspace/src/Child.vue".parse().expect("uri");
+    let parent_uri: Uri = "file:///workspace/src/Parent.vue".parse().expect("uri");
+    let grandparent_uri: Uri = "file:///workspace/src/Grandparent.vue"
+        .parse()
+        .expect("uri");
+    let closed_uri: Uri = "file:///workspace/src/ClosedImporter.vue"
+        .parse()
+        .expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: child_declaring_prop("label"),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: PARENT_PASSING_LABEL.to_string(),
+    });
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: grandparent_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: GRANDPARENT_USING_PARENT.to_string(),
+    });
+    // Closed direct importer of the child: open just long enough to record the
+    // reverse edge, pre-warm its verter-diag cache, then close. `notify_close`
+    // clears the overlay only — reverse edges survive (see workspace
+    // `notify_close` vs `notify_delete`), so the closed file remains in the
+    // child's affected closure and would be armed by an open-filter miss.
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: closed_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: PARENT_PASSING_LABEL.to_string(),
+    });
+
+    let child_id = documents
+        .get_canonical_id(&child_uri)
+        .expect("open child has a canonical id");
+    let parent_id = documents
+        .get_canonical_id(&parent_uri)
+        .expect("open parent has a canonical id");
+    let grandparent_id = documents
+        .get_canonical_id(&grandparent_uri)
+        .expect("open grandparent has a canonical id");
+    let closed_id = documents
+        .get_canonical_id(&closed_uri)
+        .expect("open closed-importer has a canonical id");
+
+    let deps = verter_only_deps(Arc::clone(&documents));
+    let observer = deps.clone();
+
+    // Pre-warm every importer's cache so the arm's drop is observable.
+    let _ = compute_verter_diagnostics(&observer, &parent_id, &parent_uri);
+    let _ = compute_verter_diagnostics(&observer, &grandparent_id, &grandparent_uri);
+    let _ = compute_verter_diagnostics(&observer, &closed_id, &closed_uri);
+    let closed_entry_before = snapshot_entry(
+        &observer.cached_verter_diags,
+        &closed_uri,
+        "the closed importer's pre-warm",
+    );
+    assert!(
+        observer
+            .cached_verter_diags
+            .contains_key(grandparent_uri.as_str()),
+        "pre-warm must leave a grandparent cache entry so a direct-only arm \
+         (which never touches the grandparent) is distinguishable from a \
+         transitive arm (which drops it)"
+    );
+
+    documents.did_close(&closed_uri);
+    assert!(
+        !documents
+            .open_uris()
+            .iter()
+            .any(|u| u == closed_uri.as_str()),
+        "fixture: ClosedImporter must be closed before the child's edit"
+    );
+
+    // Fixture precondition: reverse closure is transitive AND includes the
+    // closed direct importer. Without this the rest of the test is vacuous.
+    let importers = documents
+        .host()
+        .workspace_read()
+        .affected_canonicals(&child_id);
+    assert!(
+        importers.contains(&parent_id)
+            && importers.contains(&grandparent_id)
+            && importers.contains(&closed_id),
+        "fixture precondition: `affected_canonicals({child_id})` must contain \
+         the direct parent {parent_id}, the transitive grandparent \
+         {grandparent_id}, and the closed direct importer {closed_id}, got \
+         {importers:?}"
+    );
+
+    let parent_epoch_before = live_epoch(&documents, &parent_id);
+    let grandparent_epoch_before = live_epoch(&documents, &grandparent_id);
+    let closed_epoch_before = live_epoch(&documents, &closed_id);
+
+    // ── One arm for one settled child edit, run directly: nothing else in
+    // this process can advance an epoch or touch a slot while it runs. ──
+    let mut pending: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
+    arm_open_importer_republish(&observer, std::slice::from_ref(&child_id), &mut pending);
+
+    // (1) + (2): the armed set is EXACTLY the open transitive closure.
+    let mut armed: Vec<String> = pending.keys().cloned().collect();
+    armed.sort();
+    let mut expected = vec![grandparent_id.clone(), parent_id.clone()];
+    expected.sort();
+    assert_eq!(
+        armed, expected,
+        "one settled child edit must arm EXACTLY the open importers in the \
+         reverse closure: the direct parent, the transitive grandparent, and \
+         nothing else. The closed direct importer {closed_id} is in the \
+         closure and must NOT appear; a direct-only arm would omit the \
+         grandparent {grandparent_id}"
+    );
+
+    // (3) No cascade, as the mechanism itself: the tick appends to
+    // `settled_edits` only for a signal carrying `requires_sync`, so an armed
+    // republish can never re-enter this arm as an edit.
+    for (armed_id, (_, signal)) in pending.iter() {
+        assert!(
+            !signal.requires_sync,
+            "armed importer {armed_id} must carry `requires_sync: false` — a \
+             `true` here puts the armed file into the NEXT tick's \
+             `settled_edits`, which re-arms ITS importers: the republish \
+             cascade this contract forbids"
+        );
+        assert!(
+            signal.force_diagnostics,
+            "armed importer {armed_id} must carry `force_diagnostics: true` — \
+             the arm exists to make the importer republish"
+        );
+    }
+
+    // (4) Exactly one epoch advance per armed file, and the pre-warmed entry
+    // dropped so no stale value survives the arm.
+    for (armed_id, before) in [
+        (&parent_id, parent_epoch_before),
+        (&grandparent_id, grandparent_epoch_before),
+    ] {
+        let after = live_epoch(&documents, armed_id);
+        assert_eq!(
+            after,
+            before.map(|epoch| epoch + 1).or(Some(1)),
+            "arming {armed_id} must advance its diagnostics epoch EXACTLY \
+             once (was {before:?}); a second advance means it was armed twice \
+             from a single settle"
+        );
+    }
+    assert!(
+        !observer
+            .cached_verter_diags
+            .contains_key(parent_uri.as_str())
+            && !observer
+                .cached_verter_diags
+                .contains_key(grandparent_uri.as_str()),
+        "arming must drop each armed importer's cache entry"
+    );
+
+    // (2, continued) The closed importer is frozen in both dimensions.
+    assert_eq!(
+        live_epoch(&documents, &closed_id),
+        closed_epoch_before,
+        "a closed importer must not be armed: its host diagnostics epoch must \
+         stay at the pre-edit baseline {closed_epoch_before:?}"
+    );
+    assert_eq!(
+        observer
+            .cached_verter_diags
+            .get(closed_uri.as_str())
+            .map(|entry| (entry.0, entry.1, entry.2.clone())),
+        Some(closed_entry_before.clone()),
+        "a closed importer must not be armed: its pre-warmed cache entry must \
+         survive the arm byte-identical (arming drops the entry)"
+    );
+
+    // ── The same arm, through the REAL coordinator: the open direct parent
+    // must republish the post-edit content. Observed on content, not a timer.
+    let handle = spawn_sync_coordinator(deps);
+    let _ = documents.did_change(&child_uri, 2, &child_declaring_prop("title"));
+    observer.needs_provider_sync.insert(child_id.clone());
+    handle.signal(
+        child_id.clone(),
+        child_uri.as_str().to_string(),
+        Instant::now(),
+    );
+
+    await_parent_republish_with(
+        &observer.cached_verter_diags,
+        parent_uri.as_str(),
+        "the open direct parent must republish `verter/unknown-prop` after the \
+         child renames its prop",
+        has_unknown_label_prop,
+    )
+    .await;
+}
+
+/// The stale write a pre-arm computation lands, distinguishable from anything
+/// a real recompute can produce.
+fn inflight_sentinel() -> Diagnostic {
+    Diagnostic {
+        range: Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 1,
+            },
+        },
+        severity: Some(DiagnosticSeverity::WARNING),
+        code: Some(NumberOrString::String(
+            "test/pre-arm-inflight-write".to_string(),
+        )),
+        message: "planted by a computation that entered before the arm".to_string(),
+        ..Default::default()
+    }
+}
+
+/// The arm's fence is carrier-agnostic: an OPEN plain `.ts` importer gets the
+/// same guarantee a `.vue` parent does.
+///
+/// The failure this pins is not hypothetical, and it is not about `.ts`
+/// syntax — it is about which files carry a compile row. The epoch the fence
+/// rides lived behind two gates that a plain script reaches routinely and a
+/// freshly-compiled carrier does not:
+///
+/// - `get_diagnostics_generation` reported `None` for any canonical flagged
+///   evicted, while `evict` left the stored counter untouched and
+///   `bump_diagnostics_generation` kept advancing it — so the arm's advance
+///   was invisible;
+/// - reopening a document with byte-identical content takes the `upsert`
+///   quintuple-unchanged fast path, which does not clear that evicted flag.
+///
+/// `did_close` → `did_open` is therefore enough: the reopened document is
+/// OPEN, is in the child's reverse closure, is armed — and its epoch reads the
+/// same value before the arm and after it. With the reader collapsing that
+/// `None` onto `0`, an in-flight computation's pre-arm write validates against
+/// a post-arm read and the parent republishes pre-edit diagnostics as fresh.
+///
+/// Deterministic by construction: the arm is called directly, so the plant
+/// lands after it because the test puts it there, and no compile can advance
+/// the epoch behind the assertion's back. The planted set carries a sentinel
+/// no recompute can produce, so "the read refused the plant" is observable
+/// even for a file whose real diagnostics are empty in both worlds.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_plain_ts_importer_is_fenced_after_an_evict_and_reopen() {
+    let tmp = tempfile::tempdir().expect("workspace");
+    let ws = tmp.path();
+    std::fs::create_dir_all(ws.join("src")).expect("src dir");
+    std::fs::write(ws.join("tsconfig.json"), "{\"include\":[\"src\"]}").expect("tsconfig");
+    let child_source = "export const label = 'x';\n";
+    let parent_source = "import { label } from './child';\nexport const echo = label;\n";
+    std::fs::write(ws.join("src/child.ts"), child_source).expect("child on disk");
+    std::fs::write(ws.join("src/parent.ts"), parent_source).expect("parent on disk");
+
+    let workspace_id = crate::test_utils::canonical_test_path(ws);
+    let child_id = format!("{workspace_id}/src/child.ts");
+    let parent_id = format!("{workspace_id}/src/parent.ts");
+
+    let host = crate::test_utils::make_filesystem_test_host(ws);
+    host.configure_projects(vec![crate::project_resolver::IdeProjectConfig::new(
+        workspace_id.clone(),
+        workspace_id.clone(),
+        Some(format!("{workspace_id}/tsconfig.json")),
+    )]);
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+
+    let child_uri = crate::uri::path_to_file_uri(&child_id).expect("child uri");
+    let parent_uri = crate::uri::path_to_file_uri(&parent_id).expect("parent uri");
+    let open_parent = TextDocumentItem {
+        uri: parent_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: parent_source.to_string(),
+    };
+    let _ = documents.did_open(&open_parent);
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: child_source.to_string(),
+    });
+
+    // The server's `did_close` handler: drop the cached entry, evict the file
+    // from the host (`server/lifecycle.rs`). Then reopen it byte-identical —
+    // the `upsert` quintuple-unchanged fast path, which leaves the evicted
+    // flag set.
+    documents.did_close(&parent_uri);
+    host.evict(&parent_id);
+    let _ = documents.did_open(&open_parent);
+    assert!(
+        documents
+            .open_uris()
+            .iter()
+            .any(|u| u == parent_uri.as_str()),
+        "fixture: the plain-script parent must be OPEN again after the reopen"
+    );
+
+    // Fixture precondition: the arm can reach it at all.
+    let importers = documents
+        .host()
+        .workspace_read()
+        .affected_canonicals(&child_id);
+    assert!(
+        importers.contains(&parent_id),
+        "fixture precondition: `affected_canonicals({child_id})` must contain \
+         the open plain-script parent {parent_id}, got {importers:?}"
+    );
+
+    let deps = verter_only_deps(Arc::clone(&documents));
+
+    // The pre-arm computation, through the real compute path: its write
+    // carries the parent's version and the epoch it sampled at entry.
+    let _ = compute_verter_diagnostics(&deps, &parent_id, &parent_uri);
+    let warmed = snapshot_entry(
+        &deps.cached_verter_diags,
+        &parent_uri,
+        "the plain-script parent's pre-arm compute",
+    );
+    let stale_entry: crate::server::CachedVerterDiagEntry =
+        (warmed.0, warmed.1, vec![inflight_sentinel()]);
+    let epoch_before_arm = live_epoch(&documents, &parent_id);
+    assert_eq!(
+        warmed.1, epoch_before_arm,
+        "fixture: the compute must stamp the epoch it read, or the plant does \
+         not model an in-flight write"
+    );
+
+    // ── The arm. ──
+    let mut pending: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
+    arm_open_importer_republish(&deps, std::slice::from_ref(&child_id), &mut pending);
+    assert!(
+        pending.contains_key(&parent_id),
+        "the open plain-script parent must be armed by its child's settled \
+         edit — armed: {:?}",
+        pending.keys().collect::<Vec<_>>()
+    );
+
+    // The advance the fence rides must be OBSERVABLE. This is the assertion
+    // the evicted-reopened plain script failed: the arm bumped a counter no
+    // reader could see, so before and after were the same value.
+    let epoch_after_arm = live_epoch(&documents, &parent_id);
+    assert_ne!(
+        epoch_after_arm, epoch_before_arm,
+        "arming an open plain-script importer must move the epoch a reader \
+         validates against: it read {epoch_before_arm:?} before the arm and \
+         {epoch_after_arm:?} after, so a computation that entered before the \
+         arm still validates against every read that follows it"
+    );
+
+    // The in-flight computation's late write lands after the arm.
+    deps.cached_verter_diags
+        .insert(parent_uri.as_str().to_string(), stale_entry.clone());
+
+    let served = compute_verter_diagnostics(&deps, &parent_id, &parent_uri);
+    assert!(
+        !served.iter().any(|d| d.code == stale_entry.2[0].code),
+        "a post-arm read on the open plain-script parent was satisfied by the \
+         pre-arm computation's late write: it served the planted sentinel as \
+         fresh. Plant stamped {:?}, live epoch {:?}; served: {served:?}",
+        stale_entry.1,
+        live_epoch(&documents, &parent_id)
     );
 }

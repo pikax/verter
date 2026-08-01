@@ -66,11 +66,14 @@ fn macro_type_dep_outranks_external_src_on_public_result() {
     upsert_vue(
         &host,
         "/src/Comp.vue",
+        // Both script blocks declare the SAME `lang`: Vue rejects an SFC whose
+        // `<script>` and `<script setup>` disagree (and so does Verter), and an
+        // external-`src` block is no exception — it still carries a `lang`.
         "<script setup lang=\"ts\">\n\
          import type { Foo } from './types';\n\
          defineProps<Foo>();\n\
          </script>\n\
-         <script src=\"./ext.ts\"></script>\n",
+         <script lang=\"ts\" src=\"./ext.ts\"></script>\n",
     );
 
     let profile = CompileProfile {

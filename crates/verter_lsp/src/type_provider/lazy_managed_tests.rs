@@ -7,11 +7,20 @@ use super::lazy_managed::LazyManagedTypeProvider;
 use super::mock::{MockCall, MockTypeProvider};
 
 /// Preflight for the real lazy-recovery test: node, a resolvable tsserver.js,
-/// the workspace esbuild binary, and the typescript-plugin dependencies must all
-/// be present before the test's hard expectations are meaningful.
+/// the shared test-plugin builder plus the workspace esbuild package it drives,
+/// and the typescript-plugin dependencies must all be present before the
+/// test's hard expectations are meaningful.
 fn real_lazy_toolchain_available(repo_root: &std::path::Path) -> bool {
     if verter_type_runtime::find_node().is_none()
-        || !repo_root.join("node_modules/esbuild/bin/esbuild").is_file()
+        || !repo_root
+            .join("scripts")
+            .join("build-test-typescript-plugin.mjs")
+            .is_file()
+        || !repo_root
+            .join("node_modules")
+            .join("esbuild")
+            .join("package.json")
+            .is_file()
         || !repo_root
             .join("packages")
             .join("typescript-plugin")
@@ -85,31 +94,27 @@ async fn build_source_plugin_probe(
     std::os::unix::fs::symlink(&workspace_dependencies, &dependency_link)
         .expect("create lazy plugin dependency symlink");
 
-    let alias = format!(
-        "--alias:@verter/language-shared={}",
-        repo_root
-            .join("packages/language-shared/src/index.ts")
-            .to_string_lossy()
-            .replace('\\', "/")
+    // The shared builder drives esbuild's JavaScript API; the workspace
+    // `esbuild/bin/esbuild` file is the platform native executable and node
+    // cannot parse it as JavaScript.
+    let plugin_builder = repo_root
+        .join("scripts")
+        .join("build-test-typescript-plugin.mjs");
+    assert!(
+        plugin_builder.is_file(),
+        "shared test-plugin builder missing at {}",
+        plugin_builder.display()
     );
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::process::Command::new(node_path)
-            .arg(repo_root.join("node_modules/esbuild/bin/esbuild"))
-            .arg(repo_root.join("packages/typescript-plugin/src/index.ts"))
-            .args([
-                "--bundle",
-                "--platform=node",
-                "--format=cjs",
-                "--target=node18",
-            ])
-            .arg(alias)
-            .arg(format!("--outfile={}", plugin_entry.to_string_lossy()))
+            .arg(&plugin_builder)
+            .arg(&plugin_entry)
             .output(),
     )
     .await
     .expect("lazy source plugin build exceeded 30 seconds")
-    .expect("run workspace esbuild for lazy plugin");
+    .expect("run shared test-plugin builder for lazy plugin");
     assert!(
         output.status.success(),
         "build lazy production plugin source: stdout={} stderr={}",

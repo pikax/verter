@@ -83,7 +83,7 @@ try {
   // Full native metadata is still exposed on the extension payload.
   console.log(meta._verter?.components);
 } finally {
-  checker.dispose();
+  checker.close();
 }
 ```
 

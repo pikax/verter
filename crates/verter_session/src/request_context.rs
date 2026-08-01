@@ -48,6 +48,62 @@ pub fn current_request_cancellation_token() -> Option<CancellationToken> {
 use crate::semantic_query::{PartialReasonSet, ResultCompleteness};
 
 thread_local! {
+    /// Per-thread nesting depth of [`RootTemplateDemandScope`].
+    ///
+    /// A plain `Cell<u32>` rather than a `RequestContext` field: the demand must
+    /// be readable by the analysis-snapshot builders whether or not a request
+    /// context happens to be installed, and it is raised/lowered strictly on the
+    /// one thread that runs the fallthrough resolve.
+    static ROOT_TEMPLATE_DEMAND_DEPTH: std::cell::Cell<u32> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+/// RAII scope declaring that the enclosing work needs a file's TEMPLATE
+/// analysis even though the configured [`verter_semantic::analysis::AnalysisScope`]
+/// carries no template flag.
+///
+/// This exists so root reachability — the single template fact the
+/// attribute-fallthrough surface consumes — can be obtained on the ONE path
+/// that projects it (the public-API carrier render) instead of by adding a
+/// template bit to `AnalysisScope::BUILD`, which would materialise the entire
+/// template snapshot (elements, binding occurrences, slots, refs, events,
+/// `v-for`/`v-model`, if-chains, plus cross-file `<template src>` reads) for
+/// every carrier file every BUILD-scope consumer ever analyses.
+///
+/// Fan-out is bounded by the resolver itself: the fallthrough resolve reads an
+/// analysis snapshot for the owner and, recursively, only for the components on
+/// its ROOT chain. Nothing else is touched. The computed snapshot persists into
+/// the shared raw-template slot (`persist_raw_template_analysis`), keyed by the
+/// source generation, so a second render of the same file version reuses it
+/// rather than walking again.
+///
+/// Re-entrant, and a no-op when the configured scope already asks for template
+/// analysis.
+#[must_use]
+pub(crate) struct RootTemplateDemandScope {
+    _private: (),
+}
+
+impl RootTemplateDemandScope {
+    pub(crate) fn enter() -> Self {
+        ROOT_TEMPLATE_DEMAND_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self { _private: () }
+    }
+}
+
+impl Drop for RootTemplateDemandScope {
+    fn drop(&mut self) {
+        ROOT_TEMPLATE_DEMAND_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Whether a [`RootTemplateDemandScope`] is active on this thread.
+pub(crate) fn root_template_analysis_demanded() -> bool {
+    ROOT_TEMPLATE_DEMAND_DEPTH.with(|depth| depth.get() > 0)
+}
+
+thread_local! {
     /// Per-thread stack of per-COLD-COMPUTE completeness accumulators.
     ///
     /// A cold compute that admits a result into a SHARED semantic cache

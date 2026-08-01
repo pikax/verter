@@ -5,10 +5,8 @@
 //! `verter_semantic` owns the OXC shallow pass, so it owns the syntax-capture
 //! half: the [`ScriptFactProvider`] trait, the closed [`ScriptFactSyntaxGate`],
 //! the per-file parse-domain [`FrameworkScriptCandidates`] /
-//! [`FrameworkScriptCandidateSet`] collection, and the resolved-fact envelope
-//! ([`FrameworkScriptFacts`] / [`FrameworkScriptFactSet`]) whose typed payload
-//! rides behind the same token-gated hidden-downcast doctrine the parse
-//! carriers use.
+//! [`FrameworkScriptCandidateSet`] collection, and the producer-owned
+//! validation outcome.
 //!
 //! Capture is SYNTAX-ONLY: a provider's [`ScriptFactProvider::capture`] may
 //! touch live OXC + `lower_ts_type`, but MUST NOT resolve imports or read
@@ -34,6 +32,68 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 
 pub mod svelte;
 
+mod negative_evidence_seal {
+    pub trait Sealed {}
+}
+
+/// A sealed capability proving that an observation inventory is complete, so
+/// absence from it is authoritative.
+///
+/// Only producer-owned exact inventories implement this trait. Partial and
+/// unavailable script-fact states cannot implement it because the seal is
+/// private to this module.
+pub trait NegativeEvidence: negative_evidence_seal::Sealed {
+    /// One observation in the exact inventory.
+    type Observation;
+
+    /// Every observation in the complete inventory.
+    fn observations(&self) -> &[Self::Observation];
+}
+
+/// Why a usable script-fact result is incomplete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptFactPartialReason {
+    /// At least one provenance-sensitive import could not be resolved, while
+    /// syntax-owned observations remained usable.
+    UnresolvedImportProvenance,
+    /// The parser recovered an AST after reporting syntax errors. Positive
+    /// observations remain usable, but the recovered tree cannot prove
+    /// absence.
+    SyntaxRecovery,
+}
+
+/// Why no reliable script-fact payload could be produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptFactUnavailableReason {
+    /// The source/evaluation state was unavailable.
+    SourceUnavailable,
+    /// The semantic analysis needed to validate imports was unavailable.
+    AnalysisUnavailable,
+    /// The syntax capture could not be completed.
+    CaptureFailed,
+    /// The selected provider returned a payload with an unexpected type.
+    ProviderPayloadMismatch,
+    /// Provider validation explicitly produced no reliable facts.
+    ValidationProducedNoFacts,
+}
+
+/// A provider's resolved-validation outcome before the session wraps it in the
+/// consumer-facing evidence family.
+pub enum ScriptFactValidation {
+    /// The payload is complete, including authoritative empty inventories.
+    Exact(Arc<dyn FrameworkScriptFactPayload>),
+    /// The payload contains usable positive observations but cannot prove
+    /// absence for every channel.
+    Partial {
+        /// The usable observations.
+        payload: Arc<dyn FrameworkScriptFactPayload>,
+        /// Why the payload is incomplete.
+        reason: ScriptFactPartialReason,
+    },
+    /// No reliable payload was produced.
+    Unavailable(ScriptFactUnavailableReason),
+}
+
 /// The marker + `Any`-bridge a resolved framework-script-fact payload carries.
 ///
 /// Each provider's resolved payload type implements this; typed retrieval is
@@ -46,15 +106,6 @@ pub trait FrameworkScriptFactPayload: Send + Sync + 'static {
     /// resolved-validation half can hand back a typed `Arc<T>` (the owned form
     /// of the one retrieval downcast).
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
-}
-
-/// Downcast a resolved framework-script-fact payload `Arc` to its concrete
-/// type, or `None` when it is not a `T`.
-#[must_use]
-pub fn downcast_fact_payload<T: FrameworkScriptFactPayload>(
-    payload: Arc<dyn FrameworkScriptFactPayload>,
-) -> Option<Arc<T>> {
-    payload.as_any_arc().downcast::<T>().ok()
 }
 
 /// The closed, EXACT-VALUED gate that decides whether a provider is active for
@@ -108,9 +159,9 @@ pub trait ScriptFactProvider: Send + Sync {
     /// Capture this provider's syntax candidates from the live OXC program.
     ///
     /// SYNTAX-ONLY: may touch the OXC AST + `lower_ts_type`, MUST NOT resolve
-    /// imports or read capability bits. Returns `None` when the program carries
-    /// no candidates for this provider.
-    fn capture(&self, cx: ScriptCandidateCx<'_>) -> Option<FrameworkScriptCandidates>;
+    /// imports or read capability bits. A successful capture always returns an
+    /// envelope, including an envelope whose typed inventory is exactly empty.
+    fn capture(&self, cx: ScriptCandidateCx<'_>) -> FrameworkScriptCandidates;
     /// Re-anchor this provider's captured candidates to the PRODUCING
     /// canonical.
     ///
@@ -131,6 +182,20 @@ pub trait ScriptFactProvider: Send + Sync {
     /// so its envelope passes through untouched.
     fn absolutize_candidates(
         &self,
+        candidates: ExactFrameworkScriptCandidates,
+        canonical: &str,
+    ) -> ExactFrameworkScriptCandidates {
+        candidates.map(|candidates| self.absolutize_candidate_observations(candidates, canonical))
+    }
+    /// Re-anchor candidate observations that do not carry an exact-capture
+    /// proof.
+    ///
+    /// This is the recovered-parse counterpart of
+    /// [`Self::absolutize_candidates`]. It must apply the same typed payload
+    /// rewrite and coherent stable-hash rebuild, but it deliberately cannot
+    /// mint [`ExactFrameworkScriptCandidates`].
+    fn absolutize_candidate_observations(
+        &self,
         candidates: FrameworkScriptCandidates,
         _canonical: &str,
     ) -> FrameworkScriptCandidates {
@@ -144,12 +209,9 @@ pub trait ScriptFactProvider: Send + Sync {
     /// targets (the session resolved the candidate specifiers through its own
     /// import resolver and hands the outcome as data), and a capability lookup.
     /// The provider rejects userland look-alikes (a candidate whose import did
-    /// not resolve to the framework's package) and refuses emission when a
-    /// consumed capability bit is OFF. Returns `None` when the candidates do not
-    /// validate into a resolved fact — the honest answer, never a fabricated
-    /// payload.
-    fn validate(&self, cx: ResolvedValidationCx<'_>)
-        -> Option<Arc<dyn FrameworkScriptFactPayload>>;
+    /// not resolve to the framework's package) and reports exact, partial, or
+    /// unavailable evidence explicitly.
+    fn validate(&self, cx: ResolvedValidationCx<'_>) -> ScriptFactValidation;
 }
 
 /// The TYPED resolved-package identity of an import — the package the session's
@@ -281,6 +343,40 @@ pub struct FrameworkScriptCandidates {
     pub payload: Arc<dyn Any + Send + Sync>,
 }
 
+/// A producer-minted proof that one provider's syntax candidate inventory was
+/// captured completely, including the exact-empty case.
+///
+/// Construction is private to the syntax dispatcher. Consumers can inspect the
+/// envelope but cannot forge this proof.
+#[derive(Clone)]
+pub struct ExactFrameworkScriptCandidates {
+    candidates: FrameworkScriptCandidates,
+}
+
+impl ExactFrameworkScriptCandidates {
+    fn new(candidates: FrameworkScriptCandidates) -> Self {
+        Self { candidates }
+    }
+
+    fn map(self, map: impl FnOnce(FrameworkScriptCandidates) -> FrameworkScriptCandidates) -> Self {
+        Self::new(map(self.candidates))
+    }
+
+    /// The completely captured candidate envelope.
+    #[must_use]
+    pub fn candidates(&self) -> &FrameworkScriptCandidates {
+        &self.candidates
+    }
+}
+
+impl std::fmt::Debug for ExactFrameworkScriptCandidates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ExactFrameworkScriptCandidates")
+            .field(&self.candidates)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for FrameworkScriptCandidates {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameworkScriptCandidates")
@@ -298,11 +394,11 @@ impl std::fmt::Debug for FrameworkScriptCandidates {
 #[derive(Clone, Debug, Default)]
 pub struct FrameworkScriptCandidateSet {
     /// One entry per active provider that captured candidates.
-    pub per_provider: Vec<FrameworkScriptCandidates>,
+    pub per_provider: Vec<ExactFrameworkScriptCandidates>,
 }
 
 impl FrameworkScriptCandidateSet {
-    /// Whether no provider captured candidates for this file.
+    /// Whether no provider was active for this file.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.per_provider.is_empty()
@@ -313,52 +409,10 @@ impl FrameworkScriptCandidateSet {
     pub fn for_adapter(
         &self,
         adapter_id: &FrameworkAdapterId,
-    ) -> Option<&FrameworkScriptCandidates> {
+    ) -> Option<&ExactFrameworkScriptCandidates> {
         self.per_provider
             .iter()
-            .find(|c| &c.adapter_id == adapter_id)
-    }
-}
-
-/// One provider's RESOLVED framework script facts (the resolved-validation half output).
-///
-/// Produced session-side by validating syntax candidates against resolved
-/// import sources + capability bits. The typed [`FrameworkScriptFactPayload`]
-/// rides behind the hidden-downcast doctrine.
-#[derive(Clone)]
-pub struct FrameworkScriptFacts {
-    /// The adapter these facts belong to.
-    pub adapter_id: FrameworkAdapterId,
-    /// The producing provider's version.
-    pub provider_version: u32,
-    /// Structural hash of the resolved facts.
-    pub stable_hash: [u8; 16],
-    /// The resolved typed payload.
-    pub payload: Arc<dyn FrameworkScriptFactPayload>,
-}
-
-impl std::fmt::Debug for FrameworkScriptFacts {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FrameworkScriptFacts")
-            .field("adapter_id", &self.adapter_id)
-            .field("provider_version", &self.provider_version)
-            .field("stable_hash", &self.stable_hash)
-            .finish_non_exhaustive()
-    }
-}
-
-/// The per-file collection of every provider's resolved facts.
-#[derive(Clone, Debug, Default)]
-pub struct FrameworkScriptFactSet {
-    /// One entry per provider that produced resolved facts.
-    pub per_provider: Vec<FrameworkScriptFacts>,
-}
-
-impl FrameworkScriptFactSet {
-    /// Whether no provider produced resolved facts for this file.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.per_provider.is_empty()
+            .find(|c| &c.candidates().adapter_id == adapter_id)
     }
 }
 
@@ -366,8 +420,8 @@ impl FrameworkScriptFactSet {
 /// per-provider candidates.
 ///
 /// EMPTY `active_providers` ⇒ an empty set with ZERO capture work — the
-/// byte-identical pre-existing path. A provider that captures nothing
-/// contributes no entry.
+/// byte-identical pre-existing path. Every active provider contributes an exact
+/// envelope, including an exact-empty candidate inventory.
 #[must_use]
 pub fn capture_script_candidates(
     active_providers: &[Arc<dyn ScriptFactProvider>],
@@ -433,9 +487,7 @@ pub fn capture_script_candidates_with_context(
             module_script_region,
             framework_mode_hint,
         };
-        if let Some(candidates) = provider.capture(cx) {
-            per_provider.push(candidates);
-        }
+        per_provider.push(ExactFrameworkScriptCandidates::new(provider.capture(cx)));
     }
     FrameworkScriptCandidateSet { per_provider }
 }
@@ -473,26 +525,25 @@ mod tests {
         fn syntax_gate(&self) -> ScriptFactSyntaxGate {
             self.gate.clone()
         }
-        fn capture(&self, _cx: ScriptCandidateCx<'_>) -> Option<FrameworkScriptCandidates> {
+        fn capture(&self, _cx: ScriptCandidateCx<'_>) -> FrameworkScriptCandidates {
             self.captured
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Some(FrameworkScriptCandidates {
+            FrameworkScriptCandidates {
                 adapter_id: self.adapter_id(),
                 provider_version: self.provider_version(),
                 stable_hash: [0u8; 16],
                 payload: Arc::new(()),
-            })
+            }
         }
         fn consumed_capabilities(&self) -> &[&'static str] {
             &["fixture-cap"]
         }
-        fn validate(
-            &self,
-            cx: ResolvedValidationCx<'_>,
-        ) -> Option<Arc<dyn FrameworkScriptFactPayload>> {
+        fn validate(&self, cx: ResolvedValidationCx<'_>) -> ScriptFactValidation {
             // Refuse when the consumed capability bit is OFF.
             if !(cx.capability_on)("fixture-cap") {
-                return None;
+                return ScriptFactValidation::Unavailable(
+                    ScriptFactUnavailableReason::ValidationProducedNoFacts,
+                );
             }
             // Reject a userland look-alike: the candidate's import must have
             // resolved to the framework's own installed PACKAGE — tested via the
@@ -502,9 +553,11 @@ mod tests {
                 .iter()
                 .any(|t| t.package.as_ref().is_some_and(|p| p.name == "fixture-fw"));
             if !resolved_to_framework {
-                return None;
+                return ScriptFactValidation::Unavailable(
+                    ScriptFactUnavailableReason::ValidationProducedNoFacts,
+                );
             }
-            Some(Arc::new(FixturePayload))
+            ScriptFactValidation::Exact(Arc::new(FixturePayload))
         }
     }
 
@@ -579,14 +632,19 @@ mod tests {
             resolved_canonical: Some("/node_modules/fixture-fw/index.d.ts".to_string()),
             package: Some(ResolvedPackage::named("fixture-fw")),
         }];
-        // Capability bit OFF ⇒ the resolved-validation refuses (None), even
+        // Capability bit OFF ⇒ the resolved-validation is unavailable, even
         // though the import resolved to the framework package.
         let cx = ResolvedValidationCx {
             candidates: &candidates,
             resolved_import_targets: &targets,
             capability_on: &|_| false,
         };
-        assert!(provider.validate(cx).is_none());
+        assert!(matches!(
+            provider.validate(cx),
+            ScriptFactValidation::Unavailable(
+                ScriptFactUnavailableReason::ValidationProducedNoFacts
+            )
+        ));
     }
 
     #[test]
@@ -607,7 +665,12 @@ mod tests {
             resolved_import_targets: &targets,
             capability_on: &|_| true,
         };
-        assert!(provider.validate(cx).is_none());
+        assert!(matches!(
+            provider.validate(cx),
+            ScriptFactValidation::Unavailable(
+                ScriptFactUnavailableReason::ValidationProducedNoFacts
+            )
+        ));
     }
 
     #[test]
@@ -624,9 +687,9 @@ mod tests {
             resolved_import_targets: &targets,
             capability_on: &|cap| cap == "fixture-cap",
         };
-        let payload = provider
-            .validate(cx)
-            .expect("a resolved + capability-on candidate validates");
+        let ScriptFactValidation::Exact(payload) = provider.validate(cx) else {
+            panic!("a resolved + capability-on candidate validates exactly");
+        };
         assert!(payload.as_any().downcast_ref::<FixturePayload>().is_some());
     }
 
@@ -643,14 +706,18 @@ mod tests {
             fn syntax_gate(&self) -> ScriptFactSyntaxGate {
                 ScriptFactSyntaxGate::ImportSpecifier("no-cap")
             }
-            fn capture(&self, _cx: ScriptCandidateCx<'_>) -> Option<FrameworkScriptCandidates> {
-                None
+            fn capture(&self, _cx: ScriptCandidateCx<'_>) -> FrameworkScriptCandidates {
+                FrameworkScriptCandidates {
+                    adapter_id: self.adapter_id(),
+                    provider_version: self.provider_version(),
+                    stable_hash: [0; 16],
+                    payload: Arc::new(()),
+                }
             }
-            fn validate(
-                &self,
-                _cx: ResolvedValidationCx<'_>,
-            ) -> Option<Arc<dyn FrameworkScriptFactPayload>> {
-                None
+            fn validate(&self, _cx: ResolvedValidationCx<'_>) -> ScriptFactValidation {
+                ScriptFactValidation::Unavailable(
+                    ScriptFactUnavailableReason::ValidationProducedNoFacts,
+                )
             }
         }
         assert!(NoCapProvider.consumed_capabilities().is_empty());

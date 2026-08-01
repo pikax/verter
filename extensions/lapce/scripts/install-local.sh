@@ -4,7 +4,7 @@
 #
 # Builds bin/verter-lapce.wasm (cargo, wasm32-wasip1, release), detects the
 # per-channel Lapce plugins directory for the current OS, copies volt.toml + the
-# wasm into <plugins>/verter/, and prints the exact `lsp.serverPath` config
+# wasm into <plugins>/verter-volt/, and prints the exact `lsp.serverPath` config
 # snippet with the absolute built verter-lsp path filled in. Idempotent (re-run
 # to refresh). Fails loudly if the wasm or the verter-lsp binary is missing.
 #
@@ -81,11 +81,22 @@ case "$uname_s" in
     ;;
 esac
 
-# 3. Create <plugins>/verter/ and copy volt.toml + bin/verter-lapce.wasm into it.
-VOLT_DIR="$PLUGINS_DIR/verter"
+# 3. Create <plugins>/verter-volt/ and copy volt.toml + bin/verter-lapce.wasm into it.
+# Lapce's plugin folder name is conventionally the volt `name` field.
+VOLT_DIR="$PLUGINS_DIR/verter-volt"
 mkdir -p "$VOLT_DIR/bin"
 cp -f "$VOLT_TOML" "$VOLT_DIR/volt.toml"
 cp -f "$WASM_PATH" "$VOLT_DIR/bin/verter-lapce.wasm"
+# Remove the legacy install dir if present (pre-rename name "verter"). Lapce may
+# hold a lock on it while running — treat that as a non-fatal warning.
+LEGACY_VOLT_DIR="$PLUGINS_DIR/verter"
+if [ -d "$LEGACY_VOLT_DIR" ] && [ "$LEGACY_VOLT_DIR" != "$VOLT_DIR" ]; then
+  if rm -rf "$LEGACY_VOLT_DIR" 2>/dev/null; then
+    echo "==> Removed legacy install at $LEGACY_VOLT_DIR"
+  else
+    echo "==> WARNING: could not remove legacy install at $LEGACY_VOLT_DIR; close Lapce and delete it manually if it remains."
+  fi
+fi
 echo "==> Installed volt to $VOLT_DIR"
 
 # 4. Print the exact lsp.serverPath snippet with the absolute verter-lsp path.
@@ -99,7 +110,10 @@ echo ""
 echo "==> verter-lsp binary: $BIN_NOTE"
 echo "==> Add this to your Lapce settings (settings.toml):"
 echo ""
-echo "[volt.verter]"
+# Lapce looks up plugin config by the volt's `name` field ("verter-volt"), as a
+# top-level settings table. Dotted keys are unflattened into nested
+# initializationOptions before they reach the wasm plugin.
+echo "[verter-volt]"
 echo "\"lsp.serverPath\" = \"$SERVER_BIN\""
 echo "\"typeProvider\" = \"tsgo\""
 echo ""

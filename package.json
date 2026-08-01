@@ -19,19 +19,19 @@
   "main": "index.js",
   "scripts": {
     "test": "pnpm -r --parallel run test",
-    "test:e2e": "pnpm --filter vscode test:e2e:matrix",
-    "test:e2e:single": "pnpm --filter vscode test:e2e",
+    "test:e2e": "pnpm --filter verter-vscode test:e2e:matrix",
+    "test:e2e:single": "pnpm --filter verter-vscode test:e2e",
     "test:lsp:neutral": "cargo build -p verter_lsp -p verter_relay_shim && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm --filter @verter/dx-harness test:editor-neutral-lsp",
     "test:endurance": "pnpm --filter @verter/dx-harness run test:endurance",
-    "test:scripts": "vitest run scripts/sccache-env.test.mjs",
+    "test:scripts": "vitest run scripts/sccache-env.test.mjs && node --test scripts/lib/publish-set.spec.mjs && node --test scripts/editor-contracts/plenary-outcome-guard.test.mjs",
     "bump": "node scripts/bump.mjs",
     "fmt": "oxfmt",
-    "build": "pnpm run build:native && pnpm run build:lsp && pnpm run build:wasm && pnpm run build:ts && pnpm --filter @verter/component-meta build",
+    "build": "pnpm run build:native && pnpm run build:lsp && pnpm run build:wasm && pnpm run build:ts",
     "build:native": "pnpm --filter @verter/native build",
     "build:lsp": "cargo build -p verter_lsp",
     "build:lsp:release": "cargo build -p verter_lsp --release",
     "build:wasm": "pnpm --filter @verter/wasm build",
-    "build:ts": "pnpm -r --filter \"./packages/**\" --filter !@verter/native --filter !@verter/wasm --filter !@verter/playground --filter !@verter/component-meta --filter !example run build",
+    "build:ts": "pnpm -r --filter \"./packages/**\" --filter !@verter/native --filter !@verter/wasm --filter !@verter/playground --filter !example run build",
     "build:tsc": "cargo build -p verter_tsc",
     "build:tsc:release": "cargo build -p verter_tsc --release",
     "build:mcp": "cargo build -p verter_mcp",
@@ -41,8 +41,8 @@
     "build:zed": "rustup target add wasm32-wasip2 && cargo build --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 --release && npx shx mkdir -p extensions/zed/bin && npx shx cp extensions/zed/target/wasm32-wasip2/release/verter_zed.wasm extensions/zed/bin/verter-zed.wasm",
     "build:playground": "pnpm --filter @verter/playground build",
     "build:unplugin": "pnpm --filter @verter/unplugin build",
-    "watch": "pnpm --filter @verter/language-shared --filter vscode --filter @verter/typescript-plugin watch",
-    "dev-extension": "pnpm run build:lsp && pnpm --filter @verter/language-shared --filter vscode --filter @verter/typescript-plugin watch",
+    "watch": "pnpm --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
+    "dev-extension": "pnpm run build:lsp && pnpm --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
     "update-all": "pnpm up -r -i -L",
     "package": "cd extensions/vscode && npm install --omit=dev && npx shx mkdir -p node_modules/@verter && npx shx cp -r ../typescript-plugin node_modules/@verter/typescript-plugin && npx shx rm -r node_modules/@oxc-parser && npx vsce package",
     "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin",
@@ -73,9 +73,9 @@
     "test:vue-macro-oracle": "node --test scripts/vue-macro-runtime-oracle/oracle.test.mjs"
   },
   "dependencies": {
-    "@vue/compiler-core": "^3.5.34",
+    "@vue/compiler-core": "3.5.34",
     "@vue/compiler-sfc": "3.5.34",
-    "oxfmt": "^0.52.0"
+    "oxfmt": "0.52.0"
   },
   "devDependencies": {
     "@bufbuild/buf": "1.70.0",

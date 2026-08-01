@@ -1,7 +1,7 @@
 //! The template-expression REWRITE half of the Svelte client plan builder.
 //!
-//! Extracted from `client_plan.rs` (the file-size guard boundary): these are the
-//! [`SupportedClientIr`] methods that rewrite a template expression (an `ExprId` or a
+//! This focused sibling contains the [`SupportedClientIr`] methods that rewrite a
+//! template expression (an `ExprId` or a
 //! raw source string) to its emitted client form through the FALLIBLE
 //! source-preserving rewriter ([`expr_rewrite`]), threading the per-instance proxy-init
 //! map so a template-side reassignment matches the official `should_proxy(rhs)`. They

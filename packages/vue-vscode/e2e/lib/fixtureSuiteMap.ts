@@ -29,6 +29,7 @@ const LEGACY_SUITE_GLOBS = [
   "import-resolution.test",
   "imported-props.test",
   "inlay-hints.test",
+  "native-hover-default.test",
   "provider-parity.test",
   "references.test",
   "rename.test",
@@ -52,6 +53,9 @@ export const FIXTURE_SUITE_GLOBS: Readonly<Record<string, readonly string[]>> = 
   "single-file": LEGACY_SUITE_GLOBS,
   "barrel-exports": LEGACY_SUITE_GLOBS,
   "editor-owned-project": ["editor-owned-project.test"],
+  // The extension-hosted provider's acceptance: its own suite only. The legacy
+  // tree assumes an in-repo fixture layout this out-of-tree workspace does not have.
+  "out-of-tree-monorepo": ["out-of-tree-monorepo.test"],
 
   "vue-contract": ["frameworks/vue/"],
   "svelte-contract": ["frameworks/svelte/"],

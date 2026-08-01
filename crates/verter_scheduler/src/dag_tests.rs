@@ -80,21 +80,21 @@ fn work_kind_has_exactly_five_variants() {
 #[test]
 fn next_ready_returns_highest_priority_first() {
     let mut dag = SchedulerDag::new();
-    let t_low = dag.submit(
+    let t_low = dag.submit_expect(
         file_stage("/low.vue", 1, FileStageKey::Source),
         WorkKind::Load,
         Priority::Background,
         Vec::new(),
         None,
     );
-    let t_hi = dag.submit(
+    let t_hi = dag.submit_expect(
         file_stage("/hi.vue", 1, FileStageKey::Source),
         WorkKind::Load,
         Priority::Critical,
         Vec::new(),
         None,
     );
-    let t_mid = dag.submit(
+    let t_mid = dag.submit_expect(
         file_stage("/mid.vue", 1, FileStageKey::Source),
         WorkKind::Load,
         Priority::Interactive,
@@ -116,14 +116,14 @@ fn next_ready_returns_highest_priority_first() {
 #[test]
 fn submit_dedup_merges_identity_and_upgrades_priority() {
     let mut dag = SchedulerDag::new();
-    let t1 = dag.submit(
+    let t1 = dag.submit_expect(
         file_stage("/a.vue", 1, FileStageKey::Source),
         WorkKind::Load,
         Priority::Background,
         Vec::new(),
         None,
     );
-    let t2 = dag.submit(
+    let t2 = dag.submit_expect(
         file_stage("/a.vue", 1, FileStageKey::Source),
         WorkKind::Load,
         Priority::Critical,
@@ -145,14 +145,14 @@ fn submit_dedup_merges_identity_and_upgrades_priority() {
 #[test]
 fn cancel_older_generation_drops_stale_node() {
     let mut dag = SchedulerDag::new();
-    let _old = dag.submit(
+    let _old = dag.submit_expect(
         file_stage("/a.vue", 1, FileStageKey::Source),
         WorkKind::Load,
         Priority::Interactive,
         Vec::new(),
         None,
     );
-    let new = dag.submit(
+    let new = dag.submit_expect(
         file_stage("/a.vue", 2, FileStageKey::Source),
         WorkKind::Load,
         Priority::Interactive,
@@ -173,14 +173,14 @@ fn cancel_older_generation_drops_stale_node() {
 fn dependency_gating_holds_back_node_until_dep_completes() {
     let mut dag = SchedulerDag::new();
     let dep_id = file_stage("/dep.ts", 1, FileStageKey::Analysis);
-    let _dep_tok = dag.submit(
+    let _dep_tok = dag.submit_expect(
         dep_id.clone(),
         WorkKind::Analysis,
         Priority::Interactive,
         Vec::new(),
         None,
     );
-    let waiter = dag.submit(
+    let waiter = dag.submit_expect(
         artifact("/a.vue", 1, 7),
         WorkKind::Artifact,
         Priority::Interactive,
@@ -209,14 +209,14 @@ fn dependency_gating_holds_back_node_until_dep_completes() {
 fn dynamic_import_barrier_uses_cache_node_dep_to_gate_artifact() {
     let mut dag = SchedulerDag::new();
     let barrier = cache_node(1, 42, 7, 99);
-    let _bt = dag.submit(
+    let _bt = dag.submit_expect(
         barrier.clone(),
         WorkKind::CacheNode,
         Priority::Interactive,
         Vec::new(),
         None,
     );
-    let consumer = dag.submit(
+    let consumer = dag.submit_expect(
         artifact("/a.vue", 1, 7),
         WorkKind::Artifact,
         Priority::Interactive,
@@ -266,14 +266,14 @@ fn capacity_release_returns_permits_and_makes_double_release_unrepresentable() {
 fn cancel_returns_stranded_waiters_for_failure_propagation() {
     let mut dag = SchedulerDag::new();
     let dep_id = file_stage("/dep.ts", 1, FileStageKey::Analysis);
-    let _dep = dag.submit(
+    let _dep = dag.submit_expect(
         dep_id.clone(),
         WorkKind::Analysis,
         Priority::Interactive,
         Vec::new(),
         None,
     );
-    let waiter = dag.submit(
+    let waiter = dag.submit_expect(
         artifact("/a.vue", 1, 7),
         WorkKind::Artifact,
         Priority::Interactive,
@@ -301,7 +301,7 @@ fn submit_dedup_merges_incoming_deps_into_existing_node() {
 
     // Admit deps so the gating identities exist.
     for d in [&dep_a, &dep_b, &dep_c] {
-        dag.submit(
+        dag.submit_expect(
             d.clone(),
             WorkKind::Analysis,
             Priority::Background,
@@ -311,7 +311,7 @@ fn submit_dedup_merges_incoming_deps_into_existing_node() {
     }
 
     // First submit with {A, B}.
-    let t1 = dag.submit(
+    let t1 = dag.submit_expect(
         target.clone(),
         WorkKind::Analysis,
         Priority::Background,
@@ -319,7 +319,7 @@ fn submit_dedup_merges_incoming_deps_into_existing_node() {
         None,
     );
     // Second submit with {C} — before A or B completes.
-    let t2 = dag.submit(
+    let t2 = dag.submit_expect(
         target.clone(),
         WorkKind::Analysis,
         Priority::Background,
@@ -358,7 +358,7 @@ fn in_flight_dedup_no_panic_no_deps_change() {
     let id = file_stage("/target.vue", 1, FileStageKey::Source);
 
     // Admit and dispatch target first.
-    let t1 = dag.submit(
+    let t1 = dag.submit_expect(
         id.clone(),
         WorkKind::Load,
         Priority::Interactive,
@@ -371,7 +371,7 @@ fn in_flight_dedup_no_panic_no_deps_change() {
     // id is now dispatched. A second submit with empty deps is a
     // legitimate joiner. Without the joiner allowance this would
     // `debug_assert!(false)`.
-    let t2 = dag.submit(
+    let t2 = dag.submit_expect(
         id.clone(),
         WorkKind::Load,
         Priority::Interactive,
@@ -407,7 +407,7 @@ fn dispatched_dedup_with_deps_does_not_mutate_incoming_edges() {
     // tagged by request_id=42. The dedup join on the dispatched
     // path must NOT overwrite this context with the joiner's None.
     let dep_a = file_stage("/a.ts", 1, FileStageKey::Analysis);
-    let _t_a = dag.submit(
+    let _t_a = dag.submit_expect(
         dep_a.clone(),
         WorkKind::Analysis,
         Priority::Background,
@@ -415,7 +415,7 @@ fn dispatched_dedup_with_deps_does_not_mutate_incoming_edges() {
         None,
     );
     let first_ctx = OpaqueRequestContext::test_only(42);
-    let t1 = dag.submit(
+    let t1 = dag.submit_expect(
         target_id.clone(),
         WorkKind::Load,
         Priority::Background,
@@ -446,14 +446,14 @@ fn dispatched_dedup_with_deps_does_not_mutate_incoming_edges() {
     // AND the first-arrived submitter's request_context survives
     // (the joiner's None must not clobber it).
     let dep_b = file_stage("/b.ts", 1, FileStageKey::Analysis);
-    let _t_b = dag.submit(
+    let _t_b = dag.submit_expect(
         dep_b.clone(),
         WorkKind::Analysis,
         Priority::Interactive,
         Vec::new(),
         None,
     );
-    let t2 = dag.submit(
+    let t2 = dag.submit_expect(
         target_id.clone(),
         WorkKind::Load,
         Priority::Critical,
@@ -527,7 +527,7 @@ fn dispatched_dedup_with_deps_does_not_mutate_incoming_edges() {
 fn priority_upgrade_survives_in_flight_dedup() {
     let mut dag = SchedulerDag::new();
     let id = file_stage("/target.vue", 1, FileStageKey::Source);
-    let t1 = dag.submit(
+    let t1 = dag.submit_expect(
         id.clone(),
         WorkKind::Load,
         Priority::Background,
@@ -539,7 +539,7 @@ fn priority_upgrade_survives_in_flight_dedup() {
     // id is now dispatched. Re-submit with Critical — without the
     // priority-upgrade arm this would panic in debug or drop the
     // upgrade in release.
-    let t2 = dag.submit(
+    let t2 = dag.submit_expect(
         id.clone(),
         WorkKind::Load,
         Priority::Critical,
@@ -565,7 +565,7 @@ fn priority_upgrade_survives_in_flight_dedup() {
 fn supersede_old_file_generations_cancels_stale_dag_nodes() {
     let mut dag = SchedulerDag::new();
     let stale = file_stage("/a.vue", 1, FileStageKey::Source);
-    let _stale_tok = dag.submit(
+    let _stale_tok = dag.submit_expect(
         stale.clone(),
         WorkKind::Load,
         Priority::Interactive,
@@ -610,14 +610,14 @@ fn next_ready_defers_when_cpu_class_saturated_and_resumes_on_complete() {
     // Submit two CPU-bound jobs at the same priority.
     let id_a = file_stage("/a.ts", 1, FileStageKey::Analysis);
     let id_b = file_stage("/b.ts", 1, FileStageKey::Analysis);
-    let _t_a = dag.submit(
+    let _t_a = dag.submit_expect(
         id_a.clone(),
         WorkKind::Analysis,
         Priority::Interactive,
         Vec::new(),
         None,
     );
-    let _t_b = dag.submit(
+    let _t_b = dag.submit_expect(
         id_b.clone(),
         WorkKind::Analysis,
         Priority::Interactive,
@@ -658,14 +658,14 @@ fn next_ready_admits_io_when_cpu_full_and_vice_versa() {
 
     let cpu_id = file_stage("/cpu.ts", 1, FileStageKey::Analysis);
     let io_id = file_stage("/io.vue", 1, FileStageKey::Source);
-    let _ = dag.submit(
+    let _ = dag.submit_expect(
         cpu_id,
         WorkKind::Analysis,
         Priority::Interactive,
         Vec::new(),
         None,
     );
-    let _ = dag.submit(
+    let _ = dag.submit_expect(
         io_id,
         WorkKind::Load,
         Priority::Interactive,
@@ -686,14 +686,14 @@ fn next_ready_admits_io_when_cpu_full_and_vice_versa() {
 #[test]
 fn submit_count_stays_one_under_dedup() {
     let mut dag = SchedulerDag::new();
-    dag.submit(
+    dag.submit_expect(
         file_stage("/a.vue", 1, FileStageKey::Source),
         WorkKind::Load,
         Priority::Background,
         Vec::new(),
         None,
     );
-    dag.submit(
+    dag.submit_expect(
         file_stage("/a.vue", 1, FileStageKey::Source),
         WorkKind::Load,
         Priority::Critical,
@@ -723,14 +723,14 @@ fn has_dep_on_returns_true_when_dep_is_in_deps_remaining() {
     let dep_id = file_stage("/dep.ts", 1, FileStageKey::Analysis);
     let owner_id = artifact("/a.vue", 1, 7);
     let dep_key = DepKey::from_identity(&dep_id);
-    dag.submit(
+    dag.submit_expect(
         dep_id,
         WorkKind::Analysis,
         Priority::Interactive,
         Vec::new(),
         None,
     );
-    dag.submit(
+    dag.submit_expect(
         owner_id.clone(),
         WorkKind::Artifact,
         Priority::Interactive,
@@ -751,14 +751,14 @@ fn has_dep_on_returns_false_when_dep_completed() {
     let dep_id = file_stage("/dep.ts", 1, FileStageKey::Analysis);
     let owner_id = artifact("/a.vue", 1, 7);
     let dep_key = DepKey::from_identity(&dep_id);
-    dag.submit(
+    dag.submit_expect(
         dep_id.clone(),
         WorkKind::Analysis,
         Priority::Interactive,
         Vec::new(),
         None,
     );
-    dag.submit(
+    dag.submit_expect(
         owner_id.clone(),
         WorkKind::Artifact,
         Priority::Interactive,
@@ -806,14 +806,14 @@ fn dep_reaches_owner_returns_true_for_three_node_cycle() {
     };
     // B gates on C; C gates on A. The closing edge from A to B
     // would close the cycle.
-    dag.submit(
+    dag.submit_expect(
         b_id,
         WorkKind::Analysis,
         Priority::Background,
         vec![c_dep],
         None,
     );
-    dag.submit(
+    dag.submit_expect(
         c_id,
         WorkKind::Analysis,
         Priority::Background,
@@ -863,7 +863,7 @@ fn dep_reaches_owner_detects_cycle_past_256_hops() {
             generation: 1,
             stage: FileStageKey::Analysis,
         };
-        dag.submit(
+        dag.submit_expect(
             current_id,
             WorkKind::Analysis,
             Priority::Background,
@@ -954,7 +954,7 @@ fn dep_reaches_owner_frontier_bounded_on_dense_graph() {
             } else {
                 Vec::new()
             };
-            dag.submit(
+            dag.submit_expect(
                 node_id,
                 WorkKind::Analysis,
                 Priority::Background,
@@ -1018,7 +1018,7 @@ fn next_ready_for_pump_skips_active_path_identities() {
     use crate::caller_kind::CallerKind;
     let mut dag = SchedulerDag::new();
     let id = file_stage("/a.vue", 1, FileStageKey::Analysis);
-    dag.submit(
+    dag.submit_expect(
         id.clone(),
         WorkKind::Analysis,
         Priority::Interactive,
@@ -1048,7 +1048,7 @@ fn next_ready_for_pump_prefers_cpu_class_for_cpu_worker_caller() {
 
     // CPU candidate (Analysis).
     let cpu_id = file_stage("/a.vue", 1, FileStageKey::Analysis);
-    dag.submit(
+    dag.submit_expect(
         cpu_id.clone(),
         WorkKind::Analysis,
         Priority::Interactive,
@@ -1057,7 +1057,7 @@ fn next_ready_for_pump_prefers_cpu_class_for_cpu_worker_caller() {
     );
     // I/O candidate (Source).
     let io_id = file_stage("/b.vue", 1, FileStageKey::Source);
-    dag.submit(
+    dag.submit_expect(
         io_id.clone(),
         WorkKind::Load,
         Priority::Interactive,
@@ -1086,7 +1086,7 @@ fn next_ready_for_pump_prefers_io_class_for_io_worker_caller() {
     let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
 
     let cpu_id = file_stage("/a.vue", 1, FileStageKey::Analysis);
-    dag.submit(
+    dag.submit_expect(
         cpu_id.clone(),
         WorkKind::Analysis,
         Priority::Interactive,
@@ -1094,7 +1094,7 @@ fn next_ready_for_pump_prefers_io_class_for_io_worker_caller() {
         None,
     );
     let io_id = file_stage("/b.vue", 1, FileStageKey::Source);
-    dag.submit(
+    dag.submit_expect(
         io_id.clone(),
         WorkKind::Load,
         Priority::Interactive,

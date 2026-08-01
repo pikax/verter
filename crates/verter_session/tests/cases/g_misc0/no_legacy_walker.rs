@@ -550,8 +550,8 @@ fn is_self_excluded(path: &Path) -> bool {
 /// rail enforces a hand-authored-source rule (no revived helper names), so
 /// a generated data row that happens to contain a retired substring is not
 /// a re-introduction — and scanning thousands of rows is pure cost. Skip
-/// them by basename. Mirrors `architecture_guards.rs`'s
-/// `GENERATED_DATA_SOURCE_FILES` and the `no_oversize_files` exemption.
+/// them by basename. These basenames mirror `architecture_guards.rs`'s
+/// `GENERATED_DATA_SOURCE_FILES`.
 const GENERATED_DATA_FILE_NAMES: &[&str] = &["entity_table.rs", "diff_oracle_divergences.rs"];
 
 fn is_generated_data_file(path: &Path) -> bool {

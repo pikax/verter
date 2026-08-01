@@ -156,6 +156,51 @@ pub struct ResolvedTsserver {
     pub source: TsserverSource,
     /// Number of sibling `lib.*.d.ts` default-library files observed.
     pub default_lib_count: usize,
+    /// Installs a NEARER tier offered and this resolution refused, in search
+    /// order — empty on the common path where the first candidate served.
+    ///
+    /// Retained because a successful fall-through SWAPS THE TOOLCHAIN: a
+    /// refused project-local TypeScript followed by a servable global one
+    /// silently replaces the project-pinned engine, and the user then type-checks
+    /// against a version their project never selected. That is a
+    /// reproducibility defect, so the skipped tier and the reason travel WITH the
+    /// result and are surfaced by [`Self::skipped_tier_advisory`] rather than
+    /// being dropped on success.
+    pub skipped: Vec<TsserverCandidateRejection>,
+}
+
+impl ResolvedTsserver {
+    /// A user-facing advisory naming the nearer install(s) this resolution
+    /// skipped and why, or `None` when nothing was skipped.
+    ///
+    /// Bounded like [`TsserverDiscoveryError`]'s report: an ancestor walk in a
+    /// deep monorepo can refuse several tiers, and the first few are what the
+    /// user acts on.
+    #[must_use]
+    pub fn skipped_tier_advisory(&self) -> Option<String> {
+        const SHOWN: usize = 3;
+        if self.skipped.is_empty() {
+            return None;
+        }
+        let shown = self
+            .skipped
+            .iter()
+            .take(SHOWN)
+            .map(|rejection| format!("{}: {}", rejection.path.display(), rejection.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let rest = match self.skipped.len().checked_sub(SHOWN) {
+            Some(rest) if rest > 0 => format!(" (and {rest} more)"),
+            _ => String::new(),
+        };
+        Some(format!(
+            "Verter: TypeScript is being served from {} instead of a nearer install that was \
+             refused \u{2014} {shown}{rest}. Type-checking therefore uses a TypeScript this project did \
+             not pin; fix the refused install or set the VS Code `typescript.tsdk` setting to the \
+             one you want.",
+            self.path.display()
+        ))
+    }
 }
 
 /// One rejected tsserver candidate.
@@ -210,13 +255,27 @@ pub fn resolve_tsserver(
     tsdk: Option<&str>,
     owning_project_dir: Option<&str>,
 ) -> Result<ResolvedTsserver, TsserverDiscoveryError> {
-    resolve_tsserver_with_global(tsdk, owning_project_dir, global_tsserver_candidate)
+    resolve_tsserver_with_global(
+        tsdk,
+        owning_project_dir,
+        global_tsserver_candidate,
+        |path| path.canonicalize(),
+    )
 }
 
+/// The injectable core of [`resolve_tsserver`].
+///
+/// `canonicalize` is a parameter for the same reason `global_candidate` is: the
+/// exec-representability refusal below triggers only on a Windows
+/// extended-length path, which `Path::canonicalize()` produces on Windows ONLY.
+/// Injecting it lets the whole discovery flow — candidate, validation, refusal,
+/// next tier, rendered error — run and DISCRIMINATE on macOS and Linux, instead
+/// of being a branch no gate can reach.
 fn resolve_tsserver_with_global(
     tsdk: Option<&str>,
     owning_project_dir: Option<&str>,
     global_candidate: impl FnOnce() -> Option<PathBuf>,
+    canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf> + Copy,
 ) -> Result<ResolvedTsserver, TsserverDiscoveryError> {
     let mut candidates = Vec::new();
 
@@ -241,20 +300,23 @@ fn resolve_tsserver_with_global(
         ));
     }
 
+    // Rejections accumulate ACROSS tiers and travel with whichever tier finally
+    // serves: a later tier winning does not make an earlier refusal irrelevant,
+    // it makes it the reason the engine is not the one the project pinned.
     let mut rejections = Vec::new();
     for (candidate, source) in candidates {
         if !candidate.exists() {
             continue;
         }
-        match validate_tsserver_candidate(&candidate, source) {
-            Ok(resolved) => return Ok(resolved),
+        match validate_tsserver_candidate(&candidate, source, canonicalize) {
+            Ok(resolved) => return Ok(resolved.with_skipped(rejections)),
             Err(rejection) => rejections.push(rejection),
         }
     }
     if let Some(candidate) = global_candidate() {
         if candidate.exists() {
-            match validate_tsserver_candidate(&candidate, TsserverSource::Global) {
-                Ok(resolved) => return Ok(resolved),
+            match validate_tsserver_candidate(&candidate, TsserverSource::Global, canonicalize) {
+                Ok(resolved) => return Ok(resolved.with_skipped(rejections)),
                 Err(rejection) => rejections.push(rejection),
             }
         }
@@ -266,13 +328,31 @@ fn resolve_tsserver_with_global(
 fn validate_tsserver_candidate(
     candidate: &Path,
     source: TsserverSource,
+    canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>,
 ) -> Result<ResolvedTsserver, TsserverCandidateRejection> {
-    let path = candidate
-        .canonicalize()
-        .map_err(|error| TsserverCandidateRejection {
-            path: candidate.to_path_buf(),
-            reason: format!("could not resolve the real install path: {error}"),
-        })?;
+    let path = canonicalize(candidate).map_err(|error| TsserverCandidateRejection {
+        path: candidate.to_path_buf(),
+        reason: format!("could not resolve the real install path: {error}"),
+    })?;
+    // An install whose canonical path has no normal Win32 spelling cannot be
+    // EXECUTED even though it exists: node parses argv[1] with its own
+    // `\\?\`-unaware path handling and dies before tsserver initialises. Refusing
+    // it HERE, as a candidate rejection, is what makes the failure visible and
+    // recoverable — discovery moves on to the `typescript.tsdk` and global tiers
+    // (either may be nameable), and if nothing is usable the accumulated
+    // rejections carry the path, the reason, and the action all the way to the
+    // startup warning through `TsserverDiscoveryError`. A refusal discovered
+    // later, at spawn time, is swallowed by the per-feature error paths and the
+    // user just sees TypeScript go dark.
+    if let Some(refusal) = path.to_str().and_then(verter_span::path::verbatim_refusal) {
+        return Err(TsserverCandidateRejection {
+            path,
+            reason: format!(
+                "this install resolves to an extended-length Windows path that node cannot \
+                 execute: {refusal}"
+            ),
+        });
+    }
     let Some(lib_dir) = path.parent() else {
         return Err(TsserverCandidateRejection {
             path: candidate.to_path_buf(),
@@ -307,7 +387,16 @@ fn validate_tsserver_candidate(
         path,
         source,
         default_lib_count,
+        skipped: Vec::new(),
     })
+}
+
+impl ResolvedTsserver {
+    /// Attach the tiers this resolution passed over on its way to serving.
+    fn with_skipped(mut self, skipped: Vec<TsserverCandidateRejection>) -> Self {
+        self.skipped = skipped;
+        self
+    }
 }
 
 /// The global tier's candidate, resolved AT MOST ONCE per process.
@@ -743,5 +832,184 @@ mod tests {
         let resolved = find_tsserver(tsdk_install.join("lib").to_str(), project.to_str());
 
         assert_eq!(resolved, Some(expected.canonicalize().unwrap()));
+    }
+
+    // ── An install node cannot EXECUTE is refused as a candidate, not at spawn ──
+    //
+    // `Path::canonicalize()` only returns the Windows extended-length form on
+    // Windows, so these inject the canonicalizer (the same shape
+    // `resolve_tsserver_with_global` already uses for the global tier) and drive
+    // the REAL discovery flow with a verbatim result. What is covered on every
+    // host: the refusal, the tier fallthrough, and the rendered user-facing
+    // string. What only Windows can show: that canonicalize emits this form.
+
+    /// A canonicalizer that answers with an extended-length path Win32 cannot
+    /// name — the `\\?\` shape a Windows `canonicalize()` would return for an
+    /// install under a device-named directory.
+    fn canonicalize_to_unnameable(path: &Path) -> std::io::Result<PathBuf> {
+        let real = path.canonicalize()?;
+        let _ = real;
+        Ok(PathBuf::from(
+            r"\\?\D:\ws\NUL\node_modules\typescript\lib\tsserver.js",
+        ))
+    }
+
+    #[test]
+    fn an_install_node_cannot_execute_is_refused_with_an_actionable_user_message() {
+        let workspace = tempfile::tempdir().unwrap();
+        let project = workspace.path().join("packages/ui");
+        write_complete_typescript_install(&project.join("node_modules/typescript"), "6.0.2");
+
+        let error = resolve_tsserver_with_global(
+            None,
+            project.to_str(),
+            || None,
+            canonicalize_to_unnameable,
+        )
+        .expect_err("an install node cannot execute must not be served");
+
+        // This rendered string is what reaches the user: discovery error ->
+        // `probe.refusals` -> `WorkspaceTsserverProbe::refusal_summary()` ->
+        // `TsserverSpawnError::Unavailable` -> `tsserver_error_message` ->
+        // `client.show_message(WARNING, ...)`.
+        let message = error.to_string();
+        assert!(
+            message.contains(r"\\?\D:\ws\NUL\node_modules\typescript\lib\tsserver.js"),
+            "the user message names the offending path: {message}"
+        );
+        assert!(
+            message.contains("reserved Windows device name"),
+            "the user message names WHY it was refused: {message}"
+        );
+        assert!(
+            message.contains("typescript.tsdk"),
+            "the user message names the action: {message}"
+        );
+        // NEGATIVE: this is a refusal with a reason, not the generic
+        // library-less rejection.
+        assert!(
+            !message.contains("contains no sibling lib.*.d.ts"),
+            "an unnameable install is not a library-less one: {message}"
+        );
+    }
+
+    #[test]
+    fn a_skipped_nearer_install_is_retained_and_surfaced_on_the_successful_result() {
+        // A successful fall-through SWAPS THE TOOLCHAIN: the project-pinned
+        // install was refused and a different one now type-checks the code. That
+        // must never be silent, so the refusal travels WITH the result.
+        let workspace = tempfile::tempdir().unwrap();
+        let project = workspace.path().join("packages/ui");
+        write_complete_typescript_install(&project.join("node_modules/typescript"), "6.0.2");
+        let tsdk_install = workspace.path().join("configured-typescript");
+        write_complete_typescript_install(&tsdk_install, "6.0.2");
+
+        let seen = std::cell::Cell::new(0usize);
+        let canonicalize = |path: &Path| -> std::io::Result<PathBuf> {
+            let real = path.canonicalize()?;
+            if seen.get() == 0 {
+                seen.set(1);
+                return Ok(PathBuf::from(
+                    r"\\?\D:\ws\NUL\node_modules\typescript\lib\tsserver.js",
+                ));
+            }
+            Ok(real)
+        };
+
+        let resolved = resolve_tsserver_with_global(
+            tsdk_install.join("lib").to_str(),
+            project.to_str(),
+            || None,
+            canonicalize,
+        )
+        .expect("a nameable tsdk install still serves");
+
+        assert_eq!(
+            resolved.skipped.len(),
+            1,
+            "the refused nearer tier is retained"
+        );
+        let advisory = resolved
+            .skipped_tier_advisory()
+            .expect("a skipped tier produces a user-facing advisory");
+        assert!(
+            advisory.contains(r"\\?\D:\ws\NUL\node_modules\typescript\lib\tsserver.js"),
+            "the advisory names the install that was skipped: {advisory}"
+        );
+        assert!(
+            advisory.contains("reserved Windows device name"),
+            "the advisory names WHY it was skipped: {advisory}"
+        );
+        assert!(
+            advisory.contains("did not pin"),
+            "the advisory names the CONSEQUENCE \u{2014} a different TypeScript: {advisory}"
+        );
+        assert!(
+            advisory.contains("typescript.tsdk"),
+            "the advisory names the action: {advisory}"
+        );
+    }
+
+    #[test]
+    fn a_first_tier_hit_carries_no_skipped_advisory() {
+        // NEGATIVE CONTROL: the common path must stay silent, or every workspace
+        // gets a spurious toolchain-swap warning.
+        let workspace = tempfile::tempdir().unwrap();
+        let project = workspace.path().join("packages/ui");
+        write_complete_typescript_install(&project.join("node_modules/typescript"), "6.0.2");
+
+        let resolved =
+            resolve_tsserver_with_global(None, project.to_str(), || None, |p| p.canonicalize())
+                .expect("an ordinary install must serve");
+        assert!(resolved.skipped.is_empty());
+        assert_eq!(resolved.skipped_tier_advisory(), None);
+    }
+
+    #[test]
+    fn an_unnameable_project_install_falls_through_to_a_nameable_tsdk() {
+        // The refusal is a candidate rejection, so the NEXT tier still gets a
+        // chance — a `typescript.tsdk` install at a nameable path serves.
+        let workspace = tempfile::tempdir().unwrap();
+        let project = workspace.path().join("packages/ui");
+        write_complete_typescript_install(&project.join("node_modules/typescript"), "6.0.2");
+        let tsdk_install = workspace.path().join("configured-typescript");
+        let tsdk_entry = write_complete_typescript_install(&tsdk_install, "6.0.2");
+
+        let seen = std::cell::Cell::new(0usize);
+        let canonicalize = |path: &Path| -> std::io::Result<PathBuf> {
+            let real = path.canonicalize()?;
+            // Only the FIRST (project-local) candidate is unnameable.
+            if seen.get() == 0 {
+                seen.set(1);
+                return Ok(PathBuf::from(
+                    r"\\?\D:\ws\NUL\node_modules\typescript\lib\tsserver.js",
+                ));
+            }
+            Ok(real)
+        };
+
+        let resolved = resolve_tsserver_with_global(
+            tsdk_install.join("lib").to_str(),
+            project.to_str(),
+            || None,
+            canonicalize,
+        )
+        .expect("a nameable tsdk install still serves");
+        assert_eq!(resolved.path, tsdk_entry.canonicalize().unwrap());
+        assert_eq!(resolved.source, TsserverSource::ConfiguredTsdk);
+    }
+
+    #[test]
+    fn a_nameable_install_is_never_refused_by_the_exec_representability_check() {
+        // NEGATIVE CONTROL: the check must reject ONLY what node cannot execute.
+        let workspace = tempfile::tempdir().unwrap();
+        let project = workspace.path().join("packages/ui");
+        let expected =
+            write_complete_typescript_install(&project.join("node_modules/typescript"), "6.0.2");
+
+        let resolved =
+            resolve_tsserver_with_global(None, project.to_str(), || None, |p| p.canonicalize())
+                .expect("an ordinary install must serve");
+        assert_eq!(resolved.path, expected.canonicalize().unwrap());
     }
 }

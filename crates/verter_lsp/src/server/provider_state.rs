@@ -11,6 +11,9 @@
 //! `server/mod.rs` so it sees the parent's private struct fields without
 //! visibility widening.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use tower_lsp_server::ls_types::Uri;
 
 use crate::documents::line_index::LineIndex;
@@ -21,6 +24,10 @@ use crate::type_provider::merge;
 
 use super::server_utils::source_id_from_provider_carrier_path;
 use super::{TypeProviderContext, VerterLanguageServer};
+
+#[cfg(test)]
+#[path = "workspace_symbol_frontier_tests.rs"]
+mod workspace_symbol_frontier_tests;
 
 impl VerterLanguageServer {
     /// Capture the immutable FOREIGN-carrier IDE surface set a provider-backed
@@ -119,6 +126,43 @@ impl VerterLanguageServer {
         ide_code: &str,
         source_map_json: Option<&str>,
     ) {
+        let _ = self.record_carrier_ide_snapshot_inner(
+            None,
+            canonical_id,
+            ide_path,
+            ide_code,
+            source_map_json,
+        );
+    }
+
+    /// Record retained IDE output only if `revision` is still the live open
+    /// document at the store-write linearization point.
+    pub(super) fn record_carrier_ide_snapshot_if_current(
+        &self,
+        uri: &Uri,
+        revision: &crate::documents::DocumentSnapshotIdentity,
+        canonical_id: &str,
+        ide_path: &str,
+        ide_code: &str,
+        source_map_json: Option<&str>,
+    ) -> bool {
+        self.record_carrier_ide_snapshot_inner(
+            Some((uri, revision)),
+            canonical_id,
+            ide_path,
+            ide_code,
+            source_map_json,
+        )
+    }
+
+    fn record_carrier_ide_snapshot_inner(
+        &self,
+        retained: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
+        canonical_id: &str,
+        ide_path: &str,
+        ide_code: &str,
+        source_map_json: Option<&str>,
+    ) -> bool {
         let store = self.documents.provider_surfaces();
         let host = self.documents.host();
         let owned_map: Option<std::sync::Arc<str>> = match source_map_json {
@@ -133,29 +177,95 @@ impl VerterLanguageServer {
             }
         };
         let map_json = source_map_json.or(owned_map.as_deref());
-        let provider_code = self
-            .project_sync
-            .as_ref()
-            .and_then(|sync| sync.synced_tsx_content(ide_path))
-            .unwrap_or_else(|| std::sync::Arc::from(ide_code));
-        let workspace = self.vfs_workspace.read().clone();
-        let prepared = crate::carrier_provider_projection::prepare_carrier_provider_imports(
-            workspace.as_deref(),
-            canonical_id,
-            ide_code,
-            self.position_encoding.read().clone(),
-        );
-        let _ = crate::provider_surface_store::record_carrier_companion_surface_with_rewrites(
+        // ONE value: the bytes the provider holds and the mapper describing them.
+        // Recording anything else — notably the raw compiler bytes, or a
+        // projection narrower than the one this engine's publication applies —
+        // makes the recorded content hash disagree with the receipt-stamped one,
+        // and the committed-surface gate then refuses every capture for this
+        // source. `ProjectSync` owns that answer for the active engine.
+        let delivered = match self.project_sync.as_ref() {
+            Some(sync) => sync.carrier_provider_surface(ide_path, ide_code),
+            None => {
+                // No provider topology is bound, so no engine holds this buffer.
+                // The shared carrier-import projection is the whole answer.
+                let workspace = self.vfs_workspace.read().clone();
+                let encoding = self.position_encoding.read().clone();
+                match crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                    workspace.as_deref(),
+                    canonical_id,
+                    ide_code,
+                    encoding,
+                ) {
+                    Ok(prepared) => Some(prepared),
+                    Err(_) => return false,
+                }
+            }
+        };
+        // Fail closed: a buffer whose provider bytes cannot be modelled is not
+        // recorded, so no request maps offsets through content no engine has.
+        let Some(delivered) = delivered else {
+            tracing::debug!(
+                "record_carrier_ide_snapshot: no modellable provider surface for {ide_path}"
+            );
+            return false;
+        };
+        if let Some((uri, revision)) = retained {
+            return self
+                .documents
+                .with_current_snapshot_identity(uri, revision, |document| {
+                    crate::provider_surface_store::record_carrier_ide_surface_with_source(
+                        store,
+                        canonical_id,
+                        ide_path,
+                        &delivered,
+                        map_json,
+                        Arc::clone(&document.source),
+                    );
+                })
+                .is_some();
+        }
+        crate::provider_surface_store::record_carrier_ide_surface(
             store,
             Some(&self.documents),
             host,
             canonical_id,
             ide_path,
-            crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
-            provider_code.as_ref(),
+            &delivered,
             map_json,
-            Some(prepared.rewrites),
         );
+        true
+    }
+
+    /// The bytes of the carrier's CURRENT public-API projection — the identity
+    /// an API companion delivery would carry right now.
+    ///
+    /// `None` when the carrier projects no public API or the projection fails:
+    /// an unknown identity never matches a delivered one, so the companion reads
+    /// as not-current and a completeness-requiring request fails closed until a
+    /// publication delivers a known one.
+    pub(super) fn current_public_api_identity(
+        &self,
+        canonical_id: &str,
+    ) -> Option<std::sync::Arc<str>> {
+        let projected = super::handler_guard::block_in_place_if_available(|| {
+            self.documents.host().get_public_api(canonical_id)
+        });
+        match projected {
+            // The identity of what a delivery would carry: deliveries publish
+            // the TS-labeled rendering (the `.verter.ts` companion is
+            // TypeScript-labeled whatever the SFC's dialect), so the identity
+            // must be those same bytes or a widened JavaScript Options-API
+            // companion would never read as current.
+            Ok(api) => api.map(|api| std::sync::Arc::clone(api.ts_labeled_code())),
+            Err(error) => {
+                crate::report_public_api_projection_error(
+                    "current_public_api_identity",
+                    canonical_id,
+                    &error,
+                );
+                None
+            }
+        }
     }
 
     /// Pre-extracted data for type provider calls.
@@ -182,6 +292,26 @@ impl VerterLanguageServer {
     /// file first when `didChange` has advanced beyond the committed snapshot.
     /// Every provider-backed interactive feature uses this entry point so tsgo
     /// and tsserver have identical immediate-post-edit behavior.
+    ///
+    /// A PROJECTION-LESS carrier (failed open-time compile, or the startup
+    /// race) is also repaired here — the full current-file repair
+    /// (`ensure_current_file_synced`: recompile → carrier gateway → provider
+    /// sync → surface record → commit), never a cache-only mapper install.
+    /// The generation-local repair lane bounds a concurrent request storm to
+    /// one compile. A genuinely later request retries unchanged bytes after an
+    /// unavailable-input or host-transient failure, so scheduler cancellation
+    /// cannot strand the carrier behind a durable failure memo. Only a
+    /// deterministic source-byte verdict is retained across requests.
+    ///
+    /// FEATURE SET: hover, completion, definition, type-definition,
+    /// references, prepare-rename/rename, signature help, and quickfix code
+    /// actions repair through this entry point — every request-answering
+    /// provider-backed feature. Passive decoration surfaces (document
+    /// highlights, semantic tokens, inlay hints, code lens) deliberately do
+    /// NOT: they fire on cursor-move/render cadence, so an inline repair
+    /// there would put a compile on that cadence; they read the current
+    /// surface (`type_provider_context`) and self-serve once a
+    /// request-answering feature or the background coordinator installs it.
     pub(super) async fn repaired_type_provider_context(
         &self,
         uri: &Uri,
@@ -270,6 +400,20 @@ impl VerterLanguageServer {
             // tsserver store can be fully advertised while those local opens
             // are still parked, so only receipt-gated direct-open state proves
             // this provider's project graph is complete.
+            //
+            // The frontier's completeness unit is the carrier IDE companion —
+            // the buffer holding the carrier's script and template symbols, and
+            // therefore the one that must be a Program root before a
+            // project-wide references/rename answer can be proven. That is
+            // exactly what the tsserver arm below admits: `activate_published_sources`
+            // promotes `SnapshotRole::CarrierIde` members only, and counts a
+            // source as activated only when it has one. The tsgo arm mirrors
+            // that unit. The API companion is the *import target* projection
+            // consumed by files that import a carrier; the background API-sync
+            // task opens it for imported carriers, and the interactive IDE-sync
+            // path deliberately never opens it for the file under the cursor.
+            // Requiring it here would gate the frontier on a companion neither
+            // arm activates and the current file never gets.
             Ok(expected_sources
                 .iter()
                 .filter(|source| {
@@ -278,7 +422,6 @@ impl VerterLanguageServer {
                         .is_some_and(|state| {
                             state.owner_binding.owner_key() == Some(owner_key.as_str())
                                 && state.ide_background_loaded
-                                && state.api_background_loaded
                                 && state.commit_stamp.is_some()
                         })
                 })
@@ -291,20 +434,30 @@ impl VerterLanguageServer {
         };
 
         match activation {
-            Ok(activated) if activated == expected_sources.len() => true,
+            Ok(activated) if activated == expected_sources.len() => {
+                // Roots are live. On tsgo the graph must also RESOLVE: its
+                // buffers are explicit opens, so a carrier-import edge whose
+                // target companion is unopened leaves the IMPORTER's use of
+                // that symbol unresolved while both IDE roots look complete.
+                if !matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo)
+                    || self.carrier_import_closure_is_live(&expected_sources, &owner_key)
+                {
+                    return true;
+                }
+                tracing::debug!(
+                    "workspace-symbol frontier not ready: carrier-import closure incomplete"
+                );
+                self.signal_frontier_scanner_priority(expected_sources)
+                    .await;
+                false
+            }
             Ok(activated) => {
                 tracing::debug!(
                     "workspace-symbol frontier not ready: activated {activated}/{} carriers",
                     expected_sources.len()
                 );
-                // The scanner is already running; priority signals make the
-                // missing owning-project carriers its next work without making
-                // this interactive request join background compilation.
-                if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
-                    for source in expected_sources {
-                        scanner.signal_priority(source);
-                    }
-                }
+                self.signal_frontier_scanner_priority(expected_sources)
+                    .await;
                 false
             }
             Err(error) => {
@@ -312,6 +465,206 @@ impl VerterLanguageServer {
                 false
             }
         }
+    }
+
+    /// Make the incomplete owning-project carriers the scanner's next work
+    /// without making this interactive request join background compilation.
+    async fn signal_frontier_scanner_priority(&self, expected_sources: Vec<String>) {
+        if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
+            for source in expected_sources {
+                scanner.signal_priority(source);
+            }
+        }
+    }
+
+    /// Whether every EFFECTIVE carrier-import edge reachable from the owning
+    /// project's carriers already has its provider surface live for this owner.
+    ///
+    /// This is a SEPARATE demand from the IDE-root predicate above, and it gates
+    /// a different failure: the roots being open proves each carrier's own
+    /// symbols are in the Program, not that a cross-carrier reference RESOLVES.
+    /// A parent's IDE buffer imports the rewritten `{child}.verter.ts` specifier,
+    /// so while that API companion is unopened the parent's use of a child symbol
+    /// is unresolved — and a project-wide references/rename answer comes back
+    /// plausible but missing that file, which is worse than no answer.
+    ///
+    /// The demand is exactly what the background import-dependency publication
+    /// delivers, so it can never gate on a surface nothing produces:
+    /// - a carrier reached by a direct import (or a dynamic module reference)
+    ///   needs its API companion open under a receipt-gated commit;
+    /// - a barrel that RE-EXPORTS a carrier needs its rewritten shadow buffer
+    ///   loaded — its `export … from './X.vue'` specifier is projected, so the
+    ///   on-disk bytes do not resolve for the provider.
+    ///
+    /// A carrier that is NOT an import target is not gated (a standalone
+    /// initiating carrier, and the file under the cursor, need only their IDE
+    /// root); neither is any target outside this configured project, which the
+    /// provider resolves from disk.
+    fn carrier_import_closure_is_live(&self, expected_sources: &[String], owner_key: &str) -> bool {
+        let published = self
+            .vfs_workspace
+            .read()
+            .as_ref()
+            .and_then(|workspace| workspace.load_published())
+            .or_else(|| self.documents.host().workspace_read().published_root());
+        let Some(published) = published else {
+            return false;
+        };
+        let owned_by_frontier_project =
+            |path: &str| configured_owner_key(&published.snapshot, path) == Some(owner_key);
+
+        let host = self.documents.host();
+        let resolver_snapshot = self.published_resolver();
+        let reader = super::server_utils::LspProjectResolverReader::new(&self.documents);
+
+        let mut carrier_targets: Vec<String> = Vec::new();
+        let mut seen_carriers: HashSet<String> = HashSet::new();
+        let mut barrel_frontier: Vec<String> = Vec::new();
+        let mut seen_barrels: HashSet<String> = HashSet::new();
+        let mut push_carrier = |target: String, carrier_targets: &mut Vec<String>| {
+            if seen_carriers.insert(target.clone()) {
+                carrier_targets.push(target);
+            }
+        };
+
+        for source in expected_sources {
+            let Some(ingress) = host.get_script_ingress(source) else {
+                // The importer's edges cannot be enumerated from an unindexed
+                // script: fail closed rather than assume it imports nothing.
+                return false;
+            };
+            let direct_targets =
+                match super::server_utils::collect_imported_carrier_priority_ids_from_imports_for_publication(
+                    &ingress.imports,
+                    Some(source.as_str()),
+                    |parent, specifier| {
+                        self.resolve_import_specifier_for_publication(parent, specifier)
+                    },
+                ) {
+                    Ok(targets) => targets,
+                    Err(_) => return false,
+                };
+            for target in direct_targets {
+                push_carrier(target, &mut carrier_targets);
+            }
+            let Some(dynamic_targets) =
+                super::server_utils::collect_priority_carrier_public_api_targets_from_module_references(
+                resolver_snapshot.as_ref(),
+                &reader,
+                source,
+                &ingress.module_references,
+            )
+            else {
+                return false;
+            };
+            for target in dynamic_targets {
+                push_carrier(target, &mut carrier_targets);
+            }
+            for import in ingress.imports.iter() {
+                let resolved = match import.resolved_canonical_id.clone() {
+                    Some(resolved) => Some(resolved),
+                    None => match self
+                        .resolve_import_specifier_for_publication(source, &import.source)
+                    {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return false,
+                    },
+                };
+                let Some(resolved) = resolved else {
+                    continue;
+                };
+                if verter_workspace::resolver::path_is_carrier(&resolved) {
+                    continue;
+                }
+                if seen_barrels.insert(resolved.clone()) {
+                    barrel_frontier.push(resolved);
+                }
+            }
+        }
+
+        // Follow the `export … from` graph the publication's barrel leg follows,
+        // classifying each hop by its RESOLVED target (never the specifier text),
+        // so an aliased or multi-hop re-export reaches the terminal carrier.
+        // `seen_barrels` terminates cycles.
+        let mut rewritten_barrels: Vec<String> = Vec::new();
+        while let Some(barrel) = barrel_frontier.pop() {
+            if !owned_by_frontier_project(&barrel) {
+                // A package-backed or foreign-project module: the provider
+                // resolves it from disk and publication never rewrites it.
+                continue;
+            }
+            let Some(ingress) = host.get_script_ingress(&barrel) else {
+                return false;
+            };
+            let mut re_exports_carrier = false;
+            for module_reference in ingress.module_references.iter() {
+                if module_reference.syntax
+                    != verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom
+                {
+                    continue;
+                }
+                let Some(specifier) = module_reference.literal_specifier.as_deref() else {
+                    continue;
+                };
+                let target = match self.resolve_import_specifier_for_publication(&barrel, specifier)
+                {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                        let Some(target) = admitted.into_result() else {
+                            continue;
+                        };
+                        target
+                    }
+                    verter_workspace::ResolutionPublication::Refused(_) => return false,
+                };
+                if verter_workspace::resolver::path_is_carrier(&target) {
+                    re_exports_carrier = true;
+                    push_carrier(target, &mut carrier_targets);
+                } else if seen_barrels.insert(target.clone()) {
+                    barrel_frontier.push(target);
+                }
+            }
+            if re_exports_carrier {
+                rewritten_barrels.push(barrel);
+            }
+        }
+
+        carrier_targets
+            .iter()
+            .filter(|target| owned_by_frontier_project(target))
+            .all(|target| {
+                self.provider_sync_states
+                    .get(target.as_str())
+                    .is_some_and(|state| {
+                        state.owner_binding.owner_key() == Some(owner_key)
+                            && state.commit_stamp.is_some()
+                            // LIVENESS *and* CURRENCY. An open API buffer whose
+                            // bytes predate the importer's edit resolves the
+                            // importer's use of a renamed symbol to nothing, and
+                            // the answer comes back missing that file — the same
+                            // partial-but-plausible result an unopened companion
+                            // produces, one stage later. The state-wide
+                            // `commit_stamp` cannot stand in for this: an
+                            // IDE-only receipt advances it while attesting no
+                            // API bytes at all.
+                            && state.api_companion_is_live_and_current()
+                    })
+            })
+            && rewritten_barrels.iter().all(|barrel| {
+                self.provider_sync_states
+                    .get(barrel.as_str())
+                    .is_some_and(|state| {
+                        state.owner_binding.owner_key() == Some(owner_key)
+                            // Same principle, cheaper key: the rewritten
+                            // projection cannot be recomputed per request, so an
+                            // edited barrel is not current until its buffer is
+                            // re-delivered from these exact source bytes.
+                            && host.get_source(barrel).is_some_and(|source| {
+                                state.shadow_is_live_and_current(&source)
+                            })
+                    })
+            })
     }
 
     /// Whether `uri` projects through a SELF-FILE rune-module own buffer.
@@ -328,36 +681,50 @@ impl VerterLanguageServer {
             .is_some_and(|projection| projection.is_self_file())
     }
 
-    /// Whether `uri` is a carrier owned by MULTIPLE configured projects (a genuine
-    /// tsconfig overlap resolved to a single tsgo default owner for per-file
-    /// features). A PROVIDER rename runs only within that one owner project, so a
-    /// symbol that ESCAPES the owner (exported + imported by a sibling configured
-    /// project) would rename partially and leave the symbol dangling in the
-    /// siblings. Cheaply detecting escape is not feasible without the cross-project
-    /// rename fan-out (not yet implemented), so rename fails CLOSED for this case — this
-    /// predicate is the gate. A uniquely-owned carrier (`Unique`), an unowned one
-    /// (`None`), and a non-carrier all return `false` (rename unaffected).
+    /// Rename claimancy for `uri`, preserving the authority boundary between a
+    /// published ownership graph and a transient bootstrap revision.
     ///
-    /// Gated on `ownership_ready`: a bootstrap snapshot's overlap is not yet
-    /// authoritative, so it never trips the gate.
-    pub(super) fn carrier_is_multi_claimant(&self, uri: &Uri) -> bool {
+    /// A carrier is never classified from a missing/non-authoritative snapshot
+    /// or while the root and provider generations disagree: an empty bootstrap
+    /// graph and a rebuild transition both mean "not known coherently", not "no
+    /// other claimant". Once ownership is coherent and authoritative, an
+    /// overlap is `Ready`; a unique or unowned carrier is
+    /// `NotMultiClaimant`. Non-carriers do not use this carrier-only gate.
+    pub(super) fn carrier_multi_claimancy(&self, uri: &Uri) -> CarrierMultiClaimancy {
         let host = self.documents.host();
         let canonical = crate::documents::uri_to_canonical_id(uri);
         if !verter_workspace::resolver::path_is_carrier(&canonical) {
-            return false;
+            return CarrierMultiClaimancy::NotMultiClaimant(None);
         }
         let Some(published) = host.workspace_read().published_root() else {
-            return false;
+            return CarrierMultiClaimancy::NotReady;
         };
-        if !published.ownership_ready {
-            return false;
-        }
-        matches!(
+        let Some(witness) = self.ownership_generation_fence.capture(&published) else {
+            return CarrierMultiClaimancy::NotReady;
+        };
+        if matches!(
             published
                 .snapshot
                 .configured_owner_resolution_for_file(&canonical),
             verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Ambiguous(_)
-        )
+        ) {
+            CarrierMultiClaimancy::Ready
+        } else {
+            CarrierMultiClaimancy::NotMultiClaimant(Some(witness))
+        }
+    }
+
+    /// Revalidate a request's ownership witness against both live authorities.
+    ///
+    /// The root alone is insufficient during background rebuild: the provider
+    /// authority moves first, while the previous ready root remains published.
+    pub(super) fn ownership_generation_still_current(
+        &self,
+        witness: crate::configured_owner::OwnershipGenerationWitness,
+    ) -> bool {
+        let published = self.documents.host().workspace_read().published_root();
+        self.ownership_generation_fence
+            .validates(witness, published.as_deref())
     }
 
     /// Find the Vue URI corresponding to an IDE path.
@@ -445,6 +812,7 @@ impl VerterLanguageServer {
                 provider_sync_states: &self.provider_sync_states,
                 provider_surfaces: self.documents.provider_surfaces(),
                 documents: Some(&self.documents),
+                project_sync: self.project_sync.as_ref(),
                 canonical_id,
                 is_jsx,
                 ide,
@@ -556,6 +924,7 @@ impl VerterLanguageServer {
         canonical_id: &str,
         is_jsx: bool,
         ide_code: Option<&str>,
+        retained: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     ) {
         let previous = self.provider_sync_state_for_source(canonical_id);
         // Converting a previously-committed OWNED carrier (it carried a commit stamp) to
@@ -584,6 +953,15 @@ impl VerterLanguageServer {
         if let (Some(sync), Some(ide_code), Some(ide_path)) =
             (&self.project_sync, ide_code, target.ide_path.clone())
         {
+            #[cfg(test)]
+            self.maybe_pause_ide_sync_before_provider_write(canonical_id)
+                .await;
+            if let Some((uri, revision)) = retained {
+                if !self.retained_ide_response_is_current(uri, Some(revision)) {
+                    self.needs_ide_sync.insert(canonical_id.to_string());
+                    return;
+                }
+            }
             let result = if target.ide_background_loaded {
                 sync.sync_tsx(&ide_path, ide_code).await
             } else {
@@ -596,7 +974,26 @@ impl VerterLanguageServer {
                     // synced (interactive queries capture this surface). No source
                     // map in scope → the choke attaches the live IDE artifact's
                     // map only if it still byte-matches `ide_code`.
-                    self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None);
+                    #[cfg(test)]
+                    self.maybe_pause_ide_sync_before_surface_record(canonical_id)
+                        .await;
+                    let recorded = if let Some((uri, revision)) = retained {
+                        self.record_carrier_ide_snapshot_if_current(
+                            uri,
+                            revision,
+                            canonical_id,
+                            &ide_path,
+                            ide_code,
+                            None,
+                        )
+                    } else {
+                        self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None);
+                        true
+                    };
+                    if !recorded {
+                        self.needs_ide_sync.insert(canonical_id.to_string());
+                        return;
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -864,6 +1261,32 @@ impl VerterLanguageServer {
                 .documents
                 .get(uri)
                 .is_some_and(|doc| *doc.source == *ctx.snapshot.provider_content)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CarrierMultiClaimancy {
+    NotMultiClaimant(Option<crate::configured_owner::OwnershipGenerationWitness>),
+    NotReady,
+    Ready,
+}
+
+/// The tsconfig key of the ONE configured project that owns `path`, or `None`
+/// when no single configured project does (unowned, ambiguous, or fallback-only).
+fn configured_owner_key<'a>(
+    snapshot: &'a verter_workspace::WorkspaceSnapshot,
+    path: &str,
+) -> Option<&'a str> {
+    let verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Unique(owner) =
+        snapshot.configured_owner_resolution_for_file(path)
+    else {
+        return None;
+    };
+    match &snapshot.projects.get(owner.0 as usize)?.payload {
+        verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+            tsconfig_path, ..
+        } => Some(tsconfig_path.as_str()),
+        _ => None,
     }
 }
 

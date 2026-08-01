@@ -83,7 +83,7 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
     // Owner-absent ⇒ route the membership RETRACT/DEFER through the gateway; it
     // resolves the empty companion set to Absent (retract) / Bootstrap (defer) and
     // returns a no-owner outcome (`Unresolved` terminal / `NotReady` transient), or
-    // `Pending` when the store retract FAILED. The dialect comes from the compile,
+    // `RetractFailed` when the store retract FAILED. The dialect comes from the compile,
     // falling back to the parse-level script language when it is unavailable.
     let is_jsx = documents.is_jsx_for_canonical(canonical_id);
     let membership = carrier_publish
@@ -104,6 +104,7 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
             provider_sync_states,
             provider_surfaces: documents.provider_surfaces(),
             documents: Some(documents),
+            project_sync: Some(sync),
             canonical_id,
             is_jsx,
             ide,
@@ -114,11 +115,12 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
         .await;
     match decision {
         // Settle the non-owned disposition through the coordinator — NEVER dropped, so a
-        // failed retract (`Pending`) is always requeued (via the drain's keep-queued
+        // failed retract (`RetractFailed`) is always requeued (via the drain's keep-queued
         // outcome) rather than cleared as-if-retracted, and a terminal `Unresolved`
         // advances the owner-loss barrier. The buffer-side preserve-open / remove-closed
-        // handling runs ONLY for a settled no-owner class (`NotReady` / `Unresolved`); a
-        // `Pending` PRESERVES local state (cleanup skipped) so the failed retract is retried.
+        // handling runs ONLY for a settled no-owner class (`NotReady` / `Unresolved`);
+        // `Pending` / `RetractFailed` PRESERVE local state (cleanup skipped) so the failed
+        // retract is retried.
         crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
             match carrier_coordinator.settle(not_owned, canonical_id, None) {
                 crate::external_ts::SettleClass::NotReady => {
@@ -149,7 +151,11 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
                     .await;
                     CarrierApplyOutcome::Unresolved
                 }
-                crate::external_ts::SettleClass::Pending => CarrierApplyOutcome::Pending,
+                // Both non-advertising classes keep the carrier queued and commit nothing;
+                // `RetractFailed` additionally means the cross-process store may still
+                // advertise it, so it is never treated as a settled disposition.
+                crate::external_ts::SettleClass::Pending
+                | crate::external_ts::SettleClass::RetractFailed => CarrierApplyOutcome::Pending,
             }
         }
         // The authoritative resolver resolved an OWNER (disagreeing with the cheap

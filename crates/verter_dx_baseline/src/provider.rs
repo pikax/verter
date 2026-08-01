@@ -17,6 +17,7 @@ use verter_type_runtime::protocol::TypeProviderError;
 use verter_type_runtime::tsgo::TsgoTypeProvider;
 use verter_type_runtime::tsserver::TsserverTypeProvider;
 use verter_type_runtime::TypeProvider;
+use verter_workspace::native_fs::NativeFs;
 
 use crate::protocol::{ErrorKind, ProviderName, ToolRoot};
 
@@ -69,23 +70,51 @@ pub enum Resolution {
     Skipped { reason: String },
 }
 
-/// Refuse a discovered tsserver.js that is not exactly `expected`.
+/// Normalise an EXTERNAL tool path to the one internal form.
 ///
-/// Both paths are canonicalized (slash/drive-case normalized) before
-/// comparison. This is the gate that rejects an ambient workspace/global-npm
-/// `tsserver.js`.
+/// Tool paths reach the bridge from outside — `expected_tsserver_js` off the
+/// `hello` wire, `discovered` out of filesystem discovery — so they are
+/// normalised here, ONCE, at ingress; everything downstream sees only the
+/// normalised form.
+///
+/// The internal form is the canonical spelling of the path's filesystem
+/// IDENTITY. String canonicalisation alone (slash/drive-case) cannot reconcile
+/// two spellings of one file: in a pnpm workspace
+/// `packages/vue-vscode/node_modules/typescript` is a SYMLINK into
+/// `node_modules/.pnpm/typescript@<v>/…`, so the harness' spelled tool root and
+/// the tsserver discovery finds by real path denote the same file under two
+/// names — a guaranteed mismatch on Linux, which Windows happened to dodge.
+///
+/// A path that does not exist has no filesystem identity, so it degrades to
+/// string canonicalisation; a missing `expected` is reported by its own
+/// `ExpectedMissing` check rather than here.
+///
+/// The symlink resolution goes through [`NativeFs::realpath`] — the workspace's
+/// single disk boundary — rather than a local canonicalize syscall, which the
+/// `vfs_boundary_is_authoritative` / `no_std_fs_outside_native_fs_or_allow_list`
+/// guards forbid outside that boundary. `realpath` already returns its result
+/// through the one canonical-path owner (so the Windows `\\?\` extended-length
+/// prefix is stripped on that arm too) and memoizes per path, so a repeated
+/// tool-root resolution costs no extra syscall.
+pub fn normalize_tool_path(fs: &NativeFs, raw: &str) -> String {
+    fs.realpath(raw).unwrap_or_else(|| canonicalize_path(raw))
+}
+
+/// Refuse a discovered tsserver.js that is not `expected`.
+///
+/// BOTH arguments must already be normalised by [`normalize_tool_path`] — this
+/// is a pure comparison of internal values, not a normalisation site. It stays
+/// the gate that rejects an ambient workspace/global-npm `tsserver.js`.
 pub fn enforce_tsserver_path_match(
     expected: &str,
     discovered: &str,
 ) -> Result<(), ProviderInitError> {
-    let e = canonicalize_path(expected);
-    let d = canonicalize_path(discovered);
-    if e == d {
+    if expected == discovered {
         Ok(())
     } else {
         Err(ProviderInitError::PathMismatch {
-            expected: e,
-            discovered: d,
+            expected: expected.to_string(),
+            discovered: discovered.to_string(),
         })
     }
 }
@@ -139,6 +168,7 @@ pub fn require_node(
 /// `expected_tsserver_js` exactly.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_tsserver_with(
+    fs: &NativeFs,
     tool_root: &ToolRoot,
     workspace_root: &str,
     strict: bool,
@@ -149,28 +179,38 @@ pub fn resolve_tsserver_with(
         .tsserver_tsdk
         .as_deref()
         .ok_or(ProviderInitError::MissingToolRootField("tsserverTsdk"))?;
-    let expected = tool_root.expected_tsserver_js.as_deref().ok_or(
-        ProviderInitError::MissingToolRootField("expectedTsserverJs"),
-    )?;
+    // BOUNDARY: `expected_tsserver_js` arrives off the `hello` wire. Normalise
+    // it once, here; everything below compares the internal form only.
+    let expected = normalize_tool_path(
+        fs,
+        tool_root.expected_tsserver_js.as_deref().ok_or(
+            ProviderInitError::MissingToolRootField("expectedTsserverJs"),
+        )?,
+    );
 
     let node = require_node(discover_node)?;
 
     // Strict CI asserts the pinned tsserver.js exists before the bridge starts.
-    if strict && !Path::new(expected).exists() {
-        return Err(ProviderInitError::ExpectedMissing(expected.to_string()));
+    if strict && !Path::new(&expected).exists() {
+        return Err(ProviderInitError::ExpectedMissing(expected));
     }
 
-    // Pass the explicit tsdk into discovery, then refuse anything but `expected`.
+    // Pass the explicit tsdk into discovery, then refuse anything but
+    // `expected`. Discovery is the other BOUNDARY, so its result is normalised
+    // on the way in too — otherwise a symlinked spelling of the very same file
+    // reads as a mismatch.
     match discover_tsserver(tsdk, workspace_root) {
-        Some(discovered) => enforce_tsserver_path_match(expected, &discovered)?,
+        Some(discovered) => {
+            enforce_tsserver_path_match(&expected, &normalize_tool_path(fs, &discovered))?
+        }
         None => return Err(ProviderInitError::ToolNotFound("tsserver.js")),
     }
 
     Ok((
-        canonicalize_path(expected),
+        expected.clone(),
         SpawnPlan::Tsserver {
             node,
-            tsserver_js: expected.to_string(),
+            tsserver_js: expected,
         },
     ))
 }
@@ -181,7 +221,9 @@ pub fn resolve_tsserver_with(
 /// Strict: any tool-root problem is a hard failure (`Err`). Non-strict: the same
 /// problem becomes `Ok(Resolution::Skipped { reason })`, recording why the
 /// baseline did not run — never a silent pass.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_with(
+    fs: &NativeFs,
     provider: ProviderName,
     tool_root: &ToolRoot,
     workspace_root: &str,
@@ -196,6 +238,7 @@ pub fn resolve_with(
                 .map(|bin| (canonicalize_path(&bin), SpawnPlan::Tsgo { bin }))
         }
         ProviderName::Tsserver => resolve_tsserver_with(
+            fs,
             tool_root,
             workspace_root,
             strict,
@@ -217,7 +260,11 @@ pub fn resolve_with(
 }
 
 /// Production resolution: wires the real `verter_type_runtime` discovery.
+///
+/// `fs` is the session-owned disk boundary — one `NativeFs` per bridge, so the
+/// tool-path realpath memo is shared across every resolution in the session.
 pub async fn resolve(
+    fs: &NativeFs,
     provider: ProviderName,
     tool_root: &ToolRoot,
     workspace_root: &str,
@@ -240,6 +287,7 @@ pub async fn resolve(
             .map(|resolution| resolution.path.to_string_lossy().into_owned())
     };
     resolve_with(
+        fs,
         provider,
         tool_root,
         workspace_root,

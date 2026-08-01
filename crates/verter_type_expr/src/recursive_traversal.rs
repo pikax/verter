@@ -1,11 +1,10 @@
 //! Depth-safe recursive traversal of [`TypeExpr`]: the iterative `Drop`
 //! and the iterative, byte-identical-to-derive `Hash`.
 //!
-//! Both impls live here (rather than inline in `lib.rs`) purely to keep
-//! the crate root under the production file-size budget. The orphan rule
-//! permits `impl Drop`/`impl Hash for TypeExpr` in any module of this
-//! crate because `TypeExpr` is crate-local; the helpers reach every node
-//! type through `use crate::*`.
+//! Both impls live here so the traversal machinery remains separate from the
+//! core type definitions in `lib.rs`. The orphan rule permits `impl Drop`/`impl
+//! Hash for TypeExpr` in any module of this crate because `TypeExpr` is
+//! crate-local; the helpers reach every node type through `use crate::*`.
 //!
 //! Neither walker recurses on the call stack — both flatten the
 //! `Arc<TypeExpr>` tree onto an explicit heap worklist — so arbitrarily

@@ -159,6 +159,7 @@ pub(super) enum ChildPropDeclarationProof {
         /// span the completeness gate proves the merged edit covers. `None` when the
         /// originating span did not resolve to a position (the gate then has no
         /// precise range to assert and fails closed).
+        #[allow(dead_code)] // retained for classification diagnostics and focused tests
         range: Option<Range>,
         /// The INLINE-only synthesis seam: when the declaration came from the
         /// child's `defineProps` MACRO field (not an imported-type member), this is

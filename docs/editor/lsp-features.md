@@ -82,7 +82,8 @@ tools. They are Verter protocol extensions, not standard LSP methods:
 The server validates request parameters and returns normal JSON-RPC errors for
 invalid or unavailable inputs. Projection safety limits retain their typed
 partial reason internally and are also published through the document
-diagnostic path; see [Release State and Known Limitations](/arch/release-state).
+diagnostic path; see
+[Release State and Known Limitations](https://github.com/pikax/verter/blob/main/docs/arch/release-state.md).
 
 ## Document Synchronization
 
@@ -195,6 +196,46 @@ event map, while Svelte TypeScript runes-instance handlers use the installed
 Classic/legacy scripts and JavaScript do not receive synthetic parameter types;
 JavaScript follows authored JSDoc and the workspace's `allowJs`/`checkJs` and
 strictness settings.
+
+The `verter-tsc` CLI applies the same rule as the editor: a JavaScript SFC
+projects a JavaScript companion, so a project that has not enabled `checkJs`
+gets no implicit-any errors from its `.vue` JavaScript, and one that has
+enabled it gets the same JavaScript diagnostics (including JSDoc-typed ones)
+the editor reports. This covers Options-API components too — a no-`setup`
+`<script>` block's body is passed through to the companion the CLI generates
+for cross-component imports, and that companion is JavaScript when the block
+is. `checkJs` is read from your own `tsconfig.json`; the CLI never sets it.
+
+The companion follows all four authored dialects, not just JavaScript versus
+TypeScript: `lang="jsx"` and `lang="tsx"` project JSX-capable companions, so an
+authored JSX element in a passed-through `<script>` body is parsed as JSX rather
+than reported as a syntax error (in a plain `.ts` file `<div/>` parses as a type
+assertion). The parent-facing attribute-fallthrough surface (issue #97) reaches
+JavaScript Options-API components too: inside their JavaScript companion it is
+spelled in JSDoc (`@typedef`/`@type`), never TypeScript-only syntax, so the
+companion stays legal JavaScript with zero `TS8xxx` syntax diagnostics while a
+parent's `<Child href="…">` is checked against the same widened surface a
+TypeScript child projects. Editor surfaces that store the companion in a
+TypeScript-labeled file receive the equivalent TypeScript rendering instead,
+because JSDoc types are only honored in JavaScript files. A JavaScript `<script setup>` that calls `defineExpose({ … })` is
+the one case where the companion cannot carry the authored body at all: that
+surface is a generated TypeScript declaration, so the exposed members are
+published with `unknown` types instead. The component's own JavaScript is still
+checked, through the `.jsx` companion, exactly as your `checkJs` setting asks.
+
+### Mixed-language SFCs are rejected
+
+Vue's own compiler throws when an SFC's `<script>` and `<script setup>` blocks
+declare different `lang`s, and Verter reports the same thing rather than quietly
+picking one block's language:
+
+```
+src/Mixed.vue(4,1): error VTER1002: <script> and <script setup> must have the same language type.
+```
+
+Give both blocks the same `lang` (or leave both without one). Until you do,
+Verter treats the file as TypeScript so that no diagnostic from the TypeScript
+block goes missing.
 
 ::: warning TSGO Limitation
 TSGO has a known limitation: re-exported `.vue` components (e.g., barrel files) may lose their typing. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found.

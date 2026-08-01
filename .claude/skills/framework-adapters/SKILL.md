@@ -56,6 +56,59 @@ derivations are CONSUMERS of the column; consumer rewiring is a later
 vertical, but the column + mirror + freshness pin land here so the two
 cannot drift.
 
+`sidecar_suffixes` names the adjacent virtualized-`@verter/types` overlay
+(`VERTER_TYPES_SIDECAR_SUFFIXES` — `{source}{.tsx|.jsx}.__verter_types.d.ts`,
+identical for Vue and Svelte): the fallback `.d.ts` the LSP publishes beside a
+carrier's IDE companion when the owner project cannot resolve `@verter/types`
+(`ProjectSync::publish_tsx` → `prepare_carrier_provider_surface`). Naming it in
+the column is what makes `classify_carrier_companion` reverse-map it to its
+carrier source, so the SHARED tsgo overlay records + injects it with its
+carrier family; an unclassified sidecar was silently dropped by the shared
+lane's `shared_record` gate — the editor-owned Program then 2307'd the
+rewritten `__verter_types` import and every template-region answer degraded
+(hover `any`, completions null) while managed stayed green.
+
+The producer never spells the sidecar itself: creation, the import specifier,
+and cleanup all derive from the descriptor API
+(`verter_types_sidecar_path` / `verter_types_import_specifier`, consumed by
+`prepare_carrier_provider_surface` and `ProjectSync::close_virtual_verter_types`),
+so a producer-side rename cannot drift from what the classifier recognizes.
+Both derivations fail closed on the SAME shared basename predicate: a
+basename-less companion path (empty / separator-terminated, `/` and `\` alike)
+derives `None` for the sidecar path AND the specifier, never a fabricated
+`{directory}.__verter_types.d.ts`. (The descriptor authority constants —
+`VERTER_TYPES_SIDECAR_MODULE_STEM` / `VERTER_TYPES_SIDECAR_EXT` /
+`VERTER_TYPES_SIDECAR_SUFFIXES` — remain the one place the spelling lives in
+production; only independent re-derivations outside them are forbidden.)
+Guarded by the descriptor naming/derivation unit tests
+(`verter_types_sidecar_column_derives_from_the_module_stem`, including the
+no-basename refusal pins with Windows spellings), the producer→classifier
+round-trip — run per built-in adapter through the REAL `open_tsx` →
+`publish_tsx` funnel:
+(`published_provider_paths_classify_as_companions_of_their_carrier` (Vue) and
+`published_svelte_provider_paths_classify_as_companions_of_their_carrier`
+(Svelte, with the Svelte specialization branch asserted active) in
+`crates/verter_lsp/src/type_provider/project_sync.rs` — every path the real
+publication funnel hands the provider must classify as a companion of its
+carrier, and one must classify as the Sidecar) — and the live
+`composite_shared_template_answers_are_typed_{single_project,monorepo_nested_leaf}`
+suite (`crates/verter_lsp/tests/cases/shared_provider_live.rs`), which publishes
+through the real `ProjectSync` funnel rather than a hand-built sidecar.
+
+An ORDINARY module import of a carrier resolves through ONE shared function with
+ONE answer, `@verter/language-shared`'s
+`carrier/policy.ts::resolveCarrierImportTarget`: the `importSurface` column via
+`carrier/naming.ts::toImportSurfaceFileName`, never the `ide` column. Every host
+that rewrites the specifier itself (the tsserver plugin, the browser/WASM
+in-context service) gets that same target, because the surfaces are semantically
+distinct and a user must not observe a different component type per host. Native
+tsgo is the one engine with no choice — no host plugin, so its own
+basename-append probe finds the `declarationSurface` column — and it does not go
+through this function. The path transforms are framework-neutral by
+construction, so a new adapter participates with no host edit. See
+`/host-session` → "Ordinary Carrier Import → Public-API Surface" for the
+semantic-parity rationale and the readiness/invalidation half.
+
 ### Client framework manifest (de-Vue-forked client wiring)
 
 A SECOND descriptor-generated, byte-pinned TS artifact —
@@ -159,8 +212,10 @@ exposes EXACTLY two ops:
   parse-domain artifact materialization internally (ensure-loaded → read
   the `framework_parse` slot → token-gated downcast) and hands back ONLY the
   typed carrier, never `FrameworkParseArtifact` / `IndexedReady`.
-- `script_facts_for::<T: FrameworkScriptFactPayload>(canonical) -> Option<Arc<T>>`
-  — drives the resolved-validation half on demand.
+- `script_facts_for::<T: FrameworkScriptFactPayload>(canonical) ->
+  ScriptFactEvidence<T>` — drives the resolved-validation half on demand while
+  preserving exact (including exact-empty), partial, unavailable, and
+  not-applicable states.
 
 It never resolves types, indexes a file, runs OXC, calls
 `ProjectSemanticDispatch`, or reads a `StoreView`. Pinned by
@@ -308,7 +363,11 @@ The seam splits across the crate that owns each domain:
   `active_providers` slice; an EMPTY slice is the byte-identical pre-existing
   path with ZERO capture work (`script_fact_providers_zero_cost_on_miss`).
   `ScriptFactSyntaxGate` is closed + exact-valued (`CarrierLanguage` /
-  `ImportSpecifier`) — no predicate arm.
+  `ImportSpecifier`) — no predicate arm. The session capture path mints
+  `ExactFrameworkScriptCandidates`, including an exact-empty entry, only when
+  its OXC parse completes without syntax diagnostics. A recovered parse carries
+  positive-only candidate observations into a partial result and never
+  populates either script-fact store; cache absence means only “not computed.”
 - **Resolved-validation half** (`framework/script_facts.rs`). Driven on
   demand by `script_facts_for`. The `ActiveProviderIndex` (rebuilt per
   registry construction; `is_empty()` fast path) is the shared gate
@@ -321,15 +380,22 @@ The seam splits across the crate that owns each domain:
   `validate` receives NEUTRAL data (`ResolvedValidationCx`: candidates,
   resolved-import targets, a capability lookup) so the trait stays free of
   session resolver types. Publication is `SignatureAdmission::Cacheable`-only
-  (overflow ⇒ `ReturnOnly`, no warm); the cold tracer observes the owner's
-  `ImportRoute` fact (a re-route stale-serves otherwise). The provider
-  rejects userland look-alikes and refuses emission when a consumed
-  capability bit is OFF.
+  and accepts only producer-minted `ExactScriptFacts` (overflow ⇒ `ReturnOnly`,
+  no warm); partial and unavailable results never warm. The cold tracer
+  observes the owner's `ImportRoute` fact (a re-route stale-serves otherwise).
+  `ScriptFactEvidence` preserves exact, partial, unavailable, and
+  not-applicable top-level outcomes without collapsing them to `Option`.
+  `PartialScriptFacts` has no whole-payload accessor: Svelte consumers use
+  `conservative_svelte_observations()` for positive-only degradation, while
+  `exact_syntax()` exposes a separate producer-proven syntax facet only for
+  resolution-partial evidence.
 
-NO production provider registers in this program — Vue's macro analysis
-stays inside the shallow pass, so the seam is exercised by an in-tree
-fixture provider. A later framework vertical's provider drives the resolved
-path in production.
+Svelte registers the production provider. Its payload separates exact
+syntax-owned facts (`ExactSveltePropsCalls`, props type syntax, defaults,
+bindables, legacy props, instance/module exports) from resolution-owned
+`Snippet` and dispatcher provenance. Import-resolution failure therefore
+cannot erase already-exact `$props()` geometry. Vue's macro analysis stays
+inside the shallow pass.
 
 ## Component-default synth
 

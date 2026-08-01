@@ -35,6 +35,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ExtensionTsService } from "./extensionTsService.js";
+import { materializeWorkspaceTypeScript } from "./extensionTsService.testUtils.js";
 
 /** A bound import the resolved edit must produce: `import { myHelper } from "./helper"`. */
 const EXPECT_IMPORT_SYMBOL = "myHelper";
@@ -74,6 +75,9 @@ describe("ExtensionTsService — extension provider auto-import shaping", () => 
     // language service offers `myHelper` as an auto-import candidate.
     const root = mkdtempSync(join(tmpdir(), "ext-autoimport-"));
     tmps.push(root);
+    // The service serves ONLY from a workspace TypeScript — materialize one the
+    // way a real workspace's install would.
+    materializeWorkspaceTypeScript(root);
     writeFileSync(
       join(root, "tsconfig.json"),
       JSON.stringify({
@@ -162,6 +166,9 @@ describe("ExtensionTsService — extension provider auto-import shaping", () => 
     // auto-import code action (it is already in scope, no `source`).
     const root = mkdtempSync(join(tmpdir(), "ext-autoimport-local-"));
     tmps.push(root);
+    // The service serves ONLY from a workspace TypeScript — materialize one the
+    // way a real workspace's install would.
+    materializeWorkspaceTypeScript(root);
     writeFileSync(
       join(root, "tsconfig.json"),
       JSON.stringify({

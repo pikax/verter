@@ -9,7 +9,7 @@ interface DrawerItem {
   label: string;
 }
 
-const item: DrawerItem = { id: 1, label: "row" };
+const item: DrawerItem = { id: 1, label: "row" }; // @dx-anchor mma.decl
 
 // A complete member access: completion/hover at the end of `item.label` resolves
 // the `label` member off `DrawerItem`.

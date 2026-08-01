@@ -148,8 +148,98 @@ The canonical full verification pass:
 
 1. `node scripts/gate.mjs` — CANONICAL Rust gate. Builds the test universe ONCE via `cargo nextest archive` (single compile, no second-command recompile), then runs BOTH surfaces from the same artifacts — SURFACE 1 = `cargo nextest run --workspace` (per-test process isolation, every workspace test target including the ~25 verter_session integration binaries); SURFACE 2 = the verter_session libtest binaries executed DIRECTLY (in-process / multi-test-per-process, the same direct surface as `cargo test -p verter_session --tests`). SURFACE 2 runs those binaries under the workspace-unified `session_metrics` feature set (ON), intentionally replacing the old package-scoped default-feature (`session_metrics` OFF) rebuild rather than reproducing its feature config — no test target the old pair compiled is dropped. Before the archive build it runs a freshness-tooling preflight: it ensures the workspace `buf` + `oxfmt` binaries are present (auto-running `pnpm install --frozen-lockfile` inside the mutex/timeout/stall machinery when the `node_modules/.bin` shims are missing), then VERDICT-GATES the `cases::typeinfo_proto_ts_freshness::*` byte-pin tolerance on that outcome — tooling present/installed ⇒ tolerance OFF, so a freshness failure is a HARD gate failure (exit 1), NOT PASS-WITH-TOLERATED; a deterministic install failure (e.g. frozen-lockfile mismatch) ⇒ a LOUD setup failure (exit 127), never silently tolerated (when an install is attempted — both `node_modules/.bin/{buf,oxfmt}` shims already present ⇒ the preflight returns already-present and no install runs); when pnpm is not resolvable AND `buf` is not resolvable the Rust byte-pin pair SKIPS gracefully and PASSES, so the gate reports an ORDINARY PASS (no FAIL line) — the verdict-gated tolerance flips ON there only as a LATENT safety net that would surface PASS-WITH-TOLERATED solely in the unusual case the pair emitted a tolerated FAIL despite `buf` being absent. `oxfmt` absence NEVER grants tolerance — with `buf` present, a missing `oxfmt` is a LOUD setup failure (exit 127), not a degraded run. Run it with `node_modules` present (the normal path) so the byte-pin runs GENUINELY: with the tooling present a freshness failure is a HARD FAIL (a real stale-binding regression to regenerate + commit) — PASS-WITH-TOLERATED is NEVER the regression signal on a normal machine, and on a buf-less runner the pair yields an ordinary PASS via the skip, not PASS-WITH-TOLERATED. See `docs/arch/gate-performance.md`.
 2. `cargo clippy --workspace -- -D warnings`
-3. `cargo fmt --all --check`
-4. `pnpm test` for TypeScript changes
+3. `cargo check --workspace --release` — the gate compiles DEBUG only. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. Nothing else in the loop compiles the release cfg. Mirrored in CI by the `rust-build-configs` job.
+4. `cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings` — host clippy cannot see target-gated code, and the `wasm32-wasip1`/`wasip2` clippy jobs cover the SEPARATE `extensions/lapce` + `extensions/zed` manifests, not this one. Same `rust-build-configs` job in CI.
+5. `cargo fmt --all --check`
+6. `pnpm test` for TypeScript changes
+
+Confirm `cargo clippy --version` reports the `rust-toolchain.toml`-pinned version before trusting
+2–4. Clippy output from a different toolchain is not evidence about the one CI runs.
+
+The gate runner also emits an advisory warning for each non-exempt production Rust source above 1,500
+lines, formatted as `path (N lines)`. This scan is informational only: its findings do not enter either
+surface analyzer, the failure accumulator, or the final gate verdict.
+
+**Build-prerequisite preflight — fail-closed, and the FIRST step of gate mode.** Parts of the Rust suite
+load artifacts cargo does not build. The real-provider suites spawn the pinned tsserver with
+`--globalPlugins @verter/typescript-plugin --pluginProbeLocations packages/vue-vscode/node_modules`; that
+probe dir is a pnpm symlink to `packages/typescript-plugin`, whose `main` is `dist/index.js` — a `tsc -b`
+OUTPUT that `pnpm install` does NOT produce. With the symlink present and the dist absent, tsserver loads
+no plugin, cannot resolve `.vue`/`.svelte` carriers, and ~64 `*_tsserver` tests fail with `TS2307: Cannot
+find module './Comp.vue' or its corresponding type declarations.` — sixty-four opaque failures that read
+exactly like a compiler regression. So before the freshness preflight, before cargo, and before any test,
+the gate **loads** that plugin entry in a child process and, on any load failure, exits 127 with the marker
+`BUILD-PREREQUISITE MISSING`, naming the probe target, the load error, the producing packages, and the
+producer command.
+
+- **The oracle is a real load, not a file list.** `require()` of the probe directory — the same resolution
+  tsserver performs — in a child process (`runBuildPrerequisiteLoadProbe`), fail-closed on every non-zero
+  shape (structured load error, spawn error, signal, timeout, unparseable output). A stat list would be a
+  mirror of the emit graph and would drift: the plugin entry eagerly requires its emitted helpers
+  (`dist/helpers/carrierStore.js` among them) and `@verter/language-shared`'s entry re-exports a dozen
+  emitted siblings, so a tree with **both `index.js` present and one helper missing** satisfies every stat
+  and still throws inside tsserver. The load also covers the half-built case the plugin's tsconfig allows:
+  `noEmitOnError` is off, so `tsc -b` on the plugin alone emits a dist while failing with `TS2307: Cannot
+  find module '@verter/language-shared'`.
+- **The probe runs under tsserver's environment, not the gate's.** `TsserverTypeProvider::spawn` strips
+  `CHILD_PROCESS_ENV_DENYLIST` (`crates/verter_type_runtime/src/tsserver/ipc.rs` — `NODE_OPTIONS`,
+  `VSCODE_INSPECTOR_OPTIONS`, `ELECTRON_RUN_AS_NODE`) before launching node, so an inheriting probe would
+  have strictly more influence than the process it speaks for. That gap is exploitable, not theoretical:
+  measured, `NODE_OPTIONS=--require=<preload>` with a preload patching `Module._load` to return a dummy for
+  `process.argv[1]` made the probe exit 0 and report loaded while tsserver still failed on a missing
+  helper. The probe reads that denylist **out of the Rust call site** (`parseTsserverEnvDenylist`) rather
+  than restating it, so the two cannot drift; a generated mirror was rejected because its freshness test
+  lives in the Rust suite the probe runs *before*. If the const cannot be found or parsed the probe fails
+  closed as `environment-unknown`. It strips exactly that denylist and nothing more — equivalence, not
+  maximal hardening: a var tsserver also inherits influences the real load identically.
+- **The timeout is a HARD bound, sized by the gate's deadline.** `spawnSync`'s default `killSignal` is
+  SIGTERM, which a child can trap — measured, a child trapping SIGTERM with an open handle left the parent
+  blocked for its full 25s lifetime and then returned status 0, i.e. a hang *and* a false positive. The
+  probe kills with `SIGKILL` (no graceful phase: the child's whole job is one `require()`, so there is
+  nothing to flush — unlike `runContainedStep`, which escalates because it reaps whole build trees), and its
+  budget is `probeBudgetMs(deadline, now)` — the smaller of a 60s cap and the gate's own remaining
+  wallclock, so it cannot outlive the `--timeout` it sits inside while holding the single-flight mutex.
+  Honest limit: this kills the direct child only; a module that spawns a detached grandchild on require
+  would leak it, the same limitation the contained-step runner carries.
+- **Failure classes are typed, not string-matched.** The probe returns a `reason`
+  (`module-not-found` / `load-error` / `timeout` / `spawn-error` / `signalled` / `unknown-exit` /
+  `environment-unknown`). Only `module-not-found` means "this tree was never built"; every other class means
+  the probe could not *answer*. Callers that gate behavior on the prerequisite must branch on `reason` —
+  see `(xix)` below, where skipping on any failure would green-skip a scenario whose artifacts are present.
+- **What it does not prove: freshness.** A dist that loads but was emitted from an older commit passes.
+  That is a separate problem and is deliberately out of scope — not an oversight.
+- **Two packages produce the closure**, and they are the producer command's scope: the plugin, plus
+  `@verter/language-shared`. `@verter/native` is deliberately excluded — the plugin's
+  `"files": ["src/index.ts"]` leaves out `src/tsc/`, its only consumer, and no Rust test loads a `.node`.
+- **Produce them** with `pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build`
+  (pnpm orders multi-filter recursive scripts topologically). NOT `pnpm build` (native + LSP + wasm + every
+  TS package) and NOT `--filter @verter/typescript-plugin...` — the trailing ellipsis selects the package
+  AND ITS DEPENDENCIES, dragging in `@verter/native`'s `napi build --release`. This is also the step
+  `ci.yml`'s `rust-test` and `release.yml`'s `test` job run before the gate.
+- **It never builds for you and never skips.** Building implicitly would make the verdict depend on a
+  mutation the gate performed; skipping would restore the silent pass — with no install at all the affected
+  tests SKIP and the gate goes green having proven nothing, the "unexpected prerequisite skips" half of
+  Verification Must Prove Execution. `--prepare` is exempt: it builds the archive and runs no test.
+- **Discrimination** is proven by `(GB9)` in `scripts/gate-selftest.mjs`, which drives the REAL production
+  CLI (a byte-copy rooted in a synthetic git repo holding a miniature of the package graph, so the gate
+  keeps its zero test seams and no developer tree is mutated) in six directions: nothing built / plugin
+  entry missing / language-shared missing / **a transitively-required helper missing while both entries are
+  present** ⇒ 127 before the freshness preflight and before cargo, with the refusal reporting
+  `MODULE_NOT_FOUND` rather than a probe that could not answer; everything built ⇒ SATISFIED and the run
+  proceeds. Every plant is stat-proven applied and re-stated after the run. Three properties are exercised
+  with real subprocesses rather than injected result shapes, because they are the ways a bad tree could
+  still pass: `(GB9.1b)` runs a **real SIGTERM-trapping child** and asserts the bound holds, the reason is
+  `timeout`, and no process survives; `(GB9.1c)` runs a **real forged `NODE_OPTIONS` preload** and asserts
+  it cannot fake a load, with a helper-present control proving the env was sanitized rather than broken, and
+  a launcher-deleted leg proving `environment-unknown` fails closed; `(GB9.1d)`/`(GB9.1e)` pin the denylist
+  parser's fail-closed shapes and the deadline clamp.
+- **`(xix)` declares its precondition, narrowly.** That scenario drives the real gate against the real repo
+  expecting it to reach cargo, so on a tree without the prerequisites it would hit this 127 and report a
+  meaningless failure — and its verdict would depend on the very state under test. It now measures the state
+  and emits a TRUE skip (counted in SKIP, never PASS) **only** when `reason === "module-not-found"`. Any
+  other class — EPERM, timeout, an unrelated plugin throw, an unreadable launcher — FAILS, because
+  `finish()` exits 0 whenever FAIL is zero, so skipping on an infrastructure failure would silently retire a
+  scenario whose artifacts are present.
 
 Without Node, or to debug one surface in isolation, run the two underlying surfaces directly: `cargo nextest run --workspace` then `cargo test -p verter_session --tests`. Run the gate with `node_modules` present (e.g. `pnpm install --frozen-lockfile` first in a fresh worktree) so the freshness-tooling preflight is a no-op and the `cases::typeinfo_proto_ts_freshness::*` byte-pin runs genuinely — with the tooling present a freshness failure is a HARD gate failure (exit 1, a real stale-binding regression to regenerate + commit), not tolerated. On a buf-less runner (pnpm not resolvable AND `buf` not resolvable) the Rust byte-pin SKIPS and PASSES, so the gate reports an ordinary PASS; the verdict-gated tolerance flips ON there only as a latent safety net (PASS-WITH-TOLERATED appears solely if the pair somehow emitted a tolerated FAIL despite `buf` being absent, which the skip does not). `oxfmt` absence never grants tolerance (with `buf` present a missing `oxfmt` is a LOUD setup failure).
 

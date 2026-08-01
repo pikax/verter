@@ -17,6 +17,7 @@ use verter_semantic::analysis::types::Hash16;
 use verter_session::VerterHost;
 
 use crate::carrier_cache::{EngineRecheckState, RegenKey};
+use crate::carrier_provider_projection::PreparedCarrierProviderContent;
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
 use crate::documents::provider_projection::ProviderPositionMapper;
@@ -314,8 +315,10 @@ pub fn record_carrier_api_surface(
         host,
         canonical_id,
         provider_path,
-        ProviderSurfaceKind::CarrierApi,
-        api_code,
+        RecordedProviderSurface::Verbatim {
+            kind: ProviderSurfaceKind::CarrierApi,
+            code: api_code,
+        },
         source_map_json,
     );
 }
@@ -451,13 +454,13 @@ pub fn captured_surface_still_valid_for_canonical(
 /// nothing). Without this record the interactive request-surface capture has
 /// no `CarrierIde` snapshot to serve, and every provider-backed feature drops
 /// its provider contribution for the synced file.
-pub fn record_carrier_ide_surface(
+pub(crate) fn record_carrier_ide_surface(
     store: &ProviderSurfaceStore,
     documents: Option<&DocumentRegistry>,
     host: &VerterHost,
     canonical_id: &str,
     provider_path: &str,
-    ide_code: &str,
+    delivered: &PreparedCarrierProviderContent,
     source_map_json: Option<&str>,
 ) {
     // These direct-open sites do not stamp a companion version, so the recorded
@@ -468,10 +471,50 @@ pub fn record_carrier_ide_surface(
         host,
         canonical_id,
         provider_path,
-        ProviderSurfaceKind::CarrierIde,
-        ide_code,
+        RecordedProviderSurface::CarrierIde(delivered),
         source_map_json,
     );
+}
+
+/// Identity-fenced variant for an OPEN carrier. The caller supplies the exact
+/// live source while holding the document registry shard guard that proved its
+/// retained revision current, so source resolution cannot drift between the
+/// comparison and the store write.
+pub(crate) fn record_carrier_ide_surface_with_source(
+    store: &ProviderSurfaceStore,
+    canonical_id: &str,
+    provider_path: &str,
+    delivered: &PreparedCarrierProviderContent,
+    source_map_json: Option<&str>,
+    carrier_source: Arc<str>,
+) {
+    let _ = record_carrier_companion_surface_with_source(
+        store,
+        canonical_id,
+        provider_path,
+        RecordedProviderSurface::CarrierIde(delivered),
+        source_map_json,
+        carrier_source,
+    );
+}
+
+/// The bytes to record for a companion surface, and — for the projected carrier
+/// IDE role — the mapper describing exactly those bytes.
+///
+/// The IDE arm carries ONE indivisible value rather than a `(content, rewrites)`
+/// pair of parameters. That pair was the defect's enabling shape: a caller could
+/// hand over raw compiler bytes alongside a mapper prepared for the projected
+/// buffer, and the recorded content hash then never matched the receipt-stamped
+/// one, so `authorizes_carrier_ide_capture` refused every capture and no
+/// provider-backed feature ever ran. Splitting them is no longer expressible.
+pub(crate) enum RecordedProviderSurface<'a> {
+    /// A role the provider receives exactly as compiled.
+    Verbatim {
+        kind: ProviderSurfaceKind,
+        code: &'a str,
+    },
+    /// The carrier IDE role, whose generated imports were projected.
+    CarrierIde(&'a PreparedCarrierProviderContent),
 }
 
 /// Record a published carrier companion surface of ANY role (`CarrierIde` /
@@ -493,53 +536,43 @@ pub fn record_carrier_ide_surface(
 /// [`ProviderSurfaceStore::current_snapshot`] read — a concurrent close racing
 /// between the record and the re-read could return `None` (pinning the version to a
 /// stale `1` fallback) or a sibling capture's generation.
-#[allow(clippy::too_many_arguments)]
 #[must_use]
-pub fn record_carrier_companion_surface(
+pub(crate) fn record_carrier_companion_surface(
     store: &ProviderSurfaceStore,
     documents: Option<&DocumentRegistry>,
     host: &VerterHost,
     canonical_id: &str,
     provider_path: &str,
-    kind: ProviderSurfaceKind,
-    code: &str,
+    surface: RecordedProviderSurface<'_>,
     source_map_json: Option<&str>,
 ) -> Option<u64> {
-    let inferred_rewrites = (kind == ProviderSurfaceKind::CarrierIde).then(|| {
-        crate::carrier_provider_projection::infer_carrier_provider_rewrites(
-            code,
-            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
-        )
-    });
-    record_carrier_companion_surface_with_rewrites(
+    let carrier_source = resolve_carrier_source(documents, host, canonical_id)?;
+    record_carrier_companion_surface_with_source(
         store,
-        documents,
-        host,
         canonical_id,
         provider_path,
-        kind,
-        code,
+        surface,
         source_map_json,
-        inferred_rewrites,
+        carrier_source,
     )
 }
 
-/// Rewrite-aware form of [`record_carrier_companion_surface`] for a carrier IDE
-/// buffer whose generated imports were projected after compilation.
-#[allow(clippy::too_many_arguments)]
-#[must_use]
-pub fn record_carrier_companion_surface_with_rewrites(
+fn record_carrier_companion_surface_with_source(
     store: &ProviderSurfaceStore,
-    documents: Option<&DocumentRegistry>,
-    host: &VerterHost,
     canonical_id: &str,
     provider_path: &str,
-    kind: ProviderSurfaceKind,
-    code: &str,
+    surface: RecordedProviderSurface<'_>,
     source_map_json: Option<&str>,
-    rewrites: Option<crate::documents::provider_projection::GeneratedRewriteMapper>,
+    carrier_source: Arc<str>,
 ) -> Option<u64> {
-    let carrier_source = resolve_carrier_source(documents, host, canonical_id)?;
+    let (kind, code, rewrites) = match surface {
+        RecordedProviderSurface::Verbatim { kind, code } => (kind, code, None),
+        RecordedProviderSurface::CarrierIde(delivered) => (
+            ProviderSurfaceKind::CarrierIde,
+            delivered.content().as_ref(),
+            Some(delivered.rewrites().clone()),
+        ),
+    };
     // The receipt contract stamps the compiler map JSON identity separately
     // from provider-content identity. Post-compile rewrites are already covered
     // by the content hash and must not manufacture a different map hash than
@@ -599,23 +632,33 @@ pub fn record_and_version_carrier_companions(
             SnapshotRole::Shadow => ProviderSurfaceKind::Shadow,
             SnapshotRole::Real => ProviderSurfaceKind::Real,
         };
+        // The companion owns its content/projection pair, so the recorded surface
+        // is BY CONSTRUCTION the one the receipt fingerprints.
+        let surface = match companion.recorded_content() {
+            crate::external_ts::CompanionContent::ProjectedIde(delivered) => {
+                RecordedProviderSurface::CarrierIde(delivered)
+            }
+            crate::external_ts::CompanionContent::Verbatim(code) => {
+                RecordedProviderSurface::Verbatim { kind, code }
+            }
+        };
         // Stamp the version from the generation `record` linearized for THIS
         // capture (returned directly), NOT a second `current_snapshot` read: the
         // re-read could race a concurrent close to `None` (pinning the IDE
         // companion at the `1` fail-safe) or to a sibling capture's generation. The
         // `1` fail-safe survives only when the carrier source was unavailable
         // (record skipped, returns `None`).
-        companion.version = record_carrier_companion_surface(
+        let generation = record_carrier_companion_surface(
             store,
             documents,
             host,
             canonical_id,
             &companion.provider_uri,
-            kind,
-            &companion.content,
+            surface,
             companion.map_json.as_deref(),
         )
         .unwrap_or(1);
+        companion.version = generation;
     }
 }
 
@@ -655,7 +698,10 @@ pub fn record_carrier_api_surface_code_only(
         }
     };
     let owned_map: Option<Arc<str>> = api
-        .filter(|api| &*api.code == api_code)
+        // Deliveries publish the TS-labeled rendering, so content identity is
+        // checked against those same bytes (for most surfaces identical to
+        // `code`; distinct only for a widened JavaScript Options-API stub).
+        .filter(|api| &**api.ts_labeled_code() == api_code)
         .and_then(|api| api.source_map.clone());
     record_carrier_api_surface(
         store,

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::{DerivedFactKind, FactVersionRef, ResolveImportsFactRef};
+use crate::resolver_core::{FactVersionRef, ResolveImportsFactRef};
 use crate::semantic_query::admit::{admit_decision, Admission};
 use crate::semantic_query::{
     BrokenInputClass, IndexKey, PathSegment, PrimitiveKind, QueryError, QueryResult,
@@ -34,15 +34,14 @@ fn sig(facts: Vec<FactVersionRef>) -> ReadSetSignature {
 }
 
 fn import_route_fact() -> FactVersionRef {
-    FactVersionRef::DerivedFactHash {
-        canonical_id: "/missing.ts".to_string(),
-        kind: DerivedFactKind::ImportRoute,
-        hash: [7u8; 16],
-    }
+    // The import-route rooting rail is a REAL resolve-domain resolution
+    // witness (a forged one is impossible by design — `ResolutionFactRef`'s
+    // fields are sealed to `verter_workspace`).
+    crate::fact_signature_helpers::resolution_witness_fact_for_tests()
 }
 
 fn negative_resolved_import_fact() -> FactVersionRef {
-    FactVersionRef::ResolveImports(ResolveImportsFactRef {
+    FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
         canonical_id: "/importer.ts".to_string(),
         key: FactKey::ResolvedImportClause {
             specifier: InternedSpecifier::from("./missing"),

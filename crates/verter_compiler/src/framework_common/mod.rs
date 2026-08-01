@@ -20,6 +20,7 @@
 
 pub mod carrier_compiler;
 pub mod ctx;
+pub mod generated_identifier;
 pub mod registry;
 pub mod vue_bridge;
 
@@ -35,4 +36,5 @@ pub use carrier_compiler::{
     RuntimeTemplateBlock, TemplateFacts,
 };
 pub use ctx::CarrierCompilerCtx;
+pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};
 pub use registry::CarrierCompilerRegistry;

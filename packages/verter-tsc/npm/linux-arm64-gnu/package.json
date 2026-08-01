@@ -1,6 +1,6 @@
 {
   "name": "@verter/tsc-linux-arm64-gnu",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "verter-tsc binary for Linux ARM64 (glibc)",
   "license": "MIT",
   "repository": {
@@ -20,6 +20,6 @@
     "glibc"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

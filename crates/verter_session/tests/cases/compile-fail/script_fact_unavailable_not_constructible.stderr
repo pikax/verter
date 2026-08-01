@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/cases/compile-fail/script_fact_unavailable_not_constructible.rs:6:37
+  |
+6 |     let _ = UnavailableScriptFacts::new(
+  |                                     ^^^ private associated function
+  |
+ ::: src/framework/script_facts.rs
+  |
+  |     fn new(reason: ScriptFactUnavailableReason) -> Self {
+  |     --------------------------------------------------- private associated function defined here

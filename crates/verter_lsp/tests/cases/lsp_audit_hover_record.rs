@@ -24,7 +24,10 @@ async fn lsp_audit_hover_session_publishes_lsp_record() {
     }));
 
     let canonical = "/probe.vue".to_string();
-    let session = host.lsp_audit_begin(LspMethodTag::Hover, &canonical);
+    let session = host.lsp_audit_begin(
+        LspMethodTag::Hover,
+        verter_audit::RequestTargetIdentity::RegisteredCanonical(canonical.clone()),
+    );
     let request_id = session
         .request_id()
         .expect("Active session must expose its id");
@@ -41,6 +44,9 @@ async fn lsp_audit_hover_session_publishes_lsp_record() {
         method: LspMethodTag::Hover,
         position: Some(verter_audit::payloads::lsp::PositionInfo {
             canonical_id: canonical.clone(),
+            target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+                canonical.clone(),
+            )),
             line: 4,
             character: 7,
         }),
@@ -90,7 +96,10 @@ async fn lsp_audit_disabled_returns_noop_session() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     assert!(!host.config().audit_enabled);
 
-    let session = host.lsp_audit_begin(LspMethodTag::Hover, "/probe.vue");
+    let session = host.lsp_audit_begin(
+        LspMethodTag::Hover,
+        verter_audit::RequestTargetIdentity::RegisteredCanonical("/probe.vue".to_string()),
+    );
     assert!(matches!(session, LspAuditSession::Noop));
     assert!(session.request_id().is_none());
 
@@ -132,7 +141,7 @@ async fn run_with_audit_publishes_record_when_audit_enabled() {
     let result = audit_harness::run_with_audit::<u8, _, _>(
         &host,
         LspMethodTag::Hover,
-        canonical,
+        verter_audit::RequestTargetIdentity::RegisteredCanonical(canonical),
         Some(position),
         async move { Ok(7u8) },
         |payload, value| {
@@ -155,7 +164,7 @@ async fn run_with_audit_short_circuits_when_audit_disabled() {
     let result = audit_harness::run_with_audit::<u8, _, _>(
         &host,
         LspMethodTag::Hover,
-        "/probe.vue".to_string(),
+        verter_audit::RequestTargetIdentity::RegisteredCanonical("/probe.vue".to_string()),
         Some(tower_lsp_server::ls_types::Position {
             line: 0,
             character: 0,

@@ -120,4 +120,9 @@ pub(crate) struct PublicApiRenderSeed<'a> {
     /// overlay, so syntax extraction, semantic macro projection, and revision
     /// fencing all observe the same bytes.
     pub(crate) view: &'a dyn crate::session_view::SessionView,
+    /// The batch's captured fixed view itself, so a per-item consumer that
+    /// needs a request-bound snapshot (the fallthrough resolver) pins THIS
+    /// capture instead of opening its own — the render path takes ZERO
+    /// per-item store-view reads, which the O(1) batch gates measure.
+    pub(crate) fixed: &'a crate::resolver_store::BatchFixedView,
 }

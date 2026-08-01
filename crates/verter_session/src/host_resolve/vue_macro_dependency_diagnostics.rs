@@ -30,7 +30,7 @@ pub(super) fn collect(
                 type_name,
             } => diagnostics.push(HostDiagnostic {
                 severity: HostSeverity::Error,
-                code: "HOST_MISSING_MACRO_TYPE_DEP".to_string(),
+                code: crate::types::HOST_MISSING_MACRO_TYPE_DEP.to_string(),
                 message: format!(
                     "missing macro type dependency '{}' for type '{}' in '{}'",
                     import_source, type_name, snapshot.canonical_id
@@ -54,7 +54,7 @@ pub(super) fn collect(
                 };
                 diagnostics.push(HostDiagnostic {
                     severity: HostSeverity::Error,
-                    code: "HOST_MISSING_MACRO_TYPE_DEP".to_string(),
+                    code: crate::types::HOST_MISSING_MACRO_TYPE_DEP.to_string(),
                     message: format!(
                         "missing macro type dependency: type '{}' resolves but its surface references unresolvable type '{}' (declared in '{}') in '{}'",
                         dep.type_name, name, owner_canonical, snapshot.canonical_id
@@ -143,14 +143,22 @@ fn import_backed_surface_arm_is_missing(
         &import.source,
         verter_workspace::ResolveRequestKind::TypeImport,
     ) {
-        None => true,
-        Some(target) => {
+        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+            let Some(target) = admitted.into_result() else {
+                return true;
+            };
             let requested = binding.imported_name.as_deref().unwrap_or(&binding.name);
             let mut visited = rustc_hash::FxHashSet::default();
             matches!(
                 export_surface_verdict(host, &target, requested, &mut visited, 0),
                 ExportSurfaceVerdict::Absent
             )
+        }
+        verter_workspace::ResolutionPublication::Refused(_) => {
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+            );
+            false
         }
     }
 }
@@ -223,7 +231,17 @@ fn follow_export_surface_route(
         source,
         verter_workspace::ResolveRequestKind::TypeImport,
     ) {
-        Some(target) => export_surface_verdict(host, &target, name, visited, depth + 1),
-        None => ExportSurfaceVerdict::Unknowable,
+        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+            match admitted.into_result() {
+                Some(target) => export_surface_verdict(host, &target, name, visited, depth + 1),
+                None => ExportSurfaceVerdict::Unknowable,
+            }
+        }
+        verter_workspace::ResolutionPublication::Refused(_) => {
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+            );
+            ExportSurfaceVerdict::Unknowable
+        }
     }
 }

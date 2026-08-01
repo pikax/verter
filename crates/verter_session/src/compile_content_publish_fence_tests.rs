@@ -448,3 +448,210 @@ fn stable_env_publish_lands_under_the_captured_identity() {
     let warm = compile(&host, &profile);
     assert!(warm.cache_hit, "the published entry must serve warm");
 }
+
+/// The same coherent-snapshot discipline applies to `latest_diagnostics`,
+/// which is NOT a keyed cache entry but observable state a reader trusts as
+/// describing the CURRENT buffer.
+///
+/// A Vue template parse error makes `compile_entry` return `Err`, so this pair
+/// drives the FAILURE write site — the one the LSP regression actually runs
+/// through (`ensure_ide_compiled` answers `Err`, and the diagnostics the editor
+/// shows were stored by that arm before it returned).
+const BROKEN_V1: &str =
+    "<script setup lang=\"ts\">const n = 1</script><template><div><span></div></template>";
+const CLEAN_V2: &str =
+    "<script setup lang=\"ts\">const n = 2</script><template><div>{{ n }}</div></template>";
+
+fn try_compile(
+    host: &VerterHost,
+    profile: &CompileProfile,
+) -> Result<crate::types::VirtualFileResponse, crate::types::HostError> {
+    host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some(CANONICAL.to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile.clone(),
+    })
+}
+
+/// `None` = no slot at all (the state an upsert's clear leaves behind);
+/// `Some(n)` = a compile wrote `n` diagnostics under this profile.
+fn stored_diagnostics(host: &VerterHost, profile: &CompileProfile) -> Option<usize> {
+    host.get_diagnostics(CANONICAL, profile)
+        .map(|snapshot| snapshot.diagnostics.len())
+}
+
+/// A compile whose bytes are already superseded must NOT write its
+/// diagnostics into the state the newer edit cleared.
+///
+/// `latest_diagnostics` has no key to reject a stale write: `get_diagnostics`
+/// is a pure cached read, and its LSP consumers stamp what they read with the
+/// document version THEY captured. So an in-flight v1 compile that lands its
+/// parse errors after v2's upsert cleared the slot makes v1's errors
+/// indistinguishable from v2's own — a publisher that captured v2, read the
+/// slot, and passed its own document-identity fence publishes them as v2.
+/// The user's file is clean and the editor shows errors that no longer exist
+/// anywhere in the buffer, with nothing to clear them until the next edit.
+///
+/// Discrimination: pre-fence, both write sites inserted unconditionally, so
+/// the raced compile left BROKEN_V1's ten template errors readable under the
+/// live CLEAN_V2 content and the first assertion sees `Some(10)`. Post-fence
+/// the write declines and the slot stays as the upsert left it. The recovery
+/// legs pin that the fence compares identities rather than simply suppressing
+/// writes — an always-declining "fix" fails them, and it is the same failure
+/// mode (diagnostics that never arrive) this whole branch exists to repair.
+#[test]
+fn a_superseded_compile_never_writes_its_diagnostics_over_the_newer_revision() {
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    publish_graph(
+        &workspace,
+        vec![("@n/*".to_string(), vec!["./src/*".to_string()])],
+    );
+    let host = host_over(Arc::clone(&workspace));
+    upsert(&host, BROKEN_V1);
+
+    // Land the CLEAN v2 upsert inside the snapshot→compile-input window, so
+    // the compile below carries v1's bytes while the live buffer is v2.
+    {
+        let hook_host = Arc::clone(&host);
+        let fired = std::sync::atomic::AtomicBool::new(false);
+        *host.compile_input_seam_hook.lock() = Some(Arc::new(move || {
+            if !fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                upsert(&hook_host, CLEAN_V2);
+            }
+        }));
+    }
+    let profile = content_profile();
+    let raced = try_compile(&host, &profile);
+    *host.compile_input_seam_hook.lock() = None;
+
+    match raced {
+        Err(crate::types::HostError::CompileError(failure)) => assert!(
+            failure.diagnostics.has_errors,
+            "precondition: the raced compile must have consumed the \
+             request-start (v1) bytes and failed on them — otherwise there is \
+             no superseded write to fence",
+        ),
+        other => panic!(
+            "precondition: BROKEN_V1 must fail the compile under StrictError, \
+             got {other:?}"
+        ),
+    }
+    assert_eq!(
+        stored_diagnostics(&host, &profile),
+        None,
+        "a compile whose source moved mid-flight must not write its \
+         diagnostics: the live buffer is CLEAN_V2, so v1's template errors \
+         would be read back and published stamped with v2's document version",
+    );
+
+    // Recovery leg 1: the buffer is stable at CLEAN_V2, so its own compile
+    // writes — the fence compares identities, it does not suppress writes.
+    // A `Some(0)` (not `None`) proves the SUCCESS write site landed too.
+    let clean = try_compile(&host, &profile).expect("CLEAN_V2 compiles");
+    assert!(
+        clean.code.contains("const n = 2"),
+        "the settled compile must serve the live revision",
+    );
+    assert_eq!(
+        stored_diagnostics(&host, &profile),
+        Some(0),
+        "an unmoved successful compile must still write — a `None` here means \
+         the fence declined a write for the live revision",
+    );
+
+    // Recovery leg 2: break it again with no race. The failure site's
+    // diagnostics MUST land, or the fence has traded a stale-write bug for a
+    // never-write bug — the exact regression this branch repairs.
+    upsert(&host, BROKEN_V1);
+    let broken = try_compile(&host, &profile);
+    assert!(
+        matches!(broken, Err(crate::types::HostError::CompileError(_))),
+        "the settled compile must fail on the re-broken revision",
+    );
+    assert!(
+        stored_diagnostics(&host, &profile).is_some_and(|count| count > 0),
+        "an unmoved failing compile must still write its diagnostics — a fence \
+         that declines unconditionally reproduces the empty-diagnostics \
+         regression",
+    );
+}
+
+/// The fenced writer's contract, exercised directly.
+///
+/// The end-to-end test above proves the fence fires on a real raced compile;
+/// this pins the decision itself, independent of the compile pipeline, so a
+/// refactor that moves the call sites cannot quietly drop it. Both the identity
+/// check and the write are scoped to ONE compile-cache entry guard — that
+/// placement is what makes it a fence and not a hint, because the clear it
+/// races takes the very same entry.
+#[test]
+fn the_diagnostics_fence_declines_a_moved_revision_and_accepts_the_live_one() {
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    publish_graph(
+        &workspace,
+        vec![("@n/*".to_string(), vec!["./src/*".to_string()])],
+    );
+    let host = host_over(Arc::clone(&workspace));
+
+    let live_whole_hash = |host: &VerterHost| {
+        host.scheduler()
+            .try_get_source(CANONICAL)
+            .and_then(|snap| {
+                snap.downcast_data::<crate::host_executor::HostSourceData>()
+                    .map(|data| data.parse.whole_hash)
+            })
+            .expect("the upserted canonical has a live source")
+    };
+
+    upsert(&host, BROKEN_V1);
+    let v1 = live_whole_hash(&host);
+    upsert(&host, CLEAN_V2);
+    let v2 = live_whole_hash(&host);
+    assert_ne!(v1, v2, "precondition: the two revisions must differ");
+
+    let profile = content_profile();
+    let profile_hash = crate::hash::compile_profile_hash(&profile);
+    let some_diagnostics = crate::types::DiagnosticsSnapshot {
+        diagnostics: vec![crate::types::HostDiagnostic {
+            severity: crate::types::HostSeverity::Error,
+            code: "XInvalidEndTag".to_string(),
+            message: "Invalid end tag.".to_string(),
+            span: None,
+        }],
+        has_errors: true,
+    };
+
+    assert!(
+        !host.store_latest_diagnostics_if_source_unmoved(
+            CANONICAL,
+            profile_hash,
+            v1,
+            some_diagnostics.clone(),
+        ),
+        "a write carrying the SUPERSEDED revision's identity must be declined — \
+         the live buffer is v2, and these diagnostics describe v1",
+    );
+    assert_eq!(
+        stored_diagnostics(&host, &profile),
+        None,
+        "the declined write must leave the slot exactly as the upsert's clear \
+         left it",
+    );
+
+    assert!(
+        host.store_latest_diagnostics_if_source_unmoved(
+            CANONICAL,
+            profile_hash,
+            v2,
+            some_diagnostics.clone(),
+        ),
+        "a write carrying the LIVE revision's identity must land — a fence that \
+         declines unconditionally strands the file with no diagnostics at all",
+    );
+    assert_eq!(
+        stored_diagnostics(&host, &profile),
+        Some(1),
+        "the accepted write must be readable",
+    );
+}

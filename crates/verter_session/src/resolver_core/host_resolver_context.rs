@@ -390,11 +390,19 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        crate::VerterHost::resolve_type_dependency_canonical(
+        match crate::VerterHost::resolve_type_dependency_canonical(
             self.inner,
             owner_canonical,
             import_source,
-        )
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(_) => {
+                super::resolver_context::note_non_cacheable_read_fan_out(
+                    super::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
+                None
+            }
+        }
     }
 
     #[inline]

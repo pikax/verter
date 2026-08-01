@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+
+use crate::semantic_tokens::SemanticTokenLegendMap;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
@@ -1330,13 +1332,23 @@ async fn read_loop(
                                     .and_then(|item| item.get("section"))
                                     .and_then(|s| s.as_str())
                                     .unwrap_or("");
-                                if section.contains("inlayHints") {
+                                // TSGO 7.0.2 requests the sections `js/ts`,
+                                // `typescript`, `javascript`, `editor` (verified
+                                // live) and reads inlay-hint preferences NESTED
+                                // under `typescript.inlayHints` /
+                                // `javascript.inlayHints`. TypeScript inlay
+                                // hints are all preference-gated (off by
+                                // default), so an empty answer here silently
+                                // disables the whole feature.
+                                if section == "typescript" || section == "javascript" {
                                     serde_json::json!({
-                                        "enabled": true,
-                                        "variableTypes": { "enabled": true },
-                                        "functionLikeReturnTypes": { "enabled": true },
-                                        "parameterNames": { "enabled": "literals" }
+                                        "inlayHints": inlay_hint_preferences()
                                     })
+                                } else if section.contains("inlayHints") {
+                                    // A direct `…inlayHints`-section request
+                                    // (older engines): answer the preferences
+                                    // object itself.
+                                    inlay_hint_preferences()
                                 } else {
                                     serde_json::json!({})
                                 }
@@ -2093,6 +2105,13 @@ pub struct TsgoTypeProvider {
     /// Deliberate-teardown intent, shared with the transport + read loop. See
     /// [`LspTransport::teardown_intent`].
     teardown_intent: Arc<AtomicBool>,
+    /// The name-remap from the SERVER-advertised semantic-token legend into
+    /// Verter's published legend, retained from the `initialize` result (owned
+    /// spawn) or injected by the shared-attach seam (whose relay observes the
+    /// editor's `initialize` in-band). `None` until a legend is observed —
+    /// [`TypeProvider::get_semantic_tokens`] then FAILS CLOSED with an empty
+    /// result instead of forwarding raw server-space indices.
+    semantic_token_legend: Arc<StdRwLock<Option<Arc<SemanticTokenLegendMap>>>>,
 }
 
 impl Drop for TsgoTypeProvider {
@@ -2197,14 +2216,18 @@ impl TsgoTypeProvider {
         // an LSP server gates every optional feature on what the client
         // advertises, so a capability the client never declares is silently
         // dropped and TSGO never emits data this provider's handlers are ready
-        // to consume. The helper advertises EXACTLY the completion- and
-        // diagnostic-channel capabilities TSGO's handlers consume (diagnostic
-        // `tagSupport` on both channels; `completionItem.resolveSupport` for the
-        // `completionItem/resolve` round-trips; `contextSupport` + the
-        // `completionItemKind` valueSet). TSGO's base features (hover / definition /
-        // references / rename / signatureHelp / codeAction / semanticTokens /
-        // documentHighlight / inlayHint / pull-diagnostic) are left to TSGO's static
-        // server-side registration and are not advertised here.
+        // to consume. The helper advertises EXACTLY the capabilities TSGO's
+        // handlers consume (diagnostic `tagSupport` on both channels;
+        // `completionItem.resolveSupport` for the `completionItem/resolve`
+        // round-trips; `contextSupport` + the `completionItemKind` valueSet;
+        // `semanticTokens` — verified live: without it the engine advertises an
+        // EMPTY legend and returns zero token data; `workspace.configuration` —
+        // the engine only pulls the preferences that turn inlay hints on when
+        // the client claims the configuration channel). TSGO's remaining base
+        // features (hover / definition / references / rename / signatureHelp /
+        // codeAction / documentHighlight / inlayHint / pull-diagnostic) are
+        // left to TSGO's static server-side registration and are not
+        // advertised here.
         let init_result = match provider
             .transport
             .request_with_priority(
@@ -2231,6 +2254,18 @@ impl TsgoTypeProvider {
         };
 
         tracing::debug!("TSGO initialized: {:?}", init_result);
+
+        // Retain the SERVER-advertised semantic-token legend: tsgo's token
+        // indices are meaningless without it, and its order is server-owned
+        // (it matches neither Verter's published legend nor the capability's
+        // advertised order). No legend ⇒ get_semantic_tokens fails closed.
+        match SemanticTokenLegendMap::from_initialize_result(&init_result) {
+            Some(map) => provider.set_semantic_token_legend(map),
+            None => tracing::warn!(
+                "TSGO initialize result carried no usable semanticTokensProvider legend — \
+                 semantic tokens will fail closed (empty) for this session"
+            ),
+        }
 
         // Send initialized notification
         if let Err(error) = provider
@@ -2403,7 +2438,32 @@ impl TsgoTypeProvider {
             contents,
             diagnostics_cache,
             teardown_intent,
+            semantic_token_legend: Arc::new(StdRwLock::new(None)),
         }
+    }
+
+    /// Retain the semantic-token legend remap for this engine session.
+    ///
+    /// The owned spawn path calls this with the map built from ITS `initialize`
+    /// result; the shared-attach seam calls it with the legend the relay
+    /// observed in-band on the EDITOR's `initialize` response (Verter never
+    /// re-initializes an editor-owned engine, so that witness is the only place
+    /// the legend exists). Without a retained legend `get_semantic_tokens`
+    /// fails closed and returns no tokens.
+    pub fn set_semantic_token_legend(&self, map: SemanticTokenLegendMap) {
+        let mut slot = self
+            .semantic_token_legend
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(Arc::new(map));
+    }
+
+    /// The retained legend remap, if a server legend has been observed.
+    fn semantic_token_legend(&self) -> Option<Arc<SemanticTokenLegendMap>> {
+        self.semantic_token_legend
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Attach an `--api` checker session to THIS `tsgo --lsp` process by sending
@@ -2745,8 +2805,47 @@ fn build_client_capabilities() -> serde_json::Value {
                         "valueSet": ["quickfix"]
                     }
                 }
+            },
+            // `get_semantic_tokens` pulls `textDocument/semanticTokens/full`.
+            // The engine gates the WHOLE feature on this capability (verified
+            // live on the pinned 7.0.2: without it the initialize result
+            // advertises an EMPTY legend and every request returns zero data).
+            // The advertised names are Verter's PUBLISHED legend — the server
+            // intersects them with its own vocabulary and echoes the negotiated
+            // legend (in ITS order) in the initialize result, which
+            // `SemanticTokenLegendMap` retains and remaps per token.
+            "semanticTokens": {
+                "requests": { "full": true },
+                "tokenTypes": crate::semantic_tokens::VERTER_TOKEN_TYPES,
+                "tokenModifiers": crate::semantic_tokens::VERTER_TOKEN_MODIFIERS,
+                "formats": ["relative"]
             }
+        },
+        // The configuration PULL channel. TSGO requests the `typescript` /
+        // `javascript` / `js/ts` / `editor` sections ONLY when the client
+        // claims this capability, and TypeScript inlay hints are entirely
+        // preference-gated (all off by default) — without this channel the
+        // engine can never learn the preferences that turn them on, and
+        // `textDocument/inlayHint` returns null for every file (verified
+        // live). The read loop's `workspace/configuration` responder supplies
+        // the preferences.
+        "workspace": {
+            "configuration": true
         }
+    })
+}
+
+/// The inlay-hint preference payload served on the `workspace/configuration`
+/// channel (VS Code's `typescript.inlayHints.*` / `javascript.inlayHints.*`
+/// schema). TypeScript inlay hints are ALL preference-gated and default off;
+/// this is the single place the provider decides which hint families the
+/// engine computes: inferred variable types, function-like return types, and
+/// literal-argument parameter names.
+fn inlay_hint_preferences() -> serde_json::Value {
+    serde_json::json!({
+        "parameterNames": { "enabled": "literals" },
+        "variableTypes": { "enabled": true },
+        "functionLikeReturnTypes": { "enabled": true }
     })
 }
 
@@ -3624,7 +3723,19 @@ impl TypeProvider for TsgoTypeProvider {
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        // FAIL CLOSED without a retained server legend: tsgo token indices are
+        // meaningless outside the legend its initialize result advertised, and
+        // forwarding them raw paints every identifier a wrong-but-plausible
+        // color. Absent beats wrong.
+        let legend = self.semantic_token_legend();
         Box::pin(async move {
+            let Some(legend) = legend else {
+                tracing::warn!(
+                    "TSGO get_semantic_tokens: no server semantic-token legend retained for \
+                     this session — returning no tokens instead of unmapped indices"
+                );
+                return Ok(vec![]);
+            };
             let content_snapshot = {
                 let cache = contents_cache.lock().await;
                 cache.get(&contents_key(&path_owned)).cloned()
@@ -3644,7 +3755,11 @@ impl TypeProvider for TsgoTypeProvider {
                 .cloned()
                 .unwrap_or_default();
 
-            Ok(decode_semantic_tokens(&data, content_snapshot.as_deref()))
+            Ok(decode_semantic_tokens(
+                &data,
+                content_snapshot.as_deref(),
+                &legend,
+            ))
         })
     }
 
@@ -4318,8 +4433,23 @@ fn parse_text_edit_to_code_edit<'a>(
     })
 }
 
-/// Decode delta-encoded semantic tokens into absolute-offset tokens.
-fn decode_semantic_tokens(data: &[serde_json::Value], content: Option<&str>) -> Vec<SemanticToken> {
+/// Decode delta-encoded semantic tokens into absolute-offset tokens, remapping
+/// each token from the SERVER's advertised legend into Verter's published
+/// legend space through `legend`.
+///
+/// A token whose type index or modifier bits the legend map cannot express is
+/// DROPPED (fail closed) — its delta still advances the running position, so
+/// subsequent tokens stay correctly anchored. A malformed/out-of-range numeric
+/// field or an overflowing delta accumulation terminates the stream because no
+/// later delta can be anchored safely.
+fn decode_semantic_tokens(
+    data: &[serde_json::Value],
+    content: Option<&str>,
+    legend: &SemanticTokenLegendMap,
+) -> Vec<SemanticToken> {
+    let Some(content) = content else {
+        return vec![];
+    };
     if data.len() < 5 {
         return vec![];
     }
@@ -4328,23 +4458,66 @@ fn decode_semantic_tokens(data: &[serde_json::Value], content: Option<&str>) -> 
     let mut current_start = 0u32;
 
     for chunk in data.chunks_exact(5) {
-        let delta_line = chunk[0].as_u64().unwrap_or(0) as u32;
-        let delta_start = chunk[1].as_u64().unwrap_or(0) as u32;
-        let length = chunk[2].as_u64().unwrap_or(0) as u32;
-        let token_type = chunk[3].as_u64().unwrap_or(0) as u32;
-        let token_modifiers = chunk[4].as_u64().unwrap_or(0) as u32;
+        let Some(delta_line) = chunk[0]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            break;
+        };
+        let Some(delta_start) = chunk[1]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            break;
+        };
+        let Some(length) = chunk[2]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            break;
+        };
+        let Some(token_type) = chunk[3]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            break;
+        };
+        let Some(token_modifiers) = chunk[4]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            break;
+        };
 
         if delta_line > 0 {
-            current_line += delta_line;
+            let Some(next_line) = current_line.checked_add(delta_line) else {
+                break;
+            };
+            current_line = next_line;
             current_start = delta_start;
         } else {
-            current_start += delta_start;
+            let Some(next_start) = current_start.checked_add(delta_start) else {
+                break;
+            };
+            current_start = next_start;
         }
 
-        let start = if let Some(c) = content {
-            position_to_offset(c, current_line, current_start)
-        } else {
-            pack_position(current_line, current_start)
+        let Some((token_type, token_modifiers)) = legend.map_token(token_type, token_modifiers)
+        else {
+            continue;
+        };
+
+        let Some(end_character) = current_start.checked_add(length) else {
+            break;
+        };
+        let Some(start) = position_to_offset_checked(content, current_line, current_start) else {
+            continue;
+        };
+        let Some(end) = position_to_offset_checked(content, current_line, end_character) else {
+            continue;
+        };
+        let Some(length) = end.checked_sub(start) else {
+            continue;
         };
 
         tokens.push(SemanticToken {
@@ -4376,26 +4549,20 @@ fn parse_document_highlight(
 /// Parse an LSP InlayHint JSON value into an `InlayHint`.
 fn parse_inlay_hint(item: &serde_json::Value, content: Option<&str>) -> Option<InlayHint> {
     let pos = item.get("position")?;
-    let line = pos.get("line")?.as_u64()? as u32;
-    let character = pos.get("character")?.as_u64()? as u32;
-
-    let offset = if let Some(c) = content {
-        position_to_offset(c, line, character)
-    } else {
-        pack_position(line, character)
-    };
+    let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
+    let character = u32::try_from(pos.get("character")?.as_u64()?).ok()?;
+    let offset = position_to_offset_checked(content?, line, character)?;
 
     // label can be a string or an array of InlayHintLabelPart
     let label = if let Some(s) = item.get("label").and_then(|v| v.as_str()) {
         s.to_string()
-    } else if let Some(parts) = item.get("label").and_then(|v| v.as_array()) {
+    } else {
+        let parts = item.get("label").and_then(|v| v.as_array())?;
         parts
             .iter()
             .filter_map(|p| p.get("value").and_then(|v| v.as_str()))
             .collect::<Vec<_>>()
             .join("")
-    } else {
-        return None;
     };
 
     let kind = item

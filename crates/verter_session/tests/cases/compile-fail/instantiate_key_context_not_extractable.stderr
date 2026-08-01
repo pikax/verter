@@ -1,7 +1,7 @@
 error[E0624]: method `context` is private
-  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:34:42
+  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:38:42
    |
-34 |         let _ctx: InstantiateContext = k.context();
+38 |         let _ctx: InstantiateContext = k.context();
    |                                          ^^^^^^^ private method
    |
   ::: src/semantic_query.rs
@@ -10,9 +10,9 @@ error[E0624]: method `context` is private
    |     -------------------------------------------------- private method defined here
 
 error[E0624]: method `body_source` is private
-  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:35:25
+  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:39:25
    |
-35 |         let _source = k.body_source();
+39 |         let _source = k.body_source();
    |                         ^^^^^^^^^^^ private method
    |
   ::: src/semantic_query.rs
@@ -21,9 +21,9 @@ error[E0624]: method `body_source` is private
    |     --------------------------------------------------------- private method defined here
 
 error[E0624]: method `args` is private
-  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:36:23
+  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:40:23
    |
-36 |         let _args = k.args();
+40 |         let _args = k.args();
    |                       ^^^^ private method
    |
   ::: src/semantic_query.rs

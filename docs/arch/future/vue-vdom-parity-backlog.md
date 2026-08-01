@@ -87,7 +87,6 @@ The C1 fix (0f4415c23: dynamic `<component :is>` always opens a block) covers th
 ## D. Architecture-guard debt (GATE-BREAKING, from the conformance crate) — needed before the branch's gate is green
 
 These trip `node scripts/gate.mjs` (the conformance crate is entirely new — absent at base 6f816df83, so these are ours). They are NOT behavioral; they break the gate:
-- `canon.rs` is 1785 lines → file-size/extraction guard. Split into modules.
 - `assemble_vue_main_module` made `pub` (Slice-2b real-assembler coupling) → verter_session pub-surface snapshot drift + `lib.rs` line ceiling. Update the snapshot / trim, or reconsider the coupling.
 - `std::fs` in `verter_vue_conformance/src/lib.rs` → std::fs guard. Route through an allowed API or exempt the test/conformance crate (with justification).
 - `generator_smoke.rs` archaeology → no-phase-archaeology guard. Rescrub.

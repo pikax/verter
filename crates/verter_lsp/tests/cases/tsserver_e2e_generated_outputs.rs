@@ -328,7 +328,8 @@ const outerLabel = 'outer'
     let src_dir = tmp.join("src");
     let child_api_path = src_dir.join("TypedSlotComp.vue.ts");
     let parent_ide_path = src_dir.join("TemplateSlotCases.vue.tsx");
-    std::fs::write(&child_api_path, &*child_api.code).expect("child API should be written");
+    std::fs::write(&child_api_path, child_api.ts_labeled_code().as_ref())
+        .expect("child API should be written");
     std::fs::write(&parent_ide_path, &*parent_ide.code).expect("parent IDE should be written");
 
     let provider = TsserverTypeProvider::spawn(
@@ -348,7 +349,7 @@ const outerLabel = 'outer'
     let parent_ide_path_str = parent_ide_path.to_string_lossy().replace('\\', "/");
 
     provider
-        .open_file(&child_api_path_str, &child_api.code)
+        .open_file(&child_api_path_str, child_api.ts_labeled_code())
         .await
         .expect("child API should open");
     provider
@@ -540,7 +541,7 @@ const outerLabel = 'outer'
     let parent_ide_path_str = parent_ide_path.to_string_lossy().replace('\\', "/");
 
     provider
-        .open_file(&child_api_path_str, &child_api.code)
+        .open_file(&child_api_path_str, child_api.ts_labeled_code())
         .await
         .expect("child API should open");
     provider
@@ -715,14 +716,14 @@ const outerLabel = 'outer'
     provider
         .open_file(
             &child_api_path.to_string_lossy().replace('\\', "/"),
-            &child_api.code,
+            child_api.ts_labeled_code(),
         )
         .await
         .expect("child API should open");
     provider
         .open_file(
             &parent_api_path.to_string_lossy().replace('\\', "/"),
-            &parent_api.code,
+            parent_api.ts_labeled_code(),
         )
         .await
         .expect("parent API should open");
@@ -862,4 +863,128 @@ async fn test_e2e_tsserver_vfor_member_access_from_fixture_generated_vue_output(
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Live tsserver discriminator for the semantic-token lane: the REAL engine's
+/// `encodedSemanticClassifications-full` (`"format": "2020"`) response must
+/// come back remapped into VERTER's published legend space — interface = 4,
+/// variable = 8, function = 12, with `declaration` on bit 0 and `readonly` on
+/// bit 2 (the same identifiers an equivalent `.ts` file gets under VS Code's
+/// TypeScript semantic highlighting).
+///
+/// Discrimination: the pre-fix decoder read the classification fields
+/// inverted (`type = c & 0xFF`, `mods = c >> 8`) and dropped the `+1` type
+/// offset, so against a REAL engine every one of these kind asserts fails.
+/// The fail-closed half is also live-checked: a correct decoder must NOT drop
+/// the whole real-world stream (a non-empty response proves the 2020 packing
+/// assumption holds against the actual engine, not just canned fixtures).
+#[tokio::test]
+async fn test_e2e_tsserver_semantic_tokens_map_to_verter_legend() {
+    let (node_path, tsserver_path) = tsserver_assets_or_skip().expect(
+        "node and the workspace tsserver.js are required for the live semantic-token discriminator",
+    );
+
+    let tmp = std::env::temp_dir().join("verter_tsserver_semtok_legend");
+    let _ = std::fs::remove_dir_all(&tmp);
+    create_test_project_with_workspace_node_modules(&tmp)
+        .expect("the live semantic-token fixture project must be materialized");
+
+    let content = "interface Shape { area: number }\n\
+                   const localCount = 42;\n\
+                   function computeArea(shape: Shape): number { return shape.area + localCount; }\n";
+    let ts_path = tmp.join("src").join("semtok.ts");
+    std::fs::write(&ts_path, content).expect("fixture write");
+
+    let provider = TsserverTypeProvider::spawn(
+        &node_path,
+        &tsserver_path,
+        tmp.to_str().expect("tmp path should be valid UTF-8"),
+        None,
+        None,
+        false,
+        None,
+    )
+    .await
+    .expect("tsserver should spawn");
+
+    let ts_path_str = ts_path.to_string_lossy().replace('\\', "/");
+    provider
+        .open_file(&ts_path_str, content)
+        .await
+        .expect("fixture should open");
+
+    // tsserver loads the project asynchronously after `open`; poll until the
+    // classification stream is non-empty (same robustness as the completion
+    // retries above).
+    let mut tokens = provider
+        .get_semantic_tokens(&ts_path_str)
+        .await
+        .unwrap_or_default();
+    for delay_ms in [200u64, 400, 800, 1600, 3200] {
+        if !tokens.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        tokens = provider
+            .get_semantic_tokens(&ts_path_str)
+            .await
+            .unwrap_or_default();
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    assert!(
+        !tokens.is_empty(),
+        "the REAL tsserver 2020 classification stream must survive the fail-closed \
+         remap — an empty result would mean the decoder drops genuine engine data"
+    );
+
+    let find = |start: u32, length: u32| {
+        tokens
+            .iter()
+            .find(|t| t.start == start && t.length == length)
+            .unwrap_or_else(|| panic!("no token at byte {start} (len {length}); got: {tokens:?}"))
+    };
+
+    // "Shape" @ bytes 10..15: Verter `interface` (4) + `declaration` (bit 0).
+    let shape = find(10, 5);
+    assert_eq!(
+        shape.token_type, 4,
+        "`Shape` must map to Verter `interface` (4); the inverted pre-fix decode \
+         yields a different provider-space kind against the real engine"
+    );
+    assert_eq!(
+        shape.token_modifiers & 1,
+        1,
+        "`Shape` declaration must carry Verter `declaration` (bit 0)"
+    );
+
+    // "localCount" @ bytes 39..49: Verter `variable` (8), `declaration` +
+    // `readonly` (bit 2) — const-ness must survive the per-bit modifier remap.
+    let local_count = find(39, 10);
+    assert_eq!(
+        local_count.token_type, 8,
+        "`localCount` must map to Verter `variable` (8)"
+    );
+    assert_eq!(
+        local_count.token_modifiers & (1 << 2),
+        1 << 2,
+        "`localCount` (a const) must carry Verter `readonly` (bit 2) — TS encodes \
+         readonly on bit 3, so an unremapped bitset loses it"
+    );
+
+    // "computeArea" @ bytes 65..76: Verter `function` (12).
+    let compute_area = find(65, 11);
+    assert_eq!(
+        compute_area.token_type, 12,
+        "`computeArea` must map to Verter `function` (12)"
+    );
+
+    // Fail-closed sanity over the whole stream: nothing outside the published
+    // 23-type legend may ever be emitted.
+    for token in &tokens {
+        assert!(
+            token.token_type < 23,
+            "token {token:?} carries an index outside Verter's published legend"
+        );
+    }
 }

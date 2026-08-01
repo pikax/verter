@@ -201,12 +201,7 @@ pub(crate) fn wildcard_match_score(
     exported_name: &str,
     wildcard: &crate::resolver_core::WildcardReexport,
 ) -> usize {
-    let candidate = if wildcard.canonical_id.is_empty() {
-        wildcard.source_specifier.as_str()
-    } else {
-        wildcard.canonical_id.as_str()
-    };
-    let Some(stem) = wildcard_source_stem_for_matching(candidate) else {
+    let Some(stem) = wildcard_source_stem_for_matching(wildcard.source_specifier.as_str()) else {
         return 0;
     };
     if exported_name.starts_with(stem.as_str()) {

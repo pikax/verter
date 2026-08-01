@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from "vitest";
 import ts from "typescript";
-import { carrierRootMembership } from "@verter/language-shared";
+import { carrierRootMembership, toImportSurfaceFileName } from "@verter/language-shared";
 import { createFixtureLs, diagRows, fixtures, surfacesOf, VROOT } from "./__fixtures__/wasmLsKit";
 
 const MAIN_TS = `import Comp from "./Comp.vue";
@@ -16,7 +16,7 @@ export { bad, good };
 `;
 
 describe("wasm_in_context_ls_carrier_membership (#1)", () => {
-  it("a plain .ts `import Comp from './Comp.vue'` puts the DECLARATION carrier in the program and misuse yields a real prop-type TS2322, not any", () => {
+  it("a plain .ts `import Comp from './Comp.vue'` puts the API carrier in the program and misuse yields a real prop-type TS2322, not any", () => {
     const { ls, path } = createFixtureLs(ts, {
       user: { "main.ts": MAIN_TS },
       carriers: { "Comp.vue": surfacesOf(fixtures.compVue) },
@@ -24,17 +24,18 @@ describe("wasm_in_context_ls_carrier_membership (#1)", () => {
 
     const program = ls.languageService.getProgram();
     expect(program).toBeDefined();
-    // Extension-MIDDLE declaration carrier is a program member…
-    expect(program!.getSourceFile(path("Comp.d.vue.ts"))).toBeDefined();
-    // …and the extension-LAST legacy spelling is NOT.
+    // The API carrier — the SAME surface the tsserver plugin redirects to — is
+    // the program member the import reaches.
+    expect(program!.getSourceFile(path("Comp.vue.verter.ts"))).toBeDefined();
+    // Never the extension-LAST legacy spelling.
     expect(program!.getSourceFile(path("Comp.vue.d.ts"))).toBeUndefined();
 
     const diags = diagRows(ts, ls.languageService.getSemanticDiagnostics(path("main.ts")));
     const assignability = diags.filter((d) => d.code === 2322);
     // Exactly the `bad` line errs — a real `{ count: number }` prop type
-    // flowed through the declaration carrier. If the import resolved to
-    // nothing (or to `any`), there would be no 2322 at all; if BOTH lines
-    // erred, the prop type would be corrupt.
+    // flowed through the API carrier. If the import resolved to nothing (or to
+    // `any`), there would be no 2322 at all; if BOTH lines erred, the prop type
+    // would be corrupt.
     expect(assignability).toHaveLength(1);
     expect(assignability[0].message).toMatch(/not assignable to type 'number'/);
     // No unresolved-module fallback: the import itself resolves.
@@ -42,29 +43,31 @@ describe("wasm_in_context_ls_carrier_membership (#1)", () => {
   });
 });
 
-describe("wasm_extension_middle_only_resolution (#5)", () => {
-  it("bare './Comp.vue' resolves to Comp.d.vue.ts — never Comp.vue.d.ts, never Comp.vue.tsx", () => {
+describe("wasm_import_surface_only_resolution (#5)", () => {
+  it("bare './Comp.vue' resolves to Comp.vue.verter.ts — never Comp.d.vue.ts, never Comp.vue.d.ts", () => {
     const { ls, path } = createFixtureLs(ts, {
       user: { "main.ts": MAIN_TS },
       carriers: { "Comp.vue": surfacesOf(fixtures.compVue) },
     });
     const program = ls.languageService.getProgram()!;
-    expect(program.getSourceFile(path("Comp.d.vue.ts"))).toBeDefined();
+    expect(program.getSourceFile(path("Comp.vue.verter.ts"))).toBeDefined();
     expect(program.getSourceFile(path("Comp.vue.d.ts"))).toBeUndefined();
-    // The import's type identity comes from the DECLARATION surface: the
-    // decl carrier declares `Comp` without the API carrier's `__OmitNew`
-    // wrapper, so resolution did not fall through to `.verter.ts`.
-    const declText = program.getSourceFile(path("Comp.d.vue.ts"))!.text;
-    expect(declText).toBe(fixtures.compVue.decl!.code);
+    // The import's type identity comes from the API surface: it carries the
+    // `__OmitNew` wrapper the declaration carrier does not, so resolution did
+    // not fall through to `.d.vue.ts`.
+    const apiText = program.getSourceFile(path("Comp.vue.verter.ts"))!.text;
+    expect(apiText).toBe(fixtures.compVue.api!.code);
+    expect(apiText).toContain("__OmitNew");
+    expect(fixtures.compVue.decl!.code).not.toContain("__OmitNew");
   });
 
-  it("fail-closed: with NO published declaration carrier the bare import does NOT fall through to .tsx/.verter.ts", () => {
+  it("fail-closed: with NO published API carrier the bare import does NOT fall through to .tsx/.d.vue.ts", () => {
     const { ls, path } = createFixtureLs(ts, {
       user: { "main.ts": MAIN_TS },
       carriers: {
-        // IDE + API published, declaration NOT — the redirect must fail
-        // closed rather than serve another surface for the bare import.
-        "Comp.vue": surfacesOf(fixtures.compVue, { ide: true, api: true, decl: false }),
+        // IDE + declaration published, API NOT — the redirect must fail closed
+        // rather than serve another surface for the bare import.
+        "Comp.vue": surfacesOf(fixtures.compVue, { ide: true, api: false, decl: true }),
       },
     });
     const diags = diagRows(ts, ls.languageService.getSemanticDiagnostics(path("main.ts")));
@@ -140,12 +143,20 @@ describe("wasm_ide_carrier_is_self_diagnostic_root (#10)", () => {
     expect(carrierRootMembership(path("Comp.vue.verter.ts"))).toBe("redirectReached");
   });
 
-  it("the declaration carrier ENTERS the program once a user file imports the bare carrier", () => {
+  it("the API carrier ENTERS the program through a user import alone, with no IDE root", () => {
+    // No IDE carrier published, so its `export { default } from
+    // './Comp.vue.verter.js'` re-export cannot be what pulls the API surface
+    // in — the user's own bare import is the only path.
     const { ls, path } = createFixtureLs(ts, {
       user: { "main.ts": MAIN_TS },
-      carriers: { "Comp.vue": surfacesOf(fixtures.compVue) },
+      carriers: { "Comp.vue": surfacesOf(fixtures.compVue, { ide: false, decl: true, api: true }) },
     });
-    expect(ls.languageService.getProgram()!.getSourceFile(path("Comp.d.vue.ts"))).toBeDefined();
+    const program = ls.languageService.getProgram()!;
+    expect(program.getSourceFile(path("Comp.vue.tsx"))).toBeUndefined();
+    expect(program.getSourceFile(path("Comp.vue.verter.ts"))).toBeDefined();
+    // The declaration carrier is published but nothing reaches it: no host in
+    // this repo redirects there. It stays out of the program.
+    expect(program.getSourceFile(path("Comp.d.vue.ts"))).toBeUndefined();
   });
 });
 
@@ -189,14 +200,14 @@ export { asNumber };
     expect(v2.decl).toBeGreaterThan(v1.decl);
     expect(v2.api).toBeGreaterThan(v1.api);
     // …and the host reports the new versions.
-    expect(ls.host.getScriptVersion(declPath)).not.toBe(String(v1.decl));
+    expect(ls.host.getScriptVersion(apiPath)).not.toBe(String(v1.api));
 
     // The Program sees the NEW types: count is now string → 2322.
     diags = diagRows(ts, ls.languageService.getSemanticDiagnostics(path("main.ts")));
     expect(diags.filter((d) => d.code === 2322)).toHaveLength(1);
-    // The new `label` prop is visible.
-    const declText = ls.languageService.getProgram()!.getSourceFile(declPath)!.text;
-    expect(declText).toContain("label");
+    // The new `label` prop is visible on the surface the import reaches.
+    const apiText = ls.languageService.getProgram()!.getSourceFile(apiPath)!.text;
+    expect(apiText).toContain("label");
 
     // Delete: removal cleans up ALL of the source's carriers + the root list.
     store.removeSource(sourcePath);
@@ -218,14 +229,14 @@ const good: SP["count"] = 1;
 export { bad, good };
 `;
 
-  it("the SAME membership + extension-middle resolution holds for a Svelte .d.svelte.ts carrier", () => {
+  it("the SAME membership + import-surface resolution holds for a Svelte .svelte.verter.ts carrier", () => {
     const { ls, path } = createFixtureLs(ts, {
       user: { "svelteMain.ts": SVELTE_MAIN },
       carriers: { "Comp.svelte": surfacesOf(fixtures.compSvelte) },
     });
 
     const program = ls.languageService.getProgram()!;
-    expect(program.getSourceFile(path("Comp.d.svelte.ts"))).toBeDefined();
+    expect(program.getSourceFile(path("Comp.svelte.verter.ts"))).toBeDefined();
     expect(program.getSourceFile(path("Comp.svelte.d.ts"))).toBeUndefined();
 
     const diags = diagRows(ts, ls.languageService.getSemanticDiagnostics(path("svelteMain.ts")));
@@ -235,20 +246,20 @@ export { bad, good };
     expect(diags.some((d) => d.code === 2307)).toBe(false);
   });
 
-  it("fail-closed parity: no published Svelte declaration carrier ⇒ unresolved import, no fallthrough", () => {
+  it("fail-closed parity: no published Svelte API carrier ⇒ unresolved import, no fallthrough", () => {
     // No IDE carrier in this program either: nothing imports `svelte`, so the
     // svelte package's ambient `declare module '*.svelte'` wildcard stays out
     // and the bare import surfaces the raw fail-closed resolution result.
     const { ls, path } = createFixtureLs(ts, {
       user: { "svelteMain.ts": SVELTE_MAIN },
       carriers: {
-        "Comp.svelte": surfacesOf(fixtures.compSvelte, { ide: false, api: true, decl: false }),
+        "Comp.svelte": surfacesOf(fixtures.compSvelte, { ide: false, api: false, decl: true }),
       },
     });
     const diags = diagRows(ts, ls.languageService.getSemanticDiagnostics(path("svelteMain.ts")));
     expect(diags.some((d) => d.code === 2307)).toBe(true);
     expect(
-      ls.languageService.getProgram()!.getSourceFile(path("Comp.d.svelte.ts")),
+      ls.languageService.getProgram()!.getSourceFile(path("Comp.svelte.verter.ts")),
     ).toBeUndefined();
   });
 
@@ -263,21 +274,93 @@ export { bad, good };
     // props do NOT flow (no specific-prop 2322 on either probe assignment).
     const { ls, path } = createFixtureLs(ts, {
       user: { "svelteMain.ts": SVELTE_MAIN },
-      carriers: { "Comp.svelte": surfacesOf(fixtures.compSvelte, { api: true, decl: false }) },
+      carriers: { "Comp.svelte": surfacesOf(fixtures.compSvelte, { api: false, decl: true }) },
     });
     const program = ls.languageService.getProgram()!;
-    expect(program.getSourceFile(path("Comp.d.svelte.ts"))).toBeUndefined();
+    expect(program.getSourceFile(path("Comp.svelte.verter.ts"))).toBeUndefined();
     const diags = diagRows(ts, ls.languageService.getSemanticDiagnostics(path("svelteMain.ts")));
     expect(diags.some((d) => d.code === 2307)).toBe(false);
     expect(diags.filter((d) => d.code === 2322)).toHaveLength(0);
   });
 
-  it("the Svelte declaration carrier exposes only the official native Component contract", () => {
-    const code = fixtures.compSvelte.decl!.code;
+  it("the Svelte import surface exposes only the official native Component contract", () => {
+    const code = fixtures.compSvelte.api!.code;
     expect(code).not.toMatch(/from\s+["']svelte["']/);
     expect(code).toContain('import("svelte").Component<');
     expect(code).not.toContain("__VerterPublicInstance");
     expect(code).not.toContain("new (...args: any[])");
     expect(code).not.toContain(": any");
+  });
+});
+
+/**
+ * The two carrier surfaces a component publishes are NOT interchangeable, so
+ * "which one does an ordinary import reach" is a semantic question, not a
+ * filename question. A runtime-object `defineExpose({ count })` is the sharpest
+ * case in the tree: the API surface emits `count: typeof count` (the setup body
+ * is emitted, so the inferred `number` survives) while the declaration surface
+ * can only emit `count: unknown` (the body is omitted, so the binding is not in
+ * scope — see the TODO at `crates/verter_compiler/src/tsc/script.rs`).
+ *
+ * Every host that CAN choose its import target must therefore choose the same
+ * one, or the same source types differently depending on where the user reads
+ * it. These guards pin that at the type level, not at the path level.
+ */
+describe("cross_host_import_surface_semantic_parity (#11)", () => {
+  const EXPOSE_MAIN = `import Expose from "./Expose.vue";
+type Inst = InstanceType<typeof Expose>;
+const asNumber: number = ({} as Inst).count;
+export { asNumber };
+`;
+  const EXPOSE_MAIN_WRONG = `import Expose from "./Expose.vue";
+type Inst = InstanceType<typeof Expose>;
+const asString: string = ({} as Inst).count;
+export { asString };
+`;
+
+  it("the captured surfaces really are type-incompatible for an inferred exposed member", () => {
+    // The premise the rest of this describe rests on, read off the REAL
+    // captured host output rather than assumed.
+    expect(fixtures.exposeVue.api!.code).toContain("count: typeof count");
+    expect(fixtures.exposeVue.decl!.code).toContain("count: unknown");
+  });
+
+  it("an inferred `defineExpose`d member types as its REAL type in the browser host", () => {
+    const { ls, path } = createFixtureLs(ts, {
+      user: { "main.ts": EXPOSE_MAIN },
+      carriers: { "Expose.vue": surfacesOf(fixtures.exposeVue) },
+    });
+    const diags = diagRows(ts, ls.languageService.getSemanticDiagnostics(path("main.ts")));
+    // `count` is `number`: assigning it to `number` is clean, and the module
+    // resolved (an unresolved import would surface 2307 instead).
+    expect(diags.some((d) => d.code === 2307)).toBe(false);
+    expect(diags.filter((d) => d.code === 2322)).toHaveLength(0);
+  });
+
+  it("…and is NOT `any`/`unknown`: assigning it to the wrong type still errs", () => {
+    const { ls, path } = createFixtureLs(ts, {
+      user: { "main.ts": EXPOSE_MAIN_WRONG },
+      carriers: { "Expose.vue": surfacesOf(fixtures.exposeVue) },
+    });
+    const diags = diagRows(ts, ls.languageService.getSemanticDiagnostics(path("main.ts")));
+    const assignability = diags.filter((d) => d.code === 2322);
+    expect(assignability).toHaveLength(1);
+    expect(assignability[0].message).toMatch(/'number' is not assignable to type 'string'/);
+  });
+
+  it("the browser reaches the SAME descriptor-derived surface the tsserver plugin redirects to", () => {
+    const { ls, path, store } = createFixtureLs(ts, {
+      user: { "main.ts": EXPOSE_MAIN },
+      carriers: { "Expose.vue": surfacesOf(fixtures.exposeVue) },
+    });
+    // Pinned to the shared derivation, not to a literal: both hosts call the
+    // same policy over the same `importSurface` descriptor column.
+    const expected = toImportSurfaceFileName(path("Expose.vue"));
+    expect(expected).toBe(path("Expose.vue.verter.ts"));
+    const program = ls.languageService.getProgram()!;
+    expect(program.getSourceFile(expected!)).toBeDefined();
+    // The weaker declaration surface is published and still not reached.
+    expect(store.readyFile(path("Expose.d.vue.ts"))).toBeDefined();
+    expect(program.getSourceFile(path("Expose.d.vue.ts"))).toBeUndefined();
   });
 });

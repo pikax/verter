@@ -31,6 +31,13 @@ pub struct ChildComponentContext {
     pub source: String,
     /// The analysis snapshot of the child component.
     pub analysis: FileAnalysisSnapshot,
+    /// The child's resolved attribute-fallthrough surface: the attribute names
+    /// a parent may pass that the child does not declare. Produced by
+    /// `verter_session`'s single inheritance resolver and carried here so the
+    /// diagnostic and the code-action layers agree on what is genuinely
+    /// unknown — an attribute that falls through must neither be reported nor
+    /// offered an "add prop" quick fix. EMPTY = nothing is inherited.
+    pub inherited_attrs: std::collections::HashSet<String>,
     /// SFC blocks parsed from the child source.
     pub blocks: Vec<SfcBlock>,
     /// Line index for position conversions.
@@ -159,6 +166,7 @@ mod tests {
             uri: "file:///project/src/Child.vue".parse().unwrap(),
             source: source.to_string(),
             analysis,
+            inherited_attrs: std::collections::HashSet::new(),
             blocks,
             line_index,
         }

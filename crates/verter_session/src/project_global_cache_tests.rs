@@ -740,7 +740,7 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
 /// resolution must re-resolve rather than serve the stale
 /// known-miss from the cache.
 #[test]
-fn import_route_negative_cache_invalidates_on_workspace_content_generation_bump() {
+fn bundler_known_miss_is_never_served_warm_from_the_derived_route_cache() {
     use crate::types::DependencyResolution;
     let host = host();
 
@@ -761,25 +761,35 @@ fn import_route_negative_cache_invalidates_on_workspace_content_generation_bump(
         }],
     );
 
-    // Pre-condition: the cached negative is observable.
-    let pre = host.cached_import_route_resolution("/w/owner.ts", "./theme");
+    // The snapshot IS retained: the caller's route table is stored
+    // verbatim, known-miss included.
+    let stored = host
+        .derived_raw_cache()
+        .get("/w/owner.ts")
+        .and_then(|entry| entry.import_routes.get("./theme").cloned());
     assert!(
-        pre.is_some()
-            && pre.as_ref().unwrap().resolved_canonical_id.is_none()
-            && pre.as_ref().unwrap().possible_canonical_ids.is_empty(),
-        "bundler-provided known-miss is cached in derived.import_routes"
+        stored.as_ref().is_some_and(
+            |res| res.resolved_canonical_id.is_none() && res.possible_canonical_ids.is_empty()
+        ),
+        "the caller-supplied known-miss must be retained verbatim in \
+         derived.import_routes; observed {stored:?}"
     );
 
-    // Upsert the new canonical — workspace content_generation bumps.
+    // But it is never SERVED warm — not even in the same generation it
+    // was recorded in. A negative answer is not evidence that the
+    // answer is still negative, so the read-side oracle refuses it and
+    // the caller re-resolves through the one owner-edge authority.
+    assert_eq!(
+        host.cached_import_route_resolution("/w/owner.ts", "./theme"),
+        None,
+        "a known-miss must never be served warm, so no global generation \
+         stamp can pin it current"
+    );
+
+    // Upsert the new canonical — the previously-unresolvable specifier
+    // is now satisfiable. The stale negative still must not be served.
     upsert_ts(&host, "/w/theme.ts", "export default { item: 'item' }");
 
-    // Post-condition: the cached negative MUST NOT be served any
-    // more. The fact-validation oracle uses the recorded
-    // `import_routes_recorded_at_generation` to detect the
-    // generation advance and force a cold re-resolution. We assert
-    // either (a) the negative was invalidated outright (cache miss
-    // returns None), or (b) the re-read returns a fresh positive
-    // resolution for the now-discoverable target.
     let post = host.cached_import_route_resolution("/w/owner.ts", "./theme");
     let is_negative_still_served = post
         .as_ref()
@@ -787,9 +797,8 @@ fn import_route_negative_cache_invalidates_on_workspace_content_generation_bump(
         .unwrap_or(false);
     assert!(
         !is_negative_still_served,
-        "known-miss must invalidate once workspace content_generation \
-         advances. Observed {:?}",
-        post
+        "the known-miss must stay unserved once the target appears. \
+         Observed {post:?}"
     );
 }
 

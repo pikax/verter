@@ -90,14 +90,25 @@ fn camel_to_kebab(s: &str) -> String {
 
 // ── Completion merge ───────────────────────────────────────────────
 
-/// Internal verter helper prefix that should be filtered from completions.
+/// Vue IDE codegen's synthetic-region marker, stripped from provider hover
+/// text so a quickinfo signature reads as the authored spelling.
 pub(super) const VERTER_INTERNAL_PREFIX: &str = "___VERTER___";
 
-/// Internal compiler identifiers that should never appear in completions.
-fn is_internal_dunder(label: &str) -> bool {
+/// Whether a provider completion kind can name an element attribute.
+///
+/// A JSX attribute is a MEMBER of the element's props type, so it arrives as
+/// `Field` (or `Property`/`Method` for an accessor-shaped surface). Every
+/// other kind the provider can emit at that offset — `Variable`, `Function`,
+/// `Class`, `Interface`, `Enum`, `Module`, `Keyword` — is a free identifier
+/// from the enclosing scope and is never an attribute name.
+fn is_attribute_surface_kind(kind: CompletionKind) -> bool {
     matches!(
-        label,
-        "__props" | "__emit" | "__slots" | "__expose" | "__returned"
+        kind,
+        CompletionKind::Field
+            | CompletionKind::Property
+            | CompletionKind::Method
+            | CompletionKind::EnumMember
+            | CompletionKind::Constant
     )
 }
 
@@ -247,16 +258,22 @@ pub fn merge_completions(
         result.iter().map(|i| i.label.clone()).collect();
 
     for item in type_result.items {
-        // Filter internal verter identifiers
-        if item.label.starts_with(VERTER_INTERNAL_PREFIX) {
+        // Drop every compiler-generated carrier identifier. The emitter crate
+        // owns the namespace rule, so a helper added to any IDE prelude is
+        // covered the moment it is emitted — the previous per-shape list
+        // covered Vue's `___VERTER___` spelling only and let the Svelte
+        // prelude's two-underscore `__verter_*` helpers straight through.
+        if verter_compiler::framework_common::is_generated_identifier(&item.label) {
             continue;
         }
-        // Filter $V_ prefixed types (string-exported type helpers)
-        if item.label.starts_with("$V_") {
-            continue;
-        }
-        // Filter compiler-internal dunder identifiers (__props, __emit, __slots, etc.)
-        if is_internal_dunder(&item.label) {
+        // In a template attribute-name position only a MEMBER of the element's
+        // attribute surface is an attribute. The provider answers a Vue
+        // `v-bind`/`v-on` shorthand slot (which lowers to a nameless JSX
+        // attribute) with its whole global scope; running `Variable` /
+        // `Function` / `Class` / `Module` / `Keyword` identifiers through the
+        // JSX→Vue transform published thousands of kebab-cased DOM globals
+        // (`web-g-l-sampler`) as element attributes.
+        if template_attr_context && !item.kind.is_some_and(is_attribute_surface_kind) {
             continue;
         }
         // Apply JSX→Vue transformation when in template attribute context

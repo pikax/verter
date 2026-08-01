@@ -82,15 +82,14 @@ pub(crate) fn parse_raw_id(raw: &str) -> Option<ParsedRawId> {
                 .and_then(|p| p.parse::<usize>().ok())
                 .unwrap_or(0);
             VirtualNodeKind::Style { index }
-        } else if let Some(rest) = suffix.strip_prefix("custom.") {
+        } else {
+            let rest = suffix.strip_prefix("custom.")?;
             let index = rest
                 .split('.')
                 .next()
                 .and_then(|p| p.parse::<usize>().ok())
                 .unwrap_or(0);
             VirtualNodeKind::Custom { index }
-        } else {
-            return None;
         };
 
         return Some(ParsedRawId {

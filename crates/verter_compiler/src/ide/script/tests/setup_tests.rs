@@ -48,6 +48,51 @@ fn standalone_and_ambient_types_preserve_slot_argument_maps() {
     );
 }
 
+/// `runCustomDirective` must carry the directive type's `Arg` parameter — the
+/// FOURTH position of `Directive<HostElement, Value, Modifiers, Arg>` — into the
+/// `arg` parameter of the call signature it returns.
+///
+/// Hardcoding `arg: string | undefined` DISCARDS it: every string argument then
+/// satisfies the parameter, so `v-theme:badarg` on a directive that constrains its
+/// argument (`Directive<HTMLElement, string, …, "fg" | "bg">`) type-checks clean.
+/// The invalid-MODIFIER surface was checked and the invalid-ARGUMENT surface was
+/// not. A directive that leaves `Arg` at its Vue default (`any`) is unaffected.
+///
+/// Asserted on BOTH surfaces: the ambient module (what `verter-tsc` injects) and
+/// the standalone `.d.ts` (what provider consumers serve) are two hand-maintained
+/// copies of the same declaration, so a one-sided edit silently reopens the hole
+/// on the other consumer.
+#[test]
+fn verter_types_surface_carries_the_directive_arg_type_parameter() {
+    let arg_inferred = r#"import("vue").Directive<infer TElement, infer TValue, infer M extends string, infer TArg>"#;
+    let arg_used = "arg: TArg | undefined";
+    let arg_discarded = "arg: string | undefined";
+
+    for (name, surface) in [
+        ("ambient", VERTER_TYPES_AMBIENT_MODULE),
+        ("standalone", VERTER_TYPES_STANDALONE_DTS),
+    ] {
+        assert!(
+            surface.contains(arg_inferred),
+            "{name}: runCustomDirective must infer the directive's Arg type parameter"
+        );
+        // BOTH branches of the element-compatibility conditional must carry it —
+        // fixing only the `El extends TElement` branch leaves the mismatched-element
+        // branch checking `string`.
+        assert_eq!(
+            surface.matches(arg_used).count(),
+            2,
+            "{name}: both runCustomDirective call-signature branches must type `arg` as the \
+             inferred Arg"
+        );
+        assert!(
+            !surface.contains(arg_discarded),
+            "{name}: `arg: string | undefined` discards the directive's Arg type parameter — an \
+             invalid `v-dir:arg` then type-checks clean"
+        );
+    }
+}
+
 #[test]
 fn vue_imports_emit_bare_carrier_specifier() {
     let (code, _) = gen_tsx_script(

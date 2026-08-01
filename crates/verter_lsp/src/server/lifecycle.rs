@@ -580,26 +580,38 @@ pub(super) async fn handle_did_open(
         // TEST SEAM: suppressed so the cross-file-rename child-closed lane proves
         // `handle_rename`'s own sync-before-query is the sole sync of the child API.
         && !server.suppress_imported_carrier_prewarm;
-    let imported_carrier_priority_ids = collect_imported_carrier_priority_ids_from_specifiers(
-        &result.import_specifiers,
-        current_canonical_id.as_deref(),
-        |parent, specifier| server.resolve_import_specifier(parent, specifier),
-    );
+    let imported_carrier_priority_ids =
+        collect_imported_carrier_priority_ids_from_specifiers_for_publication(
+            &result.import_specifiers,
+            current_canonical_id.as_deref(),
+            |parent, specifier| server.resolve_import_specifier_for_publication(parent, specifier),
+        );
+    if let Err(refusal) = &imported_carrier_priority_ids {
+        tracing::debug!(
+            "did_open: imported-carrier prewarm refused for {}: {:?}",
+            uri.as_str(),
+            refusal.reason()
+        );
+    }
     // Signal the background scanner to prioritize this file's directory
     if let Some(scanner) = server.workspace_scanner.lock().await.as_ref() {
         if let Some(canonical_id) = current_canonical_id.as_ref() {
             scanner.signal_priority(canonical_id.clone());
         }
-        for import_id in &imported_carrier_priority_ids {
-            scanner.signal_priority(import_id.clone());
+        if let Ok(import_ids) = &imported_carrier_priority_ids {
+            for import_id in import_ids {
+                scanner.signal_priority(import_id.clone());
+            }
         }
     }
 
     if prewarm_imported_carrier_apis {
-        for import_id in &imported_carrier_priority_ids {
-            let _ = server
-                .sync_imported_carrier_api_lightweight(import_id)
-                .await;
+        if let Ok(import_ids) = &imported_carrier_priority_ids {
+            for import_id in import_ids {
+                let _ = server
+                    .sync_imported_carrier_api_lightweight(import_id)
+                    .await;
+            }
         }
     }
 
@@ -635,13 +647,15 @@ pub(super) async fn handle_did_open(
         && !prewarm_imported_carrier_apis
         && !server.suppress_imported_carrier_prewarm
     {
-        for import_id in &imported_carrier_priority_ids {
-            let should_sync =
-                !server.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
-            if should_sync {
-                let _ = server
-                    .sync_imported_carrier_api_lightweight(import_id)
-                    .await;
+        if let Ok(import_ids) = &imported_carrier_priority_ids {
+            for import_id in import_ids {
+                let should_sync =
+                    !server.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
+                if should_sync {
+                    let _ = server
+                        .sync_imported_carrier_api_lightweight(import_id)
+                        .await;
+                }
             }
         }
     }
@@ -658,9 +672,15 @@ pub(super) async fn handle_did_open(
     if let Some(canonical_id) = current_canonical_id.as_ref() {
         server.needs_ide_sync.insert(canonical_id.clone());
         server.needs_deferred_sync.insert(canonical_id.clone());
-        server
-            .sync_coordinator
-            .signal(canonical_id.clone(), uri.as_str().to_string());
+        // Deliberately stamped `now` rather than at handler entry. An open is
+        // not a keystroke: this handler has already synced the file eagerly
+        // above, so the debounced pass is a follow-up whose quiet window
+        // legitimately starts once that work is done.
+        server.sync_coordinator.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            std::time::Instant::now(),
+        );
         // Background import-dependency publication (imported carrier APIs +
         // the barrel re-export walk) for the freshly opened document. This —
         // not any interactive request — is what mints the DependencyReady
@@ -702,13 +722,36 @@ pub(super) async fn handle_did_change(
 
     let is_virtual = server.documents.get_virtual_source_uri(&uri).is_some();
 
+    // Take the in-flight ticket at handler ENTRY — before the global commit
+    // mutex, before the document commit, before the debounce signal. Two things
+    // depend on this being the FIRST thing that happens to a received change:
+    //
+    // * The ticket owns the receipt instant the debounce quiet window is
+    //   measured from. `sync_coordinator.signal(..)` is the LAST statement of
+    //   this handler, so a receipt taken there — or, worse, at the coordinator's
+    //   inbox drain — is already however long the mutex wait and the commit took.
+    //   That is the whole of https://github.com/pikax/verter/issues/96.
+    // * While the ticket is alive the coordinator treats this document as still
+    //   moving and will not dispatch a sync for it, so the coalescing invariant
+    //   holds whatever a single commit costs — a receipt that is already older
+    //   than the debounce cannot fire a sync out from under a commit that is
+    //   still running.
+    //
+    // A virtual document never reaches the commit or the signal, so it takes no
+    // ticket and cannot gate its source's canonical id.
+    let change_in_flight = (!is_virtual)
+        .then(|| server.documents.get_canonical_id(&uri))
+        .flatten()
+        .map(|canonical_id| server.sync_coordinator.change_received(canonical_id));
+
     // CRITICAL: Serialize the synchronous document commit/upsert via a
     // tokio::sync::Mutex.
     //
-    // tower-lsp dispatches did_change notifications CONCURRENTLY. Each handler calls
-    // host.upsert() + host.ensure_compiled() which acquire std::sync::RwLock (blocking).
-    // With N concurrent handlers on M worker threads, if N >= M all threads are blocked
-    // on the RwLock, starving the runtime (no timers, heartbeats, or responses fire).
+    // Each handler calls host.upsert(), which acquires std::sync::RwLock
+    // (blocking). With N handlers contending, every thread that holds one blocks
+    // the runtime (no timers, heartbeats, or responses fire). The commit does NOT
+    // compile the IDE TSX — that is deferred to the demand side precisely because
+    // this section is serialized.
     //
     // By serializing through a tokio::sync::Mutex, waiting handlers YIELD their worker
     // thread instead of blocking it. Only one handler holds the blocking lock at a time.
@@ -822,9 +865,12 @@ pub(super) async fn handle_did_change(
 
             server.needs_ide_sync.insert(canonical_id.clone());
             server.needs_deferred_sync.insert(canonical_id.clone());
-            server
-                .sync_coordinator
-                .signal(canonical_id.clone(), uri.as_str().to_string());
+            // Signalled through the entry ticket, so the quiet window is stamped
+            // with when this change REACHED the server rather than with now —
+            // the mutex wait and the commit have already run at this point.
+            if let Some(change) = change_in_flight.as_ref() {
+                change.signal(uri.as_str().to_string());
+            }
             // Re-publish the import-dependency closure after edit silence: the
             // content-generation bump already invalidated the DependencyReady
             // receipt (its key embeds the generation), and this debounced
@@ -843,6 +889,25 @@ pub(super) async fn handle_did_change(
             // split: no provider I/O, project loading, or diagnostics can retain a
             // `didChange` handler or build an unbounded per-keystroke queue.
         }
+    } else if let Some(canonical_id) = canonical_id {
+        // A style-only edit needs none of the above — no provider sync, no
+        // hover-cache invalidation, no dependency-frontier refresh, no import
+        // republication. It DOES need the debounced tick, because the host
+        // upsert just CLEARED this file's `latest_diagnostics` for it (the
+        // clear fires on any semantic change, and a style slice is one), and
+        // `get_diagnostics` never recompiles. Skipping the tick entirely leaves
+        // the template errors the user can still see in their file reported
+        // nowhere — the same empty-and-never-refilled state this whole change
+        // exists to prevent, reached without any race.
+        //
+        // Anything that clears `latest_diagnostics` must arm the recompute that
+        // refills it. This is that arming, and it asks for the REPUBLISH only:
+        // the tick recompiles for every revision it is about to publish, so the
+        // provider work this branch exists to avoid stays avoided.
+        if let Some(change) = change_in_flight.as_ref() {
+            change.signal_diagnostics_only(uri.as_str().to_string());
+        }
+        let _ = canonical_id;
     }
 
     tracing::info!("did_change EXIT v{version}");

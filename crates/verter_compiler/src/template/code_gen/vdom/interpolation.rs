@@ -88,6 +88,7 @@ mod tests {
         let oxc = OxcParsedExpression {
             offset: 3,
             expression: None,
+            multi_statement: false,
             errors: None,
             bindings: None,
             ide_recovery_scope: Vec::new(),
@@ -119,6 +120,7 @@ mod tests {
         let oxc = OxcParsedExpression {
             offset: 2,
             expression: None,
+            multi_statement: false,
             errors: None,
             bindings: None,
             ide_recovery_scope: Vec::new(),
@@ -143,6 +145,7 @@ mod tests {
         let oxc = OxcParsedExpression {
             offset: 3,
             expression: None,
+            multi_statement: false,
             errors: None,
             bindings: Some(BindingExtractionResult {
                 bindings: vec![crate::utils::oxc::Binding {
@@ -178,6 +181,7 @@ mod tests {
         let oxc = OxcParsedExpression {
             offset: 3,
             expression: None,
+            multi_statement: false,
             errors: None,
             bindings: Some(BindingExtractionResult {
                 bindings: vec![crate::utils::oxc::Binding {
@@ -213,6 +217,7 @@ mod tests {
         let oxc = OxcParsedExpression {
             offset: 3,
             expression: None,
+            multi_statement: false,
             errors: None,
             bindings: None, // No bindings extracted
             ide_recovery_scope: Vec::new(),
@@ -239,6 +244,7 @@ mod tests {
         let oxc = OxcParsedExpression {
             offset: 13,
             expression: None,
+            multi_statement: false,
             errors: None,
             bindings: None,
             ide_recovery_scope: Vec::new(),

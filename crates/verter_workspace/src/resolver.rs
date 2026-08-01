@@ -318,7 +318,7 @@ impl ProjectResolver {
     /// (relative/absolute, `#imports`, `node_modules`) are still attempted.
     /// Only alias-based resolution (workspace aliases, tsconfig paths, baseUrl,
     /// project references) requires an owning project.
-    pub fn resolve_with_reader(
+    fn resolve_with_reader(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         request: &ResolveRequest,
@@ -351,7 +351,16 @@ impl ProjectResolver {
         Some(self.build_resolve_result(request, source_id, resolution_kind))
     }
 
-    pub fn resolve_for_project_with_reader(
+    pub(crate) fn resolve_tracked(
+        &self,
+        _capability: &crate::engine::TrackedResolutionCapability,
+        reader: &crate::resolution_currency::TransactionReader<'_>,
+        request: &ResolveRequest,
+    ) -> Option<ResolveResult> {
+        self.resolve_with_reader(reader, request)
+    }
+
+    fn resolve_for_project_with_reader(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         owner: &crate::types::ProjectOwnership,
@@ -364,6 +373,36 @@ impl ProjectResolver {
         Some(self.build_project_resolve_result(specifier, source_id, resolution_kind))
     }
 
+    pub(crate) fn resolve_for_project_tracked(
+        &self,
+        _capability: &crate::engine::TrackedResolutionCapability,
+        reader: &crate::resolution_currency::TransactionReader<'_>,
+        owner: &crate::types::ProjectOwnership,
+        specifier: &str,
+        ctx: ResolutionContext,
+    ) -> Option<ResolveResult> {
+        self.resolve_for_project_with_reader(reader, owner, specifier, ctx)
+    }
+
+    pub(crate) fn project_exact_result(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        source_id: String,
+        context: ResolutionContext,
+    ) -> ResolveResult {
+        self.build_resolve_result(
+            &ResolveRequest {
+                importer_id: importer_id.to_owned(),
+                specifier: specifier.to_owned(),
+                kind: context.kind,
+                phase: context.phase,
+            },
+            source_id,
+            ResolutionKind::Bundler,
+        )
+    }
+
     /// Build a [`ResolveResult`] from a resolved source path.
     ///
     /// Looks up `nearest_config_for_path()` on the **target** (not importer) for correct
@@ -374,6 +413,10 @@ impl ProjectResolver {
         source_id: String,
         resolution_kind: ResolutionKind,
     ) -> ResolveResult {
+        #[cfg(test)]
+        crate::engine::resolution_test_hooks::fire(
+            crate::engine::resolution_test_hooks::ResolutionPhase::ProviderProjection,
+        );
         let target_owner = self.nearest_config_for_path(&source_id);
         let provider_id = target_owner
             .and_then(|_| self.provider_id_for_source(&source_id))
@@ -652,12 +695,43 @@ impl ProjectResolver {
     /// Returns the shortest alias-based specifier (tsconfig paths or workspace aliases)
     /// that round-trips back to the original target via `resolve_with_reader()`.
     /// Returns `None` if no alias matches or the importer has no owning project.
-    pub fn preferred_specifier(
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn preferred_specifier(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         target_id: &str,
     ) -> Option<String> {
+        let normalized_target = normalize_canonical_id(target_id);
+        let candidates = self.preferred_specifier_candidates(importer_id, target_id)?;
+
+        // Round-trip verify and pick shortest.
+        let mut best: Option<String> = None;
+        for candidate in candidates {
+            let request = crate::types::ResolveRequest {
+                importer_id: importer_id.to_string(),
+                specifier: candidate.clone(),
+                kind: crate::types::ResolveRequestKind::EsmImport,
+                phase: crate::types::ResolvePhase::CodegenBlocker,
+            };
+            if let Some(result) = self.resolve_with_reader(reader, &request) {
+                if normalize_canonical_id(&result.source_id) == normalized_target {
+                    match &best {
+                        Some(current) if current.len() <= candidate.len() => {}
+                        _ => best = Some(candidate),
+                    }
+                }
+            }
+        }
+
+        best
+    }
+
+    pub(crate) fn preferred_specifier_candidates(
+        &self,
+        importer_id: &str,
+        target_id: &str,
+    ) -> Option<Vec<String>> {
         let owner = self.nearest_config_for_path(importer_id)?;
         let normalized_target = normalize_canonical_id(target_id);
         let mut candidates: Vec<String> = Vec::new();
@@ -696,26 +770,7 @@ impl ProjectResolver {
             }
         }
 
-        // 3. Round-trip verify and pick shortest
-        let mut best: Option<String> = None;
-        for candidate in candidates {
-            let request = crate::types::ResolveRequest {
-                importer_id: importer_id.to_string(),
-                specifier: candidate.clone(),
-                kind: crate::types::ResolveRequestKind::EsmImport,
-                phase: crate::types::ResolvePhase::CodegenBlocker,
-            };
-            if let Some(result) = self.resolve_with_reader(reader, &request) {
-                if normalize_canonical_id(&result.source_id) == normalized_target {
-                    match &best {
-                        Some(current) if current.len() <= candidate.len() => {}
-                        _ => best = Some(candidate),
-                    }
-                }
-            }
-        }
-
-        best
+        Some(candidates)
     }
 
     /// Non-recursive entry for project-reference resolution: seeds the
@@ -1198,7 +1253,11 @@ fn resolve_existing_path(
     candidate: &str,
 ) -> Option<String> {
     let normalized = normalize_canonical_id(candidate);
-    if !reader.file_exists(&normalized) {
+    if !matches!(
+        reader.probe_path(&normalized),
+        crate::resolution_currency::PathProbe::File
+            | crate::resolution_currency::PathProbe::Directory
+    ) {
         return None;
     }
     Some(
@@ -1597,7 +1656,7 @@ fn read_package_manifest_if_present(
     canonical_id: &str,
 ) -> Option<PackageManifest> {
     let normalized = normalize_canonical_id(canonical_id);
-    if !reader.file_exists(&normalized) {
+    if reader.probe_path(&normalized) != crate::resolution_currency::PathProbe::File {
         return None;
     }
     reader.read_package_manifest(&normalized)
@@ -2053,6 +2112,9 @@ pub fn normalize_known_file_id(file_id: &str) -> String {
     collapse_path(file_id)
 }
 
+#[cfg(test)]
+#[path = "resolution_witness_contract_tests.rs"]
+mod resolution_witness_contract_tests;
 #[cfg(test)]
 #[path = "resolver_tests.rs"]
 mod resolver_tests;

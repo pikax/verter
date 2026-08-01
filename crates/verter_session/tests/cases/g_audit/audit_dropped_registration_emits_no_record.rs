@@ -96,6 +96,9 @@ fn finalize_then_drop_does_not_publish_a_second_record() {
         let record = RequestAuditRecord {
             request_id: 9999,
             canonical_id: "/finalised_then_dropped.vue".to_string(),
+            target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+                "/finalised_then_dropped.vue".to_string(),
+            )),
             kind: RequestKind::ComponentMeta,
             parent_request_id: None,
             from_cache: false,

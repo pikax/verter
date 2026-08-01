@@ -74,7 +74,7 @@ try {
   console.log(meta.props);
   console.log(meta._verter?.components);
 } finally {
-  checker.dispose();
+  checker.close();
 }
 ```
 

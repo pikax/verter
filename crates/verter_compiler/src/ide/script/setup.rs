@@ -324,11 +324,9 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             }
         } else if attrs_type.is_none() && template_ast.is_some() {
             // No explicit attrs → cast to ___VERTER___Attrs (root element fallthrough)
-            let gn = generic_info
-                .as_ref()
-                .map(|g| g.names_bracket())
-                .unwrap_or_default();
-            let cast = format!(" as unknown as {}Attrs{}", PREFIX, gn);
+            // The alias is local to TemplateBindingFN and captures its outer
+            // component generic instead of redeclaring it.
+            let cast = format!(" as unknown as {}Attrs", PREFIX);
             for &end_offset in &use_attrs_info.bare_call_ends {
                 let sfc_offset = content_start + end_offset;
                 out.prepend_alloc(sfc_offset, &cast);
@@ -1042,24 +1040,9 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             let mut tail = String::with_capacity(512);
             tail.push_str("\n} // close block scope\n"); // close block scope
 
-            // Emit Comp functions + getRootComponent inside templateBindingFN
-            // In JSX mode, drop generics (no TypeScript syntax in JS output).
-            let gs = if options.is_jsx {
-                String::new()
-            } else {
-                generic_info
-                    .as_ref()
-                    .map(|g| g.source_bracket())
-                    .unwrap_or_default()
-            };
-            let gn = if options.is_jsx {
-                String::new()
-            } else {
-                generic_info
-                    .as_ref()
-                    .map(|g| g.names_bracket())
-                    .unwrap_or_default()
-            };
+            // These helpers are nested in TemplateBindingFN, so they capture its
+            // component generic. Redeclaring the same parameters here makes
+            // generic-independent roots produce TS6196.
             let prop_names: rustc_hash::FxHashSet<&str> = bindings
                 .iter()
                 .filter(|(_, bt)| bt.is_props())
@@ -1067,8 +1050,8 @@ pub(super) fn process_tsx_script_setup<'alloc>(
                 .collect();
             let (root_comp_entries, all_comp_offsets) = emit_comp_functions_to_string(
                 &mut tail,
-                &gs,
-                &gn,
+                "",
+                "",
                 template_ast,
                 source,
                 options.is_jsx,
@@ -1097,8 +1080,8 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             if template_ast.is_some() {
                 emit_get_root_component_to_string(
                     &mut tail,
-                    &gs,
-                    &gn,
+                    "",
+                    "",
                     &root_comp_entries,
                     narrowing_result.as_ref(),
                 );
@@ -1108,7 +1091,15 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             // (these reference getRootComponent which is function-local)
             if template_ast.is_some() && !options.is_jsx {
                 let inherit_attrs = !macro_state.has_inherit_attrs_false;
-                emit_attrs_type_aliases(&mut tail, &generic_info, inherit_attrs);
+                let attributes_generic_args = if attrs_type.is_some() {
+                    generic_info
+                        .as_ref()
+                        .map(|g| g.names_bracket())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                emit_attrs_type_aliases(&mut tail, &attributes_generic_args, inherit_attrs);
             }
 
             // Emit void references to suppress unused warnings for Comp/getRootComponent

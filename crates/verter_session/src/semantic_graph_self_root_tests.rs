@@ -2673,3 +2673,4 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
         }
     }
 }
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;

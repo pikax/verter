@@ -56,12 +56,13 @@ jobs:
     name: Perf harness correctness (PR)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # The gate predicate + evaluation math, the discriminating gate-property
@@ -95,6 +96,7 @@ jobs:
     name: Self-referential perf gate (nightly, blocking)
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest # the ONE canonical blocking perf environment
+    timeout-minutes: 60
     steps:
       # A workflow_dispatch may pass an arbitrary `samples`; the blocking gate
       # computes p50/p95/p99 over the pooled per-side distribution and needs at
@@ -121,7 +123,7 @@ jobs:
         with:
           fetch-depth: 0 # need history to build the pinned baseline ref
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: actions/cache@v5
         with:
           path: |
@@ -132,10 +134,10 @@ jobs:
           key: ${{ runner.os }}-perf-gate-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-perf-gate-cargo-
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       # The tsgo engine (typescript@7.0.2, the TS 7 native compiler) is PINNED
       # in the workspace-root devDeps; --frozen-lockfile brings exactly that

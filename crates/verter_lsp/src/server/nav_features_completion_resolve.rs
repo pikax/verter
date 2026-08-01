@@ -10,8 +10,8 @@
 //! edits.
 //!
 //! `handle_completion_resolve` calls both functions through this sibling
-//! module; it lives apart from `nav_features` so each stays within the
-//! file-size guard (`no_oversize_files`).
+//! module; it lives apart from `nav_features` so both modules remain a readable
+//! size.
 
 use tower_lsp_server::ls_types::*;
 

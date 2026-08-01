@@ -138,6 +138,27 @@ impl VerterHost {
     /// context into base content); a caller without coherent inputs
     /// (torn generation join, non-SFC) simply skips the computation
     /// and the template stays absent — fail closed, never mixed.
+    /// Whether the template analysis must be materialised for a file served on
+    /// THIS call.
+    ///
+    /// Two independent sources, either of which suffices:
+    ///
+    /// * the configured [`verter_semantic::analysis::AnalysisScope`] carries a
+    ///   template flag — the standing, host-wide answer;
+    /// * a [`crate::request_context::RootTemplateDemandScope`] is active on this
+    ///   thread — the REQUEST-SCOPED answer used by the public-API carrier
+    ///   render, whose parent-facing props type is projected from the
+    ///   inheritance resolver's root reachability.
+    ///
+    /// The demand exists so `AnalysisScope::BUILD` can stay template-free: a
+    /// template bit there would materialise the whole template snapshot for
+    /// every carrier file every BUILD-scope consumer analyses, to obtain the one
+    /// fact the carrier actually reads.
+    pub(crate) fn template_analysis_required(&self) -> bool {
+        self.config.effective_scope().needs_template_analysis()
+            || crate::request_context::root_template_analysis_demanded()
+    }
+
     pub(crate) fn compute_template_analysis_if_missing(
         &self,
         canonical: &str,
@@ -228,45 +249,13 @@ impl VerterHost {
 
         // Convert RawTemplateData â†’ TemplateAnalysisSnapshot using existing converter
         if let Some(raw) = raw {
-            // Build converter inputs from snapshot (already computed, not stale entry)
-            let imports: Vec<(String, String)> = snapshot
-                .imports
-                .iter()
-                .flat_map(|imp| {
-                    imp.bindings
-                        .iter()
-                        .map(|b| (b.name.clone(), imp.source.clone()))
-                })
-                .collect();
-
-            // Build binding_class_unions + props_binding_name from snapshot
-            let mut unions: Vec<(String, Vec<String>)> = Vec::new();
-            let define_props = snapshot
-                .macros
-                .iter()
-                .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps);
-            if let Some(dp) = define_props {
-                for field in &dp.prop_fields {
-                    if let Some(type_ann) = &field.type_annotation {
-                        let classes =
-                            verter_semantic::analysis::parse_string_literal_union(type_ann);
-                        if !classes.is_empty() {
-                            unions.push((field.name.clone(), classes));
-                        }
-                    }
-                }
-            }
-            for binding in &snapshot.bindings {
-                if let Some(type_ann) = &binding.type_annotation {
-                    let effective = verter_semantic::analysis::unwrap_reactive_type(type_ann)
-                        .unwrap_or(type_ann);
-                    let classes = verter_semantic::analysis::parse_string_literal_union(effective);
-                    if !classes.is_empty() {
-                        unions.push((binding.name.clone(), classes));
-                    }
-                }
-            }
-            let props_name = define_props.and_then(|dp| dp.binding_name.clone());
+            // Converter inputs come from the ONE shared projection (type-only
+            // imports excluded, static async-component carriers linked).
+            let (imports, unions, props_name) = crate::host_resolve::template_converter_inputs(
+                &snapshot.imports,
+                &snapshot.macros,
+                &snapshot.bindings,
+            );
 
             let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
                 &snapshot.macros,
@@ -392,7 +381,7 @@ impl VerterHost {
                 return Some(self.finalize_analysis_snapshot(
                     canonical,
                     snapshot,
-                    self.config.effective_scope().needs_template_analysis(),
+                    self.template_analysis_required(),
                     template_inputs,
                     analysis_started,
                 ));
@@ -504,7 +493,7 @@ impl VerterHost {
                 return Some(self.finalize_analysis_snapshot(
                     canonical,
                     snapshot,
-                    scope.needs_template_analysis(),
+                    self.template_analysis_required(),
                     template_inputs,
                     analysis_started,
                 ));
@@ -521,7 +510,7 @@ impl VerterHost {
             Some(self.finalize_analysis_snapshot(
                 canonical,
                 snapshot,
-                self.config.effective_scope().needs_template_analysis(),
+                self.template_analysis_required(),
                 joined_inputs,
                 analysis_started,
             ))
@@ -557,6 +546,7 @@ impl VerterHost {
         canonical_or_alias: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<FileAnalysisSnapshot> {
+        verter_workspace::probe_scope!(GET_ANALYSIS);
         self.provenance
             .get_analysis_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -619,7 +609,7 @@ impl VerterHost {
             return Some(self.finalize_analysis_snapshot(
                 canonical.as_str(),
                 snapshot,
-                self.config.effective_scope().needs_template_analysis(),
+                self.template_analysis_required(),
                 template_inputs,
                 analysis_started,
             ));
@@ -922,7 +912,10 @@ impl VerterHost {
         // lookup so a canonical with no artifact at all (the common probe
         // shape for unresolvable specifiers) costs no workspace
         // `file_exists` probe.
-        if !self.artifact_only_candidate_is_fresh(analysis_canonical, indexed.edge_generation) {
+        if !self.artifact_only_candidate_is_fresh(
+            analysis_canonical,
+            indexed.built_at_content_generation,
+        ) {
             return None;
         }
         // Edge-currency gate (same rationale as
@@ -1018,7 +1011,7 @@ impl VerterHost {
     /// Serving-class freshness for an artifact-only CANDIDATE: the
     /// authority gate ([`Self::artifact_only_authority_allows`]) PLUS the
     /// workspace's per-canonical content-transition rail — the
-    /// candidate's build generation (`IndexedReady.edge_generation`, the
+    /// candidate's build generation (`IndexedReady.built_at_content_generation`, the
     /// `content_generation` captured when the artifact was built from
     /// live workspace content) must be at-or-after the canonical's last
     /// recorded content transition. The workspace records transitions at
@@ -1056,6 +1049,7 @@ impl VerterHost {
     /// normalization candidate and must not fan workspace probes out
     /// over candidates that have no artifact at all).
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn artifact_only_entry_exists(&self, canonical_id: &str) -> bool {
         self.is_artifact_only_scope(canonical_id)
             && self
@@ -1101,8 +1095,11 @@ impl VerterHost {
         // scope's surviving artifact is a stale leftover. Gate evaluated
         // AFTER the artifact lookup so a canonical with no artifact costs
         // no workspace `file_exists` probe.
-        self.artifact_only_candidate_is_fresh(analysis_canonical, indexed.edge_generation)
-            .then_some(indexed)
+        self.artifact_only_candidate_is_fresh(
+            analysis_canonical,
+            indexed.built_at_content_generation,
+        )
+        .then_some(indexed)
     }
 
     /// Current-content-pinned [`crate::file_artifact_store::FileArtifacts`]
@@ -1166,8 +1163,11 @@ impl VerterHost {
             .project_type_store
             .indexed()
             .get_artifacts_any(analysis_canonical)?;
-        self.artifact_only_candidate_is_fresh(analysis_canonical, artifacts.indexed.edge_generation)
-            .then_some(artifacts)
+        self.artifact_only_candidate_is_fresh(
+            analysis_canonical,
+            artifacts.indexed.built_at_content_generation,
+        )
+        .then_some(artifacts)
     }
 
     /// Establish ONE tear-free
@@ -1514,19 +1514,28 @@ impl VerterHost {
             return Some(source);
         }
 
-        let dep_id = self
-            .resolve_loaded_dependency_canonical(
-                owner_canonical,
-                specifier,
-                verter_workspace::ResolveRequestKind::SfcSrcAttr,
-            )
-            .or_else(|| {
-                self.resolve_loaded_dependency_canonical(
-                    owner_canonical,
-                    specifier,
-                    verter_workspace::ResolveRequestKind::EsmImport,
-                )
-            })?;
+        let dep_id = match self.resolve_loaded_dependency_canonical(
+            owner_canonical,
+            specifier,
+            verter_workspace::ResolveRequestKind::SfcSrcAttr,
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                match admitted.into_result() {
+                    Some(resolved) => Some(resolved),
+                    None => match self.resolve_loaded_dependency_canonical(
+                        owner_canonical,
+                        specifier,
+                        verter_workspace::ResolveRequestKind::EsmImport,
+                    ) {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return None,
+                    },
+                }
+            }
+            verter_workspace::ResolutionPublication::Refused(_) => return None,
+        }?;
 
         self.get_source(&dep_id)
             .or_else(|| {
@@ -1546,28 +1555,57 @@ impl VerterHost {
         parent_canonical_id: &str,
         snapshot: &mut FileAnalysisSnapshot,
     ) {
-        for import in &mut snapshot.imports {
+        verter_workspace::probe_scope!(RESOLVE_SNAPSHOT_IMPS);
+        // Establish the owner's canonical post-parse artifact FIRST. The
+        // snapshot being enriched here is the owner's, and its authored
+        // import inventory is that artifact's shallow surface — so the
+        // artifact is this resolution's basis, not an incidental
+        // by-product. Two consequences ride on making the dependency
+        // explicit:
+        //
+        // * one shared file-ready/read/parse/shallow-process lifecycle —
+        //   a caller that reaches this path does not leave the canonical
+        //   unpublished for the next consumer to parse again;
+        // * a FENCED (ReturnOnly, `store_published == false`) serve marks
+        //   the enclosing cacheability scope, so a consumer building a
+        //   durable entry from a superseded basis refuses its own
+        //   admission.
+        let _ = self.ensure_indexed_ready_serve(parent_canonical_id);
+
+        let mut resolved_imports = Vec::new();
+        for (index, import) in snapshot.imports.iter().enumerate() {
             if import.resolved_canonical_id.is_none() {
-                import.resolved_canonical_id = self
+                let authoritative = self
                     .authoritative_import_route(parent_canonical_id, &import.source)
                     .and_then(|resolution| {
                         resolution
                             .resolved_canonical_id
                             .clone()
                             .or_else(|| resolution.effective_target().map(str::to_string))
-                    })
-                    .or_else(|| {
-                        let ctx = verter_workspace::ResolutionContext {
-                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                            kind: if import.is_type_only {
-                                verter_workspace::ResolveRequestKind::TypeImport
-                            } else {
-                                verter_workspace::ResolveRequestKind::EsmImport
-                            },
-                        };
-                        self.resolve_via_vfs(parent_canonical_id, &import.source, ctx)
                     });
+                let resolved = if authoritative.is_some() {
+                    authoritative
+                } else {
+                    let ctx = verter_workspace::ResolutionContext {
+                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                        kind: if import.is_type_only {
+                            verter_workspace::ResolveRequestKind::TypeImport
+                        } else {
+                            verter_workspace::ResolveRequestKind::EsmImport
+                        },
+                    };
+                    match self.resolve_via_vfs(parent_canonical_id, &import.source, ctx) {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return,
+                    }
+                };
+                resolved_imports.push((index, resolved));
             }
+        }
+        for (index, resolved) in resolved_imports {
+            snapshot.imports[index].resolved_canonical_id = resolved;
         }
     }
 
@@ -1669,29 +1707,74 @@ impl VerterHost {
         }
     }
 
-    /// Returns the monotonic diagnostics generation counter for a file.
-    /// Incremented on every write to `latest_diagnostics`. Used by the LSP
-    /// cache to detect host-driven recompiles without a document version change.
+    /// Returns the monotonic diagnostics generation counter for a file — the
+    /// EPOCH consumers stamp into a derived cache entry and re-validate that
+    /// entry against. Advanced on every write to `latest_diagnostics`, on
+    /// eviction (which clears them), and by [`Self::bump_diagnostics_generation`].
+    /// Used by the LSP cache to detect host-driven diagnostic changes that
+    /// move no document version.
+    ///
+    /// `None` means "this host has never recorded an epoch for the canonical",
+    /// and it is a value no advance can ever produce — the first advance
+    /// records `1`. That total ordering is what makes the epoch usable as a
+    /// fence: a reader may collapse `None` onto its own "nothing observed"
+    /// sentinel without that sentinel ever colliding with a recorded epoch.
+    ///
+    /// Deliberately NOT gated on the eviction flag. The epoch is not a
+    /// diagnostics payload: hiding it while `evict` was still advancing the
+    /// stored counter made an advance invisible to readers, so a reader that
+    /// sampled `None` before the advance and `None` after it could not tell
+    /// the two apart — the exact collision the fence exists to prevent. An
+    /// evicted file's diagnostics are already empty via
+    /// [`Self::get_diagnostics`], which owns that gate.
     pub fn get_diagnostics_generation(&self, canonical_or_alias: &str) -> Option<u64> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-
-        {
-            if self.is_canonical_evicted(&canonical) {
-                return None;
-            }
-            let cc = self.compile_cache().get(&canonical)?;
-            Some(cc.diagnostics_generation)
-        }
+        let cc = self.compile_cache().get(&canonical)?;
+        Some(cc.diagnostics_generation)
     }
 
-    /// Bump the diagnostics generation counter for a file without changing
-    /// its diagnostics.
+    /// Advance the diagnostics epoch for a file without changing its
+    /// diagnostics — the "everything derived from this file's diagnostics is
+    /// now stale" signal for readers that cannot see a document version move
+    /// (a file's parents after the file itself was edited, for one).
+    ///
+    /// The advance MUST be observable through
+    /// [`Self::get_diagnostics_generation`] for every canonical this host
+    /// knows, whether or not the file ever acquired a `ProfileState` row: a
+    /// row is created lazily by compilation and by dependency ingress, so an
+    /// open document that has never been compiled (a plain script, or any
+    /// carrier reopened onto the byte-identical-content upsert fast path
+    /// after an evict) can legitimately have none. Advancing only an existing
+    /// row made this a silent no-op for exactly those files, leaving their
+    /// readers unable to distinguish before from after.
+    ///
+    /// The no-op is preserved for a canonical this host does not know at all:
+    /// there is nothing to be stale about, and materialising state for an
+    /// unknown path would be an ingress side effect this method does not own.
     pub fn bump_diagnostics_generation(&self, canonical_or_alias: &str) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
         if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
             cc.diagnostics_generation += 1;
+            return;
         }
+        if !self.host_knows_canonical(&canonical) {
+            return;
+        }
+        // Racy-create is fine: `or_default` returns the row a concurrent
+        // writer installed, so the advance lands on whichever row wins.
+        let mut cc = self.compile_cache().entry(canonical).or_default();
+        cc.diagnostics_generation += 1;
+    }
+
+    /// True when this host has ingested the canonical at all — a committed
+    /// scheduler source, or any per-file row a prior ingest left behind.
+    /// Gates [`Self::bump_diagnostics_generation`]'s row materialisation so
+    /// it can never conjure state for a path the host has never seen.
+    fn host_knows_canonical(&self, canonical: &str) -> bool {
+        self.scheduler.try_get_source(canonical).is_some()
+            || self.derived_raw_cache().contains_key(canonical)
+            || self.dependency_cache().contains_key(canonical)
     }
 
     /// Clear all compile slots for a specific file.
@@ -1910,24 +1993,21 @@ impl VerterHost {
     ///
     /// `set_import_dependencies` is the **complete caller-supplied
     /// route-snapshot writer** for
-    /// [`DerivedRawState::import_routes`](crate::types::DerivedRawState)
-    /// AND the **single producer** of
-    /// [`DerivedRawState::import_routes_known_miss_recorded_at_generation`].
-    /// For every known-miss specifier in the supplied snapshot (no
-    /// resolved canonical, no candidates, no effective target), the
-    /// current workspace `content_generation` is recorded so the
-    /// reader can detect when a new canonical may now satisfy a
-    /// previously unresolvable specifier. Positive resolutions do
-    /// not need a generation tag — they stay valid until the
-    /// owner's source content changes.
+    /// [`DerivedRawState::import_routes`](crate::types::DerivedRawState).
+    /// Known-miss specifiers in the supplied snapshot (no resolved
+    /// canonical, no candidates, no effective target) carry no
+    /// currency stamp: a negative answer is not evidence that the
+    /// answer is still negative, so the reader always re-resolves it
+    /// through the one owner-edge authority. Positive resolutions are
+    /// caller-supplied and authoritative — they stay valid until the
+    /// owner's source content changes or the caller re-pushes.
     ///
-    /// Positive-only route point admission lives in
-    /// [`Self::cache_positive_import_route_result`]: that helper
-    /// must NOT touch the known-miss generation sidecar, and this
-    /// method must NOT be used as a positive-only point cache (doing
-    /// so would risk re-stamping a previously admitted known miss at
-    /// the current `content_generation` and incorrectly extending a
-    /// stale negative answer that should have re-resolved).
+    /// This is the ONLY writer of `DerivedRawState.import_routes`: the
+    /// host memoises no resolution there. A host-side positive-route
+    /// memo would duplicate the workspace's bounded owner-edge candidate
+    /// slot and, having no witness of its own, would need a global
+    /// `content_generation` equality to decide whether it was still
+    /// true.
     pub fn set_import_dependencies(
         &self,
         canonical_or_alias: &str,
@@ -1983,68 +2063,26 @@ impl VerterHost {
             deps.extend(Self::resolved_dependency_targets(&existing_routes));
             deps
         };
-        // Replace import_routes on DerivedRawState.
-        // R3/R26/R28: for each known-miss in the new map,
-        // record the workspace `content_generation` at admission so
-        // the reader can detect when a new canonical (which advances
-        // content_generation) may now satisfy the previously
-        // unresolvable specifier. The pushed POSITIVE resolutions are
-        // caller-supplied authoritative routes (the bundler tells the
-        // host how ITS resolver resolves and re-pushes on its own
-        // watch events), so they carry NO positive generation stamp —
-        // the wholesale replace also drops any host-memoized stamps
-        // from the previous table.
-        //
-        // EXEMPTION from the capture-before-resolve stamp discipline:
-        // this stamp is a LIVE read at record time, unlike the
-        // host-memoized positive stamps (which are captured by the
-        // resolving caller before its resolution runs). The resolution
-        // here ran in the CALLER's process (the bundler's own
-        // resolver) — there is no host-side pre-resolve point to
-        // capture. The record-time read is the tightest capture
-        // available, and the residual window (a file appears after the
-        // bundler resolved but before this push records — the miss is
-        // then stamped current for the remainder of this generation) is
-        // covered by the caller-authority contract itself: the bundler
-        // re-pushes on its own watch events, and any subsequent
-        // content-generation move stales the stamp and re-resolves the
-        // miss host-side.
-        let current_generation = self.ws().content_generation();
-        let mut known_miss_generations: rustc_hash::FxHashMap<String, u64> =
-            rustc_hash::FxHashMap::default();
-        for (specifier, res) in import_routes.iter() {
-            if res.resolved_canonical_id.is_none() && res.possible_canonical_ids.is_empty() {
-                known_miss_generations.insert(specifier.clone(), current_generation);
-            }
-        }
+        // Replace import_routes on DerivedRawState. Every entry is a
+        // caller-supplied authoritative route (the bundler tells the host
+        // how ITS resolver resolves and re-pushes on its own watch
+        // events); the host memoises nothing here, so the table is the
+        // caller's statement verbatim. Its currency rides the
+        // `ExactResolution` facts the exact-table sync below installs.
         {
             let mut derived_ref = self
                 .derived_raw_cache()
                 .entry(canonical.clone())
                 .or_default();
             derived_ref.value_mut().import_routes = import_routes.clone();
-            derived_ref
-                .value_mut()
-                .import_routes_known_miss_recorded_at_generation = known_miss_generations;
-            derived_ref
-                .value_mut()
-                .import_routes_positive_recorded_at_generation
-                .clear();
         }
+
         let old_transitive_deps = old_deps
             .difference(&old_direct_deps)
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();
 
         self.sync_transitive_macro_type_dependencies(&canonical, &old_transitive_deps);
-
-        // Admit the resolved-import facts bundle for the owner so
-        // downstream consumers (`RouteDb`, materialiser, etc.) can
-        // read resolved facts directly instead of re-walking the
-        // AST. First-writer-wins on the cache key composed of the
-        // owner's per-canonical env hashes. Skipping on duplicate
-        // keys keeps `Arc` identity stable for in-flight readers.
-        let _ = self.admit_resolved_import_facts_for_owner(&canonical, &import_routes);
 
         // Sync exact resolutions to workspace. The workspace's
         // `replace_exact_resolutions` is value-idempotent and reports
@@ -2056,6 +2094,20 @@ impl VerterHost {
             .ws()
             .set_exact_resolutions(&canonical, vfs_resolutions)
             .changed;
+
+        // Admit the resolved-import facts bundle for the owner so
+        // downstream consumers (`RouteDb`, materialiser, etc.) can
+        // read resolved facts directly instead of re-walking the AST.
+        //
+        // ORDERING: strictly AFTER the exact-resolution sync above. The
+        // bundle roots on the owner's import-route resolution witness,
+        // whose observations include the `ExactResolution` fact for each
+        // specifier. Admitting before the push would record the
+        // PRE-push exact version, which the push immediately advances —
+        // the candidate would never validate again and every read would
+        // rebuild it.
+        let _ = self.admit_resolved_import_facts_for_owner(&canonical, &import_routes);
+
         if !routes_changed && !exacts_changed {
             // TRUE no-op: nothing route-observable changed, so there is
             // nothing for a fence to make visible and nothing to evict.
@@ -2447,7 +2499,10 @@ impl VerterHost {
             phase: verter_workspace::ResolvePhase::CodegenBlocker,
             kind: verter_workspace::ResolveRequestKind::EsmImport,
         };
-        self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind)
+        match self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(_) => None,
+        }
     }
 
     #[cfg(test)]

@@ -17,6 +17,189 @@ use crate::type_provider::protocol::{
 use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 use crate::ProjectSyncMode;
 
+// ── synthetic store-backed workspace roots ────────────────────────────────
+//
+// Several tests below drive the real `CarrierPublishCoordinator` over the on-disk
+// carrier store, whose dir is `temp/verter-carrier-store/<host>/blake3(<ws_root>)`.
+// That dir is PROCESS-EXTERNAL, so a synthetic root shared by two concurrent test
+// processes aliases them onto ONE `manifest.json`. These helpers are the single seam
+// those roots come from.
+
+/// The synthetic workspace root for a store-backed server test, from the
+/// disambiguators a concurrent test run varies over.
+///
+/// `pid` is the load-bearing one: these tests run one per PROCESS, so the per-process
+/// counter in [`unique_server_ws_root`] reads 0 in every process, and
+/// `SystemTime::now()` is only MICROSECOND-resolution on macOS. Without the process
+/// identity the root collides whenever two test processes reach it inside the same
+/// microsecond.
+fn server_ws_root_for(tag: &str, pid: u32, nanos: u128, n: u64) -> String {
+    format!("/verter_{tag}_{pid}_{nanos}_{n}/ws")
+}
+
+/// A synthetic workspace root unique across concurrent PROCESSES — see
+/// [`server_ws_root_for`].
+fn unique_server_ws_root(tag: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    server_ws_root_for(tag, std::process::id(), nanos, n)
+}
+
+/// Read the carrier-store manifest for `ws_root` STRICTLY: `None` ONLY when the manifest
+/// genuinely does not exist, and a PANIC naming the cause for every other failure.
+///
+/// These tests must not read through `CarrierPublishStore::current_manifest`, which by
+/// design reports a fresh EMPTY manifest for an unreadable or unparseable one. That
+/// fail-open is right for a read-only diagnostics view and wrong here in two distinct
+/// ways: a presence `.expect(...)` would blame the PUBLISH for a STORE failure, and an
+/// ABSENCE assertion ("owner loss must retract the carrier") would pass VACUOUSLY
+/// because an empty manifest trivially satisfies "not owned".
+fn carrier_manifest_strict(ws_root: &str) -> Option<crate::external_ts::Manifest> {
+    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
+    let path = store.manifest_path();
+    match std::fs::read(&path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<crate::external_ts::Manifest>(&bytes).unwrap_or_else(|e| {
+                panic!(
+                    "the carrier-store oracle must surface a store failure rather than \
+                     report nothing published: manifest at {} is present but unparseable: {e}",
+                    path.display()
+                )
+            }),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => panic!(
+            "the carrier-store oracle must surface a store failure rather than report \
+             nothing published: manifest at {} is unreadable: {e} (kind={:?}, errno={:?})",
+            path.display(),
+            e.kind(),
+            e.raw_os_error()
+        ),
+    }
+}
+
+/// A synthetic store-backed workspace root must be unique across concurrent PROCESSES,
+/// not merely within one process.
+///
+/// These tests run one per PROCESS, so a per-process counter disambiguates nothing
+/// across them, and `SystemTime::now()` is only MICROSECOND-resolution on macOS. A root
+/// built from the clock alone aliases two test processes that reach it inside the same
+/// microsecond onto ONE on-disk carrier store and one `manifest.json`, where a
+/// read-modify-write from either erases the other's.
+#[test]
+fn synthetic_server_ws_root_is_unique_across_processes_not_only_within_one() {
+    // Same microsecond, same per-process counter, same tag — only the process differs.
+    const SAME_MICROSECOND: u128 = 1_785_068_278_682_867_000;
+    let a = server_ws_root_for("b1_prod", 4242, SAME_MICROSECOND, 0);
+    let b = server_ws_root_for("b1_prod", 4243, SAME_MICROSECOND, 0);
+    assert_ne!(
+        a, b,
+        "two test PROCESSES deriving a root in the same microsecond must not get the \
+         SAME workspace root"
+    );
+
+    // The consequence that actually bites: the derived store dirs must differ.
+    let host = crate::external_ts::default_carrier_store_host_version();
+    assert_ne!(
+        crate::external_ts::carrier_store_dir_for(host, &a),
+        crate::external_ts::carrier_store_dir_for(host, &b),
+        "distinct test processes must resolve DISTINCT carrier-store dirs; an aliased \
+         dir means two processes share one manifest"
+    );
+
+    // Distinct tags must stay distinct, and the within-process counter must still work.
+    assert_ne!(
+        server_ws_root_for("b1_prod", 4242, SAME_MICROSECOND, 0),
+        server_ws_root_for("b1_other", 4242, SAME_MICROSECOND, 0),
+        "two tags must not collapse onto one root"
+    );
+
+    // Every tag this file actually mints must be process-varying. `membership_publish`
+    // and `foreign_mapping` regressed by building their root from a function-local
+    // `AtomicUsize` starting at 0 instead of this seam: under one-test-per-process every
+    // process minted `_0`, so the root was a FIXED STRING shared by every process AND
+    // every run. `foreign_mapping` was the worse of the two — a SHARED fixture helper
+    // with two callers, so two concurrent processes aliased onto one manifest.
+    for tag in [
+        "editor_live",
+        "b1_prod",
+        "b1_other",
+        "reqsurf_pub",
+        "membership_publish",
+        "foreign_mapping",
+    ] {
+        assert_ne!(
+            server_ws_root_for(tag, 4242, SAME_MICROSECOND, 0),
+            server_ws_root_for(tag, 4243, SAME_MICROSECOND, 0),
+            "tag {tag} must vary with the process identity"
+        );
+    }
+    assert_ne!(
+        server_ws_root_for("b1_prod", 4242, SAME_MICROSECOND, 0),
+        server_ws_root_for("b1_prod", 4242, SAME_MICROSECOND, 1),
+        "two roots taken inside one microsecond by ONE process must still differ"
+    );
+
+    // And the live derivation must actually vary the process identity in.
+    let live = unique_server_ws_root("b1_prod");
+    assert!(
+        live.starts_with(&format!("/verter_b1_prod_{}_", std::process::id())),
+        "unique_server_ws_root must carry this process's identity; got {live}"
+    );
+}
+
+/// The carrier-store oracle must surface an unreadable / unparseable manifest as a
+/// FAILURE, never launder it into "nothing is published".
+///
+/// `CarrierPublishStore::current_manifest` deliberately reports a fresh EMPTY manifest
+/// for a corrupt one — correct for a read-only diagnostics view, wrong beneath these
+/// tests' assertions. Two shapes go wrong: a presence `.expect(...)` blames the publish
+/// instead of the store, and an ABSENCE assertion (`owner loss must retract`) passes
+/// VACUOUSLY because an empty manifest trivially satisfies "not owned".
+#[test]
+fn carrier_manifest_oracle_reports_a_corrupt_manifest_as_a_failure_not_as_absence() {
+    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
+
+    let corrupt_root = unique_server_ws_root("oracle_corrupt");
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &corrupt_root);
+    std::fs::create_dir_all(store.workspace_dir()).expect("create the store dir");
+    std::fs::write(store.manifest_path(), b"{ this manifest is truncated")
+        .expect("write a corrupt manifest");
+
+    // Pin the fail-open behaviour of the diagnostics reader the oracle must NOT inherit.
+    assert!(
+        store.current_manifest().projects.is_empty(),
+        "the diagnostics reader is fail-open by design; this pins what the oracle must \
+         not inherit"
+    );
+
+    let detail = std::panic::catch_unwind(|| carrier_manifest_strict(&corrupt_root)).expect_err(
+        "a present-but-corrupt manifest must be a hard FAILURE from the oracle, never an \
+         empty manifest that reads as nothing being published",
+    );
+    let message = detail
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_else(|| "<non-string panic>".to_string());
+    assert!(
+        message.contains("unparseable"),
+        "the failure must name the actual cause; got {message:?}"
+    );
+
+    // A genuinely absent manifest stays distinguishable from a corrupt one.
+    let absent_root = unique_server_ws_root("oracle_absent");
+    assert!(
+        carrier_manifest_strict(&absent_root).is_none(),
+        "a store that was never published must read as None, not as a failure"
+    );
+}
+
 #[derive(Default)]
 struct SlowConfigurePathsProvider {
     configure_paths_started: AtomicUsize,
@@ -1123,7 +1306,11 @@ fn install_test_resolver_for_root_with_options(
         snapshot,
         Box::new(views),
     ));
-    server.install_vfs_workspace(vfs_ws);
+    // This helper models the completed production publication, so install the
+    // authoritative workspace into both the server and the host. A server-only
+    // handle would leave rename admission reading the host's earlier
+    // non-authoritative graph.
+    server.swap_vfs_workspace(vfs_ws);
 }
 
 /// A `FilesystemWorkspace` publishing ONE `Configured` project owning everything under
@@ -1584,10 +1771,30 @@ fn test_analyzed_module_reference(
     }
 }
 
-#[derive(Default)]
 struct TestResolverReader {
     files: HashSet<String>,
     texts: HashMap<String, Arc<str>>,
+    workspace: verter_workspace::MemoryWorkspace,
+}
+
+impl Default for TestResolverReader {
+    fn default() -> Self {
+        let workspace =
+            verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default());
+        verter_workspace::WorkspaceAccess::configure_resolver(
+            &workspace,
+            vec![crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.json".to_string()),
+            )],
+        );
+        Self {
+            files: HashSet::new(),
+            texts: HashMap::new(),
+            workspace,
+        }
+    }
 }
 
 impl TestResolverReader {
@@ -1598,7 +1805,10 @@ impl TestResolverReader {
             reader.files.insert(normalized.clone());
             reader
                 .texts
-                .insert(normalized, Arc::<str>::from("// test file"));
+                .insert(normalized.clone(), Arc::<str>::from("// test file"));
+            reader
+                .workspace
+                .inject_file(normalized, Arc::<str>::from("// test file"));
         }
         reader
     }
@@ -1616,6 +1826,34 @@ impl verter_workspace::WorkspaceRead for TestResolverReader {
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         let normalized = canonical_id.replace('\\', "/");
         self.file_exists(&normalized).then_some(normalized)
+    }
+
+    fn resolve_import(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> Option<verter_workspace::ResolveResult> {
+        verter_workspace::WorkspaceRead::resolve_import(
+            &self.workspace,
+            importer_id,
+            specifier,
+            ctx,
+        )
+    }
+
+    fn resolve_import_outcome(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> verter_workspace::ResolutionOutcome {
+        verter_workspace::WorkspaceRead::resolve_import_outcome(
+            &self.workspace,
+            importer_id,
+            specifier,
+            ctx,
+        )
     }
 
     fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
@@ -1661,6 +1899,54 @@ impl verter_workspace::WorkspaceAccess for TestResolverReader {
     }
     fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
     fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
+}
+
+struct ReturnOnlyResolverReader;
+
+impl verter_workspace::WorkspaceRead for ReturnOnlyResolverReader {
+    fn read_file(&self, _canonical_id: &str) -> Option<Arc<str>> {
+        None
+    }
+
+    fn file_exists(&self, canonical_id: &str) -> bool {
+        canonical_id == "/workspace/src/dep.ts"
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        self.file_exists(canonical_id)
+            .then(|| canonical_id.to_string())
+    }
+
+    fn resolve_import(
+        &self,
+        _importer_id: &str,
+        specifier: &str,
+        _ctx: verter_workspace::ResolutionContext,
+    ) -> Option<verter_workspace::ResolveResult> {
+        (specifier == "./dep").then(|| verter_workspace::ResolveResult {
+            source_id: "/workspace/src/dep.ts".to_string(),
+            provider_id: "/workspace/src/dep.ts".to_string(),
+            provider_specifier: "./dep".to_string(),
+            provider_target: verter_workspace::ProviderTarget::SourceFile,
+            resolution_kind: verter_workspace::ResolutionKind::Relative,
+            owner_tsconfig_path: Some("/workspace/tsconfig.json".to_string()),
+        })
+    }
+
+    fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn dependency_snapshot(
+        &self,
+        _canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        None
+    }
 }
 
 async fn make_definition_test_server(
@@ -1713,6 +1999,47 @@ async fn make_definition_test_server_with_kind_and_deadlines(
     Arc<MockTypeProvider>,
     String,
 ) {
+    let mut host_config = HostConfig::default();
+    host_config.lsp_method_timeouts.request_deadlines = request_deadlines;
+    make_definition_test_server_with_config(files, kind, host_config, true).await
+}
+
+/// Build the production default-profile definition server: the projection host
+/// runs BUILD and optional semantic analysis stays off. Carrier `did_open`
+/// still compiles the normal IDE + TEMPLATE_DATA projection.
+async fn make_default_profile_definition_test_server(
+    files: &[(&str, &str, &str)],
+) -> (
+    tempfile::TempDir,
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tokio::task::JoinHandle<()>,
+    Arc<MockTypeProvider>,
+    String,
+) {
+    make_definition_test_server_with_config(
+        files,
+        crate::TypeProviderKind::Tsserver,
+        HostConfig {
+            analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+            ..HostConfig::default()
+        },
+        false,
+    )
+    .await
+}
+
+async fn make_definition_test_server_with_config(
+    files: &[(&str, &str, &str)],
+    kind: crate::TypeProviderKind,
+    host_config: HostConfig,
+    enable_semantic_analysis: bool,
+) -> (
+    tempfile::TempDir,
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tokio::task::JoinHandle<()>,
+    Arc<MockTypeProvider>,
+    String,
+) {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
@@ -1733,8 +2060,6 @@ async fn make_definition_test_server_with_kind_and_deadlines(
     let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
     );
-    let mut host_config = HostConfig::default();
-    host_config.lsp_method_timeouts.request_deadlines = request_deadlines;
     let host = Arc::new(VerterHost::new(host_config, vfs_workspace));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
@@ -1754,13 +2079,16 @@ async fn make_definition_test_server_with_kind_and_deadlines(
             },
         )
     });
-    // Definition-server fixtures also back the native component/directive/slot
-    // hover contract matrix. Keep that optional lane explicit in tests now that
-    // the production initialization default is disabled.
-    service
-        .inner()
-        .hover_native_semantics_enabled
-        .store(true, std::sync::atomic::Ordering::Release);
+    if enable_semantic_analysis {
+        // Definition-server fixtures also back the native
+        // component/directive/slot hover contract matrix. Keep that optional
+        // lane explicit in tests now that the production initialization default
+        // is disabled.
+        service
+            .inner()
+            .hover_native_semantics_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
     let drain_handle = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -1768,13 +2096,15 @@ async fn make_definition_test_server_with_kind_and_deadlines(
 
     let workspace_id = crate::test_utils::canonical_test_path(&workspace);
     let server = service.inner();
-    server.documents.set_semantic_analysis_enabled(true);
+    if enable_semantic_analysis {
+        server.documents.set_semantic_analysis_enabled(true);
+    }
     let ide_project = crate::project_resolver::IdeProjectConfig::new(
         workspace_id.clone(),
         workspace_id.clone(),
         Some(format!("{workspace_id}/tsconfig.json")),
     );
-    // Sync resolver to host's VFS so resolve_import_via_workspace works
+    // Sync resolver to host's VFS so resolve_import_transient works
     host.configure_projects(vec![ide_project]);
     install_test_resolver_for_root(
         server,
@@ -1793,7 +2123,7 @@ async fn make_definition_test_server_with_kind_and_deadlines(
             version: 1,
             text: (*source).to_string(),
         });
-        if matches!(*language_id, "vue" | "svelte") {
+        if enable_semantic_analysis && matches!(*language_id, "vue" | "svelte") {
             scheduled_semantic += 1;
             server.documents.schedule_semantic_analysis(&uri);
         }
@@ -1811,14 +2141,7 @@ async fn make_definition_test_server_with_kind_and_deadlines(
     (temp, service, drain_handle, provider, workspace_id)
 }
 
-fn fixture_workspace_root(name: &str) -> String {
-    let path = std::fs::canonicalize(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(format!("../../packages/vue-vscode/e2e/fixtures/{name}")),
-    )
-    .expect("fixture workspace path should canonicalize");
-    crate::test_utils::canonical_test_path(&path)
-}
+use crate::test_harness::fixture_workspace_root;
 
 #[test]
 fn fixture_workspace_root_returns_canonical_path() {
@@ -2010,6 +2333,50 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
     );
 }
 
+/// A result-only adapter has no immutable-world witness. Its useful transient
+/// target must therefore never become a provider buffer or an exact host route.
+#[test]
+fn provider_sync_refuses_return_only_resolution_products() {
+    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let source = "import { value } from './dep';\n";
+    let expr = "'./dep'";
+    let start = source.find(expr).expect("fixture import");
+
+    let prepared = prepare_non_carrier_provider_sync(
+        Some(&PublishedResolverSnapshot {
+            resolver,
+            resolution_view: None,
+            ownership_ready: true,
+        }),
+        &ReturnOnlyResolverReader,
+        "/workspace/src/App.ts",
+        source,
+        &[test_module_reference(
+            expr,
+            Some("./dep"),
+            &[],
+            verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+            start,
+            start + expr.len(),
+        )],
+    );
+
+    assert!(
+        prepared.is_none(),
+        "ResolutionUntrackedBackend must stop the whole resolution-derived provider product"
+    );
+
+    // Mutation recipe: project the adapter outcome through the transient result
+    // path in either rewrite or dependency collection. Preparation becomes Some
+    // and the downstream sync/route sinks can publish the unwitnessed target.
+}
+
 #[test]
 fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
     let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
@@ -2033,6 +2400,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
     let prepared = prepare_non_carrier_provider_sync(
         Some(&PublishedResolverSnapshot {
             resolver,
+            resolution_view: None,
             ownership_ready: true,
         }),
         &reader,
@@ -2127,6 +2495,7 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
 
     let resolved = collect_resolved_provider_dependencies_from_analyzed_refs(
         &resolver,
+        None,
         &reader,
         "/workspace/src/TempImporter.vue",
         &[
@@ -2147,7 +2516,8 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
                 child_start + child_expr.len(),
             ),
         ],
-    );
+    )
+    .expect("memory-backed resolution is publishable");
 
     let resolved_sources = resolved
         .iter()
@@ -2827,6 +3197,49 @@ fn on_type_formatting_triggers_on_gt_only_not_slash() {
     );
 }
 
+/// The advertised semantic-token legend IS the shared mapping owner's
+/// published vocabulary, name-for-name and index-for-index. Every provider
+/// lane remaps its token space into `verter_type_runtime::semantic_tokens`'
+/// published indices, so a wire legend that drifts from those arrays re-opens
+/// the exact index-space mismatch this pin exists to prevent.
+#[test]
+fn advertised_semantic_token_legend_is_the_shared_owners_published_vocabulary() {
+    use tower_lsp_server::ls_types::SemanticTokensServerCapabilities;
+
+    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let Some(SemanticTokensServerCapabilities::SemanticTokensOptions(options)) =
+        caps.semantic_tokens_provider.as_ref()
+    else {
+        panic!("semantic tokens must be advertised as SemanticTokensOptions");
+    };
+
+    let advertised_types: Vec<&str> = options
+        .legend
+        .token_types
+        .iter()
+        .map(|t| t.as_str())
+        .collect();
+    assert_eq!(
+        advertised_types,
+        verter_type_runtime::semantic_tokens::VERTER_TOKEN_TYPES.to_vec(),
+        "legend token types must equal the shared owner's published array, in order"
+    );
+
+    let advertised_modifiers: Vec<&str> = options
+        .legend
+        .token_modifiers
+        .iter()
+        .map(|m| m.as_str())
+        .collect();
+    assert_eq!(
+        advertised_modifiers,
+        verter_type_runtime::semantic_tokens::VERTER_TOKEN_MODIFIERS.to_vec(),
+        "legend token modifiers must equal the shared owner's published array, in order \
+         (including the TypeScript-family `local` bit — without it every \
+         function-scoped binding's token fails closed and disappears)"
+    );
+}
+
 /// The advertised `resolve_provider` capability is HONEST: it mirrors the
 /// `resolve_provider` argument (which the initialize handler derives from the
 /// active provider's `supports_completion_resolve`), never a hard-coded `true`.
@@ -3112,13 +3525,10 @@ async fn editor_tsserver_yields_only_rename_and_keeps_serving_merged_features() 
     );
 }
 
-/// Publish a READY root with TWO sibling configured projects (`tsconfig.json` +
-/// `tsconfig.app.json`) both `include`-ing everything under `root`, with no
-/// reference edge — so every carrier under `root` is a genuine MULTI-CLAIMANT
-/// overlap (`configured_owner_resolution_for_file` ⇒ `Ambiguous`) onto an EXISTING
-/// workspace. Published LAST (after server construction + `did_open`) so it wins
-/// over any bootstrap/rescan root those steps publish.
-fn publish_multi_claimant_root(vfs_ws: &verter_workspace::FilesystemWorkspace, root: &str) {
+fn configured_claimant_snapshot(
+    root: &str,
+    tsconfig_names: &[&str],
+) -> Arc<verter_workspace::WorkspaceSnapshot> {
     let root_cp = verter_workspace::CanonicalPath::new(root);
     let make_configured = |tsconfig: &str| {
         let spec = verter_workspace::StaticMembershipSpec {
@@ -3150,21 +3560,67 @@ fn publish_multi_claimant_root(vfs_ws: &verter_workspace::FilesystemWorkspace, r
             },
         }
     };
-    let projects = vec![
-        make_configured(&format!("{root}/tsconfig.json")),
-        make_configured(&format!("{root}/tsconfig.app.json")),
-    ];
-    let snapshot = std::sync::Arc::new(
+    let projects = tsconfig_names
+        .iter()
+        .map(|name| make_configured(&format!("{root}/{name}")))
+        .collect();
+    Arc::new(
         verter_workspace::snapshot_builder::build_workspace_snapshot_simple(
             projects,
             verter_workspace::workspace_snapshot::SnapshotGeneration(1),
         ),
-    );
+    )
+}
+
+/// Publish a READY root with TWO sibling configured projects (`tsconfig.json` +
+/// `tsconfig.app.json`) both `include`-ing everything under `root`, with no
+/// reference edge — so every carrier under `root` is a genuine MULTI-CLAIMANT
+/// overlap (`configured_owner_resolution_for_file` ⇒ `Ambiguous`) onto an EXISTING
+/// workspace. Published LAST (after server construction + `did_open`) so it wins
+/// over any bootstrap/rescan root those steps publish.
+fn publish_multi_claimant_root(vfs_ws: &verter_workspace::FilesystemWorkspace, root: &str) {
+    let snapshot = configured_claimant_snapshot(root, &["tsconfig.json", "tsconfig.app.json"]);
     let views = crate::workspace_state::build_lsp_views(vfs_ws, &snapshot, vec![]);
     vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
         snapshot,
         Box::new(views),
     ));
+}
+
+/// Build a provider-backed rename server without the managed carrier-publish
+/// coordinator. That keeps this admission test focused: before the admission
+/// fix, the provider request reaches the mock and exposes the partial edit
+/// instead of being independently stopped by workspace-frontier readiness.
+fn make_claimancy_rename_test_server(
+    ws: Arc<verter_workspace::FilesystemWorkspace>,
+) -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tower_lsp_server::ClientSocket,
+    Arc<MockTypeProvider>,
+) {
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws));
+    let provider = Arc::new(MockTypeProvider::new());
+    let host_for_server = Arc::clone(&host);
+    let provider_for_server: Arc<dyn TypeProvider> = provider.clone();
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&provider_for_server)),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::None,
+                type_provider_topology: crate::TypeProviderTopology::implied_by(
+                    crate::TypeProviderKind::None,
+                ),
+                mcp_port: None,
+                type_provider_reason: Some("test provider".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    (service, socket, provider)
 }
 
 // A carrier owned by MULTIPLE configured projects must FAIL rename CLOSED (a
@@ -3212,7 +3668,10 @@ async fn multi_claimant_carrier_fails_rename_closed_never_partial() {
     // `did_open` — so it is the authoritative root the rename gate observes.
     publish_multi_claimant_root(&ws, "/workspace");
     assert!(
-        server.carrier_is_multi_claimant(&uri),
+        matches!(
+            server.carrier_multi_claimancy(&uri),
+            super::provider_state::CarrierMultiClaimancy::Ready
+        ),
         "the carrier must be detected as multi-claimant for this test to be meaningful"
     );
     let position = find_document_position(server, &uri, "shared", 0);
@@ -3254,11 +3713,350 @@ async fn multi_claimant_carrier_fails_rename_closed_never_partial() {
     }
 }
 
+// Genuine-bootstrap mirror of
+// `multi_claimant_carrier_fails_rename_closed_never_partial`. The workspace is
+// left on the exact eager root `Engine::new()` publishes: ownership is not
+// authoritative and the project graph is empty. Rename must not infer unique
+// ownership from that absence of claimants.
+//
+// DISCRIMINATING: without the authority-first check, the gate recognizes a cold
+// snapshot only when its already-populated graph says `Ambiguous`. Against the
+// genuine empty bootstrap root it returns `NotMultiClaimant`; both prepare and
+// rename proceed, and the injected provider's single-file `WorkspaceEdit`
+// escapes.
+#[tokio::test(flavor = "multi_thread")]
+async fn genuine_bootstrap_carrier_fails_rename_closed_never_partial() {
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let (service, _socket, provider) = make_claimancy_rename_test_server(Arc::clone(&ws));
+    let server = service.inner();
+
+    let source = "<script setup lang=\"ts\">\nexport const shared = 1\n</script>\n<template><div>{{ shared }}</div></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+    let bootstrap = ws
+        .load_published()
+        .expect("Engine::new must eagerly publish the bootstrap root");
+    assert!(
+        !bootstrap.ownership_ready
+            && bootstrap.snapshot.projects.is_empty()
+            && matches!(
+                server.carrier_multi_claimancy(&uri),
+                super::provider_state::CarrierMultiClaimancy::NotReady
+            ),
+        "the genuine empty bootstrap graph must classify carrier rename as NotReady, got \
+         ownership_ready={}, projects={}, claimancy={:?}",
+        bootstrap.ownership_ready,
+        bootstrap.snapshot.projects.len(),
+        server.carrier_multi_claimancy(&uri),
+    );
+    let position = find_document_position(server, &uri, "{{ shared }}", 3);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+    let after_sync = ws
+        .load_published()
+        .expect("provider sync must leave the eager bootstrap root published");
+    assert!(
+        Arc::ptr_eq(&bootstrap, &after_sync)
+            && !after_sync.ownership_ready
+            && after_sync.snapshot.projects.is_empty()
+            && matches!(
+                server.carrier_multi_claimancy(&uri),
+                super::provider_state::CarrierMultiClaimancy::NotReady
+            ),
+        "provider sync helpers must not manufacture ownership authority; got \
+         same_root={}, ownership_ready={}, projects={}, claimancy={:?}",
+        Arc::ptr_eq(&bootstrap, &after_sync),
+        after_sync.ownership_ready,
+        after_sync.snapshot.projects.len(),
+        server.carrier_multi_claimancy(&uri),
+    );
+    let ctx = synced_type_provider_context(server, &uri).await;
+    let usage_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("usage position should map into TSX");
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        usage_offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: ctx.tsx_path.clone(),
+            start: usage_offset,
+            end: usage_offset + "shared".len() as u32,
+        }],
+    );
+
+    let rename = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "renamed".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await;
+    match rename {
+        Err(err) => assert!(
+            err.message.contains("authoritative project ownership"),
+            "the bootstrap refusal must explain the missing authority, got {err:?}"
+        ),
+        Ok(edit) => {
+            panic!("a genuine-bootstrap carrier must NEVER return a rename edit, got {edit:?}")
+        }
+    }
+
+    let prepare = super::rename_prepare::handle_prepare_rename(
+        server,
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position,
+        },
+    )
+    .await;
+    match prepare {
+        Err(err) => assert!(
+            err.message.contains("authoritative project ownership"),
+            "prepare-rename must expose the missing-authority cause, got {err:?}"
+        ),
+        Ok(response) => {
+            panic!("prepare-rename must expose the bootstrap refusal, got {response:?}")
+        }
+    }
+}
+
+/// Proves that rename admission refuses a pre-scripted provider response when
+/// the ownership authority-assignment marker moves away from the published root
+/// generation during the provider await. The rebuild pauses in `configure_paths`
+/// after assigning the new authority but before production's per-file rebinding
+/// step and before publishing the rebuilt root; releasing it afterward also
+/// proves that the held rebuild publishes the expected ambiguous graph.
+///
+/// This mock's response is independent of ownership, and its open/query paths do
+/// not consume the stored authority or perform production's `resync_open_files`
+/// rebinding. This test therefore does NOT prove that an open provider file moved
+/// to the rebuilt winner.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_refuses_when_ownership_assignment_marker_moves_during_provider_await() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("workspace source dir");
+    let source = "<script setup lang=\"ts\">\nexport const shared = 1\n</script>\n<template><div>{{ shared }}</div></template>\n";
+    std::fs::write(workspace.join("src/App.vue"), source).expect("write carrier");
+    let config = r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] }
+  },
+  "include": ["src/**/*.vue"]
+}"#;
+    std::fs::write(workspace.join("tsconfig.zzz.json"), config)
+        .expect("write initial unique config");
+
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let (service, socket, provider) = make_claimancy_rename_test_server(Arc::clone(&ws));
+    let drain_handle = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    server.swap_vfs_workspace(Arc::clone(&ws));
+    server.vite_config_options.lock().await.enabled = false;
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_id)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    server
+        .spawn_background_init(None, "stale-authority regression initial build")
+        .await;
+    let initial_root = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(root) = ws.load_published() {
+                if root.ownership_ready
+                    && root.snapshot.generation
+                        == verter_workspace::workspace_snapshot::SnapshotGeneration(1)
+                {
+                    break root;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial background init must publish a ready root");
+
+    let canonical = format!("{workspace_id}/src/App.vue");
+    let initial_resolution = initial_root
+        .snapshot
+        .configured_owner_resolution_for_file(&canonical);
+    assert!(
+        matches!(
+            initial_resolution,
+            verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Unique(_)
+        ),
+        "the pre-rebuild root must genuinely prove unique ownership, got \
+         {initial_resolution:?} from projects {:?}",
+        initial_root
+            .snapshot
+            .projects
+            .iter()
+            .map(|project| (&project.root, &project.payload))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        matches!(
+            provider.configured_owner(&canonical),
+            Some(verter_type_runtime::traits::ProjectOwnership::Owned(owner))
+                if owner.config_path.ends_with("/tsconfig.zzz.json")
+        ),
+        "the provider must initially consume the unique root's owner"
+    );
+
+    let uri = open_test_vue(server, &canonical, source);
+    let position = find_document_position(server, &uri, "{{ shared }}", 3);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+    let ctx = synced_type_provider_context(server, &uri).await;
+    let usage_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("usage position should map into TSX");
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        usage_offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: ctx.tsx_path.clone(),
+            start: usage_offset,
+            end: usage_offset + "shared".len() as u32,
+        }],
+    );
+
+    // Suspend the provider response only after admission has observed a matching
+    // initial marker/root generation. The rebuild then advances the assignment
+    // marker while this exact request is awaiting its answer.
+    let (rename_arrived, rename_release) = provider.block_get_rename_locations(&ctx.tsx_path);
+    let (configure_arrived, configure_release) = provider.block_configure_paths();
+    let rename = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "renamed".into(),
+            work_done_progress_params: Default::default(),
+        },
+    );
+    let rebuild_during_provider_await = async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            rename_arrived.notified(),
+        )
+        .await
+        .expect("rename must reach the provider under the initial ownership witness");
+
+        std::fs::write(workspace.join("tsconfig.json"), config)
+            .expect("add the second claimant config");
+        server
+            .spawn_background_init(None, "stale-authority regression rebuild")
+            .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            configure_arrived.notified(),
+        )
+        .await
+        .expect("rebuild must pause after installing provider ownership");
+
+        let held_root = ws
+            .load_published()
+            .expect("the previous ready root must remain published during rebuild");
+        assert!(
+            Arc::ptr_eq(&initial_root, &held_root)
+                && held_root.ownership_ready
+                && matches!(
+                    held_root
+                        .snapshot
+                        .configured_owner_resolution_for_file(&canonical),
+                    verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Unique(_)
+                ),
+            "the held rebuild window must expose the old ready Unique root"
+        );
+        assert!(
+            matches!(
+                provider.configured_owner(&canonical),
+                Some(verter_type_runtime::traits::ProjectOwnership::Owned(owner))
+                    if owner.config_path.ends_with("/tsconfig.json")
+            ),
+            "the mock must expose the rebuilt authority's new default winner"
+        );
+        assert!(
+            matches!(
+                server.carrier_multi_claimancy(&uri),
+                super::provider_state::CarrierMultiClaimancy::NotReady
+            ),
+            "a new request entering the root/provider mismatch must refuse as NotReady"
+        );
+
+        rename_release.notify_one();
+    };
+    let (rename, ()) = futures_util::future::join(rename, rebuild_during_provider_await).await;
+    match rename {
+        Err(err) => assert!(
+            err.message.contains("ownership changed"),
+            "the rebuild-window refusal must name ownership instability, got {err:?}"
+        ),
+        Ok(edit) => panic!(
+            "a stale ready root must NEVER license a provider rename after ownership moved, \
+             got {edit:?}"
+        ),
+    }
+
+    configure_release.notify_one();
+    let rebuilt_root = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(root) = ws.load_published() {
+                if root.snapshot.generation
+                    == verter_workspace::workspace_snapshot::SnapshotGeneration(2)
+                {
+                    break root;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("released rebuild must publish its root");
+    assert!(
+        rebuilt_root.ownership_ready
+            && matches!(
+                rebuilt_root
+                    .snapshot
+                    .configured_owner_resolution_for_file(&canonical),
+                verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Ambiguous(_)
+            ),
+        "the exact held rebuild must publish the ambiguous graph"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 // Positive control for the multi-claimant fail-closed rename gate: a UNIQUE
-// (single-claimant) carrier must STILL rename normally — a real `WorkspaceEdit`,
-// never the fail-closed error. This guards against an over-broad regression where
-// the `carrier_is_multi_claimant` gate fires on a normally-owned carrier and breaks
-// rename everywhere. Rename behavior itself is UNTOUCHED — this is a guard test.
+// carrier in an AUTHORITATIVE snapshot must STILL rename normally — a real
+// `WorkspaceEdit`, never the fail-closed error. This guards against an over-broad
+// regression where rename is refused after ownership publication.
 //
 // DISCRIMINATING: widen the gate to fire on a unique carrier and `prepare` becomes
 // `Err` / `rename` becomes the fail-closed `Err`, failing the assertions below.
@@ -3270,11 +4068,37 @@ async fn unique_carrier_still_renames_normally_not_fail_closed() {
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
     let server = service.inner();
 
-    // The carrier has a SINGLE configured owner — the multi-claimant fail-closed gate
-    // must NOT apply.
+    let canonical = server
+        .documents
+        .get_canonical_id(&app_uri)
+        .expect("the open carrier must have a canonical id");
+    let published = server
+        .documents
+        .host()
+        .workspace_read()
+        .published_root()
+        .expect("the definition fixture must publish its ownership graph");
+    // The carrier has a SINGLE configured owner in an AUTHORITATIVE snapshot —
+    // the admission gate must serve.
     assert!(
-        !server.carrier_is_multi_claimant(&app_uri),
-        "a normally-owned carrier must not be classified multi-claimant"
+        published.ownership_ready
+            && matches!(
+                published
+                    .snapshot
+                    .configured_owner_resolution_for_file(&canonical),
+                verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Unique(_)
+            )
+            && matches!(
+                server.carrier_multi_claimancy(&app_uri),
+                super::provider_state::CarrierMultiClaimancy::NotMultiClaimant(_)
+            ),
+        "the control must be authoritatively unique and admitted, got \
+         ownership_ready={}, resolution={:?}, claimancy={:?}",
+        published.ownership_ready,
+        published
+            .snapshot
+            .configured_owner_resolution_for_file(&canonical),
+        server.carrier_multi_claimancy(&app_uri),
     );
 
     let position = find_document_position(server, &app_uri, "{{ vueTsTitle }}", 3);
@@ -3355,13 +4179,7 @@ async fn unique_carrier_still_renames_normally_not_fail_closed() {
 /// branch as managed tsserver, not the direct-open branch used by tsgo.
 #[tokio::test(flavor = "multi_thread")]
 async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
-    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
-
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let workspace_root = format!("/verter_editor_live_{nanos}/ws");
+    let workspace_root = unique_server_ws_root("editor_live");
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     let canonical_id = format!("{workspace_root}/src/App.vue");
 
@@ -3390,8 +4208,8 @@ async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
     let uri = open_test_vue(server, &canonical_id, initial);
     assert!(server.publish_carrier_to_external_ts(&canonical_id).await);
 
-    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &workspace_root);
-    let initial_manifest = store.current_manifest();
+    let initial_manifest = carrier_manifest_strict(&workspace_root)
+        .expect("the editor-owned publish must have written a manifest");
     let initial_ide = initial_manifest
         .projects
         .get(&tsconfig)
@@ -3410,7 +4228,8 @@ async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
     );
     assert!(server.publish_carrier_to_external_ts(&canonical_id).await);
 
-    let updated_manifest = store.current_manifest();
+    let updated_manifest = carrier_manifest_strict(&workspace_root)
+        .expect("the post-edit republish must have written a manifest");
     let updated_ide = updated_manifest
         .projects
         .get(&tsconfig)
@@ -3795,7 +4614,7 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
         },
     ];
 
-    let ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
+    let ids = collect_imported_carrier_priority_ids_from_imports_with_transient_fallback(
         &imports,
         Some("/workspace/src/TemplateSlotCases.vue"),
         |parent, specifier| {
@@ -3819,7 +4638,84 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
 }
 
 #[test]
+fn refused_later_carrier_resolution_discards_the_entire_priority_batch() {
+    let imports = vec![
+        verter_semantic::analysis::AnalyzedImport {
+            source: "./First.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            is_type_only: false,
+            bindings: Vec::new(),
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: Some("/workspace/src/First.vue".to_string()),
+        },
+        verter_semantic::analysis::AnalyzedImport {
+            source: "./Second.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            is_type_only: false,
+            bindings: Vec::new(),
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: None,
+        },
+    ];
+
+    let publication = collect_imported_carrier_priority_ids_from_imports_for_publication(
+        &imports,
+        Some("/workspace/src/App.vue"),
+        |_parent, _specifier| {
+            verter_workspace::ResolutionPublication::refused(
+                verter_audit::NonAdmissionReason::ResolutionUntrackedBackend,
+            )
+        },
+    );
+
+    assert!(
+        publication.is_err(),
+        "a later refusal must discard the earlier admitted carrier instead of publishing a partial batch"
+    );
+}
+
+#[test]
 fn did_open_resolves_carrier_working_set_from_upsert_import_facts() {
+    use verter_workspace::{WorkspaceAccess, WorkspaceRead};
+
+    let workspace =
+        verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default());
+    workspace.set_project_graph(verter_workspace::ProjectGraph::from_configs(vec![
+        verter_workspace::VfsProjectConfig {
+            root: "/workspace".to_string(),
+            rank: verter_workspace::ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: Vec::new(),
+            extensions: vec![".ts".to_string(), ".vue".to_string(), ".svelte".to_string()],
+            workspace_root: "/workspace".to_string(),
+            workspace_aliases: Vec::new(),
+            compiler_options: Default::default(),
+            references: Vec::new(),
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/workspace"),
+            ),
+        },
+    ]));
+    WorkspaceAccess::set_exact_resolutions(
+        &workspace,
+        "/workspace/src/App.vue",
+        vec![
+            ("./Child.vue", "/workspace/src/Child.vue"),
+            ("./Panel.svelte", "/workspace/src/Panel.svelte"),
+            ("./plain", "/workspace/src/plain.ts"),
+        ]
+        .into_iter()
+        .map(
+            |(specifier, resolved_canonical_id)| verter_workspace::ExactResolution {
+                specifier: specifier.to_string(),
+                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                kind: verter_workspace::ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some(resolved_canonical_id.to_string()),
+                possible_canonical_ids: vec![resolved_canonical_id.to_string()],
+            },
+        )
+        .collect(),
+    );
     let imports = vec![
         verter_session::ScriptImportInfo {
             source: "./Child.vue".to_string(),
@@ -3838,16 +4734,24 @@ fn did_open_resolves_carrier_working_set_from_upsert_import_facts() {
         },
     ];
 
-    let ids = collect_imported_carrier_priority_ids_from_specifiers(
+    let ids = collect_imported_carrier_priority_ids_from_specifiers_for_publication(
         &imports,
         Some("/workspace/src/App.vue"),
-        |_parent, specifier| match specifier {
-            "./Child.vue" => Some("/workspace/src/Child.vue".to_string()),
-            "./Panel.svelte" => Some("/workspace/src/Panel.svelte".to_string()),
-            "./plain" => Some("/workspace/src/plain.ts".to_string()),
-            _ => None,
+        |parent, specifier| {
+            WorkspaceRead::resolve_import_outcome(
+                &workspace,
+                parent,
+                specifier,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::EsmImport,
+                },
+            )
+            .into_publication()
+            .map_result(|resolution| resolution.source_id)
         },
     );
+    let ids = ids.expect("fixture resolutions should be admitted");
 
     assert_eq!(
         ids,
@@ -3875,6 +4779,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
     let targets = collect_priority_carrier_public_api_targets_from_module_references(
         Some(&PublishedResolverSnapshot {
             resolver,
+            resolution_view: None,
             ownership_ready: true,
         }),
         &reader,
@@ -3897,7 +4802,8 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
                 27,
             ),
         ],
-    );
+    )
+    .expect("memory-backed resolution is publishable");
 
     assert_eq!(
         targets,
@@ -3921,6 +4827,7 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
     let targets = collect_priority_carrier_public_api_targets_from_module_references(
         Some(&PublishedResolverSnapshot {
             resolver,
+            resolution_view: None,
             ownership_ready: true,
         }),
         &reader,
@@ -3933,7 +4840,8 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
             0,
             15,
         )],
-    );
+    )
+    .expect("unknown dynamic references perform no resolution");
 
     assert!(
         targets.is_empty(),
@@ -4344,7 +5252,7 @@ async fn resolve_component_document_for_usage_follows_barrel_reexports() {
 
     let parent_canonical_id = uri_to_canonical_id(&app_uri);
     let barrel_canonical_id = server
-        .resolve_import_specifier(&parent_canonical_id, "./components")
+        .resolve_import_specifier_transient(&parent_canonical_id, "./components")
         .expect("barrel import should resolve to a concrete module");
 
     assert!(
@@ -5037,6 +5945,21 @@ async fn did_change_acknowledges_before_provider_refresh_for_all_carrier_modes()
     }
 }
 
+/// Liveness escape for the "does not wait for a blocked provider update" probes.
+///
+/// These tests prove a NON-BLOCKING property, and they prove it STRUCTURALLY: the
+/// blocked provider update is released only AFTER the probe's result is in hand, so
+/// any probe that genuinely waited on that update can never complete — it hangs
+/// forever, and ANY finite bound catches it. The bound therefore exists purely to
+/// turn that hang into a test failure instead of a stuck suite.
+///
+/// It is deliberately NOT a latency assertion. The previous 250ms bound read as one,
+/// and on a loaded machine it fired against completions that were correctly
+/// non-blocking but merely slow — a false failure that says nothing about the
+/// property under test. Do not tighten this into a performance budget; if request
+/// latency needs a bound, that belongs in a separate, explicitly-named latency test.
+const BLOCKED_PROVIDER_PROBE_LIVENESS: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[tokio::test(flavor = "multi_thread")]
 async fn unrelated_document_completion_does_not_wait_for_blocked_provider_update() {
     let child_source =
@@ -5085,10 +6008,12 @@ async fn unrelated_document_completion_does_not_wait_for_blocked_provider_update
             .offset_to_position(cursor as u32)
             .expect("completion position");
         let result = tokio::time::timeout(
-            std::time::Duration::from_millis(250),
+            BLOCKED_PROVIDER_PROBE_LIVENESS,
             server.completion(completion_params(&independent_uri, position, None)),
         )
         .await;
+        // Released only now: everything above ran while the provider update was
+        // still blocked, which is what makes this a non-blocking proof.
         update_release.notify_one();
         result
     };
@@ -5473,7 +6398,7 @@ async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_u
             },
         );
         let observe = async {
-            tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            tokio::time::timeout(BLOCKED_PROVIDER_PROBE_LIVENESS, async {
                 loop {
                     if server.documents.get(&target_uri).map(|doc| doc.version) == Some(2) {
                         break;
@@ -5489,7 +6414,7 @@ async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_u
                 .offset_to_position(cursor as u32)
                 .expect("current completion position");
             let response = tokio::time::timeout(
-                std::time::Duration::from_millis(250),
+                BLOCKED_PROVIDER_PROBE_LIVENESS,
                 server.completion(completion_params(&target_uri, position, None)),
             )
             .await
@@ -5904,31 +6829,13 @@ async fn d5_complete_labels(files: &[(&str, &str, &str)], doc: &str, needle: &st
     labels
 }
 
-#[tokio::test]
-async fn contract_slot_name_completion_offers_child_declared_slots() {
-    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp>\n    <template #\n  </MyComp>\n</template>\n";
-    let labels = d5_complete_labels(
-        &[
-            ("src/MyComp.vue", "vue", D5_CHILD_SOURCE),
-            ("src/App.vue", "vue", parent_source),
-        ],
-        "src/App.vue",
-        "<template #",
-    )
-    .await;
-    for expected in ["header", "default", "mySlot"] {
-        assert!(
-            labels.contains(&expected.to_string()),
-            "`<template #|` must offer declared slot {expected}, got: {labels:?}"
-        );
-    }
-    assert!(
-        !labels
-            .iter()
-            .any(|l| l.contains("___VERTER___") || l.contains("__props")),
-        "internal symbols must not leak: {labels:?}"
-    );
-}
+// The `<template #|` PUBLIC-BOUNDARY contract lives in
+// `real_provider_tests::template_surface::completion_vue_slot_name_offers_child_declared_slots`.
+// A `MockTypeProvider` server exercises Verter's native half in isolation and
+// enables the analysis-sidebar opt-in, so a mock-backed shorthand lane passed
+// while a real user's merged path returned zero items — the lanes below cover
+// native shapes the boundary test does not (longhand syntax, used-slot
+// filtering) and never stand in for it.
 
 #[tokio::test]
 async fn contract_slot_name_completion_longhand_offers_child_declared_slots() {
@@ -6529,6 +7436,145 @@ async fn d3_hover_text(needle: &str, character_shift: u32) -> Option<String> {
     text
 }
 
+// @ai-generated - Proves an identified Vue slot consumer retains its source-derived fallback
+// while the imported child's native slot surface is unavailable.
+#[tokio::test]
+async fn contract_slot_name_hover_falls_back_when_child_surface_is_unavailable() {
+    const PARENT_WITH_UNAVAILABLE_CHILD: &str = "<script setup lang=\"ts\">\n\
+import MissingChild from './MissingChild.vue'\n\
+</script>\n\
+<template>\n\
+  <MissingChild>\n\
+    <template #header>content</template>\n\
+  </MissingChild>\n\
+</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", PARENT_WITH_UNAVAILABLE_CHILD)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    assert!(
+        server
+            .hover_native_semantics_enabled
+            .load(std::sync::atomic::Ordering::Acquire),
+        "precondition: the native hover lane must be enabled"
+    );
+
+    let position = find_document_position(server, &app_uri, "#header", 1);
+    let doc = server.documents.get(&app_uri).expect("parent document");
+    let analysis = server
+        .documents
+        .get_analysis(&app_uri)
+        .expect("parent analysis");
+    let offset = doc
+        .line_index
+        .position_to_offset(&position)
+        .expect("slot offset");
+    assert!(
+        matches!(
+            crate::features::hover::child_hover_target_at_offset(offset, &doc.source, &analysis),
+            Some(crate::features::hover::ChildHoverTarget::SlotAttribute(_))
+        ),
+        "precondition: #header must enter the native child-slot path"
+    );
+    drop(doc);
+
+    let hover = server
+        .hover(hover_params(&app_uri, position))
+        .await
+        .expect("hover request should succeed");
+    assert_eq!(
+        hover_text(hover),
+        "**Slot content** — `#header`\n\nProvides content for the **\"header\"** slot.",
+        "an unavailable child slot surface must fall back to the static source-derived answer"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+// @ai-generated - Records the known boundary: an imported defineSlots catalog is not
+// available to the analyzer-backed hover lookup yet, so the resolved child remains silent.
+#[tokio::test]
+async fn contract_imported_define_slots_slot_name_without_analyzer_fields_remains_silent() {
+    const CHILD_WITH_UNRESOLVED_SLOTS: &str = "<script setup lang=\"ts\">\n\
+import type { ImportedSlots } from './slot-types'\n\
+defineSlots<ImportedSlots>()\n\
+</script>\n";
+    const PARENT: &str = "<script setup lang=\"ts\">\n\
+import TypedChild from './TypedChild.vue'\n\
+</script>\n\
+<template>\n\
+  <TypedChild>\n\
+    <template #header=\"{ title }\">{{ title }}</template>\n\
+  </TypedChild>\n\
+</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/TypedChild.vue", "vue", CHILD_WITH_UNRESOLVED_SLOTS),
+        ("src/App.vue", "vue", PARENT),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/TypedChild.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "#header", 1);
+    let target = {
+        let doc = server.documents.get(&app_uri).expect("parent document");
+        let analysis = server
+            .documents
+            .get_analysis(&app_uri)
+            .expect("parent analysis");
+        let offset = doc
+            .line_index
+            .position_to_offset(&position)
+            .expect("slot offset");
+        crate::features::hover::child_hover_target_at_offset(offset, &doc.source, &analysis)
+            .expect("#header must enter the native child-slot path")
+    };
+    let outcome = server
+        .child_hover_for_target(&app_uri, &target)
+        .expect("child hover resolution should succeed");
+    let child_canonical = crate::documents::uri_to_canonical_id(&child_uri);
+    let host = server.documents.host();
+    let child_analysis = host
+        .get_analysis(&child_canonical)
+        .expect("the available child must have analysis");
+    let (macro_index, slot_macro) = child_analysis
+        .macros
+        .iter()
+        .enumerate()
+        .find(|(_, mac)| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+        .expect("the child must have a defineSlots macro");
+    let resolver_surface =
+        host.resolve_vue_macro_surface(&verter_session::typeinfo::VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from(child_canonical.as_str()),
+            macro_index,
+            macro_kind: slot_macro.kind,
+            // The public resolver re-derives the authoritative current hash.
+            root_identity: [0u8; 16],
+            level: verter_session::typeinfo::TypeInfoQueryLevel::FullMetadata,
+        });
+    let actual = server
+        .hover(hover_params(&app_uri, position))
+        .await
+        .expect("hover request should succeed");
+    assert!(
+        resolver_surface.is_none()
+            && matches!(
+                &outcome,
+                crate::server::component_resolve::ChildHoverOutcome::SurfaceAvailableNoMatch
+            )
+            && actual.is_none(),
+        "the unresolved imported slot catalog remains outside analyzer slot_fields: the shared \
+         resolver root is unavailable, but the resolved child classifies as an available no-match \
+         and stays silent; resolver_surface={resolver_surface:?}, \
+         outcome={outcome:?}, hover={actual:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+// @ai-generated - Negative control proving an available child surface still outranks fallback.
 #[tokio::test]
 async fn contract_hash_slot_name_hover_shows_child_slot_signature() {
     let text = d3_hover_text("#header", 1)
@@ -6540,6 +7586,10 @@ async fn contract_hash_slot_name_hover_shows_child_slot_signature() {
             "#header hover must carry the child slot-props signature ({needle}), got: {text}"
         );
     }
+    assert!(
+        !text.contains("**Slot content**"),
+        "the native child signature must win over the static slot fallback: {text}"
+    );
 }
 
 #[tokio::test]
@@ -6583,12 +7633,10 @@ async fn contract_longhand_v_slot_name_hover_shows_child_slot_signature() {
 
 #[tokio::test]
 async fn contract_unknown_slot_name_produces_no_hover() {
-    // Negative control: a slot the child never declared must be silent —
-    // no fabricated slot hover.
     let text = d3_hover_text("#nope", 1).await;
     assert!(
         text.is_none(),
-        "unknown slot name must produce no hover, got: {text:?}"
+        "an authoritative child slot surface must fail closed for an undeclared name, got: {text:?}"
     );
 }
 
@@ -7537,22 +8585,23 @@ async fn contract_kebab_prop_rename_classifies_cross_file_usage() {
 }
 
 #[tokio::test]
-async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_template() {
-    // EXECUTED rename (not classification): renaming the kebab `:my-prop`
-    // usage must produce a merged edit covering BOTH the parent template usage
-    // AND the child's camel `myProp` defineProps declaration — the
-    // child-declaration leg Verter synthesizes must key on the DECLARED name
-    // (the carrier API spells it verbatim), never the kebab usage alias.
+async fn contract_kebab_prop_rename_refuses_when_a_second_parent_is_unproven() {
+    // EXECUTED rename (not classification): a SECOND parent also passes
+    // `:my-prop`, while the provider answer below names only the initiating
+    // parent. The old declaration+initiating-parent gate shipped that partial
+    // WorkspaceEdit; the public-prop admission must now refuse before asking the
+    // provider because no available authority proves every parent was found.
     let child_source = "<script setup lang=\"ts\">\ndefineProps<{ myProp: string }>()\n</script>\n";
     let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst v = 'x'\n</script>\n<template>\n  <MyComp :my-prop=\"v\" />\n</template>\n";
+    let second_parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst other = 'y'\n</script>\n<template>\n  <MyComp :my-prop=\"other\" />\n</template>\n";
     let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
         ("src/MyComp.vue", "vue", child_source),
         ("src/App.vue", "vue", parent_source),
+        ("src/SecondParent.vue", "vue", second_parent_source),
     ])
     .await;
 
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
-    let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
     let server = service.inner();
     let position = find_document_position(server, &app_uri, ":my-prop=", 1);
 
@@ -7586,7 +8635,33 @@ async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_tem
         }],
     );
 
-    let edit = super::nav_features_navigation::handle_rename(
+    let rename_queries_before = provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                crate::type_provider::mock::MockCall::GetRenameLocations { .. }
+            )
+        })
+        .count();
+    let prepared = super::rename_prepare::handle_prepare_rename(
+        server,
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: app_uri.clone(),
+            },
+            position,
+        },
+    )
+    .await
+    .expect("prepare request succeeds");
+    assert!(
+        prepared.is_none(),
+        "prepare must not offer a public component-prop rename"
+    );
+
+    let result = super::nav_features_navigation::handle_rename(
         server,
         RenameParams {
             text_document_position: TextDocumentPositionParams {
@@ -7599,43 +8674,32 @@ async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_tem
             work_done_progress_params: Default::default(),
         },
     )
-    .await
-    .expect("rename request should succeed")
-    .expect("a confirmed kebab rename must return the merged edit, not fail closed");
-
-    let triples = workspace_edit_triples(&edit);
-    let expected_usage = range_for_authored_snippet(server, &app_uri, "my-prop");
-    let expected_decl = range_for_authored_snippet(server, &child_uri, "myProp");
-    let app_path = crate::documents::uri_to_canonical_id(&app_uri);
-    let child_path = crate::documents::uri_to_canonical_id(&child_uri);
-    assert!(
-        triples.iter().any(|(uri, range, new_text)| {
-            verter_span::path::fs_paths_equal(
-                &crate::documents::uri_to_canonical_id(uri),
-                &app_path,
-            ) && *range == expected_usage
-                && new_text == "myPropRenamed"
-        }),
-        "the parent template usage leg must be edited range-exact: {triples:?}"
+    .await;
+    let error = result.expect_err(
+        "a public component-prop rename with an unproven sibling parent must return no edit",
+    );
+    assert_eq!(
+        error.code,
+        tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803)
     );
     assert!(
-        triples.iter().any(|(uri, range, new_text)| {
-            verter_span::path::fs_paths_equal(
-                &crate::documents::uri_to_canonical_id(uri),
-                &child_path,
-            ) && *range == expected_decl
-                && new_text == "myPropRenamed"
-        }),
-        "the child script declaration leg must be edited range-exact \
-         (synthesized from the DECLARED name, not the kebab alias): {triples:?}"
+        error.message.contains("complete cross-file usage proof"),
+        "the refusal must explain why no WorkspaceEdit is safe, got {:?}",
+        error.message
     );
-    // The mis-ranged provider leg (a PREFIX of the authored kebab name) must
-    // be pruned — only the exact synthesized usage edit survives.
-    assert!(
-        triples
-            .iter()
-            .all(|(_, range, _)| *range == expected_usage || *range == expected_decl),
-        "no mis-ranged provider leg may survive the synthesis: {triples:?}"
+    let rename_queries_after = provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                crate::type_provider::mock::MockCall::GetRenameLocations { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        rename_queries_after, rename_queries_before,
+        "public-prop admission must refuse before provider rename is called"
     );
 
     drain_handle.abort();
@@ -9113,6 +10177,1454 @@ const persistentFailureTarget: string = "ok"
             "{kind}: retries are bounded to exactly one resync+retry, got {hover_calls} hover calls"
         );
     }
+}
+
+// =========================================================================
+// W02 — a carrier with a MISSING IDE projection heals on the FIRST
+// interactive request, not only after a debounced coordinator tick, a
+// pending-snapshot drain, a reopen, or a restart.
+//
+// How these tests EXCLUDE background repair as the explanation: both heal
+// paths that already exist are STRUCTURALLY unreachable here, not merely
+// slow. (1) The debounced coordinator loop (spawned by
+// `VerterLanguageServer::new`) acts only on files signalled through
+// `sync_coordinator.signal(..)` — sent exclusively by the SERVER handlers
+// `handle_did_open` / `handle_did_change`, which these tests never invoke
+// (they drive the REGISTRY `documents.did_open` / `documents.did_change`
+// directly, the same ingress the coordinator-recovery tests use), so the
+// coordinator's pending map stays empty and its tick never calls
+// `install_missing_carrier_projection`. (2) The pending-snapshot drain and
+// the workspace scanner run only from `initialized()` / background init,
+// which these tests never call. The projection-precondition asserts after
+// every commit prove the document is still projection-less at the moment
+// the interactive request is issued.
+// =========================================================================
+
+/// The compute half of `set_type_hover_at_vue_position`, run on a TWIN server:
+/// resolve the provider (path, offset) a healed surface will serve for
+/// `position` — same bytes, same compile profile, same resolver root, same
+/// provider kind ⇒ the identical deterministic mapping — WITHOUT touching the
+/// server under test (the seeding helper would itself compile + install the
+/// projection and destroy the broken-state precondition).
+fn provider_target_via_twin_server(
+    kind: crate::TypeProviderKind,
+    path: &str,
+    language_id: &str,
+    source: &str,
+    needle: &str,
+    delta: usize,
+) -> (String, u32, Position) {
+    let twin_provider = Arc::new(MockTypeProvider::new());
+    let twin_service = make_hover_test_service_with_kind(twin_provider, kind);
+    let twin = twin_service.inner();
+    install_test_resolver(twin);
+    let uri: Uri = format!("file://{path}").parse().expect("valid twin uri");
+    let _ = twin.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: language_id.to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    assert!(
+        twin.documents.get_projection(&uri).is_some(),
+        "twin precondition: the FIXED source must compile — otherwise the heal \
+         under test has no healthy surface to converge to"
+    );
+    let position = find_document_position(twin, &uri, needle, delta);
+    let ctx = synced_type_provider_context_surface_only(twin, &uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("twin: the healthy surface must map the hover position");
+    (ctx.tsx_path.clone(), tsx_offset, position)
+}
+
+/// W02 discriminator (Vue, both provider kinds): a carrier opened MALFORMED
+/// (no projection), then FIXED by a commit that compiles nothing, must get a
+/// real provider-backed hover on the FIRST interactive request — with the
+/// background coordinator structurally excluded (see the section comment).
+///
+/// `.length` is a member only the provider can answer (the native hover lane
+/// has no member types), so the assertion is observable strictly through the
+/// provider rail: pre-change the projection-less document fails the surface
+/// capture, the provider is never queried, and hover is None.
+#[tokio::test(flavor = "multi_thread")]
+async fn projectionless_carrier_heals_on_the_first_interactive_request() {
+    let broken_source = "<script setup lang=\"ts\">\nconst broken = (((\n";
+    let fixed_source = "<script setup lang=\"ts\">\nconst healedTarget: string = \"ok\"\n</script>\n<template><div>{{ healedTarget.length }}</div></template>\n";
+    for kind in [
+        crate::TypeProviderKind::Tsserver,
+        crate::TypeProviderKind::Tsgo,
+    ] {
+        let (tsx_path, tsx_offset, position) = provider_target_via_twin_server(
+            kind,
+            "/workspace/src/App.vue",
+            "vue",
+            fixed_source,
+            ".length",
+            1,
+        );
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        // Opened malformed: the open-time compile fails, so no projection.
+        let uri = open_test_vue(server, "/workspace/src/App.vue", broken_source);
+        assert!(
+            server.documents.get_projection(&uri).is_none(),
+            "{kind}: precondition — the malformed open must leave the carrier \
+             projection-less, or this test exercises nothing"
+        );
+
+        // The user fixes the file. The REGISTRY commit stores text and compiles
+        // nothing — and sends NO coordinator signal, so no background path can
+        // install the projection before the interactive request below.
+        let _ = server.documents.did_change(&uri, 2, fixed_source);
+        assert!(
+            server.documents.get_projection(&uri).is_none(),
+            "{kind}: the commit must not compile — if it did, the per-keystroke \
+             compile is back and this asserts nothing about interactive repair"
+        );
+
+        provider.set_hover(
+            &tsx_path,
+            tsx_offset,
+            Some(HoverInfo {
+                contents: "(property) String.length: number".to_string(),
+                range_start: None,
+                range_end: None,
+            }),
+        );
+
+        let hover = server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request must not error to the client");
+        assert!(
+            hover.is_some(),
+            "{kind}: the FIRST interactive request after the fix must heal the \
+             missing projection and answer through the provider — None means the \
+             document stayed dark until a background tick"
+        );
+        let text = hover_text(hover);
+        assert!(
+            text.contains("String.length"),
+            "{kind}: the healed hover must be the provider answer, got: {text}"
+        );
+        assert!(
+            server.documents.get_projection(&uri).is_some(),
+            "{kind}: the interactive repair must have installed the projection"
+        );
+        let hover_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetHover { .. }))
+            .count();
+        assert!(
+            hover_calls >= 1,
+            "{kind}: the answer must have come through the provider rail"
+        );
+    }
+}
+
+/// W02 Svelte coverage: the interactive projection heal is carrier-generic.
+///
+/// Svelte's IDE lowering is ERROR-RECOVERING — every malformed fixture tried
+/// (unterminated script/tag/expression/block, legacy+runes conflicts,
+/// double `$props()`, …) still compiles an IDE surface — so the Vue tests'
+/// "broken open" construction cannot reach the projection-less state for a
+/// `.svelte` carrier. The state Svelte DOES occupy in production is the
+/// startup race documented on `DocumentRegistry::get_ide`: `did_open` runs
+/// before the host can serve the compile, so the document carries NO
+/// projection while the host artifact may exist. `clear_projection_for_test`
+/// reconstructs exactly that state on an otherwise pristine server (no
+/// committed sync state, no recorded provider surface), so the heal must run
+/// the FULL repair — recompile → gateway → sync → surface record → commit —
+/// not merely stuff a mapper onto the document. One provider kind suffices
+/// (the repair path is kind-agnostic above the sync verbs; the Vue
+/// discriminator covers both kinds).
+#[tokio::test(flavor = "multi_thread")]
+async fn projectionless_svelte_carrier_heals_on_the_first_interactive_request() {
+    let fixed_source = "<script lang=\"ts\">\nconst healedTarget: string = \"ok\";\n</script>\n<p>{healedTarget.length}</p>\n";
+    let kind = crate::TypeProviderKind::Tsgo;
+    let (tsx_path, tsx_offset, position) = provider_target_via_twin_server(
+        kind,
+        "/workspace/src/App.svelte",
+        "svelte",
+        fixed_source,
+        ".length",
+        1,
+    );
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_with_kind(type_provider, kind);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri: Uri = "file:///workspace/src/App.svelte".parse().expect("uri");
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: fixed_source.to_string(),
+    });
+    // Reconstruct the startup-race state: the open document has NO projection
+    // (as if did_open ran before the host could compile). Nothing else is
+    // seeded — no committed sync state, no recorded surface — so a cache-only
+    // mapper install could NOT make the capture below succeed.
+    //
+    // The repair lane admits this projection-less carrier and coalesces
+    // concurrent callers without retaining failure across later requests.
+    server.documents.clear_projection_for_test(&uri);
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the Svelte carrier must be projection-less at the moment \
+         of the interactive request"
+    );
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "precondition: the reconstructed startup-race state must admit the \
+         interactive repair"
+    );
+
+    provider.set_hover(
+        &tsx_path,
+        tsx_offset,
+        Some(HoverInfo {
+            contents: "(property) String.length: number".to_string(),
+            range_start: None,
+            range_end: None,
+        }),
+    );
+
+    let hover = server
+        .hover(hover_params(&uri, position))
+        .await
+        .expect("hover request must not error to the client");
+    assert!(
+        hover.is_some(),
+        "the FIRST interactive request after the fix must heal the missing \
+         Svelte projection and answer through the provider"
+    );
+    let text = hover_text(hover);
+    assert!(
+        text.contains("String.length"),
+        "the healed Svelte hover must be the provider answer, got: {text}"
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_some(),
+        "the interactive repair must have installed the Svelte projection"
+    );
+}
+
+/// W02 deterministic bound: a syntax verdict binds only its exact source
+/// bytes, fails closed, and prevents later requests from recompiling it.
+#[tokio::test(flavor = "multi_thread")]
+async fn broken_projectionless_carrier_fails_closed_and_bounds_content_verdicts() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_with_kind(type_provider, crate::TypeProviderKind::Tsgo);
+    let server = service.inner();
+    install_test_resolver(server);
+    // Provider-rail only: with the native lane off, a hover answer could only
+    // come from a (wrong) provider query against a surface that must not exist.
+    server
+        .hover_native_semantics_enabled
+        .store(false, std::sync::atomic::Ordering::Release);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        "<script setup lang=\"ts\">\nconst broken = (((\n",
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less"
+    );
+    assert!(
+        !server.current_file_needs_inline_type_provider_sync(&uri),
+        "the open-time syntax verdict must bind these exact bytes"
+    );
+    // A later revision, STILL malformed (the ordinary state of a file being
+    // typed). The commit stores text only.
+    let _ =
+        server
+            .documents
+            .did_change(&uri, 2, "<script setup lang=\"ts\">\nconst broken = ((((\n");
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "the commit must not compile"
+    );
+
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "new bytes have no deterministic verdict yet"
+    );
+
+    let position = Position {
+        line: 1,
+        character: 8,
+    };
+    let first = server
+        .hover(hover_params(&uri, position))
+        .await
+        .expect("hover request must not error to the client");
+    assert!(
+        first.is_none(),
+        "a broken carrier fails closed on the interactive path — a clean \
+         no-result, never a wrong or stale one"
+    );
+
+    assert!(
+        !server.current_file_needs_inline_type_provider_sync(&uri),
+        "the repair's syntax verdict must bind these exact bytes"
+    );
+
+    let cold_before_second = server
+        .documents
+        .host()
+        .provenance_snapshot()
+        .compile_cold_runs;
+    let second = server
+        .hover(hover_params(&uri, position))
+        .await
+        .expect("hover request must not error to the client");
+    assert!(second.is_none(), "still fails closed on repeat");
+    assert_eq!(
+        server
+            .documents
+            .host()
+            .provenance_snapshot()
+            .compile_cold_runs,
+        cold_before_second,
+        "a later request must not recompile bytes with a deterministic verdict"
+    );
+
+    let hover_calls = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetHover { .. }))
+        .count();
+    assert_eq!(
+        hover_calls, 0,
+        "a projection-less broken carrier must never reach the provider — there \
+         is no committed surface to query"
+    );
+
+    // A new revision is likewise repairable.
+    let _ = server.documents.did_change(
+        &uri,
+        3,
+        "<script setup lang=\"ts\">\nconst broken = (((((\n",
+    );
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "a content change remains eligible for interactive repair"
+    );
+}
+
+/// W02 concurrency bound: N callers that observe the same repair sequence
+/// still run exactly one compile. The first attempt advances the sequence
+/// under the lane; queued callers join it, while a later request may retry.
+///
+/// Measured on `compile_cold_runs`, the host's own count of cold compiles
+/// STARTED.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_requests_on_a_broken_revision_compile_at_most_once() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_with_kind(type_provider, crate::TypeProviderKind::Tsgo);
+    let server = service.inner();
+    install_test_resolver(server);
+    server
+        .hover_native_semantics_enabled
+        .store(false, std::sync::atomic::Ordering::Release);
+
+    let canonical_id = "/workspace/src/App.vue";
+    let uri = open_test_vue(
+        server,
+        canonical_id,
+        "<script setup lang=\"ts\" src=\"./missing.ts\"></script>\n<template><div/></template>\n",
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: unavailable input must leave the carrier projection-less"
+    );
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "unavailable input is not memoized, so the concurrent cohort is admitted"
+    );
+    let cold_before = server
+        .documents
+        .host()
+        .provenance_snapshot()
+        .compile_cold_runs;
+    // What ONE admitted repair of a revision whose compile fails costs in cold
+    // compiles. The repair drives `ensure_ide_compiled` once; a failing compile
+    // caches no surface, so the surface read behind it finds nothing and the
+    // repair returns without a second host round trip.
+    const COLD_RUNS_PER_ADMITTED_REPAIR: u64 = 1;
+
+    // Hold all four callers after they capture the repair sequence and before
+    // any can acquire the lane. This makes the concurrent cohort structural,
+    // independent of executor polling order.
+    let pauses: Vec<_> = (0..4)
+        .map(|_| server.pause_next_ide_sync_after_lease(canonical_id))
+        .collect();
+
+    let position = Position {
+        line: 0,
+        character: 1,
+    };
+    let requests = futures_util::future::join_all((0..4).map(|_| async {
+        let hover = server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request must not error to the client");
+        assert!(hover.is_none(), "a broken carrier fails closed");
+    }));
+    let release_cohort = async {
+        for (arrived, _) in &pauses {
+            arrived.notified().await;
+        }
+        for (_, release) in &pauses {
+            release.notify_one();
+        }
+    };
+    let (_results, ()) = futures_util::future::join(requests, release_cohort).await;
+
+    let cold_after = server
+        .documents
+        .host()
+        .provenance_snapshot()
+        .compile_cold_runs;
+    assert_eq!(
+        cold_after - cold_before,
+        COLD_RUNS_PER_ADMITTED_REPAIR,
+        "one broken revision owes ONE repair across all concurrent requests — \
+         a higher cold-compile count means the waiters did not join the \
+         completed sequence under the lane lock and each recompiled the same broken \
+         bytes (four requests raced here, so an unbounded lane would show \
+         four repairs' worth)"
+    );
+    let hover_calls = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetHover { .. }))
+        .count();
+    assert_eq!(
+        hover_calls, 0,
+        "a projection-less broken carrier must never reach the provider"
+    );
+}
+
+/// W02 source-identity fence: the repair retains the response its own compile
+/// returned, so every consumer of that response must first prove the carrier
+/// source has not moved underneath it.
+///
+/// The ordering this reproduces is the whole defect: the repair compiles
+/// revision A and holds A's provider bytes + mapper, it AWAITS (the carrier
+/// gateway, then the provider sync), a `didChange` commits revision B while it
+/// is parked, and it then syncs and RECORDS. `record_carrier_ide_surface`
+/// resolves the carrier source from the LIVE open document
+/// (`resolve_carrier_source`), so an unfenced record pairs A's bytes and A's
+/// map with source B — and the recorded pair then PASSES the source-hash
+/// validation `capture_provider_request_surface` runs, because both halves of
+/// that comparison are B. A later request maps positions in B through A's map:
+/// not a transient miss, a genuine MIS-MAPPING, which the Carrier IDE TS
+/// Surface Principle forbids outright.
+///
+/// The fence discards the retained response instead and fails the request
+/// closed, exactly as `provider_recovery`'s retry fence does for the same
+/// hazard on the query side.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repair_whose_carrier_source_moved_mid_flight_records_nothing() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Revision B: different bytes, and a source that compiles cleanly — so a
+    // failed compile can never be what this test observes.
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'edited-into-a-longer-and-quite-different-string'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("the baseline sync must commit a live IDE path");
+    let baseline = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the baseline sync records a CarrierIde surface");
+    assert_eq!(
+        baseline.carrier_source.as_ref(),
+        REQUEST_SURFACE_APP,
+        "precondition: the baseline surface describes revision A"
+    );
+
+    // Force a repair, and park it between its own compile and every consumer
+    // of the response that compile returned.
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    let (arrived, release) = server.pause_next_ide_sync_after_recompile(canonical_id);
+
+    let repair = server.ensure_current_file_synced(&uri);
+    let edit = async {
+        arrived.notified().await;
+        // The repair now holds revision A's response and has installed
+        // nothing, synced nothing, recorded nothing. Commit revision B.
+        let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+        assert_eq!(
+            server
+                .documents
+                .get(&uri)
+                .expect("document stays open")
+                .source
+                .as_ref(),
+            SOURCE_B,
+            "the interleaved edit must really have committed revision B, or \
+             this test exercises no supersession at all"
+        );
+        release.notify_one();
+    };
+    futures_util::future::join(repair, edit).await;
+
+    // NOTHING may pair revision A's provider bytes with revision B's source.
+    if let Some(recorded) = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+    {
+        assert_eq!(
+            recorded.carrier_source.as_ref(),
+            REQUEST_SURFACE_APP,
+            "a surface recorded from the retained response must still describe \
+             the revision it was compiled from. Recording revision A's provider \
+             bytes and map against the newly committed revision B is the \
+             mis-mapping: the pair then validates (both sides are B) and a later \
+             request maps B's positions through A's map"
+        );
+        assert_eq!(
+            recorded.provider_content.as_ref(),
+            baseline.provider_content.as_ref(),
+            "and the surface that survives is the pre-edit one, unchanged — the \
+             superseded repair published no new generation"
+        );
+    }
+
+    // The request-facing consequence: the live source is B and no surface for
+    // B has been synced, so the capture fails CLOSED. Under the unfenced
+    // record it succeeds — with A's content and A's mapper.
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "a carrier whose live source has no synced surface must fail the \
+         capture closed, never hand out a stale mapper that validates"
+    );
+}
+
+/// The retained-source comparison must guard the provider WRITE itself. This
+/// pauses after the old pre-sync fence, then commits revision B before the
+/// provider call can consume revision A's retained bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_change_after_the_check_prevents_the_provider_write() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'provider-write-window'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    provider.clear_calls();
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    let (arrived, release) = server.pause_next_ide_sync_before_provider_write(canonical_id);
+
+    let repair = server.ensure_current_file_synced(&uri);
+    let edit = async {
+        arrived.notified().await;
+        let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+        release.notify_one();
+    };
+    futures_util::future::join(repair, edit).await;
+
+    assert!(
+        provider.file_sync_calls().is_empty(),
+        "revision A's retained bytes must not be written to the provider after \
+         revision B commits in the check-to-sync window"
+    );
+}
+
+/// Recording is a second write point: the retained identity must be compared
+/// while installing the surface, so an edit between the old check and the
+/// record cannot pair A's provider bytes/map with B's live source.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_change_after_the_check_prevents_the_surface_record() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'surface-record-window'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("baseline IDE path");
+    let baseline = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("baseline CarrierIde surface");
+
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    let (arrived, release) = server.pause_next_ide_sync_before_surface_record(canonical_id);
+    let repair = server.ensure_current_file_synced(&uri);
+    let edit = async {
+        arrived.notified().await;
+        let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+        release.notify_one();
+    };
+    futures_util::future::join(repair, edit).await;
+
+    let recorded = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the baseline surface remains");
+    assert_eq!(
+        recorded.carrier_source.as_ref(),
+        REQUEST_SURFACE_APP,
+        "the record write must retain the baseline revision A surface, never \
+         install A's bytes and map under revision B's live source"
+    );
+    assert_eq!(
+        recorded.provider_content.as_ref(),
+        baseline.provider_content.as_ref(),
+        "the superseded repair must publish no new surface generation"
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "revision B has no synced surface yet and must fail closed"
+    );
+}
+
+/// The unresolved-preserve helper owns its own provider await and surface
+/// record, so it must carry the same retained revision through that await and
+/// use the identity-fenced record choke point.
+#[tokio::test(flavor = "multi_thread")]
+async fn unresolved_preserve_rechecks_retained_identity_at_the_record_write() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let canonical_id = "/workspace/src/App.vue";
+    const SOURCE_B: &str = r#"<script setup lang="ts">
+const msg = 'unresolved-record-window'
+const extra = 42
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#;
+
+    let revision = server
+        .documents
+        .snapshot_identity(&uri)
+        .expect("open revision A");
+    let ide = server
+        .documents
+        .get_ide(&uri)
+        .expect("revision A IDE output");
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("baseline IDE path");
+    let baseline = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("baseline CarrierIde surface");
+    let (arrived, release) = server.pause_next_ide_sync_before_surface_record(canonical_id);
+
+    let preserve = server.preserve_open_unresolved_carrier(
+        canonical_id,
+        false,
+        Some(&ide.code),
+        Some((&uri, &revision)),
+    );
+    let edit = async {
+        arrived.notified().await;
+        let _ = server.documents.did_change(&uri, 2, SOURCE_B);
+        release.notify_one();
+    };
+    futures_util::future::join(preserve, edit).await;
+
+    let recorded = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the baseline surface remains");
+    assert_eq!(
+        recorded.carrier_source.as_ref(),
+        REQUEST_SURFACE_APP,
+        "the unresolved helper must not pair retained A output with live B"
+    );
+    assert_eq!(
+        recorded.provider_content.as_ref(),
+        baseline.provider_content.as_ref(),
+        "the superseded unresolved preserve must publish no new surface"
+    );
+}
+
+/// A dirty flag cannot override a deterministic verdict for the exact bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn dirty_flag_does_not_readmit_a_deterministic_content_verdict() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_with_kind(provider, crate::TypeProviderKind::Tsgo);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let canonical_id = "/workspace/src/App.vue";
+    let uri = open_test_vue(
+        server,
+        canonical_id,
+        "<script setup lang=\"ts\">\nconst broken = (((\n",
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less"
+    );
+    // The registry-only open above does not mark the server dirty flag.
+    // Reconstruct the production state explicitly.
+    server.needs_ide_sync.insert(canonical_id.to_string());
+    assert!(
+        !server.current_file_needs_inline_type_provider_sync(&uri),
+        "the exact syntax-verdict bytes remain declined despite a dirty flag"
+    );
+
+    // A genuinely NEW revision still owes its one attempt.
+    let _ =
+        server
+            .documents
+            .did_change(&uri, 2, "<script setup lang=\"ts\">\nconst broken = ((((\n");
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "new content remains repairable"
+    );
+}
+
+/// W02 liveness (rename ingress): a compile blocked on unavailable input is
+/// never memoized as a verdict on its bytes, so a genuinely later request
+/// retries it.
+///
+/// Driven through `handle_rename` itself, so the whole request path is under
+/// test — admission, the repair, plan resolution — rather than the internal
+/// helper the handler calls:
+///
+/// Both the open-time attempt and each rename observe a missing external
+/// `src=` file. `XUnavailableMacroSemanticResult` and
+/// `XMissingMacroSemanticBundle` share the same non-memoized classification,
+/// covering scheduler cancellation without requiring a cancellation race in
+/// this request-path test.
+///
+/// Measured on the host's `compile_cold_runs`, not only on calls into the
+/// registry accounting ingress: the claim is about compiles the rename
+/// ingress causes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_rename_retries_a_failed_projectionless_revision() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_with_kind(provider, crate::TypeProviderKind::Tsgo);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let canonical_id = "/workspace/src/App.vue";
+    let uri = open_test_vue(
+        server,
+        canonical_id,
+        "<script setup lang=\"ts\" src=\"./missing.ts\"></script>\n<template><div/></template>\n",
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the unavailable external input must leave the carrier projection-less"
+    );
+    assert!(
+        server.current_file_needs_inline_type_provider_sync(&uri),
+        "an unavailable-input failure must not bind the open bytes"
+    );
+
+    let rename_at = |position: Position| RenameParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        new_name: "renamed".into(),
+        work_done_progress_params: Default::default(),
+    };
+    let position = Position {
+        line: 0,
+        character: 1,
+    };
+    let rename_once = || async {
+        let edit = super::nav_features_navigation::handle_rename(server, rename_at(position))
+            .await
+            .expect("a rename on a broken carrier must not error to the client");
+        assert!(
+            edit.is_none(),
+            "a projection-less broken carrier has no surface to rename against — \
+             it fails closed, never a partial or mis-mapped WorkspaceEdit, got {edit:?}"
+        );
+    };
+
+    let cold_runs = || {
+        server
+            .documents
+            .host()
+            .provenance_snapshot()
+            .compile_cold_runs
+    };
+    let cold_before_first = cold_runs();
+    rename_once().await;
+    let cold_after_first = cold_runs();
+    assert_eq!(
+        cold_after_first - cold_before_first,
+        1,
+        "rename is an interactive consistency boundary: the first rename on an \
+         unattempted revision must drive the repair. Zero here means rename no \
+         longer repairs the current file before capturing its surface"
+    );
+    rename_once().await;
+    assert_eq!(
+        cold_runs() - cold_after_first,
+        1,
+        "a later request must retry the projection-less carrier even when its \
+         bytes are unchanged: cancellation is transient but advances no host \
+         generation, so a cross-request failure memo would decline forever"
+    );
+}
+
+/// W02 feature-set consistency (signature help): signature help is a
+/// request-answering provider-backed feature, so it heals a projection-less
+/// carrier through the SAME attempt-bounded interactive repair hover and
+/// completion use — it must not stay dark until a background tick.
+#[tokio::test(flavor = "multi_thread")]
+async fn signature_help_heals_a_projectionless_carrier_on_the_first_request() {
+    let broken_source = "<script setup lang=\"ts\">\nconst broken = (((\n";
+    let fixed_source = "<script setup lang=\"ts\">\nconst healedTarget: string = \"ok\"\n</script>\n<template><div>{{ healedTarget.at(0) }}</div></template>\n";
+    let kind = crate::TypeProviderKind::Tsgo;
+    let (tsx_path, tsx_offset, position) = provider_target_via_twin_server(
+        kind,
+        "/workspace/src/App.vue",
+        "vue",
+        fixed_source,
+        "at(0)",
+        3,
+    );
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_with_kind(type_provider, kind);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(server, "/workspace/src/App.vue", broken_source);
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less"
+    );
+    let _ = server.documents.did_change(&uri, 2, fixed_source);
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "the commit must not compile"
+    );
+
+    provider.set_signature_help(
+        &tsx_path,
+        tsx_offset,
+        Some(crate::type_provider::protocol::SignatureHelp {
+            signatures: vec![crate::type_provider::protocol::SignatureInfo {
+                label: "at(index: number): string | undefined".to_string(),
+                documentation: None,
+                parameters: vec![],
+                active_parameter: None,
+            }],
+            active_signature: Some(0),
+            active_parameter: None,
+        }),
+    );
+
+    let help = server
+        .signature_help(SignatureHelpParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            context: None,
+        })
+        .await
+        .expect("signature help request must not error to the client");
+    assert!(
+        help.is_some(),
+        "the FIRST signature-help request after the fix must heal the missing \
+         projection and answer through the provider — None means signature \
+         help stays dark on a carrier hover already heals"
+    );
+    assert!(
+        server.documents.get_projection(&uri).is_some(),
+        "the interactive repair must have installed the projection"
+    );
+    let signature_calls = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetSignatureHelp { .. }))
+        .count();
+    assert!(
+        signature_calls >= 1,
+        "the answer must have come through the provider rail"
+    );
+}
+
+/// W02 feature-set consistency (code actions): quickfix code actions are a
+/// request-answering provider-backed feature, so they heal a projection-less
+/// carrier through the same attempt-bounded interactive repair.
+#[tokio::test(flavor = "multi_thread")]
+async fn code_action_heals_a_projectionless_carrier_on_the_first_request() {
+    let broken_source = "<script setup lang=\"ts\">\nconst broken = (((\n";
+    let fixed_source = "<script setup lang=\"ts\">\nconst healedTarget: string = \"ok\"\n</script>\n<template><div>{{ healedTarget.length }}</div></template>\n";
+    let kind = crate::TypeProviderKind::Tsgo;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_with_kind(type_provider, kind);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(server, "/workspace/src/App.vue", broken_source);
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less"
+    );
+    let _ = server.documents.did_change(&uri, 2, fixed_source);
+    assert!(
+        server.documents.get_projection(&uri).is_none(),
+        "the commit must not compile"
+    );
+
+    let position = find_document_position(server, &uri, "healedTarget.length", 1);
+    let _ = server
+        .code_action(CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range: Range {
+                start: position,
+                end: position,
+            },
+            context: CodeActionContext::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .expect("code action request must not error to the client");
+    assert!(
+        server.documents.get_projection(&uri).is_some(),
+        "the interactive repair must have installed the projection — a \
+         projection-less carrier must not silently skip the provider action \
+         surface while hover on the same carrier heals"
+    );
+    let action_calls = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetCodeActions { .. }))
+        .count();
+    assert!(
+        action_calls >= 1,
+        "the healed request must have queried the provider action surface"
+    );
+}
+
+/// Shared fixture for the definition transient-recovery pair: a member access
+/// (`foo.bar`) whose receiver the native path could resolve but whose MEMBER
+/// only the provider can — the exact asymmetry of the reported defect ("`foo`
+/// works (sometimes) but `bar` NEVER works" while hover at the same cursor
+/// shows the correct type). Returns `(uri, member_position, expected_decl_range)`
+/// with the provider scripted to answer the member's declaration span inside
+/// the generated TSX (copied authored text), so the full carrier-IDE reverse
+/// map runs on recovery.
+fn seed_member_definition_fixture(
+    server: &VerterLanguageServer,
+    provider: &MockTypeProvider,
+    path: &str,
+) -> (Uri, Position, Range) {
+    let app_source = r#"<script setup lang="ts">
+const foo = { bar: 1 }
+</script>
+<template><div>{{ foo.bar }}</div></template>
+"#;
+    let app_uri = open_test_vue(server, path, app_source);
+    let vue_li = crate::documents::line_index::LineIndex::new_utf16(app_source);
+
+    // Cursor: the MEMBER `bar` in the template `{{ foo.bar }}`.
+    let usage_off = app_source.find("{{ foo.bar }}").expect("member usage") + "{{ foo.".len();
+    let member_position = vue_li
+        .offset_to_position(usage_off as u32)
+        .expect("usage position");
+
+    // Expected result: the authored `bar` in `const foo = { bar: 1 }`.
+    let decl_off = app_source.find("{ bar: 1 }").expect("member decl") + "{ ".len();
+    let expected_decl_range = Range {
+        start: vue_li
+            .offset_to_position(decl_off as u32)
+            .expect("decl start"),
+        end: vue_li
+            .offset_to_position((decl_off + "bar".len()) as u32)
+            .expect("decl end"),
+    };
+
+    // Script the provider: definition AND type-definition at the member's
+    // generated offset answer the declaration's span INSIDE the generated TSX
+    // (copied authored script text — the shape a real engine returns for a
+    // local object member). Both tables are scripted so the same fixture backs
+    // the definition and type-definition recovery pairs.
+    let ctx = synced_type_provider_context_surface_only(server, &app_uri);
+    let usage_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &member_position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("member usage should map into the generated TSX");
+    let tsx_decl_off = ctx
+        .tsx_content
+        .find("{ bar: 1 }")
+        .expect("authored decl is copied into the TSX")
+        + "{ ".len();
+    let decl_location = crate::type_provider::protocol::TypeLocation {
+        path: ctx.tsx_path.clone(),
+        start: tsx_decl_off as u32,
+        end: (tsx_decl_off + "bar".len()) as u32,
+    };
+    provider.set_definitions(&ctx.tsx_path, usage_tsx_offset, vec![decl_location.clone()]);
+    provider.set_type_definitions(&ctx.tsx_path, usage_tsx_offset, vec![decl_location]);
+    (app_uri, member_position, expected_decl_range)
+}
+
+fn definition_params(uri: &Uri, position: Position) -> GotoDefinitionParams {
+    GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    }
+}
+
+fn definition_locations_of(resp: Option<GotoDefinitionResponse>) -> Vec<Location> {
+    match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+        Some(GotoDefinitionResponse::Array(locs)) => locs,
+        Some(GotoDefinitionResponse::Link(links)) => links
+            .into_iter()
+            .map(|link| Location {
+                uri: link.target_uri,
+                range: link.target_selection_range,
+            })
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// No-silent-empty for CTRL+CLICK: a transient provider failure on a MEMBER
+/// definition must resync + retry once — the navigation recovers instead of
+/// silently returning nothing. This is the definition half of the hover
+/// contract above (`hover_recovers_with_resync_and_retry_after_transient_
+/// provider_error`): without it, the same perturbed provider state that hover
+/// self-heals through leaves every member CTRL+CLICK dead (members have no
+/// native fallback), which is exactly the reported "`bar` NEVER works while
+/// hover shows the correct type" asymmetry.
+#[tokio::test]
+async fn definition_recovers_with_resync_and_retry_after_transient_provider_error() {
+    for kind in [
+        crate::TypeProviderKind::Tsserver,
+        crate::TypeProviderKind::Tsgo,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let (app_uri, member_position, expected_decl_range) =
+            seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+
+        // ONE transient failure, then the provider answers normally.
+        provider.fail_next_definitions(1);
+
+        let locs = definition_locations_of(
+            server
+                .goto_definition(definition_params(&app_uri, member_position))
+                .await
+                .expect("definition request should succeed"),
+        );
+        assert!(
+            !locs.is_empty(),
+            "{kind}: a transient provider error must recover to the member definition, got empty"
+        );
+        assert!(
+            locs.iter()
+                .any(|l| l.uri == app_uri && l.range == expected_decl_range),
+            "{kind}: the recovered member definition must land on the authored `bar` declaration \
+             {expected_decl_range:?}, got: {locs:?}"
+        );
+        let definition_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetDefinition { .. }))
+            .count();
+        assert_eq!(
+            definition_calls, 2,
+            "{kind}: exactly one retry after the transient failure, got {definition_calls} \
+             definition calls"
+        );
+    }
+}
+
+/// Fail-closed bound for the definition retry: a PERSISTENT provider failure
+/// retries exactly once after a resync and then returns the native result
+/// (None for a member — never a fabricated location, never a spin).
+#[tokio::test]
+async fn definition_fails_closed_after_bounded_retry_when_provider_keeps_failing() {
+    for kind in [
+        crate::TypeProviderKind::Tsserver,
+        crate::TypeProviderKind::Tsgo,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let (app_uri, member_position, _expected_decl_range) =
+            seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+
+        provider.fail_next_definitions(16);
+
+        let resp = server
+            .goto_definition(definition_params(&app_uri, member_position))
+            .await
+            .expect("definition request must not error to the client");
+        assert!(
+            definition_locations_of(resp).is_empty(),
+            "{kind}: a persistent provider error fails closed after the bounded retry"
+        );
+        let definition_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetDefinition { .. }))
+            .count();
+        assert_eq!(
+            definition_calls, 2,
+            "{kind}: retries are bounded to exactly one resync+retry, got {definition_calls} \
+             definition calls"
+        );
+    }
+}
+
+/// The type-definition twin of the transient-recovery contract: the governing
+/// surface principle names definition AND type-definition, and the same router
+/// `NotReady`/restart/IPC perturbation must heal identically for Go to Type
+/// Definition on a member position.
+#[tokio::test]
+async fn type_definition_recovers_with_resync_and_retry_after_transient_provider_error() {
+    for kind in [
+        crate::TypeProviderKind::Tsserver,
+        crate::TypeProviderKind::Tsgo,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let (app_uri, member_position, expected_decl_range) =
+            seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+
+        // ONE transient failure, then the provider answers normally.
+        provider.fail_next_type_definitions(1);
+
+        let locs = definition_locations_of(
+            server
+                .goto_type_definition(definition_params(&app_uri, member_position))
+                .await
+                .expect("type-definition request should succeed"),
+        );
+        assert!(
+            !locs.is_empty(),
+            "{kind}: a transient provider error must recover to the member type definition, \
+             got empty"
+        );
+        assert!(
+            locs.iter()
+                .any(|l| l.uri == app_uri && l.range == expected_decl_range),
+            "{kind}: the recovered member type definition must land on the authored `bar` \
+             declaration {expected_decl_range:?}, got: {locs:?}"
+        );
+        let type_definition_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetTypeDefinition { .. }))
+            .count();
+        assert_eq!(
+            type_definition_calls, 2,
+            "{kind}: exactly one retry after the transient failure, got {type_definition_calls} \
+             type-definition calls"
+        );
+    }
+}
+
+/// Fail-closed bound for the type-definition retry: a PERSISTENT provider
+/// failure retries exactly once after a resync and then returns None — never a
+/// fabricated location, never a spin.
+#[tokio::test]
+async fn type_definition_fails_closed_after_bounded_retry_when_provider_keeps_failing() {
+    for kind in [
+        crate::TypeProviderKind::Tsserver,
+        crate::TypeProviderKind::Tsgo,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let (app_uri, member_position, _expected_decl_range) =
+            seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+
+        provider.fail_next_type_definitions(16);
+
+        let resp = server
+            .goto_type_definition(definition_params(&app_uri, member_position))
+            .await
+            .expect("type-definition request must not error to the client");
+        assert!(
+            definition_locations_of(resp).is_empty(),
+            "{kind}: a persistent provider error fails closed after the bounded retry"
+        );
+        let type_definition_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetTypeDefinition { .. }))
+            .count();
+        assert_eq!(
+            type_definition_calls, 2,
+            "{kind}: retries are bounded to exactly one resync+retry, got {type_definition_calls} \
+             type-definition calls"
+        );
+    }
+}
+
+/// The RETRY IDENTITY FENCE: a concurrent edit landing between the two
+/// attempts can put a DIFFERENT token at the same coordinates (`foo.bar` →
+/// `fyy.baz`), and a fence-less retry would return a coherent-but-WRONG
+/// definition for the original request (the recomputed offset validates only
+/// that the coordinate maps within the NEW surface). The shared recovery owner
+/// must refuse the retry when the recaptured surface's carrier source differs
+/// from the initial capture — fail closed, and never issue the second query.
+#[tokio::test]
+async fn provider_retry_is_fenced_on_carrier_source_identity() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // v2 is byte-shape-identical to v1 (same lengths, same coordinates), so the
+    // member position still MAPS in v2 — the fence, not offset validation, must
+    // be what blocks the retry.
+    let v2_source = r#"<script setup lang="ts">
+const fyy = { baz: 1 }
+</script>
+<template><div>{{ fyy.baz }}</div></template>
+"#;
+
+    let (app_uri, member_position, _expected_decl_range) =
+        seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+    let initial_ctx = synced_type_provider_context_surface_only(server, &app_uri);
+    let initial_offset = merge::carrier_position_to_tsx_offset_validated(
+        &member_position,
+        &initial_ctx.carrier_line_index,
+        &initial_ctx.mapper,
+        &initial_ctx.tsx_line_index,
+    )
+    .expect("member usage maps into the generated TSX");
+
+    // A poison answer the retry WOULD return if the fence let it through:
+    // `baz`'s declaration in the v2 surface, coherent with the fresh context.
+    let poison = crate::type_provider::protocol::TypeLocation {
+        path: initial_ctx.tsx_path.clone(),
+        start: 0,
+        end: 3,
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in = calls.clone();
+
+    let outcome = super::provider_recovery::provider_query_with_bounded_recovery(
+        "definition",
+        &member_position,
+        initial_ctx,
+        initial_offset,
+        |_tsx_path: String, _offset: u32| {
+            let n = calls_in.fetch_add(1, Ordering::SeqCst);
+            let poison = poison.clone();
+            async move {
+                if n == 0 {
+                    Err(crate::type_provider::protocol::TypeProviderError::new(
+                        "scripted transient failure".to_string(),
+                    ))
+                } else {
+                    Ok(vec![poison])
+                }
+            }
+        },
+        || async {
+            // The concurrent edit lands while the handler is resyncing.
+            let _ = server.documents.did_change(&app_uri, 2, v2_source);
+        },
+        // The post-resync surface describes the EDITED document (v2).
+        || Some(synced_type_provider_context_surface_only(server, &app_uri)),
+    )
+    .await;
+
+    assert!(
+        outcome.value.is_none(),
+        "a retry against an edited carrier source must FAIL CLOSED — it would answer a \
+         different request than the one asked"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the identity fence must refuse the SECOND query outright, not launder a \
+         cross-revision answer"
+    );
+}
+
+/// The fence keys on SOURCE identity, not surface generation: a resync that
+/// re-records the SAME carrier source under a fresh generation/stamp must
+/// still retry (an over-strict generation fence would turn every recovery
+/// into a fail-closed miss and reintroduce the dead-CTRL+CLICK defect).
+#[tokio::test]
+async fn provider_retry_proceeds_when_carrier_source_is_unchanged_across_regeneration() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let (app_uri, member_position, _expected_decl_range) =
+        seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+    let initial_ctx = synced_type_provider_context_surface_only(server, &app_uri);
+    let initial_generation = initial_ctx.snapshot.stamp.generation;
+    let initial_source_hash = initial_ctx.snapshot.source_hash;
+    let initial_offset = merge::carrier_position_to_tsx_offset_validated(
+        &member_position,
+        &initial_ctx.carrier_line_index,
+        &initial_ctx.mapper,
+        &initial_ctx.tsx_line_index,
+    )
+    .expect("member usage maps into the generated TSX");
+
+    let answer = crate::type_provider::protocol::TypeLocation {
+        path: initial_ctx.tsx_path.clone(),
+        start: 7,
+        end: 10,
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in = calls.clone();
+    // The stamp/source identity of the surface the recapture actually served,
+    // recorded so the discrimination preconditions below assert on the REAL
+    // retry context rather than on what this test hoped it built.
+    let recaptured = Arc::new(std::sync::Mutex::new(
+        None::<(u64, crate::provider_surface_store::ContentHash)>,
+    ));
+    let recaptured_in = recaptured.clone();
+
+    let outcome = super::provider_recovery::provider_query_with_bounded_recovery(
+        "definition",
+        &member_position,
+        initial_ctx,
+        initial_offset,
+        |_tsx_path: String, _offset: u32| {
+            let n = calls_in.fetch_add(1, Ordering::SeqCst);
+            let answer = answer.clone();
+            async move {
+                if n == 0 {
+                    Err(crate::type_provider::protocol::TypeProviderError::new(
+                        "scripted transient failure".to_string(),
+                    ))
+                } else {
+                    Ok(vec![answer])
+                }
+            }
+        },
+        || async {},
+        || {
+            // Mint a genuinely FRESH surface generation over byte-identical
+            // source: re-record the same provider content (every record
+            // advances the store generation), then recapture. Without this,
+            // the recapture would serve the INITIAL snapshot back and a
+            // generation-equality fence would pass this test vacuously —
+            // exactly what it exists to rule out.
+            let canonical_id = server
+                .documents
+                .get_canonical_id(&app_uri)
+                .expect("canonical id");
+            let ide = server.documents.get_ide(&app_uri).expect("IDE output");
+            let tsx_path = server
+                .active_ide_path_for_uri(&app_uri)
+                .expect("live IDE path");
+            server.record_carrier_ide_snapshot(&canonical_id, &tsx_path, &ide.code, None);
+            let ctx = server.type_provider_context(&app_uri)?;
+            *recaptured_in.lock().unwrap() =
+                Some((ctx.snapshot.stamp.generation, ctx.snapshot.source_hash));
+            Some(ctx)
+        },
+    )
+    .await;
+
+    // Discrimination preconditions: the retry surface really was a DIFFERENT
+    // generation over the SAME source — so a generation-equality fence fails
+    // this test while the source-identity fence passes it.
+    let (retry_generation, retry_source_hash) = recaptured
+        .lock()
+        .unwrap()
+        .expect("the recovery must have recaptured a retry surface");
+    assert!(
+        retry_generation > initial_generation,
+        "precondition: the recapture must serve a genuinely ADVANCED surface generation \
+         (initial {initial_generation}, retry {retry_generation})"
+    );
+    assert_eq!(
+        retry_source_hash, initial_source_hash,
+        "precondition: the regenerated surface must describe byte-identical carrier source"
+    );
+
+    assert!(
+        outcome.value.is_some_and(|locs| locs.len() == 1),
+        "an identical-source retry must proceed and recover the provider answer"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the retry must actually re-query when the carrier source is unchanged"
+    );
 }
 
 // @ai-generated - Guards canonical child resolution across sequential parent sync/query state.
@@ -11258,6 +13770,9 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
     let pending_snapshot_provider_sync = DashSet::new();
@@ -11361,6 +13876,9 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
     let pending_snapshot_provider_sync = DashSet::new();
@@ -11477,6 +13995,9 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -11590,6 +14111,9 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -12368,16 +14892,10 @@ async fn stale_repair_holding_pre_close_lease_cannot_retire_revived_lane() {
 /// BLOCKER-1's hermetic test missed by calling `publish_carrier` directly).
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
-    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
-
     // Unique workspace root so the per-(host_version, ws_root) carrier store dir is
     // isolated from other tests. A unix-style absolute root round-trips cleanly
     // through `open_test_vue`'s `file://{path}` URI (canonical_id == path).
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let ws_root = format!("/verter_b1_prod_{nanos}/ws");
+    let ws_root = unique_server_ws_root("b1_prod");
     let tsconfig = format!("{ws_root}/tsconfig.json");
     let source = format!("{ws_root}/src/App.vue");
 
@@ -12406,8 +14924,8 @@ async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
     // Capture the published provider paths so the post-retract check is path-exact
     // without hardcoding the companion suffix.
     let published_providers: Vec<String> = {
-        let store = CarrierPublishStore::open(default_carrier_store_host_version(), &ws_root);
-        let manifest = store.current_manifest();
+        let manifest =
+            carrier_manifest_strict(&ws_root).expect("the publish must have written a manifest");
         let project = manifest
             .projects
             .get(&tsconfig)
@@ -12445,7 +14963,7 @@ async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
 
     // 2. The owner DISAPPEARS: install a ready snapshot rooted ELSEWHERE that does
     //    NOT own this file (owner loss; ownership_ready = true).
-    let other_root = format!("/verter_b1_other_{nanos}/ws");
+    let other_root = unique_server_ws_root("b1_other");
     install_test_resolver_for_root(
         server,
         &other_root,
@@ -12455,11 +14973,10 @@ async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
     // 3. Drive the SAME production entry again. Owner loss MUST retract the carrier.
     server.ensure_current_file_synced(&uri).await;
 
-    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &ws_root);
-    let manifest = store.current_manifest();
+    let manifest = carrier_manifest_strict(&ws_root);
     let still_owned = manifest
-        .projects
-        .get(&tsconfig)
+        .as_ref()
+        .and_then(|manifest| manifest.projects.get(&tsconfig))
         .map(|p| p.owned_sources.iter().any(|o| o.source_uri == source))
         .unwrap_or(false);
     assert!(
@@ -12469,8 +14986,8 @@ async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
          production before the fix)"
     );
     let still_ready = manifest
-        .projects
-        .get(&tsconfig)
+        .as_ref()
+        .and_then(|manifest| manifest.projects.get(&tsconfig))
         .map(|p| {
             published_providers
                 .iter()
@@ -12535,6 +15052,9 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -12546,6 +15066,7 @@ const msg = 'hello'
             canonical_id,
             false,
             Some("export default { updated: true }"),
+            None,
         )
         .await;
 
@@ -12631,13 +15152,21 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
     // Flip to TS: is_jsx = false → desired path is `.tsx`. Fresh IDE code; the
     // new `.tsx` open SUCCEEDS (no failure injection).
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
+        .preserve_open_unresolved_carrier(
+            canonical_id,
+            false,
+            Some("export default { ts: true }"),
+            None,
+        )
         .await;
 
     let calls = provider.file_sync_calls();
@@ -12746,12 +15275,15 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
     // Flip to TS (is_jsx = false → desired `.tsx`) but with NO IDE code this pass.
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, None)
+        .preserve_open_unresolved_carrier(canonical_id, false, None, None)
         .await;
 
     let calls = provider.file_sync_calls();
@@ -12835,13 +15367,21 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
     // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
+        .preserve_open_unresolved_carrier(
+            canonical_id,
+            false,
+            Some("export default { ts: true }"),
+            None,
+        )
         .await;
 
     let calls = provider.file_sync_calls();
@@ -12935,13 +15475,21 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
     // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
     provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
+        .preserve_open_unresolved_carrier(
+            canonical_id,
+            false,
+            Some("export default { ts: true }"),
+            None,
+        )
         .await;
 
     let calls = provider.file_sync_calls();
@@ -13090,7 +15638,7 @@ const msg = 'hello'
 
     // No prior committed state seeded; no IDE code this pass.
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, None)
+        .preserve_open_unresolved_carrier(canonical_id, false, None, None)
         .await;
 
     let state = server
@@ -13167,6 +15715,9 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert("/workspace/src/App.vue".to_string(), prior_state.clone());
 
@@ -13309,6 +15860,9 @@ async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -13436,6 +15990,9 @@ async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kin
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
     let pending_snapshot_provider_sync = DashSet::new();
@@ -13547,7 +16104,7 @@ async fn background_init_drain_clears_stale_macro_type_diagnostic_for_package_ex
     // resolves immediately via the "types" export condition in package.json.
     // No stale HOST_MISSING_MACRO_TYPE_DEP diagnostic should appear.
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     assert!(
         !diags.iter().any(|d| matches!(
             &d.code,
@@ -13866,6 +16423,9 @@ async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -13913,6 +16473,9 @@ async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -13990,6 +16553,7 @@ defineProps<{ msg: string }>()
                 Some(tsconfig.clone()),
             ),
         ]),
+        resolution_view: None,
         ownership_ready: true,
     };
 
@@ -14011,6 +16575,9 @@ defineProps<{ msg: string }>()
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
 
@@ -14128,6 +16695,7 @@ defineProps<{ msg: string }>()
                 Some(tsconfig.clone()),
             ),
         ]),
+        resolution_view: None,
         ownership_ready: true,
     };
 
@@ -14151,6 +16719,9 @@ defineProps<{ msg: string }>()
             ),
             source_revision: u64::MAX,
         }),
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(canonical_id.clone(), prior_state);
 
@@ -14244,6 +16815,7 @@ defineProps<{ msg: string }>()
                 Some(tsconfig.clone()),
             ),
         ]),
+        resolution_view: None,
         ownership_ready: true,
     };
 
@@ -14264,6 +16836,9 @@ defineProps<{ msg: string }>()
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
 
@@ -14898,6 +17473,9 @@ defineProps<{ msg: string }>()
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -14980,6 +17558,9 @@ defineProps<{ msg: string }>()
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     server.commit_provider_sync_state("/workspace/src/App.vue", prior_state.clone());
 
@@ -15253,6 +17834,9 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -15671,6 +18255,9 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -15844,7 +18431,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
 
 #[tokio::test(flavor = "multi_thread")]
 async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_properties() {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/vue-vscode/node_modules/typescript/lib")
         .to_string_lossy()
@@ -15853,8 +18440,7 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
         eprintln!("skipping: node not found");
         return;
     };
-    let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
-    else {
+    let Some(tsserver_path) = crate::test_harness::harness_tsserver_path(&tsdk) else {
         eprintln!("skipping: tsserver.js not found");
         return;
     };
@@ -15960,9 +18546,11 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
         .get_completions(&ctx.tsx_path, tsx_offset, Some("."))
         .await
     else {
-        eprintln!("skipping: direct tsserver completion timed out (cold start)");
         provider.shutdown().await;
-        return;
+        panic!(
+            "direct tsserver completion must answer; a timeout here means the \
+             staged fixture never reached a typed state"
+        );
     };
     let direct_labels: Vec<String> = direct_result
         .items
@@ -15977,11 +18565,15 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
     );
 
     if !labels.contains(&"disabled".to_string()) {
-        eprintln!(
-            "skipping: tsserver not warmed up (got global completions instead of member access)"
-        );
+        // FAIL, never skip. `disabled` is absent exactly when the fixture's
+        // dependency surface did not resolve, and returning green here reports a
+        // pass for a test that ran none of its assertions.
         provider.shutdown().await;
-        return;
+        panic!(
+            "member-access completion must resolve the fixture's typed surface; \
+             `disabled` is missing, which means the staged fixture's dependencies \
+             did not materialize, got: {labels:?}"
+        );
     }
     assert!(
             labels.contains(&"label".to_string()),
@@ -15996,7 +18588,7 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
 #[tokio::test(flavor = "multi_thread")]
 async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immediately_after_open()
 {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/vue-vscode/node_modules/typescript/lib")
         .to_string_lossy()
@@ -16005,8 +18597,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
         eprintln!("skipping: node not found");
         return;
     };
-    let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
-    else {
+    let Some(tsserver_path) = crate::test_harness::harness_tsserver_path(&tsdk) else {
         eprintln!("skipping: tsserver.js not found");
         return;
     };
@@ -16102,11 +18693,15 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
     );
 
     if !labels.contains(&"disabled".to_string()) {
-        eprintln!(
-            "skipping: tsserver not warmed up (got global completions instead of member access)"
-        );
+        // FAIL, never skip. `disabled` is absent exactly when the fixture's
+        // dependency surface did not resolve, and returning green here reports a
+        // pass for a test that ran none of its assertions.
         provider.shutdown().await;
-        return;
+        panic!(
+            "member-access completion must resolve the fixture's typed surface; \
+             `disabled` is missing, which means the staged fixture's dependencies \
+             did not materialize, got: {labels:?}"
+        );
     }
     assert!(
         labels.contains(&"label".to_string()),
@@ -16121,7 +18716,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
 #[tokio::test(flavor = "multi_thread")]
 async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_dot_trigger_immediately_after_open(
 ) {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/vue-vscode/node_modules/typescript/lib")
         .to_string_lossy()
@@ -16130,8 +18725,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
         eprintln!("skipping: node not found");
         return;
     };
-    let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
-    else {
+    let Some(tsserver_path) = crate::test_harness::harness_tsserver_path(&tsdk) else {
         eprintln!("skipping: tsserver.js not found");
         return;
     };
@@ -16227,11 +18821,15 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
     );
 
     if !labels.contains(&"disabled".to_string()) {
-        eprintln!(
-            "skipping: tsserver not warmed up (got global completions instead of member access)"
-        );
+        // FAIL, never skip. `disabled` is absent exactly when the fixture's
+        // dependency surface did not resolve, and returning green here reports a
+        // pass for a test that ran none of its assertions.
         provider.shutdown().await;
-        return;
+        panic!(
+            "member-access completion must resolve the fixture's typed surface; \
+             `disabled` is missing, which means the staged fixture's dependencies \
+             did not materialize, got: {labels:?}"
+        );
     }
     assert!(
             labels.contains(&"label".to_string()),
@@ -16245,17 +18843,15 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
 
 #[test]
 fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let app_path = format!("{workspace_id}/src/App.vue");
     let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
     let uri = crate::uri::path_to_file_uri(&app_path).expect("fixture uri should be valid");
 
-    let fixture_path = std::fs::canonicalize(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packages/vue-vscode/e2e/fixtures/single-project"),
-    )
-    .unwrap();
-    let host = crate::test_utils::make_filesystem_test_host(&fixture_path);
+    // Root the host at the SAME staged copy `workspace_id`, `app_path` and the
+    // document URI come from. Rooting it at the authored tree instead would make
+    // the host resolve a different fixture than the one under test.
+    let host = crate::test_utils::make_filesystem_test_host(std::path::Path::new(&workspace_id));
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
     let _ = documents.did_open(&TextDocumentItem {
         uri: uri.clone(),
@@ -16267,9 +18863,10 @@ fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
     let cached_verter_diags = Arc::new(DashMap::new());
 
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     let fragment_path = format!("{workspace_id}/src/FragmentComp.vue");
-    let fragment_analysis = resolve_component_for(host.as_ref(), &app_path, "./FragmentComp.vue");
+    let fragment_analysis = resolve_component_for(host.as_ref(), &app_path, "./FragmentComp.vue")
+        .map(|(_, analysis)| analysis);
 
     assert!(
             diags.iter().any(|diag| {
@@ -16351,7 +18948,7 @@ fn unused_declared_props_emits_slots_surface_by_default_with_unnecessary_tag() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     let by_code = |code: &str| {
         diags
@@ -16451,7 +19048,7 @@ fn unused_declaration_diagnostics_fail_open_on_escapes_destructure_and_use_slots
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -16463,6 +19060,338 @@ fn unused_declaration_diagnostics_fail_open_on_escapes_destructure_and_use_slots
         )),
         "escaped/destructured/useSlots component must produce ZERO unused-declaration \
          diagnostics (fail-open; destructured props are provider-owned TS6133), got: {diags:?}"
+    );
+}
+
+/// Props-root binding through `withDefaults`: the analyzer stores the root
+/// binding on the OUTER `WithDefaults` macro while the INNER `DefineProps`
+/// carries the prop fields with no binding of its own. Acceptance: a prop
+/// read in `<script setup>` (`props.title`) and a prop read in the template
+/// (`{{ props.count }}`) must NOT be flagged.
+#[test]
+fn with_defaults_bound_props_script_and_template_reads_are_not_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ title: string; count: number }>(), { title: 'x', count: 0 });\n\
+                  console.log(props.title);\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div>{{ props.count }}</div>\n\
+                  </template>\n";
+    let file = dir.path().join("WithDefaultsUsed.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+        )),
+        "props read via the bound withDefaults root (script `props.title`, template \
+         `{{ props.count }}`) must NOT be flagged, got: {diags:?}"
+    );
+}
+
+/// The discriminator: under bound `withDefaults` a GENUINELY unused prop must
+/// STILL be reported — the fix arms the analysis, it must not silence it.
+#[test]
+fn with_defaults_bound_props_genuinely_unused_prop_is_still_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ title: string; unusedProp: number }>(), { title: 'x', unusedProp: 0 });\n\
+                  console.log(props.title);\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div />\n\
+                  </template>\n";
+    let file = dir.path().join("WithDefaultsUnused.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
+
+    let unused_props = diags
+        .iter()
+        .filter(|diag| {
+            matches!(
+                diag.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unused_props.len(),
+        1,
+        "a genuinely-unused prop under bound withDefaults must STILL surface exactly \
+         one diagnostic, got: {diags:?}"
+    );
+    assert!(unused_props[0].message.contains("unusedProp"));
+    assert!(
+        !unused_props
+            .iter()
+            .any(|diag| diag.message.contains("title")),
+        "the read member must stay silent, got: {diags:?}"
+    );
+}
+
+/// The escape machinery must now be ARMED: spreading the bound `withDefaults`
+/// root whole (`{ ...props }`) is a whole-object escape and suppresses every
+/// unused-prop diagnostic (fail-open).
+#[test]
+fn with_defaults_bound_props_whole_object_spread_suppresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ title: string }>(), { title: 'x' });\n\
+                  const all = { ...props };\n\
+                  console.log(all);\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div />\n\
+                  </template>\n";
+    let file = dir.path().join("WithDefaultsSpread.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+        )),
+        "whole-object spread of the bound withDefaults root must suppress (fail-open), \
+         got: {diags:?}"
+    );
+}
+
+/// Template whole-object binding under bound `withDefaults`: `<div
+/// v-bind="props">` is an unconsumed occurrence of the bound root — a
+/// whole-object escape that suppresses every unused-prop diagnostic
+/// (fail-open). The escape is kind-wide by design, so the anti-silencing
+/// control is the paired file opened in the same host below: the SAME
+/// component without the escape must still flag its genuinely-unused props.
+#[test]
+fn with_defaults_bound_props_template_whole_object_bind_suppresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ title: string; unusedProp: number }>(), { title: 'x', unusedProp: 0 });\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div v-bind=\"props\" />\n\
+                  </template>\n";
+    let file = dir.path().join("WithDefaultsTemplateBind.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+        )),
+        "template whole-object `v-bind=\"props\"` on the bound withDefaults root is an \
+         escape and must suppress every unused-prop diagnostic, got: {diags:?}"
+    );
+
+    // Anti-silencing control: the SAME component without the escape — no prop
+    // is read anywhere, so BOTH must surface. Proves the zero above is the
+    // escape, not a silent diagnostic pipeline.
+    let control_source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ title: string; unusedProp: number }>(), { title: 'x', unusedProp: 0 });\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div />\n\
+                  </template>\n";
+    let control_file = dir.path().join("WithDefaultsTemplateBindControl.vue");
+    std::fs::write(&control_file, control_source).unwrap();
+    let control_uri =
+        crate::uri::path_to_file_uri(&control_file.to_string_lossy().replace('\\', "/"))
+            .expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: control_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: control_source.to_string(),
+    });
+    let control_diags = crate::server::document_diagnostics_for_test(
+        &documents,
+        &control_uri,
+        &cached_verter_diags,
+        None,
+    );
+    let control_unused: Vec<_> = control_diags
+        .iter()
+        .filter(|diag| {
+            matches!(
+                diag.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+            )
+        })
+        .collect();
+    assert_eq!(
+        control_unused.len(),
+        2,
+        "anti-silencing control: without the escape both genuinely-unused props must \
+         STILL be flagged, got: {control_diags:?}"
+    );
+    assert!(
+        control_unused.iter().any(|d| d.message.contains("title"))
+            && control_unused
+                .iter()
+                .any(|d| d.message.contains("unusedProp")),
+        "control must flag exactly `title` and `unusedProp`, got: {control_diags:?}"
+    );
+}
+
+/// Style root access under bound `withDefaults`: `<style>` `v-bind(props.color)`
+/// references the bound props ROOT — member-level liveness cannot be bounded,
+/// so the whole unused-prop kind suppresses (fail-open). The anti-silencing
+/// control is the paired file without the `<style>` trigger: the SAME
+/// component must still flag its genuinely-unused props.
+#[test]
+fn with_defaults_bound_props_style_root_vbind_suppresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ color: string; unusedProp: number }>(), { color: 'red', unusedProp: 0 });\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div class=\"x\">t</div>\n\
+                  </template>\n\
+                  \n\
+                  <style>\n\
+                  .x { color: v-bind(props.color); }\n\
+                  </style>\n";
+    let file = dir.path().join("WithDefaultsStyleVBind.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+        )),
+        "style `v-bind(props.color)` on the bound withDefaults root must suppress every \
+         unused-prop diagnostic (root liveness cannot be bounded), got: {diags:?}"
+    );
+
+    // Anti-silencing control: the SAME component without the `<style>`
+    // trigger — neither prop is read anywhere, so BOTH must surface.
+    let control_source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ color: string; unusedProp: number }>(), { color: 'red', unusedProp: 0 });\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div class=\"x\">t</div>\n\
+                  </template>\n";
+    let control_file = dir.path().join("WithDefaultsStyleVBindControl.vue");
+    std::fs::write(&control_file, control_source).unwrap();
+    let control_uri =
+        crate::uri::path_to_file_uri(&control_file.to_string_lossy().replace('\\', "/"))
+            .expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: control_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: control_source.to_string(),
+    });
+    let control_diags = crate::server::document_diagnostics_for_test(
+        &documents,
+        &control_uri,
+        &cached_verter_diags,
+        None,
+    );
+    let control_unused: Vec<_> = control_diags
+        .iter()
+        .filter(|diag| {
+            matches!(
+                diag.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+            )
+        })
+        .collect();
+    assert_eq!(
+        control_unused.len(),
+        2,
+        "anti-silencing control: without the style trigger both genuinely-unused props \
+         must STILL be flagged, got: {control_diags:?}"
+    );
+    assert!(
+        control_unused.iter().any(|d| d.message.contains("color"))
+            && control_unused
+                .iter()
+                .any(|d| d.message.contains("unusedProp")),
+        "control must flag exactly `color` and `unusedProp`, got: {control_diags:?}"
     );
 }
 
@@ -16494,7 +19423,7 @@ fn svelte_legacy_slot_produces_no_unused_declaration_diagnostic() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -16536,7 +19465,7 @@ fn template_emit_binding_call_never_flags_the_emitted_event() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -16577,7 +19506,7 @@ fn template_dollar_emit_call_suppresses_emit_diagnostics() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -16648,8 +19577,12 @@ fn broken_script_mid_edit_emits_no_unused_declaration_hints() {
         });
 
         let cached_verter_diags = Arc::new(DashMap::new());
-        let diags =
-            compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        let diags = crate::server::document_diagnostics_for_test(
+            &documents,
+            &uri,
+            &cached_verter_diags,
+            None,
+        );
 
         assert!(
             !diags.iter().any(|diag| matches!(
@@ -16697,7 +19630,7 @@ fn style_vbind_bare_prop_name_keeps_prop_live_and_dead_prop_flagged() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     let unused_props: Vec<_> = diags
         .iter()
@@ -16726,7 +19659,7 @@ fn style_vbind_bare_prop_name_keeps_prop_live_and_dead_prop_flagged() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_missed() {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/vue-vscode/node_modules/typescript/lib")
         .to_string_lossy()
@@ -16735,8 +19668,7 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
         eprintln!("skipping: node not found");
         return;
     };
-    let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
-    else {
+    let Some(tsserver_path) = crate::test_harness::harness_tsserver_path(&tsdk) else {
         eprintln!("skipping: tsserver.js not found");
         return;
     };
@@ -16824,11 +19756,15 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
     );
 
     if !labels.contains(&"disabled".to_string()) {
-        eprintln!(
-            "skipping: tsserver not warmed up (got global completions instead of member access)"
-        );
+        // FAIL, never skip. `disabled` is absent exactly when the fixture's
+        // dependency surface did not resolve, and returning green here reports a
+        // pass for a test that ran none of its assertions.
         provider.shutdown().await;
-        return;
+        panic!(
+            "member-access completion must resolve the fixture's typed surface; \
+             `disabled` is missing, which means the staged fixture's dependencies \
+             did not materialize, got: {labels:?}"
+        );
     }
     assert!(
         labels.contains(&"label".to_string()),
@@ -16842,7 +19778,7 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
 
 #[tokio::test(flavor = "multi_thread")]
 async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_parent() {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/vue-vscode/node_modules/typescript/lib")
         .to_string_lossy()
@@ -16851,8 +19787,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
         eprintln!("skipping: node not found");
         return;
     };
-    let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
-    else {
+    let Some(tsserver_path) = crate::test_harness::harness_tsserver_path(&tsdk) else {
         eprintln!("skipping: tsserver.js not found");
         return;
     };
@@ -17053,9 +19988,13 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
     };
 
     if !labels.contains(&"name".to_string()) {
-        eprintln!("skipping: tsserver not warmed up (slot member completions missing 'name')");
+        // FAIL, never skip — see the member-access discriminators above.
         provider.shutdown().await;
-        return;
+        panic!(
+            "slot member completion must resolve the scoped-slot type; `name` is \
+             missing, which means the staged fixture's dependencies did not \
+             materialize, got: {labels:?}"
+        );
     }
     assert!(
         labels.contains(&"id".to_string()),
@@ -17128,14 +20067,14 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
     // Type deps (types.ts) are resolved via VFS workspace read fallback during
     // compilation but may not be explicitly loaded into the scheduler.
     assert!(
-        host.resolve_import_via_workspace(&app_id, "@/types")
-            .is_some(),
+        host.resolve_import_transient(&app_id, "@/types").is_some(),
         "macro type dep @/types should resolve via VFS"
     );
 
     // Verify the resolver can resolve these specifiers
     let snapshot = PublishedResolverSnapshot {
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![project]),
+        resolution_view: None,
         ownership_ready: true,
     };
     // The drain carries a `CarrierPublishCtx` with the published vfs (the single
@@ -17149,11 +20088,10 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
         ownership_ready: true,
     };
     let ws = documents.host().workspace_read();
-    let external_resolved = snapshot.resolver.resolve_with_reader(
-        ws.as_ref(),
-        &crate::project_resolver::ResolveRequest {
-            importer_id: app_id.clone(),
-            specifier: "@/partials/panel.html".to_string(),
+    let external_resolved = ws.resolve_import(
+        &app_id,
+        "@/partials/panel.html",
+        crate::project_resolver::ResolutionContext {
             kind: crate::project_resolver::ResolveRequestKind::SfcSrcAttr,
             phase: crate::project_resolver::ResolvePhase::CodegenBlocker,
         },
@@ -17261,6 +20199,7 @@ defineProps<{ msg: string }>()
                 Some(tsconfig.clone()),
             ),
         ]),
+        resolution_view: None,
         ownership_ready: true,
     };
     // The tsgo drain always carries a `CarrierPublishCtx` with the published vfs (the
@@ -18882,6 +21821,9 @@ async fn deleting_carrier_source_closes_its_companions_in_provider() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -19582,7 +22524,7 @@ fn compute_verter_diagnostics_ignores_plain_typescript_files() {
     let cached_verter_diags = Arc::new(DashMap::new());
 
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         documents.get(&uri).is_some(),
@@ -19631,7 +22573,7 @@ const props = defineProps<Props<string>>()
     });
 
     let diagnostics =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &DashMap::new(), None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &DashMap::new(), None);
     let limited: Vec<_> = diagnostics
         .iter()
         .filter(|diagnostic| {
@@ -19685,7 +22627,7 @@ fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
 
     // First call — should contain HOST_MISSING_MACRO_TYPE_DEP
     let diags1 =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     assert!(
         diags1.iter().any(|d| matches!(
             &d.code,
@@ -19708,7 +22650,7 @@ fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
 
     // Second call — same doc version, but diagnostics_generation changed
     let diags2 =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     assert!(
             !diags2.iter().any(|d| matches!(
                 &d.code,
@@ -19723,8 +22665,9 @@ async fn resync_aliased_imports_resolves_and_syncs_after_registry_built() {
     // Setup: temp dir with workspace/src/App.vue importing @/components/Child.vue
     // Use a non-dot-prefixed directory so tsconfig discovery doesn't skip it
     // (tsconfig discovery skips dot-directories).
-    let temp_base = std::env::temp_dir().join("verter_test_resync_aliased");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_resync_aliased").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
 
@@ -19785,14 +22728,22 @@ import Child from '@/components/Child.vue'
 
     // Phase 1: before VFS snapshot is built — aliased import should NOT resolve
     let analysis = host.get_analysis(&app_id).expect("analysis for App.vue");
-    let ids_before = collect_imported_carrier_priority_ids_from_imports_with_fallback(
+    let ids_before = collect_imported_carrier_priority_ids_from_imports_for_publication(
         &analysis.imports,
         Some(&app_id),
         |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
     );
+    // The bootstrap root carries no configured project, which is a COMPLETE
+    // context observation (the stable `unowned` context), not a provenance
+    // gap — so the request is admitted. What it admits is a witnessed MISS:
+    // the `@/*` alias has no mapping until the registry publishes one, and an
+    // admitted miss publishes no carrier id.
+    let ids_before = ids_before
+        .expect("a complete bootstrap root admits the unowned alias request instead of refusing");
     assert!(
         ids_before.is_empty(),
-        "aliased imports should NOT resolve when project_registry is None, got: {ids_before:?}"
+        "the `@/*` alias must not resolve before the project registry is published, got: \
+         {ids_before:?}"
     );
 
     // Phase 2: Build and populate project registry with tsconfig alias
@@ -19817,11 +22768,12 @@ import Child from '@/components/Child.vue'
     let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
 
     // Now aliased import should resolve
-    let ids_after = collect_imported_carrier_priority_ids_from_imports_with_fallback(
+    let ids_after = collect_imported_carrier_priority_ids_from_imports_for_publication(
         &analysis.imports,
         Some(&app_id),
         |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
     );
+    let ids_after = ids_after.expect("published project registry should admit alias resolution");
     assert!(
         !ids_after.is_empty(),
         "aliased imports should resolve after project_registry is populated"
@@ -19962,8 +22914,9 @@ async fn declaration_closure_proactively_opens_transitive_decl_overlays() {
     // from an open root, so a bare `import B from "./B.vue"` resolves with no
     // TS2307. Cover the TRANSITIVE case: A imports B imports C — opening A opens
     // B.d.vue.ts AND C.d.vue.ts. Also pin that a cycle (C imports A) terminates.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_transitive");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_closure_transitive").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -20117,8 +23070,9 @@ async fn lone_leaf_carrier_opens_its_own_declaration_overlay() {
     // `visited` with the root and skipped it), and the main per-document sync only
     // opened the IDE `.vue.tsx` + API `.vue.verter.ts`. So a lone leaf got neither —
     // its `Leaf.d.vue.ts` was never opened.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_lone_leaf");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_closure_lone_leaf").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -20245,8 +23199,9 @@ async fn stale_pass_does_not_reopen_a_declaration_overlay_a_newer_pass_closed() 
     // RED-before (no ADD gate): the older pass re-opens the overlay (the open is
     // ungated and monotonic-max re-records the edge). Post-fix: the per-root
     // high-water gate rejects it.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_stale_reopen");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_closure_stale_reopen").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -20394,8 +23349,10 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
     // RED-before (gate read + record NOT under one guard, i.e. the gate dropped from
     // `gate_and_record_root_edge`): the older open records and `open_dts` re-opens
     // Root.d.vue.ts after the advance. GREEN-after: the shared guard gates it.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_stale_open_interleave");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_closure_stale_open_interleave")
+            .expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -20662,8 +23619,9 @@ async fn closure_final_reconcile_drops_root_that_closed_mid_pass() {
     // is never closed — a permanent leak. Instead the call site
     // RE-READS the open set after the async work, so the now-closed A is dropped
     // and its solely-A overlay is returned for close.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_close_mid_pass");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard = tempfile::TempDir::with_prefix("verter_test_decl_closure_close_mid_pass")
+        .expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -20840,8 +23798,10 @@ async fn closure_final_reconcile_drops_root_that_closed_mid_pass() {
 /// before the pass re-reads it → the edge is dropped → no leak.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn did_close_orders_didclose_before_release_so_no_overlay_leak_at_real_handler() {
-    let temp_base = std::env::temp_dir().join("verter_test_did_close_release_order_leak");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_did_close_release_order_leak")
+            .expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -21074,8 +24034,9 @@ async fn did_close_orders_didclose_before_release_so_no_overlay_leak_at_real_han
 /// so production carries no probe.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guarded_decl_close_does_not_strand_concurrently_reopened_overlay() {
-    let temp_base = std::env::temp_dir().join("verter_test_decl_close_supersession");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_close_supersession").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -21473,8 +24434,9 @@ async fn closure_reconciles_dropped_import_releases_overlay() {
     // RED-before: the closure only ever INSERTED; removal happened ONLY on
     // did_close. So `B.d.vue.ts` stayed attributed to A (and stayed open) after A
     // stopped importing B.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_reconcile");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_closure_reconcile").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -21887,7 +24849,7 @@ async fn reconcile_does_not_reissue_close_for_an_in_flight_tombstone() {
 fn carrier_dependency_ids_resolves_carriers_and_filters_non_carriers() {
     // P2 #4: `carrier_dependency_ids` resolves each script import through the
     // engine's workspace resolver (analysis-time `resolved_canonical_id`, with the
-    // `resolve_import_specifier_standalone` → `host.resolve_import_via_workspace`
+    // `resolve_import_specifier_standalone` → `host.resolve_for_persistent_state`
     // fallback rail) and returns ONLY the carrier→carrier edges — a non-carrier
     // (`.ts`) dependency is dropped (handled by the other passes), per the
     // documented contract. (The fallback rail itself is a timing safety net for the
@@ -21905,6 +24867,13 @@ fn carrier_dependency_ids_resolves_carriers_and_filters_non_carriers() {
         verter_workspace::MemoryOptions::default(),
     ));
     let host = VerterHost::new(HostConfig::default(), ws);
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/src".to_string(),
+            "/src".to_string(),
+            Some("/src/tsconfig.json".to_string()),
+        ),
+    ]);
     host.upsert(UpsertRequest {
         canonical_id: None,
         input_id: "/src/A.vue".to_string(),
@@ -21936,6 +24905,7 @@ fn carrier_dependency_ids_resolves_carriers_and_filters_non_carriers() {
     );
 
     let deps = carrier_dependency_ids(&host, "/src/A.vue");
+    let deps = deps.expect("exact fixture resolutions should be admitted");
 
     // POSITIVE: the carrier dependency `./B.vue` is resolved and returned.
     assert!(
@@ -21959,8 +24929,9 @@ async fn resync_aliased_imports_retains_prior_path_when_replacement_sync_fails()
     // marked stale by the force-rebind clause; pre-fix the pass closed it BEFORE
     // syncing, so a failed sync left the artifact gone. Post-fix: a failed sync
     // closes nothing and retains the prior state.
-    let temp_base = std::env::temp_dir().join("verter_test_resync_aliased_retain");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_resync_aliased_retain").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
     std::fs::write(
@@ -22058,6 +25029,9 @@ import Child from '@/components/Child.vue'
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(child_id.clone(), prior_state.clone());
 
@@ -22115,8 +25089,9 @@ import Child from '@/components/Child.vue'
 
 #[tokio::test(flavor = "multi_thread")]
 async fn resync_aliased_imports_syncs_vue_ide_artifact_for_tsgo() {
-    let temp_base = std::env::temp_dir().join("verter_test_resync_aliased_tsgo");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_resync_aliased_tsgo").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
 
@@ -22212,8 +25187,9 @@ async fn resync_aliased_imports_syncs_barrel_and_vue_deps_for_tsgo() {
     // Setup: App.vue imports `{ Overlay }` from a barrel (./components/index.ts)
     // which re-exports `./Overlay.vue`. Both the barrel and its Vue dependency
     // must be synced eagerly so TSGO resolves the component types.
-    let temp_base = std::env::temp_dir().join("verter_test_resync_barrel_tsgo");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_resync_barrel_tsgo").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
 
@@ -22362,8 +25338,9 @@ async fn resync_aliased_already_loaded_open_vue_reconciled_when_owner_lost() {
     // committed binding still matching the live resolution, so an owner-lost open
     // file falls through to `reconcile_unowned_carrier_provider_file` → converts to
     // Unresolved + closes the dropped owner-derived `.vue.ts`.
-    let temp_base = std::env::temp_dir().join("verter_test_r24_aliased_owner_lost");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_r24_aliased_owner_lost").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
     std::fs::write(
@@ -22470,6 +25447,9 @@ defineProps<{ msg: string }>()
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(child_id.clone(), prior_state);
 
@@ -22536,8 +25516,9 @@ async fn resync_barrel_vue_dep_reconciles_open_owned_overlay_on_owner_loss() {
     // discovery actually REACHED Overlay. If discovery regressed to a no-op, the
     // seeded `Owned` binding would survive unchanged and nothing would close, so
     // a pure state-survival + absence-of-close assertion would pass vacuously.
-    let temp_base = std::env::temp_dir().join("verter_test_barrel_open_unowned");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_barrel_open_unowned").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
     std::fs::write(
@@ -22659,6 +25640,9 @@ defineProps<{ show: boolean }>()
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -22780,6 +25764,9 @@ defineProps<{ msg: string }>()
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -22888,6 +25875,9 @@ defineProps<{ msg: string }>()
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -23045,14 +26035,12 @@ async fn resync_background_owner_loss_retracts_ledger_membership() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_compiled_owner_resolved_publishes_ledger_via_reconciler() {
     use crate::external_ts::CanonicalSource;
-    static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
 
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let service = make_hover_test_service(type_provider);
     let server = service.inner();
-    let fixture_id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
-    let workspace_root = format!("/verter_membership_publish_{fixture_id}");
+    let workspace_root = unique_server_ws_root("membership_publish");
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     let canonical_id = format!("{workspace_root}/src/App.vue");
     install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
@@ -23854,6 +26842,9 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
     // Record the surface a successful IDE sync would have recorded — the
@@ -24004,6 +26995,9 @@ fn active_non_decl_paths_excludes_the_declaration_overlay() {
         shadow_background_loaded: true,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
 
     // The full active set still includes the declaration overlay.
@@ -24064,6 +27058,9 @@ async fn generic_stale_closer_never_closes_declaration_overlay() {
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
 
     // Exactly the call shape the removal paths use: the generic closer over the
@@ -24273,8 +27270,9 @@ async fn guarded_close_is_superseded_when_generation_advanced_even_if_set_looks_
 /// concurrency; this one discriminates the GENERATION/REACHABILITY gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
-    let temp_base = std::env::temp_dir().join("verter_test_decl_close_no_resurrect");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_close_no_resurrect").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -25245,6 +28243,9 @@ async fn make_virtual_file_fixture(
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
     server.record_carrier_ide_snapshot("/workspace/src/App.vue", &tsx_path, recorded_content, None);
@@ -25435,14 +28436,15 @@ async fn make_foreign_mapping_fixture() -> (
     String,
     String,
 ) {
-    static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
-
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let service = make_hover_test_service_tsgo(type_provider);
     let server = service.inner();
-    let fixture_id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
-    let workspace_root = format!("/verter_foreign_mapping_{fixture_id}");
+    // A SHARED fixture helper: both callers run in their own PROCESS under nextest, so a
+    // function-local `AtomicUsize` starting at 0 minted `/verter_foreign_mapping_0` in
+    // BOTH — one store dir, one manifest.json, concurrently. Route through the
+    // process-varying seam.
+    let workspace_root = unique_server_ws_root("foreign_mapping");
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
 
@@ -25621,11 +28623,7 @@ async fn definition_drops_foreign_carrier_location_when_foreign_surface_advances
 /// the publish) must still fail closed.
 #[tokio::test(flavor = "multi_thread")]
 async fn tsserver_published_carrier_surface_is_captured_and_serves_hover() {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let root = format!("/verter_reqsurf_pub_{nanos}/ws");
+    let root = unique_server_ws_root("reqsurf_pub");
     let tsconfig = format!("{root}/tsconfig.json");
 
     let provider = Arc::new(MockTypeProvider::new());
@@ -26305,7 +29303,7 @@ fn e2e_fixture_unused_declarations_matches_boundary_semantics() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     let count = |code: &str| {
         diags
             .iter()
@@ -26763,6 +29761,138 @@ async fn svelte_real_pipeline_class_definition_reaches_style_rule() {
     let target = &locations[0];
     assert_eq!(
         target.range.start.line,
+        line_for_snippet(source, ".chip-live {"),
+        "definition lands on the .chip-live rule line"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Default-profile Vue CSS definition uses template data emitted by the normal
+/// IDE projection compile even though optional semantic analysis is disabled.
+#[tokio::test]
+async fn vue_default_profile_class_definition_reaches_style_rule() {
+    let source = "<template>\n  <div class=\"chip-live\">chip</div>\n</template>\n\n<style>\n.chip-live {\n  color: red;\n}\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_default_profile_definition_test_server(&[("src/CssIntel.vue", "vue", source)]).await;
+
+    let uri = workspace_uri(&workspace_id, "src/CssIntel.vue");
+    let server = service.inner();
+    assert!(
+        !server.documents.semantic_analysis_enabled(),
+        "the production default must leave optional semantic analysis off"
+    );
+    assert_eq!(
+        server.documents.host().config().effective_scope(),
+        verter_semantic::analysis::AnalysisScope::BUILD,
+        "the projection host must use the production BUILD scope"
+    );
+
+    let analysis = server
+        .documents
+        .get_analysis(&uri)
+        .expect("BUILD projection analysis must serve");
+    let template = analysis
+        .template
+        .as_deref()
+        .expect("the IDE projection's TEMPLATE_DATA target must publish Vue template facts");
+    assert!(
+        template
+            .elements
+            .iter()
+            .any(|element| element.static_classes().any(|class| class == "chip-live")),
+        "the compiled template data must carry the authored class"
+    );
+    assert!(
+        analysis.markup_class_tokens.is_empty(),
+        "Vue currently has no parse-domain markup class-token producer"
+    );
+    assert!(
+        analysis.styles.iter().any(|style| {
+            style
+                .css
+                .as_ref()
+                .is_some_and(|css| css.classes.iter().any(|class| class.name == "chip-live"))
+        }),
+        "the declaring style rule must still be present"
+    );
+
+    let position = find_document_position(server, &uri, "class=\"chip-live\"", 8);
+    let response = server
+        .goto_definition(goto_definition_params(&uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("Vue class token should navigate to its style rule");
+    let locations = definition_locations(response);
+    assert_eq!(
+        locations[0].range.start.line,
+        line_for_snippet(source, ".chip-live {"),
+        "definition lands on the .chip-live rule line"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Default-profile Svelte CSS definition uses parse-domain markup class tokens
+/// and therefore remains available without optional semantic analysis.
+#[tokio::test]
+async fn svelte_default_profile_class_definition_reaches_style_rule() {
+    let source = "<script lang=\"ts\">\n  let on = true;\n</script>\n\n<div class=\"chip-live\" class:on>chip</div>\n\n<style>\n  .chip-live {\n    color: red;\n  }\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_default_profile_definition_test_server(&[("src/CssIntel.svelte", "svelte", source)])
+            .await;
+
+    let uri = workspace_uri(&workspace_id, "src/CssIntel.svelte");
+    let server = service.inner();
+    assert!(
+        !server.documents.semantic_analysis_enabled(),
+        "the production default must leave optional semantic analysis off"
+    );
+    assert_eq!(
+        server.documents.host().config().effective_scope(),
+        verter_semantic::analysis::AnalysisScope::BUILD,
+        "the projection host must use the production BUILD scope"
+    );
+
+    let analysis = server
+        .documents
+        .get_analysis(&uri)
+        .expect("BUILD projection analysis must serve");
+    assert!(
+        analysis
+            .template
+            .as_ref()
+            .is_none_or(|template| template.elements.is_empty()),
+        "Svelte class navigation must not rely on a template element inventory"
+    );
+    assert!(
+        analysis
+            .markup_class_tokens
+            .iter()
+            .any(|token| token.name == "chip-live"),
+        "Svelte parse-domain markup tokens must survive the served snapshot"
+    );
+    assert!(
+        analysis.styles.iter().any(|style| {
+            style
+                .css
+                .as_ref()
+                .is_some_and(|css| css.classes.iter().any(|class| class.name == "chip-live"))
+        }),
+        "the declaring style rule must be present"
+    );
+
+    let position = find_document_position(server, &uri, "class=\"chip-live\"", 8);
+    let response = server
+        .goto_definition(goto_definition_params(&uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("Svelte class token must navigate to its style rule");
+    let locations = definition_locations(response);
+    assert_eq!(
+        locations[0].range.start.line,
         line_for_snippet(source, ".chip-live {"),
         "definition lands on the .chip-live rule line"
     );
@@ -28371,5 +31501,928 @@ async fn shortened_budget_cuts_the_dead_tail_without_dropping_answered_requests(
         wedged_elapsed < std::time::Duration::from_secs(15) / 3,
         "the shortened budget must cut the dead-tail wait to well under a third of \
          the old 15s, took {wedged_elapsed:?}"
+    );
+}
+
+// ── Rename completeness: refuse a partial edit set ─────────────────────
+
+/// A JS (`@ts-check`) carrier whose binding lives in BOTH the script and the
+/// markup. `jsValue` is authored three times: the declaration, the script
+/// call argument, and the markup expression.
+const RENAME_COMPLETENESS_VUE: &str = "<script setup>\n// @ts-check\nconst jsValue = { label: \"javascript\" };\nfunction renderJs(value) {\n  return value.label;\n}\nconst jsRendered = renderJs(jsValue);\n</script>\n\n<template>\n  <p>{{ jsRendered }} {{ jsValue.label }}</p>\n</template>\n";
+
+const RENAME_COMPLETENESS_SVELTE: &str = "<script>\n// @ts-check\nlet jsValue = { label: \"javascript\" };\nfunction renderJs(value) {\n  return value.label;\n}\nlet jsRendered = renderJs(jsValue);\n</script>\n\n<p>{jsRendered} {jsValue.label}</p>\n";
+
+/// The SET of authored `token` ranges in `source`, in the document's own
+/// coordinates. Asserting against this set — never against a count — keeps a
+/// future fourth occurrence from passing silently.
+fn authored_token_ranges(
+    source: &str,
+    token: &str,
+) -> std::collections::BTreeSet<(u32, u32, u32, u32)> {
+    let line_index = crate::documents::line_index::LineIndex::new_utf16(source);
+    let mut ranges = std::collections::BTreeSet::new();
+    let bytes = source.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let mut from = 0usize;
+    while let Some(found) = source[from..].find(token) {
+        let start = from + found;
+        let end = start + token.len();
+        from = start + 1;
+        if start > 0 && is_word(bytes[start - 1]) {
+            continue;
+        }
+        if end < bytes.len() && is_word(bytes[end]) {
+            continue;
+        }
+        let s = line_index
+            .offset_to_position(start as u32)
+            .expect("position");
+        let e = line_index.offset_to_position(end as u32).expect("position");
+        ranges.insert((s.line, s.character, e.line, e.character));
+    }
+    ranges
+}
+
+/// The SET of ranges a rename transaction mutates in `uri`.
+fn rename_edit_ranges(
+    edit: &WorkspaceEdit,
+    uri: &Uri,
+) -> std::collections::BTreeSet<(u32, u32, u32, u32)> {
+    workspace_edit_triples(edit)
+        .into_iter()
+        .filter(|(edited, _, _)| {
+            verter_span::path::fs_paths_equal(
+                &crate::documents::uri_to_canonical_id(edited),
+                &crate::documents::uri_to_canonical_id(uri),
+            )
+        })
+        .map(|(_, range, _)| {
+            (
+                range.start.line,
+                range.start.character,
+                range.end.line,
+                range.end.character,
+            )
+        })
+        .collect()
+}
+
+/// A rename that cannot prove its edit set is complete must REFUSE, never ship
+/// a partial one.
+///
+/// An EMPTY provider location set is not evidence of completeness. It is what a
+/// carrier DENIED by provider-feature admission returns
+/// (`TsgoCompositeProvider::get_rename_locations` serves `Ok(vec![])` on
+/// denial), and it is indistinguishable from a provider that resolved nothing.
+/// Verter's own rename half is SAME-FILE ONLY, and for a Svelte carrier it does
+/// not even see the markup occurrences (`TemplateAnalysisSnapshot`
+/// `binding_occurrences` is empty for `.svelte` — the markup collector only
+/// gathers component usages, snippets and directives). Shipping that half as
+/// authoritative is a SUCCESSFUL rename that leaves the source referencing a
+/// name that no longer exists.
+///
+/// DISCRIMINATES: before the completeness gate, the Svelte row returned a
+/// 2-of-3 `WorkspaceEdit` — script declaration + script usage, with
+/// `{jsValue.label}` silently untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_refuses_a_partial_edit_set_when_the_provider_supplies_no_locations() {
+    // Every row is exercised before any verdict, so one carrier's failure never
+    // hides the other's.
+    let mut violations: Vec<String> = Vec::new();
+    for (extension, language_id, source) in [
+        ("vue", "vue", RENAME_COMPLETENESS_VUE),
+        ("svelte", "svelte", RENAME_COMPLETENESS_SVELTE),
+    ] {
+        let app_path = format!("src/JavaScriptCase.{extension}");
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_definition_test_server_with_kind(
+                &[(&app_path, language_id, source)],
+                crate::TypeProviderKind::Tsgo,
+            )
+            .await;
+        let server = service.inner();
+        let uri = workspace_uri(&workspace_id, &app_path);
+        server.ensure_current_file_synced(&uri).await;
+        server.publish_import_dependencies_settled(&uri).await;
+
+        let position = find_document_position(server, &uri, "jsValue", 0);
+        let edit = super::nav_features_navigation::handle_rename(
+            server,
+            RenameParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position,
+                },
+                new_name: "jsDatum".into(),
+                work_done_progress_params: Default::default(),
+            },
+        )
+        .await
+        .expect("an incomplete rename must fail closed, not raise a protocol error");
+
+        // The provider WAS consulted — this is a completeness refusal, not a
+        // short-circuit that never reached the provider.
+        assert!(
+            provider
+                .calls()
+                .iter()
+                .any(|call| matches!(call, MockCall::GetRenameLocations { .. })),
+            "{extension}: the handler must consult the provider before deciding completeness"
+        );
+
+        // The durable invariant, stated over the SET: a returned transaction
+        // covers EVERY authored occurrence, or there is no transaction at all.
+        if let Some(ws) = &edit {
+            let covered = rename_edit_ranges(ws, &uri);
+            let authored = authored_token_ranges(source, "jsValue");
+            if covered != authored {
+                violations.push(format!(
+                    "{extension}: SILENT PARTIAL — covered {covered:?}, authored {authored:?}"
+                ));
+            }
+            violations.push(format!(
+                "{extension}: a rename whose provider yielded no locations must refuse, got \
+                 {covered:?}"
+            ));
+        }
+
+        drain_handle.abort();
+        drop(service);
+    }
+    assert!(
+        violations.is_empty(),
+        "rename must refuse rather than ship an unproven edit set:\n{}",
+        violations.join("\n")
+    );
+}
+
+/// The completeness gate must not have widened into a blanket refusal: a
+/// carrier whose provider DOES answer still renames, and still covers the exact
+/// authored occurrence set.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_still_covers_the_full_authored_set_when_the_provider_answers() {
+    let app_path = "src/JavaScriptCase.vue";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[(app_path, "vue", RENAME_COMPLETENESS_VUE)],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, app_path);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+
+    let position = find_document_position(server, &uri, "jsValue", 0);
+    let ctx = synced_type_provider_context(server, &uri).await;
+    let decl_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("the declaration position maps into the IDE surface");
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        decl_offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: ctx.tsx_path.clone(),
+            start: decl_offset,
+            end: decl_offset + "jsValue".len() as u32,
+        }],
+    );
+
+    let edit = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "jsDatum".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename request should succeed")
+    .expect("an answering provider must still produce a rename");
+
+    assert_eq!(
+        rename_edit_ranges(&edit, &uri),
+        authored_token_ranges(RENAME_COMPLETENESS_VUE, "jsValue"),
+        "the rename must cover the exact authored occurrence set, got {edit:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// CSS class rename is a Verter-native surface with NO TypeScript correlate:
+/// the provider legitimately yields nothing for it, and the completeness gate
+/// must not refuse it. Proves the gate keys on the provider-backed binding
+/// route, not on "the provider returned an empty vector".
+#[tokio::test(flavor = "multi_thread")]
+async fn css_class_rename_still_serves_without_any_provider_locations() {
+    let source = "<template>\n  <div class=\"panel\"></div>\n</template>\n\n<style scoped>\n.panel {\n  color: red;\n}\n</style>\n";
+    let app_path = "src/Styled.vue";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[(app_path, "vue", source)],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, app_path);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+
+    let position = find_document_position(server, &uri, "class=\"panel\"", 7);
+    let edit = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "card".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename request should succeed")
+    .expect("a native CSS rename must still serve without provider locations");
+
+    assert_eq!(
+        rename_edit_ranges(&edit, &uri),
+        authored_token_ranges(source, "panel"),
+        "the CSS rename must cover the template and style occurrences, got {edit:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+// ---------------------------------------------------------------------------
+// https://github.com/pikax/verter/issues/96 — the PRODUCTION ingress.
+//
+// `tower-lsp-server` does not spawn a task per notification. `Server::serve`
+// pushes handler futures into an mpsc channel and polls them through
+// `buffer_unordered` INLINE on the serve thread (documented on
+// `SERVE_THREAD_STACK_BYTES` in `lib.rs`). `BufferUnordered` fills its queue
+// from the channel WITHOUT polling, then polls the queued futures one at a
+// time — and `handle_did_change` runs from entry through commit without
+// pending (an uncontended `did_change_mutex.lock()` completes in the current
+// poll, and the commit itself is a synchronous `block_in_place_if_available`).
+//
+// So handler k runs to completion before handler k+1 is polled at all. Any
+// coalescing scheme that depends on later notifications having ANNOUNCED
+// themselves before an earlier one commits is inert here: at commit time,
+// handler k is the only handler that has ever been entered.
+//
+// That is why the document commit must not compile at all.
+
+/// Frame `count` full-document `textDocument/didChange` notifications for
+/// `uri`, versions `first_version..`, each carrying a distinguishable source.
+fn did_change_burst_frames(uri: &Uri, first_version: i32, count: usize) -> (Vec<u8>, String) {
+    let revision = |marker: i32| {
+        format!(
+            "<script setup lang=\"ts\">\nconst count = {marker}\n</script>\n\
+             <template><div>{{{{ count }}}}</div></template>\n"
+        )
+    };
+    let mut bytes = Vec::new();
+    let mut last = String::new();
+    for index in 0..count {
+        let version = first_version + index as i32;
+        last = revision(version);
+        let body = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri.as_str(), "version": version },
+                "contentChanges": [ { "text": last } ],
+            },
+        }))
+        .expect("didChange frame serializes");
+        bytes.extend_from_slice(
+            format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes(),
+        );
+    }
+    (bytes, last)
+}
+
+/// Drive an LSP session over duplex pipes through a REAL `Server::serve` loop.
+///
+/// Returns the client-side write half (frames written here reach the server the
+/// way a client's stdin does, through `FramedRead` → the serve loop's mpsc
+/// channel → `buffer_unordered`) once the session is initialized, so a caller
+/// can measure from a settled baseline.
+async fn serve_over_duplex_initialized(
+    service: tower_lsp_server::LspService<VerterLanguageServer>,
+    socket: tower_lsp_server::ClientSocket,
+) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (server_stdin, mut client_to_server) = tokio::io::duplex(1 << 20);
+    let (server_stdout, mut client_from_server) = tokio::io::duplex(1 << 20);
+    let serve = tokio::spawn(async move {
+        tower_lsp_server::Server::new(server_stdin, server_stdout, socket)
+            .concurrency_level(crate::LSP_MAX_CONCURRENCY)
+            .serve(service)
+            .await;
+    });
+
+    let body = serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "processId": null, "rootUri": null, "capabilities": {} },
+    }))
+    .expect("initialize frame serializes");
+    client_to_server
+        .write_all(format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes())
+        .await
+        .expect("initialize frame reaches the server");
+    client_to_server.flush().await.expect("flush initialize");
+
+    // Read until the initialize RESPONSE appears. This is the fence that proves
+    // the serve loop is live and the session has left `Uninitialized`, where
+    // ordinary notifications would be discarded rather than handled.
+    let mut seen = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client_from_server.read(&mut chunk),
+        )
+        .await
+        .expect("the server must answer initialize")
+        .expect("server stdout must stay readable");
+        assert!(
+            read > 0,
+            "the server closed stdout before answering initialize"
+        );
+        seen.extend_from_slice(&chunk[..read]);
+        if String::from_utf8_lossy(&seen).contains("\"id\":1") {
+            break;
+        }
+    }
+
+    (client_to_server, serve)
+}
+
+/// Cold compile RUNS this host has started — the feature-independent rail
+/// bumped once per cold run past the warm-hit consult.
+///
+/// It must be this rail and not the post-success compile tick: a compile that
+/// FAILS returns before that tick, so a burst of malformed revisions could
+/// execute a cold compile per keystroke while a tick-based counter reported
+/// zero. A malformed intermediate revision is the ordinary state of a file
+/// being typed, so the instrument has to see it.
+fn cold_compile_runs(host: &Arc<VerterHost>) -> u64 {
+    host.provenance_snapshot().compile_cold_runs
+}
+
+/// Build a provider-less server for the ingress measurement.
+///
+/// `type_provider: None` makes the coordinator's `project_sync` `None`, and
+/// `sync_file` returns at its first statement in that case — so the debounced
+/// coordinator can contribute NO compiles to the measurement however long the
+/// serve loop takes. Semantic analysis stays off (its analyses run on a
+/// separate host anyway). The document has no imports, so the background
+/// import-dependency publication has nothing to walk.
+fn ingress_measurement_server(
+    host: &Arc<VerterHost>,
+) -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tower_lsp_server::ClientSocket,
+) {
+    let host_for_server = Arc::clone(host);
+    tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::None,
+                type_provider_topology: crate::TypeProviderTopology::implied_by(
+                    crate::TypeProviderKind::None,
+                ),
+                mcp_port: None,
+                type_provider_reason: None,
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: true,
+            },
+        )
+    })
+}
+
+/// A burst of `didChange` notifications arriving on the wire must not cost one
+/// IDE compile per notification.
+///
+/// This is the discriminating test for https://github.com/pikax/verter/issues/96.
+/// It drives the real `LspService` + `Server::serve` ingress, stages nothing by
+/// hand, and counts COLD COMPILE RUNS (a warm `ensure_compile_artifacts` hit
+/// does not move the rail, and a FAILED compile does) rather than provider
+/// updates.
+///
+/// It asserts BOTH halves of the contract, and both are deterministic:
+///
+///   * **Zero while the burst is in flight.** The test holds a
+///     [`ChangeInFlight`] ticket for this canonical id across the whole burst.
+///     A document with a change in flight is excluded from the coordinator's
+///     deadline computation AND its dispatch set, so the coordinator provably
+///     cannot dispatch while that ticket is alive. Any compile counted here
+///     therefore came from the notification-handling path — the #96 bug.
+///     Without the ticket this measurement is a race: the debounce is measured
+///     from handler RECEIPT, so a 24-edit backlog that takes longer than
+///     `DEBOUNCE_MS` to commit leaves the window already elapsed the moment the
+///     last handler finishes, and the legitimate debounced compile can land
+///     before the sample.
+///
+///   * **Exactly one after quiescence.** Dropping the ticket lets the file go
+///     quiet; the coordinator then owes exactly one refresh for the settled
+///     revision — the debt the commit path no longer pays. This doubles as the
+///     positive control: it proves the rail is live, so the zero above is not a
+///     dead counter, and it proves the burst's work was DEFERRED rather than
+///     silently skipped.
+///
+/// One is the whole point of the design: 24 notifications, one compile. A
+/// per-notification compile reads 24 at the first assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_of_did_change_notifications_does_not_compile_once_per_notification() {
+    const BURST: usize = 24;
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n\
+                  <template><div>{{ count }}</div></template>\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let (service, socket) = ingress_measurement_server(&host);
+    let uri = open_test_vue(service.inner(), "/workspace/src/App.vue", source);
+    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+    let profile = service.inner().documents.tsx_profile.read().clone();
+    assert!(
+        host.get_ide(&canonical_id, &profile).is_some(),
+        "precondition: the OPEN must have produced the carrier's IDE TSX, so the \
+         burst below starts from an established projection rather than bootstrapping one"
+    );
+    let coordinator = service.inner().sync_coordinator.clone();
+
+    let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+
+    // Pin the document non-quiescent for the whole burst. This is what makes
+    // the in-flight measurement a fact rather than a race.
+    let ticket = coordinator.change_received(canonical_id.clone());
+
+    // Baseline taken AFTER the session is initialized, so nothing the handshake
+    // does is attributed to the burst.
+    let before = cold_compile_runs(&host);
+    let (frames, final_source) = did_change_burst_frames(&uri, 2, BURST);
+    {
+        use tokio::io::AsyncWriteExt;
+        client_to_server
+            .write_all(&frames)
+            .await
+            .expect("the burst must reach the server");
+        client_to_server.flush().await.expect("flush the burst");
+    }
+
+    // Fence on the LAST revision being committed. Waiting longer can only let
+    // MORE commit-path compiles land, and the held ticket keeps the debounced
+    // one off, so this can never turn a real per-notification compile into a
+    // pass.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while host.get_source(&canonical_id).as_deref() != Some(final_source.as_str()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "precondition: every queued notification must be committed; the document \
+             is still at {:?}",
+            host.get_source(&canonical_id)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let in_flight = cold_compile_runs(&host) - before;
+
+    assert_eq!(
+        in_flight, 0,
+        "{BURST} didChange notifications started {in_flight} cold compile run(s) on the \
+         notification-handling path. `tower-lsp-server` polls handler futures inline \
+         and each one runs from entry through commit without pending, so a compile in \
+         the commit is a serialized queue as long as the user's typing burst — the ~9s \
+         of issue #96. The commit owes the document's TEXT; the TSX is owed by whoever \
+         demands it"
+    );
+
+    // Release the ticket: the file may now go quiet, and the coordinator owes
+    // exactly one compile for the settled revision.
+    drop(ticket);
+    let settled = await_settled_cold_compiles(&host, before).await;
+    assert_eq!(
+        settled, 1,
+        "after the burst went quiet the debounced coordinator must compile the \
+         settled revision EXACTLY once ({settled} observed). Zero means the \
+         deferred work is never done — Verter's own diagnostics would go empty \
+         and stay empty, which is the regression this pairs with. More than one \
+         means the refresh is no longer coalesced onto the quiet window"
+    );
+    serve.abort();
+}
+
+/// Wait for the cold-compile rail to reach a value and STAY there, then return
+/// the delta from `before`.
+///
+/// The debounced refresh is asynchronous, so a bare sleep either flakes short or
+/// pads every run. This polls for the first movement, then requires the rail to
+/// hold still across a full debounce window — so a per-notification storm cannot
+/// be sampled mid-flight and read as a small number.
+async fn await_settled_cold_compiles(host: &Arc<VerterHost>, before: u64) -> u64 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let quiet_for = std::time::Duration::from_millis(crate::sync_coordinator::DEBOUNCE_MS * 3);
+    loop {
+        let observed = cold_compile_runs(host) - before;
+        if observed > 0 {
+            tokio::time::sleep(quiet_for).await;
+            let again = cold_compile_runs(host) - before;
+            if again == observed {
+                return observed;
+            }
+            continue;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the debounced coordinator never compiled the settled revision"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Frame `count` full-document `didChange` notifications carrying revisions that
+/// do NOT compile — the ordinary mid-edit state of a file being typed.
+fn invalid_did_change_burst_frames(
+    uri: &Uri,
+    first_version: i32,
+    count: usize,
+) -> (Vec<u8>, String) {
+    let mut bytes = Vec::new();
+    let mut last = String::new();
+    for index in 0..count {
+        let version = first_version + index as i32;
+        last = format!("<script setup lang=\"ts\">\nconst broken{version} = (((\n");
+        let body = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri.as_str(), "version": version },
+                "contentChanges": [ { "text": last } ],
+            },
+        }))
+        .expect("didChange frame serializes");
+        bytes.extend_from_slice(
+            format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes(),
+        );
+    }
+    (bytes, last)
+}
+
+/// The case https://github.com/pikax/verter/issues/96 is actually about, at the
+/// real ingress: a carrier with NO projection, typed into with revisions that do
+/// not compile.
+///
+/// A commit that compiles "only until the first projection exists" sounds
+/// bounded by document. It is not: a failed compile installs no projection, so
+/// the next notification compiles again. Malformed intermediate revisions are
+/// the normal state of typing, so that reinstates the serialized per-keystroke
+/// compile queue in full — reachable without any unusual input.
+///
+/// Measured on the COLD-RUN rail. The post-success compile tick cannot see this
+/// at all: a failing compile returns before that tick, so this burst reads zero
+/// there whether it compiled once per notification or never. The companion test
+/// `a_burst_of_did_change_notifications_does_not_compile_once_per_notification`
+/// covers the established-projection burst.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notification() {
+    const BURST: usize = 24;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let (service, socket) = ingress_measurement_server(&host);
+
+    // Open in a state whose IDE projection cannot be built, so every commit
+    // below takes the projection-less path.
+    let uri = open_test_vue(
+        service.inner(),
+        "/workspace/src/Invalid.vue",
+        "<script setup lang=\"ts\">\nconst broken = (((\n",
+    );
+    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+    assert!(
+        service.inner().documents.get_projection(&uri).is_none(),
+        "precondition: the fixture must fail to project, or this burst runs the \
+         established-projection path the sibling test already covers"
+    );
+    let coordinator = service.inner().sync_coordinator.clone();
+
+    let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+    // Same deterministic pin as the sibling test: the coordinator cannot
+    // dispatch for a canonical id with a change in flight, so the in-flight
+    // count below is attributable to the notification path alone.
+    let ticket = coordinator.change_received(canonical_id.clone());
+    let before = cold_compile_runs(&host);
+    let (frames, final_source) = invalid_did_change_burst_frames(&uri, 2, BURST);
+    {
+        use tokio::io::AsyncWriteExt;
+        client_to_server
+            .write_all(&frames)
+            .await
+            .expect("the burst must reach the server");
+        client_to_server.flush().await.expect("flush the burst");
+    }
+
+    // Fence on the LAST revision being committed. Waiting longer can only let
+    // more commit-path compiles land, so it cannot turn a real per-notification
+    // compile into a pass.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while host.get_source(&canonical_id).as_deref() != Some(final_source.as_str()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "precondition: every queued notification must be committed; the document \
+             is still at {:?}",
+            host.get_source(&canonical_id)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let in_flight = cold_compile_runs(&host) - before;
+
+    assert_eq!(
+        in_flight, 0,
+        "{BURST} malformed didChange notifications on a projection-less carrier \
+         started {in_flight} cold compile run(s). Compiling while no projection exists \
+         never terminates — the compile fails, no projection is installed, and the \
+         next keystroke repeats it. That is the serialized queue of issue #96, \
+         reachable by ordinary typing"
+    );
+    assert!(
+        service_projection_still_absent(&host, &canonical_id),
+        "the malformed carrier must still have no IDE surface — if one appeared, a \
+         compile ran somewhere the rail did not attribute to this burst"
+    );
+
+    // Release the ticket. Exactly one debounced compile must follow — the
+    // failing revision still owes its DIAGNOSTICS, which the failure arm stores
+    // before returning `Err`, and that is the only reason the editor shows the
+    // parse errors at all. A `Never` here is the empty-diagnostics regression;
+    // a per-notification count is #96.
+    drop(ticket);
+    let settled = await_settled_cold_compiles(&host, before).await;
+    assert_eq!(
+        settled, 1,
+        "after the burst went quiet the debounced coordinator must compile the \
+         settled (still malformed) revision EXACTLY once ({settled} observed)"
+    );
+    assert!(
+        service_projection_still_absent(&host, &canonical_id),
+        "the settled revision still does not compile, so the debounced refresh must \
+         install NO projection — a projection here means the fixture stopped being \
+         malformed and the burst asserted nothing"
+    );
+
+    // Positive control: the rail moves for this document once a valid revision is
+    // compiled on demand, so the counts above are not a dead counter.
+    let before_control = cold_compile_runs(&host);
+    let _ = host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some(canonical_id.clone()),
+        input_id: canonical_id.clone(),
+        source: Arc::from(
+            "<script setup lang=\"ts\">\nconst fixed = 1\n</script>\n\
+             <template><div>{{ fixed }}</div></template>\n",
+        ),
+        file_language: verter_session::FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let profile = verter_session::CompileProfile::default();
+    let _ = host.ensure_ide_compiled(&canonical_id, &profile);
+    assert!(
+        cold_compile_runs(&host) > before_control,
+        "compiling this document on demand must start a cold run — otherwise the zero \
+         above is vacuous"
+    );
+    serve.abort();
+}
+
+/// A STYLE-ONLY edit must not silently erase the file's diagnostics.
+///
+/// This is the one edit shape that clears without arming anything. The host
+/// upsert clears `latest_diagnostics` on any semantic change, and a style slice
+/// is one — verified here rather than assumed, by asserting the errors are
+/// present before the edit and that the edit really did classify as style-only
+/// (the template text is byte-identical across it). But `handle_did_change`
+/// skipped the whole coordinator block for a style-only edit, because none of
+/// what it does — provider sync, hover-cache invalidation, dependency-frontier
+/// refresh, import republication — is owed for a CSS tweak.
+///
+/// The result was the branch's own regression in a narrower window, reached with
+/// no race at all: change a colour, and every template error in the file stops
+/// being reported. Worse than merely going quiet, the republish that follows
+/// pushes the emptiness to the editor.
+///
+/// The invariant this pins is the general one — anything that clears
+/// `latest_diagnostics` must arm the recompute that refills it — checked at the
+/// shape that violated it. Driven through the real `Server::serve` ingress so it
+/// covers `handle_did_change`'s wiring, not a hand-staged signal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_style_only_edit_does_not_erase_the_files_diagnostics() {
+    // A template whose STRUCTURE parses (so the upsert can diff slices and
+    // classify the edit as style-only at all) but whose directive expression does
+    // not compile, held BYTE-IDENTICAL across the edit, plus a style block that
+    // is the only thing that moves. A template broken badly enough to fail
+    // parsing is NOT usable here: slice diffing cannot classify it, the upsert
+    // reports no change, and nothing is cleared — the test would pass vacuously.
+    let revision = |color: &str| {
+        format!(
+            "<script setup lang=\"ts\">\nconst count = 1\n</script>\n\
+             <template>\n  <div v-if=\"count ===\">{{{{ count }}}}</div>\n</template>\n\
+             <style scoped>\n.a {{ color: {color}; }}\n</style>\n"
+        )
+    };
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let (service, socket) = ingress_measurement_server(&host);
+    let uri = open_test_vue(
+        service.inner(),
+        "/workspace/src/Styled.vue",
+        &revision("red"),
+    );
+    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+    let profile = service.inner().documents.tsx_profile.read().clone();
+
+    let opened = host
+        .get_diagnostics(&canonical_id, &profile)
+        .map(|snapshot| snapshot.diagnostics.len())
+        .unwrap_or(0);
+    assert!(
+        opened > 0,
+        "precondition: the malformed template must report Verter's own parse \
+         errors at open, or this test has nothing to lose"
+    );
+    let cached_verter_diags = Arc::clone(&service.inner().cached_verter_diags);
+
+    let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+    let styled = revision("blue");
+    {
+        use tokio::io::AsyncWriteExt;
+        let body = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri.as_str(), "version": 2 },
+                "contentChanges": [ { "text": styled } ],
+            },
+        }))
+        .expect("didChange frame serializes");
+        client_to_server
+            .write_all(format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes())
+            .await
+            .expect("the edit must reach the server");
+        client_to_server.flush().await.expect("flush the edit");
+    }
+
+    // Wait for the debounced republish stamped with the edited version.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let published = loop {
+        if let Some(entry) = cached_verter_diags.get(uri.as_str()) {
+            if entry.0 == 2 {
+                break entry.2.clone();
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the style-only edit never produced a republish for v2; cached version: \
+             {:?}",
+            cached_verter_diags.get(uri.as_str()).map(|entry| entry.0)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+
+    let parse_errors = published
+        .iter()
+        .filter(|diagnostic| {
+            matches!(
+                diagnostic.code.as_ref(),
+                Some(NumberOrString::String(code)) if code.starts_with('X')
+            )
+        })
+        .count();
+    assert!(
+        parse_errors > 0,
+        "a style-only edit erased the file's template errors: the host cleared \
+         `latest_diagnostics` for it and nothing was armed to recompute them, so \
+         the republish pushed an empty set for a file whose template still does \
+         not parse. Published: {:?}",
+        published
+            .iter()
+            .map(|diagnostic| diagnostic.code.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // The edit really was style-only: a template change would make this test
+    // pass through the ordinary edit path and prove nothing about the skip.
+    assert!(
+        host.get_source(&canonical_id)
+            .as_deref()
+            .is_some_and(|source| source.contains("color: blue")),
+        "precondition: the styled revision must be the committed one"
+    );
+    serve.abort();
+}
+
+/// Whether the host still has no IDE TSX for `canonical_id` (a pure cached read).
+fn service_projection_still_absent(host: &Arc<VerterHost>, canonical_id: &str) -> bool {
+    host.get_ide(canonical_id, &verter_session::CompileProfile::default())
+        .is_none()
+}
+
+/// The pending-snapshot drain is the OTHER path that compiles a carrier's IDE
+/// surface for an open document, and it must recover a projection-less document
+/// too.
+///
+/// A carrier whose open-time compile failed has no provider projection; the
+/// document commit never compiles one, and the interactive repair heals it only
+/// when a provider-backed request arrives (attempt-bounded). If the path that
+/// DOES compile here does not install the projection, a document nobody hovers
+/// stays stranded with no IDE features.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+    std::fs::write(workspace.join("tsconfig.app.json"), "{}").expect("write tsconfig");
+
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
+    let app_id = format!("{workspace_id}/src/App.vue");
+    let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+
+    // Opened malformed: no IDE surface, so no projection.
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst broken = (((\n".to_string(),
+    });
+    assert!(
+        documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less"
+    );
+
+    // Fixed by a later edit. The commit stores text and compiles nothing.
+    let _ = documents.did_change(
+        &uri,
+        2,
+        "<script setup lang=\"ts\">\nconst fixed = 1\n</script>\n\
+         <template><div>{{ fixed }}</div></template>\n",
+    );
+    assert!(
+        documents.get_projection(&uri).is_none(),
+        "the commit must not compile — if it did, this asserts nothing about the drain"
+    );
+
+    let tsconfig = format!("{workspace_id}/tsconfig.app.json");
+    let snapshot = PublishedResolverSnapshot {
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                workspace_id.clone(),
+                workspace_id.clone(),
+                Some(tsconfig.clone()),
+            ),
+        ]),
+        resolution_view: None,
+        ownership_ready: true,
+    };
+    let owner_vfs = configured_owner_vfs(&workspace_id, &tsconfig);
+    let carrier_publish = crate::server::background_drain::CarrierPublishCtx {
+        coordinator: None,
+        provider_delivery: crate::external_ts::CarrierProviderDelivery::DirectOpen,
+        vfs: Arc::clone(&owner_vfs),
+        ownership_ready: true,
+    };
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+
+    let _ = sync_pending_carrier_provider_file(
+        Some(&sync),
+        &documents,
+        &snapshot,
+        &provider_sync_states,
+        &app_id,
+        Some(&carrier_publish),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    assert!(
+        documents.get_projection(&uri).is_some(),
+        "the drain compiles the carrier's IDE surface, so it must also install the \
+         projection the failed open never built — otherwise this path leaves the \
+         document stranded with no IDE features"
     );
 }

@@ -1,12 +1,17 @@
 import { defineComponent } from "vue"
+type __Verter_RootElementAttrs<Tag extends string> = Tag extends keyof import("vue").IntrinsicElementAttributes ? import("vue").IntrinsicElementAttributes[Tag] : {}
+declare module "vue" {
+  interface IntrinsicElementAttributes {}
+}
+type __Verter_DataAttrs = { [Key in `data-${string}`]?: unknown }
 type __OmitNew<T> = { [K in keyof T]: T[K] }
 
 const __comp = defineComponent({
 })
 
 declare const Slots: __OmitNew<typeof __comp> & {
-  new(props?: import("vue").PublicProps & {}): {
-    $props: import("vue").PublicProps & {},
+  new(props?: import("vue").PublicProps & Omit<__Verter_RootElementAttrs<"div">, "class" | "style" | keyof import("vue").PublicProps> & __Verter_DataAttrs): {
+    $props: import("vue").PublicProps & Omit<__Verter_RootElementAttrs<"div">, "class" | "style" | keyof import("vue").PublicProps> & __Verter_DataAttrs,
     $emit: (event: string, ...args: unknown[]) => void,
     $slots: {
   default(props: { item: number }): any
@@ -17,4 +22,4 @@ declare const Slots: __OmitNew<typeof __comp> & {
   }
 }
 export default Slots
-//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovU2xvdHMudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5kZWZpbmVTbG90czx7XG4gIGRlZmF1bHQocHJvcHM6IHsgaXRlbTogbnVtYmVyIH0pOiBhbnlcbn0+KClcbjwvc2NyaXB0PlxuPHRlbXBsYXRlPjxkaXYgLz48L3RlbXBsYXRlPlxuIl0sIm1hcHBpbmdzIjoiQTtBO0E7QTtBOztBO0EsMEMsRTtBLHdDLEU7QSxXLDJDO0E7OztBO0E7QTtBO0E7QSJ9
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovU2xvdHMudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5kZWZpbmVTbG90czx7XG4gIGRlZmF1bHQocHJvcHM6IHsgaXRlbTogbnVtYmVyIH0pOiBhbnlcbn0+KClcbjwvc2NyaXB0PlxuPHRlbXBsYXRlPjxkaXYgLz48L3RlbXBsYXRlPlxuIl0sIm1hcHBpbmdzIjoiQTtBO0E7OztBO0E7QTtBO0E7O0E7QSwwQyxnSDtBLHdDLGdIO0EsVywyQztBOzs7QTtBO0E7QTtBO0EifQ==

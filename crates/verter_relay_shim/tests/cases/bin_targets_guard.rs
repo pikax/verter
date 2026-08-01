@@ -1,7 +1,9 @@
 //! Static structural guard on the crate's binary targets.
 //!
 //! `fake_tsgo_heartbeat` is a TEST-SUPPORT helper the relay-shim lifecycle tests spawn as a
-//! stand-in `tsgo` (`tests/shim_live.rs`, via `CARGO_BIN_EXE_fake_tsgo_heartbeat`). It must stay a
+//! stand-in `tsgo` (`tests/cases/shim_live.rs`, resolved by its `bin_exe!` macro: the runtime
+//! `NEXTEST_BIN_EXE_fake_tsgo_heartbeat` under nextest, the compile-time
+//! `CARGO_BIN_EXE_fake_tsgo_heartbeat` outside it). It must stay a
 //! test-support target — sourced from the test tree, never a production/packaged binary — while the
 //! ONLY production binary is `verter-relay-shim`, and the crate is never published to a registry.
 //! This guard pins that classification statically by manifest structure.

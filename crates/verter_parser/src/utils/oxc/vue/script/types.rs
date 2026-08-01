@@ -123,6 +123,38 @@ pub enum DeclarationKind {
     Class,
 }
 
+/// One parameter of a [`CallableShape`], as authored.
+#[derive(Debug, Clone)]
+pub struct CallableParam<'a> {
+    /// The parameter's name when it is a plain identifier; `None` for a
+    /// destructuring pattern, which has no single name to carry.
+    pub name: Option<&'a str>,
+    /// Whether a caller may omit it — a default initializer (`step = 1`) or an
+    /// explicit `?`.
+    pub optional: bool,
+}
+
+/// The call shape of a binding, recovered from the AUTHORED function node.
+///
+/// This is SYNTAX, not inference: it says the binding is a function and how it
+/// may be called, and nothing about what it returns. That is exactly what is
+/// knowable about a JavaScript function without checking it, and it is enough
+/// for the one thing a `unknown`-typed member cannot do — be called.
+///
+/// It exists because a generated TypeScript surface cannot always carry the
+/// authored JavaScript body it would need to infer `typeof binding`: inlining
+/// untyped JavaScript into a `.ts` root makes `strict`/`noImplicitAny` report
+/// on code the project never asked to have checked. Without a shape the member
+/// has to fall back to `unknown`, which merely moves the false diagnostic from
+/// the component to everyone who consumes it.
+#[derive(Debug, Clone)]
+pub struct CallableShape<'a> {
+    /// Fixed parameters, in source order.
+    pub params: Vec<CallableParam<'a>>,
+    /// Whether a rest parameter (`...args`) follows them.
+    pub has_rest: bool,
+}
+
 /// Declaration item (variable, function, class)
 #[derive(Debug)]
 pub struct ScriptDeclaration<'a> {
@@ -137,6 +169,11 @@ pub struct ScriptDeclaration<'a> {
     /// Whether the initializer is a ref-creating call (ref, computed, shallowRef, etc.).
     /// When true, inline template mode will append `.value` to the identifier.
     pub is_ref_like: bool,
+    /// The authored call shape when this binding is a function — a `function`
+    /// declaration, or a `const`/`let`/`var` whose initializer is an arrow or
+    /// function expression. `None` for everything else, INCLUDING a
+    /// destructured binding (which has no single initializer of its own).
+    pub callable: Option<CallableShape<'a>>,
 }
 
 /// Kind of TypeScript-only declaration

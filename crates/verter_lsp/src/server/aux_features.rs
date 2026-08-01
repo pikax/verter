@@ -16,7 +16,7 @@ use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::documents::uri_to_canonical_id;
 use crate::features::action_utils::fix_placeholder_uris;
 use crate::features::call_hierarchy;
@@ -47,7 +47,7 @@ pub(super) async fn handle_document_symbol(
     let symbols = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let symbols = build_document_symbols(&blocks, analysis.as_ref(), &doc.line_index);
         if symbols.is_empty() {
             None
@@ -66,11 +66,11 @@ pub(super) async fn handle_document_symbol_with_audit(
 ) -> Result<Option<DocumentSymbolResponse>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::DocumentSymbols,
-        canonical_id,
+        target_identity,
         None,
         async move { handle_document_symbol(server, params).await },
         |payload, value| {
@@ -97,7 +97,7 @@ pub(super) async fn handle_folding_range(
     let ranges = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let ranges = build_folding_ranges(&blocks, analysis.as_ref(), &doc.line_index);
         if ranges.is_empty() {
             None
@@ -118,7 +118,7 @@ pub(super) async fn handle_selection_range(
 
     let result = (|| {
         let doc = server.documents.get(uri)?;
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let line_index = &doc.line_index;
         let source_len = doc.source.len() as u32;
 
@@ -235,7 +235,7 @@ pub(super) async fn handle_document_highlight(
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         highlights_at_position(
             position,
             &doc.source,
@@ -247,6 +247,9 @@ pub(super) async fn handle_document_highlight(
 
     // Enhance with TypeProvider if available. The context is built from ONE
     // captured immutable provider surface (path, content, mapper, indexes).
+    // Deliberately NOT `repaired_type_provider_context`: highlights fire on
+    // cursor-move cadence, and the Verter-native result above already serves —
+    // see the healing-feature list on `repaired_type_provider_context`.
     if let Some(tp) = &server.type_provider {
         if let Some(ctx) = server.type_provider_context(uri) {
             if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
@@ -308,9 +311,12 @@ pub(super) async fn handle_signature_help(
         }
     }
 
-    // Extract all context synchronously — no DashMap guard held across await.
+    // Signature help is a request-answering feature (the user typed `(` or
+    // invoked it), so it repairs a dirty or projection-less carrier through
+    // the same attempt-bounded interactive repair hover/completion use —
+    // it must not stay dark until a background tick.
     if let Some(tp) = &server.type_provider {
-        if let Some(ctx) = server.type_provider_context(uri) {
+        if let Some(ctx) = server.repaired_type_provider_context(uri).await {
             if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
                 &ctx.carrier_line_index,
@@ -361,7 +367,7 @@ pub(super) async fn handle_code_action(
 
         // Extract component refactoring
         if wants_code_action_kind(only, "refactor.extract") {
-            let blocks = scan_sfc_blocks(&doc.source);
+            let blocks = scan_sfc_blocks_for_document(&doc);
             if let Some(extract_action) =
                 crate::features::extract_component::extract_component_action(
                     &doc.source,
@@ -376,7 +382,7 @@ pub(super) async fn handle_code_action(
         }
 
         if wants_code_action_kind(only, "quickfix") {
-            let blocks = scan_sfc_blocks(&doc.source);
+            let blocks = scan_sfc_blocks_for_document(&doc);
 
             // Macro code actions (defineSlots, defineEmits generation/augmentation)
             let cursor_offset = doc.line_index.position_to_offset(&range.start);
@@ -482,7 +488,12 @@ pub(super) async fn handle_code_action(
         && wants_code_action_kind(only, "quickfix")
     {
         if let Some(tp) = &server.type_provider {
-            if let Some(ctx) = server.type_provider_context(uri) {
+            // Quickfix code actions are request-answering (the user opened the
+            // lightbulb), so they repair a dirty or projection-less carrier
+            // through the same attempt-bounded interactive repair as hover —
+            // the typing-cooldown gate above keeps the repair off the
+            // per-keystroke path.
+            if let Some(ctx) = server.repaired_type_provider_context(uri).await {
                 let start_offset = merge::carrier_position_to_tsx_offset_validated(
                     &range.start,
                     &ctx.carrier_line_index,
@@ -698,11 +709,11 @@ pub(super) async fn handle_code_action_with_audit(
 ) -> Result<Option<CodeActionResponse>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::CodeAction,
-        canonical_id,
+        target_identity,
         None,
         async move { handle_code_action(server, params).await },
         |payload, value| {
@@ -724,6 +735,9 @@ pub(super) async fn handle_semantic_tokens_full(
     // Skip TSGO while typing — serial TSGO pipeline must stay clear
     // for interactive requests. VS Code re-requests after the typing pause.
     // Extract all context synchronously — no DashMap guard held across await.
+    // Deliberately NOT `repaired_type_provider_context`: semantic tokens are a
+    // render-cadence decoration and the client re-requests them — see the
+    // healing-feature list on `repaired_type_provider_context`.
     if !server.is_typing_cooldown() {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
@@ -765,11 +779,11 @@ pub(super) async fn handle_semantic_tokens_full_with_audit(
 ) -> Result<Option<SemanticTokensResult>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::SemanticTokens,
-        canonical_id,
+        target_identity,
         None,
         async move { handle_semantic_tokens_full(server, params).await },
         |payload, value| {
@@ -795,7 +809,7 @@ pub(super) async fn handle_code_lens(
     let lenses = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         Some(code_lenses(&blocks, analysis.as_ref(), &doc.line_index))
     })();
 
@@ -872,7 +886,7 @@ pub(super) async fn handle_inlay_hint(
     let mut hints: Vec<InlayHint> = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri)?;
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         Some(crate::features::inlay_hints::verter_inlay_hints(
             &doc.source,
             &blocks,
@@ -884,6 +898,9 @@ pub(super) async fn handle_inlay_hint(
 
     // Standard .vue file: merge with type provider hints when available.
     // Extract all context synchronously — no DashMap guard held across await.
+    // Deliberately NOT `repaired_type_provider_context`: inlay hints are a
+    // render-cadence decoration and the client re-requests them — see the
+    // healing-feature list on `repaired_type_provider_context`.
     if !typing && inlay_enabled {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
@@ -977,11 +994,11 @@ pub(super) async fn handle_inlay_hint_with_audit(
 ) -> Result<Option<Vec<InlayHint>>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
+    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::InlayHints,
-        canonical_id,
+        target_identity,
         None,
         async move { handle_inlay_hint(server, params).await },
         |payload, value| {
@@ -1004,7 +1021,7 @@ pub(super) async fn handle_linked_editing_range(
     let result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         linked_editing_ranges(
             position,
             &doc.source,
@@ -1027,7 +1044,7 @@ pub(super) async fn handle_document_link(
     let links = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let links = build_document_links(&doc.source, &blocks, analysis.as_ref(), &doc.line_index);
         if links.is_empty() {
             None
@@ -1048,7 +1065,7 @@ pub(super) async fn handle_document_color(
 
     let colors = (|| {
         let doc = server.documents.get(uri)?;
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         Some(color_info::document_colors(
             &doc.source,
             &blocks,
@@ -1076,7 +1093,7 @@ pub(super) async fn handle_formatting(
 
     let edits = (|| {
         let doc = server.documents.get(uri)?;
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let edits = format_document(&doc.source, &blocks, &doc.line_index, &params.options);
         if edits.is_empty() {
             None
@@ -1182,7 +1199,7 @@ pub(super) async fn handle_prepare_call_hierarchy(
     let result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         call_hierarchy::prepare_call_hierarchy(
             position,
             &doc.source,

@@ -1,7 +1,7 @@
 //! Leaf graph→`TypeExpr` conversions used by the shared
 //! [`fold_node`](super::fold_node): the semantic primitive-kind and mapped-modifier
-//! mappings. Split from the parent for file-size; the fold that calls them lives in
-//! `shape_engine`.
+//! mappings. The conversions stay separate from the shared fold that calls them
+//! in `shape_engine`.
 
 use verter_type_expr::{MappedModifier, PrimitiveName};
 

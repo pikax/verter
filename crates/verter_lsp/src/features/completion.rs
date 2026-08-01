@@ -1019,9 +1019,8 @@ fn script_completions(analysis: &FileAnalysisSnapshot) -> Vec<CompletionItem> {
         }
     }
 
-    // Filter out internal symbols
-    items
-        .retain(|item| !item.label.starts_with("___VERTER___") && !is_internal_dunder(&item.label));
+    // Filter out generated carrier identifiers
+    items.retain(|item| !verter_compiler::framework_common::is_generated_identifier(&item.label));
 
     items
 }
@@ -1205,9 +1204,8 @@ fn template_completions(
         }
     }
 
-    // Filter out internal symbols
-    items
-        .retain(|item| !item.label.starts_with("___VERTER___") && !is_internal_dunder(&item.label));
+    // Filter out generated carrier identifiers
+    items.retain(|item| !verter_compiler::framework_common::is_generated_identifier(&item.label));
 
     // Deduplicate by label
     items.sort_by(|a, b| a.label.cmp(&b.label));
@@ -2108,14 +2106,6 @@ fn to_pascal_case(s: &str) -> String {
         }
     }
     result
-}
-
-/// Internal compiler identifiers that should never appear in completions.
-fn is_internal_dunder(label: &str) -> bool {
-    matches!(
-        label,
-        "__props" | "__emit" | "__slots" | "__expose" | "__returned"
-    )
 }
 
 fn macro_kind_label(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'static str {

@@ -99,22 +99,30 @@ pub struct CodeTransform<'a> {
     pub(super) anchored_present: bool,
 }
 
-/// One source-bearing output range from a [`CodeTransform`]. This crate-private
-/// projection lets higher-level emitters preserve transform provenance while
-/// composing several transformed fragments into a larger generated artifact.
-/// Pure insertions are intentionally absent.
+/// One source-bearing output range from a [`CodeTransform`]. This projection
+/// lets higher-level emitters preserve transform provenance while composing
+/// several transformed fragments into a larger generated artifact, and lets a
+/// consumer derive an exact input↔output position mapping from the SAME chunk
+/// walk that produced the bytes — never from a second, independently maintained
+/// model of the same edits. Pure insertions are intentionally absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct GeneratedSourceRange {
+pub struct GeneratedSourceRange {
     /// Start byte in the built output.
-    pub(crate) generated_start: u32,
+    pub generated_start: u32,
     /// End byte in the built output.
-    pub(crate) generated_end: u32,
+    pub generated_end: u32,
     /// Start byte in the transform's original source.
-    pub(crate) source_start: u32,
+    pub source_start: u32,
+    /// End byte (exclusive) in the transform's original source — the authored
+    /// extent this output range accounts for. For a byte-preserved range it is
+    /// `source_start + (generated_end - generated_start)`; for a REPLACEMENT it
+    /// is the end of the span the replacement text stands in for, which is the
+    /// only place the two widths differ.
+    pub source_end: u32,
     /// Whether the range is replacement text rather than byte-preserved source.
     /// Replacement ranges require the caller's typed token mapping because the
     /// replacement and authored bytes do not have a general linear relation.
-    pub(crate) replacement: bool,
+    pub replacement: bool,
 }
 
 fn push_preserved_source_ranges(
@@ -137,6 +145,7 @@ fn push_preserved_source_ranges(
             generated_start: segment_generated,
             generated_end: segment_generated + segment_len,
             source_start: segment_source,
+            source_end: location,
             replacement: false,
         });
         segment_source = location;
@@ -147,6 +156,7 @@ fn push_preserved_source_ranges(
             generated_start: segment_generated,
             generated_end: generated_start + len,
             source_start: segment_source,
+            source_end,
             replacement: false,
         });
     }
@@ -1246,7 +1256,7 @@ impl<'a> CodeTransform<'a> {
     /// through one ordinary `CodeTransform` map. Synthesized insertions are not
     /// represented; callers therefore cannot accidentally assign them authored
     /// provenance.
-    pub(crate) fn build_string_with_source_ranges(&self) -> (String, Vec<GeneratedSourceRange>) {
+    pub fn build_string_with_source_ranges(&self) -> (String, Vec<GeneratedSourceRange>) {
         let (output, ranges, _) = self.build_string_with_source_ranges_and_unmapped_boundaries();
         (output, ranges)
     }
@@ -1296,9 +1306,9 @@ impl<'a> CodeTransform<'a> {
                 }
                 Chunk::Moved {
                     start,
+                    end,
                     content,
                     replacement,
-                    ..
                 } => {
                     let len = content.len() as u32;
                     if len > 0 {
@@ -1307,6 +1317,7 @@ impl<'a> CodeTransform<'a> {
                                 generated_start: generated,
                                 generated_end: generated + len,
                                 source_start: *start,
+                                source_end: *end,
                                 replacement: true,
                             });
                         } else {
@@ -1321,13 +1332,18 @@ impl<'a> CodeTransform<'a> {
                     }
                     generated += len;
                 }
-                Chunk::Overwritten { start, content, .. } => {
+                Chunk::Overwritten {
+                    start,
+                    end,
+                    content,
+                } => {
                     let len = content.len() as u32;
                     if len > 0 {
                         ranges.push(GeneratedSourceRange {
                             generated_start: generated,
                             generated_end: generated + len,
                             source_start: *start,
+                            source_end: *end,
                             replacement: true,
                         });
                     }
@@ -1345,6 +1361,9 @@ impl<'a> CodeTransform<'a> {
                             generated_start: generated + offset,
                             generated_end: generated + len,
                             source_start: *source_start,
+                            // A mapped insertion stands at a source POINT — it
+                            // accounts for no authored extent.
+                            source_end: *source_start,
                             replacement: true,
                         });
                     }

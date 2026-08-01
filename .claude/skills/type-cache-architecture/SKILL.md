@@ -228,29 +228,35 @@ its own.
 Invalidation is not propagated; the fact diff is the public observability of
 what changed.
 
-**Import-route admission ownership.** `DerivedRawState.import_routes` and
-`DerivedRawState.import_routes_known_miss_recorded_at_generation` have distinct
-validity models and distinct admission producers:
+**Import-route admission ownership.** `DerivedRawState.import_routes` is
+exclusively the CALLER-SUPPLIED authoritative route table:
 
-- `VerterHost::set_import_dependencies` is the **single producer** of the full
-  caller-supplied route snapshot AND the sole admission point for the
-  known-miss generation sidecar. For each known-miss specifier (no resolved
-  canonical, no candidates, no effective target), it records the current
-  workspace `content_generation` so the reader can detect when a new canonical
-  may now satisfy a previously unresolvable specifier.
-- `VerterHost::cache_positive_import_route_result` is the **single
-  positive-only point producer** for `DerivedRawState.import_routes`. Positive
-  resolutions stay valid until the owner's source content changes; they need no
-  generation tag and must NOT touch the sidecar.
+- `VerterHost::set_import_dependencies` is the **single producer**. Its entries
+  serve until the caller replaces them; their currency rides the
+  `ExactResolution` facts the same push installs.
 - `VerterHost::configure_projects` and
-  `VerterHost::upsert_via_scheduler_with_priority` may `.clear()` both fields
-  in lockstep. Leaving the sidecar populated after either reset would extend a
-  stale `content_generation` stamp into the next admission cycle.
+  `VerterHost::upsert_via_scheduler_with_priority` may `.clear()` it.
+- The host memoises NO resolution there. The host-side positive-route memo
+  (`cache_positive_import_route_result`), its `PositiveRouteStamp` sidecar, and
+  the known-miss generation sidecar are DELETED: a second copy of the
+  workspace's bounded owner-edge candidate slot needed a global
+  `content_generation` equality to decide whether it was still true, which was
+  the last global-generation warm-resolution validity test in the session.
+
+**Parse/resolve artifact ownership.** `IndexedReady` and `ShallowFileState`
+retain NO resolved canonical, and materialisation performs ZERO import
+resolution. The complete artifact reuse gate is parse-env equality
+(`indexed_surface_is_current`); `built_at_content_generation` is a
+CONTENT-domain per-canonical stamp read only by
+`artifact_only_candidate_is_fresh`. The `Route` derived fact is a pure
+parse-domain digest; the resolve-domain half of a route answer rides the
+path-precise import-route resolution witness. See
+`docs/arch/path-precise-resolution-currency.md`.
 
 The integration guard at `crates/verter_session/tests/cases/g_misc3/import_route_writer_guard.rs`
 enforces both halves statically: no direct `import_routes` mutation outside the
-three named writers, and no known-miss sidecar admission outside
-`set_import_dependencies`.
+named writers, and `positive_route_memo_producer_is_deleted` rejects a
+reintroduced host-side route memo.
 
 ### Cache identity & validation
 
@@ -781,6 +787,36 @@ helper that returns the carrier as `Option<ReadSetSignature>` (or `None` on
 refusal). It is consumed by test scaffolds that need the owned rail; production
 callsites match on the variants directly.
 
+Workspace resolution carries the same distinction through
+`ResolutionOutcome`. A result-only compatibility query must consume
+`into_transient_result()` and must not retain the target. Any provider, route,
+exact-edge, parsed-edge, or artifact sink must instead consume
+`into_publication()`, whose `ResolutionPublication::{Admitted, Refused}` shape
+keeps an admitted miss distinct from a typed refusal. `AdmittedResolution`
+has no external constructor: only the Engine transaction finalizer can mint
+one, and projections (`map_result`, `map_admitted`, `replace_result`) require an
+existing admitted carrier. The former `from_admitted_state` escape hatch is
+deleted. Batch producers such as provider-buffer preparation resolve the full
+batch first and propagate a single refusal across the whole
+resolution-derived product; they do not publish an admitted subset or treat a
+refusal as an ordinary miss.
+
+Filesystem-backed resolution uses a two-step evidence bridge. Discovery may
+use normal workspace caches only to learn the observation set. Freeze then
+re-reads every observed path type, file/manifest value, realpath, and exact
+directory membership through independent live filesystem operations that
+bypass snapshot, probe, manifest, realpath, and directory caches. The replay
+reader is immutable and captured-only; a missing or conflicting observation
+marks the bridge incomplete and forces `ReturnOnly`.
+
+Published resolution provenance is always real. Context selection must identify
+an actual configured project and its resolve environment/provider projection.
+Missing importer/project/config/provider identity produces
+`ResolutionIncompleteProvenance`; the transient result remains usable but no
+query cache, parsed/lazy edge, provider/session state, or context-version table
+is published. Production eval/declaration canonical normalization re-enters the
+Engine; its old direct `file_exists` normalizer is test-only.
+
 Hard rules:
 
 - Direct construction of `Arc::from(Vec::<FactVersionRef>::new())` outside
@@ -1067,6 +1103,15 @@ The dispatch table is bounded by `FactDomain` (3 variants), not by `FactKey`.
 Adding a new `FactKey` extends the per-domain `*FactRef` enum but does NOT
 widen the trait.
 
+The resolve-imports domain is a CLOSED two-arm enum under ONE validator, not
+two rails: `ResolveImportsFactRef::Semantic { .. }` (the session's
+`ResolvedImportFactsDb` bindings) and `ResolveImportsFactRef::Resolution(..)`
+(workspace resolution-currency observations, validated against the store
+view's captured `CapturedResolutionWorld` — see `/host-session`). Both arms
+land in the same `FactVersionRef::ResolveImports` variant, the same
+`ReadSetSignature`, the same `SignatureAdmission` overflow convention, and the
+same `ValidatedFactCache` admission path.
+
 **R27.** All semantic fingerprint computation is **stack-safe**: implemented as
 an explicit worklist with a `VisitedSet`. Cycles emit a stable
 `CycleRef(visit_index)` placeholder. Visit order is canonical: lexicographic by
@@ -1297,9 +1342,11 @@ The coordinated invalidation boundaries are:
   exact owners.
 - `ROUTE_DB_RESOLVER_VERSION = 2` rejects route values that do not carry the
   defining declaration owner.
-- `SvelteScriptProvider::VERSION = 9` independently rejects Svelte candidate
+- `SvelteScriptProvider::VERSION = 11` independently rejects Svelte candidate
   payloads without the persisted exact module-export inventory, export owners,
-  and owner-qualified binding keys.
+  owner-qualified binding keys, or the per-call `$props()` public-key/local-
+  binding span inventory, and payloads predating exact-empty evidence plus the
+  syntax/resolution channel split.
 
 Exact-owner shallow facts also govern qualified namespace roots. For
 `import * as Ns from './dep'`, the cached binding for `(owner, Ns)` is a MODULE
@@ -1486,10 +1533,12 @@ The discrimination matrix:
 
 - `crates/verter_workspace/src/env_hash.rs` — five env-hash functions on
   `IdeProjectConfig` + `EnvHashInputs<'_>`.
-- `crates/verter_semantic/src/facts/registry.rs` — `FactKey`, `Fact`,
+- `crates/verter_workspace/src/fact_registry.rs` — `FactKey`, `Fact`,
   `FactDomain`, `FactRegistry`, `SymbolSpace`, `MemberKind`, `FactLane`,
   `ObservedFact`, `MacroKind`, `MacroTargetKey`, `InternedSpecifier`,
   `InternedName`, `InternedGlobPattern`, `AugmentationTargetKindTag`.
+  `crates/verter_semantic/src/facts/registry.rs` is the semantic compatibility
+  re-export plus the semantic `MacroKind` conversion.
 - `crates/verter_semantic/src/facts/hashing.rs` — `compute_semantic_hash`,
   `compute_member_presence_hash`, `compute_member_shape_hash`, `CrossDeclLens`,
   `CrossDeclRef`, `HashOutcome`, `MAX_HASH_DEPTH = 64`.
@@ -1551,7 +1600,7 @@ The discrimination matrix:
   provenance, `binder_scope_id` query identity, negative lookup `ReturnOnly`).
 - `crates/verter_session/tests/cases/g_file/file_artifact_store_smoke.rs` — consumer-side
   smoke tests.
-- `crates/verter_semantic/src/facts/registry.rs` (`registry_tests` inline
+- `crates/verter_workspace/src/fact_registry.rs` (`registry_tests` inline
   module) — `FactKey::domain()` routing per R12 / R26, `SymbolSpace` tag
   stability per R11.
 - `crates/verter_semantic/src/facts/hashing.rs` (inline `tests` module) —

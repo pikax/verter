@@ -14,7 +14,7 @@ pub(super) fn collect_snippet_candidate_members(
         let TSSignature::TSPropertySignature(sig) = member else {
             continue;
         };
-        let Some(member_name) = static_string_property_key(&sig.key) else {
+        let Some(member_name) = property_key_name(&sig.key) else {
             continue;
         };
         let Some(annotation) = &sig.type_annotation else {
@@ -29,7 +29,7 @@ pub(super) fn collect_snippet_candidate_members(
                     out.snippet_candidates.push(SvelteSnippetImportCandidate {
                         local_binding: type_name.to_string(),
                         import_source: source.clone(),
-                        member_name: member_name.to_string(),
+                        member_name,
                     });
                 }
             }
@@ -219,12 +219,19 @@ pub(super) fn binding_name(pattern: &BindingPattern<'_>) -> Option<String> {
     }
 }
 
-/// The static name of a property/binding key, when it is a plain identifier or
-/// string literal.
-pub(super) fn static_string_property_key<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
+/// The static name of a property/binding key.
+///
+/// OXC represents keyword-spelled boolean and null binding keys as static
+/// identifiers today; the literal arms keep the complete static-key contract
+/// explicit if that representation changes.
+pub(super) fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
     match key {
-        PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
-        PropertyKey::StringLiteral(s) => Some(s.value.as_str()),
+        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+        PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+        PropertyKey::BigIntLiteral(n) => Some(n.value.to_string()),
+        PropertyKey::BooleanLiteral(b) => Some(b.value.to_string()),
+        PropertyKey::NullLiteral(_) => Some("null".to_string()),
         _ => None,
     }
 }
@@ -259,6 +266,18 @@ pub(super) fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8;
             d.key.hash(&mut hasher);
             d.value.hash(&mut hasher);
         }
+    }
+    candidates.props_calls.len().hash(&mut hasher);
+    for call in &candidates.props_calls {
+        call.public_keys.len().hash(&mut hasher);
+        for key in &call.public_keys {
+            key.name.hash(&mut hasher);
+        }
+        call.local_bindings.len().hash(&mut hasher);
+        for binding in &call.local_bindings {
+            binding.name.hash(&mut hasher);
+        }
+        call.has_rest.hash(&mut hasher);
     }
     for c in &candidates.snippet_candidates {
         c.local_binding.hash(&mut hasher);

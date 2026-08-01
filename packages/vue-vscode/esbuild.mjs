@@ -3,6 +3,8 @@ import { fileURLToPath } from "url";
 import { cpSync, mkdirSync, existsSync, readdirSync, lstatSync, rmSync, statSync } from "fs";
 import path from "path";
 
+import { productionBundleConfig } from "./esbuild.config.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
@@ -111,24 +113,53 @@ function prepareLspBinary() {
   console.warn(`Warning: LSP binary not found — run 'cargo build --release -p verter_lsp' first`);
 }
 
+/**
+ * Copy the standalone MCP server binary into bin/ so it gets bundled in the
+ * VSIX.
+ *
+ * Same policy as the LSP binary above: newest local Cargo artifact wins, a
+ * CI-pre-placed binary is retained, and a missing binary only warns — the
+ * extension fails soft at runtime (`resolveMcpServerBinary` logs and MCP
+ * tools stay unavailable) rather than failing the build.
+ */
+function prepareMcpBinary() {
+  const ext = process.platform === "win32" ? ".exe" : "";
+  const binName = `verter-mcp${ext}`;
+  const binDir = path.join(__dirname, "bin");
+  const binDst = path.join(binDir, binName);
+
+  const candidates = ["release", "debug"]
+    .map((profile) => ({
+      profile,
+      src: path.join(monorepoRoot, "target", profile, binName),
+    }))
+    .filter(({ src }) => existsSync(src))
+    .map((candidate) => ({ ...candidate, modified: statSync(candidate.src).mtimeMs }))
+    .sort((left, right) => right.modified - left.modified);
+
+  const newest = candidates[0];
+  const destinationModified = existsSync(binDst) ? statSync(binDst).mtimeMs : -Infinity;
+  if (newest && newest.modified > destinationModified) {
+    mkdirSync(binDir, { recursive: true });
+    cpSync(newest.src, binDst);
+    console.log(`MCP binary copied from target/${newest.profile}/${binName}`);
+    return;
+  }
+  if (existsSync(binDst)) {
+    console.log(`MCP binary at bin/${binName} is current`);
+    return;
+  }
+
+  console.warn(`Warning: MCP binary not found — run 'cargo build --release -p verter_mcp' first`);
+}
+
 /** @type {import('esbuild').BuildOptions} */
-const config = {
-  entryPoints: [path.join(__dirname, "src", "extension.ts")],
-  bundle: true,
-  outfile: path.join(__dirname, "dist", "extension.js"),
-  external: ["vscode", "@verter/typescript-plugin"],
-  format: "cjs",
-  platform: "node",
-  target: "node18",
-  mainFields: ["module", "main"],
-  sourcemap: !production,
-  minify: production,
-  treeShaking: true,
-};
+const config = productionBundleConfig({ production });
 
 if (!watch) {
   prepareDeps();
   prepareLspBinary();
+  prepareMcpBinary();
 }
 
 if (watch) {

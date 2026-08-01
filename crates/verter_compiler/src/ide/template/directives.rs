@@ -335,6 +335,7 @@ fn resolve_iterable_segments(
     let parsed = OxcParsedExpression {
         offset: iterable_start,
         expression: None,
+        multi_statement: false,
         errors: None,
         bindings: Some(BindingExtractionResult {
             bindings,
@@ -796,6 +797,7 @@ mod tests {
         let condition = OxcParsedExpression {
             offset: pos,
             expression: None,
+            multi_statement: false,
             errors: None,
             bindings: Some(BindingExtractionResult {
                 bindings: vec![Binding {

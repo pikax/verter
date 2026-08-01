@@ -1,6 +1,6 @@
 {
   "name": "@verter/tsc-linux-arm64-musl",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "verter-tsc binary for Linux ARM64 (musl)",
   "license": "MIT",
   "repository": {
@@ -20,6 +20,6 @@
     "musl"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

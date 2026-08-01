@@ -25,10 +25,27 @@ use crate::provider_sync::{
     open_unresolved_carrier_commit, open_unresolved_carrier_state, revert_unsynced_kinds,
     NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
 };
-use crate::server::compute_verter_diagnostics_for_with_views;
 use crate::type_provider::merge;
 use crate::type_provider::project_sync::ProjectSync;
 use crate::type_provider::traits::TypeProvider;
+
+/// Per-canonical bookkeeping for changes the server has RECEIVED but has not
+/// finished processing.
+///
+/// A change is "in flight" from the instant its `did_change` handler is entered
+/// — before the global document-commit mutex, before the document is committed,
+/// before the debounce signal is deposited — until that handler is done. A
+/// document with a change in flight is not quiet, whatever the receipt on its
+/// last signal says, so the coordinator will not dispatch a sync for it.
+#[derive(Default)]
+struct CanonicalChangeState {
+    /// Live [`ChangeInFlight`] tickets for this canonical id.
+    tickets: u32,
+}
+
+/// Shared "changes received but not yet processed" map, read by the coordinator
+/// loop and written by the `did_change` handlers.
+type ChangeTracker = Arc<parking_lot::Mutex<HashMap<String, CanonicalChangeState>>>;
 
 /// Handle for sending signals to the coordinator.
 #[derive(Clone)]
@@ -38,6 +55,8 @@ pub struct SyncCoordinatorHandle {
     /// Latest URI per canonical document. Replacements coalesce while the actor
     /// is busy synchronizing another file or waiting on a provider commit.
     pending: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
+    /// Changes received but not yet processed. See [`CanonicalChangeState`].
+    changes: ChangeTracker,
 }
 
 #[derive(Clone, Debug)]
@@ -45,26 +64,99 @@ struct PendingSignal {
     uri: String,
     requires_sync: bool,
     force_diagnostics: bool,
+    /// When the change this signal describes REACHED the server, not when the
+    /// coordinator got round to draining it out of the inbox.
+    ///
+    /// A signal can sit in the inbox for seconds: `did_change` handlers commit
+    /// their document under one global mutex before they signal, and the
+    /// coordinator's own `sync_file(..).await` is inline in its loop. Stamping
+    /// at drain charges all of that waiting to the user as fresh quiet time and
+    /// restarts the full debounce window from zero.
+    received_at: Instant,
 }
 
 impl SyncCoordinatorHandle {
     /// Signal that a file has changed and needs a debounced sync.
-    pub fn signal(&self, canonical_id: String, uri_str: String) {
+    ///
+    /// `received_at` is when the change REACHED the server — the caller's own
+    /// entry instant, never `Instant::now()` taken at some later point on the
+    /// path. The debounce window is measured from it.
+    pub fn signal(&self, canonical_id: String, uri_str: String, received_at: Instant) {
         self.pending
             .lock()
             .entry(canonical_id)
             .and_modify(|pending| {
                 pending.uri = uri_str.clone();
                 pending.requires_sync = true;
+                // Newest receipt wins, and `max` rather than assignment: LSP
+                // notification handlers run concurrently, so an older change can
+                // deposit its signal after a newer one has already deposited
+                // its own. Assigning would walk the window backwards and fire
+                // the sync while the user is still typing.
+                pending.received_at = pending.received_at.max(received_at);
             })
             .or_insert(PendingSignal {
                 uri: uri_str,
                 requires_sync: true,
                 force_diagnostics: false,
+                received_at,
             });
         // Full means a wake is already queued, which is exactly the desired
         // coalescing behavior. Closed means the server is shutting down.
         let _ = self.wake_tx.try_send(());
+    }
+
+    /// Signal that a file needs a debounced REPUBLISH but no provider sync.
+    ///
+    /// The edit that motivates this is the style-only one: it needs no provider
+    /// sync, no dependency-frontier refresh and no import republication — but
+    /// the host still CLEARED the file's diagnostics for it, and a clear that
+    /// arms no recompute leaves the editor showing nothing. The debounced tick
+    /// recompiles for every revision it is about to publish, so asking it to
+    /// publish is what refills them.
+    ///
+    /// Merges rather than overwrites: it must never downgrade a pending
+    /// `requires_sync` deposited by a real edit for the same quiet window.
+    pub fn signal_diagnostics_only(
+        &self,
+        canonical_id: String,
+        uri_str: String,
+        received_at: Instant,
+    ) {
+        self.pending
+            .lock()
+            .entry(canonical_id)
+            .and_modify(|pending| {
+                pending.uri = uri_str.clone();
+                pending.force_diagnostics = true;
+                pending.received_at = pending.received_at.max(received_at);
+            })
+            .or_insert(PendingSignal {
+                uri: uri_str,
+                requires_sync: false,
+                force_diagnostics: true,
+                received_at,
+            });
+        let _ = self.wake_tx.try_send(());
+    }
+
+    /// Record that a change to `canonical_id` has been RECEIVED.
+    ///
+    /// Call this at `did_change` handler ENTRY, before the global commit mutex
+    /// and before any document work. The returned ticket stamps the receipt
+    /// instant the debounce window is measured from and holds the coordinator
+    /// off this canonical id until the change has been processed.
+    pub fn change_received(&self, canonical_id: String) -> ChangeInFlight {
+        self.changes
+            .lock()
+            .entry(canonical_id.clone())
+            .or_default()
+            .tickets += 1;
+        ChangeInFlight {
+            handle: self.clone(),
+            canonical_id,
+            received_at: Instant::now(),
+        }
     }
 
     /// Create an isolated handle/inbox pair for testing the coalescing contract.
@@ -75,6 +167,7 @@ impl SyncCoordinatorHandle {
             Self {
                 wake_tx,
                 pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             },
             wake_rx,
         )
@@ -86,6 +179,57 @@ impl SyncCoordinatorHandle {
             .into_iter()
             .map(|(canonical_id, pending)| (canonical_id, pending.uri))
             .collect()
+    }
+}
+
+/// A `did_change` handler's ticket for one received change to one document.
+///
+/// Created at handler entry; dropped when the handler is done. It owns the
+/// receipt instant so no caller can substitute a later one by accident.
+pub struct ChangeInFlight {
+    handle: SyncCoordinatorHandle,
+    canonical_id: String,
+    received_at: Instant,
+}
+
+impl ChangeInFlight {
+    /// Deposit this change's debounce signal, stamped with the instant the
+    /// change was received rather than any later instant on the path.
+    pub fn signal(&self, uri_str: String) {
+        self.handle
+            .signal(self.canonical_id.clone(), uri_str, self.received_at);
+    }
+
+    /// Deposit a REPUBLISH-only signal for this change, stamped with the same
+    /// receipt instant. See [`SyncCoordinatorHandle::signal_diagnostics_only`].
+    pub fn signal_diagnostics_only(&self, uri_str: String) {
+        self.handle
+            .signal_diagnostics_only(self.canonical_id.clone(), uri_str, self.received_at);
+    }
+}
+
+impl Drop for ChangeInFlight {
+    fn drop(&mut self) {
+        {
+            let mut changes = self.handle.changes.lock();
+            if let Some(state) = changes.get_mut(&self.canonical_id) {
+                state.tickets = state.tickets.saturating_sub(1);
+                if state.tickets == 0 {
+                    changes.remove(&self.canonical_id);
+                }
+            }
+        }
+        // Releasing a ticket is what makes a document quiescent again, and the
+        // coordinator PARKS on a canonical id whose change is in flight (it is
+        // excluded from the deadline computation, so an all-gated inbox leaves
+        // no timer armed at all). Wake unconditionally so the release is always
+        // observed — including on the handler paths that return without ever
+        // signalling (a virtual document, a style-only edit).
+        //
+        // No wakeup is lost when the channel is already full: a queued wake is
+        // one the coordinator has not consumed yet, so it will re-read this map
+        // after this decrement.
+        let _ = self.handle.wake_tx.try_send(());
     }
 }
 
@@ -130,27 +274,34 @@ pub struct SyncCoordinatorDeps {
 }
 
 /// Debounce interval: sync fires after 300ms of silence for a given file.
-const DEBOUNCE_MS: u64 = 300;
+pub(crate) const DEBOUNCE_MS: u64 = 300;
 
 /// Spawn the coordinator task and return a handle for sending signals.
 pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandle {
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    let changes: ChangeTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let semantic_ready_rx = deps.documents.subscribe_semantic_ready();
     tracing::info!("sync_coordinator: spawned (debounce {DEBOUNCE_MS}ms)");
     tokio::spawn(coordinator_loop(
         wake_rx,
         semantic_ready_rx,
         Arc::clone(&pending),
+        Arc::clone(&changes),
         Arc::new(deps),
     ));
-    SyncCoordinatorHandle { wake_tx, pending }
+    SyncCoordinatorHandle {
+        wake_tx,
+        pending,
+        changes,
+    }
 }
 
 async fn coordinator_loop(
     mut wake_rx: mpsc::Receiver<()>,
     mut semantic_ready_rx: tokio::sync::broadcast::Receiver<crate::documents::SemanticReady>,
     inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
+    changes: ChangeTracker,
     deps: Arc<SyncCoordinatorDeps>,
 ) {
     let debounce = Duration::from_millis(DEBOUNCE_MS);
@@ -161,26 +312,45 @@ async fn coordinator_loop(
     // diagnostic task without risking a half-committed provider surface.
     let mut diagnostic_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
 
+    // A canonical id whose change is still in flight is NOT quiet, so it is
+    // excluded from BOTH the deadline computation and the dispatch set. It is
+    // deliberately excluded from the deadline too: with no timer armed for it
+    // the loop parks on the wake channel instead of spinning on an already-
+    // elapsed `sleep_until`. `ChangeInFlight::drop` always wakes the loop, so
+    // the file is re-examined the instant it becomes quiescent.
+    let quiescent = |canonical_id: &str| !changes.lock().contains_key(canonical_id);
+
     loop {
         // Calculate next deadline from pending files
-        let next_deadline = pending_files.values().map(|(t, _)| *t + debounce).min();
+        let next_deadline = pending_files
+            .iter()
+            .filter(|(canonical_id, _)| quiescent(canonical_id))
+            .map(|(_, (t, _))| *t + debounce)
+            .min();
 
         tokio::select! {
             wake = wake_rx.recv() => {
                 match wake {
                     Some(()) => {
                         let signals = std::mem::take(&mut *inbox.lock());
-                        let received_at = Instant::now();
                         for (canonical_id, signal) in signals {
                             tracing::debug!("sync_coordinator: signal {canonical_id}");
                             if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
                                 stale.abort();
                             }
-                            // Reset the quiet window for the latest edit only.
+                            // Reset the quiet window for the latest edit only —
+                            // measured from when that edit REACHED the server,
+                            // which the signal carries, NOT from now. Time spent
+                            // waiting in the inbox is time the file was already
+                            // quiet, and must not be charged to the user again.
+                            // `max` for the same reason `signal` uses it: a
+                            // concurrently-dispatched older handler can deposit
+                            // after a newer one.
+                            let received_at = signal.received_at;
                             pending_files
                                 .entry(canonical_id)
                                 .and_modify(|(changed_at, pending)| {
-                                    *changed_at = received_at;
+                                    *changed_at = (*changed_at).max(received_at);
                                     pending.uri = signal.uri.clone();
                                     pending.requires_sync |= signal.requires_sync;
                                     pending.force_diagnostics |= signal.force_diagnostics;
@@ -215,6 +385,10 @@ async fn coordinator_loop(
                             if let Some(stale) = diagnostic_tasks.remove(&ready.canonical_id) {
                                 stale.abort();
                             }
+                            // Deliberately `Instant::now()`: unlike a keystroke
+                            // signal, a semantic-ready event has no earlier
+                            // receipt to honour — the reason to republish arose
+                            // exactly here, so the quiet window starts here.
                             let received_at = Instant::now();
                             pending_files
                                 .entry(ready.canonical_id)
@@ -229,6 +403,7 @@ async fn coordinator_loop(
                                         uri: ready.uri,
                                         requires_sync: false,
                                         force_diagnostics: true,
+                                        received_at,
                                     },
                                 ));
                         }
@@ -236,6 +411,9 @@ async fn coordinator_loop(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // Recover from a burst by invalidating and scheduling every
                         // open document. These are diagnostics-only passes.
+                        // Deliberately `Instant::now()`: the recovery sweep is
+                        // its own reason to republish and carries no earlier
+                        // per-document receipt.
                         let received_at = Instant::now();
                         for uri in deps.documents.open_uris() {
                             let Ok(parsed) = uri.parse::<Uri>() else { continue; };
@@ -249,6 +427,7 @@ async fn coordinator_loop(
                                         uri,
                                         requires_sync: false,
                                         force_diagnostics: true,
+                                        received_at,
                                     },
                                 ),
                             );
@@ -272,20 +451,51 @@ async fn coordinator_loop(
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                // Find files that have been quiet for >= debounce_ms
+                // Find files that have been quiet for >= debounce_ms. A file
+                // whose change is still in flight is NOT quiet however old its
+                // last receipt is: without this gate, receipt-time stamping
+                // would dispatch once per handler for the whole backlog — one
+                // provider sync per keystroke, the exact flood the debounce
+                // exists to prevent.
                 let now = Instant::now();
                 let ready: Vec<(String, PendingSignal)> = pending_files
                     .iter()
-                    .filter(|(_, (t, _))| now.duration_since(*t) >= debounce)
+                    .filter(|(id, (t, _))| now.duration_since(*t) >= debounce && quiescent(id))
                     .map(|(id, (_, signal))| (id.clone(), signal.clone()))
                     .collect();
+
+                // The canonicals whose settled signal carried a REAL edit
+                // (`requires_sync`) — the only signal class after which the
+                // results of files that IMPORT this one can have changed. Their
+                // open importers are re-armed after the loop, once this tick's
+                // own work (including the edited file's provider sync, which
+                // runs inline above the arming's debounce window) is done.
+                let mut settled_edits: Vec<String> = Vec::new();
 
                 for (canonical_id, signal) in ready {
                     pending_files.remove(&canonical_id);
                     let mut publish_diagnostics = signal.force_diagnostics;
-                    if signal.requires_sync
-                        && deps.needs_provider_sync.remove(&canonical_id).is_some()
-                    {
+                    let will_sync = signal.requires_sync
+                        && deps.needs_provider_sync.remove(&canonical_id).is_some();
+                    if signal.requires_sync {
+                        settled_edits.push(canonical_id.clone());
+                    }
+
+                    // The carrier's IDE surface is owed by THIS tick, for every
+                    // settled revision it is about to sync or publish — not by
+                    // the provider sync it used to sit inside. A revision can
+                    // need the recompile without needing any provider work at
+                    // all: a style-only edit clears the file's diagnostics and
+                    // asks only for a republish, and publishing without first
+                    // recompiling would publish the emptiness the clear left
+                    // behind. Skipped when this tick will do neither, so a
+                    // signal whose work bit an interactive sync already consumed
+                    // compiles nothing.
+                    if will_sync || publish_diagnostics {
+                        refresh_carrier_ide_surface(&deps, &canonical_id);
+                    }
+
+                    if will_sync {
                         let sync_version = signal.uri
                             .parse::<Uri>()
                             .ok()
@@ -325,31 +535,222 @@ async fn coordinator_loop(
                         );
                     }
                 }
+                arm_open_importer_republish(&deps, &settled_edits, &mut pending_files);
                 diagnostic_tasks.retain(|_, task| !task.is_finished());
             }
         }
     }
 }
 
+/// Arm a debounced diagnostics-only republish for every OPEN importer of each
+/// canonical whose settled REAL edit this tick just processed.
+///
+/// A child edit changes what its parents' diagnostics say — a renamed prop
+/// turns a parent's usage into `verter/unknown-prop`; a changed prop type
+/// turns the parent's generated TSX into a provider type error — but the edit
+/// clears and re-arms only the CHILD: the host upsert clears the child's
+/// `latest_diagnostics`, the `did_change` handler signals the child's
+/// canonical, and this tick publishes only pending keys. Without this arming a
+/// parent keeps whatever the editor last showed, forever. The workspace's
+/// reverse import graph exists for exactly this consumer ("LSP affected-files
+/// reporting + diagnostics" — `WorkspaceRead::affected_canonicals`, R22); it
+/// is read-only bookkeeping here and is never wired to cache invalidation —
+/// the parent's recompute reads host state that revalidates on read.
+///
+/// Depth: the TRANSITIVE closure (`affected_canonicals`), not direct importers
+/// only — a parent that re-exports or wraps the child can change its own
+/// public surface, so a grandparent's diagnostics can move too. The walk is an
+/// in-memory reverse-axis BFS; the expensive work is bounded separately below.
+///
+/// What bounds the fan-out:
+/// - armed at most once per settled quiet window per edited file — the arming
+///   rides THIS tick, never the per-keystroke `did_change` path, so a burst of
+///   keystrokes coalesces into one child settle and one arming;
+/// - only OPEN importers arm (push diagnostics exist for open editors only, and
+///   the tick's own refresh gate drops closed documents anyway), so the armed
+///   work is bounded by the open-editor count, not by the import graph;
+/// - armed importers enter the SAME debounced pending map with a fresh receipt
+///   — they publish one debounce window later, coalescing with each other,
+///   with their own pending edits, and with any further child settles;
+/// - the republish is diagnostics-only (`requires_sync: false`): no provider
+///   sync, and the tick's IDE refresh is a warm cache hit for a parent whose
+///   own compile inputs did not change.
+///
+/// Fail-closed: the arming only schedules the parent through the existing
+/// publish path, which already refuses to publish torn results (surface
+/// re-validation, document-version fences). A CHILD edit moves neither the
+/// parent's document version nor, on its own, the parent's diagnostics
+/// generation — so without intervention the parent's version-keyed
+/// document-half cache would warm-hit and republish yesterday's set as fresh.
+///
+/// The stale-cache fence is the GENERATION BUMP, not the entry drop. Dropping
+/// the entry alone cannot fence a parent computation already in flight: that
+/// computation snapshotted the pre-arm generation at entry, captured pre-edit
+/// child state, and lands its cache write AFTER the drop — with the parent's
+/// version and generation both still matching, every later read warm-hits it.
+/// Bumping the parent's host diagnostics generation here advances the epoch
+/// that every computation stamps into its write and every read re-validates
+/// against the live counter (the same read-side-authoritative rail
+/// host-driven recompiles already use), so a computation that began before
+/// the arm can never satisfy a read that happens after it. The entry drop
+/// stays only to free the known-dead value eagerly.
+fn arm_open_importer_republish(
+    deps: &SyncCoordinatorDeps,
+    settled_edits: &[String],
+    pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
+) {
+    if settled_edits.is_empty() {
+        return;
+    }
+    // The OPEN documents are the bound: enumerate them once (their canonical
+    // ids and the client's own URI serialization, which keys the diagnostic
+    // caches), then test each against the reverse closure — never a
+    // document-map scan per closure member.
+    let open_documents: Vec<(String, String)> = deps
+        .documents
+        .open_uris()
+        .into_iter()
+        .filter_map(|uri_str| {
+            let uri: Uri = uri_str.parse().ok()?;
+            Some((deps.documents.get_canonical_id(&uri)?, uri_str))
+        })
+        .collect();
+    if open_documents.is_empty() {
+        return;
+    }
+    let workspace = deps.documents.host().workspace_read();
+    let received_at = Instant::now();
+    for edited in settled_edits {
+        let affected: std::collections::HashSet<String> =
+            workspace.affected_canonicals(edited).into_iter().collect();
+        for (importer, importer_uri) in &open_documents {
+            if importer == edited || !affected.contains(importer) {
+                continue;
+            }
+            tracing::debug!(
+                "sync_coordinator: arming open importer {importer} after settled edit of {edited}"
+            );
+            deps.documents.host().bump_diagnostics_generation(importer);
+            deps.cached_verter_diags.remove(importer_uri);
+            pending_files
+                .entry(importer.clone())
+                .and_modify(|(changed_at, pending)| {
+                    *changed_at = (*changed_at).max(received_at);
+                    pending.force_diagnostics = true;
+                    pending.received_at = pending.received_at.max(received_at);
+                })
+                .or_insert((
+                    received_at,
+                    PendingSignal {
+                        uri: importer_uri.clone(),
+                        requires_sync: false,
+                        force_diagnostics: true,
+                        received_at,
+                    },
+                ));
+        }
+    }
+}
+
+/// Refresh the carrier's IDE surface for the revision the debounce just
+/// settled on: load it, recompile it, and install a provider projection if the
+/// document has none.
+///
+/// This is the debounced tick's COMPILE half, called from the tick itself
+/// rather than from the provider sync, and gated ONLY on the document still
+/// being open. The document commit owes only the document's text — it stopped
+/// compiling per keystroke, which is
+/// https://github.com/pikax/verter/issues/96 — so this tick is what owes the
+/// IDE surface for the settled revision.
+///
+/// That debt belongs to the REVISION, not to the provider and not to the sync:
+/// `upsert` clears the file's `latest_diagnostics` on any semantic change, and
+/// `get_diagnostics` is a pure cached read that never compiles, so without this
+/// compile Verter's OWN template and parse diagnostics go EMPTY and stay empty.
+/// Nothing about that involves a type provider — the shipping default route has
+/// none (`--type-provider=editor-tsserver` installs no local provider; the
+/// editor's own tsserver serves TypeScript) — and nothing about it requires a
+/// provider sync either, which is why a style-only edit, whose whole point is
+/// that it needs no provider work, still reaches this.
+///
+/// Carrier-agnostic: `ensure_ide_compiled` answers `Ok(false)` for anything
+/// with no IDE surface, so a self-file document (rune module, plain script)
+/// pays a source lookup and nothing else, while Vue and Svelte carriers refresh
+/// identically.
+///
+/// Bounded by the debounce, never by keystroke: one quiet window, one compile.
+fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
+    // Nothing is owed for a document that is no longer open. `did_change`
+    // leaves a pending signal behind and `did_close` does not cancel it, so an
+    // edit-then-close lands here after the close has already removed the
+    // document AND evicted the host source. Without this gate `ensure_loaded`
+    // would RESURRECT the file from disk and pull its dependency closure in
+    // for a buffer nobody is looking at — and the publication that follows
+    // finds no document and drops the result anyway. This is the open-document
+    // check the recovery helper this replaced performed first.
+    //
+    // `sync_file`'s provider arm is deliberately NOT gated on it, and keeps its
+    // own `ensure_ide_compiled`: retracting or clearing a closed carrier's
+    // provider state is work a close still owes, and that arm also syncs
+    // carriers that were never open (a workspace file whose `.tsx` an importer
+    // needs).
+    if deps.documents.canonical_id_to_uri(canonical_id).is_none() {
+        return;
+    }
+    // The compile below reads the file and the dependency closure this loads.
+    // A fast path for an already-loaded open document, which is every document
+    // reaching this tick.
+    deps.documents.host().ensure_loaded(canonical_id);
+    let profile = deps.documents.tsx_profile.read().clone();
+    let compiled = crate::server::block_in_place_guarded(|| {
+        deps.documents
+            .host
+            .ensure_ide_compiled(canonical_id, &profile)
+    });
+    if !compiled.unwrap_or(false) {
+        return;
+    }
+    // A carrier whose open-time compile FAILED has no provider projection and
+    // fails closed on every capture until a repair path compiles one. The
+    // interactive repair heals it on the next provider-backed request, but only
+    // attempt-bounded and only when a request arrives — this tick is the
+    // request-INDEPENDENT recovery. Cache read only — the compile just above
+    // already ran — and a no-op once a projection exists, so it never disturbs
+    // the steady-state carry.
+    deps.documents
+        .install_missing_carrier_projection(canonical_id);
+}
+
 /// Perform the actual sync: sync TSX/DTS to the type provider.
 ///
-/// A provider-less route (`deps.project_sync == None`) has nothing to sync —
-/// the caller still publishes Verter-owned diagnostics afterwards.
+/// The carrier's IDE surface is NOT this function's job — the tick refreshes it
+/// through [`refresh_carrier_ide_surface`] before calling here, because a
+/// revision can owe that recompile without owing any provider work. A
+/// provider-less route (`deps.project_sync == None`) therefore has nothing to
+/// do here at all; the tick still publishes Verter-owned diagnostics
+/// afterwards.
 async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
     let Some(project_sync) = deps.project_sync.as_ref() else {
         return;
     };
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
-    let Some(snapshot) = ({
+    // Re-readable: the self-file sync below revalidates the published snapshot
+    // AFTER its provider await, so it needs the accessor, not one capture.
+    let published_snapshot = || {
         let ws = deps.vfs_workspace.read();
         ws.as_ref().and_then(|ws| {
             let published = ws.load_published()?;
             Some(crate::server::PublishedResolverSnapshot {
                 resolver: published.snapshot.resolver.clone(),
+                resolution_view: Some(crate::server::PublishedResolutionView {
+                    workspace: Arc::clone(ws),
+                    published: Arc::clone(&published),
+                }),
                 ownership_ready: published.ownership_ready,
             })
         })
-    }) else {
+    };
+    let Some(snapshot) = published_snapshot() else {
         tracing::debug!(
             "sync_coordinator: deferring sync without resolver snapshot {canonical_id}"
         );
@@ -357,7 +758,6 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             .insert(canonical_id.to_string());
         return;
     };
-    deps.documents.host().ensure_loaded(canonical_id);
 
     // A self-file document (a `.svelte.ts` / `.svelte.js` rune module OR a
     // plain TS-family script) is NOT a carrier — it serves its OWN-path
@@ -375,7 +775,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 &deps.documents,
                 project_sync,
                 &deps.provider_sync_states,
-                Some(&snapshot),
+                &published_snapshot,
                 &uri,
                 canonical_id,
                 &file_language,
@@ -399,6 +799,13 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     // Sync IDE (TSX) output to type provider. IDE-sync: drive the IDE/TSX
     // surface (not the runtime `Main`) so a Main-less carrier (Svelte)
     // populates its `CachedTsx` before the `get_ide` read below.
+    //
+    // Kept even though `refresh_carrier_ide_surface` ran above, and NOT folded
+    // into it: that refresh serves the OPEN document, while the provider arm
+    // also syncs carriers with no open document at all (a workspace file whose
+    // `.tsx` an importer needs). For an open document this is a warm hit on the
+    // slot the refresh just filled — the same profile, so the same normalized
+    // slot — and a warm hit starts no cold run.
     let profile = deps.documents.tsx_profile.read().clone();
     let _ = tokio::task::block_in_place(|| {
         deps.documents
@@ -441,6 +848,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         provider_sync_states: &deps.provider_sync_states,
         provider_surfaces: deps.documents.provider_surfaces(),
         documents: Some(&deps.documents),
+        project_sync: Some(project_sync),
         canonical_id,
         is_jsx,
         ide: ide.as_ref(),
@@ -500,18 +908,19 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                             synced_kinds.push(ProviderPathKind::Ide);
                             // Record a fresh generation pinning the EXACT IDE bytes
                             // just synced (interactive queries capture this surface).
-                            let provider_code = project_sync
-                                .synced_tsx_content(&ide_path)
-                                .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
-                            crate::provider_surface_store::record_carrier_ide_surface(
-                                deps.documents.provider_surfaces(),
-                                Some(&deps.documents),
-                                deps.documents.host(),
-                                canonical_id,
-                                &ide_path,
-                                provider_code.as_ref(),
-                                ide.source_map.as_deref(),
-                            );
+                            if let Some(delivered) =
+                                project_sync.carrier_provider_surface(&ide_path, &ide.code)
+                            {
+                                crate::provider_surface_store::record_carrier_ide_surface(
+                                    deps.documents.provider_surfaces(),
+                                    Some(&deps.documents),
+                                    deps.documents.host(),
+                                    canonical_id,
+                                    &ide_path,
+                                    &delivered,
+                                    ide.source_map.as_deref(),
+                                );
+                            }
                         }
                         Err(e) => {
                             tracing::warn!("sync_coordinator: tsx sync failed for {ide_path}: {e}")
@@ -536,14 +945,18 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             };
             if let Some(api) = api {
                 if let Some(dts_path) = committed_state.api_path.clone() {
+                    // Destination-keyed rendering (the `.verter.ts` companion
+                    // is TypeScript-labeled whatever the SFC's dialect);
+                    // stamp/record the SAME bytes that were delivered.
+                    let api_code = api.code_for_companion_path(&dts_path);
                     let result = if committed_state.api_background_loaded {
-                        project_sync.sync_dts(&dts_path, &api.code).await
+                        project_sync.sync_dts(&dts_path, api_code).await
                     } else {
-                        project_sync.open_dts(&dts_path, &api.code).await
+                        project_sync.open_dts(&dts_path, api_code).await
                     };
                     match result {
                         Ok(()) => {
-                            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                            committed_state.mark_api_delivered(api_code);
                             synced_kinds.push(ProviderPathKind::Api);
                             // Record a fresh generation pinning the EXACT content
                             // just synced under this virtual path.
@@ -553,7 +966,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                                 deps.documents.host(),
                                 canonical_id,
                                 &dts_path,
-                                &api.code,
+                                api_code,
                                 api.source_map.as_deref(),
                             );
                         }
@@ -701,18 +1114,18 @@ async fn preserve_open_unresolved_carrier(
                 ide_synced = true;
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // synced (interactive queries capture this surface).
-                let provider_code = project_sync
-                    .synced_tsx_content(&ide_path)
-                    .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
-                crate::provider_surface_store::record_carrier_ide_surface(
-                    deps.documents.provider_surfaces(),
-                    Some(&deps.documents),
-                    deps.documents.host(),
-                    canonical_id,
-                    &ide_path,
-                    provider_code.as_ref(),
-                    ide.source_map.as_deref(),
-                );
+                if let Some(delivered) = project_sync.carrier_provider_surface(&ide_path, &ide.code)
+                {
+                    crate::provider_surface_store::record_carrier_ide_surface(
+                        deps.documents.provider_surfaces(),
+                        Some(&deps.documents),
+                        deps.documents.host(),
+                        canonical_id,
+                        &ide_path,
+                        &delivered,
+                        ide.source_map.as_deref(),
+                    );
+                }
             }
             Err(error) => tracing::warn!(
                 "sync_coordinator: failed to sync open unresolved IDE path {ide_path}: {error}"
@@ -985,61 +1398,22 @@ fn compute_verter_diagnostics(
     canonical_id: &str,
     uri: &Uri,
 ) -> Vec<Diagnostic> {
-    // Recompute verter diagnostics fresh (lint + host errors) instead of reading stale cache.
+    // The complete Verter-owned set from the ONE shared composer. `did_open` /
+    // `did_change` route through this coordinator, and every other publisher
+    // (both background-init sweeps, the pull `textDocument/diagnostic` path)
+    // replaces the client's whole list for the document — so all of them must
+    // assemble the same categories or the last writer silently erases the rest.
     let mut verter_diags = {
         let vfs_ws = deps.vfs_workspace.read();
-        compute_verter_diagnostics_for_with_views(
+        crate::server::verter_owned_diagnostics(
             &deps.documents,
             uri,
+            canonical_id,
             &deps.cached_verter_diags,
             vfs_ws.as_deref(),
+            deps.project_sync.as_ref(),
         )
     };
-
-    // Surface the `verter(project)` ownership diagnostic on the DEBOUNCED publish
-    // path — `did_open` / `did_change` route through this coordinator, NOT through
-    // the request-only `compute_full_diagnostics`, so an unresolved carrier
-    // (terminal `NoProject` / disk-layout carrier-path conflict) is now explained
-    // on open AND edit. A resolved carrier (`Bound`, including a resolved
-    // multi-claimant) and a bootstrap `NotReady` stay silent — the shared owner
-    // authority decides, never a path-shape heuristic.
-    verter_diags.extend(crate::external_ts::project_ownership_diagnostics_for(
-        deps.documents.host(),
-        canonical_id,
-    ));
-
-    // A `.svelte` file whose owner workspace has NO `svelte`
-    // install fails CLOSED (module-not-found on the shim's `svelte` import) —
-    // surface the typed `svelte-package-missing` diagnostic on the source file
-    // so the failure is explained, not just a raw TS module-not-found. The
-    // owner root resolves through the published resolver snapshot.
-    if crate::server::carrier_language_for(canonical_id).is_some_and(|l| l.is_svelte()) {
-        let owner_root = {
-            let ws = deps.vfs_workspace.read();
-            ws.as_ref()
-                .and_then(|ws| ws.load_published())
-                .and_then(|p| {
-                    p.snapshot
-                        .resolver
-                        .nearest_config_for_path(canonical_id)
-                        .map(|o| o.root.clone())
-                })
-        };
-        if let Some(owner_root) = owner_root {
-            let source = deps
-                .documents
-                .host
-                .get_source(canonical_id)
-                .unwrap_or_default();
-            if let Some(diag) = crate::svelte_assets::svelte_package_missing_diagnostic(
-                canonical_id,
-                &owner_root,
-                &source,
-            ) {
-                verter_diags.push(diag);
-            }
-        }
-    }
 
     // When a type provider serves this session, suppress component usage
     // diagnostics (unknown-prop, unknown-model) since the provider validates

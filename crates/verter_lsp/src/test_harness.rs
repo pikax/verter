@@ -6,9 +6,14 @@
 //! that generates both tsserver and TSGO test variants from a single test body.
 //!
 //! Fixture source is read from the repository and document content is fed through
-//! in-memory APIs (`host.upsert()` + `did_open()`). Tests that need package contracts
-//! materialize deterministic declarations under gitignored fixture `node_modules`, and
-//! every real-provider session owns an isolated temporary carrier store.
+//! in-memory APIs (`host.upsert()` + `did_open()`). A fixture that needs package
+//! contracts is STAGED first: its authored tree is copied into a per-process
+//! directory that excludes `node_modules`, and deterministic declarations are
+//! materialized into that copy. The authored tree's own `node_modules` is gitignored
+//! and shared with the VS Code E2E suite, so it accumulates whatever ran last on the
+//! machine; a run never reads it. Every real-provider session owns an isolated
+//! temporary carrier store. See `test_harness_fixture_dependencies` for the staging
+//! and materialization rules.
 
 use std::sync::Arc;
 
@@ -21,8 +26,79 @@ use crate::type_provider::traits::TypeProvider;
 
 #[path = "test_harness_fixture_dependencies.rs"]
 mod fixture_dependencies;
+/// Document-position location: the contiguous byte-string locators and the
+/// structural template-tag locator that resolves through the SFC parse.
+mod locate;
 use crate::LspConfig;
 pub(crate) use fixture_dependencies::fixture_workspace_root;
+
+/// A fixture workspace root WITH its type-only dependency surface materialized.
+///
+/// Any test that puts a real type provider (or a host that resolves imports)
+/// over a fixture must use this rather than [`fixture_workspace_root`]. A staged
+/// root starts with NO `node_modules`, so a fixture whose sources import `vue`
+/// resolves nothing until dependencies are materialized into the copy — and a
+/// provider answering from an unresolved import returns a DEGRADED surface, not
+/// an error. Tests that then guard on the degraded answer report green without
+/// running their assertions, which is worse than the stale state staging
+/// removed: that failed loudly, this passes quietly.
+///
+/// This PAIRS the two rather than making the unpaired form unreachable:
+/// [`fixture_workspace_root`] remains available, and
+/// [`crate::test_harness::TestSessionBuilder`] pairs them by hand for its own
+/// fixtures. The silent green is closed at the ASSERTION — the discriminators
+/// that masked it now fail — not by API inaccessibility. A manually-spawned
+/// provider test that calls the unpaired form still compiles; it fails loudly
+/// instead of passing quietly.
+pub(crate) fn provider_fixture_workspace_root(name: &str) -> String {
+    let root = fixture_workspace_root(name);
+    materialize_real_provider_framework_types(name);
+    root
+}
+
+/// Resolve the tsserver every harness-spawned session runs, from the CONFIGURED
+/// tsdk alone.
+///
+/// `resolve_tsserver` ranks every `node_modules/typescript` on the owning
+/// project's ANCESTOR WALK above the configured tsdk. Fixtures are staged under
+/// the system temp directory, whose ancestry this harness does not own, so a
+/// `node_modules/typescript` anywhere above it — or a `TMPDIR` pointed inside a
+/// tree that has one — would silently swap the TypeScript under every tsserver
+/// test while the authored fixture kept resolving the repo's own.
+///
+/// This function takes NO workspace root, so no caller can reintroduce that
+/// ancestry: the resolved TypeScript is the one named here, on any host and
+/// under any `TMPDIR`. Hermetic per the Testing-Hermeticity rule, and equal to
+/// what a clean checkout resolves by CONSTRUCTION rather than by coincidence.
+/// Resolution is also pinned to the tsdk TIER, not merely to a tsdk-first
+/// search: with no workspace root the ancestor walk is gone, but the ambient
+/// `npm root -g` tier remains, so a missing or rejected tsdk would otherwise let
+/// the harness run the GLOBAL compiler while reporting nothing unusual. A
+/// substitution is refused loudly; a machine with no TypeScript at all still
+/// yields `None`, which callers surface as an absent-provider skip.
+pub(crate) fn harness_tsserver_path(tsdk: &str) -> Option<std::path::PathBuf> {
+    let resolved = verter_type_runtime::discovery::resolve_tsserver(Some(tsdk), None).ok()?;
+    Some(accept_only_configured_tsdk(resolved))
+}
+
+/// Reject any tsserver the harness did not name.
+///
+/// Split out from [`harness_tsserver_path`] so the refusal is testable without
+/// a global npm install: the tier is what decides, and every tier other than
+/// the configured tsdk means a compiler substituted for the one under test.
+pub(crate) fn accept_only_configured_tsdk(
+    resolved: verter_type_runtime::discovery::ResolvedTsserver,
+) -> std::path::PathBuf {
+    assert_eq!(
+        resolved.source,
+        verter_type_runtime::discovery::TsserverSource::ConfiguredTsdk,
+        "the harness must run the TypeScript it names, but resolution supplied a \
+         {:?} install at {} — refusing to substitute a compiler",
+        resolved.source,
+        resolved.path.display()
+    );
+    resolved.path
+}
 use fixture_dependencies::materialize_real_provider_framework_types;
 
 /// Keep real external-provider sessions below the host-saturation point. A tsgo
@@ -46,8 +122,9 @@ fn real_provider_session_gate() -> &'static Arc<tokio::sync::Semaphore> {
 // sibling [`crate::test_harness_gating`] module.
 #[allow(unused_imports)]
 pub(crate) use crate::test_harness_gating::{
-    handle_absent_provider, provider_absence_outcome, provider_required, ProviderAbsence,
-    TestProviderKind,
+    absent_provider_receipt_line, absent_provider_skip_receipt, body_receipt_line,
+    body_receipt_status, handle_absent_provider, provider_absence_outcome, provider_required,
+    BodyReceiptStatus, ProviderAbsence, TestProviderKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -63,6 +140,7 @@ pub(crate) struct TestSessionBuilder {
     suppress_imported_carrier_prewarm: bool,
     plugin_response_remap: bool,
     resilient: bool,
+    tsgo_lsp_feature_only: bool,
 }
 
 impl TestSessionBuilder {
@@ -80,6 +158,7 @@ impl TestSessionBuilder {
             // `plugin_response_remap(true)`.
             plugin_response_remap: false,
             resilient: false,
+            tsgo_lsp_feature_only: false,
         }
     }
 
@@ -102,6 +181,20 @@ impl TestSessionBuilder {
     /// Only meaningful for the tsserver provider (the plugin lives there).
     pub(crate) fn plugin_response_remap(mut self, enabled: bool) -> Self {
         self.plugin_response_remap = enabled;
+        self
+    }
+
+    /// Exercise tsgo's real LSP feature surface without attaching the separate
+    /// `--api` checker transport.
+    ///
+    /// Semantic tokens and inlay hints are implemented by
+    /// [`crate::tsgo::ipc::TsgoTypeProvider`] and the production owned
+    /// composite delegates those feature reads to that exact instance. Tests
+    /// limited to those reads can use this seam without opening the checker's
+    /// Unix-domain socket; the default remains the full one-process
+    /// dual-surface provider used by diagnostics/type-checker tests.
+    pub(crate) fn tsgo_lsp_feature_only(mut self, enabled: bool) -> Self {
+        self.tsgo_lsp_feature_only = enabled;
         self
     }
 
@@ -176,11 +269,10 @@ impl TestSessionBuilder {
                     Some(p) => p,
                     None => return handle_absent_provider(self.kind, "node not found"),
                 };
-                let tsserver_path =
-                    match crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id)) {
-                        Some(p) => p,
-                        None => return handle_absent_provider(self.kind, "tsserver.js not found"),
-                    };
+                let tsserver_path = match harness_tsserver_path(&tsdk) {
+                    Some(p) => p,
+                    None => return handle_absent_provider(self.kind, "tsserver.js not found"),
+                };
                 let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../../packages/vue-vscode/node_modules")
                     .to_string_lossy()
@@ -305,13 +397,17 @@ impl TestSessionBuilder {
                             )
                         }
                     };
-                match crate::tsgo::ipc::TsgoOwnedProvider::attach(inner, &tsgo_bin).await {
-                    Ok(owned) => Arc::new(owned),
-                    Err(e) => {
-                        return handle_absent_provider(
-                            self.kind,
-                            &format!("tsgo --api attach failed: {e}"),
-                        )
+                if self.tsgo_lsp_feature_only {
+                    inner
+                } else {
+                    match crate::tsgo::ipc::TsgoOwnedProvider::attach(inner, &tsgo_bin).await {
+                        Ok(owned) => Arc::new(owned),
+                        Err(e) => {
+                            return handle_absent_provider(
+                                self.kind,
+                                &format!("tsgo --api attach failed: {e}"),
+                            )
+                        }
                     }
                 }
             }
@@ -409,7 +505,7 @@ impl TestSessionBuilder {
             &[root_uri.clone()],
             &vite_opts,
         );
-        // Sync resolver to host's VFS so resolve_import_via_workspace works
+        // Sync resolver to host's VFS so resolve_import_transient works
         host.configure_projects(
             build_result
                 .registry
@@ -444,7 +540,9 @@ impl TestSessionBuilder {
                     Box::new(views),
                 ));
             }
-            server.install_vfs_workspace(vfs_ws);
+            // This harness models completed `background_init`, including the
+            // host-side authority the rename admission gate reads.
+            server.swap_vfs_workspace_for_test(vfs_ws);
         }
 
         // Replicate the lifecycle from `initialized()`:
@@ -475,6 +573,7 @@ impl TestSessionBuilder {
             workspace_id,
             kind: self.kind,
             carrier_store_dir: session_carrier_store_dir,
+            skip_reason: std::sync::Mutex::new(None),
             _drain_handle: drain_handle,
             _provider_process_permit: provider_process_permit,
         };
@@ -518,6 +617,16 @@ pub(crate) struct RealProviderTestSession {
     /// [`Self::shutdown`]. Both the spawned plugin (via `VERTER_CARRIER_STORE_DIR`)
     /// and the LSP-side publish backend resolve exactly this dir.
     carrier_store_dir: std::path::PathBuf,
+    /// The session's DEGRADATION LEDGER: the reason the body stopped short of
+    /// its assertions (cold provider warmup, an empty controlled result), or
+    /// `None` when nothing degraded.
+    ///
+    /// This is what the end-of-body receipt derives its status from. Without it
+    /// the receipt attested "the generated test function reached its end", which
+    /// a body that `return`ed at a warmup guard also does — so a skipped body
+    /// minted the same `status=body-returned` line as one that actually ran its
+    /// assertions, and a receipt scan could not tell them apart.
+    skip_reason: std::sync::Mutex<Option<String>>,
     _drain_handle: tokio::task::JoinHandle<()>,
     /// Held for the entire external-provider lifetime so the Rust test runner cannot
     /// replace a completed session with another process until shutdown has finished.
@@ -548,6 +657,30 @@ impl RealProviderTestSession {
         matches!(self.kind, TestProviderKind::Tsgo)
     }
 
+    /// Record that the body stopped short of its assertions, and why.
+    ///
+    /// Every documented degradation path funnels through here, so the end-of-body
+    /// receipt derives its status from a recorded FACT rather than from control
+    /// flow reaching the end of the generated test function. The FIRST reason
+    /// wins (it is the one that ended the body).
+    fn record_skip(&self, reason: &str) {
+        let mut recorded = self
+            .skip_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if recorded.is_none() {
+            *recorded = Some(reason.to_string());
+        }
+    }
+
+    /// The recorded degradation reason, if the body degraded.
+    fn recorded_skip(&self) -> Option<String> {
+        self.skip_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Fail-closed gate for a controlled provider result that came back empty.
     ///
     /// A real-provider regression test that needs a NON-empty result from a
@@ -570,6 +703,7 @@ impl RealProviderTestSession {
                 self.kind.label(),
             );
         }
+        self.record_skip(reason);
         eprintln!("skipping ({}): {reason}", self.kind.label());
         true
     }
@@ -577,13 +711,14 @@ impl RealProviderTestSession {
     /// Fail-closed gate for a provider WARM-UP that never became ready.
     ///
     /// The sibling of [`Self::allow_empty_result_skip`] for the warm-up phase: a
-    /// test body that would `return` early because `wait_until_ready` failed is
-    /// VACUOUS — its assertions never ran. Under require-mode
+    /// test body that would `return` early because the provider never warmed up
+    /// is VACUOUS — its assertions never ran. Under require-mode
     /// (`VERTER_REQUIRE_{TSGO,TSSERVER}=1`) that vacuity is a hard FAILURE (the
-    /// non-vacuity gate); off require-mode it records a machine-greppable
-    /// `RECEIPT … status=SKIPPED-WARMUP` marker and returns `true` so the caller
-    /// can degrade gracefully (`return`). A skipped body therefore can never
-    /// masquerade as a completed one in a receipt scan.
+    /// non-vacuity gate); off require-mode it RECORDS the degradation on the
+    /// session and returns `true` so the caller can degrade gracefully
+    /// (`return`). The single end-of-body receipt then reports
+    /// `status=SKIPPED-WARMUP`, so a skipped body can never masquerade as a
+    /// completed one in a receipt scan.
     #[must_use]
     pub(crate) fn allow_warmup_skip(&self, test: &str) -> bool {
         if provider_required(self.kind) {
@@ -594,23 +729,32 @@ impl RealProviderTestSession {
                 self.kind.label(),
             );
         }
+        self.record_skip(&format!("{test}: provider never warmed up"));
         eprintln!(
-            "RECEIPT real-provider test={test} provider={} require_mode=0 status=SKIPPED-WARMUP",
+            "skipping ({}): {test} never warmed up its provider",
             self.kind.label()
         );
         true
     }
 
-    /// Emit the end-of-body non-vacuity receipt marker. Called by
-    /// `real_provider_test!` after the test body returns; paired with
-    /// require-mode (where every skip path panics instead of returning), a
-    /// `status=body-returned require_mode=1` line is machine-checkable proof
+    /// Emit the SINGLE end-of-body receipt for a generated test.
+    ///
+    /// The status is DERIVED from the session's degradation ledger, not from the
+    /// body having returned: a body that returned at a warmup guard or an
+    /// empty-result guard emits `status=SKIPPED-WARMUP reason=…`, and only a body
+    /// with nothing recorded emits `status=body-returned`. Paired with
+    /// require-mode — where every degradation path panics instead of recording —
+    /// a `status=body-returned require_mode=1` line is machine-checkable proof
     /// the body's assertions executed against a live provider.
     pub(crate) fn emit_body_receipt(&self, test: &str) {
         eprintln!(
-            "RECEIPT real-provider test={test} provider={} require_mode={} status=body-returned",
-            self.kind.label(),
-            u8::from(provider_required(self.kind)),
+            "{}",
+            body_receipt_line(
+                test,
+                self.kind.label(),
+                provider_required(self.kind),
+                self.recorded_skip().as_deref(),
+            )
         );
     }
 
@@ -711,23 +855,6 @@ impl RealProviderTestSession {
         uri
     }
 
-    /// Find a position within an open document by searching for `needle` and adding `delta`.
-    pub(crate) fn find_position(&self, uri: &Uri, needle: &str, delta: usize) -> Position {
-        let doc = self
-            .server()
-            .test_documents()
-            .get(uri)
-            .expect("document should be open");
-        let offset = doc
-            .source
-            .find(needle)
-            .unwrap_or_else(|| panic!("needle `{needle}` should exist in document"))
-            + delta;
-        doc.line_index
-            .offset_to_position(offset as u32)
-            .expect("valid position")
-    }
-
     /// The committed carrier [`crate::provider_sync::ProviderSyncState`] for an open
     /// carrier-source URI, or `None` when none has been committed.
     ///
@@ -741,41 +868,6 @@ impl RealProviderTestSession {
         uri: &Uri,
     ) -> Option<crate::provider_sync::ProviderSyncState> {
         self.server().test_provider_sync_state(uri)
-    }
-
-    /// Find the Nth (0-indexed) occurrence of `needle` and add `delta`.
-    pub(crate) fn find_nth_position(
-        &self,
-        uri: &Uri,
-        needle: &str,
-        n: usize,
-        delta: usize,
-    ) -> Position {
-        let doc = self
-            .server()
-            .test_documents()
-            .get(uri)
-            .expect("document should be open");
-        let mut start = 0;
-        let mut count = 0;
-        loop {
-            match doc.source[start..].find(needle) {
-                Some(pos) => {
-                    let abs_pos = start + pos;
-                    if count == n {
-                        return doc
-                            .line_index
-                            .offset_to_position((abs_pos + delta) as u32)
-                            .expect("valid position");
-                    }
-                    count += 1;
-                    start = abs_pos + 1;
-                }
-                None => {
-                    panic!("needle `{needle}` occurrence {n} not found (only {count} occurrences)")
-                }
-            }
-        }
     }
 
     /// Ensure the current file is synced to the type provider.
@@ -1047,14 +1139,15 @@ impl RealProviderTestSession {
         }
     }
 
-    /// Extract a filesystem path from a URI (for assertions).
-    /// Returns a forward-slash path without the `file://` scheme.
+    /// Extract a filesystem path from a URI (for assertions and fixture reads).
+    ///
+    /// Routes through the single canonical-path owner
+    /// ([`crate::documents::uri_to_canonical_id`]) so the produced path is
+    /// byte-equal to every other producer and is a REAL path a test can open:
+    /// it percent-decodes, restores the leading `/` on Unix, and lowercases the
+    /// Windows drive letter.
     pub(crate) fn uri_to_path(uri: &Uri) -> String {
-        uri.to_string()
-            .strip_prefix("file:///")
-            .unwrap_or_else(|| uri.as_str().strip_prefix("file://").unwrap_or(uri.as_str()))
-            .replace("%3A", ":")
-            .replace("%20", " ")
+        crate::documents::uri_to_canonical_id(uri)
     }
 
     /// Retry-loop waiting for the provider to warm up.
@@ -1123,6 +1216,7 @@ impl RealProviderTestSession {
                 uri.as_str(),
             );
         }
+        self.record_skip(&format!("provider-not-warmed-up:{}", uri.as_str()));
         eprintln!(
             "skipping ({}): provider not warmed up for {}",
             self.kind.label(),
@@ -1324,18 +1418,65 @@ export namespace JSX {
 }
 "#;
 
-/// The Svelte 5 callable component contract consumed by the generated public
-/// facade. Keep the fixture dependency-free while preserving the real generic
-/// shape whose props must flow into a plain TypeScript importer.
-const SVELTE_TYPE_STUB_DTS: &str = r#"export interface Component<
-  Props extends Record<string, any> = {},
-  Exports extends Record<string, any> = {},
-  Bindings extends keyof Props | "" = string
-> {
-  (internals: unknown, props: Props): Exports;
-}
-export {};
-"#;
+/// The in-repo vendored minimal `svelte` package (`index.d.ts`,
+/// `elements.d.ts`, `attachments.d.ts`, `store.d.ts`, `transition.d.ts`,
+/// `animate.d.ts`, `package.json`) — the SAME hermetic Svelte 5 surface the
+/// session-side type-check gate vendors, embedded at compile time so the
+/// fixture never depends on a cwd-relative path or an npm install.
+///
+/// A hand-rolled single-file stub is NOT sufficient here: the generated
+/// `.svelte.tsx` prelude imports `svelte/store`, `svelte/attachments`,
+/// `svelte/transition` and `svelte/animate`, and the managed-tsgo Svelte JSX
+/// asset preparation ([`crate::svelte_assets`]) REQUIRES the owner package to
+/// declare an `./elements` type export — a package without it is rejected as
+/// unusable, so the carrier reaches the engine UNSPECIALIZED (its `svelte`
+/// imports unresolved) alongside a `svelte-package-unusable` diagnostic.
+/// Modelling the real export map is what makes the Svelte assertions in this
+/// fixture exercise the production path instead of a degraded one.
+const VENDORED_SVELTE_PACKAGE: &[(&str, &str)] = &[
+    (
+        "package.json",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/package.json"
+        ),
+    ),
+    (
+        "index.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/index.d.ts"
+        ),
+    ),
+    (
+        "elements.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/elements.d.ts"
+        ),
+    ),
+    (
+        "attachments.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/attachments.d.ts"
+        ),
+    ),
+    (
+        "store.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/store.d.ts"
+        ),
+    ),
+    (
+        "transition.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/transition.d.ts"
+        ),
+    ),
+    (
+        "animate.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/animate.d.ts"
+        ),
+    ),
+];
 
 /// Make the `external-ts-dx` fixture self-sufficient for the §2.9 plain-`.ts`-
 /// imports-`.vue`/`.svelte` enhanced-DX contract: provide a flat dependency-free
@@ -1384,19 +1525,20 @@ pub(crate) fn materialize_external_ts_dx_deps() -> std::path::PathBuf {
             )
             .expect("write external-ts-dx vue manifest");
 
-            // The Svelte public facade deliberately uses the native Svelte 5
-            // callable `Component<Props, Exports, Bindings>` type. Materialise
-            // exactly that type so the fixture verifies the authored prop surface
-            // instead of degrading through an unresolved `svelte` import.
+            // The Svelte carrier's generated IDE TSX consumes the native Svelte 5
+            // surface (`Component<Props, Exports, Bindings>` in the public facade,
+            // plus `svelte/store` / `svelte/attachments` / `svelte/transition` /
+            // `svelte/animate` in the prelude) AND its owner-bound JSX asset
+            // preparation resolves the package's `./elements` type export. Vendor
+            // the real (minimal) Svelte 5 export map so the fixture verifies the
+            // authored prop surface through the production path instead of
+            // degrading through an unresolved or malformed `svelte` install.
             let svelte_dir = node_modules.join("svelte");
             std::fs::create_dir_all(&svelte_dir).expect("create external-ts-dx svelte package");
-            std::fs::write(svelte_dir.join("index.d.ts"), SVELTE_TYPE_STUB_DTS)
-                .expect("write external-ts-dx svelte types");
-            std::fs::write(
-                svelte_dir.join("package.json"),
-                r#"{"name":"svelte","version":"5.0.0-stub","types":"index.d.ts","exports":{".":{"types":"./index.d.ts"}}}"#,
-            )
-            .expect("write external-ts-dx svelte manifest");
+            for (name, contents) in VENDORED_SVELTE_PACKAGE {
+                std::fs::write(svelte_dir.join(name), contents)
+                    .unwrap_or_else(|e| panic!("write external-ts-dx svelte {name}: {e}"));
+            }
 
             // `@verter/types` from the bundled standalone declaration.
             let types_dir = node_modules.join("@verter").join("types");

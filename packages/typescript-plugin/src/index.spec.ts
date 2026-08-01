@@ -1,5 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+  rmSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import ts from "typescript";
@@ -37,29 +46,29 @@ function vueAndSvelteManifest(): Manifest {
     epoch: 1,
     host_version: "test",
     projects: {
-      "d:/ws/tsconfig.json": {
+      "/ws/tsconfig.json": {
         owned_sources: [
           {
-            source_uri: "d:/ws/src/A.vue",
-            provider_uri: "d:/ws/src/A.vue.tsx",
+            source_uri: "/ws/src/A.vue",
+            provider_uri: "/ws/src/A.vue.tsx",
             role: "CarrierIde",
             script_kind: "TSX",
           },
           {
-            source_uri: "d:/ws/src/B.vue",
-            provider_uri: "d:/ws/src/B.vue.tsx",
+            source_uri: "/ws/src/B.vue",
+            provider_uri: "/ws/src/B.vue.tsx",
             role: "CarrierIde",
             script_kind: "TSX",
           },
           {
-            source_uri: "d:/ws/src/W.svelte",
-            provider_uri: "d:/ws/src/W.svelte.tsx",
+            source_uri: "/ws/src/W.svelte",
+            provider_uri: "/ws/src/W.svelte.tsx",
             role: "CarrierIde",
             script_kind: "TSX",
           },
         ],
         ready_files: {
-          "d:/ws/src/A.vue.tsx": {
+          "/ws/src/A.vue.tsx": {
             content_hash: "a1",
             version: 5,
             script_kind: "TSX",
@@ -67,7 +76,7 @@ function vueAndSvelteManifest(): Manifest {
             map_hash: "0",
             blob_rel: "blobs/A.vue.tsx",
           },
-          "d:/ws/src/W.svelte.tsx": {
+          "/ws/src/W.svelte.tsx": {
             content_hash: "w1",
             version: 2,
             script_kind: "TSX",
@@ -83,13 +92,13 @@ function vueAndSvelteManifest(): Manifest {
 
 function javascriptSvelteManifest(): Manifest {
   const manifest = vueAndSvelteManifest();
-  const project = manifest.projects["d:/ws/tsconfig.json"];
+  const project = manifest.projects["/ws/tsconfig.json"];
   const owned = project.owned_sources.find((entry) => entry.source_uri.endsWith("/W.svelte"));
   if (!owned) throw new Error("fixture Svelte owner missing");
-  owned.provider_uri = "d:/ws/src/W.svelte.jsx";
+  owned.provider_uri = "/ws/src/W.svelte.jsx";
   owned.script_kind = "JSX";
-  delete project.ready_files["d:/ws/src/W.svelte.tsx"];
-  project.ready_files["d:/ws/src/W.svelte.jsx"] = {
+  delete project.ready_files["/ws/src/W.svelte.tsx"];
+  project.ready_files["/ws/src/W.svelte.jsx"] = {
     content_hash: "wj1",
     version: 3,
     script_kind: "JSX",
@@ -109,7 +118,7 @@ interface FakeHostState {
 function createInfo(
   storeDir: string | undefined,
   disk: FakeHostState,
-  projectName = "d:/ws/tsconfig.json",
+  projectName = "/ws/tsconfig.json",
 ) {
   const logger = { info: () => {}, msg: () => {} };
   const normalize = (f: string) => f.replace(/\\/g, "/");
@@ -190,7 +199,7 @@ function createInfo(
 
   const project: any = {
     // The plugin `process.chdir`s to this on startup, so it must be a real
-    // directory; the store paths (`d:/ws/...`) are independent of cwd.
+    // directory; the store paths (`/ws/...`) are independent of cwd.
     getCurrentDirectory: () => process.cwd(),
     getCompilerOptions: () => ({}),
     getProjectName: () => projectName,
@@ -286,13 +295,13 @@ describe("host-proxy matrix: compiler options", () => {
 
   it("admits a ready JavaScript carrier without enabling project-wide JS checking", () => {
     const manifest = vueAndSvelteManifest();
-    const project = manifest.projects["d:/ws/tsconfig.json"];
+    const project = manifest.projects["/ws/tsconfig.json"];
     const owned = project.owned_sources.find((entry) => entry.source_uri.endsWith("/A.vue"))!;
-    owned.provider_uri = "d:/ws/src/A.vue.jsx";
+    owned.provider_uri = "/ws/src/A.vue.jsx";
     owned.script_kind = "JSX";
-    const ready = project.ready_files["d:/ws/src/A.vue.tsx"];
-    delete project.ready_files["d:/ws/src/A.vue.tsx"];
-    project.ready_files["d:/ws/src/A.vue.jsx"] = {
+    const ready = project.ready_files["/ws/src/A.vue.tsx"];
+    delete project.ready_files["/ws/src/A.vue.tsx"];
+    project.ready_files["/ws/src/A.vue.jsx"] = {
       ...ready,
       script_kind: "JSX",
       blob_rel: "blobs/A.vue.jsx",
@@ -320,7 +329,7 @@ describe("editor tsserver attestation", () => {
     };
 
     const configured = init({ typescript: ts } as any);
-    configured.create(createInfo(undefined, { diskFiles: {} }, "d:/ws/tsconfig.json"));
+    configured.create(createInfo(undefined, { diskFiles: {} }, "/ws/tsconfig.json"));
     configured.onConfigurationChanged!(config);
 
     const inferred = init({ typescript: ts } as any);
@@ -330,7 +339,7 @@ describe("editor tsserver attestation", () => {
     const receiptFile = readdirSync(directory).find((file) => file.endsWith(".json"));
     expect(receiptFile).toBeDefined();
     const receipt = JSON.parse(readFileSync(join(directory, receiptFile!), "utf8"));
-    expect(receipt.projects).toContain("d:/ws/tsconfig.json");
+    expect(receipt.projects).toContain("/ws/tsconfig.json");
   });
 
   it("reconfigures the configured project when another factory receives the editor command", () => {
@@ -342,8 +351,8 @@ describe("editor tsserver attestation", () => {
     );
     const configuredInfo = createInfo(
       undefined,
-      { diskFiles: { "d:/ws/src/A.vue": "<template>raw</template>" } },
-      "d:/ws/tsconfig.json",
+      { diskFiles: { "/ws/src/A.vue": "<template>raw</template>" } },
+      "/ws/tsconfig.json",
     );
     const configured = init({ typescript: ts } as any);
     configured.create(configuredInfo);
@@ -352,24 +361,24 @@ describe("editor tsserver attestation", () => {
     commandReceiver.create(createInfo(undefined, { diskFiles: {} }, "/dev/null/inferredProject1*"));
     commandReceiver.onConfigurationChanged!({
       carrierStoreDir: directory,
-      activeCarrierSources: ["d:/ws/src/A.vue"],
+      activeCarrierSources: ["/ws/src/A.vue"],
     });
 
     expect(configured.getExternalFiles!(configuredInfo.project, 0 as any)).toContain(
-      "d:/ws/src/A.vue",
+      "/ws/src/A.vue",
     );
-    const snapshot = configuredInfo.languageServiceHost.getScriptSnapshot("d:/ws/src/A.vue");
+    const snapshot = configuredInfo.languageServiceHost.getScriptSnapshot("/ws/src/A.vue");
     expect(snapshot.getText(0, snapshot.getLength())).toBe("export const generated = true;");
   });
 });
 
 describe("host-proxy matrix: getScriptSnapshot", () => {
   it("advances only the active managed ScriptInfo from a published store version", async () => {
-    const source = "d:/ws/src/A.vue";
+    const source = "/ws/src/A.vue";
     const raw = "<template>{{ value }}</template>";
     const generated = "const value: string = missingName;\n";
     const cold = vueAndSvelteManifest();
-    cold.projects["d:/ws/tsconfig.json"].ready_files = {};
+    cold.projects["/ws/tsconfig.json"].ready_files = {};
     const dir = track(writeStore(cold, {}));
     const info = createInfo(dir, { diskFiles: { [source]: raw } });
     let scriptText = raw;
@@ -410,7 +419,7 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
   });
 
   it("serializes managed carrier protocol positions against the current generated version", async () => {
-    const source = "d:/ws/src/A.vue";
+    const source = "/ws/src/A.vue";
     const raw = "<template>{{ value }}</template>";
     const generated = ["/* generated preamble */", "const value = 1;", "unknownValue;", ""].join(
       "\n",
@@ -441,7 +450,7 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
     const nextGenerated = "/* v2 */\r\nconst astral = '𝕏';\r\nnextUnknown;\r\n";
     const nextManifest = vueAndSvelteManifest();
     nextManifest.epoch = 2;
-    nextManifest.projects["d:/ws/tsconfig.json"].ready_files[`${source}.tsx`] = {
+    nextManifest.projects["/ws/tsconfig.json"].ready_files[`${source}.tsx`] = {
       content_hash: "a2",
       version: 6,
       script_kind: "TSX",
@@ -481,7 +490,7 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
     };
     init({ typescript: ts } as any).create(info);
 
-    const companion = "d:/ws/src/A.vue.tsx";
+    const companion = "/ws/src/A.vue.tsx";
     const snapshot = info.languageServiceHost.getScriptSnapshot(companion);
     const version = info.languageServiceHost.getScriptVersion(companion);
 
@@ -498,7 +507,7 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
-    const snap = info.languageServiceHost.getScriptSnapshot("d:/ws/src/A.vue.tsx");
+    const snap = info.languageServiceHost.getScriptSnapshot("/ws/src/A.vue.tsx");
     expect(snap).toBeDefined();
     expect(snap.getText(0, snap.getLength())).toBe("export const A = 1; // vue");
   });
@@ -575,16 +584,16 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
-    const snap = info.languageServiceHost.getScriptSnapshot("d:/ws/src/W.svelte.tsx");
+    const snap = info.languageServiceHost.getScriptSnapshot("/ws/src/W.svelte.tsx");
     expect(snap.getText(0, snap.getLength())).toBe("export const W = 1; // svelte");
   });
 
   it("falls through to disk for a non-companion path", () => {
     const dir = track(writeStore(vueAndSvelteManifest(), {}));
-    const info = createInfo(dir, { diskFiles: { "d:/ws/src/plain.ts": "const x = 1;" } });
+    const info = createInfo(dir, { diskFiles: { "/ws/src/plain.ts": "const x = 1;" } });
     init({ typescript: ts } as any).create(info);
 
-    const snap = info.languageServiceHost.getScriptSnapshot("d:/ws/src/plain.ts");
+    const snap = info.languageServiceHost.getScriptSnapshot("/ws/src/plain.ts");
     expect(snap.getText(0, snap.getLength())).toBe("const x = 1;");
   });
 });
@@ -600,8 +609,8 @@ describe("host-proxy matrix: getScriptVersion / getScriptKind", () => {
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
-    expect(info.languageServiceHost.getScriptVersion("d:/ws/src/A.vue.tsx")).toBe("5:a1");
-    expect(info.languageServiceHost.getScriptVersion("d:/ws/src/W.svelte.tsx")).toBe("2:w1");
+    expect(info.languageServiceHost.getScriptVersion("/ws/src/A.vue.tsx")).toBe("5:a1");
+    expect(info.languageServiceHost.getScriptVersion("/ws/src/W.svelte.tsx")).toBe("2:w1");
   });
 
   it("maps the manifest script kind to ts.ScriptKind (vue + svelte)", () => {
@@ -614,17 +623,15 @@ describe("host-proxy matrix: getScriptVersion / getScriptKind", () => {
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
-    expect(info.languageServiceHost.getScriptKind("d:/ws/src/A.vue.tsx")).toBe(ts.ScriptKind.TSX);
-    expect(info.languageServiceHost.getScriptKind("d:/ws/src/W.svelte.tsx")).toBe(
-      ts.ScriptKind.TSX,
-    );
+    expect(info.languageServiceHost.getScriptKind("/ws/src/A.vue.tsx")).toBe(ts.ScriptKind.TSX);
+    expect(info.languageServiceHost.getScriptKind("/ws/src/W.svelte.tsx")).toBe(ts.ScriptKind.TSX);
   });
 
   it("falls through to the disk version/kind for a non-companion", () => {
     const dir = track(writeStore(vueAndSvelteManifest(), {}));
-    const info = createInfo(dir, { diskFiles: { "d:/ws/src/plain.ts": "x" } });
+    const info = createInfo(dir, { diskFiles: { "/ws/src/plain.ts": "x" } });
     init({ typescript: ts } as any).create(info);
-    expect(info.languageServiceHost.getScriptVersion("d:/ws/src/plain.ts")).toBe("disk-0");
+    expect(info.languageServiceHost.getScriptVersion("/ws/src/plain.ts")).toBe("disk-0");
   });
 });
 
@@ -639,8 +646,8 @@ describe("host-proxy matrix: readFile / fileExists", () => {
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
-    expect(info.serverHost.readFile("d:/ws/src/A.vue.tsx")).toBe("vue-content");
-    expect(info.serverHost.readFile("d:/ws/src/W.svelte.tsx")).toBe("svelte-content");
+    expect(info.serverHost.readFile("/ws/src/A.vue.tsx")).toBe("vue-content");
+    expect(info.serverHost.readFile("/ws/src/W.svelte.tsx")).toBe("svelte-content");
   });
 
   it("fileExists is true for a ready companion (vue + svelte), false for unknown", () => {
@@ -653,22 +660,22 @@ describe("host-proxy matrix: readFile / fileExists", () => {
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
-    expect(info.serverHost.fileExists("d:/ws/src/A.vue.tsx")).toBe(true);
-    expect(info.serverHost.fileExists("d:/ws/src/W.svelte.tsx")).toBe(true);
-    expect(info.serverHost.fileExists("d:/ws/src/Nope.vue.tsx")).toBe(false);
+    expect(info.serverHost.fileExists("/ws/src/A.vue.tsx")).toBe(true);
+    expect(info.serverHost.fileExists("/ws/src/W.svelte.tsx")).toBe(true);
+    expect(info.serverHost.fileExists("/ws/src/Nope.vue.tsx")).toBe(false);
   });
 
   it("readFile/fileExists fall through to real disk for a non-companion", () => {
     const dir = track(writeStore(vueAndSvelteManifest(), {}));
-    const info = createInfo(dir, { diskFiles: { "d:/ws/src/real.ts": "real" } });
+    const info = createInfo(dir, { diskFiles: { "/ws/src/real.ts": "real" } });
     init({ typescript: ts } as any).create(info);
 
-    expect(info.serverHost.readFile("d:/ws/src/real.ts")).toBe("real");
-    expect(info.serverHost.fileExists("d:/ws/src/real.ts")).toBe(true);
+    expect(info.serverHost.readFile("/ws/src/real.ts")).toBe("real");
+    expect(info.serverHost.fileExists("/ws/src/real.ts")).toBe(true);
   });
 });
 
-describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carrier)", () => {
+describe("host-proxy matrix: resolveModuleNameLiterals (in-project → public-API carrier)", () => {
   function resolveOne(info: any, specifier: string, containing: string): string | undefined {
     const result = info.languageServiceHost.resolveModuleNameLiterals(
       [{ text: specifier }],
@@ -680,36 +687,73 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     return result[0]?.resolvedModule?.resolvedFileName;
   }
 
-  it("redirects a relative .vue import to the .vue.tsx IDE carrier (NOT .verter.ts)", () => {
+  it("ABSTAINS for a relative .vue import when the project owns no public-API carrier", () => {
+    // The fixture owns only the `CarrierIde` role. An ordinary import must never
+    // be handed the JSX/TSX editor surface (that is the `--jsx is not set`
+    // defect); with no import surface owned the plugin fails CLOSED and lets
+    // TypeScript's own resolution answer, so the later publication can heal it.
     const dir = track(writeStore(vueAndSvelteManifest(), {}));
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
-    const resolved = resolveOne(info, "./A.vue", "d:/ws/src/consumer.ts");
-    expect(resolved).toBe("d:/ws/src/A.vue.tsx");
-    expect(resolved).not.toContain(".verter.ts");
+    const resolved = resolveOne(info, "./A.vue", "/ws/src/consumer.ts");
+    expect(resolved).toBeUndefined();
   });
 
-  it("redirects a relative .svelte import to the .svelte.tsx IDE carrier", () => {
+  it("ABSTAINS for a relative .svelte import when the project owns no public-API carrier", () => {
     const dir = track(writeStore(vueAndSvelteManifest(), {}));
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
-    const resolved = resolveOne(info, "./W.svelte", "d:/ws/src/consumer.ts");
-    expect(resolved).toBe("d:/ws/src/W.svelte.tsx");
-    expect(resolved).not.toContain(".verter.ts");
+    const resolved = resolveOne(info, "./W.svelte", "/ws/src/consumer.ts");
+    expect(resolved).toBeUndefined();
+  });
+
+  it("redirects a relative .vue import to its public API carrier when both roles exist", () => {
+    const manifest = vueAndSvelteManifest();
+    const project = manifest.projects["/ws/tsconfig.json"];
+    project.owned_sources.push({
+      source_uri: "/ws/src/A.vue",
+      provider_uri: "/ws/src/A.vue.verter.ts",
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    project.ready_files["/ws/src/A.vue.verter.ts"] = {
+      content_hash: "aa1",
+      version: 6,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    const dir = track(
+      writeStore(manifest, { "blobs/A.vue.verter.ts": "export default class A {}" }),
+    );
+    const info = createInfo(dir, { diskFiles: {} });
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./A.vue" }],
+      "/ws/src/consumer.ts",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+
+    expect(result?.resolvedFileName).toBe("/ws/src/A.vue.verter.ts");
+    expect(result?.extension).toBe(ts.Extension.Ts);
   });
 
   it("redirects a Svelte import to its public API carrier when both roles exist", () => {
     const manifest = javascriptSvelteManifest();
-    const project = manifest.projects["d:/ws/tsconfig.json"];
+    const project = manifest.projects["/ws/tsconfig.json"];
     project.owned_sources.push({
-      source_uri: "d:/ws/src/W.svelte",
-      provider_uri: "d:/ws/src/W.svelte.verter.ts",
+      source_uri: "/ws/src/W.svelte",
+      provider_uri: "/ws/src/W.svelte.verter.ts",
       role: "CarrierApi",
       script_kind: "TS",
     });
-    project.ready_files["d:/ws/src/W.svelte.verter.ts"] = {
+    project.ready_files["/ws/src/W.svelte.verter.ts"] = {
       content_hash: "wa1",
       version: 4,
       script_kind: "TS",
@@ -727,13 +771,13 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
 
     const result = info.languageServiceHost.resolveModuleNameLiterals(
       [{ text: "./W.svelte" }],
-      "d:/ws/src/consumer.ts",
+      "/ws/src/consumer.ts",
       undefined,
       {},
       undefined,
     )[0]?.resolvedModule;
 
-    expect(result?.resolvedFileName).toBe("d:/ws/src/W.svelte.verter.ts");
+    expect(result?.resolvedFileName).toBe("/ws/src/W.svelte.verter.ts");
     expect(result?.extension).toBe(ts.Extension.Ts);
     const snapshot = info.languageServiceHost.getScriptSnapshot(result!.resolvedFileName);
     expect(snapshot.getText(0, snapshot.getLength())).toBe(
@@ -742,12 +786,12 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
 
     const selfImport = info.languageServiceHost.resolveModuleNameLiterals(
       [{ text: "./W.svelte.verter.js" }],
-      "d:/ws/src/W.svelte.tsx",
+      "/ws/src/W.svelte.tsx",
       undefined,
       {},
       undefined,
     )[0]?.resolvedModule;
-    expect(selfImport?.resolvedFileName).toBe("d:/ws/src/W.svelte.verter.ts");
+    expect(selfImport?.resolvedFileName).toBe("/ws/src/W.svelte.verter.ts");
     expect(selfImport?.extension).toBe(ts.Extension.Ts);
   });
 
@@ -756,7 +800,7 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
-    const resolved = resolveOne(info, "@verter/svelte-jsx/jsx-runtime", "d:/ws/src/W.svelte.tsx");
+    const resolved = resolveOne(info, "@verter/svelte-jsx/jsx-runtime", "/ws/src/W.svelte.tsx");
 
     expect(resolved?.replace(/\\/g, "/")).toMatch(
       /\/node_modules\/@verter\/svelte-jsx\/jsx-runtime\.d\.ts$/,
@@ -815,51 +859,83 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     );
   });
 
-  it("redirects a JavaScript .svelte import to the .svelte.jsx IDE carrier as JSX", () => {
+  it("never hands a JavaScript .svelte carrier's JSX surface to an ordinary importer", () => {
     const dir = track(writeStore(javascriptSvelteManifest(), {}));
     const info = createInfo(dir, { diskFiles: {} });
     init({ typescript: ts } as any).create(info);
 
     const result = info.languageServiceHost.resolveModuleNameLiterals(
       [{ text: "./W.svelte" }],
-      "d:/ws/src/consumer.ts",
+      "/ws/src/consumer.ts",
       undefined,
       {},
       undefined,
     )[0]?.resolvedModule;
-    expect(result?.resolvedFileName).toBe("d:/ws/src/W.svelte.jsx");
-    expect(result?.extension).toBe(ts.Extension.Jsx);
+    expect(result).toBeUndefined();
   });
 
-  it("redirects a JavaScript .vue import to its manifest-owned JSX carrier", () => {
+  it("resolves a JavaScript .svelte carrier to its TS import surface, not its .jsx carrier", () => {
+    const manifest = javascriptSvelteManifest();
+    const project = manifest.projects["/ws/tsconfig.json"];
+    project.owned_sources.push({
+      source_uri: "/ws/src/W.svelte",
+      provider_uri: "/ws/src/W.svelte.verter.ts",
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    project.ready_files["/ws/src/W.svelte.verter.ts"] = {
+      content_hash: "wj2",
+      version: 4,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/W.svelte.verter.ts",
+    };
+    const dir = track(
+      writeStore(manifest, { "blobs/W.svelte.verter.ts": "export default class W {}" }),
+    );
+    const info = createInfo(dir, { diskFiles: {} });
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./W.svelte" }],
+      "/ws/src/consumer.ts",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+    // The carrier's SOURCE dialect is an editing concern; every consumer sees
+    // one TypeScript import surface.
+    expect(result?.resolvedFileName).toBe("/ws/src/W.svelte.verter.ts");
+    expect(result?.extension).toBe(ts.Extension.Ts);
+  });
+
+  it("never hands a JavaScript .vue carrier's manifest-owned JSX carrier to an importer", () => {
     const manifest = vueAndSvelteManifest();
-    const project = manifest.projects["d:/ws/tsconfig.json"];
+    const project = manifest.projects["/ws/tsconfig.json"];
     const owned = project.owned_sources.find((entry) => entry.source_uri.endsWith("/A.vue"))!;
-    owned.provider_uri = "d:/ws/src/A.vue.jsx";
+    owned.provider_uri = "/ws/src/A.vue.jsx";
     owned.script_kind = "JSX";
-    const ready = project.ready_files["d:/ws/src/A.vue.tsx"];
-    delete project.ready_files["d:/ws/src/A.vue.tsx"];
-    project.ready_files["d:/ws/src/A.vue.jsx"] = {
+    const ready = project.ready_files["/ws/src/A.vue.tsx"];
+    delete project.ready_files["/ws/src/A.vue.tsx"];
+    project.ready_files["/ws/src/A.vue.jsx"] = {
       ...ready,
       script_kind: "JSX",
       blob_rel: "blobs/A.vue.jsx",
     };
     const dir = track(writeStore(manifest, { "blobs/A.vue.jsx": "export default {};" }));
-    const info = createInfo(dir, { diskFiles: { "d:/ws/src/A.vue": "<template />" } });
+    const info = createInfo(dir, { diskFiles: { "/ws/src/A.vue": "<template />" } });
     init({ typescript: ts } as any).create(info);
 
     const result = info.languageServiceHost.resolveModuleNameLiterals(
       [{ text: "./A.vue" }],
-      "d:/ws/src/consumer.ts",
+      "/ws/src/consumer.ts",
       undefined,
       undefined,
       undefined,
     );
 
-    expect(result[0]?.resolvedModule).toMatchObject({
-      resolvedFileName: "d:/ws/src/A.vue.jsx",
-      extension: ts.Extension.Jsx,
-    });
+    expect(result[0]?.resolvedModule).toBeUndefined();
   });
 
   it("leaves a plain relative .ts import to TS's own resolution", () => {
@@ -868,7 +944,7 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     init({ typescript: ts } as any).create(info);
 
     // Non-carrier specifier: the override returns undefined → delegate result.
-    const resolved = resolveOne(info, "./plain", "d:/ws/src/consumer.ts");
+    const resolved = resolveOne(info, "./plain", "/ws/src/consumer.ts");
     expect(resolved).toBeUndefined();
   });
 
@@ -921,7 +997,7 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
 
   it("preserves the project host's authoritative @verter/types resolution", () => {
     const info = createInfo(undefined, { diskFiles: {} });
-    const projectResolution = "d:/pnp/@verter/types/index.d.ts";
+    const projectResolution = "/pnp/@verter/types/index.d.ts";
     info.languageServiceHost.resolveModuleNameLiterals = (
       literals: readonly ts.StringLiteralLike[],
     ) =>
@@ -938,7 +1014,7 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
 
     init({ typescript: ts } as any).create(info);
 
-    expect(resolveOne(info, "@verter/types", "d:/ws/src/App.vue.tsx")).toBe(projectResolution);
+    expect(resolveOne(info, "@verter/types", "/ws/src/App.vue.tsx")).toBe(projectResolution);
   });
 });
 
@@ -953,7 +1029,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     const info = createInfo(dir, { diskFiles: {} });
     info.config = {
       carrierStoreDir: dir,
-      activeCarrierSources: ["d:/ws/src/A.vue"],
+      activeCarrierSources: ["/ws/src/A.vue"],
     };
     const plugin = init({ typescript: ts } as any);
     // `create` records the store dir for the project before getExternalFiles.
@@ -963,11 +1039,11 @@ describe("getExternalFiles carrier working-set ownership", () => {
     // owns Program roots. W.svelte is ready in the background store but is not
     // active and must not inflate this configured project.
     const files = plugin.getExternalFiles!(info.project, 0 as any);
-    expect(files).toEqual(["d:/ws/src/A.vue"]);
-    expect(files).not.toContain("d:/ws/src/W.svelte");
+    expect(files).toEqual(["/ws/src/A.vue"]);
+    expect(files).not.toContain("/ws/src/W.svelte");
     // B.vue is owned but not ready, so neither identity may be advertised.
-    expect(files).not.toContain("d:/ws/src/B.vue");
-    expect(files).not.toContain("d:/ws/src/B.vue.tsx");
+    expect(files).not.toContain("/ws/src/B.vue");
+    expect(files).not.toContain("/ws/src/B.vue.tsx");
   });
 
   it("returns [] when the store is unavailable", () => {
@@ -997,14 +1073,15 @@ describe("getExternalFiles carrier working-set ownership", () => {
 
   it("collapses case-variant spellings of one identity on a case-insensitive host", () => {
     // A store whose owned sources spell ONE carrier source with two different
-    // casings (e.g. drive-letter case from different producers). On a
-    // case-insensitive host both raw strings name the SAME document identity;
-    // advertising both would hand TS6 two external-file roots for one
-    // identity — the double-identity hazard this function exists to avoid.
+    // casings (e.g. a root segment cased differently by two producers — the
+    // drive-letter-case flavour of this on Windows). On a case-insensitive
+    // host both raw strings name the SAME document identity; advertising both
+    // would hand TS6 two external-file roots for one identity — the
+    // double-identity hazard this function exists to avoid.
     const manifest = vueAndSvelteManifest();
-    manifest.projects["d:/ws/tsconfig.json"].owned_sources.push({
-      source_uri: "D:/ws/src/A.vue",
-      provider_uri: "d:/ws/src/A.vue.tsx",
+    manifest.projects["/ws/tsconfig.json"].owned_sources.push({
+      source_uri: "/WS/src/A.vue",
+      provider_uri: "/ws/src/A.vue.tsx",
       role: "CarrierIde",
       script_kind: "TSX",
     });
@@ -1013,7 +1090,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
-      activeCarrierSources: ["d:/ws/src/A.vue"],
+      activeCarrierSources: ["/ws/src/A.vue"],
     };
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
@@ -1025,8 +1102,8 @@ describe("getExternalFiles carrier working-set ownership", () => {
     sys.useCaseSensitiveFileNames = false;
     try {
       const files = plugin.getExternalFiles!(info.project, 0 as any);
-      const aIdentities = files.filter((file) => file.toLowerCase() === "d:/ws/src/a.vue.tsx");
-      expect(aIdentities).toEqual(["d:/ws/src/A.vue.tsx"]);
+      const aIdentities = files.filter((file) => file.toLowerCase() === "/ws/src/a.vue.tsx");
+      expect(aIdentities).toEqual(["/ws/src/A.vue.tsx"]);
     } finally {
       sys.useCaseSensitiveFileNames = original;
     }
@@ -1044,7 +1121,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     const info = createInfo(dir, { diskFiles: {} });
     info.config = {
       carrierStoreDir: dir,
-      activeCarrierSources: ["d:/ws/src/A.vue", "d:/ws/src/W.svelte"],
+      activeCarrierSources: ["/ws/src/A.vue", "/ws/src/W.svelte"],
     };
     let graphRoots: string[] = [];
     info.project.getRootFiles = () => graphRoots;
@@ -1058,7 +1135,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     graphRoots = [...second];
     const third = plugin.getExternalFiles!(info.project, 0 as any).sort();
 
-    expect(first).toEqual(["d:/ws/src/A.vue", "d:/ws/src/W.svelte"]);
+    expect(first).toEqual(["/ws/src/A.vue", "/ws/src/W.svelte"]);
     expect(second).toEqual(first);
     expect(third).toEqual(first);
   });
@@ -1074,18 +1151,18 @@ describe("getExternalFiles carrier working-set ownership", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
-      activeCarrierSources: ["d:/ws/src/A.vue", "d:/ws/src/W.svelte"],
+      activeCarrierSources: ["/ws/src/A.vue", "/ws/src/W.svelte"],
     };
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
     expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual([
-      "d:/ws/src/A.vue.tsx",
-      "d:/ws/src/W.svelte.tsx",
+      "/ws/src/A.vue.tsx",
+      "/ws/src/W.svelte.tsx",
     ]);
-    const raw = info.languageServiceHost.getScriptSnapshot("d:/ws/src/A.vue");
+    const raw = info.languageServiceHost.getScriptSnapshot("/ws/src/A.vue");
     expect(raw).toBeUndefined();
-    const companion = info.languageServiceHost.getScriptSnapshot("d:/ws/src/A.vue.tsx");
+    const companion = info.languageServiceHost.getScriptSnapshot("/ws/src/A.vue.tsx");
     expect(companion.getText(0, companion.getLength())).toBe("export const A = 1;");
   });
 
@@ -1100,7 +1177,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
-      activeCarrierSources: ["d:/ws/src/A.vue"],
+      activeCarrierSources: ["/ws/src/A.vue"],
       [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
     init({ typescript: ts } as any).create(info);
@@ -1109,8 +1186,8 @@ describe("getExternalFiles carrier working-set ownership", () => {
     // membership before invoking a plugin provider. The configured companion
     // owner is the one project that can answer the source request; no sibling
     // inferred project may claim the same virtual request membership.
-    expect(info.project.containsFile("d:/ws/src/A.vue")).toBe(true);
-    expect(info.project.containsFile("d:/ws/src/Unknown.vue")).toBe(false);
+    expect(info.project.containsFile("/ws/src/A.vue")).toBe(true);
+    expect(info.project.containsFile("/ws/src/Unknown.vue")).toBe(false);
   });
 
   it("does not infer source-feature ownership from carrier membership", () => {
@@ -1124,13 +1201,13 @@ describe("getExternalFiles carrier working-set ownership", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
-      activeCarrierSources: ["d:/ws/src/A.vue"],
+      activeCarrierSources: ["/ws/src/A.vue"],
     };
     init({ typescript: ts } as any).create(info);
 
-    expect(info.project.containsFile("d:/ws/src/A.vue")).toBe(false);
+    expect(info.project.containsFile("/ws/src/A.vue")).toBe(false);
     expect(init({ typescript: ts } as any).getExternalFiles(info.project as any)).toContain(
-      "d:/ws/src/A.vue.tsx",
+      "/ws/src/A.vue.tsx",
     );
   });
 
@@ -1166,7 +1243,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
-      activeCarrierSources: ["d:/ws/src/A.vue"],
+      activeCarrierSources: ["/ws/src/A.vue"],
       carrierStoreRefreshToken: 1,
     };
     let dirty = 0;
@@ -1178,8 +1255,8 @@ describe("getExternalFiles carrier working-set ownership", () => {
 
     const next = vueAndSvelteManifest();
     next.epoch = initial.epoch + 1;
-    next.projects["d:/ws/tsconfig.json"].ready_files["d:/ws/src/W.svelte.tsx"] = {
-      ...next.projects["d:/ws/tsconfig.json"].ready_files["d:/ws/src/W.svelte.tsx"],
+    next.projects["/ws/tsconfig.json"].ready_files["/ws/src/W.svelte.tsx"] = {
+      ...next.projects["/ws/tsconfig.json"].ready_files["/ws/src/W.svelte.tsx"],
       content_hash: "warmed-2",
       version: 2,
     };
@@ -1193,7 +1270,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
 
     expect(dirty).toBe(0);
     expect(diagnostics).toBe(0);
-    expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual(["d:/ws/src/A.vue.tsx"]);
+    expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual(["/ws/src/A.vue.tsx"]);
   });
 
   it("rebinds an already-created editor project without refreshing inside the configure request", async () => {
@@ -1214,14 +1291,14 @@ describe("getExternalFiles carrier working-set ownership", () => {
 
     plugin.onConfigurationChanged!({
       carrierStoreDir: dir,
-      activeCarrierSources: ["d:/ws/src/A.vue", "d:/ws/src/W.svelte"],
+      activeCarrierSources: ["/ws/src/A.vue", "/ws/src/W.svelte"],
     });
 
     expect(plugin.getExternalFiles!(info.project, 0 as any).sort()).toEqual([
-      "d:/ws/src/A.vue",
-      "d:/ws/src/W.svelte",
+      "/ws/src/A.vue",
+      "/ws/src/W.svelte",
     ]);
-    const snap = info.languageServiceHost.getScriptSnapshot("d:/ws/src/A.vue");
+    const snap = info.languageServiceHost.getScriptSnapshot("/ws/src/A.vue");
     expect(snap.getText(0, snap.getLength())).toBe("x");
     expect(dirty).toBe(0);
     expect(diagnostics).toBe(0);
@@ -1240,7 +1317,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
       }),
     );
     const info = createInfo(undefined, { diskFiles: {} });
-    info.project.getConfigFilePath = () => "d:/ws/tsconfig.json";
+    info.project.getConfigFilePath = () => "/ws/tsconfig.json";
     const addedRoots: string[] = [];
     const roots = new Set<{ fileName: string }>();
     const removedRoots: string[] = [];
@@ -1264,19 +1341,19 @@ describe("getExternalFiles carrier working-set ownership", () => {
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
-    const activeCarrierSources = ["d:/ws/src/A.vue", "d:/ws/src/W.svelte"];
+    const activeCarrierSources = ["/ws/src/A.vue", "/ws/src/W.svelte"];
     plugin.onConfigurationChanged!({ carrierStoreDir: dir, activeCarrierSources });
     expect(targetedReloads).toBe(0);
 
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(addedRoots.sort()).toEqual(["d:/ws/src/A.vue", "d:/ws/src/W.svelte"]);
+    expect(addedRoots.sort()).toEqual(["/ws/src/A.vue", "/ws/src/W.svelte"]);
     expect(targetedReloads).toBe(0);
     expect(globalReloads).toBe(0);
 
     const retracted = vueAndSvelteManifest();
     retracted.epoch = 2;
-    retracted.projects["d:/ws/tsconfig.json"].ready_files = {};
+    retracted.projects["/ws/tsconfig.json"].ready_files = {};
     writeFileSync(join(dir, "manifest.json"), JSON.stringify(retracted), "utf8");
     plugin.onConfigurationChanged!({
       carrierStoreDir: dir,
@@ -1285,17 +1362,17 @@ describe("getExternalFiles carrier working-set ownership", () => {
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(removedRoots.sort()).toEqual(["d:/ws/src/A.vue", "d:/ws/src/W.svelte"]);
+    expect(removedRoots.sort()).toEqual(["/ws/src/A.vue", "/ws/src/W.svelte"]);
     expect(targetedReloads).toBe(0);
     expect(globalReloads).toBe(0);
   });
 
   it("activates a carrier published after the working-set signal without a protocol open", async () => {
     const manifest = vueAndSvelteManifest();
-    manifest.projects["d:/ws/tsconfig.json"].ready_files = {};
+    manifest.projects["/ws/tsconfig.json"].ready_files = {};
     const dir = track(writeStore(manifest, {}));
     const info = createInfo(undefined, { diskFiles: {} });
-    info.project.getConfigFilePath = () => "d:/ws/tsconfig.json";
+    info.project.getConfigFilePath = () => "/ws/tsconfig.json";
     const addedRoots: string[] = [];
     const roots = new Set<{ fileName: string }>();
     info.project.isRoot = (scriptInfo: { fileName: string }) => roots.has(scriptInfo);
@@ -1306,7 +1383,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
-    const activeCarrierSources = ["d:/ws/src/A.vue"];
+    const activeCarrierSources = ["/ws/src/A.vue"];
     plugin.onConfigurationChanged!({ carrierStoreDir: dir, activeCarrierSources });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(addedRoots).toEqual([]);
@@ -1323,8 +1400,8 @@ describe("getExternalFiles carrier working-set ownership", () => {
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(addedRoots).toEqual(["d:/ws/src/A.vue"]);
-    expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual(["d:/ws/src/A.vue"]);
+    expect(addedRoots).toEqual(["/ws/src/A.vue"]);
+    expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual(["/ws/src/A.vue"]);
   });
 
   it("reloads only the changed companion snapshot when a publication advances", async () => {
@@ -1340,7 +1417,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
       carrierStoreDir: dir,
       carrierStoreRefreshToken: 1,
     };
-    info.project.getConfigFilePath = () => "d:/ws/tsconfig.json";
+    info.project.getConfigFilePath = () => "/ws/tsconfig.json";
     let targetedReloads = 0;
     const reloadedScriptInfos: string[] = [];
     const refreshOrder: string[] = [];
@@ -1349,7 +1426,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
       refreshOrder.push("clear-resolution-cache");
     };
     info.project.projectService.getScriptInfo = (fileName: string) =>
-      fileName === "d:/ws/src/A.vue"
+      fileName === "/ws/src/A.vue"
         ? {
             reloadFromFile: () => {
               reloadedScriptInfos.push(fileName);
@@ -1367,7 +1444,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
-    const source = "d:/ws/src/A.vue";
+    const source = "/ws/src/A.vue";
     const companion = `${source}.tsx`;
     expect(info.languageServiceHost.getScriptVersion(source)).toBe("5:a1");
     const stale = info.languageServiceHost.getScriptSnapshot(source);
@@ -1375,7 +1452,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
 
     const published = vueAndSvelteManifest();
     published.epoch = 2;
-    published.projects["d:/ws/tsconfig.json"].ready_files[companion] = {
+    published.projects["/ws/tsconfig.json"].ready_files[companion] = {
       content_hash: "a2",
       version: 5,
       script_kind: "TSX",
@@ -1402,15 +1479,15 @@ describe("getExternalFiles carrier working-set ownership", () => {
   });
 
   it("replaces a warm Svelte wildcard fallback with the authored Component contract through deep barrels", async () => {
-    const projectKey = "d:/ws/tsconfig.json";
-    const source = "d:/ws/src/Native.svelte";
+    const projectKey = "/ws/tsconfig.json";
+    const source = "/ws/src/Native.svelte";
     const ide = `${source}.tsx`;
     const api = `${source}.verter.ts`;
-    const directConsumer = "d:/ws/src/direct-consumer.ts";
-    const barrelOne = "d:/ws/src/level-one.ts";
-    const barrelTwo = "d:/ws/src/level-two.ts";
-    const barrelConsumer = "d:/ws/src/barrel-consumer.ts";
-    const svelteTypes = "d:/ws/node_modules/svelte/index.d.ts";
+    const directConsumer = "/ws/src/direct-consumer.ts";
+    const barrelOne = "/ws/src/level-one.ts";
+    const barrelTwo = "/ws/src/level-two.ts";
+    const barrelConsumer = "/ws/src/barrel-consumer.ts";
+    const svelteTypes = "/ws/node_modules/svelte/index.d.ts";
     const diskFiles: Record<string, string> = {
       [directConsumer]:
         'import Native from "./Native.svelte";\n' +
@@ -1455,7 +1532,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     let projectVersion = 0;
     info.languageServiceHost.getCompilationSettings = info.project.getCompilerOptions;
     info.languageServiceHost.getCurrentDirectory = info.project.getCurrentDirectory;
-    info.languageServiceHost.getDefaultLibFileName = () => "d:/ws/no-lib.d.ts";
+    info.languageServiceHost.getDefaultLibFileName = () => "/ws/no-lib.d.ts";
     info.languageServiceHost.getProjectVersion = () => String(projectVersion);
     info.languageServiceHost.getScriptFileNames = () => Object.keys(diskFiles);
     info.languageServiceHost.fileExists = info.serverHost.fileExists;
@@ -1617,17 +1694,17 @@ function twoProjectManifest(): Manifest {
     epoch: 2,
     host_version: "test",
     projects: {
-      "d:/ws/a/tsconfig.json": {
+      "/ws/a/tsconfig.json": {
         owned_sources: [
           {
-            source_uri: "d:/ws/a/src/A.vue",
-            provider_uri: "d:/ws/a/src/A.vue.tsx",
+            source_uri: "/ws/a/src/A.vue",
+            provider_uri: "/ws/a/src/A.vue.tsx",
             role: "CarrierIde",
             script_kind: "TSX",
           },
         ],
         ready_files: {
-          "d:/ws/a/src/A.vue.tsx": {
+          "/ws/a/src/A.vue.tsx": {
             content_hash: "a1",
             version: 1,
             script_kind: "TSX",
@@ -1637,17 +1714,17 @@ function twoProjectManifest(): Manifest {
           },
         },
       },
-      "d:/ws/b/tsconfig.json": {
+      "/ws/b/tsconfig.json": {
         owned_sources: [
           {
-            source_uri: "d:/ws/b/src/B.svelte",
-            provider_uri: "d:/ws/b/src/B.svelte.tsx",
+            source_uri: "/ws/b/src/B.svelte",
+            provider_uri: "/ws/b/src/B.svelte.tsx",
             role: "CarrierIde",
             script_kind: "TSX",
           },
         ],
         ready_files: {
-          "d:/ws/b/src/B.svelte.tsx": {
+          "/ws/b/src/B.svelte.tsx": {
             content_hash: "b1",
             version: 1,
             script_kind: "TSX",
@@ -1661,6 +1738,614 @@ function twoProjectManifest(): Manifest {
   };
 }
 
+/**
+ * The DX gate for the reported defect: a plain `.ts` file importing a framework
+ * carrier from a configured project that sets NO `jsx`.
+ *
+ * Everything here is deliberate:
+ *  - the `ts.LanguageService` is created BEFORE the plugin installs its hooks
+ *    (tsserver's real lifecycle: the ConfiguredProject builds its service, then
+ *    plugins are enabled on the same host object);
+ *  - the project's compiler options carry NO `jsx`, matching the reporting user.
+ *    Note the plugin force-sets `jsx: Preserve` on those options once loaded, so
+ *    TS6142 itself is SUPPRESSED here and is only a regression guard; the
+ *    load-bearing assertions are the exact resolved filename, the resolved
+ *    extension being `Ts` (never `Tsx`/`Jsx` — which is what makes TS6142
+ *    unreachable by construction rather than by that mutation), TS2307
+ *    presence/absence, and the TS2322-mentions-`number` API witness;
+ *  - the API role is never hand-injected — only the IDE role is pre-published
+ *    (that is precisely the state the old fallback mis-served), and the
+ *    unpublished → ready transition is driven through the real publish +
+ *    `carrierStoreRefreshToken` invalidation path;
+ *  - the assertions are on the EXACT resolved filename AND the resulting
+ *    semantic diagnostics, so a suffix-only fix proves nothing.
+ */
+describe("plain .ts importing a carrier (real Program, project sets NO jsx)", () => {
+  const projectKey = "/ws/tsconfig.json";
+  const consumer = "/ws/src/consumer.ts";
+
+  /** Compiler options a real user project has: `jsx` is ABSENT. */
+  const noJsxOptions = (): ts.CompilerOptions => ({
+    strict: true,
+    noLib: true,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+  });
+
+  /** A manifest owning ONLY the IDE role for `source` (API not published yet). */
+  function ideOnlyManifest(source: string, ideProvider: string, blobRel: string): Manifest {
+    return {
+      epoch: 1,
+      host_version: "test",
+      projects: {
+        [projectKey]: {
+          owned_sources: [
+            {
+              source_uri: source,
+              provider_uri: ideProvider,
+              role: "CarrierIde",
+              script_kind: "TSX",
+            },
+          ],
+          ready_files: {
+            [ideProvider]: {
+              content_hash: "ide-1",
+              version: 1,
+              script_kind: "TSX",
+              role: "CarrierIde",
+              map_hash: "0",
+              blob_rel: blobRel,
+            },
+          },
+        },
+      },
+    };
+  }
+
+  interface Harness {
+    info: any;
+    plugin: ReturnType<typeof init>;
+    /** How many times production invoked the project's cache-clear hook. */
+    clearCalls(): number;
+    resolve(specifier: string, containing?: string): ts.ResolvedModuleFull | undefined;
+    diagnostics(fileName?: string): ts.Diagnostic[];
+    codes(fileName?: string): number[];
+    publish(manifest: Manifest, token: number): Promise<void>;
+    dir: string;
+  }
+
+  function harness(options: {
+    manifest: Manifest;
+    blobs: Record<string, string>;
+    diskFiles: Record<string, string>;
+    compilerOptions?: ts.CompilerOptions;
+  }): Harness {
+    const dir = track(writeStore(options.manifest, options.blobs));
+    const compilerOptions = options.compilerOptions ?? noJsxOptions();
+    const info = createInfo(dir, { diskFiles: options.diskFiles }, projectKey);
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 1,
+    };
+    info.project.getConfigFilePath = () => projectKey;
+    info.project.getCompilerOptions = () => compilerOptions;
+    let projectVersion = 0;
+    info.languageServiceHost.getCompilationSettings = () => compilerOptions;
+    info.languageServiceHost.getCurrentDirectory = info.project.getCurrentDirectory;
+    info.languageServiceHost.getDefaultLibFileName = () => "/ws/no-lib.d.ts";
+    info.languageServiceHost.getProjectVersion = () => String(projectVersion);
+    info.languageServiceHost.getScriptFileNames = () => Object.keys(options.diskFiles);
+    info.languageServiceHost.fileExists = info.serverHost.fileExists;
+    info.languageServiceHost.readFile = info.serverHost.readFile;
+    info.languageServiceHost.resolveModuleNameLiterals = (literals: readonly { text: string }[]) =>
+      literals.map(() => ({ resolvedModule: undefined }));
+
+    // tsserver's lifecycle: the project's LanguageService exists BEFORE the
+    // plugin is enabled on the same host object.
+    const realLanguageService = ts.createLanguageService(info.languageServiceHost);
+    info.languageService.__lsImpl = realLanguageService;
+
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    // The harness stands in for tsserver's `ProjectService.clearSemanticCache`,
+    // which does `project.resolutionCache.clear()` + `cleanupSemanticCache()` +
+    // `markAsDirty()`. There is no `ConfiguredProject` here, so there is no
+    // `ResolutionCache` to clear; what the stand-in reproduces is the OBSERVABLE
+    // consequence this gate depends on — the Program is dropped and the project
+    // version advances, so every module specifier is resolved again on the next
+    // query. It does NOT prove tsserver's own resolution-cache clear; that leg
+    // is covered by asserting production INVOKES this hook (`clearCalls` below,
+    // and the cold-start / equal-stat cases), plus TypeScript's own
+    // implementation of it.
+    let clearCalls = 0;
+    info.project.projectService.clearSemanticCache = () => {
+      clearCalls += 1;
+      projectVersion++;
+      realLanguageService.cleanupSemanticCache();
+    };
+    info.project.projectService.reloadFileNamesOfConfiguredProject = () => {
+      projectVersion++;
+      return true;
+    };
+
+    return {
+      info,
+      plugin,
+      clearCalls: () => clearCalls,
+      dir,
+      resolve(specifier: string, containing: string = consumer) {
+        return info.languageServiceHost.resolveModuleNameLiterals(
+          [{ text: specifier }],
+          containing,
+          undefined,
+          compilerOptions,
+          undefined,
+        )[0]?.resolvedModule;
+      },
+      diagnostics(fileName: string = consumer) {
+        return info.languageService.getSemanticDiagnostics(fileName) as ts.Diagnostic[];
+      },
+      codes(fileName: string = consumer) {
+        return (info.languageService.getSemanticDiagnostics(fileName) as ts.Diagnostic[]).map(
+          (d) => d.code,
+        );
+      },
+      async publish(manifest: Manifest, token: number) {
+        writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest), "utf8");
+        plugin.onConfigurationChanged!({
+          carrierStoreDir: dir,
+          [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+          carrierStoreRefreshToken: token,
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      },
+    };
+  }
+
+  /**
+   * Both component carriers, one body. Vue and Svelte take the SAME path —
+   * the import surface comes from the adapter's descriptor column, never a
+   * per-framework branch in the plugin.
+   */
+  for (const ext of [".vue", ".svelte"] as const) {
+    const source = `/ws/src/A${ext}`;
+    const ideProvider = `${source}.tsx`;
+    const apiProvider = `${source}.verter.ts`;
+
+    it(`resolves a ${ext} import to the public-API carrier across the unpublished → ready transition`, async () => {
+      const h = harness({
+        manifest: ideOnlyManifest(source, ideProvider, `blobs/A${ext}.tsx`),
+        blobs: {
+          // The IDE surface types `contract` as a STRING — if an ordinary import
+          // ever lands here the consumer type-checks CLEAN, which is exactly the
+          // silent-wrong-surface failure this gate must catch.
+          [`blobs/A${ext}.tsx`]: "declare const A: { contract: string };\nexport default A;\n",
+          [`blobs/A${ext}.verter.ts`]:
+            "declare const A: { contract: number };\nexport default A;\n",
+        },
+        diskFiles: {
+          [consumer]: `import A from "./A${ext}";\nexport const label: string = A.contract;\n`,
+        },
+      });
+
+      // ── phase 1: the project owns no import surface yet ──────────────────
+      // FAIL CLOSED. Never the JSX/TSX editor carrier (the `--jsx is not set`
+      // defect), never a fabricated `.verter.ts` the store cannot serve.
+      expect(h.resolve(`./A${ext}`)).toBeUndefined();
+      const cold = h.codes();
+      // Regression guard only — the plugin's own `jsx: Preserve` mutation keeps
+      // TS6142 unreachable while it is loaded, so nothing here rests on it.
+      expect(cold).not.toContain(6142);
+      // The IDE surface must not have silently type-checked the consumer.
+      expect(cold).not.toContain(2322);
+      // TS's own answer stands: an unresolvable module.
+      expect(cold).toContain(2307);
+
+      // ── phase 2: the owning project publishes the API companion ──────────
+      const published = ideOnlyManifest(source, ideProvider, `blobs/A${ext}.tsx`);
+      const project = published.projects[projectKey];
+      published.epoch = 2;
+      project.owned_sources.push({
+        source_uri: source,
+        provider_uri: apiProvider,
+        role: "CarrierApi",
+        script_kind: "TS",
+      });
+      project.ready_files[apiProvider] = {
+        content_hash: "api-1",
+        version: 1,
+        script_kind: "TS",
+        role: "CarrierApi",
+        map_hash: "0",
+        blob_rel: `blobs/A${ext}.verter.ts`,
+      };
+      await h.publish(published, 2);
+
+      const resolved = h.resolve(`./A${ext}`);
+      expect(resolved?.resolvedFileName).toBe(apiProvider);
+      // A non-JSX extension is what makes TS6142 unreachable by construction —
+      // the plugin must not be relying on force-enabling `jsx` for the user's
+      // whole project to keep an ordinary import type-checkable.
+      expect(resolved?.extension).toBe(ts.Extension.Ts);
+      expect(resolved?.extension).not.toBe(ts.Extension.Tsx);
+      expect(resolved?.extension).not.toBe(ts.Extension.Jsx);
+
+      const warm = h.diagnostics();
+      const warmCodes = warm.map((d) => d.code);
+      const detail = warm
+        .map((d) => `TS${d.code}: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`)
+        .join("\n");
+      // Production reached the real invalidation hook — the resolution did not
+      // simply re-run against an unchanged Program.
+      expect(h.clearCalls()).toBeGreaterThan(0);
+      // The module resolves, and it resolves to a NON-JSX surface.
+      expect(warmCodes, detail).not.toContain(2307);
+      // Regression guard only (see the `jsx: Preserve` note above).
+      expect(warmCodes, detail).not.toContain(6142);
+      // …and the API surface is genuinely in the Program: its `number` contract
+      // is what the consumer is checked against, not the IDE surface's `string`.
+      expect(
+        warm.some(
+          (d) =>
+            d.code === 2322 &&
+            ts.flattenDiagnosticMessageText(d.messageText, "\n").includes("number"),
+        ),
+        detail,
+      ).toBe(true);
+    });
+  }
+
+  it("heals a cold start: the store dir arrives after the first resolution", async () => {
+    // On a cold editor start the plugin is created before the LSP has reported
+    // the resolved carrier-store dir, so the first resolution has no store to
+    // consult at all. It must fail closed — and the store handoff must clear
+    // this project's resolution cache so the retry sees the published surface.
+    const source = "/ws/src/A.vue";
+    const apiProvider = `${source}.verter.ts`;
+    const manifest = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
+    const project = manifest.projects[projectKey];
+    project.owned_sources.push({
+      source_uri: source,
+      provider_uri: apiProvider,
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    project.ready_files[apiProvider] = {
+      content_hash: "api-1",
+      version: 1,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    const dir = track(
+      writeStore(manifest, {
+        "blobs/A.vue.tsx": "export default {};",
+        "blobs/A.vue.verter.ts": "export default class A {}",
+      }),
+    );
+
+    // Constructed with NO store dir — the pre-notification cold window.
+    const info = createInfo(undefined, { diskFiles: {} }, projectKey);
+    let resolutionCacheCleared = 0;
+    info.project.projectService.clearSemanticCache = () => {
+      resolutionCacheCleared += 1;
+    };
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    const resolveA = () =>
+      info.languageServiceHost.resolveModuleNameLiterals(
+        [{ text: "./A.vue" }],
+        "/ws/src/consumer.ts",
+        undefined,
+        {},
+        undefined,
+      )[0]?.resolvedModule;
+
+    expect(resolveA()).toBeUndefined();
+
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 1,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // The store handoff invalidated module resolution…
+    expect(resolutionCacheCleared).toBeGreaterThan(0);
+    // …and the retry now sees the published import surface.
+    const resolved = resolveA();
+    expect(resolved?.resolvedFileName).toBe(apiProvider);
+    expect(resolved?.extension).toBe(ts.Extension.Ts);
+  });
+
+  it("heals a publication whose manifest replacement has an IDENTICAL stat tuple", async () => {
+    // The reader's change key is `(mtimeMs, size)`. The Rust publisher swaps the
+    // manifest ATOMICALLY, so a publication that replaces a ready-file entry
+    // rather than adding one can land at the same byte length within a single
+    // filesystem timestamp tick — a stat-identical replacement. If the token
+    // advance reads ready versions from the stale snapshot, nothing looks
+    // changed, `clearSemanticCache` never fires, and the cached TS2307 for this
+    // exact import survives until some unrelated publication. That is the
+    // sticky-negative mode this whole change exists to prevent.
+    const source = "/ws/src/A.vue";
+    const apiProvider = `${source}.verter.ts`;
+
+    // BEFORE: the API companion is owned but NOT ready.
+    const before = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
+    before.projects[projectKey].owned_sources.push({
+      source_uri: source,
+      provider_uri: apiProvider,
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    // AFTER: the same manifest with the API companion READY.
+    const after = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
+    after.projects[projectKey].owned_sources.push({
+      source_uri: source,
+      provider_uri: apiProvider,
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    after.projects[projectKey].ready_files[apiProvider] = {
+      content_hash: "api-1",
+      version: 1,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    // Both serializations padded to ONE width, and both writes pinned to ONE
+    // whole-second timestamp, so the replacement is byte-for-byte stat-identical.
+    const width = Math.max(JSON.stringify(before).length, JSON.stringify(after).length);
+    const pad = (m: Manifest) => {
+      const json = JSON.stringify(m);
+      return json + " ".repeat(width - json.length);
+    };
+    const pinnedSeconds = Math.floor(Date.now() / 1000) - 60;
+
+    const dir = track(
+      writeStore(before, {
+        "blobs/A.vue.tsx": "export default {};",
+        "blobs/A.vue.verter.ts": "export default class A {}",
+      }),
+    );
+    const manifestPath = join(dir, "manifest.json");
+    writeFileSync(manifestPath, pad(before), "utf8");
+    utimesSync(manifestPath, pinnedSeconds, pinnedSeconds);
+
+    const info = createInfo(dir, { diskFiles: {} }, projectKey);
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 1,
+    };
+    let cacheClears = 0;
+    info.project.projectService.clearSemanticCache = () => {
+      cacheClears += 1;
+    };
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    const resolveA = () =>
+      info.languageServiceHost.resolveModuleNameLiterals(
+        [{ text: "./A.vue" }],
+        "/ws/src/consumer.ts",
+        undefined,
+        {},
+        undefined,
+      )[0]?.resolvedModule;
+
+    // Owned-but-unready: the bounded cold read times out and the plugin
+    // abstains. This ALSO seeds the reader's manifest snapshot.
+    expect(resolveA()).toBeUndefined();
+    const statBefore = statSync(manifestPath);
+
+    writeFileSync(manifestPath, pad(after), "utf8");
+    utimesSync(manifestPath, pinnedSeconds, pinnedSeconds);
+
+    // The replacement really is stat-identical — otherwise this test would be
+    // exercising the ordinary mtime-changed path and prove nothing.
+    const statAfter = statSync(manifestPath);
+    expect(statAfter.size).toBe(statBefore.size);
+    expect(statAfter.mtimeMs).toBe(statBefore.mtimeMs);
+
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 2,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // The token advance observed the publication despite the identical stat…
+    expect(cacheClears).toBeGreaterThan(0);
+    // …and the import now resolves to the public-API surface.
+    const resolved = resolveA();
+    expect(resolved?.resolvedFileName).toBe(apiProvider);
+    expect(resolved?.extension).toBe(ts.Extension.Ts);
+  });
+
+  it("abstains for an OWNED but never-published import surface (bounded, never fabricated)", () => {
+    // Ownership without content is the transient mid-publish window. The bounded
+    // cold read is allowed to wait it out, but on timeout the answer is still
+    // ABSTAIN: pointing TypeScript at a path the store cannot serve produces a
+    // sticky TS2307 that no later publication can clear.
+    const source = "/ws/src/A.vue";
+    const manifest = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
+    manifest.projects[projectKey].owned_sources.push({
+      source_uri: source,
+      provider_uri: `${source}.verter.ts`,
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    // NOTE: no `ready_files` entry for the API companion — owned, unpublished.
+    const dir = track(writeStore(manifest, { "blobs/A.vue.tsx": "export default {};" }));
+    const info = createInfo(dir, { diskFiles: {} }, projectKey);
+    init({ typescript: ts } as any).create(info);
+
+    const resolved = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./A.vue" }],
+      "/ws/src/consumer.ts",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+    expect(resolved).toBeUndefined();
+  });
+
+  it("matches the owned import surface through the host's canonical path identity", () => {
+    // A case-insensitive host (Windows / APFS): the importer spells the
+    // directory differently from the manifest the LSP wrote. The redirect must
+    // still find the owned import surface — a raw string comparison would not.
+    const source = "/ws/src/A.vue";
+    const manifest = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
+    manifest.projects[projectKey].owned_sources.push({
+      source_uri: source,
+      provider_uri: `${source}.verter.ts`,
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    manifest.projects[projectKey].ready_files[`${source}.verter.ts`] = {
+      content_hash: "api-1",
+      version: 1,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    const dir = track(
+      writeStore(manifest, {
+        "blobs/A.vue.tsx": "export default {};",
+        "blobs/A.vue.verter.ts": "export default class A {}",
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: {} }, projectKey);
+    expect(info.serverHost.useCaseSensitiveFileNames).toBe(false);
+    init({ typescript: ts } as any).create(info);
+
+    const resolved = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./A.vue" }],
+      "/WS/src/consumer.ts",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+    // The MANIFEST-owned identity is returned, not the importer's spelling: the
+    // store, the ScriptInfo content reloads and the ready-version bookkeeping
+    // all key on the path the LSP published.
+    expect(resolved?.resolvedFileName).toBe("/ws/src/A.vue.verter.ts");
+    expect(resolved?.extension).toBe(ts.Extension.Ts);
+  });
+
+  /**
+   * The alias / `baseUrl` route (a NON-relative carrier specifier). The
+   * candidate carrier source is picked out of TypeScript's own failed-lookup
+   * locations, gated on `baseUrl` containment. That gate used a raw
+   * `candidate.includes(baseUrl)` substring test — separator- and drive-case
+   * sensitive, so a `baseUrl` spelled `D:\ws\src` rejected a `d:/ws/src/...`
+   * candidate on Windows and the carrier silently failed to resolve.
+   */
+  describe("alias / baseUrl carrier specifier", () => {
+    const source = "/ws/src/A.vue";
+    const apiProvider = `${source}.verter.ts`;
+
+    /**
+     * `candidate` is the carrier source TypeScript reports in its
+     * `failedLookupLocations`; the manifest owns that source's API companion, so
+     * the ONLY thing under test is the `baseUrl` containment gate.
+     */
+    function aliasHarness(baseUrl: string | undefined, candidate: string = source) {
+      const ide = `${candidate}.tsx`;
+      const api = `${candidate}.verter.ts`;
+      const manifest = ideOnlyManifest(candidate, ide, "blobs/A.vue.tsx");
+      const project = manifest.projects[projectKey];
+      project.owned_sources.push({
+        source_uri: candidate,
+        provider_uri: api,
+        role: "CarrierApi",
+        script_kind: "TS",
+      });
+      project.ready_files[api] = {
+        content_hash: "api-1",
+        version: 1,
+        script_kind: "TS",
+        role: "CarrierApi",
+        map_hash: "0",
+        blob_rel: "blobs/A.vue.verter.ts",
+      };
+      const dir = track(
+        writeStore(manifest, {
+          "blobs/A.vue.tsx": "export default {};",
+          "blobs/A.vue.verter.ts": "export default class A {}",
+        }),
+      );
+      const info = createInfo(dir, { diskFiles: { [candidate]: "<template />" } }, projectKey);
+      const compilerOptions: ts.CompilerOptions = baseUrl === undefined ? {} : { baseUrl };
+      info.project.getCompilerOptions = () => compilerOptions;
+      // TypeScript's own resolver misses the aliased carrier and reports where
+      // it looked — the exact shape the redirect consumes.
+      info.languageServiceHost.resolveModuleNameLiterals = (
+        literals: readonly { text: string }[],
+      ) =>
+        literals.map(() => ({
+          resolvedModule: undefined,
+          failedLookupLocations: [candidate],
+        }));
+      init({ typescript: ts } as any).create(info);
+      return info;
+    }
+
+    function resolveAlias(info: any): ts.ResolvedModuleFull | undefined {
+      return info.languageServiceHost.resolveModuleNameLiterals(
+        [{ text: "@app/A.vue" }],
+        "/ws/src/consumer.ts",
+        undefined,
+        info.project.getCompilerOptions(),
+        undefined,
+      )[0]?.resolvedModule;
+    }
+
+    it("resolves an aliased carrier to the public-API carrier with no baseUrl", () => {
+      const resolved = resolveAlias(aliasHarness(undefined));
+      expect(resolved?.resolvedFileName).toBe(apiProvider);
+      expect(resolved?.extension).toBe(ts.Extension.Ts);
+    });
+
+    it("accepts a candidate under a baseUrl spelled with foreign separators", () => {
+      const resolved = resolveAlias(aliasHarness("\\ws\\src"));
+      expect(resolved?.resolvedFileName).toBe(apiProvider);
+    });
+
+    it("accepts a candidate under a baseUrl whose case differs on a case-insensitive host", () => {
+      const resolved = resolveAlias(aliasHarness("/WS/SRC"));
+      expect(resolved?.resolvedFileName).toBe(apiProvider);
+    });
+
+    it("rejects a sibling directory that merely SHARES the baseUrl prefix", () => {
+      // The kill shot for the old `candidate.includes(baseUrl)` gate:
+      // `"/ws/srcOther/A.vue".includes("/ws/src")` is TRUE, so the substring
+      // test accepted a carrier that is NOT inside `baseUrl`. Boundary-anchored
+      // containment rejects it — `/ws/srcOther` is a sibling of `/ws/src`, not a
+      // child. (Reversing the roles would not discriminate: the old test's
+      // base `/ws/srcOther` is already absent from `/ws/src/A.vue`.)
+      const info = aliasHarness("/ws/src", "/ws/srcOther/A.vue");
+      expect(resolveAlias(info)).toBeUndefined();
+    });
+
+    it("accepts a candidate nested under an ANCESTOR baseUrl directory", () => {
+      // `baseUrl` is a DIRECTORY (that is the shape TypeScript parses from a
+      // tsconfig), and a real project's carriers sit below it rather than at
+      // it. This exercises the boundary-anchored prefix branch at a real depth.
+      const resolved = resolveAlias(aliasHarness("/ws", "/ws/src/nested/A.vue"));
+      expect(resolved?.resolvedFileName).toBe("/ws/src/nested/A.vue.verter.ts");
+      expect(resolved?.extension).toBe(ts.Extension.Ts);
+    });
+  });
+});
+
 describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
   it("getExternalFiles(projectA) returns ONLY projectA's carrier, never projectB's (vue + svelte)", () => {
     const dir = track(
@@ -1671,17 +2356,17 @@ describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
     );
 
     // Two per-project plugin instances, each `create`d for its own tsconfig.
-    const infoA = createInfo(dir, { diskFiles: {} }, "d:/ws/a/tsconfig.json");
-    const infoB = createInfo(dir, { diskFiles: {} }, "d:/ws/b/tsconfig.json");
+    const infoA = createInfo(dir, { diskFiles: {} }, "/ws/a/tsconfig.json");
+    const infoB = createInfo(dir, { diskFiles: {} }, "/ws/b/tsconfig.json");
     infoA.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
-      activeCarrierSources: ["d:/ws/a/src/A.vue"],
+      activeCarrierSources: ["/ws/a/src/A.vue"],
     };
     infoB.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
-      activeCarrierSources: ["d:/ws/b/src/B.svelte"],
+      activeCarrierSources: ["/ws/b/src/B.svelte"],
     };
     const pluginA = init({ typescript: ts } as any);
     const pluginB = init({ typescript: ts } as any);
@@ -1692,11 +2377,11 @@ describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
     const filesB = pluginB.getExternalFiles!(infoB.project, 0 as any);
 
     // Project A sees ONLY its Vue carrier; project B sees ONLY its Svelte carrier.
-    expect(filesA).toEqual(["d:/ws/a/src/A.vue.tsx"]);
-    expect(filesB).toEqual(["d:/ws/b/src/B.svelte.tsx"]);
+    expect(filesA).toEqual(["/ws/a/src/A.vue.tsx"]);
+    expect(filesB).toEqual(["/ws/b/src/B.svelte.tsx"]);
     // The leak the fix closes: neither project advertises the OTHER's carrier.
-    expect(filesA).not.toContain("d:/ws/b/src/B.svelte");
-    expect(filesB).not.toContain("d:/ws/a/src/A.vue");
+    expect(filesA).not.toContain("/ws/b/src/B.svelte");
+    expect(filesB).not.toContain("/ws/a/src/A.vue");
   });
 
   it("a project without an explicit working-set signal advertises no carrier roots", () => {
@@ -1709,7 +2394,7 @@ describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
       }),
     );
     process.env.VERTER_CARRIER_STORE_DIR = dir;
-    const info = createInfo(dir, { diskFiles: {} }, "d:/ws/a/tsconfig.json");
+    const info = createInfo(dir, { diskFiles: {} }, "/ws/a/tsconfig.json");
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
@@ -1721,18 +2406,18 @@ describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
     // comes from the env fallback (B was never `create`d on this instance).
     plugin.onConfigurationChanged!(info.config);
     const projectB: any = {
-      getProjectName: () => "d:/ws/b/tsconfig.json",
+      getProjectName: () => "/ws/b/tsconfig.json",
       getRootFiles: () => [],
       getFileNames: () => [],
       projectService: {
         logger: { info: () => {} },
         getScriptInfo: (fileName: string) =>
-          fileName === "d:/ws/b/src/B.svelte.tsx" ? { isScriptOpen: () => true } : undefined,
+          fileName === "/ws/b/src/B.svelte.tsx" ? { isScriptOpen: () => true } : undefined,
       },
     };
     const filesB = plugin.getExternalFiles!(projectB, 0 as any);
     expect(filesB).toEqual([]);
-    expect(filesB).not.toContain("d:/ws/a/src/A.vue");
+    expect(filesB).not.toContain("/ws/a/src/A.vue");
   });
 
   it("host hooks for project A never serve project B's carrier content (reader is scoped)", () => {
@@ -1744,16 +2429,16 @@ describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
         "blobs/B.svelte.tsx": "B-content",
       }),
     );
-    const infoA = createInfo(dir, { diskFiles: {} }, "d:/ws/a/tsconfig.json");
+    const infoA = createInfo(dir, { diskFiles: {} }, "/ws/a/tsconfig.json");
     init({ typescript: ts } as any).create(infoA);
 
     // Project A serves its own carrier…
-    expect(infoA.serverHost.readFile("d:/ws/a/src/A.vue.tsx")).toBe("A-content");
-    expect(infoA.serverHost.fileExists("d:/ws/a/src/A.vue.tsx")).toBe(true);
+    expect(infoA.serverHost.readFile("/ws/a/src/A.vue.tsx")).toBe("A-content");
+    expect(infoA.serverHost.fileExists("/ws/a/src/A.vue.tsx")).toBe(true);
     // …but NOT project B's carrier (it falls through to disk, which is empty).
-    expect(infoA.serverHost.readFile("d:/ws/b/src/B.svelte.tsx")).toBeUndefined();
-    expect(infoA.serverHost.fileExists("d:/ws/b/src/B.svelte.tsx")).toBe(false);
-    expect(infoA.languageServiceHost.getScriptSnapshot("d:/ws/b/src/B.svelte.tsx")).toBeUndefined();
+    expect(infoA.serverHost.readFile("/ws/b/src/B.svelte.tsx")).toBeUndefined();
+    expect(infoA.serverHost.fileExists("/ws/b/src/B.svelte.tsx")).toBe(false);
+    expect(infoA.languageServiceHost.getScriptSnapshot("/ws/b/src/B.svelte.tsx")).toBeUndefined();
   });
 });
 
@@ -1767,29 +2452,29 @@ function mappableManifest(): Manifest {
     epoch: 1,
     host_version: "test",
     projects: {
-      "d:/ws/tsconfig.json": {
+      "/ws/tsconfig.json": {
         owned_sources: [
           {
-            source_uri: "d:/ws/src/A.vue",
-            provider_uri: "d:/ws/src/A.vue.tsx",
+            source_uri: "/ws/src/A.vue",
+            provider_uri: "/ws/src/A.vue.tsx",
             role: "CarrierIde",
             script_kind: "TSX",
           },
           {
-            source_uri: "d:/ws/src/U.vue",
-            provider_uri: "d:/ws/src/U.vue.tsx",
+            source_uri: "/ws/src/U.vue",
+            provider_uri: "/ws/src/U.vue.tsx",
             role: "CarrierIde",
             script_kind: "TSX",
           },
           {
-            source_uri: "d:/ws/src/W.svelte",
-            provider_uri: "d:/ws/src/W.svelte.tsx",
+            source_uri: "/ws/src/W.svelte",
+            provider_uri: "/ws/src/W.svelte.tsx",
             role: "CarrierIde",
             script_kind: "TSX",
           },
         ],
         ready_files: {
-          "d:/ws/src/A.vue.tsx": {
+          "/ws/src/A.vue.tsx": {
             content_hash: "a1",
             version: 1,
             script_kind: "TSX",
@@ -1798,7 +2483,7 @@ function mappableManifest(): Manifest {
             blob_rel: "blobs/A.vue.tsx",
             map_rel: "maps/A.vue.json",
           },
-          "d:/ws/src/U.vue.tsx": {
+          "/ws/src/U.vue.tsx": {
             content_hash: "u1",
             version: 1,
             script_kind: "TSX",
@@ -1807,7 +2492,7 @@ function mappableManifest(): Manifest {
             blob_rel: "blobs/U.vue.tsx",
             map_rel: "maps/U.vue.json",
           },
-          "d:/ws/src/W.svelte.tsx": {
+          "/ws/src/W.svelte.tsx": {
             content_hash: "w1",
             version: 1,
             script_kind: "TSX",
@@ -1828,7 +2513,7 @@ function mappableManifest(): Manifest {
 // source so the response remap reads the real `.vue`/`.svelte` text.
 const MAPPABLE_MAP = JSON.stringify({
   version: 3,
-  sources: ["d:/ws/src/A.vue"],
+  sources: ["/ws/src/A.vue"],
   names: [],
   mappings: "AAAA",
 });
@@ -1838,7 +2523,7 @@ const MAPPABLE_MAP = JSON.stringify({
 // under strict BOTH-endpoint span mapping.
 const SVELTE_MAP = JSON.stringify({
   version: 3,
-  sources: ["d:/ws/src/W.svelte"],
+  sources: ["/ws/src/W.svelte"],
   names: [],
   mappings: "AACA",
 });
@@ -1873,7 +2558,7 @@ describe("editor-owned source diagnostic routing", () => {
   // and retain one diagnostic object for an overlap rather than double-publishing.
   it("merges non-editor carrier suggestions into the semantic response without duplication", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
+    const sourcePath = "/ws/src/A.vue";
     const generatedSourceFile = ts.createSourceFile(
       sourcePath,
       mappableBlobs()["blobs/A.vue.tsx"],
@@ -1926,7 +2611,7 @@ describe("editor-owned source diagnostic routing", () => {
   // diagnostic contract; the router must not rely on a Vue-only extension test.
   it("merges non-editor Svelte suggestions into the semantic response", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/W.svelte";
+    const sourcePath = "/ws/src/W.svelte";
     const generatedSourceFile = ts.createSourceFile(
       sourcePath,
       mappableBlobs()["blobs/W.svelte.tsx"],
@@ -1958,7 +2643,7 @@ describe("editor-owned source diagnostic routing", () => {
   // passthrough; carrier-specific suggestion folding must not broaden globally.
   it("does not supplement a non-carrier semantic diagnostic response", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const fileName = "d:/ws/src/plain.ts";
+    const fileName = "/ws/src/plain.ts";
     const sourceFile = ts.createSourceFile(
       fileName,
       "const value: string = 1;\n",
@@ -1994,7 +2679,7 @@ describe("editor-owned source diagnostic routing", () => {
   // carrier source identity whose snapshot is the plugin-served generated program.
   it("passes non-editor carrier-source diagnostics through to the configured Program identity", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
+    const sourcePath = "/ws/src/A.vue";
     const sourceText = "const foo = 1;\n";
     const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
     const generatedSourceFile = ts.createSourceFile(
@@ -2040,7 +2725,7 @@ describe("editor-owned source diagnostic routing", () => {
   // identity. Editor-only companion routing must never intercept that path.
   it("passes non-editor carrier-source semantic features through to the configured Program", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
+    const sourcePath = "/ws/src/A.vue";
     const info = createInfo(dir, { diskFiles: { [sourcePath]: "const foo = 1;\n" } });
     const requests: Array<{ method: string; fileName: string; position: number }> = [];
     const quickInfo = {
@@ -2083,10 +2768,101 @@ describe("editor-owned source diagnostic routing", () => {
     ).toBe(true);
   });
 
+  // The carrier source-feature arbiter must decide from a POSITIVE ownership
+  // signal. These two cases differ in exactly one variable — whether a Verter
+  // host has configured this project's carrier store — and pin both directions:
+  // an unconfigured (unknown) surface must abstain so it never registers a
+  // second provider beside the selected one, while the configured non-editor
+  // surface (the verter_lsp-internal tsserver, the sole provider there) must
+  // keep answering.
+  const carrierArbiterProbe = (storeDir: string | undefined) => {
+    const sourcePath = "/ws/src/A.vue";
+    const plainPath = "/ws/src/real.ts";
+    const info = createInfo(storeDir, {
+      diskFiles: { [sourcePath]: "const foo = 1;\n", [plainPath]: "const bar = 2;\n" },
+    });
+    const requests: string[] = [];
+    const quickInfo = {
+      kind: ts.ScriptElementKind.constElement,
+      kindModifiers: "",
+      textSpan: { start: 6, length: 3 },
+      displayParts: [{ kind: "text", text: "const foo: number" }],
+    };
+    const definitions = [
+      { fileName: sourcePath, textSpan: { start: 6, length: 3 }, kind: "const", name: "foo" },
+    ];
+    const completions = { entries: [], isGlobalCompletion: false, isMemberCompletion: false };
+    info.languageService.__lsImpl = {
+      getQuickInfoAtPosition: (fileName: string) => {
+        requests.push(`quickInfo:${fileName}`);
+        return quickInfo;
+      },
+      getDefinitionAtPosition: (fileName: string) => {
+        requests.push(`definition:${fileName}`);
+        return definitions;
+      },
+      getCompletionsAtPosition: (fileName: string) => {
+        requests.push(`completions:${fileName}`);
+        return completions;
+      },
+    };
+    init({ typescript: ts } as any).create(info);
+    return {
+      sourcePath,
+      plainPath,
+      info,
+      requests,
+      expected: { quickInfo, definitions, completions },
+    };
+  };
+
+  it("abstains from carrier source features when no Verter host has configured this project", () => {
+    const probe = carrierArbiterProbe(undefined);
+
+    // The carrier subject is NOT this project's to answer: no configuration has
+    // told the plugin which surface it is in, so another provider may already be
+    // serving this file. Fail closed rather than produce a duplicate answer.
+    expect(probe.info.languageService.getQuickInfoAtPosition(probe.sourcePath, 6)).toBeUndefined();
+    expect(probe.info.languageService.getDefinitionAtPosition(probe.sourcePath, 6)).toBeUndefined();
+    expect(
+      probe.info.languageService.getCompletionsAtPosition(probe.sourcePath, 6, {}),
+    ).toBeUndefined();
+    expect(probe.requests.filter((entry) => entry.endsWith(probe.sourcePath))).toEqual([]);
+
+    // Abstaining is scoped to carrier subjects: a plain TypeScript file in the
+    // same unconfigured project is still answered normally.
+    expect(probe.info.languageService.getQuickInfoAtPosition(probe.plainPath, 6)).toEqual(
+      probe.expected.quickInfo,
+    );
+    expect(probe.requests).toContain(`quickInfo:${probe.plainPath}`);
+  });
+
+  it("still answers carrier source features for the configured non-editor host it owns", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const probe = carrierArbiterProbe(dir);
+
+    // The verter_lsp-internal tsserver is the SOLE provider on this surface; the
+    // arbiter must not mistake "no editor ownership flags" for "unknown".
+    expect(probe.info.languageService.getQuickInfoAtPosition(probe.sourcePath, 6)).toEqual(
+      probe.expected.quickInfo,
+    );
+    expect(probe.info.languageService.getDefinitionAtPosition(probe.sourcePath, 6)).toEqual(
+      probe.expected.definitions,
+    );
+    expect(probe.info.languageService.getCompletionsAtPosition(probe.sourcePath, 6, {})).toEqual(
+      probe.expected.completions,
+    );
+    // Every feature reached the underlying service under the carrier identity —
+    // the exact evidence an abstain would erase.
+    expect(probe.requests).toContain(`quickInfo:${probe.sourcePath}`);
+    expect(probe.requests).toContain(`definition:${probe.sourcePath}`);
+    expect(probe.requests).toContain(`completions:${probe.sourcePath}`);
+  });
+
   it("queries the ready companion and maps its diagnostic onto the source file", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const sourceText = "const foo = 1;\n";
     const companionText = mappableBlobs()["blobs/A.vue.tsx"];
     const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
@@ -2148,14 +2924,14 @@ describe("editor-owned source diagnostic routing", () => {
 
   it("routes an inferred source request through its exact configured-project companion", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const sourceText = "const foo = 1;\n";
     const companionText = mappableBlobs()["blobs/A.vue.tsx"];
     const configuredInfo = createInfo(
       dir,
       { diskFiles: { [sourcePath]: sourceText } },
-      "d:/ws/tsconfig.json",
+      "/ws/tsconfig.json",
     );
     configuredInfo.config = {
       carrierStoreDir: dir,
@@ -2226,9 +3002,47 @@ describe("editor-owned source diagnostic routing", () => {
     });
   });
 
-  it("uses the configured owner runtime for inferred-project references and rename", () => {
-    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+  /** Re-spell a POSIX-rooted fixture onto a Windows drive-letter root. */
+  const onDriveLetterRoot = <T>(fixture: T): T =>
+    JSON.parse(JSON.stringify(fixture).split("/ws/").join("d:/ws/")) as T;
+
+  /**
+   * The mappable fixture on a Windows drive-letter root.
+   *
+   * The hashes are re-spelled along with the paths: a published carrier map is
+   * CONTENT-ADDRESSED and `parsedMapFor` caches the parsed `TraceMap` by
+   * `map_hash` for the life of the process. Re-rooting the map's `sources`
+   * changes its content, so reusing the POSIX fixture's `map_hash` would be a
+   * manifest that lies about its own bytes — and the first `"ma"` parsed in the
+   * process would then answer for both spellings.
+   */
+  const driveLetterMappableManifest = (): Manifest => {
+    const manifest = onDriveLetterRoot(mappableManifest());
+    for (const project of Object.values(manifest.projects)) {
+      for (const ready of Object.values(project.ready_files)) {
+        ready.content_hash = `${ready.content_hash}-drive`;
+        ready.map_hash = `${ready.map_hash}-drive`;
+      }
+    }
+    return manifest;
+  };
+
+  // Inferred-project → configured-owner routing, driven by a WINDOWS-SHAPED
+  // request path. This runs on every host, and is not gated on `process.platform`,
+  // because the identity it exercises is decided by STRING normalisation, never by
+  // the host's path semantics: `canonicalPath` is `normalizePath` (a pure `\` → `/`
+  // replace) plus a `toLowerCase()` whenever the host is case-insensitive, which
+  // `createInfo` hard-codes. `D:\ws\src\A.vue` therefore canonicalises to
+  // `d:/ws/src/a.vue` — the store's own identity — on POSIX exactly as on Windows.
+  // Nothing on this path calls `path.resolve`, reads the cwd, or branches on the
+  // platform, so a drive-letter request is never treated as a relative name here.
+  it("normalizes a backslash-spelled, upper-cased drive request onto the configured owner runtime for references and rename", () => {
+    const dir = track(
+      writeStore(driveLetterMappableManifest(), onDriveLetterRoot(mappableBlobs())),
+    );
     const sourcePath = "d:/ws/src/A.vue";
+    // Upper-cased drive AND backslash separators — neither matches the store's
+    // spelling byte-for-byte; only normalisation makes them one identity.
     const requestPath = "D:\\ws\\src\\A.vue";
     const companionPath = "d:/ws/src/A.vue.tsx";
     const sourceText = "const foo = 1;\n";
@@ -2354,8 +3168,8 @@ describe("editor-owned source diagnostic routing", () => {
 
   it("materializes the visible source diagnostic file when the configured Program omits raw Vue", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const sourceText = "const foo = 1;\n";
     const companionFile = ts.createSourceFile(
       companionPath,
@@ -2400,8 +3214,8 @@ describe("editor-owned source diagnostic routing", () => {
 
   it("does not attach mapped diagnostics to a generated Program impostor under the source identity", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const sourceText = "const foo = 1;\n";
     const companionText = mappableBlobs()["blobs/A.vue.tsx"];
     const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
@@ -2463,8 +3277,8 @@ describe("editor-owned source diagnostic routing", () => {
 
   it("drops a diagnostic whose Program snapshot predates the published source map", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const sourceText = "const foo = 1;\n";
     const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
     info.config = {
@@ -2515,8 +3329,8 @@ describe("editor-owned source diagnostic routing", () => {
   // companion Program and that generated paths/spans never leak back to the editor.
   it("routes the semantic navigation and edit surface through the exact companion", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/W.svelte";
-    const companionPath = "d:/ws/src/W.svelte.tsx";
+    const sourcePath = "/ws/src/W.svelte";
+    const companionPath = "/ws/src/W.svelte.tsx";
     const sourceText = "<script>\nconst bar = 1;\n</script>\n";
     const sourcePosition = 15;
     const companionPosition = 6;
@@ -2715,8 +3529,8 @@ describe("editor-owned source diagnostic routing", () => {
 
   it("routes quick info through the companion and maps its span back to the source", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const info = createInfo(dir, { diskFiles: { [sourcePath]: "const foo = 1;\n" } });
     info.config = {
       carrierStoreDir: dir,
@@ -2750,8 +3564,8 @@ describe("editor-owned source diagnostic routing", () => {
 
   it("routes applicable refactors through a strictly mapped companion selection", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const info = createInfo(dir, { diskFiles: { [sourcePath]: "const foo = 1;\n" } });
     info.config = {
       carrierStoreDir: dir,
@@ -2782,8 +3596,8 @@ describe("editor-owned source diagnostic routing", () => {
 
   it("routes completions through the companion and maps replacement spans back", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const info = createInfo(dir, { diskFiles: { [sourcePath]: "const foo = 1;\n" } });
     info.config = {
       carrierStoreDir: dir,
@@ -2824,11 +3638,11 @@ describe("editor-owned source diagnostic routing", () => {
   // @ai-generated - TypeScript replacement spans can end at a generated JSX
   // delimiter even when the authored identifier itself has an exact origin.
   it("keeps lexical completion when its generated replacement end is synthetic", () => {
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const sourceText = "{{ increment }}\n";
     const manifest = mappableManifest();
-    const ready = manifest.projects["d:/ws/tsconfig.json"].ready_files[companionPath];
+    const ready = manifest.projects["/ws/tsconfig.json"].ready_files[companionPath];
     ready.blob_rel = "blobs/A.vue.tsx";
     ready.map_hash = "completion-synthetic-end";
     const dir = track(
@@ -2885,8 +3699,8 @@ describe("editor-owned source diagnostic routing", () => {
   // has the source-region context required for template scope and auto-import resolve.
   // True member completion remains on the editor TypeScript route above.
   it("yields non-member completion to the carrier completion owner", () => {
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const carrierText = "const view = <>{ foo }</>;\n";
     const dir = track(
       writeStore(mappableManifest(), {
@@ -2932,7 +3746,7 @@ describe("editor-owned source diagnostic routing", () => {
   });
 
   it("keeps generated lexical locals for a typed template prefix without globals", () => {
-    const sourcePath = "d:/ws/src/A.vue";
+    const sourcePath = "/ws/src/A.vue";
     const sourceText = "{{ sl }}\n";
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
     const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
@@ -3003,10 +3817,10 @@ describe("editor-owned source diagnostic routing", () => {
   });
 
   it("keeps provider-owned lexical template scope at an empty prefix in attribution E2E", () => {
-    const sourcePath = "d:/ws/src/A.vue";
+    const sourcePath = "/ws/src/A.vue";
     const sourceText = "{{  }}\n";
     const manifest = mappableManifest();
-    manifest.projects["d:/ws/tsconfig.json"].ready_files["d:/ws/src/A.vue.tsx"].blob_rel =
+    manifest.projects["/ws/tsconfig.json"].ready_files["/ws/src/A.vue.tsx"].blob_rel =
       "blobs/A.vue.tsx";
     const dir = track(
       writeStore(manifest, {
@@ -3058,10 +3872,10 @@ describe("editor-owned source diagnostic routing", () => {
   });
 
   it("normalizes TypeScript JSX prop labels for a framework attribute position", () => {
-    const sourcePath = "d:/ws/src/A.vue";
+    const sourcePath = "/ws/src/A.vue";
     const sourceText = "<MyComp />\n";
     const manifest = mappableManifest();
-    manifest.projects["d:/ws/tsconfig.json"].ready_files["d:/ws/src/A.vue.tsx"].blob_rel =
+    manifest.projects["/ws/tsconfig.json"].ready_files["/ws/src/A.vue.tsx"].blob_rel =
       "blobs/A.vue.tsx";
     const dir = track(
       writeStore(manifest, {
@@ -3117,13 +3931,13 @@ describe("editor-owned source diagnostic routing", () => {
   // while the template-only ownership rule above continues to yield bare
   // render-scope identifiers to Verter.
   it("keeps actionable non-member completions on the TypeScript route inside script", () => {
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const sourceText =
       '<script setup lang="ts">\ncomputed\n</script>\n<template>{{ computed }}</template>\n';
     const companionText = "computed\n";
     const manifest = mappableManifest();
-    const ready = manifest.projects["d:/ws/tsconfig.json"].ready_files[companionPath];
+    const ready = manifest.projects["/ws/tsconfig.json"].ready_files[companionPath];
     ready.blob_rel = "blobs/A.vue.tsx";
     ready.map_hash = "script-completion-map";
     const dir = track(
@@ -3194,8 +4008,8 @@ describe("editor-owned source diagnostic routing", () => {
   });
 
   it("keeps carrier membership but yields source features to a selected managed provider", () => {
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const sourceText =
       '<script setup lang="ts">\nconst value = 1\n</script>\n<template>{{ value }}</template>\n';
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
@@ -3266,18 +4080,18 @@ describe("editor-owned source diagnostic routing", () => {
     ).toBeUndefined();
     expect(requests).toEqual([]);
     expect(init({ typescript: ts } as any).getExternalFiles(info.project as any)).toContain(
-      "d:/ws/src/A.vue.tsx",
+      "/ws/src/A.vue.tsx",
     );
   });
 
   it("reanchors a generated-preamble auto-import edit into the owning script block", () => {
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const sourceText =
       '<script setup lang="ts">\nconst doubled = computed(() => 1);\n</script>\n<template>{{ doubled }}</template>\n';
     const companionText = "/** generated preamble */\nconst doubled = computed(() => 1);\n";
     const manifest = mappableManifest();
-    const ready = manifest.projects["d:/ws/tsconfig.json"].ready_files[companionPath];
+    const ready = manifest.projects["/ws/tsconfig.json"].ready_files[companionPath];
     ready.blob_rel = "blobs/A.vue.tsx";
     ready.map_hash = "auto-import-preamble-map";
     const dir = track(
@@ -3362,8 +4176,8 @@ describe("editor-owned source diagnostic routing", () => {
   // identifier list as member completion. Mixed member/non-member kinds prove the
   // response is not safe to merge into the editor's member list.
   it("yields a falsely classified member list to the carrier completion owner", () => {
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const carrierText = "const view = <>{ foo.bar }</>;\n";
     const dir = track(
       writeStore(mappableManifest(), {
@@ -3406,8 +4220,8 @@ describe("editor-owned source diagnostic routing", () => {
 
   it("routes semantic classifications and maps every encoded span back", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const info = createInfo(dir, { diskFiles: { [sourcePath]: "const foo = 1;\n" } });
     info.config = {
       carrierStoreDir: dir,
@@ -3438,8 +4252,8 @@ describe("editor-owned source diagnostic routing", () => {
 
   it("routes document highlights through the companion without raw-source requests", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const sourcePath = "d:/ws/src/A.vue";
-    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
     const sourceText = "const foo = 1;\n";
     const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
     info.config = {
@@ -3484,8 +4298,8 @@ describe("editor-owned source diagnostic routing", () => {
 });
 
 describe("editor-owned routing never uses a CLOSED tsserver project", () => {
-  const sourcePath = "d:/ws/src/A.vue";
-  const companionPath = "d:/ws/src/A.vue.tsx";
+  const sourcePath = "/ws/src/A.vue";
+  const companionPath = "/ws/src/A.vue.tsx";
   const sourceText = "const foo = 1;\n";
 
   /**
@@ -3498,11 +4312,7 @@ describe("editor-owned routing never uses a CLOSED tsserver project", () => {
    * are modelled together here.
    */
   function closedConfiguredOwner(dir: string) {
-    const info = createInfo(
-      dir,
-      { diskFiles: { [sourcePath]: sourceText } },
-      "d:/ws/tsconfig.json",
-    );
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } }, "/ws/tsconfig.json");
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
@@ -3535,11 +4345,7 @@ describe("editor-owned routing never uses a CLOSED tsserver project", () => {
 
   it("drops configuration work before touching a project closed after create", async () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
-    const info = createInfo(
-      dir,
-      { diskFiles: { [sourcePath]: sourceText } },
-      "d:/ws/tsconfig.json",
-    );
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } }, "/ws/tsconfig.json");
     info.config = { carrierStoreDir: dir, activeCarrierSources: [] };
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
@@ -3587,7 +4393,7 @@ describe("editor-owned routing never uses a CLOSED tsserver project", () => {
     const revivedInfo = createInfo(
       dir,
       { diskFiles: { [sourcePath]: sourceText } },
-      "d:/ws/tsconfig.json",
+      "/ws/tsconfig.json",
     );
     revivedInfo.config = {
       carrierStoreDir: dir,
@@ -3619,10 +4425,10 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
   // read succeeds (it reads via the plugin's `_readFile` = serverHost.readFile).
   function diskWithSources(): Record<string, string> {
     return {
-      "d:/ws/src/A.vue": "<template/>\n<script setup>\nconst foo = 1;\n</script>\n",
-      "d:/ws/src/U.vue": "<template/>\n<script setup>\nconst real = 1;\n</script>\n",
-      "d:/ws/src/W.svelte": "<script>\nconst bar = 1;\n</script>\n",
-      "d:/ws/src/Consumer.ts": "import A from './A.vue';\n",
+      "/ws/src/A.vue": "<template/>\n<script setup>\nconst foo = 1;\n</script>\n",
+      "/ws/src/U.vue": "<template/>\n<script setup>\nconst real = 1;\n</script>\n",
+      "/ws/src/W.svelte": "<script>\nconst bar = 1;\n</script>\n",
+      "/ws/src/Consumer.ts": "import A from './A.vue';\n",
     };
   }
 
@@ -3634,7 +4440,7 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     info.languageService.__lsImpl = {
       getDefinitionAtPosition: () => [
         {
-          fileName: "d:/ws/src/U.vue.tsx",
+          fileName: "/ws/src/U.vue.tsx",
           textSpan: { start: 0, length: 3 },
           kind: ts.ScriptElementKind.constElement,
           name: "generated",
@@ -3645,7 +4451,7 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     };
     init({ typescript: ts } as any).create(info);
 
-    const definitions = info.languageService.getDefinitionAtPosition("d:/ws/src/Consumer.ts", 9);
+    const definitions = info.languageService.getDefinitionAtPosition("/ws/src/Consumer.ts", 9);
 
     expect(definitions).toEqual([]);
   });
@@ -3657,7 +4463,7 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
           epoch: 1,
           host_version: "test",
           projects: {
-            "d:/ws/tsconfig.json": {
+            "/ws/tsconfig.json": {
               owned_sources: [],
               ready_files: {},
             },
@@ -3671,7 +4477,7 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     info.languageService.__lsImpl = {
       getReferencesAtPosition: () => [
         {
-          fileName: "d:/ws/src/A.vue.tsx",
+          fileName: "/ws/src/A.vue.tsx",
           textSpan: { start: 6, length: 3 },
           isWriteAccess: false,
         },
@@ -3684,10 +4490,10 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
       carrierStoreDir: reconfiguredDir,
       responseRemap: true,
     });
-    const refs = info.languageService.getReferencesAtPosition("d:/ws/src/Consumer.ts", 9);
+    const refs = info.languageService.getReferencesAtPosition("/ws/src/Consumer.ts", 9);
 
     expect(refs).toHaveLength(1);
-    expect(refs[0].fileName).toBe("d:/ws/src/A.vue");
+    expect(refs[0].fileName).toBe("/ws/src/A.vue");
     expect(refs[0].textSpan).toEqual({ start: 6, length: 3 });
   });
 
@@ -3697,12 +4503,12 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     info.languageService.__lsImpl = {
       getReferencesAtPosition: () => [
         {
-          fileName: "d:/ws/src/Consumer.ts",
+          fileName: "/ws/src/Consumer.ts",
           textSpan: { start: 9, length: 1 },
           isWriteAccess: false,
         },
         {
-          fileName: "d:/ws/src/A.vue.tsx",
+          fileName: "/ws/src/A.vue.tsx",
           textSpan: { start: 6, length: 3 },
           isWriteAccess: false,
         },
@@ -3710,11 +4516,11 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     };
     init({ typescript: ts } as any).create(info);
 
-    const refs = info.languageService.getReferencesAtPosition("d:/ws/src/Consumer.ts", 9);
+    const refs = info.languageService.getReferencesAtPosition("/ws/src/Consumer.ts", 9);
     const paths = refs.map((r: any) => r.fileName);
     // The companion entry is mapped to the SOURCE .vue, the real .ts is intact.
-    expect(paths).toContain("d:/ws/src/A.vue");
-    expect(paths).toContain("d:/ws/src/Consumer.ts");
+    expect(paths).toContain("/ws/src/A.vue");
+    expect(paths).toContain("/ws/src/Consumer.ts");
     expect(paths.some((p: string) => p.includes(".vue.tsx"))).toBe(false);
   });
 
@@ -3726,7 +4532,7 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
         // `U.vue.tsx` line 1 (offset 0) is a generated-only helper region — its
         // map only covers line 2, so this span has NO source origin.
         {
-          fileName: "d:/ws/src/U.vue.tsx",
+          fileName: "/ws/src/U.vue.tsx",
           textSpan: { start: 0, length: 3 },
           isWriteAccess: false,
         },
@@ -3734,7 +4540,7 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     };
     init({ typescript: ts } as any).create(info);
 
-    const refs = info.languageService.getReferencesAtPosition("d:/ws/src/Consumer.ts", 9);
+    const refs = info.languageService.getReferencesAtPosition("/ws/src/Consumer.ts", 9);
     // No mappable origin → dropped: NEVER a companion path, NEVER a mis-mapped source.
     expect(refs).toHaveLength(0);
   });
@@ -3744,20 +4550,20 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     const info = createInfo(dir, { diskFiles: diskWithSources() });
     info.languageService.__lsImpl = {
       findRenameLocations: () => [
-        { fileName: "d:/ws/src/W.svelte.tsx", textSpan: { start: 6, length: 3 } },
+        { fileName: "/ws/src/W.svelte.tsx", textSpan: { start: 6, length: 3 } },
       ],
     };
     init({ typescript: ts } as any).create(info);
 
     const locs = info.languageService.findRenameLocations(
-      "d:/ws/src/Consumer.ts",
+      "/ws/src/Consumer.ts",
       0,
       false,
       false,
       undefined,
     );
     expect(locs).toHaveLength(1);
-    expect(locs[0].fileName).toBe("d:/ws/src/W.svelte");
+    expect(locs[0].fileName).toBe("/ws/src/W.svelte");
     expect(locs[0].fileName).not.toContain(".svelte.tsx");
     // The rename span lands EXACTLY on `bar` inside the source's script line.
     expect(locs[0].textSpan).toEqual({ start: 15, length: 3 });
@@ -3773,11 +4579,11 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
           description: "fix",
           changes: [
             {
-              fileName: "d:/ws/src/A.vue.tsx",
+              fileName: "/ws/src/A.vue.tsx",
               textChanges: [{ span: { start: 6, length: 3 }, newText: "renamed" }],
             },
             {
-              fileName: "d:/ws/src/Consumer.ts",
+              fileName: "/ws/src/Consumer.ts",
               textChanges: [
                 { span: { start: 0, length: 0 }, newText: 'import C from "./Comp.vue.tsx";\n' },
               ],
@@ -3789,7 +4595,7 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     init({ typescript: ts } as any).create(info);
 
     const fixes = info.languageService.getCodeFixesAtPosition(
-      "d:/ws/src/Consumer.ts",
+      "/ws/src/Consumer.ts",
       0,
       1,
       [1],
@@ -3799,9 +4605,9 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     const changePaths = fixes[0].changes.map((c: any) => c.fileName);
     // The companion edit landed on the .vue SOURCE; the real .ts edit kept its
     // path with the import specifier rewritten to the bare .vue.
-    expect(changePaths).toContain("d:/ws/src/A.vue");
+    expect(changePaths).toContain("/ws/src/A.vue");
     expect(changePaths.some((p: string) => p.includes(".vue.tsx"))).toBe(false);
-    const consumerEdit = fixes[0].changes.find((c: any) => c.fileName === "d:/ws/src/Consumer.ts");
+    const consumerEdit = fixes[0].changes.find((c: any) => c.fileName === "/ws/src/Consumer.ts");
     expect(consumerEdit.textChanges[0].newText).toBe('import C from "./Comp.vue";\n');
   });
 
@@ -3819,7 +4625,7 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
           description: 'Add import from "./Comp.vue.tsx"',
           changes: [
             {
-              fileName: "d:/ws/src/A.vue.tsx",
+              fileName: "/ws/src/A.vue.tsx",
               textChanges: [{ span: { start: 6, length: 3 }, newText: 'import "./Comp.vue.tsx";' }],
             },
           ],
@@ -3829,7 +4635,7 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     init({ typescript: ts } as any).create(info);
 
     const detail = info.languageService.getCompletionEntryDetails(
-      "d:/ws/src/Consumer.ts",
+      "/ws/src/Consumer.ts",
       0,
       "Comp",
       {},
@@ -3841,7 +4647,7 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     // The description display-cleanup strips the companion suffix…
     expect(action.description).toBe('Add import from "./Comp.vue"');
     // …and the edit maps to the .vue SOURCE with the specifier rewritten.
-    expect(action.changes[0].fileName).toBe("d:/ws/src/A.vue");
+    expect(action.changes[0].fileName).toBe("/ws/src/A.vue");
     expect(action.changes[0].textChanges[0].newText).toBe('import "./Comp.vue";');
     expect(action.changes[0].textChanges[0].newText).not.toContain(".vue.tsx");
   });
@@ -3855,9 +4661,9 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
 describe("responseRemap = false (verter_lsp-internal backend) → RAW companion responses", () => {
   function diskWithSources(): Record<string, string> {
     return {
-      "d:/ws/src/A.vue": "<template/>\n<script setup>\nconst foo = 1;\n</script>\n",
-      "d:/ws/src/W.svelte": "<script>\nconst bar = 1;\n</script>\n",
-      "d:/ws/src/Consumer.ts": "import A from './A.vue';\n",
+      "/ws/src/A.vue": "<template/>\n<script setup>\nconst foo = 1;\n</script>\n",
+      "/ws/src/W.svelte": "<script>\nconst bar = 1;\n</script>\n",
+      "/ws/src/Consumer.ts": "import A from './A.vue';\n",
     };
   }
 
@@ -3874,7 +4680,7 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
     info.languageService.__lsImpl = {
       getReferencesAtPosition: () => [
         {
-          fileName: "d:/ws/src/A.vue.tsx",
+          fileName: "/ws/src/A.vue.tsx",
           textSpan: { start: 6, length: 3 },
           isWriteAccess: false,
         },
@@ -3882,10 +4688,10 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
     };
     init({ typescript: ts } as any).create(info);
 
-    const refs = info.languageService.getReferencesAtPosition("d:/ws/src/Consumer.ts", 9);
+    const refs = info.languageService.getReferencesAtPosition("/ws/src/Consumer.ts", 9);
     // RAW: the companion path is preserved (Rust maps it), the span is unchanged.
     expect(refs).toHaveLength(1);
-    expect(refs[0].fileName).toBe("d:/ws/src/A.vue.tsx");
+    expect(refs[0].fileName).toBe("/ws/src/A.vue.tsx");
     expect(refs[0].textSpan).toEqual({ start: 6, length: 3 });
   });
 
@@ -3894,20 +4700,20 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
     const info = createInfoNoRemap(dir, { diskFiles: diskWithSources() });
     info.languageService.__lsImpl = {
       findRenameLocations: () => [
-        { fileName: "d:/ws/src/W.svelte.tsx", textSpan: { start: 6, length: 3 } },
+        { fileName: "/ws/src/W.svelte.tsx", textSpan: { start: 6, length: 3 } },
       ],
     };
     init({ typescript: ts } as any).create(info);
 
     const locs = info.languageService.findRenameLocations(
-      "d:/ws/src/Consumer.ts",
+      "/ws/src/Consumer.ts",
       0,
       false,
       false,
       undefined,
     );
     expect(locs).toHaveLength(1);
-    expect(locs[0].fileName).toBe("d:/ws/src/W.svelte.tsx");
+    expect(locs[0].fileName).toBe("/ws/src/W.svelte.tsx");
   });
 
   it("getCodeFixesAtPosition: companion edits + specifier pass through RAW (no rewrite)", () => {
@@ -3920,11 +4726,11 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
           description: "fix",
           changes: [
             {
-              fileName: "d:/ws/src/A.vue.tsx",
+              fileName: "/ws/src/A.vue.tsx",
               textChanges: [{ span: { start: 6, length: 3 }, newText: "renamed" }],
             },
             {
-              fileName: "d:/ws/src/Consumer.ts",
+              fileName: "/ws/src/Consumer.ts",
               textChanges: [
                 { span: { start: 0, length: 0 }, newText: 'import C from "./Comp.vue.tsx";\n' },
               ],
@@ -3936,7 +4742,7 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
     init({ typescript: ts } as any).create(info);
 
     const fixes = info.languageService.getCodeFixesAtPosition(
-      "d:/ws/src/Consumer.ts",
+      "/ws/src/Consumer.ts",
       0,
       1,
       [1],
@@ -3946,8 +4752,8 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
     // RAW: the companion edit KEEPS its `.vue.tsx` path (Rust maps it) and the
     // inserted specifier is NOT rewritten (Rust owns that on the LSP surface).
     const changePaths = fixes[0].changes.map((c: any) => c.fileName);
-    expect(changePaths).toContain("d:/ws/src/A.vue.tsx");
-    const consumerEdit = fixes[0].changes.find((c: any) => c.fileName === "d:/ws/src/Consumer.ts");
+    expect(changePaths).toContain("/ws/src/A.vue.tsx");
+    const consumerEdit = fixes[0].changes.find((c: any) => c.fileName === "/ws/src/Consumer.ts");
     expect(consumerEdit.textChanges[0].newText).toBe('import C from "./Comp.vue.tsx";\n');
   });
 
@@ -3964,7 +4770,7 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
           description: 'Add import from "./Comp.vue.tsx"',
           changes: [
             {
-              fileName: "d:/ws/src/A.vue.tsx",
+              fileName: "/ws/src/A.vue.tsx",
               textChanges: [{ span: { start: 6, length: 3 }, newText: 'import "./Comp.vue.tsx";' }],
             },
           ],
@@ -3974,7 +4780,7 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
     init({ typescript: ts } as any).create(info);
 
     const detail = info.languageService.getCompletionEntryDetails(
-      "d:/ws/src/Consumer.ts",
+      "/ws/src/Consumer.ts",
       0,
       "Comp",
       {},
@@ -3987,7 +4793,7 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
     expect(action.description).toBe('Add import from "./Comp.vue"');
     // The actual EDIT passes through RAW: companion path kept, specifier NOT
     // rewritten — the Rust completion/merge layer owns the LSP-surface mapping.
-    expect(action.changes[0].fileName).toBe("d:/ws/src/A.vue.tsx");
+    expect(action.changes[0].fileName).toBe("/ws/src/A.vue.tsx");
     expect(action.changes[0].textChanges[0].newText).toBe('import "./Comp.vue.tsx";');
   });
 
@@ -3998,7 +4804,7 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
     // fallback `getDefinitionAtPosition` returns a companion module-level def.
     info.languageService.getDefinitionAtPosition = () => [
       {
-        fileName: "d:/ws/src/A.vue.tsx",
+        fileName: "/ws/src/A.vue.tsx",
         textSpan: { start: 0, length: 1 },
         kind: "module",
         name: "A",
@@ -4008,11 +4814,11 @@ describe("responseRemap = false (verter_lsp-internal backend) → RAW companion 
     ];
     init({ typescript: ts } as any).create(info);
 
-    const defs = info.languageService.getDefinitionAtPosition("d:/ws/src/Consumer.ts", 9);
+    const defs = info.languageService.getDefinitionAtPosition("/ws/src/Consumer.ts", 9);
     // RAW: the companion path is preserved (the Rust merge layer maps the
     // module-level def → `.vue` source); the plugin does NOT remap here.
     expect(defs).toHaveLength(1);
-    expect(defs[0].fileName).toBe("d:/ws/src/A.vue.tsx");
+    expect(defs[0].fileName).toBe("/ws/src/A.vue.tsx");
   });
 });
 
@@ -4067,12 +4873,13 @@ describe("module-level companion definition remap (import-specifier go-to-def)",
 
   function diskWithCarrierSources(): Record<string, string> {
     return {
-      "d:/ws/src/A.vue": '<template/>\n<script setup lang="ts">\nconst x = 1;\n</script>\n',
-      "d:/ws/src/W.svelte": '<script lang="ts">\nconst y = 1;\n</script>\n',
+      "/ws/src/A.vue": '<template/>\n<script setup lang="ts">\nconst x = 1;\n</script>\n',
+      "/ws/src/W.svelte": '<script lang="ts">\nconst y = 1;\n</script>\n',
       // The carriers must exist on disk so `resolveModuleFileName` (which checks
-      // `path.resolve(dir, './A.vue')`) resolves them; the plugin redirects to
-      // the IDE companion via `toIdeCarrierFileName`.
-      "d:/ws/src/Consumer.ts": CONSUMER,
+      // `path.resolve(dir, './A.vue')`) resolves them. Module-specifier
+      // NAVIGATION targets the carrier SOURCE directly — no companion is
+      // involved, and no publication state is consulted.
+      "/ws/src/Consumer.ts": CONSUMER,
     };
   }
 
@@ -4083,18 +4890,18 @@ describe("module-level companion definition remap (import-specifier go-to-def)",
     const { info, consumerSource } = infoWithProgram(
       dir,
       { diskFiles: diskWithCarrierSources() },
-      "d:/ws/src/Consumer.ts",
+      "/ws/src/Consumer.ts",
       CONSUMER,
     );
     init({ typescript: ts } as any).create(info);
 
     // Offset inside the `./A.vue` specifier text.
     const off = consumerSource.indexOf("./A.vue") + 2;
-    const defs = info.languageService.getDefinitionAtPosition("d:/ws/src/Consumer.ts", off);
+    const defs = info.languageService.getDefinitionAtPosition("/ws/src/Consumer.ts", off);
     expect(defs).toBeDefined();
     expect(defs).toHaveLength(1);
     // Lands in the .vue SOURCE.
-    expect(defs[0].fileName).toBe("d:/ws/src/A.vue");
+    expect(defs[0].fileName).toBe("/ws/src/A.vue");
     // NEVER the companion path.
     expect(defs[0].fileName).not.toContain(".vue.tsx");
     expect(defs[0].fileName).not.toContain(".verter.ts");
@@ -4109,16 +4916,16 @@ describe("module-level companion definition remap (import-specifier go-to-def)",
     const { info, consumerSource } = infoWithProgram(
       dir,
       { diskFiles: diskWithCarrierSources() },
-      "d:/ws/src/Consumer.ts",
+      "/ws/src/Consumer.ts",
       CONSUMER,
     );
     init({ typescript: ts } as any).create(info);
 
     const off = consumerSource.indexOf("./W.svelte") + 2;
-    const defs = info.languageService.getDefinitionAtPosition("d:/ws/src/Consumer.ts", off);
+    const defs = info.languageService.getDefinitionAtPosition("/ws/src/Consumer.ts", off);
     expect(defs).toBeDefined();
     expect(defs).toHaveLength(1);
-    expect(defs[0].fileName).toBe("d:/ws/src/W.svelte");
+    expect(defs[0].fileName).toBe("/ws/src/W.svelte");
     expect(defs[0].fileName).not.toContain(".svelte.tsx");
     expect(defs[0].fileName).not.toContain(".verter.ts");
   });
@@ -4130,16 +4937,16 @@ describe("module-level companion definition remap (import-specifier go-to-def)",
     const { info, consumerSource } = infoWithProgram(
       dir,
       { diskFiles: diskWithCarrierSources() },
-      "d:/ws/src/Consumer.ts",
+      "/ws/src/Consumer.ts",
       CONSUMER,
     );
     init({ typescript: ts } as any).create(info);
 
     const off = consumerSource.indexOf("./A.vue") + 2;
-    const result = info.languageService.getDefinitionAndBoundSpan("d:/ws/src/Consumer.ts", off);
+    const result = info.languageService.getDefinitionAndBoundSpan("/ws/src/Consumer.ts", off);
     expect(result).toBeDefined();
     expect(result.definitions).toHaveLength(1);
-    expect(result.definitions[0].fileName).toBe("d:/ws/src/A.vue");
+    expect(result.definitions[0].fileName).toBe("/ws/src/A.vue");
     expect(result.definitions[0].fileName).not.toContain(".vue.tsx");
   });
 });
@@ -4147,14 +4954,14 @@ describe("module-level companion definition remap (import-specifier go-to-def)",
 describe("store unavailable → fail closed", () => {
   it("serves nothing for carriers and falls through for everything else", () => {
     const info = createInfo(undefined, {
-      diskFiles: { "d:/ws/src/A.vue.tsx": "ON-DISK", "d:/ws/src/real.ts": "real" },
+      diskFiles: { "/ws/src/A.vue.tsx": "ON-DISK", "/ws/src/real.ts": "real" },
     });
     init({ typescript: ts } as any).create(info);
 
     // No store → the companion path is whatever is on real disk (no fabrication).
-    expect(info.serverHost.readFile("d:/ws/src/real.ts")).toBe("real");
+    expect(info.serverHost.readFile("/ws/src/real.ts")).toBe("real");
     // A path that happens to look like a companion still just hits disk.
-    expect(info.serverHost.readFile("d:/ws/src/A.vue.tsx")).toBe("ON-DISK");
+    expect(info.serverHost.readFile("/ws/src/A.vue.tsx")).toBe("ON-DISK");
   });
 });
 
@@ -4166,18 +4973,299 @@ describe("carrier-path conflict honor (manifest is the authority)", () => {
     init({ typescript: ts } as any).create(info);
 
     // Foo.vue.tsx is not in the manifest → not fabricated; disk says no.
-    expect(info.serverHost.fileExists("d:/ws/src/Foo.vue.tsx")).toBe(false);
-    expect(info.languageServiceHost.getScriptSnapshot("d:/ws/src/Foo.vue.tsx")).toBeUndefined();
+    expect(info.serverHost.fileExists("/ws/src/Foo.vue.tsx")).toBe(false);
+    expect(info.languageServiceHost.getScriptSnapshot("/ws/src/Foo.vue.tsx")).toBeUndefined();
   });
 
   it("does not overlay-shadow a real file living at the carrier path", () => {
     // A real user file sits at Foo.vue.tsx; Rust left it out of the manifest.
     const dir = track(writeStore(vueAndSvelteManifest(), {}));
-    const info = createInfo(dir, { diskFiles: { "d:/ws/src/Foo.vue.tsx": "REAL USER FILE" } });
+    const info = createInfo(dir, { diskFiles: { "/ws/src/Foo.vue.tsx": "REAL USER FILE" } });
     init({ typescript: ts } as any).create(info);
 
     // The plugin honors the manifest and returns the REAL file, not a companion.
-    expect(info.serverHost.readFile("d:/ws/src/Foo.vue.tsx")).toBe("REAL USER FILE");
-    expect(info.serverHost.fileExists("d:/ws/src/Foo.vue.tsx")).toBe(true);
+    expect(info.serverHost.readFile("/ws/src/Foo.vue.tsx")).toBe("REAL USER FILE");
+    expect(info.serverHost.fileExists("/ws/src/Foo.vue.tsx")).toBe(true);
+  });
+});
+
+describe("import-path completion in a plain .ts offers owned carriers", () => {
+  const projectKey = "/ws/tsconfig.json";
+  const consumer = "/ws/src/consumer.ts";
+  // Caret sits INSIDE the module-specifier literal, right after `./`.
+  const consumerText = 'import Comp from "./";\n';
+  const caret = consumerText.indexOf('"./') + '"./'.length;
+
+  const compilerOptions = (): ts.CompilerOptions => ({
+    strict: true,
+    noLib: true,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+  });
+
+  /**
+   * A manifest where `A.vue` and `W.svelte` own READY public-API surfaces
+   * (`CarrierApi` + ready blob — the resolvable state), while `B.vue` stays
+   * IDE-role-only (an ordinary import of it ABSTAINS today, so offering it
+   * would insert a specifier that does NOT resolve).
+   */
+  function resolvableCarrierManifest(): Manifest {
+    const manifest = vueAndSvelteManifest();
+    const project = manifest.projects[projectKey];
+    project.owned_sources.push(
+      {
+        source_uri: "/ws/src/A.vue",
+        provider_uri: "/ws/src/A.vue.verter.ts",
+        role: "CarrierApi",
+        script_kind: "TS",
+      },
+      {
+        source_uri: "/ws/src/W.svelte",
+        provider_uri: "/ws/src/W.svelte.verter.ts",
+        role: "CarrierApi",
+        script_kind: "TS",
+      },
+    );
+    project.ready_files["/ws/src/A.vue.verter.ts"] = {
+      content_hash: "aa1",
+      version: 6,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    project.ready_files["/ws/src/W.svelte.verter.ts"] = {
+      content_hash: "wa1",
+      version: 4,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/W.svelte.verter.ts",
+    };
+    return manifest;
+  }
+
+  function completionHarness(options: { manifest: Manifest; diskFiles: Record<string, string> }) {
+    const dir = track(
+      writeStore(options.manifest, {
+        "blobs/A.vue.verter.ts": "export default class A {}",
+        "blobs/W.svelte.verter.ts": "export default class W {}",
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: options.diskFiles }, projectKey);
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 1,
+    };
+    const opts = compilerOptions();
+    info.project.getConfigFilePath = () => projectKey;
+    info.project.getCompilerOptions = () => opts;
+    info.languageServiceHost.getCompilationSettings = () => opts;
+    info.languageServiceHost.getCurrentDirectory = info.project.getCurrentDirectory;
+    info.languageServiceHost.getDefaultLibFileName = () => "/ws/no-lib.d.ts";
+    info.languageServiceHost.getScriptFileNames = () => Object.keys(options.diskFiles);
+    info.languageServiceHost.fileExists = info.serverHost.fileExists;
+    info.languageServiceHost.readFile = info.serverHost.readFile;
+
+    // tsserver's lifecycle: the project's LanguageService exists BEFORE the
+    // plugin decorates the same host object. `getProgram` mirrors the real
+    // service (the fake `createInfo` default pins it to `undefined`).
+    const realLanguageService = ts.createLanguageService(info.languageServiceHost);
+    info.languageService.__lsImpl = realLanguageService;
+    info.languageService.getProgram = () => realLanguageService.getProgram();
+
+    init({ typescript: ts } as any).create(info);
+    return { info, opts };
+  }
+
+  it("offers each RESOLVABLE owned carrier by name (.vue AND .svelte) and the accepted specifier resolves", () => {
+    const { info, opts } = completionHarness({
+      manifest: resolvableCarrierManifest(),
+      diskFiles: {
+        [consumer]: consumerText,
+        "/ws/src/A.vue": "<template/>",
+        "/ws/src/W.svelte": "<script></script>",
+        "/ws/src/B.vue": "<template/>",
+        // On disk but ABSENT from the manifest: Rust marked it ambiguous
+        // (carrier-path conflict), so importing it cannot resolve.
+        "/ws/src/Conflicted.vue": "<template/>",
+      },
+    });
+
+    const result = info.languageService.getCompletionsAtPosition(
+      consumer,
+      caret,
+      undefined,
+      undefined,
+    ) as ts.CompletionInfo | undefined;
+    expect(result).toBeDefined();
+    const names = result!.entries.map((entry) => entry.name);
+
+    // The user-reported defect: typing `from './` in a plain .ts must offer
+    // the carrier BY NAME, for BOTH first-class frameworks.
+    expect(names).toContain("A.vue");
+    expect(names).toContain("W.svelte");
+
+    // Fail closed: a carrier the manifest does not own cannot resolve, so it
+    // is NOT offered — neither the conflicted one nor the IDE-role-only one.
+    expect(names).not.toContain("Conflicted.vue");
+    expect(names).not.toContain("B.vue");
+
+    // Never a companion/virtual path in the offer list.
+    expect(names).not.toContain("A.vue.verter.ts");
+    expect(names).not.toContain("A.vue.tsx");
+    expect(names).not.toContain("W.svelte.verter.ts");
+
+    // The entry is a path completion: TypeScript's path-entry kind, the
+    // carrier extension as kindModifiers, TS's location sort priority.
+    const vueEntry = result!.entries.find((entry) => entry.name === "A.vue")!;
+    expect(vueEntry.kind).toBe(ts.ScriptElementKind.scriptElement);
+    expect(vueEntry.kindModifiers).toBe(".vue");
+    expect(vueEntry.sortText).toBe("11");
+
+    // Accepting the entry inserts the authored bare specifier `./A.vue`, and
+    // that exact specifier RESOLVES through the same plugin host (to the
+    // public-API surface, never the IDE companion).
+    const resolved = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./A.vue" }],
+      consumer,
+      undefined,
+      opts,
+      undefined,
+    )[0]?.resolvedModule;
+    expect(resolved?.resolvedFileName).toBe("/ws/src/A.vue.verter.ts");
+  });
+
+  it("computes the replacement span from RAW source text (escaped windows separator)", () => {
+    // The user's file contains: import W from ".\\W.sv";
+    // Raw literal contents `.\\W.sv` (7 chars) cook to `.\W.sv` (6 chars) —
+    // TypeScript collapses the escaped separator in `literal.text`. A span
+    // computed from cooked offsets starts one raw character early, so
+    // accepting `W.svelte` would splice `".\W.sveltev"` into the file.
+    const text = 'import W from ".\\\\W.sv";\n';
+    const caret = text.indexOf('W.sv"') + "W.sv".length;
+    const { info } = completionHarness({
+      manifest: resolvableCarrierManifest(),
+      diskFiles: {
+        [consumer]: text,
+        "/ws/src/A.vue": "<template/>",
+        "/ws/src/W.svelte": "<script></script>",
+      },
+    });
+
+    const result = info.languageService.getCompletionsAtPosition(
+      consumer,
+      caret,
+      undefined,
+      undefined,
+    ) as ts.CompletionInfo | undefined;
+    const entry = result?.entries.find((candidate) => candidate.name === "W.svelte");
+    expect(entry).toBeDefined();
+
+    // The RAW basename `W.sv` — the actual source characters the accept must
+    // replace — starts AFTER both raw backslashes.
+    expect(entry!.replacementSpan).toEqual({ start: text.indexOf("W.sv"), length: 4 });
+
+    // Accepting the entry yields a clean, still-escaped specifier — never the
+    // corrupted `".\W.sveltev"`.
+    const span = entry!.replacementSpan!;
+    const accepted = text.slice(0, span.start) + entry!.name + text.slice(span.start + span.length);
+    expect(accepted).toBe('import W from ".\\\\W.svelte";\n');
+  });
+
+  it("does not offer an owned carrier whose import surface has not published yet (warm-up)", () => {
+    const manifest = resolvableCarrierManifest();
+    // Ownership lands BEFORE content publishes: an owned CarrierApi row with
+    // NO ready_files entry is the warm-up window. Offering it would insert a
+    // specifier the non-blocking resolution arms cannot serve yet.
+    manifest.projects[projectKey].owned_sources.push({
+      source_uri: "/ws/src/Warm.vue",
+      provider_uri: "/ws/src/Warm.vue.verter.ts",
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    const { info } = completionHarness({
+      manifest,
+      diskFiles: {
+        [consumer]: consumerText,
+        "/ws/src/A.vue": "<template/>",
+        "/ws/src/W.svelte": "<script></script>",
+        "/ws/src/Warm.vue": "<template/>",
+      },
+    });
+
+    const result = info.languageService.getCompletionsAtPosition(
+      consumer,
+      caret,
+      undefined,
+      undefined,
+    ) as ts.CompletionInfo | undefined;
+    const names = result?.entries.map((entry) => entry.name) ?? [];
+    expect(names).not.toContain("Warm.vue");
+    // The READY carriers in the same directory are still offered.
+    expect(names).toContain("A.vue");
+    expect(names).toContain("W.svelte");
+  });
+
+  it("does not offer carriers outside a module-specifier string (plain string literal)", () => {
+    const text = 'const s = "./";\n';
+    const pos = text.indexOf('"./') + '"./'.length;
+    const { info } = completionHarness({
+      manifest: resolvableCarrierManifest(),
+      diskFiles: {
+        "/ws/src/consumer.ts": text,
+        "/ws/src/A.vue": "<template/>",
+      },
+    });
+
+    const result = info.languageService.getCompletionsAtPosition(
+      "/ws/src/consumer.ts",
+      pos,
+      undefined,
+      undefined,
+    ) as ts.CompletionInfo | undefined;
+    const names = result?.entries.map((entry) => entry.name) ?? [];
+    expect(names).not.toContain("A.vue");
+  });
+
+  it("offers carriers from a SUBDIRECTORY fragment and none from the wrong directory", () => {
+    const text = 'import Comp from "./components/";\n';
+    const pos = text.indexOf('"./components/') + '"./components/'.length;
+    const manifest = resolvableCarrierManifest();
+    const project = manifest.projects[projectKey];
+    project.owned_sources.push({
+      source_uri: "/ws/src/components/Nested.vue",
+      provider_uri: "/ws/src/components/Nested.vue.verter.ts",
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    project.ready_files["/ws/src/components/Nested.vue.verter.ts"] = {
+      content_hash: "n1",
+      version: 1,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/A.vue.verter.ts",
+    };
+    const { info } = completionHarness({
+      manifest,
+      diskFiles: {
+        "/ws/src/consumer.ts": text,
+        "/ws/src/A.vue": "<template/>",
+        "/ws/src/components/Nested.vue": "<template/>",
+      },
+    });
+
+    const result = info.languageService.getCompletionsAtPosition(
+      "/ws/src/consumer.ts",
+      pos,
+      undefined,
+      undefined,
+    ) as ts.CompletionInfo | undefined;
+    const names = result?.entries.map((entry) => entry.name) ?? [];
+    expect(names).toContain("Nested.vue");
+    // Carriers owned in the PARENT directory must not leak into the subdir list.
+    expect(names).not.toContain("A.vue");
   });
 });

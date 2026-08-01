@@ -1,5 +1,5 @@
-//! Cooperative-admission substrate tests — extracted sibling of
-//! `singleflight.rs` (kept under the file-size guard cap).
+//! Cooperative-admission substrate tests, kept in a sibling so the state machine
+//! and its thread-coordinated discriminators remain independently readable.
 //!
 //! Included as a child `mod` of `singleflight` via
 //! `#[path]`, so `use super::*` reaches the substrate's private

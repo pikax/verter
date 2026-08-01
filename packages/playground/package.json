@@ -11,7 +11,8 @@
     "build:workspace-deps": "pnpm --filter @verter/type-ir build && pnpm --filter @verter/proto build && pnpm --filter @verter/types build && pnpm --filter @verter/language-shared build && pnpm --filter @verter/native build:types",
     "build": "pnpm run build:workspace-deps && pnpm --filter @verter/unplugin build && pnpm --filter @verter/wasm build && pnpm --filter @verter/component-meta build && vite build",
     "preview": "vite preview",
-    "test": "vitest --run --exclude '**/compiler.spec.ts' --exclude '**/tsService.spec.ts'",
+    "test": "vitest --run --exclude '**/compiler.spec.ts'",
+    "test:wasm": "vitest --run src/core/compiler.spec.ts",
     "test:e2e": "playwright test",
     "generate:vue-language": "tsx scripts/generate-vue-language.ts"
   },

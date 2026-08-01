@@ -389,8 +389,12 @@ export function getModuleSpecifierNavigationResult(
     definitions: [
       {
         fileName: resolvedFileName,
-        textSpan: toTextSpan(0, 1),
-        contextSpan: toTextSpan(0, 1),
+        // The target is a whole FILE, so the caret is that file's start. An
+        // empty span is what a file-level navigation means (and what the
+        // companion→source module-level remap normalises to), so both routes
+        // agree on the caret regardless of which one produced the target.
+        textSpan: toTextSpan(0, 0),
+        contextSpan: toTextSpan(0, 0),
         name: literal.text,
         kind: ts.ScriptElementKind.moduleElement,
         containerKind: ts.ScriptElementKind.unknown,

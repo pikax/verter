@@ -53,13 +53,14 @@ use crate::code_transform::{CodeTransform, GeneratedSourceRange};
 use crate::common::Span;
 use crate::cursor::position::PositionResolver;
 use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
+use crate::parser::types::SfcScriptDialect;
 use crate::parser::Syntax;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::shared::helpers::escape_js_string_into;
 use crate::tokenizer::byte::tokenize_sfc;
 use crate::utils::oxc::vue::{
-    extract_options_component_macro_args, parse_script, DefaultExportType, ImportSpecifierKind,
-    MacroArrayArg, MacroObjectArg, MacroTypeParams, OptionsComponentMacroArgs,
+    extract_options_component_macro_args, parse_script, CallableShape, DefaultExportType,
+    ImportSpecifierKind, MacroArrayArg, MacroObjectArg, MacroTypeParams, OptionsComponentMacroArgs,
     RuntimeConstructorSyntax, ScriptItem, ScriptMacro, ScriptMode, ScriptParseContext,
 };
 
@@ -80,6 +81,260 @@ declare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, 
 
 const TERMINAL_EMITS_TO_PROPS_TYPE: &str = "type __Verter_EmitsToProps<T> = T extends (...args: infer A) => any ? A extends [infer E extends string, ...infer P] ? { [K in E as `on${Capitalize<K>}`]?: (...args: P) => void } : {} : T extends Record<string, any> ? { [K in keyof T as K extends string ? `on${Capitalize<K>}` : never]?: (...args: T[K] extends any[] ? T[K] : T[K] extends (...args: infer P) => any ? P : unknown[]) => void } : {}\n";
 
+/// The type-expression BODY of each widening helper, shared between the two
+/// renderings of the fallthrough surface: the TypeScript `type` alias and the
+/// JSDoc `@typedef` (JavaScript-carrier) form. A macro rather than a `const`
+/// so both spellings stay compile-time `concat!` literals — the two renderings
+/// CANNOT drift because there is exactly one body text.
+macro_rules! fallthrough_root_element_body {
+    () => {
+        "Tag extends keyof import(\"vue\").IntrinsicElementAttributes ? import(\"vue\").IntrinsicElementAttributes[Tag] : {}"
+    };
+}
+/// See [`fallthrough_root_element_body`].
+macro_rules! fallthrough_data_attrs_body {
+    () => {
+        "{ [Key in `data-${string}`]?: unknown }"
+    };
+}
+/// See [`fallthrough_root_element_body`].
+macro_rules! fallthrough_inherited_component_props_body {
+    () => {
+        "Component extends abstract new (...args: any) => { $props: infer Props } ? { [Key in Name & keyof Props]?: Props[Key] } : {}"
+    };
+}
+/// See [`fallthrough_root_element_body`].
+macro_rules! fallthrough_channel_overlay_body {
+    () => {
+        "Omit<Base, keyof Over> & Over"
+    };
+}
+/// See [`fallthrough_root_element_body`] — the `__OmitNew` construct-signature
+/// stripper's body, shared by [`render_widened_stub_tail`] (TypeScript `type`
+/// alias) and [`render_widened_stub_tail_jsdoc`] (JSDoc `@typedef`).
+macro_rules! omit_new_body {
+    () => {
+        "{ [K in keyof T]: T[K] }"
+    };
+}
+
+/// The native root element's OWN props type, looked up through Vue's
+/// `IntrinsicElementAttributes` — the same map Vue's JSX `IntrinsicElements`
+/// is built from, so the widened surface is the element's real, member-typed
+/// props type and never an index signature.
+///
+/// `Tag` is a naked type parameter so the true branch narrows it to a key and
+/// the index is legal; a tag Vue does not publish (a custom element, an SVG
+/// tag Vue types separately) resolves to `{}` — the element contributes NO
+/// widening rather than a compile error or an open surface.
+const FALLTHROUGH_ROOT_ELEMENT_TYPE: &str = concat!(
+    "type __Verter_RootElementAttrs<Tag extends string> = ",
+    fallthrough_root_element_body!(),
+    "\n"
+);
+
+/// [`FALLTHROUGH_ROOT_ELEMENT_TYPE`] as a JSDoc `@typedef`, for the
+/// JavaScript-carrier rendering (see [`render_widened_stub_tail_jsdoc`]).
+const FALLTHROUGH_ROOT_ELEMENT_TYPEDEF: &str = concat!(
+    "/**\n * @template {string} Tag\n * @typedef {",
+    fallthrough_root_element_body!(),
+    "} __Verter_RootElementAttrs\n */\n"
+);
+
+/// Introduce-on-absence augmentation for the map
+/// [`FALLTHROUGH_ROOT_ELEMENT_TYPE`] indexes.
+///
+/// `IntrinsicElementAttributes` is only EXPORTED from `vue` from 3.3 onward; on
+/// 3.0–3.2 it exists as a non-exported internal interface, so a bare
+/// `import("vue").IntrinsicElementAttributes` reference is a hard TS2694
+/// ("namespace has no exported member") on EVERY widened carrier — not the `{}`
+/// degradation the conditional provides for an unknown TAG. A custom `vue`
+/// contract without runtime-dom's exported map fails identically.
+///
+/// Merging an EMPTY interface into `vue` makes the name exist on every Vue
+/// version: where Vue publishes the map the augmentation is a no-op, and where
+/// it does not the interface has no keys, so `Tag extends keyof …` is false for
+/// every tag and the whole widening degrades to `{}` — it VANISHES rather than
+/// erroring. This is the same mechanism, for the same reason, as the shipped
+/// `GlobalComponents` augmentation in
+/// [`crate::ide::script::type_constructs::VUE_GLOBAL_COMPONENTS_AUGMENTATION`].
+///
+/// `pub` for one consumer class: a JavaScript-carrier widening (the JSDoc
+/// rendering — see [`render_widened_stub_tail_jsdoc`]) cannot express `declare
+/// module` at all, so a program that hosts such carriers must carry this
+/// augmentation in a synthetic TypeScript ambient file instead — `verter-tsc`'s
+/// `ambient_shim_carriers` does exactly that. Without it, an old-`vue` contract
+/// turns the JSDoc reference into a silent error type (the widening degrades
+/// OPEN — every attribute accepted) and, under `checkJs`, a TS2694 on generated
+/// code.
+pub const FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION: &str =
+    "declare module \"vue\" {\n  interface IntrinsicElementAttributes {}\n}\n";
+
+/// The `data-*` half of what Vue forwards onto a native root.
+///
+/// Vue's `HTMLAttributes` has no `data-*` member and no index signature, so the
+/// element props type alone REJECTS `data-foo` on the parent-facing surface —
+/// while the template path accepts it (TypeScript skips excess-property
+/// checking on JSX attributes whose names are not valid identifiers, and the
+/// IDE codegen preserves the hyphenated spelling). Same attribute, two answers.
+///
+/// `data-*` is universally valid HTML and Vue forwards it onto the root element
+/// verbatim, so under the runtime-semantics oracle it reaches the DOM and must
+/// be accepted. The key domain is CLOSED to the `data-` prefix — this is a
+/// template-literal key set, never an open index signature, so `notARealThing`
+/// stays an error.
+const FALLTHROUGH_DATA_ATTRS_TYPE: &str = concat!(
+    "type __Verter_DataAttrs = ",
+    fallthrough_data_attrs_body!(),
+    "\n"
+);
+
+/// [`FALLTHROUGH_DATA_ATTRS_TYPE`] as a JSDoc `@typedef`, for the
+/// JavaScript-carrier rendering (see [`render_widened_stub_tail_jsdoc`]).
+const FALLTHROUGH_DATA_ATTRS_TYPEDEF: &str = concat!(
+    "/** @typedef {",
+    fallthrough_data_attrs_body!(),
+    "} __Verter_DataAttrs */\n"
+);
+
+/// The props a ROOT COMPONENT declares, restricted to the names the resolver
+/// proved actually reach it.
+///
+/// Vue forwards an attribute the owner does not declare onto its root; when
+/// that root is a COMPONENT, a prop of that name DECLARED by the root component
+/// consumes the attribute — so the owner's parent may legitimately pass it. The
+/// resolver already computes exactly which names those are (including through a
+/// multi-hop component chain, because each carrier on the chain is widened by
+/// this same mechanism, so the direct root child's own `$props` already carries
+/// the deeper contributions).
+///
+/// `Name & keyof Props` rather than `Pick<Props, Name>`: a name the child no
+/// longer declares silently drops out instead of turning the whole carrier into
+/// an error, and a non-component `Component` degrades to `{}`. Every member is
+/// optional — the owner renders its root child with no such attribute at all, so
+/// a parent that omits it is still valid for the OWNER even when the child
+/// declares it required.
+const FALLTHROUGH_INHERITED_COMPONENT_PROPS_TYPE: &str = concat!(
+    "type __Verter_InheritedComponentProps<Component, Name extends string> = ",
+    fallthrough_inherited_component_props_body!(),
+    "\n"
+);
+
+/// [`FALLTHROUGH_INHERITED_COMPONENT_PROPS_TYPE`] as a JSDoc `@typedef`, for
+/// the JavaScript-carrier rendering (see [`render_widened_stub_tail_jsdoc`]).
+const FALLTHROUGH_INHERITED_COMPONENT_PROPS_TYPEDEF: &str = concat!(
+    "/**\n * @template Component\n * @template {string} Name\n * @typedef {",
+    fallthrough_inherited_component_props_body!(),
+    "} __Verter_InheritedComponentProps\n */\n"
+);
+
+/// Right-biased merge of the two channels ONE branch can contribute.
+///
+/// A branch whose root is a COMPONENT that itself renders a native element
+/// carries both: the child's DECLARED props (consumed by the child) and the
+/// terminal element's attributes (reached only by what the child does NOT
+/// declare). Those are alternatives per key, not simultaneous constraints —
+/// intersecting them makes a child prop that shares a name with an HTML
+/// attribute (`title: number` under a `<div>` root, whose `title` is `string`)
+/// collapse to `never`, so no value satisfies a prop Vue forwards perfectly at
+/// runtime.
+///
+/// Vue's precedence is unambiguous: a key the root child DECLARES is consumed
+/// there and never reaches the element. `Over` therefore wins, and `Base` keeps
+/// every key `Over` does not claim. The subtraction is `keyof Over` —
+/// structural, so it stays exact when the child's declared set changes, and
+/// empty (`keyof {}` is `never`) when the child cannot be typed at all, which
+/// leaves the element channel intact rather than erasing it.
+const FALLTHROUGH_CHANNEL_OVERLAY_TYPE: &str = concat!(
+    "type __Verter_FallthroughOverlay<Base, Over> = ",
+    fallthrough_channel_overlay_body!(),
+    "\n"
+);
+
+/// [`FALLTHROUGH_CHANNEL_OVERLAY_TYPE`] as a JSDoc `@typedef`, for the
+/// JavaScript-carrier rendering (see [`render_widened_stub_tail_jsdoc`]).
+const FALLTHROUGH_CHANNEL_OVERLAY_TYPEDEF: &str = concat!(
+    "/**\n * @template Base\n * @template Over\n * @typedef {",
+    fallthrough_channel_overlay_body!(),
+    "} __Verter_FallthroughOverlay\n */\n"
+);
+
+/// Emit exactly the fallthrough helper declarations this projection uses.
+///
+/// Every carrier that widens nothing stays byte-identical to the un-widened
+/// one, and a carrier that widens only through a root component's declared
+/// props never mentions the Vue intrinsic map at all.
+fn push_fallthrough_helpers(out: &mut TscWriter, fallthrough: &FallthroughPropsProjection) {
+    for declaration in fallthrough_helper_decls(fallthrough) {
+        out.push_str(declaration);
+    }
+}
+
+/// [`push_fallthrough_helpers`] as plain text, for the stub generators, which
+/// assemble a `String` with a minimal source map rather than a mapped
+/// [`TscWriter`].
+fn fallthrough_helper_text(fallthrough: &FallthroughPropsProjection) -> String {
+    fallthrough_helper_decls(fallthrough).concat()
+}
+
+/// The TypeScript half of [`fallthrough_helper_pairs`], in emission order.
+fn fallthrough_helper_decls(fallthrough: &FallthroughPropsProjection) -> Vec<&'static str> {
+    fallthrough_helper_pairs(fallthrough)
+        .into_iter()
+        .map(|(ts, _)| ts)
+        .collect()
+}
+
+/// The JSDoc half of [`fallthrough_helper_pairs`] as plain text, for the
+/// JavaScript-carrier stub rendering.
+fn fallthrough_helper_jsdoc_text(fallthrough: &FallthroughPropsProjection) -> String {
+    fallthrough_helper_pairs(fallthrough)
+        .into_iter()
+        .filter_map(|(_, jsdoc)| jsdoc)
+        .collect()
+}
+
+/// The single helper inventory, in emission order, as `(TypeScript declaration,
+/// JSDoc mirror)` pairs. Every sink reads it, so a helper can never reach one
+/// carrier shape and not the other, and the two RENDERINGS of one helper share
+/// one selection condition by construction.
+///
+/// The one deliberately `None` JSDoc mirror is the `declare module "vue"`
+/// introduce-on-absence augmentation: module augmentation has no JSDoc
+/// spelling. The TS-labeled rendering keeps carrying it in-file; the
+/// JavaScript-carrier rendering relies on the PROGRAM carrying it instead
+/// ([`FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION`] is `pub` for exactly that —
+/// `verter-tsc` ships it as a synthetic ambient shim).
+fn fallthrough_helper_pairs(
+    fallthrough: &FallthroughPropsProjection,
+) -> Vec<(&'static str, Option<&'static str>)> {
+    let mut decls = Vec::with_capacity(5);
+    if fallthrough.reaches_a_native_element() {
+        decls.push((
+            FALLTHROUGH_ROOT_ELEMENT_TYPE,
+            Some(FALLTHROUGH_ROOT_ELEMENT_TYPEDEF),
+        ));
+        decls.push((FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION, None));
+        decls.push((
+            FALLTHROUGH_DATA_ATTRS_TYPE,
+            Some(FALLTHROUGH_DATA_ATTRS_TYPEDEF),
+        ));
+    }
+    if fallthrough.reaches_a_root_component() {
+        decls.push((
+            FALLTHROUGH_INHERITED_COMPONENT_PROPS_TYPE,
+            Some(FALLTHROUGH_INHERITED_COMPONENT_PROPS_TYPEDEF),
+        ));
+    }
+    if fallthrough.has_a_two_channel_arm() {
+        decls.push((
+            FALLTHROUGH_CHANNEL_OVERLAY_TYPE,
+            Some(FALLTHROUGH_CHANNEL_OVERLAY_TYPEDEF),
+        ));
+    }
+    decls
+}
+
 /// Output from the tsc codegen.
 #[derive(Debug)]
 pub struct TscOutput {
@@ -87,6 +342,46 @@ pub struct TscOutput {
     pub code: String,
     /// The JSON source map string (without base64 encoding).
     pub source_map: String,
+    /// The dialect of [`Self::code`] — the ScriptKind a consumer writing this
+    /// surface to a companion file must label it with.
+    ///
+    /// This is the dialect of the code the surface CARRIES, which is not
+    /// automatically the SFC's authored dialect: a surface built only from
+    /// GENERATED declarations (`declare const`, `type` aliases) is TypeScript
+    /// whatever language the SFC was written in, and a surface that copies an
+    /// authored body verbatim is whatever the author wrote. Getting it wrong in
+    /// either direction is a real defect — a JavaScript body labelled `.ts`
+    /// makes `strict`/`noImplicitAny` report on a file the project never asked
+    /// to have checked, and a `declare`-bearing surface labelled `.js` is a
+    /// syntax error.
+    ///
+    /// The producer-by-producer contract:
+    ///
+    /// | producer | copies an authored body? | reported dialect |
+    /// |---|---|---|
+    /// | [`generate_options_api_stub`] | YES, verbatim | the authored dialect |
+    /// | [`generate_code`] | only a TypeScript-dialect `<script setup>` body | `TypeScript`, or `Tsx` when a `lang="tsx"` body was copied |
+    /// | [`generate_testing_code`] | YES, the `<script setup>` body | `TypeScript` |
+    /// | [`generate_empty_stub`] | no | `TypeScript` |
+    /// | [`generate_declaration_code`] | no | `TypeScript` |
+    /// | [`generate_declaration_empty_stub`] | no | `TypeScript` |
+    /// | [`generate_options_api_declaration`] | no (re-renders declarations) | `TypeScript` |
+    pub dialect: SfcScriptDialect,
+    /// The SAME surface rendered for a consumer that stores it in a
+    /// TypeScript-LABELED file regardless of [`Self::dialect`] — the LSP's
+    /// fixed `.verter.ts` API companion, the tsserver-plugin mirror, the
+    /// playground carrier store. `None` means [`Self::code`] already serves
+    /// both labelings (every producer except one).
+    ///
+    /// The one producer that sets it is [`generate_options_api_stub`] for a
+    /// WIDENED JavaScript-family stub: there [`Self::code`] spells the
+    /// fallthrough widening in JSDoc (the only type-level spelling legal in a
+    /// `.js`/`.jsx` carrier), and JSDoc types are honored ONLY in
+    /// JavaScript-flavored files — publishing that rendering to a `.ts` path
+    /// would silently drop the widening. This field carries the ordinary
+    /// TypeScript rendering (helpers, `declare module "vue"` augmentation,
+    /// `declare const` tail) for exactly those consumers.
+    pub ts_carrier_code: Option<String>,
 }
 
 /// Explicit semantic input contract for TSC generation.
@@ -96,6 +391,248 @@ pub enum MacroTscInput<'a> {
     NotRequired,
     /// Authoritative TypeInfo projections for every type-based codegen macro.
     Authoritative(&'a MacroTscBundle),
+}
+
+/// The resolved attribute-fallthrough surface, projected onto the
+/// PARENT-FACING props type.
+///
+/// Vue forwards every attribute a component does not declare onto its single
+/// root element through `$attrs`, so a parent may legitimately pass those
+/// attributes. The component's own `$attrs` member answers the READ question
+/// ("what may this component pull out of `$attrs`?"); this answers the WRITE
+/// question ("what may a parent PASS?"), and only the second one is what a
+/// consumer's `<Child title="…" />` is checked against.
+///
+/// `verter_compiler` cannot compute this: `verter_session` owns the single
+/// inheritance resolver (branch unions, recursive component roots, cycles) and
+/// sits ABOVE this crate in the dependency graph. The resolver's answer
+/// therefore arrives as DATA, exactly as `attrs_type` already does.
+///
+/// An EMPTY `arms` list means "widen nothing". That is the answer for
+/// `inheritAttrs: false`, a fragment / multi-root template, no template, a
+/// branch the resolver could not resolve (including a root cycle), and every
+/// caller that has no resolver at all — the fail-closed direction, because a
+/// surface widened past what actually reaches the DOM trades a false positive
+/// for an unbounded false negative.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FallthroughPropsProjection {
+    /// One arm per resolvable fallthrough branch, in branch order.
+    ///
+    /// Arms UNION. Exactly one branch renders, so a parent's attribute has to
+    /// be valid for the branch it lands in — not for all of them at once. The
+    /// Fallthrough / Root Inheritance rule states this directly ("conditional
+    /// branches → exact union"), and an intersection actively breaks it: two
+    /// branches that type the same key differently (a `<div>` root's `title?:
+    /// string` against a component root's `title?: number`) intersect to
+    /// `never`, so a value valid on either branch is rejected on both.
+    pub arms: Vec<FallthroughArm>,
+}
+
+/// One resolvable fallthrough branch, projected.
+///
+/// A branch contributes through two independent channels, because Vue's
+/// forwarding has two possible consumers at the root:
+///
+/// * the terminal NATIVE element, whose own props type accepts the attribute
+///   as a real DOM attribute ([`Self::root_tag`]), and
+/// * the root COMPONENT, whose DECLARED props consume the attribute before it
+///   ever reaches an element ([`Self::root_component_props`]).
+///
+/// Both can be present at once (`<Child/>` root whose own root is `<div>`), and
+/// either can be absent (a native root declares nothing; a root component with
+/// `inheritAttrs: false` reaches no element).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FallthroughArm {
+    /// The native element this branch's root chain terminates at, when it
+    /// terminates at one. `None` means the chain terminates at a component
+    /// that itself inherits nothing, so NO element attribute enters here.
+    pub root_tag: Option<String>,
+    /// The props declared by this branch's ROOT COMPONENT that the owner
+    /// neither declares nor consumes. `None` when the branch roots at a native
+    /// element, or when no such name survives the resolver's subtraction.
+    pub root_component_props: Option<InheritedComponentProps>,
+}
+
+/// The declared-prop channel of one branch: a module reference plus the exact
+/// names the resolver proved reach it.
+///
+/// Deliberately a REFERENCE, not a rendered member list. Naming the child's own
+/// carrier keeps the member TYPES exact (`tone: "solid" | "ghost"` stays that,
+/// not `unknown`) and keeps a multi-hop chain transitive for free, because the
+/// child's carrier was widened by this same mechanism. Re-rendering the types
+/// here would mean spelling a type whose names resolve in the CHILD's file
+/// scope into the OWNER's carrier — the cross-owner scope bug this avoids
+/// entirely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritedComponentProps {
+    /// The module specifier of the root component, exactly as the OWNER's own
+    /// source spells it. Reusing the authored specifier (rather than deriving a
+    /// path) means it resolves precisely where the owner's own import already
+    /// resolves — through the same aliases, extensions, and companion naming.
+    pub module_specifier: String,
+    /// The member of [`Self::module_specifier`]'s module namespace that IS the
+    /// root component.
+    ///
+    /// Not always `"default"`. The owner reaches its root child through whatever
+    /// binding its own source authored: `import Child from "./Child.vue"` is
+    /// `default`, but `import { Child } from "./barrel"` is `Child` — the
+    /// resolver follows the named binding through the re-export, so an emission
+    /// that assumed `default` would read a member the barrel does not have and
+    /// silently degrade the whole channel to `{}`. Carried explicitly and
+    /// rendered as an indexed access, which is also the only spelling valid for
+    /// a non-identifier export name.
+    pub export_name: String,
+    /// The prop names that reach this component, sorted and deduplicated.
+    pub prop_names: Vec<String>,
+}
+
+impl FallthroughPropsProjection {
+    /// The projection that widens nothing.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Whether any arm reaches a native element — the `data-*` channel and the
+    /// `__Verter_RootElementAttrs` helper are needed only then.
+    fn reaches_a_native_element(&self) -> bool {
+        self.arms.iter().any(|arm| arm.root_tag.is_some())
+    }
+
+    /// Whether any arm names a root component's declared props.
+    fn reaches_a_root_component(&self) -> bool {
+        self.arms
+            .iter()
+            .any(|arm| arm.root_component_props.is_some())
+    }
+
+    /// Whether any arm carries BOTH channels and therefore needs the
+    /// right-biased overlay helper.
+    fn has_a_two_channel_arm(&self) -> bool {
+        self.arms
+            .iter()
+            .any(|arm| arm.root_tag.is_some() && arm.root_component_props.is_some())
+    }
+
+    /// Render the inherited arm, given the ALREADY-RENDERED declared props
+    /// type it will be intersected with (empty when the component declares
+    /// nothing).
+    ///
+    /// Three key sets are subtracted from EACH arm, all structurally. One rule
+    /// underlies all three: the element arm must never constrain a name the
+    /// props type ALREADY constrains from another source, because the two meet
+    /// under `&` and an incompatible pair collapses to `never`.
+    ///
+    /// * `keyof (<declared>)` — a declared prop and an intrinsic attribute of
+    ///   the same name would intersect to `never` (`{ id: number }` against
+    ///   `id?: string`), turning this widening into a NEW false positive on
+    ///   every component that names a prop after an HTML attribute. Subtracting
+    ///   by `keyof` rather than by a resolver-supplied name list keeps that
+    ///   true even when the declared props type is an unresolved import the
+    ///   resolver could not enumerate.
+    /// * `keyof import("vue").PublicProps` — the SAME collision, from the
+    ///   framework half of the props type. `PublicProps` is
+    ///   `VNodeProps & AllowedComponentProps & ComponentCustomProps`, and
+    ///   `ComponentCustomProps` is an AUGMENTABLE interface: a project that
+    ///   declares `ComponentCustomProps { title?: number }` makes `title`
+    ///   globally valid on every one of its components, so a component rooted
+    ///   at `<div>` would intersect that `number` with the intrinsic
+    ///   `title?: string` and reject a value Vue accepts everywhere.
+    ///   Subtracting the whole key set costs no acceptance: every name it
+    ///   removes from the arm is still accepted through `PublicProps` itself,
+    ///   at the project's own (authoritative) type.
+    /// * `"class" | "style"` — normally subsumed by the term above, and kept
+    ///   explicit because it must NOT depend on the `vue` contract publishing
+    ///   `AllowedComponentProps` inside `PublicProps`. These reach a component
+    ///   through that interface, are merged rather than consumed, and are
+    ///   accepted on a fragment and under `inheritAttrs: false` alike. Routing
+    ///   them through the fallthrough widening would make their acceptance
+    ///   depend on inheritance, which is exactly what Vue does not do.
+    ///
+    /// The subtraction is applied PER ARM rather than once around the whole
+    /// composition: `keyof` of a union is the INTERSECTION of its members' keys,
+    /// so a single `Omit` wrapping a union would silently narrow the surface to
+    /// the keys every branch happens to share.
+    ///
+    /// The `data-*` channel is likewise intersected per arm, and only onto arms
+    /// that actually reach an element — a branch rooted at a component that
+    /// inherits nothing forwards no `data-*` to any DOM node. Its key domain is
+    /// a template literal, not a finite member list, so it sits OUTSIDE the
+    /// `Omit`: it can never collide with `class`/`style`, and a declared
+    /// `"data-foo"` prop keeps its own (stricter) type through the intersection
+    /// rather than being erased.
+    ///
+    /// Arms then JOIN WITH `|`, parenthesised when there is more than one so the
+    /// caller can splice the result into its own `&` chain. See
+    /// [`FallthroughPropsProjection::arms`] for why union and not intersection.
+    fn render(&self, declared: &str) -> Option<String> {
+        let mut excluded =
+            String::from("\"class\" | \"style\" | keyof import(\"vue\").PublicProps");
+        if !declared.is_empty() {
+            excluded.push_str(&format!(" | keyof ({declared})"));
+        }
+
+        let arms = self
+            .arms
+            .iter()
+            .filter_map(|arm| {
+                let body = arm.render()?;
+                let mut rendered = format!("Omit<{body}, {excluded}>");
+                if arm.root_tag.is_some() {
+                    rendered.push_str(" & __Verter_DataAttrs");
+                }
+                Some(rendered)
+            })
+            .collect::<Vec<_>>();
+
+        match arms.len() {
+            0 => None,
+            1 => Some(arms.into_iter().next().expect("len == 1")),
+            _ => Some(format!("({})", arms.join(" | "))),
+        }
+    }
+}
+
+impl FallthroughArm {
+    /// This arm's contribution, or `None` when it contributes nothing.
+    ///
+    /// A branch that resolves to a root component which itself inherits nothing
+    /// AND declares no prop the owner has not already taken is a real, resolved
+    /// answer of "nothing" — it does not poison its siblings the way an
+    /// UNRESOLVED branch does.
+    ///
+    /// With BOTH channels present the element half is OVERLAID by the component
+    /// half rather than intersected with it: the child consumes what it
+    /// declares, so those keys never reach the element. Intersecting instead
+    /// collapses any shared key to `never`.
+    fn render(&self) -> Option<String> {
+        let element = self
+            .root_tag
+            .as_deref()
+            .map(|tag| format!("__Verter_RootElementAttrs<{}>", js_string_literal(tag)));
+        let component = self.root_component_props.as_ref().map(|component| {
+            let names = component
+                .prop_names
+                .iter()
+                .map(|name| js_string_literal(name.as_str()))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!(
+                "__Verter_InheritedComponentProps<typeof import({})[{}], {names}>",
+                js_string_literal(component.module_specifier.as_str()),
+                js_string_literal(component.export_name.as_str()),
+            )
+        });
+
+        match (element, component) {
+            (Some(element), Some(component)) => Some(format!(
+                "__Verter_FallthroughOverlay<{element}, {component}>"
+            )),
+            (Some(element), None) => Some(element),
+            (None, Some(component)) => Some(component),
+            (None, None) => None,
+        }
+    }
 }
 
 /// Closed failures from joining compiler syntax to authoritative TypeInfo facts.
@@ -605,6 +1142,15 @@ struct ExposeEntry {
     /// When `Some(ident)`, the codegen emits `name: typeof ident`.
     /// When `None`, falls back to `name: any` (methods, complex expressions).
     typeof_target: Option<String>,
+    /// A declaration-legal type for this member, for the surfaces that do NOT
+    /// emit the setup body and therefore cannot resolve `typeof ident`.
+    ///
+    /// `Some` when the member's call shape is recoverable from the authored
+    /// syntax: a `defineExpose` method shorthand, or a `typeof_target` that
+    /// names a `function` declaration or a function-valued `const`/`let`/`var`.
+    /// `None` when nothing is recoverable, and the surface must fall back to
+    /// `unknown`.
+    declaration_fallback: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1093,6 +1639,35 @@ fn validate_terminal_generation<'a>(
     Ok(attrs_type)
 }
 
+/// The OXC `SourceType` a `<script setup>` body must be parsed under.
+///
+/// FOUR-way, on the same two axes and for the same reasons the generated
+/// companion's extension is:
+///
+/// - **JSX axis.** `<div/>` is a JSX element in a `.tsx`/`.jsx` ScriptKind and a
+///   TYPE ASSERTION in a `.ts` one, so parsing a `lang="tsx"` body as plain
+///   TypeScript loses the whole body — and every macro in it — to a parse error.
+/// - **Language axis.** TypeScript syntax is not JavaScript syntax, and the
+///   difference is not merely permissive: in TS mode `a < b > (c)` parses as a
+///   GENERIC CALL and in JS mode as two comparisons, so a JavaScript body read
+///   as TypeScript is not just over-accepted, it can be MIS-parsed. Reading a
+///   `lang="js"` body as TypeScript also silently accepts `interface`,
+///   `x satisfies T`, `x!`, and `defineProps<T>()` in a file the engine will
+///   later reject outright — Verter would extract macros from syntax the author
+///   is not allowed to write.
+///
+/// The module-kind axis is deliberately untouched: every arm is
+/// [`SourceType::unambiguous`]-derived, exactly as `SourceType::ts()` is, so
+/// this function moves the LANGUAGE and JSX flags and nothing else.
+fn setup_source_type(dialect: SfcScriptDialect) -> SourceType {
+    match dialect {
+        SfcScriptDialect::JavaScript => SourceType::unambiguous(),
+        SfcScriptDialect::Jsx => SourceType::unambiguous().with_jsx(true),
+        SfcScriptDialect::TypeScript => SourceType::ts(),
+        SfcScriptDialect::Tsx => SourceType::tsx(),
+    }
+}
+
 /// Cached intermediate state from SFC macro extraction.
 ///
 /// Captures everything that depends on the SFC source text alone (steps 1–7)
@@ -1112,6 +1687,12 @@ pub struct ExtractedTscState {
     sfc_source: String,
     /// Filename for source maps.
     filename: Option<String>,
+    /// The SFC's AUTHORED script dialect, classified once here from the parsed
+    /// blocks through the shared classifier. Cached with the rest of the
+    /// syntax-owned state so the cached generation path reaches the same
+    /// classification the direct path does — the two must never disagree about
+    /// a file's ScriptKind.
+    authored_dialect: SfcScriptDialect,
 }
 
 impl std::fmt::Debug for ExtractedTscState {
@@ -1145,6 +1726,9 @@ pub fn extract_tsc_state(
     let mut syntax = Syntax::new(false);
     tokenize_sfc(bytes, |e| syntax.handle(&e, &ctx));
 
+    let authored_dialect =
+        crate::parser::types::sfc_script_dialect(syntax.script_setup(), syntax.script());
+
     let setup = syntax.script_setup()?;
     let content_span = setup.content?;
 
@@ -1152,7 +1736,7 @@ pub fn extract_tsc_state(
 
     // ── 2. OXC-parse script content ───────────────────────────────────
     let alloc = Allocator::default();
-    let parse_result = Parser::new(&alloc, content_str, SourceType::ts())
+    let parse_result = Parser::new(&alloc, content_str, setup_source_type(authored_dialect))
         .with_config(TokensParserConfig)
         .parse();
     let tokens = parse_result.tokens.as_slice().to_vec();
@@ -1216,6 +1800,7 @@ pub fn extract_tsc_state(
         content_str: content_str.to_string(),
         sfc_source: sfc_source.to_owned(),
         filename: options.filename.clone(),
+        authored_dialect,
     })
 }
 
@@ -1223,11 +1808,19 @@ pub fn extract_tsc_state(
 ///
 /// Clones the cached syntax state, applies terminal macro splices, and calls
 /// the appropriate code generation function.
+///
+/// `fallthrough` is the resolver-owned parent-facing attribute surface. It is
+/// a PER-CALL input, never part of `ExtractedTscState`: the state is keyed by
+/// this file's own bytes, while the fallthrough surface depends on the root
+/// element's type and, through a component root, on OTHER files — caching it
+/// alongside the syntax extract would key cross-file semantics on a
+/// single-file hash.
 pub fn generate_tsc_from_state(
     state: &ExtractedTscState,
     component_name: &str,
     mode: TscMode,
     macro_tsc: MacroTscInput<'_>,
+    fallthrough: &FallthroughPropsProjection,
 ) -> Result<TscOutput, TscGenerationError> {
     let sfc_source = state.sfc_source.as_str();
     let component_name = &sanitize_tsc_component_name(component_name);
@@ -1248,6 +1841,7 @@ pub fn generate_tsc_from_state(
             generic_params,
             attrs_type,
             root_element_tag,
+            fallthrough,
             &state.content_str,
             &state.test_bindings,
         ),
@@ -1259,6 +1853,7 @@ pub fn generate_tsc_from_state(
             generic_params,
             attrs_type,
             root_element_tag,
+            fallthrough,
         ),
         TscMode::Public => generate_code(
             component_name,
@@ -1269,7 +1864,9 @@ pub fn generate_tsc_from_state(
             attrs_type,
             None, // narrowing not used in cache path
             root_element_tag,
+            fallthrough,
             &state.content_str,
+            state.authored_dialect,
         ),
     })
 }
@@ -1293,6 +1890,7 @@ pub fn generate_tsc_output(
         component_name,
         &TscGenOptions::default(),
         MacroTscInput::NotRequired,
+        &FallthroughPropsProjection::none(),
     )
 }
 
@@ -1338,6 +1936,7 @@ pub fn generate_tsc_output_with_options(
     component_name: &str,
     tsc_options: &TscGenOptions,
     macro_tsc: MacroTscInput<'_>,
+    fallthrough: &FallthroughPropsProjection,
 ) -> Result<TscOutput, TscGenerationError> {
     let component_name = &sanitize_tsc_component_name(component_name);
     // ── 1. Tokenize SFC to locate <script setup> ──────────────────────
@@ -1370,12 +1969,13 @@ pub fn generate_tsc_output_with_options(
                         sfc_source,
                         content_str,
                         tsc_options.filename.as_deref(),
+                        fallthrough,
                     ) {
                         return Ok(output);
                     }
                 }
             }
-            return Ok(generate_declaration_empty_stub(component_name));
+            return Ok(generate_declaration_empty_stub(component_name, fallthrough));
         }
         // No <script setup> — check for Options API <script> block.
         // If present, pass through its content so defineComponent() props
@@ -1383,24 +1983,40 @@ pub fn generate_tsc_output_with_options(
         if let Some(script) = syntax.script() {
             if let Some(content) = script.content {
                 let content_str = &sfc_source[content.start as usize..content.end as usize];
-                return Ok(generate_options_api_stub(component_name, content_str));
+                // The stub passes the AUTHORED body through, so the surface's
+                // dialect is the author's — routed through the shared SFC
+                // script-dialect classification, the same one that picks the
+                // validation carrier's `.jsx`/`.tsx` extension. All FOUR
+                // dialects are distinct here: the body is copied verbatim, so
+                // `lang="jsx"` needs a JSX-capable ScriptKind (`.jsx`, not
+                // `.js`) and `lang="tsx"` needs `.tsx`, not `.ts`.
+                let dialect =
+                    crate::parser::types::sfc_script_dialect(syntax.script_setup(), Some(script));
+                return Ok(generate_options_api_stub(
+                    component_name,
+                    content_str,
+                    dialect,
+                    fallthrough,
+                ));
             }
         }
-        return Ok(generate_empty_stub(component_name));
+        return Ok(generate_empty_stub(component_name, fallthrough));
     };
     let Some(content_span) = setup.content else {
         validate_no_tsc_slots(macro_tsc)?;
         if matches!(tsc_options.mode, TscMode::Declaration) {
-            return Ok(generate_declaration_empty_stub(component_name));
+            return Ok(generate_declaration_empty_stub(component_name, fallthrough));
         }
-        return Ok(generate_empty_stub(component_name));
+        return Ok(generate_empty_stub(component_name, fallthrough));
     };
 
     let content_str = &sfc_source[content_span.start as usize..content_span.end as usize];
+    let authored_dialect =
+        crate::parser::types::sfc_script_dialect(syntax.script_setup(), syntax.script());
 
     // ── 2. OXC-parse script content ───────────────────────────────────
     let alloc = Allocator::default();
-    let parse_result = Parser::new(&alloc, content_str, SourceType::ts())
+    let parse_result = Parser::new(&alloc, content_str, setup_source_type(authored_dialect))
         .with_config(TokensParserConfig)
         .parse();
     let tokens = parse_result.tokens.as_slice().to_vec();
@@ -1479,6 +2095,7 @@ pub fn generate_tsc_output_with_options(
             generic_params,
             attrs_type,
             root_element_tag.as_deref(),
+            fallthrough,
             content_str,
             &test_bindings,
         ),
@@ -1490,6 +2107,7 @@ pub fn generate_tsc_output_with_options(
             generic_params,
             attrs_type,
             root_element_tag.as_deref(),
+            fallthrough,
         ),
         TscMode::Public => generate_code(
             component_name,
@@ -1500,7 +2118,9 @@ pub fn generate_tsc_output_with_options(
             attrs_type,
             narrowing.as_ref(),
             root_element_tag.as_deref(),
+            fallthrough,
             content_str,
+            authored_dialect,
         ),
     })
 }
@@ -3035,6 +3655,7 @@ fn build_macro_state<'a>(
                     type_params.as_ref(),
                     object_arg.as_ref(),
                     content_str,
+                    items,
                     type_usage_tracker,
                     &mut state,
                 );
@@ -3795,10 +4416,98 @@ fn process_slots(
     type_usage_tracker.mark_dependency_paths(&tp.type_dependency_paths);
 }
 
+/// Render a syntactic call shape as a declaration-legal function type.
+///
+/// The parameters are the AUTHORED ones — their names (so a consumer's
+/// signature help reads like the source) and their arity — each typed `any`,
+/// which is precisely what TypeScript itself gives an unannotated JavaScript
+/// parameter. The return type is `any` for the same reason: nothing here
+/// inspects a body, and a project that is not checking its JavaScript has
+/// already said `any` is the answer. What this buys over `unknown` is that the
+/// member can be CALLED at all.
+fn render_callable_shape(shape: &CallableShape<'_>) -> String {
+    // `?` is legal only on a TRAILING run of parameters: TypeScript rejects a
+    // required parameter after an optional one (TS1016). JavaScript has no such
+    // rule — `function focus(target = 0, mode) {}` is fine, and a caller reaches
+    // `mode` by passing `undefined` for `target` — so the authored optionality
+    // is a FACT that cannot always be expressed. Where it cannot, the parameter
+    // renders REQUIRED: a caller must pass something positionally anyway, and
+    // the alternative is a declaration that does not compile at all.
+    //
+    // So find where the trailing all-optional run begins and mark only from
+    // there. `(a = 1, b)` renders `(a: any, b: any)`; `(a, b = 1)` renders
+    // `(a: any, b?: any)`; `(a = 1, b = 2)` renders both optional. A rest
+    // parameter never blocks the run — `(a?: any, ...rest: any[])` is legal.
+    let trailing_optional_from = shape
+        .params
+        .iter()
+        .rposition(|param| !param.optional)
+        .map_or(0, |last_required| last_required + 1);
+
+    let mut rendered = String::from("(");
+    for (index, param) in shape.params.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        let name = param
+            .name
+            .filter(|name| is_testing_decl_ident(name))
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("arg{index}"));
+        rendered.push_str(&name);
+        if index >= trailing_optional_from {
+            rendered.push('?');
+        }
+        rendered.push_str(": any");
+    }
+    if shape.has_rest {
+        if !shape.params.is_empty() {
+            rendered.push_str(", ");
+        }
+        rendered.push_str("...rest: any[]");
+    }
+    rendered.push_str(") => any");
+    rendered
+}
+
+/// The declaration-legal type for an exposed member whose setup body will NOT
+/// be emitted, or `None` when nothing is recoverable from the syntax.
+///
+/// Two places carry a call shape, and both are the AUTHORED one:
+///
+/// - the `defineExpose` property itself, when its value is a function — a
+///   method shorthand (`focus(target) {}`) or a function/arrow-valued property
+///   (`focus: (target) => …`);
+/// - otherwise the setup DECLARATION the property names (`{ bump }` →
+///   `function bump(step) {…}`).
+///
+/// A permissive `(...args: any[]) => any` is deliberately NOT a fallback here.
+/// It is callable, but it accepts any arity, so `child.focus()` and
+/// `child.focus(1, 2)` both type-check against a one-parameter method — a
+/// method's arity is exactly what a consumer needs checked, and inventing a
+/// variadic one is a quieter wrong answer than `unknown`.
+fn expose_declaration_fallback(
+    property_callable: Option<&CallableShape<'_>>,
+    typeof_target: Option<&str>,
+    items: &[ScriptItem<'_>],
+) -> Option<String> {
+    if let Some(shape) = property_callable {
+        return Some(render_callable_shape(shape));
+    }
+    let target = typeof_target?;
+    items.iter().find_map(|item| match item {
+        ScriptItem::Declaration(decl) if decl.name == Some(target) => {
+            decl.callable.as_ref().map(render_callable_shape)
+        }
+        _ => None,
+    })
+}
+
 fn process_expose(
     type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'_>>,
     content_str: &str,
+    items: &[ScriptItem<'_>],
     type_usage_tracker: &mut TypeUsageTracker<'_>,
     state: &mut TscMacroState,
 ) {
@@ -3828,9 +4537,15 @@ fn process_expose(
                     None
                 }
             };
+            let declaration_fallback = expose_declaration_fallback(
+                prop.callable.as_ref(),
+                typeof_target.as_deref(),
+                items,
+            );
             state.expose_entries.push(ExposeEntry {
                 name: prop.name.to_string(),
                 typeof_target,
+                declaration_fallback,
             });
         }
     }
@@ -3976,6 +4691,145 @@ fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
 
 // ── Step 6: generate code ─────────────────────────────────────────────────────
 
+/// The local name a widened Options-API stub rebinds its default export to.
+const STUB_OPTIONS_BINDING: &str = "__Verter_ComponentOptions";
+
+/// Render the widened `declare const … export default …` tail for a STUB
+/// carrier, or `None` when this projection widens nothing.
+///
+/// The no-`<script setup>` generators produce a PARENT-FACING surface exactly
+/// as the `<script setup>` path does: a consumer's `<Comp …/>` is checked
+/// against whatever they emit. Leaving them unwidened does not just lose the
+/// fallthrough surface for Options-API / `defineComponent` / scriptless
+/// components — it breaks the widening's TRANSITIVITY, because an ancestor's
+/// component channel reads its root child's `$props` off the child's carrier.
+/// `A → B(Options API) → C` then silently rejects a prop `C` declares.
+///
+/// `component_ty` is the type expression naming the component the stub is built
+/// from. The existing surface is preserved exactly — `__OmitNew` strips only the
+/// construct signature, the declared props are re-supplied through
+/// `InstanceType<…>["$props"]`, and the SAME `keyof (declared)` subtraction the
+/// `<script setup>` path applies runs against that type — so a stub whose
+/// component declares `title: number` keeps its own stricter member rather than
+/// colliding with the root element's.
+///
+/// `declared_keys` is the type whose `keyof` is subtracted from the widening —
+/// the component's OWN declared props, and nothing else. It is NOT
+/// `InstanceType<…>["$props"]`: that type also carries `PublicProps`
+/// (`VNodeProps & AllowedComponentProps & ComponentCustomProps`), whose `keyof`
+/// is broad enough to `Omit` the entire element surface away, leaving a widening
+/// that silently evaluates to `{}`. `None` subtracts nothing, which is right for
+/// a stub with no declared props at all.
+fn render_widened_stub_tail(
+    name: &str,
+    component_ty: &str,
+    declared_keys: Option<&str>,
+    fallthrough: &FallthroughPropsProjection,
+) -> Option<String> {
+    let construct = widened_construct_surface(component_ty, declared_keys, fallthrough)?;
+    Some(format!(
+        "type __OmitNew<T> = {omit_new}\n\
+         declare const {name}: __OmitNew<{component_ty}> & {{\n  \
+         {construct}\n\
+         }}\n\
+         export default {name}\n",
+        omit_new = omit_new_body!(),
+    ))
+}
+
+/// The ONE widened construct-signature surface both stub-tail renderings embed:
+/// `new(props?: <widened>): Omit<InstanceType<C>, "$props"> & { $props:
+/// <widened> }`, with `<widened>` = declared `$props` ∩-free union of the
+/// projection arms.
+///
+/// BOTH parent-facing sites, exactly as the `<script setup>` path emits them.
+/// The construct-signature parameter alone is not enough: Vue's JSX runtime
+/// sets `JSX.ElementAttributesProperty = { $props: {} }`, so a `<Comp …/>`
+/// check reads the INSTANCE's `$props` member and ignores the constructor
+/// parameter entirely. Widening only the parameter type-checks perfectly and
+/// changes nothing a consumer sees.
+///
+/// This is pure type-expression text — legal verbatim inside a TypeScript
+/// declaration AND inside a JSDoc `@type` payload — so factoring it here is
+/// what makes the two renderings unable to drift on the published surface:
+/// only the DECLARATION syntax around it differs per carrier.
+fn widened_construct_surface(
+    component_ty: &str,
+    declared_keys: Option<&str>,
+    fallthrough: &FallthroughPropsProjection,
+) -> Option<String> {
+    let declared = format!("InstanceType<{component_ty}>[\"$props\"]");
+    let inherited = fallthrough.render(declared_keys.unwrap_or(""))?;
+    let widened = format!("{declared} & {inherited}");
+    Some(format!(
+        "new(props?: {widened}): Omit<InstanceType<{component_ty}>, \"$props\"> & {{ $props: {widened} }}"
+    ))
+}
+
+/// [`render_widened_stub_tail`] for a JavaScript carrier: the SAME widened
+/// surface, spelled entirely in JSDoc so the stub stays legal JavaScript.
+///
+/// `binding` is the local VALUE binding the stub rebound its default export to
+/// ([`STUB_OPTIONS_BINDING`]); the component type is `typeof` it, exactly as
+/// the TypeScript rendering's `component_ty` names it. Where TypeScript writes
+/// `declare const {name}: <widened>` — a type assertion by fiat — JavaScript
+/// has exactly one fiat spelling: a JSDoc-typed binding initialized through a
+/// JSDoc `any` cast (`/** @type {any} */ (expr)`). The `any` is a cast
+/// CONDUIT, not a published type: the binding's declared type is the full
+/// widened surface, so a typo on the parent stays an error (the discriminating
+/// half the fixtures pin).
+///
+/// The type-expression payloads are the IDENTICAL strings the TypeScript
+/// rendering embeds, BY CONSTRUCTION: the construct-signature surface comes
+/// from the ONE [`widened_construct_surface`] renderer and the `__OmitNew`
+/// body from the ONE [`omit_new_body!`] literal, so the two renderings cannot
+/// drift on the published surface — only the DECLARATION syntax around them
+/// differs (`@typedef`/`@type` vs `type`/`declare const`).
+///
+/// Single-line `@type` payload by design: the brace-balanced JSDoc payload
+/// parses identically multi-line, but a one-line payload cannot be broken by a
+/// consumer that re-indents comment continuations.
+fn render_widened_stub_tail_jsdoc(
+    name: &str,
+    binding: &str,
+    declared_keys: Option<&str>,
+    fallthrough: &FallthroughPropsProjection,
+) -> Option<String> {
+    let component_ty = format!("typeof {binding}");
+    let construct = widened_construct_surface(&component_ty, declared_keys, fallthrough)?;
+    Some(format!(
+        "/**\n * @template T\n * @typedef {{{omit_new}}} __OmitNew\n */\n\
+         /** @type {{__OmitNew<{component_ty}> & {{ {construct} }}}} */\n\
+         const {name} = /** @type {{any}} */ ({binding})\n\
+         export default {name}\n",
+        omit_new = omit_new_body!(),
+    ))
+}
+
+/// Byte offset in `script_content` where the exported EXPRESSION of an
+/// `export default …` statement begins, given the statement's own span start.
+///
+/// Only plain whitespace is skipped between the two keywords. A comment wedged
+/// inside `export /*…*/ default` is legal TypeScript and returns `None`, which
+/// makes the caller emit its un-widened stub rather than splice at a wrong
+/// offset — the surface stays as it is today instead of becoming corrupt.
+fn default_export_expression_start(script_content: &str, statement_start: usize) -> Option<usize> {
+    let rest = script_content.get(statement_start..)?;
+    let after_export = rest.strip_prefix("export")?;
+    let trimmed = after_export.trim_start_matches([' ', '\t', '\r', '\n']);
+    let skipped_export_ws = after_export.len() - trimmed.len();
+    if skipped_export_ws == 0 {
+        return None;
+    }
+    let after_default = trimmed.strip_prefix("default")?;
+    Some(
+        statement_start + "export".len() + skipped_export_ws + "default".len() + {
+            let body = after_default.trim_start_matches([' ', '\t', '\r', '\n']);
+            after_default.len() - body.len()
+        },
+    )
+}
+
 /// Generate a stub for Options API `<script>` blocks that preserves the
 /// original script content (including `defineComponent()` props/emits/etc.)
 /// so that cross-component type checking works.
@@ -3986,7 +4840,17 @@ fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
 /// `InstanceType<typeof import('./Foo.vue.verter.ts')['default']>` resolve to
 /// the full component instance rather than `never` (the public-API carrier is
 /// the `.verter.ts` surface).
-fn generate_options_api_stub(_component_name: &str, script_content: &str) -> TscOutput {
+///
+/// A non-empty `fallthrough` additionally rebinds the default export to a local
+/// and re-exports a WIDENED view of it — see [`render_widened_stub_tail`]. An
+/// empty projection leaves the output byte-identical to the un-widened stub.
+fn generate_options_api_stub(
+    component_name: &str,
+    script_content: &str,
+    dialect: SfcScriptDialect,
+    fallthrough: &FallthroughPropsProjection,
+) -> TscOutput {
+    let name = sanitize_tsc_component_name(component_name);
     let source_map = minimal_source_map();
     let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
 
@@ -4004,10 +4868,64 @@ fn generate_options_api_stub(_component_name: &str, script_content: &str) -> Tsc
         }
         None
     });
+    // The `export default` statement start, for the widening rebind.
+    let default_export_start = parse_result.items.iter().find_map(|item| {
+        if let ScriptItem::DefaultExport(de) = item {
+            return Some(de.span.start as usize);
+        }
+        None
+    });
 
-    let code = if let Some(span) = obj_span {
-        // Check if defineComponent is already imported
-        let has_dc_import = parse_result.items.iter().any(|item| {
+    // The widened tail, and the offset at which `export default` must become a
+    // local binding. Both must be available, or the stub stays un-widened.
+    //
+    // This generator copies the AUTHORED body through, so a JavaScript
+    // `<script>` produces a JavaScript stub — and the ORDINARY widening is
+    // spelled in TypeScript-only syntax (the `__Verter_RootElementAttrs` /
+    // `__Verter_DataAttrs` / `__OmitNew` aliases, the `declare module "vue"`
+    // augmentation, and the `declare const` tail). Emitting that into a `.js` /
+    // `.jsx` carrier makes TypeScript report TS8006 / TS8008 / TS8009 /
+    // TS8010 on Verter's OWN generated lines — syntax diagnostics reported
+    // whether or not `checkJs` is on, on a file the user never wrote. So a
+    // JavaScript-family stub widens through the JSDOC rendering instead
+    // (`render_widened_stub_tail_jsdoc` — legal JavaScript carrying the same
+    // surface), and ALSO ships the ordinary TypeScript rendering as
+    // `ts_carrier_code` for consumers whose companion file is
+    // TypeScript-labeled regardless of dialect, where JSDoc types would be
+    // silently ignored.
+    //
+    // `declared_keys` below is the component's WHOLE `$props`, raw. Its
+    // `keyof` is exactly the set of names the props type already constrains,
+    // which is exactly the set the element arm must not constrain a second
+    // time — including anything a project merged into the augmentable
+    // `ComponentCustomProps`. Subtracting `keyof PublicProps` from this
+    // operand (leaving only the component's OWN declarations) puts that
+    // collision back: the arm keeps its `title?: string` against a globally
+    // declared `title?: number` and the two intersect to `never`. Raw does NOT
+    // over-subtract: `keyof $props` covers the framework keys and the
+    // component's own props, never ordinary element attributes like `id` /
+    // `href` / `tabindex`.
+    let declared_keys = format!("InstanceType<typeof {STUB_OPTIONS_BINDING}>[\"$props\"]");
+    let widening = default_export_start
+        .and_then(|start| {
+            default_export_expression_start(script_content, start).map(|expr| (start, expr))
+        })
+        .and_then(|(start, expr_start)| {
+            render_widened_stub_tail(
+                &name,
+                &format!("typeof {STUB_OPTIONS_BINDING}"),
+                Some(&declared_keys),
+                fallthrough,
+            )
+            .map(|tail| (start, expr_start, tail))
+        });
+
+    // The component-defining body, with `defineComponent(…)` inserted around a
+    // plain object export and — when widening — `export default` rewritten to a
+    // local `const`.
+    let mut body = String::with_capacity(script_content.len() + 96);
+    let needs_dc_import = obj_span.is_some()
+        && !parse_result.items.iter().any(|item| {
             if let ScriptItem::Import(imp) = item {
                 imp.source == "vue"
                     && imp.bindings.iter().any(|b| {
@@ -4018,40 +4936,109 @@ fn generate_options_api_stub(_component_name: &str, script_content: &str) -> Tsc
                 false
             }
         });
+    if needs_dc_import {
+        body.push_str("import { defineComponent } from \"vue\"\n");
+    }
 
-        let mut result = String::with_capacity(script_content.len() + 80);
-        if !has_dc_import {
-            result.push_str("import { defineComponent } from \"vue\"\n");
-        }
-        result.push_str(&script_content[..span.start as usize]);
-        result.push_str("defineComponent(");
-        result.push_str(&script_content[span.start as usize..span.end as usize]);
-        result.push(')');
-        result.push_str(&script_content[span.end as usize..]);
-        let trimmed = result.trim();
-        format!("{trimmed}\n//# sourceMappingURL=data:application/json;base64,{encoded}\n")
-    } else {
-        // Already has defineComponent or different export type — pass through
-        format!(
-            "{content}\n//# sourceMappingURL=data:application/json;base64,{map}\n",
-            content = script_content.trim(),
-            map = encoded,
-        )
+    // Splice points in ascending offset order: the `export default` prefix
+    // rewrite always precedes the object span it exports.
+    let mut cursor = 0usize;
+    if let Some((statement_start, expr_start, _)) = widening.as_ref() {
+        body.push_str(&script_content[cursor..*statement_start]);
+        body.push_str("const ");
+        body.push_str(STUB_OPTIONS_BINDING);
+        body.push_str(" = ");
+        cursor = *expr_start;
+    }
+    if let Some(span) = obj_span {
+        body.push_str(&script_content[cursor..span.start as usize]);
+        body.push_str("defineComponent(");
+        body.push_str(&script_content[span.start as usize..span.end as usize]);
+        body.push(')');
+        cursor = span.end as usize;
+    }
+    body.push_str(&script_content[cursor..]);
+
+    let map_trailer = format!("//# sourceMappingURL=data:application/json;base64,{encoded}\n");
+    let assemble = |helpers: &str, tail: &str| {
+        let mut code = String::with_capacity(helpers.len() + body.len() + tail.len() + 128);
+        code.push_str(helpers);
+        code.push_str(body.trim());
+        code.push('\n');
+        code.push_str(tail);
+        code.push_str(&map_trailer);
+        code
     };
 
-    TscOutput { code, source_map }
+    let (code, ts_carrier_code) = match widening.as_ref() {
+        Some((_, _, ts_tail)) if dialect.is_javascript() => {
+            let jsdoc_tail = render_widened_stub_tail_jsdoc(
+                &name,
+                STUB_OPTIONS_BINDING,
+                Some(&declared_keys),
+                fallthrough,
+            )
+            .expect("the same non-empty projection renders in both carrier forms");
+            (
+                assemble(&fallthrough_helper_jsdoc_text(fallthrough), &jsdoc_tail),
+                Some(assemble(&fallthrough_helper_text(fallthrough), ts_tail)),
+            )
+        }
+        Some((_, _, ts_tail)) => (
+            assemble(&fallthrough_helper_text(fallthrough), ts_tail),
+            None,
+        ),
+        None => (assemble("", ""), None),
+    };
+
+    TscOutput {
+        code,
+        source_map,
+        // The body is the author's, verbatim: only the `defineComponent(` wrap
+        // and its import are synthesized, and both are ordinary JavaScript
+        // (the JSDoc widening is comments plus one `const` + `export`).
+        dialect,
+        ts_carrier_code,
+    }
 }
 
-fn generate_empty_stub(component_name: &str) -> TscOutput {
+fn generate_empty_stub(
+    component_name: &str,
+    fallthrough: &FallthroughPropsProjection,
+) -> TscOutput {
     let name = sanitize_tsc_component_name(component_name);
     let source_map = minimal_source_map();
     let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
+    // An empty `defineComponent({})` declares no props, so nothing is
+    // subtracted from the widening.
+    if let Some(tail) = render_widened_stub_tail(&name, "typeof __comp", None, fallthrough) {
+        let code = format!(
+            "import {{ defineComponent }} from \"vue\"\n{helpers}const __comp = defineComponent({{}})\n{tail}//# sourceMappingURL=data:application/json;base64,{encoded}\n",
+            helpers = fallthrough_helper_text(fallthrough),
+        );
+        return TscOutput {
+            code,
+            source_map,
+            // As the un-widened return below: a generated
+            // `defineComponent({})` + `declare const` surface plus a pure-type
+            // widened tail. No authored body reaches it.
+            dialect: SfcScriptDialect::TypeScript,
+            ts_carrier_code: None,
+        };
+    }
     let code = format!(
         "import {{ defineComponent }} from \"vue\"\nconst __comp = defineComponent({{}})\ndeclare const {name}: typeof __comp\nexport default {name}\n//# sourceMappingURL=data:application/json;base64,{map}\n",
         name = name,
         map = encoded,
     );
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // A generated `defineComponent({})` + `declare const` surface: no
+        // authored body reaches it, so it is TypeScript whatever the SFC is.
+        dialect: SfcScriptDialect::TypeScript,
+        ts_carrier_code: None,
+    }
 }
 
 /// Project an Options-API component's full public surface into the
@@ -4071,6 +5058,7 @@ fn generate_options_api_declaration(
     sfc_source: &str,
     options_script_content: &str,
     filename: Option<&str>,
+    fallthrough: &FallthroughPropsProjection,
 ) -> Option<TscOutput> {
     let alloc = Allocator::default();
     let parsed = Parser::new(&alloc, options_script_content, SourceType::ts())
@@ -4170,6 +5158,7 @@ fn generate_options_api_declaration(
         None,
         None,
         None,
+        fallthrough,
     ))
 }
 
@@ -4183,16 +5172,43 @@ fn generate_options_api_declaration(
 /// runtime [`generate_empty_stub`] emits all three; this is the `.d.ts`-legal
 /// counterpart. An Options-API component that DOES declare props/emits projects
 /// its full surface via [`generate_options_api_declaration`] instead.
-fn generate_declaration_empty_stub(component_name: &str) -> TscOutput {
+fn generate_declaration_empty_stub(
+    component_name: &str,
+    fallthrough: &FallthroughPropsProjection,
+) -> TscOutput {
+    const EMPTY_COMPONENT_TY: &str = "import(\"vue\").DefineComponent<{}, {}, any>";
     let name = sanitize_tsc_component_name(component_name);
     let source_map = minimal_source_map();
     let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
+    if let Some(tail) = render_widened_stub_tail(&name, EMPTY_COMPONENT_TY, None, fallthrough) {
+        // Declaration-safe throughout: `__OmitNew` and the widened `declare
+        // const` are pure type constructs — no runtime `defineComponent(…)`
+        // call and no `const __comp` value, exactly as this generator's
+        // contract requires.
+        let code = format!(
+            "{helpers}{tail}//# sourceMappingURL=data:application/json;base64,{encoded}\n",
+            helpers = fallthrough_helper_text(fallthrough),
+        );
+        return TscOutput {
+            code,
+            source_map,
+            // Pure generated declarations, no authored body — as below.
+            dialect: SfcScriptDialect::TypeScript,
+            ts_carrier_code: None,
+        };
+    }
     let code = format!(
-        "declare const {name}: import(\"vue\").DefineComponent<{{}}, {{}}, any>\nexport default {name}\n//# sourceMappingURL=data:application/json;base64,{map}\n",
+        "declare const {name}: {EMPTY_COMPONENT_TY}\nexport default {name}\n//# sourceMappingURL=data:application/json;base64,{map}\n",
         name = name,
         map = encoded,
     );
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // Pure generated declarations, no authored body.
+        dialect: SfcScriptDialect::TypeScript,
+        ts_carrier_code: None,
+    }
 }
 
 // ── Narrowing types for TSC path ──────────────────────────────────────────
@@ -4351,6 +5367,7 @@ fn generate_testing_code(
     generic_params: Option<&str>,
     attrs_type: Option<&str>,
     root_element_tag: Option<&str>,
+    fallthrough: &FallthroughPropsProjection,
     setup_content: &str,
     test_bindings: &[TestBindingEntry],
 ) -> TscOutput {
@@ -4358,6 +5375,7 @@ fn generate_testing_code(
 
     out.push_str("import { defineComponent } from \"vue\"\n");
     out.push_str("type __OmitNew<T> = { [K in keyof T]: T[K] }\n");
+    push_fallthrough_helpers(&mut out, fallthrough);
     out.push_str(
         "type __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\n",
     );
@@ -4505,6 +5523,7 @@ fn generate_testing_code(
         &state.models,
         &state.defaulted_prop_names,
         None,
+        fallthrough,
     );
 
     match generic_params {
@@ -4530,6 +5549,7 @@ fn generate_testing_code(
         &state.models,
         &state.defaulted_prop_names,
         None,
+        fallthrough,
     ));
     out.push_str(",\n");
     out.push_str("    $emit: ");
@@ -4563,7 +5583,29 @@ fn generate_testing_code(
         encoded
     ));
 
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // The testing surface's companion name is descriptor-owned and FIXED
+        // (`VirtualFileNaming::testing_api_suffix`, a single `.__verter_test.ts`
+        // mirrored into `packages/language-shared` and byte-pinned), so this
+        // reports what that name says: a TypeScript root.
+        //
+        // That is the NAME, not an accurate description of the code. This
+        // surface copies the authored `<script setup>` body verbatim — it has
+        // to, since `typeof <binding>` must resolve — so a `lang="tsx"` body
+        // carries JSX into a `.ts` root (where `<span/>` is a type assertion)
+        // and a `lang="js"` body is strict-checked in a root the project never
+        // asked to have checked. Reporting the author's dialect here would not
+        // fix either: the name would not follow it, and the generated frame
+        // (`type` aliases, `declare function`, `declare const`) is not legal in
+        // a `.js`/`.jsx` root at all, so the JavaScript arm needs a JSDoc frame
+        // or a split module, not a label. The acceptance for all four arms is
+        // written and RED at
+        // `tests::testing_surface_reports_the_dialect_of_the_code_it_carries`.
+        dialect: SfcScriptDialect::TypeScript,
+        ts_carrier_code: None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4576,13 +5618,29 @@ fn generate_code(
     attrs_type: Option<&str>,
     narrowing: Option<&TscNarrowingInfo>,
     root_element_tag: Option<&str>,
+    fallthrough: &FallthroughPropsProjection,
     setup_content: &str,
+    authored_dialect: SfcScriptDialect,
 ) -> TscOutput {
-    let needs_setup_body = !state.expose_entries.is_empty();
+    // A runtime-object `defineExpose({ x })` needs the authored setup body
+    // inlined so `typeof x` resolves the exposed binding's inferred type. That
+    // body lands in a surface that ALSO emits `type` aliases and
+    // `declare const` — TypeScript-only syntax — so the surface can never be a
+    // `.js`/`.jsx` root, and inlining a JAVASCRIPT body into it would hand the
+    // engine a TypeScript root full of the author's untyped JavaScript:
+    // `strict`/`noImplicitAny` then reports TS7006 on every untyped parameter
+    // of a file the project never asked to have checked. So a JavaScript SFC
+    // does NOT inline its body; its exposed members render through the SAME
+    // declaration-legal `unknown` placeholder the declaration path already
+    // uses. Precision for JavaScript expose entries, versus a flood of false
+    // diagnostics — and the flood is the defect this surface's language label
+    // exists to prevent.
+    let needs_setup_body = !state.expose_entries.is_empty() && !authored_dialect.is_javascript();
     let mut out = TscWriter::new(if needs_setup_body { 2048 } else { 512 });
 
     // ── Import ────────────────────────────────────────────────────────
     out.push_str("import { defineComponent } from \"vue\"\n");
+    push_fallthrough_helpers(&mut out, fallthrough);
 
     // ── Utility type: strip construct signature from typeof __comp ────
     // `typeof __comp` carries DefineComponent's `new()` which returns
@@ -4752,10 +5810,12 @@ fn generate_code(
         state,
         attrs_type,
         root_element_tag,
+        fallthrough,
         narrowing,
         full_gp.as_deref(),
-        // `Public` emits the setup body, so `typeof <exposed-binding>` resolves.
-        true,
+        // `typeof <exposed-binding>` resolves only where the setup body was
+        // actually emitted.
+        needs_setup_body,
     );
     out.push_str(&format!("export default {}\n", component_name));
 
@@ -4768,7 +5828,21 @@ fn generate_code(
         encoded
     ));
 
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // The generated frame (`type` aliases, `declare const`) is TypeScript.
+        // The one dimension the copied body can still move is JSX: a
+        // `lang="tsx"` setup body carries JSX elements, which a `.ts`
+        // ScriptKind parses as type assertions — a syntax error. Without a
+        // copied body there is no JSX and the surface is plain TypeScript.
+        dialect: if needs_setup_body && authored_dialect.is_jsx() {
+            SfcScriptDialect::Tsx
+        } else {
+            SfcScriptDialect::TypeScript
+        },
+        ts_carrier_code: None,
+    }
 }
 
 /// Render the explicit instance-shape body of the `declare const Component`
@@ -4782,11 +5856,13 @@ fn generate_code(
 /// caller is responsible for opening the `declare const Name: …{` line (the
 /// `Public` path prefixes the value-bearing `__OmitNew<typeof __comp> &`; the
 /// declaration path opens a bare `{`).
+#[allow(clippy::too_many_arguments)]
 fn render_instance_shape_body(
     out: &mut TscWriter,
     state: &TscMacroState,
     attrs_type: Option<&str>,
     root_element_tag: Option<&str>,
+    fallthrough: &FallthroughPropsProjection,
     narrowing: Option<&TscNarrowingInfo>,
     full_gp: Option<&str>,
     expose_typeof_resolvable: bool,
@@ -4813,6 +5889,7 @@ fn render_instance_shape_body(
         &state.models,
         &state.defaulted_prop_names,
         narrowing,
+        fallthrough,
     ));
     out.push_str("): {\n");
 
@@ -4824,6 +5901,7 @@ fn render_instance_shape_body(
         &state.models,
         &state.defaulted_prop_names,
         narrowing,
+        fallthrough,
     ));
     out.push_str(",\n");
 
@@ -4917,25 +5995,38 @@ fn render_instance_shape_body(
                     }
                 }
             } else {
-                // Declaration path: the setup body is OMITTED, so the exposed
-                // binding is NOT in scope — `typeof <ident>` would be an unbound
-                // value reference (an erroring declaration). Render a
-                // declaration-legal placeholder instead. `unknown` (not `any`)
-                // preserves the public member shape without inventing a type or
-                // silently widening to an unsound `any`.
+                // The setup body is OMITTED here, so the exposed binding is NOT
+                // in scope and `typeof <ident>` would be an unbound value
+                // reference (an erroring declaration). The member's type comes
+                // from what the AUTHORED syntax already tells us instead.
                 //
-                // TODO(follow-up): this is a PRECISION placeholder, not the final
-                // declaration strategy. A runtime-object `defineExpose({ x })`
-                // entry's exact type is the inferred type of the setup binding
-                // `x`, which is not yet captured in the typed macro/codegen state
-                // (only the identifier name is). Capturing resolved setup-binding
-                // types — at the point setup bindings are already classified — is
-                // required so the declaration can render each exposed member's
-                // exact type; this MUST land before the declaration carrier is
-                // wired to a consuming engine. The type-PARAMETER form
-                // (`defineExpose<{ x: T }>()`) already renders its exact type via
-                // `expose_type_text` above and is unaffected.
-                out.push_str(&format!("{}: unknown", render_member_key(&entry.name)));
+                // For a function — a `function` declaration, a function-valued
+                // `const`, or a `defineExpose` method shorthand — that is its
+                // call shape: authored parameter names, arity, optionality,
+                // every parameter `any`, returning `any`. It is not the inferred
+                // type, and it does not pretend to be; it is what TypeScript
+                // itself gives an unannotated JavaScript function, and it makes
+                // the member CALLABLE. `unknown` does not: a `bump: unknown`
+                // member cannot be called, indexed, or passed anywhere, so a
+                // parent that consumes the component gets an error for using a
+                // perfectly good method — the false diagnostic relocated from
+                // the component to everyone who imports it.
+                //
+                // Everything else falls back to `unknown`, deliberately: a
+                // `const count = ref(0)` member's type is the RESULT of
+                // inference, not a shape, and there is nothing in the syntax to
+                // recover it from. `unknown` over `any` there keeps the member
+                // present without inventing a type. That residue is bounded and
+                // recorded — the type-PARAMETER form
+                // (`defineExpose<{ count: Ref<number> }>()`) renders its exact
+                // type through `expose_type_text` above and is the authored way
+                // to say what a non-function member is.
+                match &entry.declaration_fallback {
+                    Some(rendered) => {
+                        out.push_str(&format!("{}: {rendered}", render_member_key(&entry.name)))
+                    }
+                    None => out.push_str(&format!("{}: unknown", render_member_key(&entry.name))),
+                }
             }
         }
         out.push_str(" }>\n");
@@ -4980,6 +6071,7 @@ fn render_instance_shape_body(
 /// `typeof <setup-binding>` the omitted setup body would require (see
 /// [`render_instance_shape_body`]'s `expose_typeof_resolvable`). Driven from the
 /// typed state, never a re-parse of source text.
+#[allow(clippy::too_many_arguments)]
 fn generate_declaration_code(
     component_name: &str,
     state: &TscMacroState,
@@ -4988,9 +6080,11 @@ fn generate_declaration_code(
     generic_params: Option<&str>,
     attrs_type: Option<&str>,
     root_element_tag: Option<&str>,
+    fallthrough: &FallthroughPropsProjection,
 ) -> TscOutput {
     let mut out = TscWriter::new(512);
 
+    push_fallthrough_helpers(&mut out, fallthrough);
     if state.terminal_emits_ts.is_some() {
         out.push_str(
             "type __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\n",
@@ -5039,6 +6133,7 @@ fn generate_declaration_code(
         state,
         attrs_type,
         root_element_tag,
+        fallthrough,
         None,
         full_gp.as_deref(),
         // Declaration OMITS the setup body, so `typeof <exposed-binding>` is
@@ -5056,7 +6151,13 @@ fn generate_declaration_code(
         encoded
     ));
 
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // Pure generated declarations, no authored body.
+        dialect: SfcScriptDialect::TypeScript,
+        ts_carrier_code: None,
+    }
 }
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
@@ -5344,6 +6445,13 @@ fn render_model_props_type(models: &[ModelEntry]) -> Vec<RenderedText> {
         .collect()
 }
 
+/// Render the PARENT-FACING props type: declared props ∪ models ∪
+/// emit-handler props, intersected with the resolved fallthrough surface.
+///
+/// Both parent-facing sites go through here — the `new(props?: PublicProps &
+/// …)` construct signature (the one a JSX/TSX `<Child …/>` check actually
+/// reports against) and the `$props` instance member — so the two cannot
+/// disagree about what a parent may pass.
 fn render_full_props_type(
     props_ts: &Option<PropsTs>,
     emits: &[EmitEntry],
@@ -5351,6 +6459,7 @@ fn render_full_props_type(
     models: &[ModelEntry],
     defaulted_prop_names: &[String],
     narrowing: Option<&TscNarrowingInfo>,
+    fallthrough: &FallthroughPropsProjection,
 ) -> RenderedText {
     let generic_props = narrowing.map(|nr| {
         nr.narrowing
@@ -5377,6 +6486,26 @@ fn render_full_props_type(
     let emits_part = render_emits_to_props_type(emits);
     if !emits_part.is_empty() {
         parts.push(emits_part);
+    }
+
+    // The resolved fallthrough surface is the LAST arm: a parent may pass
+    // every attribute that actually reaches the root element, on top of the
+    // declared surface. An empty projection appends nothing and the props type
+    // stays byte-identical to the un-widened one.
+    //
+    // The declared text is re-rendered UNMAPPED into the `keyof (…)` operand:
+    // it is a key-set computation, not a second occurrence of the author's
+    // declarations, and mapping it would put a second source-map claim on the
+    // same authored spans.
+    let declared_text: String = parts
+        .iter()
+        .map(|part| part.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" & ");
+    if let Some(inherited) = fallthrough.render(&declared_text) {
+        let mut arm = RenderedText::default();
+        arm.push_str(&inherited);
+        parts.push(arm);
     }
 
     if parts.is_empty() {

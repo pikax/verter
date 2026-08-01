@@ -26,7 +26,10 @@ pub fn component_code_actions(
     resolve_child_context: &dyn Fn(&str) -> Option<ChildComponentContext>,
 ) -> Vec<CodeActionOrCommand> {
     let unknowns = component_diagnostics::find_unknown_props(analysis, &|source| {
-        resolve_child_context(source).map(|ctx| ctx.analysis.clone())
+        resolve_child_context(source).map(|ctx| component_diagnostics::ResolvedChildComponent {
+            analysis: ctx.analysis.clone(),
+            inherited_attrs: ctx.inherited_attrs.clone(),
+        })
     });
 
     let mut actions = Vec::new();
@@ -131,7 +134,10 @@ pub fn component_code_actions(
 
     // V-model actions: add missing defineModel to child
     let unknown_models = component_diagnostics::find_unknown_models(analysis, &|source| {
-        resolve_child_context(source).map(|ctx| ctx.analysis.clone())
+        resolve_child_context(source).map(|ctx| component_diagnostics::ResolvedChildComponent {
+            analysis: ctx.analysis.clone(),
+            inherited_attrs: ctx.inherited_attrs.clone(),
+        })
     });
 
     for info in &unknown_models {

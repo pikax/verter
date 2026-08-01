@@ -1,0 +1,5 @@
+error[E0599]: no method named `observed` found for reference `&PartialScriptFacts<SvelteScriptFacts>` in the current scope
+  --> tests/cases/compile-fail/script_fact_partial_has_no_payload_escape.rs:10:37
+   |
+10 |         consume_as_complete(partial.observed());
+   |                                     ^^^^^^^^ method not found in `&PartialScriptFacts<SvelteScriptFacts>`

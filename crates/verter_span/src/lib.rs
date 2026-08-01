@@ -17,8 +17,10 @@
 
 pub mod path;
 pub use path::{
-    canonicalize_path, canonicalize_path_cow, fs_is_case_insensitive, fs_paths_equal, is_under_dir,
-    longest_project_root, CanonicalPath, InjectedPathKey,
+    canonicalize_path, canonicalize_path_cow, fs_is_case_insensitive, fs_paths_equal,
+    is_reserved_device_name, is_under_dir, longest_project_root, simplify_verbatim_path,
+    simplify_verbatim_path_str, verbatim_refusal, CanonicalPath, ComponentRefusal, InjectedPathKey,
+    VerbatimRefusal,
 };
 
 pub mod uri;

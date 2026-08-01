@@ -1,6 +1,6 @@
 //! The STRUCTURED dynamic-attribute VALUE builder — the official `build_attribute_value` /
-//! `build_template_chunk` value model, extracted from `client_plan` to keep it under the
-//! file-size guard.
+//! `build_template_chunk` value model, kept separate from `client_plan` so each module
+//! has one focused responsibility.
 //!
 //! [`SupportedClientIr::attr_value_for`] reads an element's `Dynamic` / `Mixed` attribute into a
 //! typed [`AttrValue`] (+ `has_state`); [`SupportedClientIr::mixed_attr_value`] is the mixed

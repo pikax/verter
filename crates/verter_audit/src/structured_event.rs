@@ -119,6 +119,22 @@ pub enum NonAdmissionReason {
     /// `ImportedRegistryDb`, `ResolvabilityDb`) routes the value through
     /// `ReturnOnly` under this reason rather than admitting it.
     PartialResult,
+    /// Resolution observed an inaccessible path; error tolerance may return a
+    /// value, but absence was not proven.
+    ResolutionInaccessiblePath,
+    /// Resolution observed a backend-unknown path state.
+    ResolutionUnknownPath,
+    /// The immutable resolution world changed before final admission.
+    ResolutionWorldChanged,
+    /// A caller requested resolution through a published view which is no
+    /// longer the Engine's current immutable resolution root.
+    ResolutionViewSuperseded,
+    /// A resolver reader cannot bridge all resolution-visible observations.
+    ResolutionUntrackedBackend,
+    /// The resolution query/context/provider projection was incomplete.
+    ResolutionIncompleteProvenance,
+    /// Stable world capture/revalidation exhausted its bounded retry loop.
+    ResolutionRetryExhausted,
 }
 
 impl std::fmt::Display for NonAdmissionReason {
@@ -137,6 +153,13 @@ impl std::fmt::Display for NonAdmissionReason {
             Self::UnresolvedProvenance => "UnresolvedProvenance",
             Self::ComputeFailed => "ComputeFailed",
             Self::PartialResult => "PartialResult",
+            Self::ResolutionInaccessiblePath => "ResolutionInaccessiblePath",
+            Self::ResolutionUnknownPath => "ResolutionUnknownPath",
+            Self::ResolutionWorldChanged => "ResolutionWorldChanged",
+            Self::ResolutionViewSuperseded => "ResolutionViewSuperseded",
+            Self::ResolutionUntrackedBackend => "ResolutionUntrackedBackend",
+            Self::ResolutionIncompleteProvenance => "ResolutionIncompleteProvenance",
+            Self::ResolutionRetryExhausted => "ResolutionRetryExhausted",
         };
         f.write_str(name)
     }
@@ -935,7 +958,73 @@ mod non_admission_reason_tests {
         NonAdmissionReason::Cancelled,
         NonAdmissionReason::UnresolvedProvenance,
         NonAdmissionReason::ComputeFailed,
+        NonAdmissionReason::PartialResult,
+        NonAdmissionReason::ResolutionInaccessiblePath,
+        NonAdmissionReason::ResolutionUnknownPath,
+        NonAdmissionReason::ResolutionWorldChanged,
+        NonAdmissionReason::ResolutionViewSuperseded,
+        NonAdmissionReason::ResolutionUntrackedBackend,
+        NonAdmissionReason::ResolutionIncompleteProvenance,
+        NonAdmissionReason::ResolutionRetryExhausted,
     ];
+
+    /// Exhaustive positional index over the enum.
+    ///
+    /// This is the anti-vacuity rail for `ALL`: the match is exhaustive,
+    /// so adding a variant is a COMPILE error here, and
+    /// [`all_lists_every_variant_exactly_once`] then proves the new
+    /// variant also reached `ALL`. Without it, `ALL` could silently
+    /// under-list the enum and every `ALL`-driven assertion below would
+    /// pass while covering nothing.
+    fn variant_index(reason: NonAdmissionReason) -> usize {
+        match reason {
+            NonAdmissionReason::IntrinsicNonCacheable => 0,
+            NonAdmissionReason::SignatureOverflow => 1,
+            NonAdmissionReason::EmptySignature => 2,
+            NonAdmissionReason::SelfRootConflict => 3,
+            NonAdmissionReason::RouteGenerationDependency => 4,
+            NonAdmissionReason::ForcedTestRefusal => 5,
+            NonAdmissionReason::GenerationSuperseded => 6,
+            NonAdmissionReason::PostComputeRevalidationFailed => 7,
+            NonAdmissionReason::BudgetExceeded => 8,
+            NonAdmissionReason::Cancelled => 9,
+            NonAdmissionReason::UnresolvedProvenance => 10,
+            NonAdmissionReason::ComputeFailed => 11,
+            NonAdmissionReason::PartialResult => 12,
+            NonAdmissionReason::ResolutionInaccessiblePath => 13,
+            NonAdmissionReason::ResolutionUnknownPath => 14,
+            NonAdmissionReason::ResolutionWorldChanged => 15,
+            NonAdmissionReason::ResolutionViewSuperseded => 16,
+            NonAdmissionReason::ResolutionUntrackedBackend => 17,
+            NonAdmissionReason::ResolutionIncompleteProvenance => 18,
+            NonAdmissionReason::ResolutionRetryExhausted => 19,
+        }
+    }
+
+    /// The variant count the exhaustive `variant_index` match covers.
+    const VARIANT_COUNT: usize = 20;
+
+    #[test]
+    fn all_lists_every_variant_exactly_once() {
+        let mut covered = [false; VARIANT_COUNT];
+        for &reason in ALL {
+            let index = variant_index(reason);
+            assert!(!covered[index], "{reason:?} appears more than once in ALL");
+            covered[index] = true;
+        }
+        let missing: Vec<usize> = covered
+            .iter()
+            .enumerate()
+            .filter(|(_, seen)| !**seen)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "ALL under-lists NonAdmissionReason: variant indices {missing:?} are \
+             covered by the exhaustive match but absent from ALL, so every \
+             ALL-driven assertion silently skips them"
+        );
+    }
 
     #[test]
     fn every_reason_is_distinct_and_copy() {
@@ -952,8 +1041,11 @@ mod non_admission_reason_tests {
                 }
             }
         }
-        // The surface has exactly the twelve documented reasons.
-        assert_eq!(ALL.len(), 12, "NonAdmissionReason must expose 12 variants");
+        assert_eq!(
+            ALL.len(),
+            VARIANT_COUNT,
+            "NonAdmissionReason must expose {VARIANT_COUNT} variants"
+        );
     }
 
     #[test]

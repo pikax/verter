@@ -62,14 +62,28 @@ describe("commonAncestorDir (mirror base is a DIRECTORY)", () => {
     );
   });
 
+  // As above, `commonAncestorDir` runs `path.resolve` on every input, so the
+  // inputs must be absolute ON THE TEST HOST. A literal `d:/ws/...` is
+  // drive-absolute on Windows but RELATIVE on POSIX, where `path.resolve`
+  // prefixes the cwd and the assertion compares a cwd-rooted path against
+  // `d:/ws`. Build the paths from `os.tmpdir()` instead, as the singleton case
+  // above already does.
   it("multiple files in the same dir collapse to that dir", () => {
-    expect(commonAncestorDir(["d:/ws/src/A.vue", "d:/ws/src/B.vue", "d:/ws/tsconfig.json"])).toBe(
-      "d:/ws",
-    );
+    const ws = path.join(os.tmpdir(), "ws");
+    expect(
+      commonAncestorDir([
+        path.join(ws, "src", "A.vue"),
+        path.join(ws, "src", "B.vue"),
+        path.join(ws, "tsconfig.json"),
+      ]),
+    ).toBe(path.resolve(ws).replace(/\\/g, "/"));
   });
 
   it("files in sibling subtrees yield the shared parent dir", () => {
-    expect(commonAncestorDir(["d:/ws/a/src/A.vue", "d:/ws/b/src/B.vue"])).toBe("d:/ws");
+    const ws = path.join(os.tmpdir(), "ws");
+    expect(
+      commonAncestorDir([path.join(ws, "a", "src", "A.vue"), path.join(ws, "b", "src", "B.vue")]),
+    ).toBe(path.resolve(ws).replace(/\\/g, "/"));
   });
 });
 

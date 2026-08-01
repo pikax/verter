@@ -311,8 +311,8 @@ impl ExternalTypeFrontier {
             let resolved = self.resolve_one(host, &pending);
 
             // Enqueue external refs from this symbol into next level.
-            // Prefer the pre-canonicalized edge, but ask the host for a
-            // type-route target when the shallow state left the edge empty.
+            // The route facts name AUTHORED specifiers, so every edge
+            // target comes from the host's type-route authority.
             for ext_ref in &resolved.unresolved_external {
                 // Per-request audit attribution: one barrel-export hop
                 // traversed. Each external ref the BFS expands counts
@@ -322,13 +322,8 @@ impl ExternalTypeFrontier {
                 if let Some(obs) = verter_audit::current_observer() {
                     obs.record_event(verter_audit::AuditEvent::RouteDbBarrelStep);
                 }
-                let target_canonical = match ext_ref.canonical_id.as_deref() {
-                    Some(canonical) => Some(canonical.to_string()),
-                    None => host.resolve_type_edge_canonical(
-                        &resolved.canonical_id,
-                        &ext_ref.source_specifier,
-                    ),
-                };
+                let target_canonical = host
+                    .resolve_type_edge_canonical(&resolved.canonical_id, &ext_ref.source_specifier);
                 let Some(target_canonical) = target_canonical else {
                     continue;
                 };
@@ -383,11 +378,8 @@ impl ExternalTypeFrontier {
 
         // Step 2: Enqueue wildcard reexport targets for the next BFS layer.
         for (order, wildcard) in type_view.wildcard_reexports().iter().enumerate() {
-            let target_canonical = if wildcard.canonical_id.is_empty() {
-                host.resolve_type_edge_canonical(&pending.canonical_id, &wildcard.source_specifier)
-            } else {
-                Some(wildcard.canonical_id.clone())
-            };
+            let target_canonical =
+                host.resolve_type_edge_canonical(&pending.canonical_id, &wildcard.source_specifier);
             let Some(target_canonical) = target_canonical else {
                 continue;
             };
@@ -452,14 +444,10 @@ impl ExternalTypeFrontier {
             ExportTarget::Local { owner, symbol_name } => {
                 if state.is_import_local_in(*owner, symbol_name) {
                     if let Some(import_target) = state.import_target_in(*owner, symbol_name) {
-                        let resolved_canonical = (!import_target.canonical_id.is_empty())
-                            .then(|| import_target.canonical_id.clone())
-                            .or_else(|| {
-                                host.resolve_type_edge_canonical(
-                                    &pending.canonical_id,
-                                    &import_target.source_specifier,
-                                )
-                            });
+                        let resolved_canonical = host.resolve_type_edge_canonical(
+                            &pending.canonical_id,
+                            &import_target.source_specifier,
+                        );
                         if let Some(ref target_canonical) = resolved_canonical {
                             let next = PendingExternalSymbol {
                                 canonical_id: target_canonical.clone(),
@@ -481,7 +469,6 @@ impl ExternalTypeFrontier {
                                     local_name: symbol_name.clone(),
                                     source_specifier: import_target.source_specifier.clone(),
                                     imported_name: import_target.imported_name.clone(),
-                                    canonical_id: Some(Arc::<str>::from(target_canonical.as_str())),
                                     route: pending.route.clone().unwrap_or_default(),
                                 }],
                                 route_provenance: Some(ResolvedRouteProvenance {
@@ -562,14 +549,10 @@ impl ExternalTypeFrontier {
             ExportTarget::Reexport {
                 source_specifier,
                 original_name,
-                canonical_id: reexport_canonical,
                 ..
             } => {
-                let effective_canonical = (!reexport_canonical.is_empty())
-                    .then(|| reexport_canonical.clone())
-                    .or_else(|| {
-                        host.resolve_type_edge_canonical(&pending.canonical_id, source_specifier)
-                    });
+                let effective_canonical =
+                    host.resolve_type_edge_canonical(&pending.canonical_id, source_specifier);
                 if let Some(ref reexport_canonical) = effective_canonical {
                     let next = PendingExternalSymbol {
                         canonical_id: reexport_canonical.clone(),
@@ -591,7 +574,6 @@ impl ExternalTypeFrontier {
                             local_name: pending.exported_name.clone(),
                             source_specifier: source_specifier.clone(),
                             imported_name: original_name.clone(),
-                            canonical_id: Some(Arc::<str>::from(reexport_canonical.as_str())),
                             route: pending.route.clone().unwrap_or_default(),
                         }],
                         route_provenance: Some(ResolvedRouteProvenance {
@@ -692,16 +674,13 @@ impl ExternalTypeFrontier {
             };
         }
 
-        // Fall back to wildcard reexport edges using the shallow edge first,
-        // then lazily proving the missing type route through the host.
+        // Fall back to wildcard reexport edges, proving each authored
+        // source specifier's type route through the host.
         let state = host.ensure_shallow_state(&current.0)?;
         for wildcard in state.type_view().wildcard_reexports() {
-            let wc_canonical = if wildcard.canonical_id.is_empty() {
+            let Some(wc_canonical) =
                 host.resolve_type_edge_canonical(&current.0, &wildcard.source_specifier)
-            } else {
-                Some(wildcard.canonical_id.clone())
-            };
-            let Some(wc_canonical) = wc_canonical else {
+            else {
                 continue;
             };
 
@@ -773,7 +752,6 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
-    use crate::resolver_core::ShallowImportResolver;
     use verter_semantic::analysis::Hash16;
     use verter_type_expr::locators::{TypeBodyPathStep, TypeParamBoundPosition};
 
@@ -797,6 +775,23 @@ mod tests {
 
         fn add_file(&mut self, canonical_id: &str, state: impl Into<Arc<ShallowFileState>>) {
             self.files.insert(canonical_id.to_string(), state.into());
+        }
+
+        /// Register a file whose cross-file edges resolve through the
+        /// HOST. The shallow surface is parse domain — it names the
+        /// authored specifier only — so every edge target is supplied
+        /// here, exactly as production supplies it from the workspace
+        /// resolution authority.
+        fn add_file_with_edges(
+            &mut self,
+            canonical_id: &str,
+            source: &str,
+            edges: &[(&str, &str)],
+        ) {
+            self.add_file(canonical_id, make_state(source));
+            for &(specifier, target) in edges {
+                self.add_missing_type_edge(canonical_id, specifier, target);
+            }
         }
 
         fn add_missing_type_edge(
@@ -841,27 +836,6 @@ mod tests {
         }
     }
 
-    /// Mock resolver that maps specifiers to canonical IDs during state construction.
-    struct MapResolver {
-        map: FxHashMap<String, String>,
-    }
-
-    impl MapResolver {
-        fn from_pairs(pairs: &[(&str, &str)]) -> Self {
-            let mut map = FxHashMap::default();
-            for &(spec, canonical) in pairs {
-                map.insert(spec.to_string(), canonical.to_string());
-            }
-            Self { map }
-        }
-    }
-
-    impl ShallowImportResolver for MapResolver {
-        fn resolve_canonical(&self, specifier: &str) -> Option<String> {
-            self.map.get(specifier).cloned()
-        }
-    }
-
     fn make_routes(
         source: &str,
     ) -> Arc<verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory> {
@@ -877,15 +851,6 @@ mod tests {
 
     fn make_state(source: &str) -> ShallowFileState {
         ShallowFileState::header_routing_only_for_test(Hash16::default(), make_routes(source))
-    }
-
-    fn make_state_resolved(source: &str, resolutions: &[(&str, &str)]) -> ShallowFileState {
-        let resolver = MapResolver::from_pairs(resolutions);
-        ShallowFileState::header_routing_only_with_resolver_for_test(
-            Hash16::default(),
-            make_routes(source),
-            &resolver,
-        )
     }
 
     #[test]
@@ -920,12 +885,10 @@ mod tests {
     #[test]
     fn reexport_follows_chain_across_levels() {
         let mut host = MockHost::new();
-        host.add_file(
+        host.add_file_with_edges(
             "/src/barrel.ts",
-            make_state_resolved(
-                r#"export { Props } from "./inner""#,
-                &[("./inner", "/src/inner.ts")],
-            ),
+            r#"export { Props } from "./inner""#,
+            &[("./inner", "/src/inner.ts")],
         );
         host.add_file(
             "/src/inner.ts",
@@ -959,9 +922,10 @@ mod tests {
     #[test]
     fn wildcard_barrel_resolves_through_export_star() {
         let mut host = MockHost::new();
-        host.add_file(
+        host.add_file_with_edges(
             "/src/barrel.ts",
-            make_state_resolved("export * from './inner'", &[("./inner", "/src/inner.ts")]),
+            "export * from './inner'",
+            &[("./inner", "/src/inner.ts")],
         );
         host.add_file(
             "/src/inner.ts",
@@ -986,12 +950,10 @@ mod tests {
     #[test]
     fn run_one_level_defers_wildcard_child_shallowing_until_next_level() {
         let mut host = MockHost::new();
-        host.add_file(
+        host.add_file_with_edges(
             "/src/barrel.ts",
-            make_state_resolved(
-                "export * from './first'\nexport * from './second'\n",
-                &[("./first", "/src/first.ts"), ("./second", "/src/second.ts")],
-            ),
+            "export * from './first'\nexport * from './second'\n",
+            &[("./first", "/src/first.ts"), ("./second", "/src/second.ts")],
         );
         host.add_file(
             "/src/first.ts",
@@ -1038,19 +1000,15 @@ mod tests {
     #[test]
     fn run_one_level_keeps_same_layer_siblings_ahead_of_grandchildren() {
         let mut host = MockHost::new();
-        host.add_file(
+        host.add_file_with_edges(
             "/src/barrel.ts",
-            make_state_resolved(
-                "export * from './a'\nexport * from './b'\n",
-                &[("./a", "/src/a.ts"), ("./b", "/src/b.ts")],
-            ),
+            "export * from './a'\nexport * from './b'\n",
+            &[("./a", "/src/a.ts"), ("./b", "/src/b.ts")],
         );
-        host.add_file(
+        host.add_file_with_edges(
             "/src/a.ts",
-            make_state_resolved(
-                "export * from './a_deep'\n",
-                &[("./a_deep", "/src/a_deep.ts")],
-            ),
+            "export * from './a_deep'\n",
+            &[("./a_deep", "/src/a_deep.ts")],
         );
         host.add_file(
             "/src/b.ts",
@@ -1104,19 +1062,15 @@ mod tests {
     #[test]
     fn pending_count_tracks_current_bfs_layer() {
         let mut host = MockHost::new();
-        host.add_file(
+        host.add_file_with_edges(
             "/src/barrel.ts",
-            make_state_resolved(
-                "export * from './a'\nexport * from './b'\n",
-                &[("./a", "/src/a.ts"), ("./b", "/src/b.ts")],
-            ),
+            "export * from './a'\nexport * from './b'\n",
+            &[("./a", "/src/a.ts"), ("./b", "/src/b.ts")],
         );
-        host.add_file(
+        host.add_file_with_edges(
             "/src/a.ts",
-            make_state_resolved(
-                "export * from './a_deep'\n",
-                &[("./a_deep", "/src/a_deep.ts")],
-            ),
+            "export * from './a_deep'\n",
+            &[("./a_deep", "/src/a_deep.ts")],
         );
         host.add_file(
             "/src/b.ts",
@@ -1246,13 +1200,15 @@ mod tests {
     fn cycle_does_not_reenter_seen_symbols() {
         let mut host = MockHost::new();
         // a.ts reexports from b.ts, b.ts reexports from a.ts
-        host.add_file(
+        host.add_file_with_edges(
             "/src/a.ts",
-            make_state_resolved(r#"export { B } from "./b""#, &[("./b", "/src/b.ts")]),
+            r#"export { B } from "./b""#,
+            &[("./b", "/src/b.ts")],
         );
-        host.add_file(
+        host.add_file_with_edges(
             "/src/b.ts",
-            make_state_resolved(r#"export { A } from "./a""#, &[("./a", "/src/a.ts")]),
+            r#"export { A } from "./a""#,
+            &[("./a", "/src/a.ts")],
         );
 
         let mut frontier = ExternalTypeFrontier::new();
@@ -1276,12 +1232,10 @@ mod tests {
     #[test]
     fn wildcard_first_wins_when_multiple_sources_export_same_name() {
         let mut host = MockHost::new();
-        host.add_file(
+        host.add_file_with_edges(
             "/src/barrel.ts",
-            make_state_resolved(
-                "export * from './first'\nexport * from './second'\n",
-                &[("./first", "/src/first.ts"), ("./second", "/src/second.ts")],
-            ),
+            "export * from './first'\nexport * from './second'\n",
+            &[("./first", "/src/first.ts"), ("./second", "/src/second.ts")],
         );
         host.add_file(
             "/src/first.ts",
@@ -1319,14 +1273,8 @@ mod tests {
     fn recursive_barrel_chain_resolves() {
         let mut host = MockHost::new();
         // a -> export * from b -> export * from c -> defines Props
-        host.add_file(
-            "/src/a.ts",
-            make_state_resolved("export * from './b'", &[("./b", "/src/b.ts")]),
-        );
-        host.add_file(
-            "/src/b.ts",
-            make_state_resolved("export * from './c'", &[("./c", "/src/c.ts")]),
-        );
+        host.add_file_with_edges("/src/a.ts", "export * from './b'", &[("./b", "/src/b.ts")]);
+        host.add_file_with_edges("/src/b.ts", "export * from './c'", &[("./c", "/src/c.ts")]);
         host.add_file(
             "/src/c.ts",
             make_state("export interface Props { deep: boolean }"),
@@ -1351,16 +1299,15 @@ mod tests {
     #[test]
     fn final_target_for_follows_alias_and_wildcard_chain() {
         let mut host = MockHost::new();
-        host.add_file(
+        host.add_file_with_edges(
             "/src/root.ts",
-            make_state_resolved(
-                "export { Props as RootProps } from './barrel'",
-                &[("./barrel", "/src/barrel.ts")],
-            ),
+            "export { Props as RootProps } from './barrel'",
+            &[("./barrel", "/src/barrel.ts")],
         );
-        host.add_file(
+        host.add_file_with_edges(
             "/src/barrel.ts",
-            make_state_resolved("export * from './inner'", &[("./inner", "/src/inner.ts")]),
+            "export * from './inner'",
+            &[("./inner", "/src/inner.ts")],
         );
         host.add_file(
             "/src/inner.ts",
@@ -1390,12 +1337,10 @@ mod tests {
     #[test]
     fn final_target_for_stops_at_direct_symbol_with_companions() {
         let mut host = MockHost::new();
-        host.add_file(
+        host.add_file_with_edges(
             "/src/types.ts",
-            make_state_resolved(
-                "import type { Dep } from './dep'\nexport interface Props { label: Dep }",
-                &[("./dep", "/src/dep.ts")],
-            ),
+            "import type { Dep } from './dep'\nexport interface Props { label: Dep }",
+            &[("./dep", "/src/dep.ts")],
         );
         host.add_file(
             "/src/dep.ts",
@@ -1425,14 +1370,8 @@ mod tests {
     #[test]
     fn final_target_for_follows_nested_wildcard_chain() {
         let mut host = MockHost::new();
-        host.add_file(
-            "/src/a.ts",
-            make_state_resolved("export * from './b'", &[("./b", "/src/b.ts")]),
-        );
-        host.add_file(
-            "/src/b.ts",
-            make_state_resolved("export * from './c'", &[("./c", "/src/c.ts")]),
-        );
+        host.add_file_with_edges("/src/a.ts", "export * from './b'", &[("./b", "/src/b.ts")]);
+        host.add_file_with_edges("/src/b.ts", "export * from './c'", &[("./c", "/src/c.ts")]);
         host.add_file(
             "/src/c.ts",
             make_state("export interface Props { deep: boolean }"),
@@ -1461,12 +1400,10 @@ mod tests {
     #[test]
     fn final_target_for_follows_exported_import_local_alias() {
         let mut host = MockHost::new();
-        host.add_file(
+        host.add_file_with_edges(
             "/src/index.ts",
-            make_state_resolved(
-                "import { Foo as Bar } from './types'; export { Bar };",
-                &[("./types", "/src/types.ts")],
-            ),
+            "import { Foo as Bar } from './types'; export { Bar };",
+            &[("./types", "/src/types.ts")],
         );
         host.add_file(
             "/src/types.ts",
@@ -1496,12 +1433,10 @@ mod tests {
     #[test]
     fn final_target_for_follows_default_import_alias_export() {
         let mut host = MockHost::new();
-        host.add_file(
+        host.add_file_with_edges(
             "/src/index.ts",
-            make_state_resolved(
-                "import PropsDefault from './dep'; export { PropsDefault as Props };",
-                &[("./dep", "/src/dep.ts")],
-            ),
+            "import PropsDefault from './dep'; export { PropsDefault as Props };",
+            &[("./dep", "/src/dep.ts")],
         );
         host.add_file(
             "/src/dep.ts",
@@ -1532,20 +1467,13 @@ mod tests {
     fn route_only_frontier_stops_at_defining_export_without_following_symbol_deps() {
         let mut host = MockHost::new();
         host.route_exports_only = true;
-        host.add_file(
+        host.add_file_with_edges(
             "/src/index.ts",
-            make_state_resolved(
-                "export { Props } from './types'",
-                &[("./types", "/src/types.ts")],
-            ),
+            "export { Props } from './types'",
+            &[("./types", "/src/types.ts")],
         );
-        host.add_file(
-            "/src/types.ts",
-            make_state_resolved(
-                "import type { Base } from './base'\nexport interface Props extends Base { label: string }",
-                &[("./base", "/src/base.ts")],
-            ),
-        );
+        host.add_file_with_edges("/src/types.ts", "import type { Base } from './base'\nexport interface Props extends Base { label: string }",
+                &[("./base", "/src/base.ts")]);
         host.add_file(
             "/src/base.ts",
             make_state("export interface Base { id: string }"),
@@ -1580,12 +1508,10 @@ mod tests {
 
         // barrel.ts: reexports Props from types.ts via a named reexport
         // The canonical ID on the reexport edge is pre-resolved.
-        host.add_file(
+        host.add_file_with_edges(
             "/src/barrel.ts",
-            make_state_resolved(
-                r#"export { Props } from './types'"#,
-                &[("./types", "/src/types.ts")],
-            ),
+            r#"export { Props } from './types'"#,
+            &[("./types", "/src/types.ts")],
         );
 
         // types.ts: defines Props locally
@@ -1820,15 +1746,13 @@ mod tests {
     fn direct_export_takes_precedence_over_wildcard_in_same_file() {
         let mut host = MockHost::new();
         // barrel has both a direct reexport AND a wildcard that could provide Props
-        host.add_file(
+        host.add_file_with_edges(
             "/src/barrel.ts",
-            make_state_resolved(
-                "export { Props } from './direct'\nexport * from './wildcard'\n",
-                &[
-                    ("./direct", "/src/direct.ts"),
-                    ("./wildcard", "/src/wildcard.ts"),
-                ],
-            ),
+            "export { Props } from './direct'\nexport * from './wildcard'\n",
+            &[
+                ("./direct", "/src/direct.ts"),
+                ("./wildcard", "/src/wildcard.ts"),
+            ],
         );
         host.add_file(
             "/src/direct.ts",

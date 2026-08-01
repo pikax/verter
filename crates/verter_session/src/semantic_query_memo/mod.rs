@@ -35,6 +35,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::semantic_query::{
     CacheRead, DepSignature, NodeScopeId, OriginEdge, OriginEdgeKind, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SemanticQueryValueTag,

@@ -3,8 +3,10 @@ import * as vscode from "vscode";
 import {
   openReadyCached,
   getAppVuePath,
-  getReferences,
+  waitForReferences,
   findPosition,
+  logMark,
+  withFrontierDiagnosis,
   FIXTURE_NAME,
 } from "../helpers";
 
@@ -22,11 +24,17 @@ suite(`References [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const refs = await getReferences(doc.uri, pos);
+    const mark = logMark();
+    const refs = await waitForReferences(doc.uri, pos, {
+      predicate: (locations) => locations.length >= 3,
+    });
     console.log(`    References for count: ${refs.length} location(s)`);
 
     // count is used in declaration, template ({{ count }}), doubled computed, :bar="count", etc.
-    expect(refs.length, "should have at least 3 references").to.be.greaterThanOrEqual(3);
+    expect(
+      refs.length,
+      withFrontierDiagnosis(mark, "should have at least 3 references"),
+    ).to.be.greaterThanOrEqual(3);
 
     // All references should be in the same file (single-file test)
     for (const ref of refs) {
@@ -46,11 +54,17 @@ suite(`References [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const refs = await getReferences(doc.uri, pos);
+    const mark = logMark();
+    const refs = await waitForReferences(doc.uri, pos, {
+      predicate: (locations) => locations.length >= 2,
+    });
     console.log(`    References for increment: ${refs.length} location(s)`);
 
     // increment is used in declaration + @click="increment" (at least 2 occurrences)
-    expect(refs.length, "should have at least 2 references").to.be.greaterThanOrEqual(2);
+    expect(
+      refs.length,
+      withFrontierDiagnosis(mark, "should have at least 2 references"),
+    ).to.be.greaterThanOrEqual(2);
   });
 
   test("Ref3: imported function has references", async function () {
@@ -60,10 +74,16 @@ suite(`References [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const refs = await getReferences(doc.uri, pos);
+    const mark = logMark();
+    const refs = await waitForReferences(doc.uri, pos, {
+      predicate: (locations) => locations.length >= 2,
+    });
     console.log(`    References for formatCount: ${refs.length} location(s)`);
 
     // formatCount: import statement + usage in const formatted = formatCount(...)
-    expect(refs.length, "should have at least 2 references").to.be.greaterThanOrEqual(2);
+    expect(
+      refs.length,
+      withFrontierDiagnosis(mark, "should have at least 2 references"),
+    ).to.be.greaterThanOrEqual(2);
   });
 });

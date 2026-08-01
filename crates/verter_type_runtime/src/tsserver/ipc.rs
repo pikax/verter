@@ -1644,6 +1644,18 @@ pub fn byte_offset_to_tsserver_pos(content: &str, offset: u32) -> (u32, u32) {
     (lc.line + 1, lc.character + 1) // tsserver is 1-based
 }
 
+/// Convert a byte offset to tsserver's zero-based absolute UTF-16 offset.
+///
+/// `encodedSemanticClassifications-full` and `provideInlayHints` take numeric
+/// absolute offsets rather than the line/offset objects used by most tsserver
+/// commands. Invalid byte offsets fail closed instead of being rounded onto a
+/// neighboring character.
+pub fn byte_offset_to_tsserver_absolute_offset(content: &str, offset: u32) -> Option<u32> {
+    let end = usize::try_from(offset).ok()?;
+    let prefix = content.get(..end)?;
+    u32::try_from(prefix.encode_utf16().count()).ok()
+}
+
 /// Convert tsserver's 1-based (line, offset) position to a byte offset.
 ///
 /// tsserver uses 1-based line and offset, where offset counts UTF-16 code units.
@@ -1693,6 +1705,42 @@ fn tsserver_pos_to_byte_offset_checked(content: &str, line: u32, offset: u32) ->
         return None;
     }
     Some(offset)
+}
+
+/// Parse one tsserver-family `provideInlayHints` entry into the provider
+/// contract's byte-offset representation.
+///
+/// Both the managed-tsserver and extension-hosted decoders consume this shared
+/// owner. A missing content snapshot or malformed/out-of-range UTF-16 position
+/// drops the hint; packed line/column sentinels are forbidden because carrier
+/// sourcemap merging interprets [`InlayHint::position`] as a byte offset.
+pub fn parse_tsserver_inlay_hint(
+    hint: &serde_json::Value,
+    content: Option<&str>,
+) -> Option<InlayHint> {
+    let text = hint.get("text")?.as_str()?.to_string();
+    let pos = hint.get("position")?;
+    let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
+    let offset = u32::try_from(pos.get("offset")?.as_u64()?).ok()?;
+    let position = tsserver_pos_to_byte_offset_checked(content?, line, offset)?;
+
+    let kind = match hint.get("kind").and_then(|value| value.as_str()) {
+        Some("Type") => Some(InlayHintKind::Type),
+        Some("Parameter") => Some(InlayHintKind::Parameter),
+        _ => None,
+    };
+
+    Some(InlayHint {
+        position,
+        label: text,
+        kind,
+        padding_left: hint
+            .get("whitespaceBefore")
+            .and_then(|value| value.as_bool()),
+        padding_right: hint
+            .get("whitespaceAfter")
+            .and_then(|value| value.as_bool()),
+    })
 }
 
 /// How a tracked open file was opened — the discriminant a resync replays on.
@@ -1906,9 +1954,170 @@ fn tsserver_plugin_args(plugin_path: Option<&str>) -> Vec<String> {
         "--globalPlugins".to_string(),
         "@verter/typescript-plugin".to_string(),
         "--pluginProbeLocations".to_string(),
-        plugin_path.to_string(),
+        verter_span::path::simplify_verbatim_path_str(plugin_path).into_owned(),
         "--allowLocalPluginLoads".to_string(),
     ]
+}
+
+/// Build the EXACT command a tsserver session is spawned from: program, every
+/// argument, every environment mutation. [`TsserverTypeProvider::spawn`] adds
+/// only the stdio wiring and the process-tree configuration on top, so this is
+/// the single argument-construction site for the tsserver lane — cold spawn,
+/// resilient respawn, and the test harness all reach tsserver through it.
+///
+/// Every path-valued input crosses the exec boundary here and is therefore run
+/// through [`verter_span::path::simplify_verbatim_path_str`]. Whether an
+/// UNSIMPLIFIABLE value is fatal depends on WHO consumes it and through WHICH
+/// API — an `fs` call accepts the `\\?\` prefix (that is what the prefix is FOR),
+/// a path algebra that predates it does not:
+///
+/// - `tsserver_path` (argv[1]) — node `resolveMainPath` → `Module._findPath` →
+///   `toRealPath`. Node's OWN path handling, `\\?\`-unaware: it degenerates to
+///   `lstat('D:')` and throws `EISDIR` before tsserver initialises. **FATAL —
+///   refuse.**
+/// - `plugin_path` (`--pluginProbeLocations`) — TypeScript's
+///   `importServicePluginSync` does `combinePaths(dir, "node_modules")` +
+///   `resolvePath` + `normalizeSlashes`, then `host.require` →
+///   `resolveJSModule` → `nodeModuleNameResolverWorker` (Node10, ancestor
+///   walk). **Simplified, never refused** — see the trace below.
+/// - `node_path` (the program) — consumed by `CreateProcessW` as
+///   `lpApplicationName`, a Win32 file API that accepts the extended-length
+///   form. `discovery::find_node` also never canonicalizes (it joins `PATH`
+///   entries), so it cannot produce one. **Simplified defensively, never
+///   refused** — refusing here would kill a session the OS would have started.
+/// - `carrier_store_dir` (`VERTER_CARRIER_STORE_DIR`) — the plugin uses it only
+///   as `path.join(storeDir, …)` + `fs.readFileSync` (`carrierStore.ts:202`,
+///   `:570`, `:591`). No `require`, no module resolution; node's `fs` accepts
+///   `\\?\`, which is precisely its documented long-path mechanism.
+///   **Simplified, never refused.**
+///
+/// ### The probe path, traced end to end
+///
+/// Two review passes reached opposite conclusions here, so the trace is recorded
+/// rather than the verdict. Against the pinned TypeScript 6.0.3 in
+/// `node_modules`:
+///
+/// 1. `importServicePluginSync` (`typescript.js:187996`) computes
+///    `normalizeSlashes(host.resolvePath(combinePaths(initialDir, "node_modules")))`.
+///    `normalizeSlashes` (`:8852`) rewrites `\` to `/`, so a verbatim
+///    `\\?\D:\ext` becomes `//?/D:/ext`.
+/// 2. TypeScript's path algebra UNDERSTANDS that spelling as absolute:
+///    `getEncodedRootLength` (`:8749`) sees `//`, scans for the next `/` from
+///    index 2, and returns 4 — the root is `//?/`. `getDirectoryPath` (`:8791`)
+///    walks ancestors correctly and stops at that root, so
+///    `forEachAncestorDirectory` (`:9154`) terminates rather than escaping. The
+///    claim that TypeScript mangles the prefix is WRONG: it preserves it.
+/// 3. But `host.resolvePath` is node's `_path.resolve` (`:8332`), which
+///    backslashes the path, and step 1's `normalizeSlashes` forward-slashes it
+///    again. So every `fileExists`/`directoryExists` probe and the final
+///    `require` run on the FORWARD-slash `//?/…` spelling.
+/// 4. Whether Win32 honours THAT spelling is not decidable from this repository.
+///    Node's `path.win32.toNamespacedPath` returns its input unchanged once it
+///    sees `?` at index 2, so the forward-slash form is what reaches libuv — and
+///    the `\\?\` prefix is documented to disable separator normalization, which
+///    is precisely what would stop those `/` characters being separators.
+///
+/// TypeScript preserves the prefix (step 2); the OS-level outcome (step 4) is
+/// genuinely unknown here. **The decision does not depend on resolving that**,
+/// because the consequences are asymmetric: if the plugin CAN load, refusing
+/// kills a session that would have worked; if it CANNOT, the plugin is absent
+/// but tsserver still serves every plain `.ts` file, and refusing turns a
+/// degraded session into no session at all. Both branches are worse than not
+/// refusing. That is the structural difference from the main script, where node
+/// provably exits and there is no session left to degrade.
+///
+/// The probe path is therefore simplified best-effort and NEVER refused. The
+/// residual — an unrepresentable probe path may silently load no plugin — is a
+/// VISIBILITY problem whose remedy is a plugin-load status surface, not a
+/// refusal.
+///
+/// The one fatal value comes from `Path::canonicalize()`, which is load-bearing
+/// (it resolves the pnpm package symlink so tsserver's script-relative
+/// default-lib lookup lands beside the real `.pnpm/typescript@…` install) and
+/// which on Windows returns `\\?\D:\…`. The canonical path is kept for
+/// filesystem work and identity; only the value handed to `exec` is simplified.
+/// `discovery::validate_tsserver_candidate` refuses an unrepresentable install
+/// as a candidate rejection, which is where the user-visible message comes from;
+/// the check repeated here is the fail-closed backstop for every other caller.
+///
+/// `cancellation_pipe_name` is deliberately NOT simplified: it is a `*` glob
+/// TEMPLATE, not a path, and it is built from `std::env::temp_dir()`, which is
+/// never an extended-length path. Running a path simplifier over a glob would be
+/// a category error (the `*` makes its last component non-representable, so the
+/// transform would refuse anyway) and would silently disarm cancellation if it
+/// ever did rewrite it.
+fn build_tsserver_command(
+    node_path: &str,
+    tsserver_path: &str,
+    cancellation_pipe_name: &str,
+    plugin_path: Option<&str>,
+    carrier_store_dir: Option<&str>,
+    plugin_response_remap: bool,
+) -> Result<tokio::process::Command, TypeProviderError> {
+    use verter_span::path::simplify_verbatim_path_str;
+
+    if let Some(refusal) = verter_span::path::verbatim_refusal(tsserver_path) {
+        return Err(TypeProviderError::new(format!(
+            "refusing to launch node against the extended-length path {tsserver_path}: {refusal}. \
+             Node cannot parse the `\\\\?\\` prefix and would exit before tsserver starts. \
+             Install TypeScript at a path Windows can name normally, or point the \
+             `typescript.tsdk` setting at one."
+        )));
+    }
+
+    let mut cmd = tokio::process::Command::new(simplify_verbatim_path_str(node_path).as_ref());
+
+    // Remove VS Code/Electron debug env vars to prevent tsserver from
+    // opening a debugger port during F5 sessions.
+    for var in CHILD_PROCESS_ENV_DENYLIST {
+        cmd.env_remove(var);
+    }
+
+    cmd.arg(simplify_verbatim_path_str(tsserver_path).as_ref())
+        .arg("--useSyntaxServer=false")
+        .arg("--disableAutomaticTypingAcquisition");
+
+    // Per-request cancellation is a transport invariant. Without it an
+    // abandoned background diagnostic keeps the single JavaScript thread
+    // busy ahead of every user request that replaced it.
+    cmd.arg("--cancellationPipeName")
+        .arg(cancellation_pipe_name);
+
+    // Load `@verter/typescript-plugin` so carriers become configured-project
+    // members. The plugin reads the carrier-publish store synchronously.
+    for plugin_arg in tsserver_plugin_args(plugin_path) {
+        cmd.arg(plugin_arg);
+    }
+
+    // Deliver the carrier-publish store dir to the plugin. The plugin reads
+    // it from `VERTER_CARRIER_STORE_DIR` (its config-key fallback); the LSP
+    // computes the SAME dir from its shared publish store, so the plugin reads
+    // exactly the bytes the LSP wrote.
+    if let Some(store_dir) = carrier_store_dir.filter(|d| !d.is_empty()) {
+        cmd.env(
+            "VERTER_CARRIER_STORE_DIR",
+            simplify_verbatim_path_str(store_dir).as_ref(),
+        );
+    }
+
+    // Gate the plugin's companion→source RESPONSE remap by surface. On the
+    // verter_lsp-internal backend (`plugin_response_remap == false`, the
+    // production default) the Rust `verter_lsp` merge layer is the SOLE
+    // response mapper — it owns the authoritative position mapper, strict
+    // offset mapping, preamble-import re-anchor, and the inserted-import
+    // specifier rewrite. Were the plugin to ALSO pre-map companion responses,
+    // the Rust merge layer would receive an already-`.vue`-source edit and
+    // double-map / drop it. So `"0"` DISABLES the plugin remap here. The VS
+    // Code DIRECT surface (no verter_lsp in the response path) leaves it
+    // `true`, where the plugin IS the only mapper. Delivered on the SAME
+    // channel as the carrier store dir; the plugin reads
+    // `VERTER_PLUGIN_RESPONSE_REMAP` (default ENABLED when unset).
+    cmd.env(
+        "VERTER_PLUGIN_RESPONSE_REMAP",
+        if plugin_response_remap { "1" } else { "0" },
+    );
+
+    Ok(cmd)
 }
 
 impl TsserverTypeProvider {
@@ -1946,18 +2155,6 @@ impl TsserverTypeProvider {
         plugin_response_remap: bool,
         crash_notify: Option<Arc<Notify>>,
     ) -> Result<Self, TypeProviderError> {
-        let mut cmd = tokio::process::Command::new(node_path);
-
-        // Remove VS Code/Electron debug env vars to prevent tsserver from
-        // opening a debugger port during F5 sessions.
-        for var in CHILD_PROCESS_ENV_DENYLIST {
-            cmd.env_remove(var);
-        }
-
-        cmd.arg(tsserver_path)
-            .arg("--useSyntaxServer=false")
-            .arg("--disableAutomaticTypingAcquisition");
-
         // Per-request cancellation is a transport invariant. Without it an
         // abandoned background diagnostic keeps the single JavaScript thread
         // busy ahead of every user request that replaced it. Failing provider
@@ -1967,39 +2164,15 @@ impl TsserverTypeProvider {
                 "tsserver cancellation directory unavailable; refusing an unpreemptible session",
             )
         })?);
-        cmd.arg("--cancellationPipeName")
-            .arg(cancellation.pipe_name_arg());
 
-        // Load `@verter/typescript-plugin` so carriers become configured-project
-        // members. The plugin reads the carrier-publish store synchronously.
-        for plugin_arg in tsserver_plugin_args(plugin_path) {
-            cmd.arg(plugin_arg);
-        }
-
-        // Deliver the carrier-publish store dir to the plugin. The plugin reads
-        // it from `VERTER_CARRIER_STORE_DIR` (its config-key fallback); the LSP
-        // computes the SAME dir from its shared publish store, so the plugin reads
-        // exactly the bytes the LSP wrote.
-        if let Some(store_dir) = carrier_store_dir.filter(|d| !d.is_empty()) {
-            cmd.env("VERTER_CARRIER_STORE_DIR", store_dir);
-        }
-
-        // Gate the plugin's companion→source RESPONSE remap by surface. On the
-        // verter_lsp-internal backend (`plugin_response_remap == false`, the
-        // production default) the Rust `verter_lsp` merge layer is the SOLE
-        // response mapper — it owns the authoritative position mapper, strict
-        // offset mapping, preamble-import re-anchor, and the inserted-import
-        // specifier rewrite. Were the plugin to ALSO pre-map companion responses,
-        // the Rust merge layer would receive an already-`.vue`-source edit and
-        // double-map / drop it. So `"0"` DISABLES the plugin remap here. The VS
-        // Code DIRECT surface (no verter_lsp in the response path) leaves it
-        // `true`, where the plugin IS the only mapper. Delivered on the SAME
-        // channel as the carrier store dir; the plugin reads
-        // `VERTER_PLUGIN_RESPONSE_REMAP` (default ENABLED when unset).
-        cmd.env(
-            "VERTER_PLUGIN_RESPONSE_REMAP",
-            if plugin_response_remap { "1" } else { "0" },
-        );
+        let mut cmd = build_tsserver_command(
+            node_path,
+            tsserver_path,
+            &cancellation.pipe_name_arg(),
+            plugin_path,
+            carrier_store_dir,
+            plugin_response_remap,
+        )?;
 
         let child = cmd
             .stdin(Stdio::piped())
@@ -4332,7 +4505,14 @@ impl TypeProvider for TsserverTypeProvider {
                 // No cached content — nothing to get tokens for
                 return Ok(vec![]);
             };
-            let end_line = content.lines().count() as u32 + 1;
+            // `EncodedSemanticClassificationsRequestArgs` takes NUMERIC
+            // `start`/`length` — UTF-16 code-unit offsets — NOT the
+            // line/offset objects most tsserver commands use. tsserver
+            // answers a line/offset-shaped request with `success: true` and
+            // ZERO spans (live-verified on TS 5.4/5.8/6.0), so the wrong
+            // shape reads as an engine with no classifications rather than
+            // an error.
+            let utf16_length = content.encode_utf16().count() as u64;
 
             let result = transport
                 .request_background(
@@ -4340,8 +4520,8 @@ impl TypeProvider for TsserverTypeProvider {
                     inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
-                            "start": { "line": 1, "offset": 1 },
-                            "end": { "line": end_line, "offset": 1 },
+                            "start": 0,
+                            "length": utf16_length,
                             "format": "2020",
                         }),
                         &project_file_name,
@@ -4357,26 +4537,17 @@ impl TypeProvider for TsserverTypeProvider {
                         .cloned()
                         .unwrap_or_default();
 
-                    // Spans come as [start, length, classification, start, length, classification, ...]
-                    let mut tokens = Vec::new();
-                    let mut i = 0;
-                    while i + 2 < spans.len() {
-                        let start = spans[i].as_u64().unwrap_or(0) as u32;
-                        let length = spans[i + 1].as_u64().unwrap_or(0) as u32;
-                        let classification = spans[i + 2].as_u64().unwrap_or(0) as u32;
-                        // Map classification to semantic token type/modifiers
-                        let token_type = classification & 0xFF;
-                        let token_modifiers = (classification >> 8) & 0xFF;
-                        tokens.push(SemanticToken {
-                            start,
-                            length,
-                            token_type,
-                            token_modifiers,
-                        });
-                        i += 3;
-                    }
-
-                    Ok(tokens)
+                    // Spans come as [start, length, classification, ...]
+                    // triplets whose classification is `"format": "2020"`
+                    // packed. The shared owner decodes the packing, remaps
+                    // both halves into Verter's published legend space
+                    // (unmappable classifications drop their span), and
+                    // converts the engine's UTF-16 span offsets to the byte
+                    // offsets the SemanticToken contract requires.
+                    Ok(crate::semantic_tokens::map_classified_spans_2020(
+                        &spans,
+                        Some(&content),
+                    ))
                 }
                 Err(_) => Ok(vec![]),
             }
@@ -4481,15 +4652,24 @@ impl TypeProvider for TsserverTypeProvider {
         let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let (sl, sc, el, ec) = {
+            let (start, length, content_snapshot) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&file) {
                     Some(c) => {
-                        let (sl, sc) = byte_offset_to_tsserver_pos(c, start_offset);
-                        let (el, ec) = byte_offset_to_tsserver_pos(c, end_offset);
-                        (sl, sc, el, ec)
+                        let Some(start) = byte_offset_to_tsserver_absolute_offset(c, start_offset)
+                        else {
+                            return Ok(vec![]);
+                        };
+                        let Some(end) = byte_offset_to_tsserver_absolute_offset(c, end_offset)
+                        else {
+                            return Ok(vec![]);
+                        };
+                        let Some(length) = end.checked_sub(start) else {
+                            return Ok(vec![]);
+                        };
+                        (start, length, Some(Arc::clone(c)))
                     }
-                    None => (1, start_offset + 1, 1, end_offset + 1),
+                    None => return Ok(vec![]),
                 }
             };
 
@@ -4499,8 +4679,8 @@ impl TypeProvider for TsserverTypeProvider {
                     inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
-                            "start": sl,
-                            "length": (el.saturating_sub(sl) + 1) * 200, // Approximate byte range
+                            "start": start,
+                            "length": length,
                         }),
                         &project_file_name,
                     ),
@@ -4509,40 +4689,12 @@ impl TypeProvider for TsserverTypeProvider {
 
             match result {
                 Ok(body) => {
-                    let _ = (sc, ec); // Used above for position calculation
                     let hints = body
                         .as_array()
                         .map(|arr| {
                             arr.iter()
                                 .filter_map(|hint| {
-                                    let text = hint.get("text")?.as_str()?.to_string();
-                                    let pos = hint.get("position")?;
-                                    let hl = pos.get("line")?.as_u64()? as u32;
-                                    let ho = pos.get("offset")?.as_u64()? as u32;
-
-                                    let kind_str =
-                                        hint.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                                    let kind = match kind_str {
-                                        "Type" => Some(InlayHintKind::Type),
-                                        "Parameter" => Some(InlayHintKind::Parameter),
-                                        _ => None,
-                                    };
-
-                                    // Convert 1-based position to packed 0-based
-                                    let position = ((hl.saturating_sub(1)) << 16)
-                                        | ((ho.saturating_sub(1)) & 0xFFFF);
-
-                                    Some(InlayHint {
-                                        position,
-                                        label: text,
-                                        kind,
-                                        padding_left: hint
-                                            .get("whitespaceBefore")
-                                            .and_then(|v| v.as_bool()),
-                                        padding_right: hint
-                                            .get("whitespaceAfter")
-                                            .and_then(|v| v.as_bool()),
-                                    })
+                                    parse_tsserver_inlay_hint(hint, content_snapshot.as_deref())
                                 })
                                 .collect()
                         })

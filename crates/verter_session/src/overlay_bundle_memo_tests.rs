@@ -339,6 +339,96 @@ fn external_supersession_between_snapshots_misses_memo() {
     );
 }
 
+/// (e2) The same retry shape, superseded by a RESOLUTION retarget.
+///
+/// `set_exact_resolutions` retargets the owner's `./dep` edge and moves
+/// NOTHING else — not the store-view epoch, not the project or content
+/// generation, not the env fold or identity. Only the resolution-fact
+/// generation advances. So this is the case (e) cannot reach: if that
+/// dimension is left out of the external-supersession fold, the two
+/// attempts share a compat token, the retry HITS, and the memo re-serves a
+/// bundle whose resolved import edges the retarget just invalidated —
+/// defeating the retry the memo exists to make possible.
+#[test]
+fn resolution_retarget_between_snapshots_misses_memo() {
+    let host = host_with_base_files();
+    let view = overlaid_view(&host, OWNER, OVERLAY_OWNER_A);
+
+    let (store_view_1, overlay) = request_pieces(&host, &view);
+    let bundle_1 = {
+        let ctx = SessionResolverContext::new(&host, &view, &store_view_1, Arc::clone(&overlay));
+        ResolverContext::prepared_decl_bundle(&ctx, OWNER).expect("attempt 1 bundle")
+    };
+
+    let applied = host.ws().set_exact_resolutions(
+        OWNER,
+        vec![verter_workspace::ExactResolution {
+            specifier: "./dep".to_string(),
+            phase: verter_workspace::ResolvePhase::ProviderGraph,
+            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            resolved_canonical_id: Some(UNRELATED.to_string()),
+            possible_canonical_ids: vec![UNRELATED.to_string()],
+        }],
+    );
+    assert!(
+        applied.changed,
+        "fixture invariant: the retarget must change workspace state"
+    );
+
+    let store_view_2 = host
+        .resolver_store_view_read()
+        .into_owned_view()
+        .with_session_overlay(&host, &view);
+    {
+        let token_1 = store_view_1.validation_token();
+        let token_2 = store_view_2.validation_token();
+        assert_eq!(
+            (
+                token_1.store_view_epoch,
+                token_1.project_generation,
+                token_1.content_generation,
+                token_1.env_hash_fold,
+                token_1.project_identity,
+                token_1.overlay_identity,
+            ),
+            (
+                token_2.store_view_epoch,
+                token_2.project_generation,
+                token_2.content_generation,
+                token_2.env_hash_fold,
+                token_2.project_identity,
+                token_2.overlay_identity,
+            ),
+            "fixture invariant: an exact retarget must move NO other \
+             external dimension — otherwise this degenerates into case (e)"
+        );
+        assert_ne!(
+            token_1.resolution_fact_generation, token_2.resolution_fact_generation,
+            "fixture invariant: the retarget must mint a resolution fact version"
+        );
+        use crate::resolver_core::StoreView;
+        assert_ne!(
+            store_view_1.compat_token(),
+            store_view_2.compat_token(),
+            "the compat token must move on a resolution retarget: it folds \
+             the external-supersession dimensions, and after the retarget \
+             the two views are NOT validation-equivalent",
+        );
+    }
+
+    let bundle_2 = {
+        let ctx = SessionResolverContext::new(&host, &view, &store_view_2, Arc::clone(&overlay));
+        ResolverContext::prepared_decl_bundle(&ctx, OWNER).expect("attempt 2 bundle")
+    };
+
+    assert!(
+        !Arc::ptr_eq(&bundle_1, &bundle_2),
+        "a retry attempt after a resolution retarget must NOT reuse the \
+         pre-retarget memoised bundle — its resolved import edges were \
+         computed against the world the retarget replaced",
+    );
+}
+
 /// (f) SUCCESS-ONLY: a materialisation whose cacheability scope reports
 /// non-cacheable is returned to its caller but NEVER memoised — the next
 /// read re-materialises (per-call semantics preserved for the fenced /

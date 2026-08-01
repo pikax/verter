@@ -1,6 +1,6 @@
 {
   "name": "@verter/unplugin",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "Universal Verter compiler plugin for Vue and Svelte across Vite, Rollup, webpack, esbuild, and compatible bundlers",
   "keywords": [
     "compiler",
@@ -195,6 +195,6 @@
     }
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

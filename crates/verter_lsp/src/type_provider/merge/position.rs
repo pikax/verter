@@ -268,13 +268,12 @@ pub(crate) fn carrier_completion_member_boundary_offset(
     let before = carrier_source.get(..cursor_byte)?;
     let op_str = if before.ends_with("?.") {
         "?."
-    } else if let Some(stripped) = before.strip_suffix('.') {
+    } else {
+        let stripped = before.strip_suffix('.')?;
         if stripped.ends_with('.') {
             return None;
         }
         "."
-    } else {
-        return None;
     };
     // The operator is ASCII, so its byte length equals its UTF-16 column width.
     let op_len = op_str.len() as u32;

@@ -39,6 +39,7 @@ use verter_session::external_ts::{
 use verter_session::VerterHost;
 use verter_workspace::FilesystemWorkspace;
 
+use crate::carrier_provider_projection::PreparedCarrierProviderContent;
 use crate::external_ts::membership_ledger::AbsentReason;
 use crate::external_ts::membership_reconciler::{
     CarrierMembershipCommitter, CommitFuture, MembershipReconciler, ReconcileErr, ReconcileOutcome,
@@ -48,6 +49,18 @@ use crate::external_ts::tsserver_backend::TsserverEngineBackend;
 use crate::external_ts::CanonicalSource;
 use crate::type_provider::traits::TypeProvider;
 
+/// The bytes a companion publishes, carrying the projection when its role has
+/// one. The IDE role's buffer is projected after compilation, so its bytes and
+/// the mapper describing them travel as ONE value: a recorder must never be able
+/// to pick up the content here and a mapper from somewhere else.
+#[derive(Debug, Clone)]
+pub(crate) enum CompanionContent {
+    /// Roles the provider receives exactly as compiled (API / Shadow / Real).
+    Verbatim(Arc<str>),
+    /// The carrier IDE buffer, whose generated imports were projected.
+    ProjectedIde(PreparedCarrierProviderContent),
+}
+
 /// One carrier companion to publish: its provider (companion) path, the carrier
 /// content, its source-map JSON (if any), and the contract role/script-kind.
 #[derive(Debug, Clone)]
@@ -55,8 +68,10 @@ pub struct CarrierCompanion {
     /// The companion provider path (`/proj/src/Comp.vue.tsx` or
     /// `/proj/src/Comp.vue.verter.ts`).
     pub provider_uri: Arc<str>,
-    /// The carrier content bytes the store writes (the IDE TSX or API `.verter.ts`).
-    pub content: Arc<str>,
+    /// The carrier content bytes the store writes (the IDE TSX or API
+    /// `.verter.ts`) — plus, for the projected IDE role, the mapper describing
+    /// exactly those bytes. Private so the two can never be set apart.
+    content: CompanionContent,
     /// The `CodeTransform` source-map JSON, threaded so the store writes a map
     /// blob the plugin reads for navigation remapping. `None` ⇒ no map blob.
     pub map_json: Option<Arc<str>>,
@@ -66,6 +81,103 @@ pub struct CarrierCompanion {
     pub script_kind: ScriptKind,
     /// The monotonic provider generation/version for this companion.
     pub version: u64,
+}
+
+impl CarrierCompanion {
+    /// A companion whose bytes reach the provider exactly as compiled. The IDE
+    /// role never uses this constructor — its buffer is projected, and
+    /// [`Self::carrier_ide`] is the only way to build it.
+    #[must_use]
+    pub(crate) fn verbatim(
+        provider_uri: Arc<str>,
+        content: Arc<str>,
+        map_json: Option<Arc<str>>,
+        role: SnapshotRole,
+        script_kind: ScriptKind,
+    ) -> Self {
+        debug_assert!(
+            role != SnapshotRole::CarrierIde,
+            "the IDE companion is projected; build it with CarrierCompanion::carrier_ide"
+        );
+        Self {
+            provider_uri,
+            content: CompanionContent::Verbatim(content),
+            map_json,
+            role,
+            script_kind,
+            version: 0,
+        }
+    }
+
+    /// The projected carrier IDE companion. Taking the prepared value whole is
+    /// what keeps the published bytes and the recorded mapper the same answer.
+    #[must_use]
+    pub(crate) fn carrier_ide(
+        provider_uri: Arc<str>,
+        prepared: PreparedCarrierProviderContent,
+        map_json: Option<Arc<str>>,
+        script_kind: ScriptKind,
+    ) -> Self {
+        Self {
+            provider_uri,
+            content: CompanionContent::ProjectedIde(prepared),
+            map_json,
+            role: SnapshotRole::CarrierIde,
+            script_kind,
+            version: 0,
+        }
+    }
+
+    /// The exact bytes this companion publishes.
+    #[must_use]
+    pub fn content(&self) -> &Arc<str> {
+        match &self.content {
+            CompanionContent::Verbatim(content) => content,
+            CompanionContent::ProjectedIde(prepared) => prepared.content(),
+        }
+    }
+
+    /// The publishable content together with its projection, for the recorder.
+    pub(crate) fn recorded_content(&self) -> &CompanionContent {
+        &self.content
+    }
+
+    /// An IDE companion whose projection is prepared from `content` through the
+    /// SAME preparer production uses, so a test never fabricates a content/mapper
+    /// pair the projection owner would not have produced.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn carrier_ide_from_generated(
+        provider_uri: Arc<str>,
+        canonical_id: &str,
+        generated: &str,
+        map_json: Option<Arc<str>>,
+        script_kind: ScriptKind,
+        version: u64,
+    ) -> Self {
+        let prepared = crate::carrier_provider_projection::expect_admitted(
+            crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                None,
+                canonical_id,
+                generated,
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            ),
+            "the test preparer has no workspace resolution inputs",
+        );
+        let mut companion = Self::carrier_ide(provider_uri, prepared, map_json, script_kind);
+        companion.version = version;
+        companion
+    }
+
+    /// Substitute the surface the provider ACTUALLY received for this companion.
+    /// Only a successful delivery mints the evidence, and it carries its own
+    /// mapper, so the pair stays consistent through the substitution.
+    pub(crate) fn replace_with_delivered_ide_surface(
+        &mut self,
+        delivered: PreparedCarrierProviderContent,
+    ) {
+        self.content = CompanionContent::ProjectedIde(delivered);
+    }
 }
 
 /// The live carrier-publish coordinator for the tsserver engine.
@@ -504,7 +616,7 @@ fn env_dims_for_project(
 /// the content-addressed `content_hash`/`map_hash` the store keys blobs on. The
 /// companion is `Closed` (a store-served external member, not an editor buffer).
 fn snapshot_file_of(source_canonical: &str, companion: &CarrierCompanion) -> SnapshotFile {
-    let content_hash = hash16_of_str(&companion.content);
+    let content_hash = hash16_of_str(companion.content());
     let map_hash = companion
         .map_json
         .as_deref()
@@ -515,7 +627,7 @@ fn snapshot_file_of(source_canonical: &str, companion: &CarrierCompanion) -> Sna
         provider_uri: Arc::clone(&companion.provider_uri),
         role: companion.role,
         script_kind: companion.script_kind,
-        content: Arc::clone(&companion.content),
+        content: Arc::clone(companion.content()),
         content_hash,
         map_hash,
         map_json: companion.map_json.clone(),

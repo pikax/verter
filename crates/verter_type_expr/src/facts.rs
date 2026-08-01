@@ -1099,9 +1099,6 @@ pub struct ExternalRouteRefFact {
     pub source_specifier: String,
     /// The original exported name in the source module.
     pub imported_name: String,
-    /// The resolved canonical file id of the target, when the specifier resolved
-    /// (`None` for an unresolved / not-yet-resolved specifier).
-    pub canonical_id: Option<Arc<str>>,
     /// The remaining route demand on the imported symbol.
     pub route: RouteDemand,
 }

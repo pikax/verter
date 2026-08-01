@@ -15,7 +15,7 @@ use verter_span::{SourceByteOffset, SourceByteRange};
 use crate::ast::types::{ElementNode, TagType};
 use crate::ide::template::emit::{
     emit_expr_plan, emit_op, emit_synthesized_shorthand_value, plan_user_expr, trim_span, EmitOp,
-    EmitText, ExprOptions, Placement,
+    EmitText, ExprOptions, ExprPlan, Placement,
 };
 use crate::ide::{event_to_jsx_name, get_directive_name, TemplateComponentBindings};
 use crate::template::code_gen::binding::BindingResolver;
@@ -25,41 +25,212 @@ use crate::template::code_gen::vdom::props::camelize;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedProp};
 use crate::types::NodeProp;
 
-/// A custom directive collected for `v-directive` emission in TSX output.
-pub struct CollectedDirective {
-    /// Typed directive expression. Setup-local directives use their authored
-    /// binding directly; only unresolved/global directives use the instance
-    /// accessor fallback.
-    pub reference: String,
-    /// Resolved value expression, or `"true"` for no-value directives
-    pub value: String,
-    /// Argument: `"\"foo\""` (quoted static), resolved expression (dynamic), or `"undefined"`
-    pub arg: String,
-    /// Modifiers object: `{"bar":true}` or `{}`
-    pub modifiers: String,
+/// One emission piece of a custom directive's relocated `v-directive` payload.
+///
+/// The payload is RELOCATED (the authored `v-color.blue="'red'"` attribute is
+/// deleted and re-emitted inside a synthetic `___VERTER___runCustomDirective(...)`
+/// call), so no authored byte survives in place. Every token the user can put a
+/// cursor on therefore needs its own mapped run — otherwise the generated position
+/// has no original position and every provider-backed feature (diagnostics, hover,
+/// definition, references, completion) fails closed at that column.
+pub enum DirectivePiece<'a> {
+    /// Unmapped synthetic scaffolding.
+    Syn(String),
+    /// A generated token owning `source_start`. Used for a static argument, each
+    /// modifier name, and each SEGMENT of the directive name's kebab→camel
+    /// projection.
+    ///
+    /// `InsertMapped` is a LINEAR run: its generated extent and its authored extent
+    /// are the same length, and a consumer resolves a position by adding the in-run
+    /// offset to the other side. So the text of a `Mapped` piece must be a
+    /// length-faithful image of the authored bytes at `source_start` — same number
+    /// of columns, character for character. Text that is longer or shorter than the
+    /// authored token it stands for silently resolves onto neighbouring authored
+    /// characters; a length-changing rewrite is carried by SEVERAL pieces, one per
+    /// length-faithful segment (see [`project_directive_name`]), never by one piece
+    /// spanning the whole rewrite.
+    Mapped {
+        text: String,
+        source_start: SourceByteOffset,
+    },
+    /// A user expression, re-emitted through the relocated sink so each identifier
+    /// keeps its own mapped run and its binding accessor prefix/suffix stays
+    /// unmapped.
+    Expr(ExprPlan<'a>),
 }
 
-/// Convert a directive name (without `v-` prefix) to camelCase with `v` prefix.
+/// A custom directive collected for `v-directive` emission in TSX output, as the
+/// ordered piece list its element-level emitter lowers.
+pub struct CollectedDirective<'a> {
+    pub pieces: Vec<DirectivePiece<'a>>,
+}
+
+/// Whether `name` is a valid bare JavaScript object-literal key (an identifier
+/// name). Reserved words are legal property names, so only the character classes
+/// matter.
+fn is_js_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// One generated slice of a directive name's kebab→camel projection.
 ///
-/// - `"focus"` → `"vFocus"`
-/// - `"click-outside"` → `"vClickOutside"`
-pub fn directive_name_to_camel(name: &str) -> String {
-    let mut result = String::with_capacity(name.len() + 1);
-    result.push('v');
-    let mut capitalize_next = true;
-    for ch in name.chars() {
-        if ch == '-' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            for upper in ch.to_uppercase() {
-                result.push(upper);
+/// `source_start` is `Some` only when `text` is a LENGTH-FAITHFUL image of the
+/// authored bytes at that offset — the same number of columns, character for
+/// character — so a mapped run over it resolves exactly in both directions. It is
+/// `None` when the slice has no such authored correlate, and the slice is then
+/// emitted UNMAPPED: an authored column with no faithful generated correlate maps
+/// to nothing rather than onto a neighbouring token, which is the Carrier IDE TS
+/// Surface Principle's fail-closed boundary.
+pub struct DirectiveNameSlice {
+    pub text: String,
+    pub source_start: Option<u32>,
+}
+
+/// Project a custom directive's authored name onto the generated camel identifier
+/// AND the slices that carry that identifier back to the authored bytes — in ONE
+/// walk, so the emitted identifier and its mapping can never disagree.
+///
+/// `dir_name` is the authored name with its `v-` prefix already stripped (what
+/// [`get_directive_name`](crate::ide::get_directive_name) returns).
+/// `v_prefix_start` is the authored byte offset of the `v` in the authored
+/// `v-{dir_name}` spelling, or `None` when the authored spelling is NOT
+/// `v-{dir_name}` — a shorthand form reaching the custom-directive path carries a
+/// SYNTHESISED name that shares no bytes with the source, so none of the generated
+/// bytes is an image of any authored byte and the whole identifier stays unmapped.
+///
+/// ## Why one run cannot carry this
+///
+/// Kebab→camel DELETES each hyphen and uppercases the character after it, so it is
+/// a LENGTH-CHANGING rewrite — and it changes length by a different amount per
+/// name: `v-color` 7→6, `v-click-outside` 15→13, `v-a` 3→2. A source-map run maps
+/// generated↔authored 1:1 within itself (its two extents are the same length by
+/// construction), so a single run over the whole identifier covers only its own
+/// generated length of authored columns: anchored at the authored `v` it reaches
+/// `v-colo` and drops the trailing `r`, and the columns it does reach are shifted by
+/// the deleted hyphen onto the WRONG authored characters (`C`↔`-`, `o`↔`c`, …).
+/// Chaining runs cannot fix that either: a chain contiguous in both spaces preserves
+/// total length, so six generated columns can never span seven authored ones.
+///
+/// ## The representation
+///
+/// One run per authored SEGMENT. A segment's generated bytes are a character-for-
+/// character image of its authored bytes (only the initial's case differs), so every
+/// authored column inside a segment resolves to the generated character it actually
+/// became — the last one included. The hyphens are what the transform deletes: they
+/// have no generated correlate at all, so they are covered by no run and resolve to
+/// nothing. Two consequences, both intended:
+///  - a POSITION anywhere in the authored name (except a hyphen) resolves exactly,
+///    which is what hover / definition / references / diagnostics query on;
+///  - a RANGE over the whole generated identifier does NOT compose, because the runs
+///    are generated-adjacent but authored-DISCONTIGUOUS across each deleted hyphen.
+///    A provider edit derived from it therefore fails closed instead of splicing a
+///    partial authored token. That is the only correct answer: the rewrite is
+///    length- AND case-changing, so a verbatim splice of provider text over the
+///    authored name is never right (`vHighlight` written over `v-color` is not even
+///    a directive), and a partial splice corrupts the source outright.
+pub fn project_directive_name(
+    dir_name: &str,
+    v_prefix_start: Option<u32>,
+) -> (String, Vec<DirectiveNameSlice>) {
+    let mut identifier = String::with_capacity(dir_name.len() + 1);
+    let mut slices: Vec<DirectiveNameSlice> = Vec::new();
+
+    // The generated identifier's leading `v` is an image of the authored `v` of the
+    // `v-` prefix — one column for one column.
+    identifier.push('v');
+    slices.push(DirectiveNameSlice {
+        text: "v".to_string(),
+        source_start: v_prefix_start,
+    });
+
+    // `v-` is exactly two bytes, so the authored name body starts two bytes after the
+    // `v` the caller identified.
+    let body_start = v_prefix_start.map(|start| start + 2);
+
+    let mut segment_start = 0usize;
+    loop {
+        let segment_end = dir_name[segment_start..]
+            .find('-')
+            .map(|offset| segment_start + offset)
+            .unwrap_or(dir_name.len());
+        let segment = &dir_name[segment_start..segment_end];
+        if !segment.is_empty() {
+            let authored = body_start.map(|start| start + segment_start as u32);
+            push_camel_segment(segment, authored, &mut identifier, &mut slices);
+        }
+        if segment_end == dir_name.len() {
+            break;
+        }
+        // Skip the hyphen itself: the transform deletes it, so it contributes no
+        // generated bytes and belongs to no run.
+        segment_start = segment_end + 1;
+    }
+
+    (identifier, slices)
+}
+
+/// Append one kebab segment's camel image to `identifier` and its carrying slices to
+/// `slices`. `authored` is the segment's authored byte offset, or `None` when the
+/// segment has no authored correlate.
+fn push_camel_segment(
+    segment: &str,
+    authored: Option<u32>,
+    identifier: &mut String,
+    slices: &mut Vec<DirectiveNameSlice>,
+) {
+    let initial = segment
+        .chars()
+        .next()
+        .expect("caller skips empty segments, so a segment has a first character");
+    let tail = &segment[initial.len_utf8()..];
+
+    // A case mapping that stays ONE character of the SAME encoded length keeps the
+    // whole camel segment a length-faithful image of the authored segment, so the
+    // segment is one run. (One char of equal UTF-8 length also has equal UTF-16
+    // length, so this holds in the source map's column space too.)
+    let mut upper = initial.to_uppercase();
+    let length_preserving = match (upper.next(), upper.next()) {
+        (Some(single), None) if single.len_utf8() == initial.len_utf8() => Some(single),
+        _ => None,
+    };
+
+    match length_preserving {
+        Some(single) => {
+            let mut text = String::with_capacity(segment.len());
+            text.push(single);
+            text.push_str(tail);
+            identifier.push_str(&text);
+            slices.push(DirectiveNameSlice {
+                text,
+                source_start: authored,
+            });
+        }
+        // The uppercase form occupies a different number of columns than the authored
+        // character it replaces (`ß` → `SS`), so a run over it would resolve every
+        // later column of the segment onto the wrong authored character. It stays
+        // UNMAPPED — fail closed on that one column — and the verbatim tail, which is
+        // still a byte-for-byte image, keeps its own run.
+        None => {
+            let expanded: String = initial.to_uppercase().collect();
+            identifier.push_str(&expanded);
+            slices.push(DirectiveNameSlice {
+                text: expanded,
+                source_start: None,
+            });
+            if !tail.is_empty() {
+                identifier.push_str(tail);
+                slices.push(DirectiveNameSlice {
+                    text: tail.to_string(),
+                    source_start: authored.map(|start| start + initial.len_utf8() as u32),
+                });
             }
-            capitalize_next = false;
-        } else {
-            result.push(ch);
         }
     }
-    result
 }
 
 /// Process all props on an element, converting to JSX syntax.
@@ -77,8 +248,8 @@ pub fn process_element_props<'alloc>(
     components: &TemplateComponentBindings,
     condition_guard: Option<&str>,
     is_jsx: bool,
-) -> Vec<CollectedDirective> {
-    let mut collected_directives: Vec<CollectedDirective> = Vec::new();
+) -> Vec<CollectedDirective<'alloc>> {
+    let mut collected_directives: Vec<CollectedDirective<'alloc>> = Vec::new();
     let v_if_guard = condition_guard;
 
     // Pre-scan: does this element have v-show? If so, :style will be handled
@@ -317,68 +488,187 @@ pub fn process_element_props<'alloc>(
                     // JSX mode: strip custom directives (no TS-only v-directive support)
                     remove_prop(prop, source, out);
                 } else {
-                    // Build CollectedDirective
-                    let camel_name = directive_name_to_camel(dir_name);
-                    let reference = if resolver.get(&camel_name).is_some() {
-                        camel_name.clone()
-                    } else {
-                        format!("___VERTER___directiveAccessor[\"{camel_name}\"]")
-                    };
+                    // Build the relocated payload as an ordered piece list. Each
+                    // authored token (directive name, value, argument, modifiers)
+                    // becomes its OWN mapped piece; only scaffolding is unmapped.
+                    let mut pieces: Vec<DirectivePiece<'alloc>> = Vec::new();
 
-                    // Value — the custom-directive expression is relocated into a
-                    // synthetic `___VERTER___runCustomDirective(...)` call, so it is
-                    // resolved to a flat string via the shared `build_prefixed_expr`
-                    // helper (no in-place mapping is possible here).
-                    let value = if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-                        let raw = &source[vs as usize..ve as usize];
-                        match oxc_prop.and_then(|p| p.exp.as_ref()) {
-                            Some(exp) => build_prefixed_expr(raw, vs, exp, resolver, &[]),
-                            None => resolver.resolve_simple_expr(raw),
-                        }
-                    } else {
-                        "true".to_string()
-                    };
+                    pieces.push(DirectivePiece::Syn(
+                        "___VERTER___runCustomDirective(___VERTER___directiveElement,".to_string(),
+                    ));
 
-                    // Arg
-                    let arg = if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
-                        let raw_arg = &source[as_ as usize..ae as usize];
-                        if prop.is_dynamic == Some(true) {
-                            // Dynamic arg: resolve as expression, strip brackets if present
-                            let inner = raw_arg
-                                .strip_prefix('[')
-                                .and_then(|s| s.strip_suffix(']'))
-                                .unwrap_or(raw_arg);
-                            resolver.resolve_simple_expr(inner)
-                        } else {
-                            // Static arg: quote it
-                            format!("\"{}\"", raw_arg)
-                        }
-                    } else {
-                        "undefined".to_string()
-                    };
-
-                    // Modifiers
-                    let modifiers = if prop.modifiers.is_empty() {
-                        "{}".to_string()
-                    } else {
-                        let mut m = String::from("{");
-                        for (i, modifier) in prop.modifiers.iter().enumerate() {
-                            if i > 0 {
-                                m.push(',');
+                    // Directive reference. Both forms carry their generated name
+                    // back to the authored `v-…` name SEGMENT BY SEGMENT, so hover /
+                    // go-to-definition / find-references / diagnostics bridge the
+                    // kebab→camel hop at every authored column of the name — and the
+                    // deleted hyphens, which have no generated correlate, fail closed
+                    // instead of resolving onto a neighbouring character. See
+                    // `project_directive_name` for why one run cannot carry a
+                    // length-changing rewrite.
+                    let authored_name = &source[prop.start as usize..prop.name_end as usize];
+                    // Anchor only when the authored spelling really IS `v-{dir_name}`:
+                    // a shorthand form reaching this path carries a SYNTHESISED name
+                    // whose bytes are nowhere in the source.
+                    let v_prefix_start =
+                        (authored_name.strip_prefix("v-") == Some(dir_name)).then_some(prop.start);
+                    let (camel_name, name_slices) =
+                        project_directive_name(dir_name, v_prefix_start);
+                    let push_name = |pieces: &mut Vec<DirectivePiece<'alloc>>| {
+                        for slice in name_slices {
+                            match slice.source_start {
+                                Some(start) => pieces.push(DirectivePiece::Mapped {
+                                    text: slice.text,
+                                    source_start: SourceByteOffset(start),
+                                }),
+                                None => pieces.push(DirectivePiece::Syn(slice.text)),
                             }
-                            let mod_name = &source[modifier.start as usize..modifier.end as usize];
-                            m.push_str(&format!("\"{}\":true", mod_name));
                         }
-                        m.push('}');
-                        m
                     };
+                    if resolver.get(&camel_name).is_some() {
+                        push_name(&mut pieces);
+                    } else {
+                        pieces.push(DirectivePiece::Syn(
+                            "___VERTER___directiveAccessor[\"".to_string(),
+                        ));
+                        push_name(&mut pieces);
+                        pieces.push(DirectivePiece::Syn("\"]".to_string()));
+                    }
 
-                    collected_directives.push(CollectedDirective {
-                        reference,
-                        value,
-                        arg,
-                        modifiers,
-                    });
+                    pieces.push(DirectivePiece::Syn(
+                        ")(___VERTER___directiveElement,".to_string(),
+                    ));
+
+                    // Value.
+                    match (prop.value_start, prop.value_end) {
+                        (Some(vs), Some(ve)) => {
+                            let (tvs, tve) = trim_span(source, vs, ve);
+                            let value_bindings = oxc_prop
+                                .and_then(|p| p.exp.as_ref())
+                                .and_then(|e| e.bindings.as_ref())
+                                .map(|b| b.bindings.as_slice());
+                            pieces.push(DirectivePiece::Expr(plan_user_expr(
+                                source,
+                                SourceByteRange::new(SourceByteOffset(tvs), SourceByteOffset(tve)),
+                                value_bindings,
+                                resolver,
+                                ExprOptions::default(),
+                            )));
+                        }
+                        _ => pieces.push(DirectivePiece::Syn("true".to_string())),
+                    }
+
+                    pieces.push(DirectivePiece::Syn(",".to_string()));
+
+                    // Argument.
+                    match (prop.arg_start, prop.arg_end) {
+                        (Some(as_), Some(ae)) => {
+                            let raw_arg = &source[as_ as usize..ae as usize];
+                            if prop.is_dynamic == Some(true) {
+                                // Dynamic arg: the bracketed expression is planned
+                                // so its identifiers map back individually.
+                                let inner = raw_arg
+                                    .strip_prefix('[')
+                                    .and_then(|s| s.strip_suffix(']'))
+                                    .unwrap_or(raw_arg);
+                                let inner_start = as_
+                                    + (inner.as_ptr() as usize - raw_arg.as_ptr() as usize) as u32;
+                                let (tas, tae) = trim_span(
+                                    source,
+                                    inner_start,
+                                    inner_start + inner.len() as u32,
+                                );
+                                let arg_bindings = oxc_prop
+                                    .and_then(|p| p.arg.as_ref())
+                                    .and_then(|a| a.bindings.as_ref())
+                                    .map(|b| b.bindings.as_slice());
+                                pieces.push(DirectivePiece::Expr(plan_user_expr(
+                                    source,
+                                    SourceByteRange::new(
+                                        SourceByteOffset(tas),
+                                        SourceByteOffset(tae),
+                                    ),
+                                    arg_bindings,
+                                    resolver,
+                                    ExprOptions::default(),
+                                )));
+                            } else {
+                                // Static arg: emitted as a QUOTED string literal, and
+                                // TypeScript spans an argument-type diagnostic over the
+                                // WHOLE string literal — both quotes included. Synthetic,
+                                // unmapped quotes therefore drop the invalid-argument
+                                // diagnostic entirely (its range starts AND ends outside
+                                // any mapped run). So each quote owns the authored
+                                // delimiter it stands for: the opening quote maps to the
+                                // `:` that introduces the argument, the closing quote to
+                                // the token that terminates it. The quoted argument is
+                                // then one run chain contiguous in BOTH the generated and
+                                // the authored space, and the diagnostic composes onto the
+                                // authored argument.
+                                pieces.push(DirectivePiece::Mapped {
+                                    text: "\"".to_string(),
+                                    source_start: SourceByteOffset(as_.saturating_sub(1)),
+                                });
+                                pieces.push(DirectivePiece::Mapped {
+                                    text: raw_arg.to_string(),
+                                    source_start: SourceByteOffset(as_),
+                                });
+                                pieces.push(DirectivePiece::Mapped {
+                                    text: "\"".to_string(),
+                                    source_start: SourceByteOffset(ae),
+                                });
+                            }
+                        }
+                        _ => pieces.push(DirectivePiece::Syn("undefined".to_string())),
+                    }
+
+                    // Modifiers. Each key is its OWN mapped run, so an
+                    // invalid-modifier diagnostic lands on exactly that authored
+                    // modifier and no valid sibling is implicated.
+                    //
+                    // The key is emitted BARE whenever the modifier is a valid JS
+                    // identifier, because TypeScript anchors the excess-property
+                    // diagnostic at the property-name node, and a bare key puts
+                    // that anchor on the mapped name itself.
+                    //
+                    // A modifier that is not a valid identifier (`v-foo.some-mod`)
+                    // must stay quoted to be legal JS, and TypeScript then spans
+                    // the WHOLE string literal — both quotes included. Synthetic,
+                    // unmapped quotes therefore drop the invalid-modifier
+                    // diagnostic entirely (its range starts AND ends outside any
+                    // mapped run). So each quote owns the authored delimiter it
+                    // stands for: the opening quote maps to the `.` that
+                    // introduces the modifier, the closing quote to the token that
+                    // terminates it. The quoted key is then one run chain
+                    // contiguous in BOTH the generated and the authored space, and
+                    // the diagnostic composes onto the authored modifier.
+                    pieces.push(DirectivePiece::Syn(",{".to_string()));
+                    for (i, modifier) in prop.modifiers.iter().enumerate() {
+                        let mod_name = &source[modifier.start as usize..modifier.end as usize];
+                        if i > 0 {
+                            pieces.push(DirectivePiece::Syn(",".to_string()));
+                        }
+                        let quoted = !is_js_identifier(mod_name);
+                        if quoted {
+                            pieces.push(DirectivePiece::Mapped {
+                                text: "\"".to_string(),
+                                source_start: SourceByteOffset(modifier.start.saturating_sub(1)),
+                            });
+                        }
+                        pieces.push(DirectivePiece::Mapped {
+                            text: mod_name.to_string(),
+                            source_start: SourceByteOffset(modifier.start),
+                        });
+                        if quoted {
+                            pieces.push(DirectivePiece::Mapped {
+                                text: "\"".to_string(),
+                                source_start: SourceByteOffset(modifier.end),
+                            });
+                        }
+                        pieces.push(DirectivePiece::Syn(":true".to_string()));
+                    }
+                    pieces.push(DirectivePiece::Syn("});".to_string()));
+
+                    collected_directives.push(CollectedDirective { pieces });
 
                     // Remove the directive from raw output
                     remove_prop(prop, source, out);
@@ -1126,23 +1416,226 @@ mod tests {
         assert_eq!(get_prop_end(&prop), 5); // name_end
     }
 
-    #[test]
-    fn directive_name_to_camel_simple() {
-        assert_eq!(directive_name_to_camel("focus"), "vFocus");
+    /// Assert the whole projection of an authored ASCII `v-…` directive name, treating
+    /// the authored name as starting at byte 0:
+    ///
+    ///  - it produces `expect_identifier`;
+    ///  - the slices CONCATENATE to exactly that identifier — otherwise the mapping
+    ///    describes a different string than the one emitted;
+    ///  - every MAPPED slice is a length-faithful, character-for-character image of the
+    ///    authored bytes it claims. A run resolves a position by adding the in-run
+    ///    offset to the other side, so a slice that is longer or shorter than the
+    ///    authored token it stands for silently lands on neighbouring characters;
+    ///  - the mapped slices cover every authored byte EXCEPT the hyphens, which the
+    ///    transform deletes, without overlapping.
+    ///
+    /// The last two are what a first-anchor assertion cannot see: they pin the EXTENT.
+    fn assert_name_projection(authored: &str, expect_identifier: &str) {
+        assert!(
+            authored.is_ascii(),
+            "this helper indexes authored bytes as columns"
+        );
+        let dir_name = authored
+            .strip_prefix("v-")
+            .expect("fixture must be an authored `v-` name");
+        let (identifier, slices) = project_directive_name(dir_name, Some(0));
+
+        assert_eq!(
+            identifier, expect_identifier,
+            "{authored}: projected identifier"
+        );
+        let concatenated: String = slices.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            concatenated, identifier,
+            "{authored}: the slices must concatenate to the emitted identifier, or the mapping \
+             describes a different string than the one the generated surface contains"
+        );
+
+        let mut covered = vec![false; authored.len()];
+        for slice in &slices {
+            let Some(start) = slice.source_start else {
+                continue;
+            };
+            let start = start as usize;
+            let end = start + slice.text.len();
+            assert!(
+                end <= authored.len(),
+                "{authored}: mapped slice {:?} at {start} runs past the authored name",
+                slice.text
+            );
+            assert!(
+                slice.text.eq_ignore_ascii_case(&authored[start..end]),
+                "{authored}: mapped slice {:?} must be a character-for-character image of the \
+                 authored {:?} at byte {start} — same number of columns, or the run resolves \
+                 onto neighbouring authored characters",
+                slice.text,
+                &authored[start..end]
+            );
+            for (byte, seen) in covered.iter_mut().enumerate().take(end).skip(start) {
+                assert!(
+                    !*seen,
+                    "{authored}: authored byte {byte} is claimed by two mapped slices"
+                );
+                *seen = true;
+            }
+        }
+
+        for (byte, ch) in authored.char_indices() {
+            assert_eq!(
+                covered[byte],
+                ch != '-',
+                "{authored}: authored byte {byte} ({ch:?}) must {} — a hyphen is DELETED by the \
+                 transform and has no generated correlate, so it maps to nothing; every other \
+                 authored byte must map, the LAST one included. Slices: {:?}",
+                if ch == '-' {
+                    "NOT be mapped"
+                } else {
+                    "be mapped"
+                },
+                slices
+                    .iter()
+                    .map(|s| (s.text.as_str(), s.source_start))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
-    fn directive_name_to_camel_hyphenated() {
-        assert_eq!(directive_name_to_camel("click-outside"), "vClickOutside");
+    fn directive_name_projection_simple() {
+        assert_name_projection("v-focus", "vFocus");
     }
 
     #[test]
-    fn directive_name_to_camel_multi_hyphen() {
-        assert_eq!(directive_name_to_camel("my-long-dir"), "vMyLongDir");
+    fn directive_name_projection_hyphenated() {
+        assert_name_projection("v-click-outside", "vClickOutside");
     }
 
     #[test]
-    fn directive_name_to_camel_single_char() {
-        assert_eq!(directive_name_to_camel("a"), "vA");
+    fn directive_name_projection_multi_hyphen() {
+        assert_name_projection("v-my-long-dir", "vMyLongDir");
+    }
+
+    #[test]
+    fn directive_name_projection_single_char() {
+        assert_name_projection("v-a", "vA");
+    }
+
+    #[test]
+    fn directive_name_projection_single_char_segments() {
+        // Every segment one character: the deficit equals the hyphen count, so a single
+        // run would cover barely half the authored name.
+        assert_name_projection("v-a-b-c", "vABC");
+    }
+
+    /// A run's extent is its own length, so the number of mapped runs must equal the
+    /// number of authored segments — one linear run over a length-changing rewrite is
+    /// the defect this projection exists to prevent.
+    #[test]
+    fn directive_name_projection_emits_one_run_per_authored_segment() {
+        let (identifier, slices) = project_directive_name("click-outside", Some(0));
+        assert_eq!(identifier, "vClickOutside");
+        let mapped: Vec<(&str, Option<u32>)> = slices
+            .iter()
+            .map(|s| (s.text.as_str(), s.source_start))
+            .collect();
+        assert_eq!(
+            mapped,
+            vec![
+                ("v", Some(0)),       // authored `v`      at 0
+                ("Click", Some(2)),   // authored `click`   at 2 (the `-` at 1 is dropped)
+                ("Outside", Some(8)), // authored `outside` at 8 (the `-` at 7 is dropped)
+            ],
+            "the projection must be THREE runs, each length-faithful; one run of length 13 over \
+             the 15-column authored name is the truncating shape"
+        );
+    }
+
+    /// A SHORTHAND form reaching the custom-directive path carries a synthesised name
+    /// whose bytes are nowhere in the source, so nothing may be mapped — mapping it
+    /// would point runs at unrelated authored bytes.
+    #[test]
+    fn directive_name_projection_without_authored_prefix_maps_nothing() {
+        let (identifier, slices) = project_directive_name("slot", None);
+        assert_eq!(identifier, "vSlot");
+        assert!(
+            slices.iter().all(|s| s.source_start.is_none()),
+            "a synthesised name must carry NO mapped run: {:?}",
+            slices
+                .iter()
+                .map(|s| (s.text.as_str(), s.source_start))
+                .collect::<Vec<_>>()
+        );
+        let concatenated: String = slices.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(concatenated, identifier);
+    }
+
+    /// Degenerate hyphenation: an empty segment contributes no generated bytes and no
+    /// run, and the surviving segments stay anchored at their true authored offsets.
+    #[test]
+    fn directive_name_projection_collapses_empty_segments() {
+        let (identifier, slices) = project_directive_name("foo--bar-", Some(0));
+        assert_eq!(identifier, "vFooBar");
+        let mapped: Vec<(&str, Option<u32>)> = slices
+            .iter()
+            .map(|s| (s.text.as_str(), s.source_start))
+            .collect();
+        assert_eq!(
+            mapped,
+            vec![("v", Some(0)), ("Foo", Some(2)), ("Bar", Some(7))],
+            "`v-foo--bar-`: `foo` at 2, `bar` at 7 (two hyphens before it), trailing hyphen \
+             contributes nothing"
+        );
+    }
+
+    /// An empty directive name (`v-`, which the parser diagnoses) still projects a
+    /// well-formed identifier whose single run is faithful.
+    #[test]
+    fn directive_name_projection_empty_name() {
+        let (identifier, slices) = project_directive_name("", Some(0));
+        assert_eq!(identifier, "v");
+        let mapped: Vec<(&str, Option<u32>)> = slices
+            .iter()
+            .map(|s| (s.text.as_str(), s.source_start))
+            .collect();
+        assert_eq!(mapped, vec![("v", Some(0))]);
+    }
+
+    /// A case mapping that PRESERVES the encoded length keeps its segment one run.
+    #[test]
+    fn directive_name_projection_length_preserving_non_ascii_initial_stays_mapped() {
+        // `é` (2 bytes) uppercases to `É` (2 bytes): same columns, so still faithful.
+        let (identifier, slices) = project_directive_name("éfoo", Some(0));
+        assert_eq!(identifier, "vÉfoo");
+        let mapped: Vec<(&str, Option<u32>)> = slices
+            .iter()
+            .map(|s| (s.text.as_str(), s.source_start))
+            .collect();
+        assert_eq!(mapped, vec![("v", Some(0)), ("Éfoo", Some(2))]);
+    }
+
+    /// A case mapping that CHANGES length cannot ride a run: the expanded initial stays
+    /// unmapped (fail closed on that one column) and only the verbatim tail — still a
+    /// byte-for-byte image — keeps a run. Mapping the expansion would shift every later
+    /// column of the segment onto the wrong authored character, the very defect the
+    /// per-segment projection exists to prevent.
+    #[test]
+    fn directive_name_projection_length_changing_uppercase_fails_closed() {
+        // `ß` (1 char, 2 bytes) uppercases to `SS` (2 chars): not length-faithful.
+        let (identifier, slices) = project_directive_name("ßfoo", Some(0));
+        assert_eq!(identifier, "vSSfoo");
+        let mapped: Vec<(&str, Option<u32>)> = slices
+            .iter()
+            .map(|s| (s.text.as_str(), s.source_start))
+            .collect();
+        assert_eq!(
+            mapped,
+            vec![
+                ("v", Some(0)),
+                ("SS", None),     // no faithful authored correlate -> unmapped
+                ("foo", Some(4)), // the authored tail, after `ß`'s two bytes
+            ]
+        );
+        let concatenated: String = slices.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(concatenated, identifier);
     }
 }

@@ -77,62 +77,52 @@ fn owner_import_surface_db_has_view_aware_lookup() {
     );
 }
 
-/// `DerivedRawState` carries a per-specifier
-/// `import_routes_known_miss_recorded_at_generation` map that
-/// records the workspace `content_generation` at known-miss
-/// admission.
+/// INVERTED-POLARITY successor to the per-entry freshness-oracle guard.
+///
+/// The oracle it pinned (`DerivedRawState::import_route_entry_is_generation_current`)
+/// existed because `DerivedRawState.import_routes` held HOST-MEMOISED
+/// positives — a duplicate of the workspace's own bounded owner-edge
+/// candidate slot — and, being a plain map with no witness, needed a
+/// global `content_generation` equality to decide whether one was still
+/// true. That was the last global-generation warm-resolution validity
+/// test in the session; the memo and the oracle are DELETED together.
+///
+/// What survives, and is asserted here:
+///
+/// * the oracle and its `PositiveRouteStamp` sidecar are gone;
+/// * the surviving positives are CALLER-SUPPLIED authoritative routes
+///   only, which serve until the caller replaces them.
+///
+/// This scan asserts only ABSENCE — deleted symbols really are deleted,
+/// which a source scan can decide. The surviving positive property (the
+/// reader refuses every known-miss and still serves a positive) is NOT
+/// asserted here: a scan for the literal `if resolution.is_known_miss()
+/// {` branch cannot distinguish an arm that refuses from an arm that
+/// falls through to `Some(resolution)`, because the text is identical in
+/// both trees. That property is owned behaviourally by
+/// `verter_session::negative_import_route_tests::\
+/// cached_import_route_resolution_refuses_a_known_miss_and_serves_a_positive`,
+/// which calls the reader and goes RED on the fall-through.
 #[test]
-fn derived_raw_state_records_known_miss_generation() {
-    let source = read_file("src/types.rs");
-    assert!(
-        source.contains("import_routes_known_miss_recorded_at_generation"),
-        "DerivedRawState MUST carry a per-specifier \
-         `import_routes_known_miss_recorded_at_generation: FxHashMap<String, u64>` so \
-         the reader can detect content_generation advancement and force a fresh \
-         resolution (R3/R26/R28)."
-    );
-}
-
-/// The reader (`cached_import_route_resolution`)
-/// gates EVERY served entry — known-misses included — through the
-/// single per-entry freshness oracle
-/// (`DerivedRawState::import_route_entry_is_generation_current`),
-/// which consults the known-miss generation sidecar and treats a
-/// missing stamp as stale (fail closed).
-#[test]
-fn cached_import_route_resolution_gates_known_miss_on_generation() {
+fn cached_import_route_resolution_carries_no_generation_oracle() {
     let reader = read_file("src/host_manage/prepared_decl.rs");
     assert!(
-        reader.contains("import_route_entry_is_generation_current"),
-        "cached_import_route_resolution MUST route every served entry through \
-         the shared per-entry freshness oracle \
-         `DerivedRawState::import_route_entry_is_generation_current` (R3)."
+        !reader.contains("import_route_entry_is_generation_current"),
+        "the per-entry generation oracle is DELETED — a global content \
+         generation is not a warm-resolution validity test."
     );
     let oracle = read_file("src/types.rs");
-    assert!(
-        oracle.contains("import_routes_known_miss_recorded_at_generation"),
-        "the per-entry freshness oracle MUST consult \
-         `import_routes_known_miss_recorded_at_generation` before reporting a \
-         known-miss as generation-current (R3)."
-    );
-    assert!(
-        oracle.contains(".is_some_and(|recorded| *recorded == current_generation)"),
-        "the oracle's known-miss arm MUST be fail-closed: a missing sidecar \
-         stamp reads as stale, and a recorded stamp is current ONLY while it \
-         equals the live `content_generation`."
-    );
-}
-
-/// The bundler producer (`set_import_dependencies`)
-/// populates the per-specifier generation sidecar for every
-/// known-miss it admits.
-#[test]
-fn set_import_dependencies_records_known_miss_generation() {
-    let source = read_file("src/host_manage/analysis_io.rs");
-    assert!(
-        source.contains("import_routes_known_miss_recorded_at_generation"),
-        "set_import_dependencies MUST populate \
-         `import_routes_known_miss_recorded_at_generation` for every known-miss admission \
-         so the reader can detect content_generation advancement."
-    );
+    for retired in [
+        "import_route_entry_is_generation_current",
+        "import_route_is_generation_current",
+        "import_routes_positive_recorded_at_generation",
+        "PositiveRouteStamp",
+        "import_routes_known_miss_recorded_at_generation",
+    ] {
+        assert!(
+            !oracle.contains(retired),
+            "`{retired}` is DELETED: global-generation equality is no longer a \
+             warm-resolution validity test."
+        );
+    }
 }

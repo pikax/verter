@@ -171,9 +171,18 @@ fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
         .indexed()
         .ensure_augmentation_index_populated(
             &relative_key,
-            |augmenter, specifier| {
-                host.resolve_type_dependency_canonical(augmenter, specifier)
-                    .map(Arc::from)
+            |augmenter, specifier| match host
+                .resolve_type_dependency_canonical(augmenter, specifier)
+            {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    admitted.into_result().map(Arc::from)
+                }
+                verter_workspace::ResolutionPublication::Refused(refusal) => {
+                    panic!(
+                        "fixture dependency resolution was refused: {:?}",
+                        refusal.reason()
+                    )
+                }
             },
             None,
         );
@@ -949,12 +958,23 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
     );
 
     // Recovery: the recompute recorded the MOVED live env, so the same
-    // demand under the same moved view warm-hits again (the rail
-    // discriminates the move, it does not permanently invalidate).
-    demand(&moved_view);
+    // demand warm-hits again (the rail discriminates the move, it does
+    // not permanently invalidate).
+    //
+    // The view is RE-CAPTURED first. `moved_view` was taken while every
+    // published artifact still carried the BASELINE parse-env stamp, and
+    // the artifact reuse gate is now exactly parse-env equality — so the
+    // recompute above legitimately re-materialised and republished the
+    // contributors under the moved env, superseding that view. Demanding
+    // through a pre-republish view would measure the republish, not the
+    // env rail.
+    let recovered_view = host.resolver_store_view_read().into_owned_view();
+    demand(&recovered_view);
+    let builds_after_recovery = graph.stats_snapshot().instantiate_count;
+    demand(&recovered_view);
     assert_eq!(
         graph.stats_snapshot().instantiate_count,
-        builds_after_first + 1,
+        builds_after_recovery,
         "after the recompute under the moved env the entry must warm-serve again"
     );
 }

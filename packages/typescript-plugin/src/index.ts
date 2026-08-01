@@ -23,7 +23,7 @@ import {
   remapDocumentSpans,
   remapModuleLevelCompanionToSource,
   remapReferencedSymbol,
-  toIdeCarrierFileName,
+  resolveCarrierImportTarget,
   type CarrierRemapContext,
   type ManifestScriptKind,
 } from "@verter/language-shared";
@@ -33,6 +33,11 @@ import {
   resolveResponseRemap,
 } from "./helpers/carrierStore";
 import { coldResolveCompanion } from "./helpers/coldRead";
+import {
+  carrierPathCompletionEntries,
+  moduleSpecifierLiteralAt,
+  rawModuleSpecifierText,
+} from "./helpers/pathCompletion";
 import {
   getAliasedNavigationResult,
   getAliasedQuickInfo,
@@ -679,6 +684,15 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       }
       if (publicationAdvanced || storeChanged) {
         vueJsxContentCache.clear();
+        // The token advance is INDEPENDENT evidence that the LSP published, and
+        // it must beat the reader's `(mtimeMs, size)` change key: an atomic
+        // manifest swap that replaces a `ready_files` entry can land at the same
+        // byte length inside one filesystem timestamp tick, which that key
+        // cannot see. Reading ready versions from the stale snapshot below would
+        // report "nothing relevant changed", skip the resolution-cache clear,
+        // and leave this project's cached `TS2307` for a now-published carrier
+        // in place until some unrelated publication.
+        store.invalidateManifest();
       }
       const nextReadyVersions = servedReadyVersions();
       const relevantReadyVersionsChanged =
@@ -1202,10 +1216,67 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     // ── module resolution: in-project `.vue`/`.svelte` → public carrier ────
 
-    const ideCarrierForSource = (sourcePath: string): string | undefined =>
-      store.companionForSource(sourcePath) ?? toIdeCarrierFileName(sourcePath) ?? undefined;
-    const importedCarrierForSource = (sourcePath: string): string | undefined =>
-      store.apiCompanionForSource(sourcePath) ?? ideCarrierForSource(sourcePath);
+    /**
+     * Whether a failed-lookup candidate lies under the project's `baseUrl` — the
+     * gate on the alias/`baseUrl` carrier redirect.
+     *
+     * Compared through the HOST's canonical path identity (`canonicalPath`:
+     * separator-normalised, and case-folded on a case-insensitive host), never a
+     * raw substring test. A raw `candidate.includes(baseUrl)` is both
+     * separator- and case-sensitive, so on Windows a `baseUrl` spelled
+     * `D:\ws\src` rejected every `d:/ws/src/...` candidate TypeScript reports and
+     * the aliased carrier silently failed to resolve; it also accepted a mere
+     * substring match (`/ws/src` "containing" `/ws/srcOther/...`). Containment is
+     * boundary-anchored: the candidate is the directory itself or sits under it.
+     */
+    const candidateWithinBaseUrl = (baseUrl: string | undefined, candidate: string): boolean => {
+      if (baseUrl === undefined || baseUrl.length === 0) {
+        return true;
+      }
+      const base = store.canonicalPath(baseUrl).replace(/\/+$/, "");
+      if (base.length === 0) {
+        return true;
+      }
+      const target = store.canonicalPath(candidate);
+      return target === base || target.startsWith(`${base}/`);
+    };
+
+    /**
+     * The provider path an ORDINARY import of a carrier source resolves to.
+     *
+     * WHICH surface is the shared carrier policy's answer
+     * ([`resolveCarrierImportTarget`] — the descriptor-generated import surface
+     * or nothing, never the `CarrierIde` JSX/TSX editor companion). WHEN it is
+     * servable is this plugin's readiness concern, in three states:
+     *
+     *  - the import surface is published ⇒ resolve to it;
+     *  - the project OWNS it but the content has not landed yet ⇒ the bounded
+     *    cold read (last-good, else a short bounded block on the manifest) —
+     *    the same wait `readFile`/`fileExists` already perform for a known
+     *    companion, so resolution and serving cannot disagree;
+     *  - not owned, or the cold read times out ⇒ ABSTAIN. TypeScript's own
+     *    answer stands (an unresolved carrier import) and the LSP's next
+     *    publication clears it: the carrier source is recorded in
+     *    `observedCarrierImportKeys` before this call, so the publication that
+     *    makes it ready counts as a RELEVANT ready-version change and triggers
+     *    this project's resolution-cache clear.
+     *
+     * Fabricating an unowned path instead would resolve to a file nothing can
+     * serve — a sticky `TS2307` no publication can heal.
+     */
+    const importedCarrierForSource = (sourcePath: string): string | undefined => {
+      // The SAME target the browser/WASM in-context service gets: both hosts
+      // rewrite the specifier themselves, so both ask the one shared policy.
+      const target = resolveCarrierImportTarget(store, sourcePath);
+      if (target.kind !== "resolve") {
+        return undefined;
+      }
+      if (store.readyFile(target.provider)?.role === "CarrierApi") {
+        return target.provider;
+      }
+      const cold = coldResolveCompanion(store, target.provider);
+      return cold.kind === "negative" ? undefined : target.provider;
+    };
     const apiCarrierForEsmSpecifier = (
       containingFile: string,
       moduleName: string,
@@ -1317,11 +1388,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           };
         }
 
-        // A relative bare `./Comp.vue` / `./Comp.svelte` import prefers the ready
-        // public API carrier. That is the consumer-facing TypeScript surface for
-        // direct and barrel imports; the JSX/TSX carrier remains editor-only. If
-        // public publication has not completed, retain the existing IDE fallback
-        // so an already-open project never resolves to an unreadable virtual file.
+        // A relative bare `./Comp.vue` / `./Comp.svelte` import resolves to the
+        // public API carrier — the consumer-facing TypeScript surface for direct
+        // and barrel imports. The JSX/TSX carrier is editor-only and is never a
+        // redirect target here; when the API carrier is not servable the plugin
+        // abstains (see `importedCarrierForSource`).
         if (isRelativeVue(moduleName)) {
           const resolved = path.resolve(path.dirname(containingFile), moduleName);
           observedCarrierImportKeys.add(activeKey(resolved));
@@ -1336,9 +1407,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           return;
         }
 
-        // A non-relative carrier specifier: let TS resolve to the carrier source,
-        // then redirect to its IDE carrier. TS's own resolver runs FIRST; we only
-        // act on a `.vue`/`.svelte` specifier TS could not resolve by extension.
+        // A non-relative (alias / `baseUrl`) carrier specifier: let TS resolve to
+        // the carrier source, then redirect to its public API carrier. TS's own
+        // resolver runs FIRST; we only act on a `.vue`/`.svelte` specifier TS
+        // could not resolve by extension.
         if (!isVue(moduleName)) {
           return;
         }
@@ -1350,7 +1422,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         const failedLocations = resolvedModule.failedLookupLocations;
         const carrierSource = failedLocations.find(
           (candidate) =>
-            (baseUrl ? candidate.includes(baseUrl) : true) &&
+            candidateWithinBaseUrl(baseUrl, candidate) &&
             isVue(candidate) &&
             _fileExists(candidate),
         );
@@ -1755,18 +1827,29 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     }
 
     /**
-     * A selected non-editor provider still needs this plugin's project-membership
-     * and module-resolution hooks, but it is the sole owner of semantic features
-     * on the visible framework source. Returning the raw TypeScript service's
-     * answer would register a second provider against `.vue`; VS Code merges that
-     * answer with Verter's managed/shared provider and leaks globals, generated
-     * helpers, and non-actionable completion items. Source-feature wrappers must
-     * therefore fail closed while membership remains enabled.
+     * Whether this project must yield carrier source features to another
+     * provider. Returning the raw TypeScript service's answer for a carrier that
+     * another provider already owns registers a SECOND provider against `.vue`;
+     * VS Code merges the two and the user sees duplicated or conflicting results
+     * with no way to tell which is authoritative. An abstain is a clean single
+     * answer from the other provider, so this arbiter decides from a POSITIVE
+     * ownership signal and yields whenever ownership cannot be established.
+     *
+     * Only carrier subjects are arbitrated; a plain `.ts`/`.js` request is always
+     * this project's to answer. For a carrier subject exactly two configurations
+     * claim this project as the owner: an editor surface that also SELECTED it
+     * (`editorOwnsMembership && editorOwnsSourceFeatures`), and the
+     * verter_lsp-internal tsserver (no editor ownership, but a resolved carrier
+     * store), which is the sole provider on its surface. Everything else yields —
+     * an editor surface that selected another provider (managed/shared tsgo); a
+     * project no Verter host has configured, where the surface is unknown; and a
+     * source-feature claim without membership, which no integration produces and
+     * so signals a partial or stale configuration.
      */
     const editorYieldsCarrierSourceFeatures = (fileName: string): boolean => {
-      if (!editorOwnsMembership || editorOwnsSourceFeatures) return false;
-      if (usesEditorCarrierRouting(fileName)) return true;
-      return isCarrierCompanionPath(store, fileName);
+      if (!isVue(fileName) && !isCarrierCompanionPath(store, fileName)) return false;
+      if (editorOwnsMembership) return !editorOwnsSourceFeatures;
+      return editorOwnsSourceFeatures || storeDir === undefined;
     };
 
     function editorCarrierSelection(
@@ -2329,8 +2412,15 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         return path.resolve(path.dirname(containingFile), moduleName);
       }
       if (isRelativeVue(moduleName)) {
-        const resolved = path.resolve(path.dirname(containingFile), moduleName);
-        return importedCarrierForSource(resolved);
+        // NAVIGATION, not module resolution: "go to `./Comp.vue`" targets the
+        // carrier SOURCE FILE, which is where the caret must land. Routing it
+        // through a generated companion (and mapping back) would make
+        // ctrl-click on an import specifier depend on publication state — the
+        // source file is navigable the moment it exists on disk.
+        const resolved = normalizePath(path.resolve(path.dirname(containingFile), moduleName));
+        return _fileExists(resolved) || store.ownedSourceFor(resolved) !== undefined
+          ? resolved
+          : undefined;
       }
       const result = ts.resolveModuleName(
         moduleName,
@@ -2667,6 +2757,61 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     const _getCompletionsAtPosition =
       languageService.getCompletionsAtPosition.bind(languageService);
+
+    // ── carrier import-path completion (module-specifier positions) ────────
+    //
+    // TypeScript's own path completion never consults `extraFileExtensions`
+    // (`getSupportedExtensionsForModuleResolution` lists TS/JS extensions plus
+    // ambient `*.x` wildcard modules only), so typing `import X from './` in a
+    // plain `.ts` buffer offers no `./Comp.vue` / `./Comp.svelte` even though
+    // the plugin resolves exactly that specifier. Augment the module-specifier
+    // string position with the carriers the store manifest OWNS in the typed
+    // fragment's directory. Every OFFERED entry's accepted bare specifier
+    // resolves against the same manifest snapshot the offer was computed from
+    // (`resolveCarrierImportTarget` — the policy the module resolver consults —
+    // plus the non-blocking readiness arms: published import surface or
+    // last-good content); a conflicted carrier (manifest-absent), an
+    // IDE-role-only carrier, a rune module, and an owned carrier still in its
+    // publication warm-up window are never offered, and the offered name is
+    // never a companion path. Replacement spans address the literal's RAW
+    // source characters, never the cooked `literal.text` (whose collapsed
+    // escapes desync it from the file). Cost: no filesystem walk and no
+    // directory listing — exactly ONE manifest read (a stat change check) per
+    // request, only at specifier positions.
+    const withCarrierPathEntries = (
+      fileName: string,
+      position: number,
+      result: tsModule.CompletionInfo | undefined,
+    ): tsModule.CompletionInfo | undefined => {
+      const sourceFile = languageService.getProgram?.()?.getSourceFile(fileName);
+      if (sourceFile === undefined) return result;
+      const literal = moduleSpecifierLiteralAt(ts, sourceFile, position);
+      if (literal === undefined) return result;
+      const entries = carrierPathCompletionEntries({
+        containingFile: fileName,
+        literalText: literal.text,
+        literalRawText: rawModuleSpecifierText(
+          sourceFile.text,
+          literal.getStart(sourceFile),
+          literal.getEnd(),
+        ),
+        literalStart: literal.getStart(sourceFile),
+        reader: store,
+        existingNames: new Set(result?.entries.map((entry) => entry.name)),
+      });
+      if (entries.length === 0) return result;
+      if (result === undefined) {
+        // Mirror TypeScript's `convertPathCompletions` result shape.
+        return {
+          isGlobalCompletion: false,
+          isMemberCompletion: false,
+          isNewIdentifierLocation: true,
+          entries,
+        };
+      }
+      return { ...result, entries: [...result.entries, ...entries] };
+    };
+
     const isMemberCompletionEntry = (entry: tsModule.CompletionEntry): boolean => {
       switch (entry.kind) {
         case ts.ScriptElementKind.memberVariableElement:
@@ -2847,7 +2992,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             : { optionalReplacementSpan: mappedOptionalReplacementSpan }),
         };
       } else {
-        result = _getCompletionsAtPosition(fileName, position, options, formattingSettings);
+        result = withCarrierPathEntries(
+          fileName,
+          position,
+          _getCompletionsAtPosition(fileName, position, options, formattingSettings),
+        );
       }
       if (result?.entries) {
         const existsRelToContaining = containingFileAwareExists(_fileExists, fileName);

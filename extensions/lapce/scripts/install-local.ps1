@@ -7,7 +7,7 @@
 .DESCRIPTION
     Builds bin/verter-lapce.wasm (cargo, wasm32-wasip1, release), detects the
     per-channel Lapce plugins directory, copies volt.toml + the wasm into
-    <plugins>/verter/, and prints the exact `lsp.serverPath` config snippet with
+    <plugins>/verter-volt/, and prints the exact `lsp.serverPath` config snippet with
     the absolute built verter-lsp.exe path filled in. Idempotent (re-run to
     refresh). Fails loudly if the wasm or the verter-lsp binary is missing.
 
@@ -61,12 +61,24 @@ if ([string]::IsNullOrEmpty($LocalAppData)) {
 }
 $PluginsDir = Join-Path $LocalAppData (Join-Path "lapce" (Join-Path $Channel (Join-Path "data" "plugins")))
 
-# 3. Create <plugins>/verter/ and copy volt.toml + bin/verter-lapce.wasm into it.
-$VoltDir = Join-Path $PluginsDir "verter"
+# 3. Create <plugins>/verter-volt/ and copy volt.toml + bin/verter-lapce.wasm into it.
+# Lapce's plugin folder name is conventionally the volt `name` field.
+$VoltDir = Join-Path $PluginsDir "verter-volt"
 $VoltBinDir = Join-Path $VoltDir "bin"
 New-Item -ItemType Directory -Force -Path $VoltBinDir | Out-Null
 Copy-Item -LiteralPath $VoltToml -Destination (Join-Path $VoltDir "volt.toml") -Force
 Copy-Item -LiteralPath $WasmPath -Destination (Join-Path $VoltBinDir "verter-lapce.wasm") -Force
+# Remove the legacy install dir if present (pre-rename name "verter"). Lapce may
+# hold a lock on it while running — treat that as a non-fatal warning.
+$LegacyVoltDir = Join-Path $PluginsDir "verter"
+if ((Test-Path -LiteralPath $LegacyVoltDir) -and ($LegacyVoltDir -ne $VoltDir)) {
+    try {
+        Remove-Item -LiteralPath $LegacyVoltDir -Recurse -Force -ErrorAction Stop
+        Write-Host "==> Removed legacy install at $LegacyVoltDir"
+    } catch {
+        Write-Host "==> WARNING: could not remove legacy install at $LegacyVoltDir ($($_.Exception.Message)); close Lapce and delete it manually if it remains."
+    }
+}
 Write-Host "==> Installed volt to $VoltDir"
 
 # 4. Print the exact lsp.serverPath snippet with the absolute verter-lsp.exe path.
@@ -82,7 +94,10 @@ Write-Host ""
 Write-Host "==> verter-lsp binary: $BinNote"
 Write-Host "==> Add this to your Lapce settings (settings.toml):"
 Write-Host ""
-Write-Host "[volt.verter]"
+# Lapce looks up plugin config by the volt's `name` field ("verter-volt"), as a
+# top-level settings table. Dotted keys are unflattened into nested
+# initializationOptions before they reach the wasm plugin.
+Write-Host "[verter-volt]"
 Write-Host "`"lsp.serverPath`" = `"$ServerBinForward`""
 Write-Host "`"typeProvider`" = `"tsgo`""
 Write-Host ""

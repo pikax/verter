@@ -576,8 +576,14 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        ResolverContext::resolve_type_dependency_canonical(
-            self.inner,
+        // SESSION-SCOPED. The parse artifact bakes no resolved target, so
+        // this is the only place a session's overlay can influence which
+        // file a specifier names: resolving through the base host here
+        // would make an overlay-only dependency invisible to every
+        // session-bound consumer.
+        let overlay = self.inner.resolution_overlay_snapshot(self.view);
+        self.inner.resolve_type_dependency_canonical_with_overlay(
+            &overlay,
             owner_canonical,
             import_source,
         )

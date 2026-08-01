@@ -25,6 +25,19 @@ use super::frontier_helpers::{
 use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
 
+/// One node of the layer-ordered wildcard walk.
+///
+/// The root is already a canonical; every descendant is an AUTHORED
+/// `(owner, source_specifier)` edge that resolves only when the walk
+/// actually visits it. Keeping descendants unresolved is what stops a
+/// barrel's later-declared `export *` siblings from being resolved (and,
+/// for carrier targets, loaded) when an earlier-declared sibling already
+/// carries the requested export.
+enum RouteLayerNode {
+    Resolved(String),
+    Edge { owner: String, specifier: String },
+}
+
 impl VerterHost {
     fn append_route_participant_fact_versions_with_context(
         &self,
@@ -46,7 +59,7 @@ impl VerterHost {
         if let Some(hash) = ctx
             .indexed_for_current_content(canonical)
             .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
-            .and_then(|indexed| indexed.route_hash)
+            .and_then(|indexed| indexed.route_surface_hash())
         {
             let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical.to_string(),
@@ -57,29 +70,6 @@ impl VerterHost {
                 facts.push(fact);
             }
         }
-    }
-
-    fn generation_current_import_route_hash_covering_sources_with_context(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        canonical: &str,
-        required_sources: &[String],
-    ) -> Option<crate::types::Hash16> {
-        let session_masks_canonical = ctx.active_session_view().is_some_and(|view| {
-            view.overlay_content_hash_for(canonical).is_some() || view.is_tombstoned(canonical)
-        });
-        if session_masks_canonical {
-            let indexed = ctx.indexed_for_current_content(canonical)?;
-            if required_sources
-                .iter()
-                .any(|source| !indexed.import_routes.contains_key(source))
-            {
-                return None;
-            }
-            return indexed.import_route_hash;
-        }
-
-        self.generation_current_import_route_hash_covering_sources(canonical, required_sources)
     }
 
     pub(crate) fn resolve_route_type_edge(
@@ -93,7 +83,17 @@ impl VerterHost {
         // pure resolution — including the normalized ESM fallback — lives in
         // the shared helper so this path, shallow-state canonicalization, and
         // known-miss revalidation agree on every edge.
-        let resolved = self.resolve_route_edge_canonical(owner_canonical, source_specifier)?;
+        let resolved = match self.resolve_route_edge_canonical(owner_canonical, source_specifier) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                admitted.into_result()?
+            }
+            verter_workspace::ResolutionPublication::Refused(_) => {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
+                return None;
+            }
+        };
 
         // Carrier-GENERIC route-edge revalidation: a framework CARRIER target
         // (`.vue`, `.svelte`, …) takes the store-view whole-hash gate; a plain
@@ -127,7 +127,7 @@ impl VerterHost {
         Some(resolved)
     }
 
-    fn resolve_route_type_edge_with_context(
+    pub(crate) fn resolve_route_type_edge_with_context(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         owner_canonical: &str,
@@ -163,15 +163,11 @@ impl VerterHost {
                 )?;
                 if state.is_import_local_in(*owner, symbol_name) {
                     let import_target = state.import_target_in(*owner, symbol_name)?;
-                    let target_canonical = if import_target.canonical_id.is_empty() {
-                        self.resolve_route_type_edge_with_context(
-                            ctx,
-                            provider_canonical,
-                            import_target.source_specifier.as_str(),
-                        )?
-                    } else {
-                        import_target.canonical_id.clone()
-                    };
+                    let target_canonical = self.resolve_route_type_edge_with_context(
+                        ctx,
+                        provider_canonical,
+                        import_target.source_specifier.as_str(),
+                    )?;
                     return self.resolve_named_type_export_route_uncached(
                         ctx,
                         target_canonical.as_str(),
@@ -192,18 +188,13 @@ impl VerterHost {
             crate::resolver_core::ExportTarget::Reexport {
                 source_specifier,
                 original_name,
-                canonical_id,
                 ..
             } => {
-                let target_canonical = if canonical_id.is_empty() {
-                    self.resolve_route_type_edge_with_context(
-                        ctx,
-                        provider_canonical,
-                        source_specifier.as_str(),
-                    )?
-                } else {
-                    canonical_id.clone()
-                };
+                let target_canonical = self.resolve_route_type_edge_with_context(
+                    ctx,
+                    provider_canonical,
+                    source_specifier.as_str(),
+                )?;
                 self.resolve_named_type_export_route_uncached(
                     ctx,
                     target_canonical.as_str(),
@@ -235,8 +226,8 @@ impl VerterHost {
         route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<RoutedShallowServe> {
         let normalized_canonical = self
-            .resolve_eval_dependency_canonical(canonical_id)
-            .unwrap_or_else(|| canonical_id.to_string());
+            .normalized_analysis_canonical(canonical_id)
+            .into_owned();
 
         // Authoritative `IndexedReady` fast path — scheduler-materialised
         // entries take precedence over the request-scoped memo.
@@ -445,6 +436,7 @@ impl VerterHost {
         self.routed_shallow_state(canonical_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_named_type_export_route_uncached(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
@@ -469,20 +461,82 @@ impl VerterHost {
             // is chosen without loading a deeper branch reachable through an
             // earlier-declared sibling. Within a layer, nodes keep the
             // score-then-declared wildcard order of their parent.
+            //
+            // A layer node is an UNRESOLVED `(owner, source_specifier)`
+            // edge, resolved at the moment it is visited — never in a
+            // batch when its parent's edges are collected. The shallow
+            // surface names AUTHORED specifiers only, so resolving an
+            // edge is real work (and, for a carrier target, a real load);
+            // resolving a whole layer up front would load every
+            // later-declared sibling of a barrel even when an
+            // earlier-declared one carries the requested export. The
+            // batch shape was invisible while the artifact baked its
+            // resolved targets, because "resolving" a collected edge was
+            // then a field read.
             let mut visited: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
             visited.insert(provider_canonical.to_string());
-            let mut layer: Vec<String> = vec![provider_canonical.to_string()];
+            let mut layer: Vec<RouteLayerNode> =
+                vec![RouteLayerNode::Resolved(provider_canonical.to_string())];
             while !layer.is_empty() {
                 // Phase 1: same-layer DIRECT export surfaces, in order.
+                // Each node resolves lazily, immediately before it is
+                // inspected, and a match returns before any later sibling
+                // of the same layer is resolved at all.
                 let mut layer_states = Vec::with_capacity(layer.len());
-                for canonical in &layer {
+                for node in &layer {
+                    let canonical = match node {
+                        RouteLayerNode::Resolved(canonical) => canonical.clone(),
+                        RouteLayerNode::Edge { owner, specifier } => {
+                            let Some(target_canonical) = self.resolve_route_type_edge_with_context(
+                                ctx,
+                                owner.as_str(),
+                                specifier.as_str(),
+                            ) else {
+                                // The wildcard's source specifier does not
+                                // resolve under the current workspace. The
+                                // Miss this may produce depends on that
+                                // unresolved edge re-resolving when the file
+                                // set changes — record the owner AND the
+                                // unresolved source specifier so the route
+                                // entry roots it on the resolve-domain
+                                // witness rail. Neither the owner's
+                                // `FileWholeHash` nor its `Route` digest
+                                // observes a known-miss specifier, so
+                                // without this the cached Miss is served
+                                // stale after the target appears. The SOURCE
+                                // identity is threaded (not just the owner)
+                                // so the rooting loop can verify the
+                                // produced witness actually covers this
+                                // exact wildcard source.
+                                unresolved_edge_owners.insert((owner.clone(), specifier.clone()));
+                                continue;
+                            };
+                            // A wildcard hop that lands on an ACTIVE
+                            // (provider, name) pair is a route cycle: skip
+                            // the edge (the in-flight walk already covers
+                            // it), mirroring the recursive walk's
+                            // active-set Miss.
+                            if active
+                                .contains(&(target_canonical.clone(), exported_name.to_string()))
+                            {
+                                continue;
+                            }
+                            if !visited.insert(target_canonical.clone()) {
+                                continue;
+                            }
+                            target_canonical
+                        }
+                    };
                     participants.insert(canonical.clone());
-                    let state =
-                        self.route_shallow_state_with_context(ctx, canonical, route_shallow_cache)?;
+                    let state = self.route_shallow_state_with_context(
+                        ctx,
+                        canonical.as_str(),
+                        route_shallow_cache,
+                    )?;
                     if let Some(target) = state.export_target(exported_name) {
                         return self.resolve_named_type_export_route_from_target(
                             ctx,
-                            canonical,
+                            canonical.as_str(),
                             target,
                             active,
                             participants,
@@ -490,60 +544,25 @@ impl VerterHost {
                             route_shallow_cache,
                         );
                     }
-                    layer_states.push((canonical.clone(), state));
+                    layer_states.push((canonical, state));
                 }
 
                 // Phase 2: build the NEXT layer from each node's wildcard
-                // edges, keeping per-node score-then-declared order.
-                let mut next_layer: Vec<String> = Vec::new();
+                // edges, keeping per-node score-then-declared order. The
+                // edges stay UNRESOLVED here.
+                let mut next_layer: Vec<RouteLayerNode> = Vec::new();
                 for (canonical, state) in layer_states {
                     let wildcard_indices = ordered_wildcard_indices_for_exported_name(
                         &state.wildcard_reexports,
                         exported_name,
                     );
                     for wildcard_index in wildcard_indices {
-                        let wildcard = &state.wildcard_reexports[wildcard_index];
-                        let target_canonical = if wildcard.canonical_id.is_empty() {
-                            self.resolve_route_type_edge_with_context(
-                                ctx,
-                                canonical.as_str(),
-                                wildcard.source_specifier.as_str(),
-                            )
-                        } else {
-                            Some(wildcard.canonical_id.clone())
-                        };
-                        let Some(target_canonical) = target_canonical else {
-                            // The wildcard's source specifier does not resolve
-                            // under the current workspace. The Miss this may
-                            // produce depends on that unresolved edge
-                            // re-resolving when the file set changes — record
-                            // the owner AND the unresolved source specifier so
-                            // the route entry roots it in the `ImportRoute`
-                            // fact rail.
-                            // Neither the owner's `FileWholeHash` nor its
-                            // `Route` hash re-resolves a known-miss specifier,
-                            // so without this the cached Miss is served stale
-                            // after the target appears. The SOURCE identity is
-                            // threaded (not just the owner) so the rooting
-                            // loop can verify the produced `ImportRoute` hash
-                            // actually covers this exact wildcard source; an
-                            // owner with a route surface that does not track
-                            // this source must NOT admit a hash that silently
-                            // drops it.
-                            unresolved_edge_owners
-                                .insert((canonical.clone(), wildcard.source_specifier.clone()));
-                            continue;
-                        };
-                        // A wildcard hop that lands on an ACTIVE (provider,
-                        // name) pair is a route cycle: skip the edge (the
-                        // in-flight walk already covers it), mirroring the
-                        // recursive walk's active-set Miss.
-                        if active.contains(&(target_canonical.clone(), exported_name.to_string())) {
-                            continue;
-                        }
-                        if visited.insert(target_canonical.clone()) {
-                            next_layer.push(target_canonical);
-                        }
+                        next_layer.push(RouteLayerNode::Edge {
+                            owner: canonical.clone(),
+                            specifier: state.wildcard_reexports[wildcard_index]
+                                .source_specifier
+                                .clone(),
+                        });
                     }
                 }
                 layer = next_layer;
@@ -580,15 +599,34 @@ impl VerterHost {
         let mut touched_canonical_ids = rustc_hash::FxHashSet::default();
         let mut unresolved_edge_owners = rustc_hash::FxHashSet::default();
         let mut route_shallow_cache = RouteShallowStateCache::default();
-        let route_result = self.resolve_named_type_export_route_uncached(
-            ctx,
-            dep_canonical,
-            requested_name,
-            &mut active,
-            &mut touched_canonical_ids,
-            &mut unresolved_edge_owners,
-            &mut route_shallow_cache,
-        )?;
+        // PATH-PRECISE resolution witness. Every hop this walk takes
+        // resolves a specifier through the sealed transaction, and each
+        // admitted transaction carries the complete observation set that
+        // produced its answer. Collecting them here roots the entry on
+        // exactly the edges the walk TRAVERSED — never the owner's whole
+        // authored inventory, which for a barrel is far broader than any
+        // single route through it and whose resolution would defeat the
+        // walk's own path precision.
+        //
+        // This is the resolve-domain half of the entry's currency. The
+        // participants' `Route` digests below are pure PARSE domain, so a
+        // `.d.ts` companion appearing beside an already-resolving `.js`
+        // retargets a hop without moving a single byte of any file in the
+        // walk — invisible to every parse fact, visible to this witness.
+        let (route_result, traversal_witness) = {
+            let scope = crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
+            let route_result = self.resolve_named_type_export_route_uncached(
+                ctx,
+                dep_canonical,
+                requested_name,
+                &mut active,
+                &mut touched_canonical_ids,
+                &mut unresolved_edge_owners,
+                &mut route_shallow_cache,
+            );
+            let collected = scope.collected();
+            (route_result?, collected)
+        };
 
         // ReturnOnly never publishes — fenced-participant arm. A walk that
         // consumed ANY fenced (ReturnOnly) shallow serve computed its route
@@ -618,51 +656,43 @@ impl VerterHost {
                 &mut seen,
             );
         }
+        for fact in traversal_witness {
+            if seen.insert(fact.clone()) {
+                facts.push(fact);
+            }
+        }
 
-        // Root any unresolved `export *` wildcard edge the traversal hit in the
-        // `ImportRoute` fact rail. The owner's
-        // `FileWholeHash` + `Route` facts do NOT re-resolve a known-miss
+        // Root any unresolved `export *` wildcard edge the traversal hit
+        // on the resolve-domain witness rail. The owner's
+        // `FileWholeHash` + `Route` facts do NOT observe a known-miss
         // specifier, so a Miss caused by an unresolvable wildcard would be
-        // served stale after the target appears. `generation_current_import_route_hash`
-        // re-resolves the owner's known-miss specifiers against the live
-        // workspace, so the recorded fact changes the moment the edge resolves.
+        // served stale after the target appears. Resolving the wildcard
+        // sources through the shared route-edge policy fans the sealed
+        // transactions' observations — including the exhausted probe set
+        // for the miss — so the recorded witness fails the moment the
+        // edge resolves.
         //
-        // When an owner has no import-route surface to root the unresolved edge
-        // on (e.g. a barrel whose wildcards resolve into a
-        // local `dep_edges` map and never publish `import_routes`), the hash is
-        // unproduce-able. We must NOT admit a fact-validated entry — a cached
-        // value could stale-serve once the target appears. But we must equally
-        // NOT DROP a valid result: returning `None` here makes `RouteDb` serve
-        // no value at all, which silently discards a route that resolved through
-        // a LATER wildcard (never conflate "refuse to
-        // cache" with "no result"). Instead, return the resolved route surface
-        // with EMPTY facts: `RouteDb`'s strict admission treats an empty fact
-        // signature as the negative-cache pattern — the value is returned to the
-        // caller but never persisted — so the next query re-resolves cold
-        // against the live workspace.
-        //
-        // The hash must also COVER every unresolved wildcard source the
-        // traversal hit on that owner. An owner can
-        // have a fully-resolved route surface (so a bare
-        // `generation_current_import_route_hash` returns `Some`) whose table
-        // does NOT track the wildcard source — e.g. a PARTIAL import-route
-        // snapshot resolving a sibling but omitting the wildcard. That hash is
-        // reproduced verbatim after the target appears, so it cannot root the
-        // known-miss. `generation_current_import_route_hash_covering_sources`
-        // returns `None` for that incomplete case, routing it through the SAME
-        // empty-facts negative-cache path as the no-surface case.
+        // The witness is built FROM the traversed sources, so coverage is
+        // structural: every unresolved wildcard source this traversal hit
+        // is necessarily observed. A REFUSED resolution (the transaction
+        // could not admit a complete signature) is the unrootable case:
+        // we must NOT admit a fact-validated entry — a cached value could
+        // stale-serve once the target appears. But we must equally NOT
+        // DROP a valid result: returning `None` here makes `RouteDb` serve
+        // no value at all, which silently discards a route that resolved
+        // through a LATER wildcard (never conflate "refuse to cache" with
+        // "no result"). Instead, return the resolved route surface with
+        // EMPTY facts: `RouteDb`'s strict admission treats an empty fact
+        // signature as the negative-cache pattern — the value is returned
+        // to the caller but never persisted — so the next query
+        // re-resolves cold against the live workspace.
         let mut owner_sources: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
         for (owner, source) in unresolved_edge_owners {
             owner_sources.entry(owner).or_default().push(source);
         }
         for (owner, sources) in owner_sources {
-            let Some(import_route_hash) = self
-                .generation_current_import_route_hash_covering_sources_with_context(
-                    ctx,
-                    owner.as_str(),
-                    &sources,
-                )
+            let Some(witness) = self.import_route_witness_for_specifiers(owner.as_str(), &sources)
             else {
                 // The empty-facts signal alone only protects the caches
                 // that inspect route facts directly (`RouteDb` /
@@ -684,13 +714,10 @@ impl VerterHost {
                 );
                 return Some((route_result, Vec::new()));
             };
-            let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: owner,
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                hash: import_route_hash,
-            };
-            if seen.insert(fact.clone()) {
-                facts.push(fact);
+            for fact in witness {
+                if seen.insert(fact.clone()) {
+                    facts.push(fact);
+                }
             }
         }
 
@@ -712,8 +739,8 @@ impl VerterHost {
         requested_name: &str,
     ) -> Option<(String, String)> {
         let normalized_canonical = self
-            .resolve_eval_dependency_canonical(dep_canonical)
-            .unwrap_or_else(|| dep_canonical.to_string());
+            .normalized_analysis_canonical(dep_canonical)
+            .into_owned();
 
         // Build the R6/R21-compliant route key from the PROVIDER's project
         // env (the route resolution is resolve-domain: it depends on the

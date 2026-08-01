@@ -586,6 +586,95 @@ impl FrameworkAdapterDescriptor {
     }
 }
 
+/// The module STEM of the virtualized `@verter/types` sidecar: the segment the
+/// producer appends to a carrier's IDE-companion BASENAME to form the relative
+/// import specifier a rewritten `@verter/types` import resolves through
+/// (`./App.vue.tsx.__verter_types`). The on-disk overlay adds the `.d.ts`
+/// declaration extension on top ([`VERTER_TYPES_SIDECAR_EXT`]) — TypeScript's
+/// extensionless probe resolves the specifier to that overlay.
+pub const VERTER_TYPES_SIDECAR_MODULE_STEM: &str = ".__verter_types";
+
+/// The on-disk extension of the virtualized `@verter/types` sidecar overlay,
+/// appended to a carrier's FULL IDE-companion path
+/// (`{ide_companion}.__verter_types.d.ts`). Exactly
+/// [`VERTER_TYPES_SIDECAR_MODULE_STEM`] + `.d.ts` — pinned by
+/// `verter_types_sidecar_column_derives_from_the_module_stem`.
+pub const VERTER_TYPES_SIDECAR_EXT: &str = ".__verter_types.d.ts";
+
+/// The adjacent `@verter/types` fallback overlay the LSP publishes BESIDE a
+/// carrier's IDE companion when the owning project cannot resolve the
+/// `@verter/types` package (`ProjectSync::publish_tsx` →
+/// `prepare_carrier_provider_surface`): `{ide_companion}.__verter_types.d.ts`,
+/// one form per IDE suffix (`.tsx` / `.jsx`). Relative to the carrier SOURCE the
+/// sidecar is therefore `{source}{ide_suffix}.__verter_types.d.ts`.
+///
+/// Naming the sidecar in the descriptor column is what lets
+/// [`classify_carrier_companion`] reverse-map it to its carrier source, so every
+/// companion-family consumer treats it as part of the carrier family — above all
+/// the SHARED tsgo overlay, whose record/inject scope keys on
+/// `carrier_source_of` and would otherwise DROP the sidecar: the editor-owned
+/// Program then fails the rewritten `__verter_types` import (TS2307), the JSX
+/// helper surface collapses, template hover degrades to `any`, and template
+/// completions return null while the managed lane (which receives the sidecar
+/// through its own lifecycle verbs) keeps serving typed answers.
+///
+/// Each element is `{ide_suffix}{VERTER_TYPES_SIDECAR_EXT}` (literal because the
+/// column is `&'static`; the derivation is pinned by
+/// `verter_types_sidecar_column_derives_from_the_module_stem`). The producer
+/// never spells these strings itself: creation, the import specifier, and
+/// cleanup all route through [`verter_types_sidecar_path`] /
+/// [`verter_types_import_specifier`], so a rename here and the published paths
+/// cannot drift apart.
+const VERTER_TYPES_SIDECAR_SUFFIXES: &[&str] =
+    &[".tsx.__verter_types.d.ts", ".jsx.__verter_types.d.ts"];
+
+/// The final path segment of an IDE-companion path, or `None` when the path
+/// names no file (empty, or separator-terminated — `/ws/src/`, `C:\ws\`,
+/// `\\?\C:\ws\`). Separator-neutral (`/` and `\`), so a Windows provider path
+/// answers the same as a normalized one. The ONE basename predicate BOTH
+/// sidecar derivations below share, so the overlay path and its import
+/// specifier refuse on exactly the same inputs and can never strand each other.
+fn ide_companion_basename(ide_companion_path: &str) -> Option<&str> {
+    ide_companion_path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+}
+
+/// The virtualized `@verter/types` sidecar overlay PATH for a carrier's IDE
+/// companion — the ONE forward derivation the producer
+/// (`prepare_carrier_provider_surface`), the cleanup path
+/// (`ProjectSync::close_virtual_verter_types`), and tests consume. Appending to
+/// the FULL IDE-companion path is what keeps the result classifiable: the
+/// companion is `{source}{ide_suffix}`, so the sidecar is
+/// `{source}{ide_suffix}{VERTER_TYPES_SIDECAR_EXT}` — exactly the
+/// `sidecar_suffixes` column entry for that IDE suffix.
+///
+/// `None` for a path with no basename ([`ide_companion_basename`]): a
+/// basename-less input names no file to sit beside, and fabricating
+/// `{directory}{VERTER_TYPES_SIDECAR_EXT}` would mint a path the classifier
+/// does not recognize — the exact drift class this API exists to prevent.
+/// Fail-closed on the SAME predicate as [`verter_types_import_specifier`].
+#[must_use]
+pub fn verter_types_sidecar_path(ide_companion_path: &str) -> Option<String> {
+    ide_companion_basename(ide_companion_path)
+        .map(|_| format!("{ide_companion_path}{VERTER_TYPES_SIDECAR_EXT}"))
+}
+
+/// The RELATIVE import specifier a rewritten `@verter/types` import resolves the
+/// sidecar overlay through: `./{ide_companion_basename}.__verter_types`
+/// (extensionless — TypeScript's declaration probe appends `.d.ts` and lands on
+/// [`verter_types_sidecar_path`]'s overlay). `None` for a path with no basename
+/// ([`ide_companion_basename`] — the same predicate the overlay-path derivation
+/// refuses on), mirroring the producer's fail-closed handling. Separator-neutral
+/// (`/` and `\`), so a Windows provider path derives the same specifier a
+/// normalized one would.
+#[must_use]
+pub fn verter_types_import_specifier(ide_companion_path: &str) -> Option<String> {
+    let basename = ide_companion_basename(ide_companion_path)?;
+    Some(format!("./{basename}{VERTER_TYPES_SIDECAR_MODULE_STEM}"))
+}
+
 /// The Vue adapter descriptor row.
 ///
 /// The single source of truth for the Vue adapter's identity, surface kinds,
@@ -616,7 +705,7 @@ pub fn vue_descriptor() -> FrameworkAdapterDescriptor {
             // redirect-reached, non-bare-probed surface, and `.svelte.__verter_test.ts`
             // is not a rune-module extension, so it is already collision-free.
             testing_api_suffix: Some(".__verter_test.ts"),
-            sidecar_suffixes: &[],
+            sidecar_suffixes: VERTER_TYPES_SIDECAR_SUFFIXES,
             // The bare `import B from "./B.vue"` declaration carrier is the
             // extension-middle `B.d.vue.ts` — the path tsgo's basename-append
             // probe reaches first (`.d.vue.ts` -> `.vue.ts` -> `.vue.tsx`).
@@ -772,7 +861,7 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
             // No testing-API surface for Svelte (the testing surface is
             // Vue-only).
             testing_api_suffix: None,
-            sidecar_suffixes: &[],
+            sidecar_suffixes: VERTER_TYPES_SIDECAR_SUFFIXES,
             // The bare `import C from "./C.svelte"` declaration carrier is the
             // extension-middle `C.d.svelte.ts` — the path tsgo's basename-append
             // probe reaches first (`.d.svelte.ts` -> `.svelte.ts` -> `.svelte.tsx`).
@@ -859,7 +948,14 @@ mod tests {
             VirtualPathPolicy::Suffix(".verter.ts")
         );
         assert_eq!(naming.testing_api_suffix, Some(".__verter_test.ts"));
-        assert_eq!(naming.sidecar_suffixes, &[] as &[&str]);
+        // The adjacent `@verter/types` fallback overlay is a named sidecar of
+        // the carrier family — one form per IDE suffix — so the SHARED overlay
+        // records + injects it with its carrier instead of dropping it.
+        assert_eq!(naming.sidecar_suffixes, VERTER_TYPES_SIDECAR_SUFFIXES);
+        let sidecar = classify_carrier_companion("/ws/src/App.vue.tsx.__verter_types.d.ts")
+            .expect("the __verter_types sidecar classifies as a Vue carrier companion");
+        assert_eq!(sidecar.source, "/ws/src/App.vue");
+        assert_eq!(sidecar.kind, CarrierCompanionKind::Sidecar);
         assert!(naming.is_structurally_valid());
     }
 
@@ -891,8 +987,99 @@ mod tests {
             VirtualPathPolicy::Suffix(".verter.ts")
         );
         assert_eq!(naming.testing_api_suffix, None);
-        assert_eq!(naming.sidecar_suffixes, &[] as &[&str]);
+        // Svelte carriers are first-class on the same virtualized-`@verter/types`
+        // sidecar rail as Vue: the `.jsx` form covers a no-lang JS component's
+        // IDE companion.
+        assert_eq!(naming.sidecar_suffixes, VERTER_TYPES_SIDECAR_SUFFIXES);
+        let sidecar = classify_carrier_companion("/ws/src/Card.svelte.jsx.__verter_types.d.ts")
+            .expect("the __verter_types sidecar classifies as a Svelte carrier companion");
+        assert_eq!(sidecar.source, "/ws/src/Card.svelte");
+        assert_eq!(sidecar.kind, CarrierCompanionKind::Sidecar);
         assert!(naming.is_structurally_valid());
+    }
+
+    #[test]
+    fn verter_types_sidecar_column_derives_from_the_module_stem() {
+        // The overlay extension IS the module stem plus the `.d.ts` declaration
+        // extension — the extensionless specifier probe must land on the overlay.
+        assert_eq!(
+            VERTER_TYPES_SIDECAR_EXT,
+            format!("{VERTER_TYPES_SIDECAR_MODULE_STEM}.d.ts")
+        );
+        for descriptor in built_in_descriptors() {
+            let naming = descriptor
+                .virtual_file_naming
+                .as_ref()
+                .expect("built-in carrier descriptors carry a naming column");
+            let VirtualPathPolicy::JsxConditional { jsx, non_jsx } = naming.ide else {
+                panic!("built-in carrier descriptors use the JsxConditional IDE policy");
+            };
+            // The column is EXACTLY the IDE suffixes with the sidecar extension
+            // appended — no extra entry, no missing IDE form.
+            let derived: std::collections::BTreeSet<String> = [non_jsx, jsx]
+                .iter()
+                .map(|ide_suffix| format!("{ide_suffix}{VERTER_TYPES_SIDECAR_EXT}"))
+                .collect();
+            let column: std::collections::BTreeSet<String> = naming
+                .sidecar_suffixes
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            assert_eq!(
+                column, derived,
+                "{:?}: sidecar_suffixes must be the IDE suffixes + VERTER_TYPES_SIDECAR_EXT",
+                descriptor.id
+            );
+            // FORWARD → CLASSIFIER round-trip: the path the producer derives for
+            // any IDE companion classifies back to that companion's carrier
+            // source as a Sidecar — the invariant whose absence dropped the
+            // sidecar from the SHARED overlay.
+            let carrier_ext = descriptor
+                .carrier_extension()
+                .expect("built-in carrier descriptors have a carrier extension");
+            for ide_suffix in [non_jsx, jsx] {
+                let source = format!("/ws/src/Comp{carrier_ext}");
+                let ide_companion = format!("{source}{ide_suffix}");
+                let sidecar = verter_types_sidecar_path(&ide_companion)
+                    .expect("an IDE companion with a basename derives a sidecar path");
+                let classified = classify_carrier_companion(&sidecar).unwrap_or_else(|| {
+                    panic!("derived sidecar {sidecar} must classify as a carrier companion")
+                });
+                assert_eq!(classified.source, source);
+                assert_eq!(classified.kind, CarrierCompanionKind::Sidecar);
+                // The specifier derives from the companion BASENAME with the
+                // module stem — the exact spelling the producer rewrites imports to.
+                assert_eq!(
+                    verter_types_import_specifier(&ide_companion).as_deref(),
+                    Some(
+                        format!(
+                            "./Comp{carrier_ext}{ide_suffix}{VERTER_TYPES_SIDECAR_MODULE_STEM}"
+                        )
+                        .as_str()
+                    )
+                );
+            }
+        }
+        // Fail-closed: a path with no basename derives NEITHER a sidecar path
+        // NOR a specifier — the helpers refuse to fabricate
+        // `.__verter_types.d.ts` at a bare directory. Both refusals fire on the
+        // same predicate, so the pair cannot drift: a specifier without an
+        // overlay (or an overlay no specifier reaches) would be a stranded
+        // publication. Windows spellings included (Cross-Platform Portability):
+        // a trailing `\` or a verbatim `\\?\` drive root is just as
+        // basename-less as a POSIX directory path.
+        for no_basename in ["", "/ws/src/", "C:\\ws\\", "\\\\?\\C:\\ws\\"] {
+            assert_eq!(
+                verter_types_sidecar_path(no_basename),
+                None,
+                "{no_basename:?} names no file, so no sidecar path may be fabricated"
+            );
+            assert_eq!(
+                verter_types_import_specifier(no_basename),
+                None,
+                "{no_basename:?} names no file, so no specifier may be derived"
+            );
+        }
     }
 
     #[test]

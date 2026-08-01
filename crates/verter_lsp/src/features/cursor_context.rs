@@ -206,9 +206,10 @@ pub fn classify_cursor_context_for_language(
         SfcCursorContext::OpeningTag { block_index } => {
             let block = &blocks[block_index];
             // D5: an unterminated nested `<template #…` (slot outlet being
-            // typed) can surface here as a phantom SFC block opening tag
-            // because the depth-ignorant scanner closed the real template
-            // block at an earlier nested `</template>`. Recover the slot-name
+            // typed) can surface here as a phantom SFC block opening tag when
+            // the scanner's depth-balanced walk fails closed to the
+            // first-close boundary on malformed input (e.g. the outer close is
+            // missing mid-edit) and rescans from there. Recover the slot-name
             // context from source before treating it as an SFC block tag.
             if language == Some(CarrierTemplateLanguage::Vue) {
                 if let Some(ctx) = slot_name_context_from_source(offset, source, analysis) {
@@ -255,11 +256,12 @@ pub fn classify_cursor_context_for_language(
         "template" => classify_template_context(offset, source, analysis),
         "style" => classify_style_context(offset, blocks, analysis),
         tag_name => {
-            // D5: the depth-ignorant SFC scanner closes the real template
-            // block at the first nested `</template>`, so a component usage
-            // after a closed nested slot template surfaces here as a phantom
-            // custom block. A slot-name token inside it is template markup —
-            // recover the slot-name context from source for Vue.
+            // D5: on MALFORMED input the SFC scanner fails closed to the
+            // first-close boundary (e.g. the outer close is missing mid-edit),
+            // so a component usage after a closed nested slot template can
+            // still surface here as a phantom custom block. A slot-name token
+            // inside it is template markup — recover the slot-name context
+            // from source for Vue.
             if language == Some(CarrierTemplateLanguage::Vue) {
                 if let Some(ctx) = slot_name_context_from_source(offset, source, analysis) {
                     return CursorContext::Template(ctx);

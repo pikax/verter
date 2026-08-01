@@ -30,7 +30,9 @@ export {
   type InitializeParamsLike,
 } from "./positionEncoding.js";
 export {
+  contractServerProfile,
   createEditorNeutralContractInventory,
+  EDITOR_NEUTRAL_SERVER_PROFILES,
   EditorNeutralContractFailure,
   executeEditorNeutralContractCase,
   resolveContractAnchor,
@@ -44,6 +46,7 @@ export {
   type EditorNeutralFramework,
   type EditorNeutralProviderRoute,
   type EditorNeutralScriptLanguage,
+  type EditorNeutralServerProfile,
   type LspCompletionItem,
   type LspCompletionList,
   type LspDiagnostic,

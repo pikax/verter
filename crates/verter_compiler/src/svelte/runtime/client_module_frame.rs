@@ -1,6 +1,6 @@
 //! The client module-frame emission helpers — the import prelude, the `$.from_html`
-//! root-factory hoist, and the backtick-template escaper. Extracted from `client.rs` to
-//! keep the emitter module under the file-size guard.
+//! root-factory hoist, and the backtick-template escaper. They stay separate from
+//! `client.rs` so module-frame and component-body emission remain focused.
 
 use super::client_imports::{UserImport, UserImportSlot};
 use super::helpers::{ImportPlan, RuntimeImport};

@@ -1,6 +1,6 @@
 //! The fail-closed REASON / diagnostic-label builders for the default-deny client
-//! syntax classifier, extracted from `client_surface.rs` to keep it under the
-//! file-size guard.
+//! syntax classifier, kept separate from `client_surface.rs` so classification
+//! and diagnostic construction remain focused.
 //!
 //! These are the small typed-IR-driven helpers the node walk (`classify_node`) calls
 //! to mint a precise [`UnsupportedSvelteRuntimeSurface`] — or a short diagnostic

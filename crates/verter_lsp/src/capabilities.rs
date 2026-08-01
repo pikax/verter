@@ -125,47 +125,24 @@ pub fn server_capabilities(
             resolve_provider: Some(false),
         }),
         inlay_hint_provider: Some(OneOf::Left(true)),
+        // The advertised legend IS the shared mapping owner's published
+        // vocabulary (`verter_type_runtime::semantic_tokens`): every provider
+        // lane remaps its own token space into these exact indices/bits, so the
+        // wire legend must be BUILT from the same arrays — a hand-maintained
+        // copy here would silently re-introduce the index-space mismatch the
+        // shared owner exists to prevent.
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 full: Some(SemanticTokensFullOptions::Bool(true)),
                 legend: SemanticTokensLegend {
-                    token_types: vec![
-                        SemanticTokenType::NAMESPACE,
-                        SemanticTokenType::TYPE,
-                        SemanticTokenType::CLASS,
-                        SemanticTokenType::ENUM,
-                        SemanticTokenType::INTERFACE,
-                        SemanticTokenType::STRUCT,
-                        SemanticTokenType::TYPE_PARAMETER,
-                        SemanticTokenType::PARAMETER,
-                        SemanticTokenType::VARIABLE,
-                        SemanticTokenType::PROPERTY,
-                        SemanticTokenType::ENUM_MEMBER,
-                        SemanticTokenType::EVENT,
-                        SemanticTokenType::FUNCTION,
-                        SemanticTokenType::METHOD,
-                        SemanticTokenType::MACRO,
-                        SemanticTokenType::KEYWORD,
-                        SemanticTokenType::MODIFIER,
-                        SemanticTokenType::COMMENT,
-                        SemanticTokenType::STRING,
-                        SemanticTokenType::NUMBER,
-                        SemanticTokenType::REGEXP,
-                        SemanticTokenType::OPERATOR,
-                        SemanticTokenType::DECORATOR,
-                    ],
-                    token_modifiers: vec![
-                        SemanticTokenModifier::DECLARATION,
-                        SemanticTokenModifier::DEFINITION,
-                        SemanticTokenModifier::READONLY,
-                        SemanticTokenModifier::STATIC,
-                        SemanticTokenModifier::DEPRECATED,
-                        SemanticTokenModifier::ABSTRACT,
-                        SemanticTokenModifier::ASYNC,
-                        SemanticTokenModifier::MODIFICATION,
-                        SemanticTokenModifier::DOCUMENTATION,
-                        SemanticTokenModifier::DEFAULT_LIBRARY,
-                    ],
+                    token_types: verter_type_runtime::semantic_tokens::VERTER_TOKEN_TYPES
+                        .iter()
+                        .map(|name| SemanticTokenType::new(name))
+                        .collect(),
+                    token_modifiers: verter_type_runtime::semantic_tokens::VERTER_TOKEN_MODIFIERS
+                        .iter()
+                        .map(|name| SemanticTokenModifier::new(name))
+                        .collect(),
                 },
                 ..Default::default()
             },

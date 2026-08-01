@@ -11,6 +11,10 @@ publish = false
 
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# Measurement-only: enables the `currency_probe` wall-clock/call-count rail
+# (`src/currency_probe.rs`). Absent from `default`; requested ONLY by the
+# `verter_bench` measurement harness, never by a production edge.
+currency_probe = []
 # Tests that require third-party repository checkouts beside this repo
 # (Testing-Hermeticity): excluded from the default canonical run; enable
 # explicitly with `--features external-corpus`.
@@ -24,6 +28,7 @@ hotpath = { version = "0.16", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 glob = "0.3.3"
+im = "15.1"
 parking_lot = "0.12.5"
 smallvec = "1.15"
 thiserror = "2.0"
@@ -31,6 +36,7 @@ verter_audit = { path = "../verter_audit" }
 verter_language = { path = "../verter_language" }
 verter_scheduler = { path = "../verter_scheduler" }
 verter_span = { path = "../verter_span" }
+verter_type_expr = { workspace = true }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

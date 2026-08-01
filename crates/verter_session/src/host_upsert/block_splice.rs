@@ -3,8 +3,10 @@
 //! Pure string/byte helpers behind
 //! [`crate::VerterHost::apply_block_overrides`]: given the original SFC
 //! source and preprocessed block overrides, produce a synthetic source
-//! with the block content replaced and `lang` attributes stripped so the
-//! compiler treats the blocks as native HTML/JS. No host, cache, or
+//! with the block content replaced and a PREPROCESSOR `lang` stripped, so
+//! the compiler reads what the override actually contains. A native script
+//! dialect (`ts`/`tsx`/`js`/`jsx`) is kept — the override of a
+//! `<script lang="ts">` block is still TypeScript. No host, cache, or
 //! scheduler access — the cluster is text-only by construction (the
 //! upsert/eviction-relevant logic stays in `host_upsert.rs`, the single
 //! file the `host_upsert_performs_no_reverse_dependent_eviction` guard
@@ -13,11 +15,12 @@
 use crate::types::{ContentOverride, FileMeta};
 
 /// Build a synthetic SFC source with preprocessed content replacing original
-/// block content and `lang` attributes stripped.
+/// block content.
 ///
 /// The synthetic source preserves the same byte structure (tags, offsets) where
-/// possible, but replaces block content and removes `lang="xxx"` from template
-/// and script tags so the compiler treats them as native HTML/JS.
+/// possible. A template's `lang` is always removed (an override is compiled
+/// HTML); a script's is removed only when it names a preprocessor language —
+/// see the call site.
 pub(super) fn build_synthetic_source(
     original: &str,
     meta: &FileMeta,
@@ -33,19 +36,41 @@ pub(super) fn build_synthetic_source(
         result = replace_block_content(&result, "template", &tpl.code, true);
     }
 
-    // Replace script content (if override provided)
+    // Replace script content (if override provided).
+    //
+    // `lang` is stripped only for a NON-NATIVE script language — a preprocessor
+    // (`coffee`, and anything else the compiler cannot read) whose override
+    // content has already been compiled down to JavaScript, so the tag would be
+    // lying if it kept saying `coffee`.
+    //
+    // A NATIVE dialect is the opposite case and must be kept. An override of a
+    // `<script lang="ts">` block is still TypeScript — the preprocessor lane
+    // never runs for it — and the tag is the ONLY place that says so.
+    // Stripping it makes the synthetic SFC a JavaScript one, which changes both
+    // how the body is PARSED (`defineProps<T>()` and every type annotation stop
+    // being syntax) and how the generated companion is LABELLED (`.jsx`, never
+    // typechecked). Both are silent: the macro simply stops being found.
     if let Some(scr) = script_override {
-        // Determine which script tag to target
-        let tag = if meta.script_lang.is_some() {
-            "script"
-        } else {
-            // No non-native script lang; should not happen, but handle gracefully
-            "script"
-        };
-        result = replace_block_content(&result, tag, &scr.code, true);
+        let strip_lang = meta
+            .script_lang
+            .as_deref()
+            .is_some_and(|lang| !is_native_script_lang(lang));
+        result = replace_block_content(&result, "script", &scr.code, strip_lang);
     }
 
     result
+}
+
+/// Whether `lang` names a script dialect the compiler reads directly, rather
+/// than a preprocessor language an override has already compiled away.
+///
+/// Decided through the parser's own `lang` classification, so the two cannot
+/// disagree about what `typescript` or `jsx` mean.
+fn is_native_script_lang(lang: &str) -> bool {
+    !matches!(
+        verter_compiler::cursor::ScriptLanguage::from_bytes(lang.as_bytes()),
+        verter_compiler::cursor::ScriptLanguage::Unknown
+    )
 }
 
 /// Replace the content of an SFC block tag and optionally strip its `lang` attribute.
@@ -163,4 +188,79 @@ fn find_pattern_after(bytes: &[u8], start: usize, pattern: &[u8]) -> Option<usiz
         .windows(pattern.len())
         .position(|w| w.eq_ignore_ascii_case(pattern))
         .map(|p| start + p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn script_override(code: &str) -> ContentOverride {
+        ContentOverride {
+            code: std::sync::Arc::from(code),
+            source_map: None,
+        }
+    }
+
+    fn meta_with_script_lang(lang: Option<&str>) -> FileMeta {
+        FileMeta {
+            has_script: true,
+            script_lang: lang.map(str::to_owned),
+            ..FileMeta::default()
+        }
+    }
+
+    /// A NATIVE script dialect survives the splice; a PREPROCESSOR language does
+    /// not.
+    ///
+    /// The synthetic source is what the compiler then parses and labels, and
+    /// `lang` is the only thing on it that says which dialect the block is.
+    /// Stripping `lang="ts"` makes the spliced SFC JavaScript: `defineProps<T>()`
+    /// stops being syntax at all (so the macro is silently not found) and the
+    /// generated companion is labelled `.jsx`, which is never typechecked.
+    /// Stripping `lang="coffee"` is the opposite and correct — the override
+    /// content has already been compiled to JavaScript, so a tag still claiming
+    /// `coffee` would be the lie.
+    ///
+    /// Fails against an unconditional strip: `lang="ts"` disappears.
+    #[test]
+    fn splicing_keeps_a_native_script_lang_and_strips_a_preprocessor_one() {
+        for lang in ["ts", "tsx", "js", "jsx", "typescript"] {
+            let original =
+                format!("<script setup lang=\"{lang}\">\nconst a = 1\n</script>\n<template><div/></template>");
+            let spliced = build_synthetic_source(
+                &original,
+                &meta_with_script_lang(Some(lang)),
+                None,
+                Some(&script_override("defineProps<{ p: number }>()")),
+            );
+            assert!(
+                spliced.contains(&format!("lang=\"{lang}\"")),
+                "a native `{lang}` block keeps its dialect through the splice: {spliced}"
+            );
+            assert!(
+                spliced.contains("defineProps<{ p: number }>()"),
+                "the override content really was spliced in: {spliced}"
+            );
+        }
+
+        // Negative: a preprocessor language IS stripped — the override has
+        // already compiled it away. Without this half the rule above would pass
+        // for a splice that never strips anything.
+        let original =
+            "<script setup lang=\"coffee\">\na = 1\n</script>\n<template><div/></template>";
+        let spliced = build_synthetic_source(
+            original,
+            &meta_with_script_lang(Some("coffee")),
+            None,
+            Some(&script_override("const a = 1")),
+        );
+        assert!(
+            !spliced.contains("lang=\"coffee\""),
+            "a compiled-away preprocessor lang must not survive: {spliced}"
+        );
+        assert!(
+            spliced.contains("const a = 1"),
+            "the compiled content really was spliced in: {spliced}"
+        );
+    }
 }

@@ -12,11 +12,40 @@ impl ProjectSync {
     /// are therefore adapted to owner-bound classic JSX namespaces in the
     /// provider buffer. Callers that record a provider surface use this method
     /// first so the recorded bytes are the exact bytes delivered to the engine.
-    fn prepare_tsx_surface<'a>(
+    ///
+    /// This is also the ONE funnel every carrier preparation passes through, so
+    /// a failure is recorded exactly once wherever it originates — the
+    /// publication path (which propagates the error) and the read path (which
+    /// fails closed to `None`) alike. The recorded reason is what
+    /// [`ProjectSync::carrier_preparation_failure`] hands the diagnostic pass;
+    /// without it a read-side failure would be observable only in a log.
+    pub(super) fn prepare_tsx_surface(
         &self,
         tsx_path: &str,
-        tsx_content: &'a str,
-    ) -> Result<PreparedTsxContent<'a>, TypeProviderError> {
+        tsx_content: &str,
+    ) -> Result<PreparedTsxContent, TypeProviderError> {
+        let result = self.prepare_tsx_surface_inner(tsx_path, tsx_content);
+        let key = super::carrier_failure_key(tsx_path);
+        match &result {
+            Ok(_) => {
+                self.carrier_preparation_failures.remove(&key);
+            }
+            Err(error) => {
+                tracing::error!(
+                    "project_sync: carrier provider surface unavailable for {tsx_path}: {error}"
+                );
+                self.carrier_preparation_failures
+                    .insert(key, Arc::from(error.message.as_str()));
+            }
+        }
+        result
+    }
+
+    fn prepare_tsx_surface_inner(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+    ) -> Result<PreparedTsxContent, TypeProviderError> {
         let specialized = if matches!(self.kind, TypeProviderKind::Tsgo) {
             if let Some(prepared) =
                 crate::svelte_assets::prepare_managed_tsgo_svelte_carrier(tsx_path, tsx_content)
@@ -48,7 +77,10 @@ impl ProjectSync {
             verter_session::framework::descriptor::classify_carrier_companion(tsx_path)
         else {
             return Ok(PreparedTsxContent {
-                content: specialized,
+                prepared: PreparedCarrierProviderContent::unprojected(
+                    Arc::from(specialized.as_ref()),
+                    tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+                ),
                 virtual_verter_types_path: None,
             });
         };
@@ -56,35 +88,27 @@ impl ProjectSync {
             .workspace
             .as_ref()
             .and_then(|workspace| workspace.read().clone());
-        let prepared = crate::carrier_provider_projection::prepare_carrier_provider_imports(
+        // ONE preparation produces the delivered bytes AND the mapper describing
+        // them, so the ledger below can hand both to a recorder as one value.
+        let surface = match crate::carrier_provider_projection::prepare_carrier_provider_surface(
             workspace.as_deref(),
             &companion.source,
+            tsx_path,
             specialized.as_ref(),
             tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
-        );
-        let projected = if prepared.content.as_ref() == specialized.as_ref() {
-            specialized
-        } else {
-            Cow::Owned(prepared.content.to_string())
-        };
-        if matches!(self.kind, TypeProviderKind::Tsgo) {
-            if let Some(virtual_types) =
-                crate::carrier_provider_projection::prepare_tsgo_verter_types_virtual(
-                    workspace.as_deref(),
-                    &companion.source,
-                    tsx_path,
-                    projected.as_ref(),
-                )
-            {
-                return Ok(PreparedTsxContent {
-                    content: Cow::Owned(virtual_types.content.to_string()),
-                    virtual_verter_types_path: Some(virtual_types.virtual_path),
-                });
+            matches!(self.kind, TypeProviderKind::Tsgo),
+        ) {
+            Ok(surface) => surface,
+            Err(refusal) => {
+                return Err(TypeProviderError::new(format!(
+                    "carrier provider projection was not admitted for {tsx_path}: {:?}",
+                    refusal.reason()
+                )));
             }
-        }
+        };
         Ok(PreparedTsxContent {
-            content: projected,
-            virtual_verter_types_path: None,
+            virtual_verter_types_path: surface.virtual_verter_types_path().map(str::to_owned),
+            prepared: surface.into_prepared(),
         })
     }
 
@@ -160,7 +184,7 @@ impl ProjectSync {
         }
 
         let result = self
-            .publish_provider_file(tsx_path, prepared.content.as_ref(), lane, verb)
+            .publish_provider_file(tsx_path, prepared.prepared.content().as_ref(), lane, verb)
             .await;
         if result.is_err() {
             // A dependency created solely for a failed carrier publication has
@@ -172,7 +196,7 @@ impl ProjectSync {
             return result;
         }
 
-        self.record_synced_tsx_content(tsx_path, prepared.content.as_ref());
+        self.record_delivered_carrier_surface(tsx_path, tsx_content, prepared.prepared);
 
         // When an installed package becomes available, publish the unrewritten
         // carrier first. Closing its old overlay before that update would break
@@ -190,13 +214,19 @@ impl ProjectSync {
     ) -> Result<(), TypeProviderError> {
         let lock = self.virtual_verter_types_lock(tsx_path);
         let _guard = lock.lock().await;
+        // Our own record of why this carrier could not be prepared describes a
+        // buffer we are giving up on, so it is dropped whatever the provider
+        // says. Otherwise a first-open failure — which never commits provider
+        // state and so may never reach the success branch below — would outlive
+        // every buffer it ever described.
+        self.clear_carrier_preparation_failure(tsx_path);
         let result = match lane {
             ProviderLane::Foreground => self.provider.close_file(tsx_path).await,
             ProviderLane::Background => self.provider.close_file_background(tsx_path).await,
             ProviderLane::Normal => self.provider.close_file_normal(tsx_path).await,
         };
         if result.is_ok() {
-            self.retract_synced_tsx_content(tsx_path);
+            self.retract_delivered_carrier_surface(tsx_path);
             self.close_virtual_verter_types(tsx_path, lane).await?;
         }
         result
@@ -207,7 +237,18 @@ impl ProjectSync {
         tsx_path: &str,
         lane: ProviderLane,
     ) -> Result<(), TypeProviderError> {
-        let path = format!("{tsx_path}.__verter_types.d.ts");
+        // Cleanup derives the SAME descriptor-owned path creation derived
+        // (`prepare_carrier_provider_surface`), so a naming change can never
+        // strand a published overlay under a stale locally-formatted spelling.
+        // A refusal (no basename) proves no overlay EXISTS to clean up: every
+        // `virtual_verter_types_paths` entry was inserted from the SAME
+        // deterministic derivation over the same `tsx_path`, so a path this
+        // refuses to name was refused at publication too and never entered the
+        // set — returning `Ok` skips nothing that lives.
+        let Some(path) = verter_session::framework::descriptor::verter_types_sidecar_path(tsx_path)
+        else {
+            return Ok(());
+        };
         if self.virtual_verter_types_paths.remove(&path).is_none() {
             return Ok(());
         }

@@ -90,6 +90,10 @@ pub enum CompilerErrorCode {
     DuplicateScriptSetup,
     /// Duplicate `<script>` block.
     DuplicateScript,
+    /// `<script setup>` and `<script>` declare different `lang`s. Vue rejects
+    /// the SFC outright; Verter reports it rather than silently picking one
+    /// block's language for the generated companions.
+    ScriptLangMismatch,
 
     // -- Directive duplication --
     /// Duplicate built-in directive on the same element (v-if, v-for, v-slot, v-once).
@@ -128,6 +132,26 @@ pub enum CompilerErrorCode {
     /// Error parsing or processing CSS in a `<style>` block.
     XCssParseError,
 }
+
+/// The machine-stable diagnostic-code STRING for
+/// [`CompilerErrorCode::XMissingMacroSemanticBundle`].
+pub const X_MISSING_MACRO_SEMANTIC_BUNDLE: &str = "XMissingMacroSemanticBundle";
+
+/// The machine-stable diagnostic-code STRING for
+/// [`CompilerErrorCode::XUnavailableMacroSemanticResult`].
+///
+/// Diagnostic codes leave the compiler as the `{:?}` spelling of the variant
+/// (`verter_compiler::compile::helpers`), so this constant is that spelling and
+/// nothing else; `x_unavailable_macro_semantic_result_matches_the_variant_spelling`
+/// pins the two together, so a variant rename cannot silently orphan a
+/// downstream classifier.
+///
+/// Downstream crates that CLASSIFY this code name this constant rather than a
+/// copied literal — the same shared-constant discipline
+/// `verter_session::types::HOST_MISSING_EXTERNAL_SOURCE` and
+/// `HOST_MISSING_MACRO_TYPE_DEP` follow for the codes `verter_session` itself
+/// produces.
+pub const X_UNAVAILABLE_MACRO_SEMANTIC_RESULT: &str = "XUnavailableMacroSemanticResult";
 
 impl CompilerErrorCode {
     /// The default human-readable message for this error code (Vue-compatible).
@@ -183,6 +207,9 @@ impl CompilerErrorCode {
             }
             Self::DuplicateScript => {
                 "Duplicate <script> block — only one plain <script> is allowed per SFC."
+            }
+            Self::ScriptLangMismatch => {
+                "<script> and <script setup> must have the same language type."
             }
             Self::XDuplicateDirective => "Duplicate built-in directive on the same element.",
             Self::XInvalidExpression => "Error parsing JavaScript expression.",
@@ -399,6 +426,33 @@ impl<'a> SyntaxPluginContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The anti-drift pin behind the two transient macro-semantic codes.
+    ///
+    /// Diagnostic codes cross the crate boundary as the `{:?}` spelling of the
+    /// variant, and a downstream classifier
+    /// (`verter_session::CompileFailure::blocked_on_unavailable_input`) matches
+    /// on the constant. Renaming the variant without updating the constant
+    /// would silently reclassify a transient macro-semantic failure as a
+    /// permanent verdict on the source bytes — the exact defect the constant
+    /// exists to prevent — so it fails here instead.
+    #[test]
+    fn macro_semantic_constants_match_the_variant_spellings() {
+        assert_eq!(
+            format!("{:?}", CompilerErrorCode::XMissingMacroSemanticBundle),
+            X_MISSING_MACRO_SEMANTIC_BUNDLE,
+            "the constant must be the code string this variant actually emits"
+        );
+        assert_eq!(
+            format!("{:?}", CompilerErrorCode::XUnavailableMacroSemanticResult),
+            X_UNAVAILABLE_MACRO_SEMANTIC_RESULT,
+            "the constant must be the code string this variant actually emits"
+        );
+        assert_ne!(
+            X_MISSING_MACRO_SEMANTIC_BUNDLE, X_UNAVAILABLE_MACRO_SEMANTIC_RESULT,
+            "the sibling codes must remain distinguishable"
+        );
+    }
 
     #[test]
     fn test_diagnostic_error_creation() {

@@ -44,6 +44,9 @@ fn make_script(source: &str, tag_open_str: &str, is_setup: bool) -> (RootNodeScr
         }),
         is_setup,
         lang,
+        // This fixture synthesises the node from a tag STRING rather than a
+        // parse. Nothing here exercises the cross-block `lang` comparison.
+        lang_value: None,
         src: None,
         generic: None,
         attrs: None,

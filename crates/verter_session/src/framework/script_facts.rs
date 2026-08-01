@@ -26,10 +26,9 @@
 //!   [`SignatureAdmission::Cacheable`] — an overflowed signature returns the
 //!   computed value to the caller alone and never warms the store.
 //!
-//! No production provider registers in this program — Vue's macro analysis
-//! stays inside the shallow pass — so [`resolve_script_facts`] is a zero-cost
-//! `None` whenever the registry's [`ActiveProviderIndex`] is empty. The seam is
-//! exercised end-to-end by an in-tree fixture provider.
+//! Svelte registers the production provider; Vue's macro analysis stays inside
+//! the shallow pass. A registration without a provider returns an explicit
+//! not-applicable outcome without per-file work.
 
 use std::sync::Arc;
 
@@ -39,18 +38,355 @@ use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 use verter_language::FrameworkAdapterId;
 use verter_semantic::analysis::framework_facts::{
-    FrameworkScriptCandidates, FrameworkScriptFactPayload, ResolvedImportTarget, ResolvedPackage,
-    ResolvedValidationCx, ScriptFactProvider,
+    ExactFrameworkScriptCandidates, FrameworkScriptCandidates, FrameworkScriptFactPayload,
+    ResolvedImportTarget, ResolvedPackage, ResolvedValidationCx, ScriptCandidateCx,
+    ScriptFactProvider, ScriptFactValidation,
+};
+pub use verter_semantic::analysis::framework_facts::{
+    ScriptFactPartialReason, ScriptFactUnavailableReason,
 };
 
 use crate::cache_runtime::SignatureAdmission;
 use crate::fact_signature_helpers::{
-    named_cacheability_scope, named_fact_tracer, ReadSetSignature,
+    named_cacheability_scope, named_fact_tracer, ReadSetSignature, ReadSetSignatureExt as _,
 };
 use crate::framework::registry::FrameworkRegistration;
 use crate::resolver_core::{ResolverContext, StoreView};
 use crate::types::Hash16;
 use crate::VerterHost;
+
+/// Producer-minted exact script facts.
+///
+/// The constructor is private to this module. Consumers can inspect the facts,
+/// but cannot turn an arbitrary payload into an exact proof.
+pub struct ExactScriptFacts<T: ?Sized> {
+    facts: Arc<T>,
+}
+
+impl<T: ?Sized> Clone for ExactScriptFacts<T> {
+    fn clone(&self) -> Self {
+        Self {
+            facts: Arc::clone(&self.facts),
+        }
+    }
+}
+
+impl<T: ?Sized> ExactScriptFacts<T> {
+    fn new(facts: Arc<T>) -> Self {
+        Self { facts }
+    }
+
+    /// The complete fact payload.
+    #[must_use]
+    pub fn facts(&self) -> &T {
+        &self.facts
+    }
+}
+
+impl ExactScriptFacts<dyn FrameworkScriptFactPayload> {
+    fn downcast<T: FrameworkScriptFactPayload>(self) -> Option<ExactScriptFacts<T>> {
+        self.facts
+            .as_any_arc()
+            .downcast::<T>()
+            .ok()
+            .map(ExactScriptFacts::new)
+    }
+}
+
+/// Usable positive script facts whose inventory is incomplete.
+///
+/// This type deliberately has no `Deref`, collection, iteration, negative
+/// lookup, or
+/// [`verter_semantic::analysis::framework_facts::NegativeEvidence`]
+/// implementation.
+#[derive(Clone)]
+pub struct PartialScriptFacts<T> {
+    facts: Arc<T>,
+    reason: ScriptFactPartialReason,
+    syntax_completeness: PartialSyntaxCompleteness,
+}
+
+impl<T> PartialScriptFacts<T> {
+    fn new(
+        facts: Arc<T>,
+        reason: ScriptFactPartialReason,
+        syntax_completeness: PartialSyntaxCompleteness,
+    ) -> Self {
+        Self {
+            facts,
+            reason,
+            syntax_completeness,
+        }
+    }
+
+    /// Why absence cannot be inferred from this payload.
+    #[must_use]
+    pub fn reason(&self) -> ScriptFactPartialReason {
+        self.reason
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartialSyntaxCompleteness {
+    Exact,
+    Recovered,
+}
+
+/// A possibly-present positive observation.
+///
+/// The value can only be visited when present. An omitted callback is not
+/// evidence of absence, so this type deliberately exposes no `Option`, `Deref`,
+/// or negative lookup projection.
+#[derive(Clone, Copy)]
+pub struct ConservativeObservation<'a, T: ?Sized> {
+    value: Option<&'a T>,
+}
+
+impl<'a, T: ?Sized> ConservativeObservation<'a, T> {
+    fn new(value: Option<&'a T>) -> Self {
+        Self { value }
+    }
+
+    /// Visit the positive observation when one was captured.
+    pub fn visit(self, visitor: impl FnOnce(&'a T)) {
+        if let Some(value) = self.value {
+            visitor(value);
+        }
+    }
+}
+
+/// A positive-only observation inventory whose empty iteration is not an
+/// authoritative negative.
+///
+/// The callback surface intentionally provides no iterator, collection, or
+/// [`verter_semantic::analysis::framework_facts::NegativeEvidence`]
+/// implementation.
+#[derive(Clone, Copy)]
+pub struct ConservativeObservations<'a, T> {
+    values: &'a [T],
+}
+
+impl<'a, T> ConservativeObservations<'a, T> {
+    fn new(values: &'a [T]) -> Self {
+        Self { values }
+    }
+
+    /// Visit each positive observation captured from the incomplete source.
+    pub fn visit(self, mut visitor: impl FnMut(&'a T)) {
+        for value in self.values {
+            visitor(value);
+        }
+    }
+}
+
+/// Positive-only Svelte observations from a partial script-fact payload.
+///
+/// Every field is exposed through [`ConservativeObservation`] or
+/// [`ConservativeObservations`]. Consumers can retain captured positives but
+/// cannot obtain the whole [`SvelteScriptFacts`](verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts),
+/// its exact props-call inventory, or an exact-empty proof.
+#[derive(Clone, Copy)]
+pub struct ConservativeSvelteScriptObservations<'a> {
+    facts: &'a verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+}
+
+impl<'a> ConservativeSvelteScriptObservations<'a> {
+    /// The observed authored props type, when captured.
+    #[must_use]
+    pub fn props_type(
+        self,
+    ) -> ConservativeObservation<'a, verter_type_expr::locators::AuthoredTypePayloadRef> {
+        ConservativeObservation::new(self.facts.syntax().props_type.as_ref())
+    }
+
+    /// Observed props defaults.
+    #[must_use]
+    pub fn prop_defaults(
+        self,
+    ) -> ConservativeObservations<'a, verter_semantic::analysis::types::AnalyzedDefaultValue> {
+        ConservativeObservations::new(&self.facts.syntax().prop_defaults)
+    }
+
+    /// Observed `$bindable()` member names.
+    #[must_use]
+    pub fn bindable_members(self) -> ConservativeObservations<'a, String> {
+        ConservativeObservations::new(&self.facts.syntax().bindable_members)
+    }
+
+    /// Observed legacy `export let` props.
+    #[must_use]
+    pub fn legacy_props(
+        self,
+    ) -> ConservativeObservations<
+        'a,
+        verter_semantic::analysis::framework_facts::svelte::SvelteLegacyProp,
+    > {
+        ConservativeObservations::new(&self.facts.syntax().legacy_props)
+    }
+
+    /// Observed instance-script exports.
+    #[must_use]
+    pub fn instance_exports(
+        self,
+    ) -> ConservativeObservations<
+        'a,
+        verter_semantic::analysis::framework_facts::svelte::SvelteInstanceExport,
+    > {
+        ConservativeObservations::new(&self.facts.syntax().instance_exports)
+    }
+
+    /// Observed module-script exports.
+    #[must_use]
+    pub fn module_exports(
+        self,
+    ) -> ConservativeObservations<'a, verter_type_expr::facts::SvelteModuleExportFact> {
+        ConservativeObservations::new(&self.facts.syntax().module_exports)
+    }
+
+    /// Observed `$props()` calls.
+    #[must_use]
+    pub fn props_calls(
+        self,
+    ) -> ConservativeObservations<
+        'a,
+        verter_semantic::analysis::framework_facts::svelte::SveltePropsCall,
+    > {
+        ConservativeObservations::new(
+            verter_semantic::analysis::framework_facts::NegativeEvidence::observations(
+                self.facts.syntax().props_calls(),
+            ),
+        )
+    }
+
+    /// Observed provenance-validated snippet member names.
+    #[must_use]
+    pub fn validated_snippet_members(self) -> ConservativeObservations<'a, String> {
+        ConservativeObservations::new(&self.facts.resolution().validated_snippet_members)
+    }
+
+    /// The observed provenance-validated dispatcher payload, when captured.
+    #[must_use]
+    pub fn dispatcher_events(
+        self,
+    ) -> ConservativeObservation<'a, verter_type_expr::locators::AuthoredTypePayloadRef> {
+        ConservativeObservation::new(self.facts.resolution().dispatcher_events.as_ref())
+    }
+}
+
+impl PartialScriptFacts<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts> {
+    /// Exact syntax facts when parsing completed without recovery.
+    ///
+    /// Resolution-only partiality preserves this channel. A recovered parse
+    /// returns `None`, so absence-sensitive consumers cannot obtain
+    /// [`ExactSveltePropsCalls`](verter_semantic::analysis::framework_facts::svelte::ExactSveltePropsCalls).
+    #[must_use]
+    pub fn exact_syntax(
+        &self,
+    ) -> Option<&verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts> {
+        matches!(self.syntax_completeness, PartialSyntaxCompleteness::Exact)
+            .then(|| self.facts.syntax())
+    }
+
+    /// Positive Svelte observations without any whole-payload or exact-empty
+    /// projection.
+    #[must_use]
+    pub fn conservative_svelte_observations(&self) -> ConservativeSvelteScriptObservations<'_> {
+        ConservativeSvelteScriptObservations { facts: &self.facts }
+    }
+}
+
+/// An unavailable script-fact state carrying no fact inventory.
+///
+/// This type deliberately has no `Deref`, collection, iteration, negative
+/// lookup, or
+/// [`verter_semantic::analysis::framework_facts::NegativeEvidence`]
+/// implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnavailableScriptFacts {
+    reason: ScriptFactUnavailableReason,
+}
+
+impl UnavailableScriptFacts {
+    fn new(reason: ScriptFactUnavailableReason) -> Self {
+        Self { reason }
+    }
+
+    /// Why no reliable fact payload was produced.
+    #[must_use]
+    pub fn reason(self) -> ScriptFactUnavailableReason {
+        self.reason
+    }
+}
+
+/// Why script facts do not apply to the selected adapter/file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptFactNotApplicableReason {
+    /// The adapter registration has no script-fact provider.
+    ProviderNotRegistered,
+    /// No registered provider's exact syntax gate matched the file.
+    ProviderGateMiss,
+}
+
+/// A proven not-applicable script-fact state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotApplicableScriptFacts {
+    reason: ScriptFactNotApplicableReason,
+}
+
+impl NotApplicableScriptFacts {
+    fn new(reason: ScriptFactNotApplicableReason) -> Self {
+        Self { reason }
+    }
+
+    /// Why the script-fact domain does not apply.
+    #[must_use]
+    pub fn reason(self) -> ScriptFactNotApplicableReason {
+        self.reason
+    }
+}
+
+/// The consumer-facing script-fact evidence family.
+///
+/// Consumers must exhaustively distinguish exact, partial, unavailable, and
+/// not-applicable states; there is no whole-evidence `Option` projection.
+#[must_use]
+pub enum ScriptFactEvidence<T> {
+    /// A complete fact payload, possibly exactly empty.
+    Exact(ExactScriptFacts<T>),
+    /// Usable positive observations that cannot prove every negative.
+    Partial(PartialScriptFacts<T>),
+    /// No reliable observations.
+    Unavailable(UnavailableScriptFacts),
+    /// The adapter/file selection proves the domain does not apply.
+    NotApplicable(NotApplicableScriptFacts),
+}
+
+#[cfg(test)]
+impl<T> ScriptFactEvidence<T> {
+    pub(crate) fn expect_exact(self, message: &str) -> Arc<T> {
+        match self {
+            Self::Exact(exact) => exact.facts,
+            Self::Partial(_) => panic!("{message}: got partial script facts"),
+            Self::Unavailable(_) => panic!("{message}: script facts unavailable"),
+            Self::NotApplicable(_) => panic!("{message}: script facts not applicable"),
+        }
+    }
+}
+
+static_assertions::assert_not_impl_any!(
+    PartialScriptFacts<
+        verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts
+    >:
+        verter_semantic::analysis::framework_facts::NegativeEvidence,
+        std::ops::Deref,
+        IntoIterator
+);
+static_assertions::assert_not_impl_any!(
+    UnavailableScriptFacts:
+        verter_semantic::analysis::framework_facts::NegativeEvidence,
+        std::ops::Deref,
+        IntoIterator
+);
 
 /// The addressable identity of the entry-point's two sibling tracer scopes.
 /// `#[cfg(test)]` because the identity exists only where a test can target it —
@@ -88,7 +424,7 @@ pub struct CandidateSlotKey {
 /// changes the key and forces a cold re-capture. Hands out immutable `Arc`s.
 #[derive(Debug, Default)]
 pub struct FrameworkScriptCandidateStore {
-    entries: DashMap<CandidateSlotKey, Arc<FrameworkScriptCandidates>>,
+    entries: DashMap<CandidateSlotKey, Arc<ExactFrameworkScriptCandidates>>,
 }
 
 impl FrameworkScriptCandidateStore {
@@ -101,7 +437,7 @@ impl FrameworkScriptCandidateStore {
     /// The cached candidates for `key`, if present. Content-addressed: a hit is
     /// always valid (the key carries every content/version dimension).
     #[must_use]
-    pub fn get(&self, key: &CandidateSlotKey) -> Option<Arc<FrameworkScriptCandidates>> {
+    pub fn get(&self, key: &CandidateSlotKey) -> Option<Arc<ExactFrameworkScriptCandidates>> {
         self.entries.get(key).map(|e| Arc::clone(e.value()))
     }
 
@@ -109,8 +445,8 @@ impl FrameworkScriptCandidateStore {
     pub fn insert(
         &self,
         key: CandidateSlotKey,
-        candidates: FrameworkScriptCandidates,
-    ) -> Arc<FrameworkScriptCandidates> {
+        candidates: ExactFrameworkScriptCandidates,
+    ) -> Arc<ExactFrameworkScriptCandidates> {
         let arc = Arc::new(candidates);
         self.entries.insert(key, Arc::clone(&arc));
         arc
@@ -158,7 +494,7 @@ pub struct ResolvedFactKey {
 #[derive(Clone)]
 pub struct StoredResolvedFact {
     /// The fully-owned, immutable resolved payload.
-    pub payload: Arc<dyn FrameworkScriptFactPayload>,
+    pub payload: ExactScriptFacts<dyn FrameworkScriptFactPayload>,
     /// Path-precise fact signature observed while resolving (covers the
     /// owner's content + every resolved import contributor).
     pub read_set_signature: ReadSetSignature,
@@ -222,7 +558,7 @@ impl FrameworkScriptFactStore {
     pub(crate) fn publish_if_cacheable(
         &self,
         key: ResolvedFactKey,
-        payload: Arc<dyn FrameworkScriptFactPayload>,
+        payload: ExactScriptFacts<dyn FrameworkScriptFactPayload>,
         admission: &SignatureAdmission,
         generation: u64,
     ) -> Arc<StoredResolvedFact> {
@@ -292,27 +628,24 @@ impl FrameworkScriptCaches {
     }
 }
 
-/// Resolve the adapter's framework script facts of type `T` for `canonical`.
-///
-/// Drives the resolved-validation half on demand:
-/// 1. The registry's [`ActiveProviderIndex`](crate::framework::registry::ActiveProviderIndex)
-///    selects the providers active for the file. An EMPTY index short-circuits
-///    to `None` with zero per-file work (the steady state — no production
-///    provider registers).
-/// 2. For each active provider, the file's candidates are captured (content-
-///    addressed slot peek/fill) by re-running the provider's syntax capture
-///    over the file's live OXC program.
-/// 3. The provider's resolved-validation (`validate`) is driven with the
-///    resolved import targets (the session's own import resolution) + a
-///    capability lookup; it rejects userland look-alikes and refuses on a
-///    capability-bit miss.
-/// 4. A resolved payload is admitted to the resolved-fact store ONLY when its
-///    fact signature is [`SignatureAdmission::Cacheable`]; the cold compute
-///    observes the owner's whole-hash + every resolved import contributor onto
-///    the tracer so a cross-file edit misses the warm entry.
-///
-/// Returns `None` honestly when no active provider produces a `T` payload.
-#[must_use]
+enum CapturedCandidateEvidence {
+    Exact(Arc<ExactFrameworkScriptCandidates>),
+    Recovered(Arc<FrameworkScriptCandidates>),
+}
+
+impl CapturedCandidateEvidence {
+    fn candidates(&self) -> &FrameworkScriptCandidates {
+        match self {
+            Self::Exact(candidates) => candidates.candidates(),
+            Self::Recovered(candidates) => candidates,
+        }
+    }
+
+    fn is_exact(&self) -> bool {
+        matches!(self, Self::Exact(_))
+    }
+}
+
 /// The TYPED resolved-package identity of `specifier` → `resolved_canonical`,
 /// computed SESSION-side where the package-backed classification authority lives.
 ///
@@ -367,11 +700,31 @@ fn bare_specifier_package_name(specifier: &str) -> Option<String> {
     Some(first.to_string())
 }
 
+/// Resolve the adapter's framework script facts of type `T` for `canonical`.
+///
+/// Drives the resolved-validation half on demand:
+/// 1. The registry's [`ActiveProviderIndex`](crate::framework::registry::ActiveProviderIndex)
+///    selects the providers active for the file. A registration with no
+///    provider short-circuits to `NotApplicable` with zero per-file work.
+/// 2. For each active provider, the file's candidates are captured (content-
+///    addressed slot peek/fill) by re-running the provider's syntax capture
+///    over the file's live OXC program.
+/// 3. The provider's resolved-validation (`validate`) is driven with the
+///    resolved import targets (the session's own import resolution) + a
+///    capability lookup; it rejects userland look-alikes and refuses on a
+///    capability-bit miss.
+/// 4. A resolved payload is admitted to the resolved-fact store ONLY when its
+///    fact signature is [`SignatureAdmission::Cacheable`]; the cold compute
+///    observes the owner's whole-hash + every resolved import contributor onto
+///    the tracer so a cross-file edit misses the warm entry.
+///
+/// Returns exact, partial, unavailable, and not-applicable evidence without
+/// projecting any state through `Option`.
 pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
     host: &VerterHost,
     registration: &FrameworkRegistration,
     canonical: &str,
-) -> Option<Arc<T>> {
+) -> ScriptFactEvidence<T> {
     resolve_script_facts_inner::<T>(host, registration, canonical, None)
 }
 
@@ -387,7 +740,7 @@ pub(crate) fn resolve_script_facts_with_ctx<T: FrameworkScriptFactPayload>(
     registration: &FrameworkRegistration,
     canonical: &str,
     ctx: &dyn ResolverContext,
-) -> Option<Arc<T>> {
+) -> ScriptFactEvidence<T> {
     resolve_script_facts_inner::<T>(host, registration, canonical, Some(ctx))
 }
 
@@ -396,7 +749,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     registration: &FrameworkRegistration,
     canonical: &str,
     request_ctx: Option<&dyn ResolverContext>,
-) -> Option<Arc<T>> {
+) -> ScriptFactEvidence<T> {
     // Zero-cost fast path: this registration registers NO provider ⇒ no
     // candidates ⇒ no facts, so the resolved-validation half does ZERO per-file
     // work — no `current_eval_state`, no classification, no `get_analysis`, no
@@ -412,9 +765,15 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
         "the host index emptiness must agree with the registry-wide provider presence"
     );
     if registration.script_fact_providers.is_empty() {
-        return None;
+        return ScriptFactEvidence::NotApplicable(NotApplicableScriptFacts::new(
+            ScriptFactNotApplicableReason::ProviderNotRegistered,
+        ));
     }
-    let (raw_source, framework_parse, whole_hash) = host.current_eval_state(canonical)?;
+    let Some((raw_source, framework_parse, whole_hash)) = host.current_eval_state(canonical) else {
+        return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
+            ScriptFactUnavailableReason::SourceUnavailable,
+        ));
+    };
     let file_language = host.language_classifier().classify(canonical);
     let carrier_language = file_language.carrier_language_id();
 
@@ -449,14 +808,15 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // each candidate specifier through its OWN import resolver
     // (`resolve_snapshot_imports`) and hands the outcome to the provider as
     // data — the provider never reaches the resolver itself.
-    // The owner's import-route resolution walks the route resolver, which
-    // reaches `ensure_indexed_ready_serve` — a FENCED (ReturnOnly,
-    // `store_published == false`) serve there derives STALE resolved import
-    // targets, and the facts entry built from them validates against the LIVE
-    // view (the fenced-serve poison model). This resolution runs BEFORE the
-    // `provider.validate` tracer installed further down, so it needs its OWN
-    // traced scope; the captured `import_non_cacheable` bit refuses this facts
-    // entry's `publish_if_cacheable` admission below (the standalone entry-point
+    // The owner's import-route resolution establishes the owner's
+    // `IndexedReady` (its authored import inventory IS that artifact's
+    // shallow surface) — a FENCED (ReturnOnly, `store_published == false`)
+    // serve there means the basis is superseded, and the facts entry built
+    // on it would validate against the LIVE view (the fenced-serve poison
+    // model). This resolution runs BEFORE the `provider.validate` tracer
+    // installed further down, so it needs its OWN traced scope; the captured
+    // `import_non_cacheable` bit refuses this facts entry's
+    // `publish_if_cacheable` admission below (the standalone entry-point
     // has no enclosing tracer, so the outer surface tracer cannot cover it).
     //
     // The facts entry's signature comes from the `provider.validate` tracer below,
@@ -501,14 +861,18 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                 .collect(),
         )
     });
-    let resolved_import_targets = resolved_import_targets_opt?;
+    let Some(resolved_import_targets) = resolved_import_targets_opt else {
+        return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
+            ScriptFactUnavailableReason::AnalysisUnavailable,
+        ));
+    };
 
     // Select the active provider through the SHARED gate-matching authority
     // (`ActiveProviderIndex::gate_matches`) over THIS registration's own
     // providers — a registration produces only its own adapter's facts. The
     // shared predicate is exactly the one the registry-wide index applies, so
     // the per-registration selection and the index agree by construction.
-    let provider = registration
+    let Some(provider) = registration
         .script_fact_providers
         .iter()
         .find(|p| {
@@ -518,7 +882,12 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                 resolved_import_targets.iter().map(|t| t.specifier.as_str()),
             )
         })
-        .cloned()?;
+        .cloned()
+    else {
+        return ScriptFactEvidence::NotApplicable(NotApplicableScriptFacts::new(
+            ScriptFactNotApplicableReason::ProviderGateMiss,
+        ));
+    };
 
     // ── Candidate capture (content-addressed slot) ──
     let env = host.host_view_env_hashes_for(canonical);
@@ -532,33 +901,49 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
         provider_id: provider.adapter_id(),
         provider_version: provider.provider_version(),
     };
-    let candidates = host
+    let candidates = match host
         .framework_script_caches()
         .candidates
         .get(&candidate_key)
-        .or_else(|| {
+    {
+        Some(candidates) => CapturedCandidateEvidence::Exact(candidates),
+        None => {
             let source_type = crate::parse::carrier_eval_source_type(framework_parse.as_deref());
-            capture_candidates_for(
+            let captured = match capture_candidates_for(
                 &provider,
                 &source,
                 source_type,
                 module_region,
                 framework_mode_hint,
                 framework_parse.as_deref(),
-            )
-            .map(|c| {
-                // Producer-side locator absolutization: fill the capture's
-                // empty-sentinel payload-ref anchors with the PRODUCING
-                // canonical BEFORE the envelope enters the content-addressed
-                // candidate store (provider-owned typed downcast + coherent
-                // `stable_hash` rebuild; the session supplies the canonical as
-                // data).
-                let c = provider.absolutize_candidates(c, canonical);
-                host.framework_script_caches()
-                    .candidates
-                    .insert(candidate_key.clone(), c)
-            })
-        })?;
+            ) {
+                Ok(captured) => captured,
+                Err(reason) => {
+                    return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(reason));
+                }
+            };
+            match captured {
+                CandidateCapture::Exact(captured) => {
+                    // Producer-side locator absolutization: fill the capture's
+                    // empty-sentinel payload-ref anchors with the PRODUCING
+                    // canonical before the exact envelope enters the
+                    // content-addressed store.
+                    let captured = provider.absolutize_candidates(captured, canonical);
+                    CapturedCandidateEvidence::Exact(
+                        host.framework_script_caches()
+                            .candidates
+                            .insert(candidate_key.clone(), captured),
+                    )
+                }
+                CandidateCapture::Recovered(captured) => {
+                    // Recovered observations are useful to this request but
+                    // cannot enter the exact candidate store.
+                    let captured = provider.absolutize_candidate_observations(captured, canonical);
+                    CapturedCandidateEvidence::Recovered(Arc::new(captured))
+                }
+            }
+        }
+    };
 
     // ── Resolved-fact lookup ──
     let project_identity = host.host_view_project_identity_for(canonical).0;
@@ -584,35 +969,46 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // view); otherwise open a proven-current view for the standalone facts
     // entry-point. Either way the read validates the recorded fact signature +
     // generation, so a stale entry misses.
-    if let Some(ctx) = request_ctx {
-        if let Some(stored) = host.framework_script_caches().facts.get_with_view(
-            &fact_key,
-            ctx.store_view(),
-            generation,
-        ) {
-            // Bubble the facts entry's import-route / package-provenance fact
-            // signature into any OUTER fact tracer (the Svelte surface-store cold
-            // trace), so a later source row consuming these cached facts inherits
-            // their cross-file facts and a same-content reroute invalidates the
-            // surface entry too.
-            stored.read_set_signature.bubble_via_tls();
-            return verter_semantic::analysis::framework_facts::downcast_fact_payload::<T>(
-                Arc::clone(&stored.payload),
+    if candidates.is_exact() {
+        if let Some(ctx) = request_ctx {
+            if let Some(stored) = host.framework_script_caches().facts.get_with_view(
+                &fact_key,
+                ctx.store_view(),
+                generation,
+            ) {
+                // Bubble the facts entry's import-route / package-provenance fact
+                // signature into any OUTER fact tracer (the Svelte surface-store cold
+                // trace), so a later source row consuming these cached facts inherits
+                // their cross-file facts and a same-content reroute invalidates the
+                // surface entry too.
+                stored.read_set_signature.bubble_via_tls();
+                return match stored.payload.clone().downcast::<T>() {
+                    Some(exact) => ScriptFactEvidence::Exact(exact),
+                    None => ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
+                        ScriptFactUnavailableReason::ProviderPayloadMismatch,
+                    )),
+                };
+            }
+        } else if let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) {
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx = crate::resolver_core::HostResolverContext::from_current(
+                host,
+                &current_view,
+                overlay,
             );
-        }
-    } else if let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) {
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx =
-            crate::resolver_core::HostResolverContext::from_current(host, &current_view, overlay);
-        if let Some(stored) = host.framework_script_caches().facts.get_with_view(
-            &fact_key,
-            host_ctx.store_view(),
-            generation,
-        ) {
-            stored.read_set_signature.bubble_via_tls();
-            return verter_semantic::analysis::framework_facts::downcast_fact_payload::<T>(
-                Arc::clone(&stored.payload),
-            );
+            if let Some(stored) = host.framework_script_caches().facts.get_with_view(
+                &fact_key,
+                host_ctx.store_view(),
+                generation,
+            ) {
+                stored.read_set_signature.bubble_via_tls();
+                return match stored.payload.clone().downcast::<T>() {
+                    Some(exact) => ScriptFactEvidence::Exact(exact),
+                    None => ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
+                        ScriptFactUnavailableReason::ProviderPayloadMismatch,
+                    )),
+                };
+            }
         }
     }
 
@@ -620,21 +1016,20 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // IMPORT ROUTE surface. A route change (a barrel / path-alias re-route that
     // points a specifier at a different canonical) leaves the owner's content
     // AND the old target's content unchanged, so the whole-hash rail alone
-    // would stale-serve. The owner `ImportRoute` derived fact roots the cached
-    // payload against that route surface.
+    // would stale-serve. The owner's import-route RESOLUTION WITNESS roots the
+    // cached payload against that route surface.
     let owner_has_imports = !resolved_import_targets.is_empty();
-    let import_route_hash = host.current_derived_fact_hash(
-        canonical,
-        crate::resolver_core::DerivedFactKind::ImportRoute,
-    );
+    let import_route_witness = host.owner_import_route_witness(canonical);
 
     // ── Cold resolved-validation, fact-traced ──
     //
     // Named for the same reason as the import-route scope above: a test targets
     // ONE of the two sibling tracers and must be able to say WHICH. Erased in a
     // production build.
-    let (payload_opt, finalise) =
-        named_fact_tracer!(host, TracerScope::ScriptFactsProviderValidate, || {
+    let (payload_opt, finalise) = named_fact_tracer!(
+        host,
+        TracerScope::ScriptFactsProviderValidate,
+        || {
             // Observe the owner's whole hash + every resolved import contributor so
             // a content edit to any of them misses the warm entry.
             crate::resolver_core::resolver_context::observe_fan_out(
@@ -645,23 +1040,28 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             );
             // Root the payload against the owner's import-route surface so a
             // re-route (unchanged file contents) misses the warm entry.
-            if let Some(hash) = import_route_hash {
-                crate::resolver_core::resolver_context::observe_fan_out(
-                    crate::resolver_core::FactVersionRef::DerivedFactHash {
-                        canonical_id: canonical.to_string(),
-                        kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                        hash,
-                    },
-                );
+            if let Some(witness) = import_route_witness.as_deref() {
+                crate::resolver_core::resolver_context::observe_fan_out_borrowed(witness);
             }
             for target in &resolved_import_targets {
                 if let Some(import_canonical) = &target.resolved_canonical {
-                    if let Some(h) = host.current_or_read_whole_hash(import_canonical) {
+                    if let Some(h) = host.get_whole_hash(import_canonical) {
                         crate::resolver_core::resolver_context::observe_fan_out(
                             crate::resolver_core::FactVersionRef::FileWholeHash {
                                 canonical_id: import_canonical.clone(),
                                 hash: h,
                             },
+                        );
+                    } else {
+                        // Script-fact validation is a consumer of already-loaded
+                        // import state, not a loading demand. Exact-empty Svelte
+                        // evidence can reach this path for an ordinary component
+                        // import; reloading that cold child would violate the
+                        // caller's query-scoped load boundary. Without its live
+                        // hash the result remains usable for this request, but it
+                        // cannot be rooted for shared warm admission.
+                        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                            crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
                         );
                     }
                 }
@@ -671,14 +1071,64 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                     .capability_is_enabled(&verter_language::CapabilityId::new(cap))
             };
             let cx = ResolvedValidationCx {
-                candidates: &candidates,
+                candidates: candidates.candidates(),
                 resolved_import_targets: &resolved_import_targets,
                 capability_on: &capability_on,
             };
             provider.validate(cx)
-        });
+        }
+    );
 
-    let payload = payload_opt?;
+    let exact_payload = match payload_opt {
+        ScriptFactValidation::Exact(payload) if candidates.is_exact() => {
+            ExactScriptFacts::new(payload)
+        }
+        ScriptFactValidation::Exact(payload) => {
+            if let crate::resolver_core::FactReadSetFinalise::Ok(facts)
+            | crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) = &finalise
+            {
+                crate::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
+            }
+            let Some(facts) = payload.as_any_arc().downcast::<T>().ok() else {
+                return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
+                    ScriptFactUnavailableReason::ProviderPayloadMismatch,
+                ));
+            };
+            return ScriptFactEvidence::Partial(PartialScriptFacts::new(
+                facts,
+                ScriptFactPartialReason::SyntaxRecovery,
+                PartialSyntaxCompleteness::Recovered,
+            ));
+        }
+        ScriptFactValidation::Partial { payload, reason } => {
+            if let crate::resolver_core::FactReadSetFinalise::Ok(facts)
+            | crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) = &finalise
+            {
+                crate::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
+            }
+            let Some(facts) = payload.as_any_arc().downcast::<T>().ok() else {
+                return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
+                    ScriptFactUnavailableReason::ProviderPayloadMismatch,
+                ));
+            };
+            let (reason, syntax_completeness) = if candidates.is_exact() {
+                (reason, PartialSyntaxCompleteness::Exact)
+            } else {
+                (
+                    ScriptFactPartialReason::SyntaxRecovery,
+                    PartialSyntaxCompleteness::Recovered,
+                )
+            };
+            return ScriptFactEvidence::Partial(PartialScriptFacts::new(
+                facts,
+                reason,
+                syntax_completeness,
+            ));
+        }
+        ScriptFactValidation::Unavailable(reason) => {
+            return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(reason));
+        }
+    };
     // Bubble the cold-computed facts signature (the owner whole-hash + every
     // resolved import contributor + the import-route rail) into any OUTER fact
     // tracer (the Svelte surface-store cold trace) so the surface entry's
@@ -698,8 +1148,13 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // An import-dependent validation whose owner import-route rail could NOT be
     // produced must NOT warm the store (it would stale-serve on a re-route).
     // Return the computed value to this caller alone, uncached.
-    if owner_has_imports && import_route_hash.is_none() {
-        return verter_semantic::analysis::framework_facts::downcast_fact_payload::<T>(payload);
+    if owner_has_imports && import_route_witness.is_none() {
+        return match exact_payload.downcast::<T>() {
+            Some(exact) => ScriptFactEvidence::Exact(exact),
+            None => ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
+                ScriptFactUnavailableReason::ProviderPayloadMismatch,
+            )),
+        };
     }
     // A FENCED (ReturnOnly, `store_published == false`) / lease-miss serve
     // consumed while resolving the import route (`import_non_cacheable`) OR while
@@ -711,23 +1166,36 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // executor's Svelte-surface entry re-reads them. The standalone entry-point
     // has no enclosing tracer, so this is the sole refusal covering it.
     if import_non_cacheable || validate_non_cacheable {
-        return verter_semantic::analysis::framework_facts::downcast_fact_payload::<T>(payload);
+        return match exact_payload.downcast::<T>() {
+            Some(exact) => ScriptFactEvidence::Exact(exact),
+            None => ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
+                ScriptFactUnavailableReason::ProviderPayloadMismatch,
+            )),
+        };
     }
     // Cacheable-only publication; overflow returns the value to this caller
     // alone (never warms the store).
     let stored = host.framework_script_caches().facts.publish_if_cacheable(
         fact_key,
-        Arc::clone(&payload),
+        exact_payload,
         &admission,
         generation,
     );
-    verter_semantic::analysis::framework_facts::downcast_fact_payload::<T>(Arc::clone(
-        &stored.payload,
-    ))
+    match stored.payload.clone().downcast::<T>() {
+        Some(exact) => ScriptFactEvidence::Exact(exact),
+        None => ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
+            ScriptFactUnavailableReason::ProviderPayloadMismatch,
+        )),
+    }
 }
 
 /// Capture a provider's candidates from a file's source by re-running its
 /// syntax-only capture over a freshly-parsed OXC program. PARSE-DOMAIN only.
+enum CandidateCapture {
+    Exact(ExactFrameworkScriptCandidates),
+    Recovered(FrameworkScriptCandidates),
+}
+
 fn capture_candidates_for(
     provider: &Arc<dyn ScriptFactProvider>,
     source: &str,
@@ -737,7 +1205,7 @@ fn capture_candidates_for(
         verter_semantic::analysis::framework_facts::FrameworkScriptModeHint,
     >,
     framework_parse: Option<&verter_language::FrameworkParseArtifact>,
-) -> Option<FrameworkScriptCandidates> {
+) -> Result<CandidateCapture, ScriptFactUnavailableReason> {
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, source, source_type).with_options(ParseOptions {
         parse_regular_expression: false,
@@ -745,18 +1213,36 @@ fn capture_candidates_for(
     });
     let result = parser.parse();
     if result.panicked {
-        return None;
+        return Err(ScriptFactUnavailableReason::CaptureFailed);
     }
-    let owner_table = crate::parse::top_level_owner_table(&result.program, framework_parse).ok()?;
-    let set = verter_semantic::analysis::framework_facts::capture_script_candidates_with_context(
-        std::slice::from_ref(provider),
-        source,
-        &result.program,
-        module_script_region,
-        framework_mode_hint,
-        &owner_table,
-    );
-    set.per_provider.into_iter().next()
+    let recovered = !result.errors.is_empty();
+    let owner_table = crate::parse::top_level_owner_table(&result.program, framework_parse)
+        .map_err(|_| ScriptFactUnavailableReason::CaptureFailed)?;
+    if recovered {
+        let candidates = provider.capture(ScriptCandidateCx {
+            source,
+            program: &result.program,
+            top_level_owners: &owner_table,
+            module_script_region,
+            framework_mode_hint,
+        });
+        Ok(CandidateCapture::Recovered(candidates))
+    } else {
+        let set =
+            verter_semantic::analysis::framework_facts::capture_script_candidates_with_context(
+                std::slice::from_ref(provider),
+                source,
+                &result.program,
+                module_script_region,
+                framework_mode_hint,
+                &owner_table,
+            );
+        set.per_provider
+            .into_iter()
+            .next()
+            .map(CandidateCapture::Exact)
+            .ok_or(ScriptFactUnavailableReason::CaptureFailed)
+    }
 }
 
 fn capability_bits_hash(host: &VerterHost, consumed: &[&'static str]) -> Hash16 {
@@ -777,20 +1263,25 @@ impl VerterHost {
     /// returning the validated
     /// [`SvelteScriptFacts`](verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts)
     /// — the snippet-typed members whose `Snippet`-candidate import RESOLVED to
-    /// the `svelte` package (a userland look-alike is rejected). `None` when the
-    /// Svelte registration is absent or the candidates do not validate.
+    /// the `svelte` package (a userland look-alike is rejected). Exact-empty,
+    /// partial, unavailable, and not-applicable outcomes remain distinct.
     ///
     /// The Svelte surface adapter's SLOTS seam consumers reach this through the
     /// shared `script_facts_for` path; this entry exposes it for the Svelte
     /// vertical's resolved-validation coverage.
-    #[must_use]
     pub fn resolve_svelte_script_facts(
         &self,
         canonical: &str,
-    ) -> Option<Arc<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>> {
-        let registration = self
+    ) -> ScriptFactEvidence<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>
+    {
+        let Some(registration) = self
             .framework_registry()
-            .get(&verter_language::FrameworkAdapterId::svelte())?;
+            .get(&verter_language::FrameworkAdapterId::svelte())
+        else {
+            return ScriptFactEvidence::NotApplicable(NotApplicableScriptFacts::new(
+                ScriptFactNotApplicableReason::ProviderNotRegistered,
+            ));
+        };
         let ctx = crate::framework::ctx::FrameworkAdapterCtx::new(registration, self);
         ctx.script_facts_for::<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>(
             canonical,
@@ -801,15 +1292,20 @@ impl VerterHost {
     /// view `ctx` — the framework-surface executor's Svelte arm uses this so the
     /// facts read shares the ONE coherent request view the rest of the response
     /// resolves under, never a second `current_store_view_for_query`.
-    #[must_use]
     pub(crate) fn resolve_svelte_script_facts_with_ctx(
         &self,
         ctx: &dyn ResolverContext,
         canonical: &str,
-    ) -> Option<Arc<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>> {
-        let registration = self
+    ) -> ScriptFactEvidence<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>
+    {
+        let Some(registration) = self
             .framework_registry()
-            .get(&verter_language::FrameworkAdapterId::svelte())?;
+            .get(&verter_language::FrameworkAdapterId::svelte())
+        else {
+            return ScriptFactEvidence::NotApplicable(NotApplicableScriptFacts::new(
+                ScriptFactNotApplicableReason::ProviderNotRegistered,
+            ));
+        };
         resolve_script_facts_with_ctx::<
             verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
         >(self, registration, canonical, ctx)
@@ -817,10 +1313,9 @@ impl VerterHost {
 }
 
 /// Shared in-tree fixture seam — a `ScriptFactProvider` and registration
-/// builders exercising the resolved-validation half end-to-end. Test-only: no
-/// production provider registers (Vue's macro analysis stays in the shallow
-/// pass), so the fixture is the sole exerciser of capture → active-set
-/// selection → resolved-validation → content-addressed cache.
+/// builders exercising the resolved-validation half end-to-end. Test-only:
+/// Svelte owns the production provider while Vue's macro analysis stays in the
+/// shallow pass.
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
@@ -890,27 +1385,33 @@ pub(crate) mod fixtures {
                 &[]
             }
         }
-        fn capture(&self, _cx: ScriptCandidateCx<'_>) -> Option<FrameworkScriptCandidates> {
-            Some(FrameworkScriptCandidates {
+        fn capture(
+            &self,
+            _cx: ScriptCandidateCx<'_>,
+        ) -> verter_semantic::analysis::framework_facts::FrameworkScriptCandidates {
+            verter_semantic::analysis::framework_facts::FrameworkScriptCandidates {
                 adapter_id: self.adapter_id(),
                 provider_version: self.provider_version(),
                 stable_hash: [7u8; 16],
                 payload: Arc::new(()),
-            })
-        }
-        fn validate(
-            &self,
-            cx: ResolvedValidationCx<'_>,
-        ) -> Option<Arc<dyn FrameworkScriptFactPayload>> {
-            if self.requires_capability && !(cx.capability_on)(FIXTURE_CAPABILITY) {
-                return None;
             }
-            let resolved = cx.resolved_import_targets.iter().find(|t| {
+        }
+        fn validate(&self, cx: ResolvedValidationCx<'_>) -> ScriptFactValidation {
+            if self.requires_capability && !(cx.capability_on)(FIXTURE_CAPABILITY) {
+                return ScriptFactValidation::Unavailable(
+                    ScriptFactUnavailableReason::ValidationProducedNoFacts,
+                );
+            }
+            let Some(resolved) = cx.resolved_import_targets.iter().find(|t| {
                 t.resolved_canonical
                     .as_deref()
                     .is_some_and(|c| c.contains("/node_modules/fixture-fw/"))
-            })?;
-            Some(Arc::new(FixtureFactPayload {
+            }) else {
+                return ScriptFactValidation::Unavailable(
+                    ScriptFactUnavailableReason::ValidationProducedNoFacts,
+                );
+            };
+            ScriptFactValidation::Exact(Arc::new(FixtureFactPayload {
                 resolved_specifier: resolved.specifier.clone(),
             }))
         }

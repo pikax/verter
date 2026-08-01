@@ -2593,9 +2593,9 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
 }
 
 fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValueDeclParts> {
-    let (name, name_offset) = match &func.id {
-        Some(id) => (id.name.to_string(), id.span.start),
-        None => return None,
+    let (name, name_offset) = {
+        let id = func.id.as_ref()?;
+        (id.name.to_string(), id.span.start)
     };
 
     let mut sig = extract_function_signature(func, source);

@@ -16,11 +16,12 @@ jobs:
   build-and-deploy:
     name: Build WASM & Deploy Playground
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
       # --- Rust + wasm-bindgen ---
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32-unknown-unknown
       - uses: actions/cache@v5
@@ -32,18 +33,19 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-
+      # Prebuilt binary. The previous guarded `cargo install` compiled
+      # wasm-bindgen-cli from source on any runner where the version probe
+      # missed, which is every cold cache.
       - name: Install wasm-bindgen CLI
-        run: |
-          if command -v wasm-bindgen >/dev/null && wasm-bindgen --version | grep -q '0.2.122'; then
-            exit 0
-          fi
-          cargo install wasm-bindgen-cli --version 0.2.122 --locked --force
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.122
 
       # --- Node + pnpm ---
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
@@ -123,3 +125,50 @@ jobs:
           done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Rust coverage. Moved off the PR path: `cargo llvm-cov` changes RUSTFLAGS, so
+  # it cannot share the rust-cache with rust-test and is a FULLY SEPARATE
+  # instrumented compile + test run of the whole workspace — the longest job in
+  # CI, producing an lcov.info artifact with no threshold, no gate and no
+  # upload to a coverage service. As a nightly trend signal it costs nothing per
+  # PR. If you want coverage to influence review, add diff-coverage reporting on
+  # changed lines rather than moving this back onto every PR.
+  # ---------------------------------------------------------------------------
+  rust-coverage:
+    name: Rust Coverage
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-coverage
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      # REQUIRED for VERTER_REQUIRE_TSGO below. The TypeScript 7 engine is
+      # discovered as `node_modules/.bin/tsc` (see
+      # verter_tsgo_api::toolchain::platform::path_executable_names, which
+      # prefers `tsc` and treats `tsgo` as the legacy native-preview shim), so
+      # the lockfile install IS the tsgo source. This job previously had no
+      # install at all and leaned on an `npx @typescript/native-preview@latest`
+      # step that populated an npx cache nothing ever reads.
+      - run: pnpm install --frozen-lockfile
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage
+        env:
+          VERTER_REQUIRE_TSGO: "1"
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: rust-coverage
+          path: lcov.info

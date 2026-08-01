@@ -95,12 +95,11 @@ impl VerterLanguageServer {
     /// directly (the test harness drains the client socket, so a pushed set is not
     /// otherwise readable).
     pub(super) async fn compute_full_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
-        let mut verter_diags = self.compute_verter_diagnostics(uri);
-        // Surface a user-visible `verter(project)` diagnostic for an UNRESOLVED open
-        // carrier (no configured project / ambiguous owner), from the ONE shared
-        // carrier-ownership resolution — so an orphaned carrier is never silently
-        // typeless.
-        verter_diags.extend(self.project_ownership_diagnostics(uri));
+        // The complete Verter-owned set — including the `verter(project)`
+        // ownership warning for an UNRESOLVED open carrier — comes from the one
+        // shared composer, so this path cannot drift from what the debounced
+        // and background publishers surface.
+        let verter_diags = self.compute_verter_diagnostics(uri);
 
         if let Some(tp) = &self.type_provider {
             match self.provider_projection_context(uri) {
@@ -169,24 +168,6 @@ impl VerterLanguageServer {
         }
     }
 
-    /// The `verter(project)` diagnostics for `uri` when it is an UNRESOLVED open
-    /// carrier (`NoProject` / `Ambiguous`). Empty for a `Bound` / `NotReady` carrier and
-    /// for a non-carrier document. Driven from the shared carrier-ownership
-    /// resolution — the same typed resolution the carrier-sync gateway consumes —
-    /// never a path-shape heuristic.
-    ///
-    /// Unlike the always-present OWNED admission gate, the diagnostics path OBSERVES
-    /// the published root's `ownership_ready`: a cold-bootstrap snapshot resolves
-    /// `NotReady` (⇒ empty), so a carrier queried before the real project graph
-    /// publishes never surfaces a FALSE `verter(project)` no-owner warning where the
-    /// carrier-sync gateway correctly defers. A genuine terminal `NoProject` /
-    /// `Ambiguous` under an authoritative snapshot still surfaces.
-    fn project_ownership_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
-        let host = self.documents.host();
-        let canonical = crate::audit_harness::canonical_id_for_uri(host, uri);
-        crate::external_ts::project_ownership_diagnostics_for(host, &canonical)
-    }
-
     /// Audit-aware wrapper for [`Self::publish_full_diagnostics`].
     ///
     /// Routes the push-diagnostics path through
@@ -201,12 +182,12 @@ impl VerterLanguageServer {
             self.publish_full_diagnostics(uri).await;
             return;
         }
-        let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), uri);
+        let target_identity = crate::audit_harness::target_identity_for_uri(&self.documents, uri);
         let uri_for_body = uri.clone();
         let _ = crate::audit_harness::run_with_audit::<usize, _, _>(
             &host,
             verter_audit::payloads::tags::LspMethodTag::Diagnostics,
-            canonical_id,
+            target_identity,
             None,
             async move {
                 self.publish_full_diagnostics(&uri_for_body).await;
@@ -424,22 +405,25 @@ impl VerterLanguageServer {
                         }
                     };
                     if let Some(api) = api {
+                        // Destination-keyed rendering; stamp/record the SAME
+                        // bytes that were delivered.
+                        let api_code = api.code_for_companion_path(&dts_path);
                         let result = if committed_state.api_background_loaded {
-                            sync.sync_dts(&dts_path, &api.code).await
+                            sync.sync_dts(&dts_path, api_code).await
                         } else {
-                            sync.open_dts(&dts_path, &api.code).await
+                            sync.open_dts(&dts_path, api_code).await
                         };
                         if let Err(e) = result {
                             tracing::warn!("sync_api: failed for {dts_path}: {e}");
                         } else {
-                            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                            committed_state.mark_api_delivered(api_code);
                             synced_kinds.push(ProviderPathKind::Api);
                             // Record a fresh generation pinning the synced content +
                             // its same-content source map under this virtual path.
                             self.record_carrier_api_snapshot(
                                 &canonical_id,
                                 &dts_path,
-                                &api.code,
+                                api_code,
                                 api.source_map.as_deref(),
                             );
                         }
@@ -612,12 +596,15 @@ impl VerterLanguageServer {
         };
 
         let reader = LspProjectResolverReader::new(&self.documents);
-        let resolved_dependencies = collect_resolved_provider_dependencies_from_analyzed_refs(
+        let Some(resolved_dependencies) = collect_resolved_provider_dependencies_from_analyzed_refs(
             &snapshot.resolver,
+            snapshot.resolution_view.as_ref(),
             &reader,
             canonical_id,
             &ingress.module_references,
-        );
+        ) else {
+            return;
+        };
 
         self.documents.host.set_import_dependencies(
             canonical_id,
@@ -732,16 +719,13 @@ impl VerterLanguageServer {
             })
             .map(|dependency| dependency.source_id.clone())
             .collect::<Vec<_>>();
-        self.sync_non_carrier_provider_graph(
-            &snapshot.resolver,
-            non_carrier_provider_graph_targets,
-        )
-        .await;
+        self.sync_non_carrier_provider_graph(snapshot, non_carrier_provider_graph_targets)
+            .await;
     }
 
     pub(super) async fn sync_non_carrier_provider_graph(
         &self,
-        resolver: &crate::project_resolver::NativeProjectResolver,
+        snapshot: &PublishedResolverSnapshot,
         initial_ids: Vec<String>,
     ) {
         let Some(sync) = &self.project_sync else {
@@ -784,10 +768,7 @@ impl VerterLanguageServer {
                 .unwrap_or_default();
 
             let Some(prepared) = prepare_non_carrier_provider_sync(
-                Some(&PublishedResolverSnapshot {
-                    resolver: resolver.clone(),
-                    ownership_ready: true,
-                }),
+                Some(snapshot),
                 &reader,
                 &canonical_id,
                 &source,
@@ -907,12 +888,32 @@ impl VerterLanguageServer {
 
     /// Flush the active file's IDE TSX to the type provider.
     ///
-    /// Lifecycle-owned current-file surface repair: `did_open` (per the open
-    /// policy) and the residual hover/completion dirty-surface heal run it.
-    /// Navigation handlers (definition / typeDefinition / rename) never start
-    /// it — they CAPTURE the committed surface (fail closed) and gate their
-    /// dependency needs through the DependencyReady receipt instead. Only syncs
-    /// the IDE path (TSX) — API (.vue.ts) sync is deferred to the coordinator.
+    /// The single current-file surface repair. Its production invokers:
+    /// - `did_open` (per the open policy);
+    /// - [`Self::repaired_type_provider_context`] — EVERY request-answering
+    ///   provider-backed interactive request (hover, completion, definition,
+    ///   type-definition, references, prepare-rename, rename, signature help,
+    ///   quickfix code actions) repairs INLINE through it when `didChange`
+    ///   has advanced past the committed snapshot, BEFORE capturing the
+    ///   request surface — so navigation DOES reach this on its request path
+    ///   for a dirty buffer; the same entry point also heals a
+    ///   PROJECTION-LESS carrier (failed open-time compile / startup race).
+    ///   Concurrent requests join one generation-local repair attempt; after
+    ///   unavailable input or a host transient, a genuinely later request may
+    ///   retry unchanged bytes, so cancellation cannot leave the carrier
+    ///   permanently dark;
+    /// - rename's unconditional interactive consistency boundary
+    ///   (`handle_rename` repairs even a clean buffer before capturing);
+    /// - the shared bounded transient-error recovery (`provider_recovery`) —
+    ///   ONE resync when a hover / definition / typeDefinition provider query
+    ///   returns `Err`, before its single identity-fenced retry.
+    ///
+    /// What navigation never does is JOIN dependency publication: every
+    /// invocation above is a current-FILE repair (recompile + provider sync of
+    /// THIS buffer), and cross-file dependency needs stay gated through the
+    /// capture-only DependencyReady receipt — no import-set/barrel walk runs
+    /// inline. Only syncs the IDE path (TSX) — API (.vue.ts) sync is deferred
+    /// to the coordinator.
     ///
     /// Runs when:
     /// - File is in `needs_ide_sync`, OR
@@ -945,6 +946,7 @@ impl VerterLanguageServer {
         // `Mutex` is fair (FIFO) and cancel-safe (a cancelled request drops out of
         // the queue), so a storm cannot starve or wedge the repair path.
         let repair_lease = self.ide_sync_repair_lease(&canonical_id, open_generation);
+        let observed_repair_sequence = repair_lease.repair_sequence();
         #[cfg(test)]
         self.maybe_pause_ide_sync_after_lease(&canonical_id).await;
         let _repair_guard = repair_lease.lock().await;
@@ -964,6 +966,19 @@ impl VerterLanguageServer {
             {
                 repair_lease.retire();
             }
+            return;
+        }
+
+        // Join an attempt that completed while this caller waited for the
+        // lane. All callers that observed one sequence run at most one compile;
+        // a genuinely later request observes the advanced sequence and may
+        // retry unchanged bytes unless they carry a deterministic verdict.
+        let projectionless_carrier = self.documents.get_projection(uri).is_none()
+            && carrier_language_for(&canonical_id).is_some();
+        if projectionless_carrier
+            && (!self.projectionless_carrier_repair_is_owed(uri)
+                || repair_lease.repair_sequence() != observed_repair_sequence)
+        {
             return;
         }
 
@@ -1067,9 +1082,35 @@ impl VerterLanguageServer {
         // Recompile + refresh mapper (in case blocker hydration changed TSX) BEFORE
         // the carrier-sync gateway runs, so a tsserver membership publish advertises
         // the freshly-compiled companions.
-        self.documents.recompile_and_refresh_mapper(uri);
-
-        let ide = self.documents.get_ide(uri);
+        //
+        // TAKE the recompile's own response rather than re-reading it. Re-reading
+        // through `DocumentRegistry::get_ide` costs a SECOND `ensure_ide_compiled`
+        // whenever the recompile did not cache a surface — which is every repair of
+        // a carrier the user is mid-way through breaking. The two values are
+        // the same host read otherwise; the one case they differ is an eviction race
+        // between the compile and its read, where the re-read used to retry inline.
+        // The next interactive request repairs that transient outcome — one
+        // round trip in a rare race, in exchange for never compiling a failing
+        // revision twice inside one admitted repair.
+        //
+        // Taking the response makes this path RETAIN it across the awaits below,
+        // so it needs the fence a re-read got for free. Pin the revision the
+        // response describes and require it, unchanged, at every point that
+        // consumes the response. See `retained_ide_response_is_current`.
+        let compiled_revision = self.documents.snapshot_identity(uri);
+        let ide = self.documents.recompile_and_refresh_mapper(uri);
+        if projectionless_carrier {
+            repair_lease.complete_repair_attempt();
+        }
+        #[cfg(test)]
+        self.maybe_pause_ide_sync_after_recompile(&canonical_id)
+            .await;
+        // FENCE (pre-gateway): the carrier gateway consumes the retained
+        // response to advertise membership, so the fence runs before it.
+        if !self.retained_ide_response_is_current(uri, compiled_revision.as_ref()) {
+            self.needs_ide_sync.insert(canonical_id.clone());
+            return;
+        }
         // The dialect comes from the compile, falling back to the parse-level
         // script language when the compile is unavailable — never a `.tsx` guess.
         let is_jsx = self.documents.is_jsx_for_canonical(&canonical_id);
@@ -1139,10 +1180,17 @@ impl VerterLanguageServer {
                     // the dropped `.vue.ts`. The gateway above already RETRACTED
                     // the STORE/ledger membership; this preserve is membership-free.
                     if self.documents.canonical_id_to_uri(&canonical_id).is_some() {
+                        // FENCE (pre-preserve): this branch SYNCS and RECORDS
+                        // the retained bytes too, and the gateway awaited above.
+                        if !self.retained_ide_response_is_current(uri, compiled_revision.as_ref()) {
+                            self.needs_ide_sync.insert(canonical_id);
+                            return;
+                        }
                         self.preserve_open_unresolved_carrier(
                             &canonical_id,
                             is_jsx,
                             ide.as_ref().map(|output| &*output.code),
+                            compiled_revision.as_ref().map(|revision| (uri, revision)),
                         )
                         .await;
                         self.queue_snapshot_provider_sync(canonical_id.clone());
@@ -1202,6 +1250,24 @@ impl VerterLanguageServer {
         // committed state must not point at the unsynced path — so the close is
         // deferred past the commit, never run before the open.
 
+        // FENCE (pre-sync): the carrier gateway awaited above. Delivering the
+        // retained bytes to the provider under a source that has since moved
+        // installs a buffer for a revision nothing will ask about, and the
+        // record below would then pair those bytes with the NEW source.
+        if !self.retained_ide_response_is_current(uri, compiled_revision.as_ref()) {
+            self.needs_ide_sync.insert(canonical_id);
+            return;
+        }
+        #[cfg(test)]
+        self.maybe_pause_ide_sync_before_provider_write(&canonical_id)
+            .await;
+        // WRITE-POINT FENCE: the test pause models the real scheduling window
+        // between an earlier comparison and invoking provider I/O.
+        if !self.retained_ide_response_is_current(uri, compiled_revision.as_ref()) {
+            self.needs_ide_sync.insert(canonical_id);
+            return;
+        }
+
         // Choose open_file vs update_file based on existing state
         let result = if ide_path_loaded {
             // Already known to provider — update. Interactive repair has no
@@ -1215,14 +1281,38 @@ impl VerterLanguageServer {
 
         match result {
             Ok(()) => {
+                // FENCE (pre-record): the provider sync awaited. The record
+                // resolves the carrier source from the LIVE open document, so an
+                // edit landing across that await would pin these bytes and this
+                // map to a source they do not describe — and the pair would then
+                // PASS the capture-time source-hash validation, because both
+                // sides of that comparison are the new source. That is a
+                // mis-mapping, not a stale read: fail closed and let the newer
+                // revision's own repair record its own surface.
+                if !self.retained_ide_response_is_current(uri, compiled_revision.as_ref()) {
+                    self.needs_ide_sync.insert(canonical_id);
+                    return;
+                }
+                #[cfg(test)]
+                self.maybe_pause_ide_sync_before_surface_record(&canonical_id)
+                    .await;
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // synced (interactive queries capture this surface).
-                self.record_carrier_ide_snapshot(
+                let Some(compiled_revision) = compiled_revision.as_ref() else {
+                    self.needs_ide_sync.insert(canonical_id);
+                    return;
+                };
+                if !self.record_carrier_ide_snapshot_if_current(
+                    uri,
+                    compiled_revision,
                     &canonical_id,
                     &ide_path,
                     &ide.code,
                     ide.source_map.as_deref(),
-                );
+                ) {
+                    self.needs_ide_sync.insert(canonical_id);
+                    return;
+                }
                 // Commit state. An UNRESOLVED open-document liveness state is
                 // membership-free and commits through the plain non-carrier path. An
                 // owner-resolved carrier commit is GATED on the gateway authorization AND
@@ -1277,7 +1367,30 @@ impl VerterLanguageServer {
                             api_path: None,
                             ..Default::default()
                         });
+                    // This pass syncs the IDE companion ONLY, and closes no other
+                    // kind's buffer. Carry every OTHER kind's loaded flag from the
+                    // state that is live right now (per-kind, same-path only), or
+                    // the committed state would claim an unloaded API companion
+                    // whose buffer this provider still holds open — a lie the
+                    // workspace-symbol import closure would then read as an
+                    // undelivered import target and refuse a complete answer for.
+                    if let Some(previous) = self.provider_sync_state_for_source(&canonical_id) {
+                        state.carry_background_loaded_from(&previous);
+                    }
                     state.set_background_loaded(ProviderPathKind::Ide, true);
+                    // Liveness is not CURRENCY. The carried flag says the API
+                    // buffer is open; it cannot say the bytes in it still
+                    // describe this source, and the receipt minted below attests
+                    // the IDE companion ONLY. So re-observe the public-API
+                    // projection here: an API-NEUTRAL edit (the common template
+                    // or body change) re-observes the delivered identity and the
+                    // companion stays current with no reopen, while an edit that
+                    // moves the public surface records the divergence a
+                    // completeness-requiring request must fail closed on until a
+                    // publication delivers the new bytes.
+                    state.observe_api_projection(
+                        self.current_public_api_identity(&canonical_id).as_deref(),
+                    );
                     // Commit through the admission gate directly so the close below can be
                     // gated on ADMISSION: a `Superseded` commit (a newer transaction reclaimed
                     // the source, or an owner-loss advanced the barrier) requeues and closes
@@ -1378,14 +1491,26 @@ impl VerterLanguageServer {
             return;
         }
 
-        self.documents.recompile_and_refresh_mapper(uri);
-
-        let Some(ide) = self.documents.get_ide(uri) else {
+        // Same take-the-response rule as `ensure_current_file_synced`: re-reading
+        // costs a second `ensure_ide_compiled` on exactly the revisions whose
+        // compile produced nothing to read — and, with it, the same
+        // source-identity fence on the response this path then retains across a
+        // close and a reopen.
+        let compiled_revision = self.documents.snapshot_identity(uri);
+        let Some(ide) = self.documents.recompile_and_refresh_mapper(uri) else {
             return;
         };
         let Some(ide_path) = self.active_ide_path_for_uri(uri) else {
             return;
         };
+        // FENCE (pre-close/reopen): retiring the live buffer and reopening it
+        // with bytes the document no longer holds would leave the provider
+        // serving a revision nothing will ask about, and the record below would
+        // pair those bytes with the newer source.
+        if !self.retained_ide_response_is_current(uri, compiled_revision.as_ref()) {
+            self.needs_ide_sync.insert(canonical_id);
+            return;
+        }
 
         // Retire the surface for the close half of the close+reopen: a capture
         // racing the gap must fail closed rather than resolve a surface whose
@@ -1404,16 +1529,38 @@ impl VerterLanguageServer {
             }
         };
 
+        if !self.retained_ide_response_is_current(uri, compiled_revision.as_ref()) {
+            self.needs_ide_sync.insert(canonical_id);
+            return;
+        }
         match sync.open_tsx(&ide_path, &ide.code).await {
             Ok(()) => {
+                // FENCE (pre-record): the close and the reopen both awaited. The
+                // record pairs these bytes with the LIVE carrier source, so an
+                // edit across either await would record a pair that describes no
+                // revision — and one that VALIDATES at capture time. Fail closed;
+                // the queued re-sync records the newer revision's own surface.
+                if !self.retained_ide_response_is_current(uri, compiled_revision.as_ref()) {
+                    self.needs_ide_sync.insert(canonical_id);
+                    return;
+                }
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // reopened (interactive queries capture this surface).
-                self.record_carrier_ide_snapshot(
+                let Some(compiled_revision) = compiled_revision.as_ref() else {
+                    self.needs_ide_sync.insert(canonical_id);
+                    return;
+                };
+                if !self.record_carrier_ide_snapshot_if_current(
+                    uri,
+                    compiled_revision,
                     &canonical_id,
                     &ide_path,
                     &ide.code,
                     ide.source_map.as_deref(),
-                );
+                ) {
+                    self.needs_ide_sync.insert(canonical_id);
+                    return;
+                }
                 if let Some(mut state) = self.provider_sync_state_for_source(&canonical_id) {
                     state.ide_path = Some(ide_path);
                     self.commit_provider_sync_state(&canonical_id, state);
@@ -1456,8 +1603,19 @@ impl VerterLanguageServer {
         // This foreground repair owns carrier IDE projections. Plain scripts have
         // no source→provider projection, while rune self-files use the separate
         // own-buffer sync path.
+        //
+        // A CARRIER with no projection (its open-time compile failed, or the
+        // startup race opened it before the host could compile) IS repaired
+        // here — a projection-less document otherwise fails closed on every
+        // provider-backed feature until a background tick fires, and the
+        // debounced coordinator / pending-snapshot drain are recovery paths,
+        // not a latency contract for the interactive request already in hand.
+        // The generation-local repair lane collapses concurrent callers onto
+        // one compile. Only deterministic source-byte verdicts decline a later
+        // request; cancellation, unavailable input, and scheduler instability
+        // record nothing because they advance no durable recovery generation.
         let Some(projection) = self.documents.get_projection(uri) else {
-            return false;
+            return self.projectionless_carrier_repair_is_owed(uri);
         };
         if projection.is_self_file() {
             return self.capture_provider_request_surface(uri).is_none();
@@ -1503,6 +1661,23 @@ impl VerterLanguageServer {
         // and syncs before querying instead of silently falling back to stale or
         // Verter-only data.
         self.capture_provider_request_surface(uri).is_none()
+    }
+
+    /// Admit an open projection-less carrier unless these exact bytes already
+    /// produced a deterministic compile verdict. Missing inputs, macro
+    /// cancellation, and host/scheduler transients never bind here.
+    fn projectionless_carrier_repair_is_owed(&self, uri: &Uri) -> bool {
+        let Some((canonical_id, source)) = self
+            .documents
+            .get(uri)
+            .map(|document| (document.canonical_id.clone(), Arc::clone(&document.source)))
+        else {
+            return false;
+        };
+        carrier_language_for(&canonical_id).is_some()
+            && !self
+                .documents
+                .carrier_ide_compile_has_content_verdict(&canonical_id, &source)
     }
 
     /// Returns true if the user is actively typing (last change was within the cooldown window).
@@ -1595,6 +1770,55 @@ impl VerterLanguageServer {
         }
         self.request_surface_matches_live_source(uri, &snapshot)
             .then_some(snapshot)
+    }
+
+    /// THE source-identity fence for a RETAINED IDE compile response.
+    ///
+    /// Both repair paths now take the response their own
+    /// `recompile_and_refresh_mapper` returns instead of re-reading it, which
+    /// removed a second cold compile per repair — but it also means the
+    /// response is HELD across the awaits that follow (the carrier gateway, the
+    /// provider sync, a close+reopen). A `didChange` landing in any of those
+    /// windows commits a different carrier source while the path still holds the
+    /// previous revision's provider bytes and mapper.
+    ///
+    /// That is not a stale read. `record_carrier_ide_surface` resolves the
+    /// carrier source from the LIVE open document, so recording the retained
+    /// response after such an edit pins the OLD bytes and the OLD map to the NEW
+    /// source — and the resulting pair PASSES
+    /// [`Self::request_surface_matches_live_source`], because both sides of that
+    /// comparison are the new source. Positions in the new revision are then
+    /// mapped through the old revision's map: a confidently WRONG answer, which
+    /// the Carrier IDE TS Surface Principle requires to fail closed instead.
+    ///
+    /// So every consumer of a retained response — mapper installation (fenced
+    /// inside [`crate::documents::DocumentRegistry::recompile_and_refresh_mapper`]
+    /// on the same identity), the carrier gateway, the provider sync, and the
+    /// record — first requires the pinned revision to still be live. `false` ⇒
+    /// discard the response and fail the request closed. Same shape and same
+    /// reason as the retry fence in [`super::provider_recovery`], which refuses
+    /// a recaptured surface whose carrier source moved between attempts.
+    ///
+    /// A `None` pin (the document was already gone when the compile started) is
+    /// never current — fail closed rather than treat "no identity" as a match.
+    pub(super) fn retained_ide_response_is_current(
+        &self,
+        uri: &Uri,
+        compiled_revision: Option<&crate::documents::DocumentSnapshotIdentity>,
+    ) -> bool {
+        let Some(revision) = compiled_revision else {
+            return false;
+        };
+        if self.documents.snapshot_identity_is_current(uri, revision) {
+            return true;
+        }
+        tracing::debug!(
+            "ide sync: discarding the retained compile response for {} — the carrier \
+             source moved while the repair awaited, so installing or recording it \
+             would describe the new source with the old map",
+            uri.as_str()
+        );
+        false
     }
 
     /// Whether the OPEN document's live source still byte-matches the captured
@@ -1701,9 +1925,9 @@ impl VerterLanguageServer {
     }
 
     /// Sync an OPEN self-file document's provider buffer to the provider as
-    /// UNRESOLVED open-document state, keyed at the document's OWN canonical
+    /// open-document Shadow state, keyed at the document's OWN canonical
     /// path (the Shadow provider path), so it is QUERYABLE before resolver
-    /// ownership is ready.
+    /// ownership is ready (and stays owner-bound once it is).
     ///
     /// Mirrors [`Self::sync_carrier_ide_unresolved`] but for a SELF-FILE
     /// document (a Svelte rune module OR a plain TS-family script): the
@@ -1731,7 +1955,9 @@ impl VerterLanguageServer {
             &self.documents,
             sync,
             &self.provider_sync_states,
-            self.published_resolver().as_ref(),
+            // Re-readable, not a captured borrow: the sync revalidates the
+            // published snapshot AFTER its provider await.
+            &|| self.published_resolver(),
             uri,
             &canonical_id,
             &file_language,
@@ -1750,6 +1976,10 @@ impl VerterLanguageServer {
         let published = ws.load_published()?;
         Some(PublishedResolverSnapshot {
             resolver: published.snapshot.resolver.clone(),
+            resolution_view: Some(super::PublishedResolutionView {
+                workspace: Arc::clone(ws),
+                published: Arc::clone(&published),
+            }),
             ownership_ready: published.ownership_ready,
         })
     }
@@ -2000,6 +2230,7 @@ impl VerterLanguageServer {
             type_provider: self.type_provider.clone(),
             workspace_scanner: Arc::clone(&self.workspace_scanner),
             init_generation: Arc::clone(&self.init_generation),
+            ownership_generation_fence: Arc::clone(&self.ownership_generation_fence),
             project_sync: self.project_sync.clone(),
             documents: Arc::clone(&self.documents),
             provider_sync_states: Arc::clone(&self.provider_sync_states),
@@ -2141,7 +2372,7 @@ impl VerterLanguageServer {
                     outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
                 let delivered = self
-                    .sync_carrier_api_unresolved(canonical_id, &api.code)
+                    .sync_carrier_api_unresolved(canonical_id, api.ts_labeled_code())
                     .await;
                 return outcome.and(ImportSyncOutcome::from_ok(delivered));
             }
@@ -2214,21 +2445,24 @@ impl VerterLanguageServer {
                         }
 
                         if let Some(dts_path) = committed_state.api_path.clone() {
+                            // Destination-keyed rendering; delivered/stamped/
+                            // recorded consistently.
+                            let api_code = api.code_for_companion_path(&dts_path);
                             let result = if committed_state.api_background_loaded {
-                                sync.sync_dts(&dts_path, &api.code).await
+                                sync.sync_dts(&dts_path, api_code).await
                             } else {
-                                sync.open_dts(&dts_path, &api.code).await
+                                sync.open_dts(&dts_path, api_code).await
                             };
                             outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
                             if result.is_ok() {
-                                committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                                committed_state.mark_api_delivered(api_code);
                                 synced_kinds.push(ProviderPathKind::Api);
                                 // Record a fresh generation pinning the EXACT content +
                                 // its same-content source map under this virtual path.
                                 self.record_carrier_api_snapshot(
                                     canonical_id,
                                     &dts_path,
-                                    &api.code,
+                                    api_code,
                                     api.source_map.as_deref(),
                                 );
                             } else if let Err(e) = result {
@@ -2277,6 +2511,7 @@ impl VerterLanguageServer {
                                     canonical_id,
                                     is_jsx,
                                     ide.as_ref().map(|output| &*output.code),
+                                    None,
                                 )
                                 .await;
                             } else {
@@ -2333,7 +2568,7 @@ impl VerterLanguageServer {
                 };
                 if let Some(api) = api {
                     let delivered = self
-                        .sync_carrier_api_unresolved(canonical_id, &api.code)
+                        .sync_carrier_api_unresolved(canonical_id, api.ts_labeled_code())
                         .await;
                     return outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
@@ -2516,22 +2751,25 @@ impl VerterLanguageServer {
                             canonical_id,
                             ProviderPathKind::Api,
                         );
+                        // Destination-keyed rendering; delivered/stamped/
+                        // recorded consistently.
+                        let api_code = api.code_for_companion_path(&dts_path);
                         let result = if is_bg {
-                            sync.sync_dts(&dts_path, &api.code).await
+                            sync.sync_dts(&dts_path, api_code).await
                         } else {
                             // First-time DTS sync: open_dts sends it to the provider
                             // (load_dts only caches locally, breaking cross-file ops).
-                            sync.open_dts(&dts_path, &api.code).await
+                            sync.open_dts(&dts_path, api_code).await
                         };
                         if result.is_ok() {
-                            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                            committed_state.mark_api_delivered(api_code);
                             synced_kinds.push(ProviderPathKind::Api);
                             // Record a fresh generation pinning the synced content +
                             // its same-content source map under this virtual path.
                             self.record_carrier_api_snapshot(
                                 canonical_id,
                                 &dts_path,
-                                &api.code,
+                                api_code,
                                 api.source_map.as_deref(),
                             );
                         }
@@ -2567,6 +2805,7 @@ impl VerterLanguageServer {
                             canonical_id,
                             is_jsx,
                             ide.map(|output| &*output.code),
+                            None,
                         )
                         .await;
                     } else {

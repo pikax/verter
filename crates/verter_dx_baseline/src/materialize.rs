@@ -982,12 +982,18 @@ pub fn materialize(req: &MaterializeRequest) -> Result<MaterializeReport, Materi
             }
         })? {
             let gen_path = artifact_path(vue, ".ts");
-            let rewrite = rewrite_vue_imports_tracked(&api.code);
+            // The twin is written at `{stem}.vue.ts` — a TypeScript-labeled
+            // destination — so it takes the TS-labeled rendering (a widened
+            // JavaScript Options-API stub's dialect rendering is JSDoc, which
+            // a `.ts` file silently ignores). The map shift reads the SAME
+            // bytes that were rewritten.
+            let api_code = api.code_for_companion_path(&gen_path.to_string_lossy());
+            let rewrite = rewrite_vue_imports_tracked(api_code);
             fs::write(&gen_path, &rewrite.output).map_err(|e| io_err(&gen_path, e))?;
             let shifted_map = api
                 .source_map
                 .as_deref()
-                .map(|m| shift_source_map_for_insertions(m, &api.code, &rewrite.insertions));
+                .map(|m| shift_source_map_for_insertions(m, api_code, &rewrite.insertions));
             report.public_api_twins.push(MaterializedArtifact {
                 source_vue: canonical.clone(),
                 generated_path: gen_path,

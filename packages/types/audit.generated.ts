@@ -325,7 +325,7 @@ from_cache_count: number,
 cache_hit_rate: number,
 /**
  * Up to five slowest records descending by `total_ms`. Each
- * summary carries enough identity (`request_id`, `canonical_id`,
+ * summary carries enough identity (`request_id`, `target_identity`,
  * `kind`) to pivot back to the full record via
  * `AuditRecordsStore::take`.
  */
@@ -1365,9 +1365,19 @@ exposed: Array<string>, };
  */
 export type PositionInfo = {
 /**
- * Canonical id of the file.
+ * Legacy canonical-id projection retained for wire compatibility.
+ *
+ * New consumers must use [`Self::target_identity`] to distinguish an
+ * unregistered request URI from a position that is not applicable.
  */
 canonical_id: string,
+/**
+ * Tagged identity of the document that owns this editor position.
+ *
+ * New producers always emit `Some`; `None` is reserved for payloads
+ * serialized before this additive field existed.
+ */
+target_identity?: RequestTargetIdentity,
 /**
  * Zero-based line.
  */
@@ -1501,11 +1511,25 @@ export type RequestAuditRecord = {
  */
 request_id: string,
 /**
- * Canonical file id the request targeted. Empty allowed for
- * kinds that do not have a single canonical (e.g. some MCP
- * tool calls).
+ * Legacy canonical-id projection retained for wire compatibility.
+ *
+ * This is the registered canonical value when
+ * [`Self::target_identity`] is
+ * `Some(RequestTargetIdentity::RegisteredCanonical(_))`, otherwise the
+ * empty string. New consumers must use [`Self::target_identity`] so an
+ * unregistered URI cannot collide with a request that has no single
+ * target.
  */
 canonical_id: string,
+/**
+ * Tagged single-target identity.
+ *
+ * New producers always emit `Some`. `None` is reserved for deserializing
+ * audit records emitted before this additive field existed; it is not an
+ * identity state and must not be treated as
+ * [`RequestTargetIdentity::NotApplicable`].
+ */
+target_identity?: RequestTargetIdentity,
 /**
  * Discriminant identifying which `RequestKind` this record is
  * for. Producers populate the matching variant in
@@ -1852,6 +1876,21 @@ cache_layers: CacheLayerBreakdown,
  * [`BypassDiagnostics`] for the per-counter contract.
  */
 bypass_diagnostics: BypassDiagnostics, };
+
+/**
+ * Identity of the single document targeted by an audit record.
+ *
+ * The variants distinguish the three states that the legacy
+ * [`RequestAuditRecord::canonical_id`] string cannot represent:
+ *
+ * - [`Self::RegisteredCanonical`] carries the production registry's exact
+ *   canonical or encoded-virtual identity.
+ * - [`Self::UnregisteredUri`] carries the request's raw URI when the document
+ *   has not entered the registry yet.
+ * - [`Self::NotApplicable`] is reserved for request kinds that genuinely do
+ *   not have one document target.
+ */
+export type RequestTargetIdentity = { "kind": "RegisteredCanonical", "value": string } | { "kind": "UnregisteredUri", "value": string } | { "kind": "NotApplicable" };
 
 /**
  * Per-phase wall-clock timings in milliseconds. Producers initialise
@@ -2366,9 +2405,22 @@ export type SlowRecordSummary = {
  */
 request_id: string,
 /**
- * Canonical file id the original request targeted.
+ * Legacy canonical-id projection retained for wire compatibility.
+ *
+ * New consumers must use [`Self::target_identity`]. This field is the
+ * exact registered canonical when one exists and the empty string for
+ * unregistered or target-less requests.
  */
 canonical_id: string,
+/**
+ * Tagged target identity copied from the original record.
+ *
+ * New summaries preserve all three identity states. `None` is reserved
+ * for summaries built from audit records emitted before the additive
+ * target-identity field existed; consumers may fall back to
+ * [`Self::canonical_id`] only in that case.
+ */
+target_identity?: RequestTargetIdentity,
 /**
  * Original `RequestKind` discriminant — preserved verbatim so
  * callers can tell which surface produced the slow record.

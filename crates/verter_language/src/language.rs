@@ -82,7 +82,7 @@ impl ScriptSourceType {
 /// the owning adapter so later stages can scope the adapter's module-level
 /// ambient typing (the rune surface) to exactly these files without
 /// classifying them as carriers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScriptFlavor {
     /// An ordinary script with no framework involvement.
     Plain,
@@ -113,7 +113,14 @@ pub enum ScriptFlavor {
 ///   a framework component (e.g. an Angular `templateUrl` target). Never
 ///   produced by a built-in row; project-gated rows resolve it at the
 ///   host level.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// The derived [`Ord`] is a genuine total order over the OPEN id sets:
+/// [`FrameworkAdapterId`] / [`LanguageId`] order by their interned string
+/// CONTENT (`Arc<str>`'s `Ord` delegates to `str`), never by intern-table
+/// insertion order or `Arc` address, so the order is stable across process
+/// runs. It is the ordering the fact-signature canonicaliser uses for
+/// `FileSourceEnv` facts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FileLanguage {
     /// A script file — either plain or a framework adapter's standalone
     /// non-component module (see [`ScriptFlavor`]).

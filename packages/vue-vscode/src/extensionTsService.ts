@@ -6,13 +6,182 @@
  * instead of over TCP. The Rust LSP sends `$/verter/tsQuery` requests which
  * are dispatched to `handleQuery()`.
  *
- * TypeScript is resolved from the workspace (via `createRequire`) so the
- * language service uses the project's own TS version.
+ * TypeScript is resolved ONLY from the workspace — from the project's own
+ * `node_modules` chain and nothing else — so the language service uses the
+ * project's own TS version and its lib files. There is no bundled fallback: a
+ * compiler packed into the extension resolves its default libs next to the
+ * bundle, where no `lib.*.d.ts` ships, so it would answer from a lib-less
+ * service — silently wrong diagnostics. There is no AMBIENT fallback either: the
+ * global folders Node ends a bare specifier at (`NODE_PATH`,
+ * `$HOME/.node_modules`, …) are a compiler the project did not install, with its
+ * own version and its own libs, and are never consulted.
+ *
+ * One instance serves ONE configured project — its root (where its TypeScript is
+ * installed) and its config file (which gives it its compiler options), both
+ * declared by the LSP. `ExtensionTsServiceRegistry` owns the per-project routing
+ * so a monorepo's packages each use their own TypeScript; this class never
+ * chooses a project.
+ *
+ * Two failures fail closed, both through one cached, actionable error thrown by
+ * every later query with the `onUnavailable` notifier firing exactly once:
+ *  - no workspace TypeScript resolves at all; and
+ *  - one resolves but carries no `lib.*.d.ts` default libraries — a library-less
+ *    install answers with the same silently-wrong diagnostics a bundled compiler
+ *    would, so it is refused rather than served (this mirrors the LSP's own
+ *    tsserver discovery, which rejects library-less candidates:
+ *    `crates/verter_type_runtime/src/discovery.rs` `validate_tsserver_candidate`).
  */
 
+import { existsSync, readdirSync, statSync } from "fs";
 import { createRequire } from "module";
-import { join } from "path";
+import { basename, dirname, join, resolve } from "path";
 import type * as ts from "typescript";
+
+import { VERTER_TYPES_STUB } from "@verter/typescript-plugin/verter-types-stub";
+
+/** The module every generated IDE carrier imports its type helpers from. */
+const VERTER_TYPES_MODULE = "@verter/types";
+
+/** Called once with the actionable message when no workspace TypeScript resolves. */
+export type UnavailableNotifier = (message: string) => void;
+
+/**
+ * Commands that carry no file and touch no project state — their response is a
+ * constant, so the per-project router answers them without binding a project.
+ * The service returns the SAME values (single source of truth for the wire
+ * shape) once it is initialised.
+ */
+export const SESSION_SCOPED_RESPONSES: Readonly<Record<string, unknown>> = Object.freeze({
+  configure: {},
+  compilerOptionsForInferredProjects: true,
+  exit: {},
+});
+
+/**
+ * Config diagnostics that do NOT invalidate the parsed compiler options.
+ *
+ * `TS18003` ("No inputs were found in config file …") reports on the config's
+ * own file LIST. This service's program is the set of files the LSP opens, so an
+ * empty input list is expected (a `files: []` solution config, a package whose
+ * sources are all carriers) and says nothing about whether the OPTIONS parsed.
+ * Every other error-category config diagnostic means the options TypeScript
+ * returned are partially salvaged, which is exactly what must not be served.
+ */
+const NON_FATAL_CONFIG_ERROR_CODES: ReadonlySet<number> = new Set([18003]);
+
+/**
+ * A TypeScript install must carry its default libraries.
+ *
+ * The predicate is the LSP-side rule from
+ * `crates/verter_type_runtime/src/discovery.rs` (`validate_tsserver_candidate`),
+ * in both of its halves: the NAME shape (`lib.` prefix, `.d.ts` suffix,
+ * non-empty middle segment) AND `entry.file_type().is_file()`. The second half
+ * is load-bearing — a DIRECTORY named `lib.es2025.d.ts`, or a symlink dangling
+ * at one, satisfies a name-only filter while carrying no library at all, and the
+ * service would then be admitted library-less. `statSync` follows symlinks, so a
+ * symlink TO a real lib file counts (it is a library) and a dangling one throws
+ * and does not.
+ */
+function countDefaultLibs(libDir: string): number {
+  return readdirSync(libDir).filter((name) => {
+    if (!name.startsWith("lib.") || !name.endsWith(".d.ts")) return false;
+    if (name.length <= "lib..d.ts".length) return false;
+    try {
+      return statSync(join(libDir, name)).isFile();
+    } catch {
+      // Unreadable or dangling: not a library we can type-check against.
+      return false;
+    }
+  }).length;
+}
+
+/**
+ * The `node_modules` directories that belong to `root` — its own, then each
+ * ancestor's, in Node's lookup order and stopping at the filesystem root.
+ *
+ * This is Node's own list — `Module._nodeModulePaths`, the directories a bare
+ * specifier is searched in — WITHOUT Node's final step. Node ends a bare
+ * specifier at GLOBAL_FOLDERS — the `NODE_PATH` entries, `$HOME/.node_modules`,
+ * `$HOME/.node_libraries` and `$PREFIX/lib/node` — so `require.resolve` can
+ * answer from a TypeScript that has nothing to do with the project: a different
+ * major version, a different set of `lib.*.d.ts`, installed by something else
+ * entirely. Serving from it is exactly the silently-wrong-diagnostics outcome
+ * this provider refuses a bundled compiler for, so the chain is walked
+ * explicitly and the global folders are never consulted.
+ *
+ * A directory already named `node_modules` contributes NOTHING from its own
+ * iteration, which is Node's rule for a project that lives inside a dependency
+ * tree: no `node_modules/node_modules` is ever probed, and the directory itself
+ * still gets searched because the PARENT's iteration already contributes that
+ * identical path. Skipping it — rather than letting it contribute itself — is
+ * what keeps the list Node's: contributing itself names the same directory
+ * twice, which resolves the same but is no longer the list Node walks.
+ */
+export function workspaceNodeModulesChain(root: string): string[] {
+  const chain: string[] = [];
+  let dir = resolve(root);
+  for (;;) {
+    if (basename(dir) !== "node_modules") chain.push(join(dir, "node_modules"));
+    const parent = dirname(dir);
+    if (parent === dir) return chain;
+    dir = parent;
+  }
+}
+
+/**
+ * The directory whose `node_modules` holds the workspace's own TypeScript, or
+ * `undefined` when nothing in `searched` installs one.
+ *
+ * Takes the already-computed chain rather than deriving its own, so the
+ * directories REPORTED when this returns `undefined` are by construction the
+ * directories that were actually consulted — the two can never drift into a
+ * diagnostic that names a search which did not happen.
+ *
+ * Presence is decided by the package MANIFEST, the same signal every package
+ * manager writes and every resolver reads. `existsSync` follows symlinks, so a
+ * pnpm/yarn store link (and the junction the fixtures materialize) counts as the
+ * install it points at.
+ *
+ * The answer is the OWNING DIRECTORY rather than the entry path so that the
+ * module itself is still loaded by Node from there — `main`, `exports` and every
+ * other package-resolution rule stay Node's, and the first lookup path already
+ * holds the package, so no later candidate (and no global folder) is reachable.
+ */
+function workspaceTypeScriptOwner(searched: readonly string[]): string | undefined {
+  for (const nodeModules of searched) {
+    if (existsSync(join(nodeModules, "typescript", "package.json"))) return dirname(nodeModules);
+  }
+  return undefined;
+}
+
+/**
+ * The `MODULE_NOT_FOUND` that resolving through Node would have raised, for the
+ * case Node is never asked about: nothing in the workspace's chain installs
+ * TypeScript at all.
+ *
+ * This is the commonest failure there is, and it needs the same underlying
+ * detail every other failure here carries as a `cause` — the actionable message
+ * alone cannot separate "no TypeScript is installed" from "TypeScript is
+ * installed somewhere this provider deliberately does not look", and those need
+ * different fixes.
+ *
+ * It reproduces what Node attached: the `MODULE_NOT_FOUND` code, and the same
+ * `Cannot find module 'typescript'` first line. What it does NOT reproduce is
+ * Node's `Require stack:` tail — nothing was required, so there is no stack, and
+ * that tail named only the anchor file anyway. The directories actually
+ * consulted go there instead: strictly the more useful fact, and the one a user
+ * with a hoisted or misplaced install needs to see.
+ */
+function typeScriptNotInstalled(searched: readonly string[]): Error {
+  return Object.assign(
+    new Error(
+      `Cannot find module 'typescript'\n` +
+        `Searched (the project's own node_modules chain — Node's lookup list ` +
+        `without its global-folder step):\n- ${searched.join("\n- ")}`,
+    ),
+    { code: "MODULE_NOT_FOUND" },
+  );
+}
 
 export class ExtensionTsService {
   private ts!: typeof ts;
@@ -21,27 +190,141 @@ export class ExtensionTsService {
   private fileVersions = new Map<string, number>();
   private openFiles = new Set<string>();
   private workspaceRoot: string;
+  private configPath: string | undefined;
+  private onUnavailable?: UnavailableNotifier;
   private initialized = false;
+  private initializationError: Error | undefined;
 
-  constructor(workspaceRoot: string) {
+  /**
+   * @param workspaceRoot the owning project's ROOT — where its TypeScript is
+   *   installed and what the language service treats as the current directory.
+   * @param configPath the config file that DEFINES the owning project, as
+   *   declared by the LSP. Optional because the pre-snapshot last-resort binding
+   *   knows no configured owner; the service then discovers a config itself.
+   */
+  constructor(workspaceRoot: string, onUnavailable?: UnavailableNotifier, configPath?: string) {
     this.workspaceRoot = workspaceRoot;
+    this.configPath = configPath;
+    this.onUnavailable = onUnavailable;
   }
 
   private ensureInitialized(): void {
+    if (this.initializationError) throw this.initializationError;
     if (this.initialized) return;
-    this.initialized = true;
 
-    // Resolve TypeScript from the workspace, fall back to bundled
+    // The workspace TypeScript is the ONLY source. `require.resolve` on its own
+    // is NOT that guarantee: its last step is the global folders, so an ambient
+    // `NODE_PATH` (every pnpm bin shim exports one) or a legacy
+    // `$HOME/.node_modules` answers for a project that installed no TypeScript
+    // at all. The owning directory is therefore found in the workspace's own
+    // `node_modules` chain first, and Node resolves the module from THERE.
+    // Nothing installed in the chain and a chain entry that fails to load are one
+    // outcome to the user — no usable TypeScript of this project's own — so both
+    // fail closed through one message.
+    const unresolvable = (cause?: unknown): Error =>
+      this.failClosed(
+        `Verter: the extension TypeScript provider could not resolve a workspace ` +
+          `TypeScript installation from ${this.workspaceRoot}. Install TypeScript in ` +
+          `the workspace (npm install -D typescript) or choose a different ` +
+          `verter.typeProvider. The provider stays disabled for this project rather ` +
+          `than serve wrong diagnostics from a TypeScript the project does not use.`,
+        cause,
+      );
+
     let tsModule: typeof ts;
+    let entryPath: string;
+    const searched = workspaceNodeModulesChain(this.workspaceRoot);
+    const owner = workspaceTypeScriptOwner(searched);
+    if (owner === undefined) throw unresolvable(typeScriptNotInstalled(searched));
     try {
-      const wsRequire = createRequire(join(this.workspaceRoot, "package.json"));
+      const wsRequire = createRequire(join(owner, "package.json"));
+      // Resolve the entry FIRST: its directory is the install's lib directory,
+      // which must be validated before the compiler is allowed to answer.
+      entryPath = wsRequire.resolve("typescript");
       tsModule = wsRequire("typescript") as typeof ts;
-    } catch {
-      tsModule = require("typescript") as typeof ts;
+    } catch (cause) {
+      throw unresolvable(cause);
     }
+
+    // The native-preview TypeScript layout (the `typescript` 7.x package) is a
+    // thin launcher: its entry exposes no `createLanguageService`, and its
+    // libraries live in a separate platform package, NOT beside the entry. It is
+    // a complete, correct install — so it must not be blamed for missing
+    // libraries and told to reinstall. Classify it on the resolved API SHAPE
+    // (what this service actually needs), never on a version string, and point
+    // at the provider that speaks that engine.
+    if (typeof (tsModule as Partial<typeof ts>).createLanguageService !== "function") {
+      throw this.failClosed(
+        `Verter: the extension TypeScript provider cannot drive the TypeScript resolved ` +
+          `from ${this.workspaceRoot} (${entryPath}): it exposes no in-process language ` +
+          `service. The native TypeScript (7.x / tsgo) family is served by a different ` +
+          `engine — set verter.typeProvider to a TSGO-backed provider, or install a ` +
+          `TypeScript 5.x in this project. The provider stays disabled for this project ` +
+          `rather than serve wrong diagnostics.`,
+      );
+    }
+
+    // A resolvable-but-library-less install (pruned/vendored/corrupted) is the
+    // same defect class as a bundled compiler: it type-checks against no lib, so
+    // every global (`string`, `Promise`, DOM) reads as an error. Refuse it.
+    const libDir = dirname(entryPath);
+    let defaultLibCount: number;
+    try {
+      defaultLibCount = countDefaultLibs(libDir);
+    } catch (cause) {
+      throw this.failClosed(
+        `Verter: the extension TypeScript provider could not read the library ` +
+          `directory of the workspace TypeScript at ${libDir}. Reinstall TypeScript ` +
+          `in the workspace (npm install -D typescript) or choose a different ` +
+          `verter.typeProvider.`,
+        cause,
+      );
+    }
+    if (defaultLibCount === 0) {
+      throw this.failClosed(
+        `Verter: the extension TypeScript provider refused the workspace TypeScript ` +
+          `at ${libDir}: it carries no lib.*.d.ts default libraries, so it would answer ` +
+          `from a library-less language service — silently wrong diagnostics. Reinstall ` +
+          `TypeScript in the workspace (npm install -D typescript) or choose a different ` +
+          `verter.typeProvider.`,
+      );
+    }
+
     this.ts = tsModule;
 
     const compilerOptions: ts.CompilerOptions = this.resolveCompilerOptions();
+
+    // `@verter/types` is where every generated carrier gets its type helpers, so
+    // a project that cannot resolve it types every template binding as `any`.
+    //
+    // The resolution host below is deliberately built on RAW `ts.sys`, not on the
+    // virtual-aware `host`: the question "does this project install the package?"
+    // must be answered by the disk alone. Answering it through a host that already
+    // claims the virtual path exists would make a hoisted or aliased real install
+    // lose to Verter's own declarations.
+    const verterTypesVirtualPath = join(
+      this.workspaceRoot,
+      "node_modules",
+      "@verter",
+      "types",
+      "index.d.ts",
+    );
+    const diskResolutionHost: ts.ModuleResolutionHost = {
+      fileExists: this.ts.sys.fileExists,
+      readFile: this.ts.sys.readFile,
+      directoryExists: this.ts.sys.directoryExists,
+      getDirectories: this.ts.sys.getDirectories,
+      realpath: this.ts.sys.realpath,
+      useCaseSensitiveFileNames: this.ts.sys.useCaseSensitiveFileNames,
+    };
+    const isVerterTypesVirtualPath = (fileName: string): boolean =>
+      this.samePath(fileName, verterTypesVirtualPath);
+    // A real file at the virtual path is served verbatim — the fallback only ever
+    // fills a hole, it never overwrites what the project installed.
+    const readVirtualAware = (fileName: string): string | undefined =>
+      isVerterTypesVirtualPath(fileName)
+        ? (this.ts.sys.readFile(fileName) ?? VERTER_TYPES_STUB)
+        : this.ts.sys.readFile(fileName);
 
     const host: ts.LanguageServiceHost = {
       getScriptFileNames: () => [...this.openFiles],
@@ -49,7 +332,7 @@ export class ExtensionTsService {
       getScriptSnapshot: (fileName) => {
         if (this.fileSnapshots.has(fileName)) return this.fileSnapshots.get(fileName)!;
         try {
-          const content = this.ts.sys.readFile(fileName);
+          const content = readVirtualAware(fileName);
           if (content !== undefined) {
             const snap = this.ts.ScriptSnapshot.fromString(content);
             this.fileSnapshots.set(fileName, snap);
@@ -63,34 +346,166 @@ export class ExtensionTsService {
       getCurrentDirectory: () => this.workspaceRoot,
       getCompilationSettings: () => compilerOptions,
       getDefaultLibFileName: this.ts.getDefaultLibFilePath,
-      fileExists: this.ts.sys.fileExists,
-      readFile: this.ts.sys.readFile,
+      fileExists: (fileName) =>
+        isVerterTypesVirtualPath(fileName) ? true : this.ts.sys.fileExists(fileName),
+      readFile: readVirtualAware,
       readDirectory: this.ts.sys.readDirectory,
       directoryExists: this.ts.sys.directoryExists,
       getDirectories: this.ts.sys.getDirectories,
+
+      // Ordinary resolution runs FIRST for every specifier, including
+      // `@verter/types`. Only when the project resolves nothing at all does the
+      // virtual declaration file stand in — so an installed copy always wins, and
+      // wins as a WHOLE package (a name the install does not export stays
+      // unresolved rather than being backfilled from Verter's declarations, which
+      // would silently merge two versions of the same package).
+      //
+      // The resolution MODE is per IMPORT SITE, not per project: under
+      // `node16`/`nodenext` an `import` in an ES module resolves a package's
+      // `import` condition while the same specifier in a CommonJS file resolves
+      // `require`, and a `resolution-mode` attribute overrides both. Dropping the
+      // mode makes `resolveModuleName` default to the CommonJS conditions, so a
+      // correctly-written ESM import silently picks up a dual-published package's
+      // CJS types. `getModeForUsageLocation` is the compiler's own answer for
+      // this literal in this file — never re-derived here.
+      resolveModuleNameLiterals: (
+        moduleLiterals,
+        containingFile,
+        redirectedReference,
+        options,
+        containingSourceFile,
+      ) =>
+        moduleLiterals.map((literal) => {
+          const resolved = this.ts.resolveModuleName(
+            literal.text,
+            containingFile,
+            options,
+            diskResolutionHost,
+            undefined,
+            redirectedReference,
+            this.ts.getModeForUsageLocation(containingSourceFile, literal, options),
+          );
+          if (literal.text !== VERTER_TYPES_MODULE || resolved.resolvedModule) {
+            return resolved;
+          }
+          return {
+            ...resolved,
+            resolvedModule: {
+              extension: this.ts.Extension.Dts,
+              isExternalLibraryImport: true,
+              resolvedFileName: verterTypesVirtualPath,
+            },
+          };
+        }),
     };
 
     this.service = this.ts.createLanguageService(host, this.ts.createDocumentRegistry());
+    this.initialized = true;
   }
 
-  private resolveCompilerOptions(): ts.CompilerOptions {
-    // Try to find tsconfig.json in the workspace root
-    const tsconfigPath = this.ts.findConfigFile(
-      this.workspaceRoot,
-      this.ts.sys.fileExists,
-      "tsconfig.json",
-    );
+  /**
+   * Whether two paths name the same file.
+   *
+   * Separator-insensitive (TypeScript hands back forward slashes even on Windows,
+   * while `path.join` produces backslashes there) and case-folded exactly when the
+   * host filesystem is, so a case-sensitive filesystem never conflates two files.
+   */
+  private samePath(left: string, right: string): boolean {
+    const normalize = (value: string): string => {
+      const slashed = value.replace(/\\/g, "/");
+      return this.ts.sys.useCaseSensitiveFileNames ? slashed : slashed.toLowerCase();
+    };
+    return normalize(left) === normalize(right);
+  }
 
-    if (tsconfigPath) {
-      const configFile = this.ts.readConfigFile(tsconfigPath, this.ts.sys.readFile);
-      if (!configFile.error) {
-        const parsed = this.ts.parseJsonConfigFileContent(
-          configFile.config,
-          this.ts.sys,
-          this.workspaceRoot,
+  /**
+   * Cache the unavailability, notify once, and return the error to throw. Every
+   * later query rethrows this same instance, so the provider stays closed for
+   * this project until the window reloads.
+   */
+  private failClosed(message: string, cause?: unknown): Error {
+    this.initializationError = new Error(message, cause === undefined ? undefined : { cause });
+    this.onUnavailable?.(message);
+    return this.initializationError;
+  }
+
+  /**
+   * The owning project's compiler options.
+   *
+   * The DECLARED config wins: a configured project IS its config file, and the
+   * LSP knows exactly which one owns this file. Only when nothing was declared
+   * (the pre-snapshot last-resort binding) does the service discover one, and
+   * then it must look for `jsconfig.json` too — a project configured by
+   * `jsconfig.json`, or by any `tsconfig.*.json`, is no less configured, and
+   * falling through to invented defaults answers with rules the user never
+   * wrote (`checkJs`, `strict`, `jsx`, path aliases…).
+   *
+   * Whichever config is used, it is parsed against ITS OWN directory. Relative
+   * `baseUrl` / `paths` / `rootDir` entries are written relative to the config
+   * that declares them, so parsing an ancestor's config against the project root
+   * points every alias at a directory that does not exist.
+   *
+   * A config that EXISTS but cannot be consumed fails closed. Falling through to
+   * the inferred defaults there is the worst outcome available: the project has
+   * rules, the service could not read them, and the user is answered under
+   * unrelated invented ones (`strict`, `checkJs`, `jsx`, path aliases…) with no
+   * signal that their configuration was discarded. The defaults are reachable
+   * only when NO config exists at all — the inferred-project case, and only for
+   * the pre-snapshot last-resort binding, since a configured owner always
+   * declares its config.
+   */
+  private resolveCompilerOptions(): ts.CompilerOptions {
+    const configPath =
+      this.configPath ??
+      this.ts.findConfigFile(this.workspaceRoot, this.ts.sys.fileExists, "tsconfig.json") ??
+      this.ts.findConfigFile(this.workspaceRoot, this.ts.sys.fileExists, "jsconfig.json");
+
+    if (configPath) {
+      const configFile = this.ts.readConfigFile(configPath, this.ts.sys.readFile);
+      if (configFile.error) {
+        throw this.failClosed(
+          `Verter: the extension TypeScript provider could not read the configuration ` +
+            `file that defines this project (${configPath}): ` +
+            `${this.ts.flattenDiagnosticMessageText(configFile.error.messageText, " ")} ` +
+            `Fix the config, or choose a different verter.typeProvider. The provider stays ` +
+            `disabled for this project rather than answer under compiler options the ` +
+            `project never declared.`,
         );
-        return parsed.options;
       }
+      const parsed = this.ts.parseJsonConfigFileContent(
+        configFile.config,
+        this.ts.sys,
+        dirname(configPath),
+        undefined,
+        configPath,
+      );
+      // `parseJsonConfigFileContent` reports unknown/invalid options, bad
+      // `extends` targets, and malformed values HERE rather than throwing — the
+      // returned `options` are what TypeScript salvaged. Ignoring them is the
+      // same silent-wrong-rules defect as ignoring a read error, so a genuine
+      // config error fails closed too. The exception is the empty-input report:
+      // this service's program is the set of files the LSP opens, never the
+      // config's own file list, so "no inputs" says nothing about the options.
+      const fatal = parsed.errors.filter(
+        (diagnostic) =>
+          diagnostic.category === this.ts.DiagnosticCategory.Error &&
+          !NON_FATAL_CONFIG_ERROR_CODES.has(diagnostic.code),
+      );
+      if (fatal.length > 0) {
+        throw this.failClosed(
+          `Verter: the extension TypeScript provider could not parse the configuration ` +
+            `file that defines this project (${configPath}): ` +
+            `${fatal
+              .map((diagnostic) =>
+                this.ts.flattenDiagnosticMessageText(diagnostic.messageText, " "),
+              )
+              .join(" ")} ` +
+            `Fix the config, or choose a different verter.typeProvider. The provider stays ` +
+            `disabled for this project rather than answer under partially-salvaged ` +
+            `compiler options.`,
+        );
+      }
+      return parsed.options;
     }
 
     // Default options matching ts-service/server.ts
@@ -117,10 +532,8 @@ export class ExtensionTsService {
 
     switch (command) {
       case "configure":
-        return {};
-
       case "compilerOptionsForInferredProjects":
-        return true;
+        return SESSION_SCOPED_RESPONSES[command];
 
       case "open": {
         const file = args.file as string;
@@ -579,7 +992,7 @@ export class ExtensionTsService {
       }
 
       case "exit":
-        return {};
+        return SESSION_SCOPED_RESPONSES[command];
 
       default:
         throw new Error(`Unknown command: ${command}`);

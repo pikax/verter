@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use tower_lsp_server::ls_types::{GotoDefinitionResponse, Hover, Location, Position, Range, Uri};
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::sfc_scanner::{custom_block_content_kind, scan_sfc_blocks_with};
 use crate::documents::uri_to_canonical_id;
 use crate::features::hover;
 use crate::type_provider::merge;
@@ -137,7 +137,12 @@ impl VerterLanguageServer {
         local_binding_name: Option<&str>,
     ) -> Option<String> {
         let parent_canonical_id = uri_to_canonical_id(parent_uri);
-        let workspace_resolved = self.resolve_import_specifier(&parent_canonical_id, import_source);
+        let workspace_resolved = match self
+            .resolve_import_specifier_for_publication(&parent_canonical_id, import_source)
+        {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(_) => return None,
+        };
         let candidates = imported_component_canonical_candidates(
             &parent_canonical_id,
             parent_analysis,
@@ -204,14 +209,32 @@ impl VerterLanguageServer {
         })
     }
 
-    pub(super) fn resolve_import_specifier(
+    pub(super) fn resolve_import_specifier_transient(
         &self,
         parent_canonical_id: &str,
         specifier: &str,
     ) -> Option<String> {
         self.documents
             .host()
-            .resolve_import_via_workspace(parent_canonical_id, specifier)
+            .resolve_import_transient(parent_canonical_id, specifier)
+    }
+
+    pub(super) fn resolve_import_specifier_for_publication(
+        &self,
+        parent_canonical_id: &str,
+        specifier: &str,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        self.documents
+            .host()
+            .resolve_for_persistent_state(
+                parent_canonical_id,
+                specifier,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::EsmImport,
+                },
+            )
+            .map_result(|resolved| resolved.source_id)
     }
 
     pub(super) fn component_import_binding_name(
@@ -372,7 +395,7 @@ impl VerterLanguageServer {
         canonical_id: &str,
         specifier: &str,
     ) -> Option<String> {
-        self.resolve_import_specifier(canonical_id, specifier)
+        self.resolve_import_specifier_transient(canonical_id, specifier)
     }
 
     pub(super) fn resolve_precise_export_location(
@@ -1067,14 +1090,26 @@ impl VerterLanguageServer {
         let child_source_arc = self.documents.host().get_source(&child_canonical_id)?;
         let child_source = child_source_arc.to_string();
         let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
-        let blocks = scan_sfc_blocks(&child_source);
+        // Host-loaded child: no editor language_id, so the canonical path
+        // classifies the carrier (a `.svelte` child balances its root
+        // components; a `.vue` child keeps raw-text custom blocks).
+        let blocks = scan_sfc_blocks_with(
+            &child_source,
+            custom_block_content_kind(None, &child_canonical_id),
+        );
         let line_index = LineIndex::new(&child_source, self.documents.encoding());
+
+        let inherited_attrs = super::server_utils::resolved_fallthrough_attr_names(
+            self.documents.host(),
+            &child_canonical_id,
+        );
 
         Some(crate::features::cross_file::ChildComponentContext {
             canonical_id: child_canonical_id,
             uri: child_uri,
             source: child_source,
             analysis,
+            inherited_attrs,
             blocks,
             line_index,
         })
@@ -1084,7 +1119,7 @@ impl VerterLanguageServer {
         &self,
         parent_uri: &Uri,
         target: &hover::ChildHoverTarget,
-    ) -> Result<Option<Hover>, verter_session::PublicApiProjectionError> {
+    ) -> Result<ChildHoverOutcome, verter_session::PublicApiProjectionError> {
         match target {
             hover::ChildHoverTarget::ComponentTag(target) => {
                 let Some(child) = self.resolve_component_context(
@@ -1092,28 +1127,30 @@ impl VerterLanguageServer {
                     &target.import_source,
                     Some(&target.component_name),
                 ) else {
-                    return Ok(None);
+                    return Ok(ChildHoverOutcome::SurfaceUnavailable);
                 };
                 let projection = self
                     .documents
                     .host()
                     .get_public_api_projection(&child.canonical_id)?;
-                Ok(Some(hover::build_child_component_hover(
-                    &target.component_name,
-                    &target.import_source,
-                    &child.analysis,
-                    projection
-                        .as_ref()
-                        .and_then(|projection| projection.contract.as_ref()),
-                    projection
-                        .as_ref()
-                        .map(|projection| projection.response.code.as_ref()),
-                    &target.usage_props,
-                )))
+                Ok(ChildHoverOutcome::Hover(
+                    hover::build_child_component_hover(
+                        &target.component_name,
+                        &target.import_source,
+                        &child.analysis,
+                        projection
+                            .as_ref()
+                            .and_then(|projection| projection.contract.as_ref()),
+                        projection
+                            .as_ref()
+                            .map(|projection| projection.response.ts_labeled_code().as_ref()),
+                        &target.usage_props,
+                    ),
+                ))
             }
             hover::ChildHoverTarget::ImportBinding(target) => {
                 let Some(parent_analysis) = self.documents.get_analysis(parent_uri) else {
-                    return Ok(None);
+                    return Ok(ChildHoverOutcome::SurfaceUnavailable);
                 };
                 let Some(child) = self.resolve_component_document_for_import_binding(
                     parent_uri,
@@ -1121,57 +1158,78 @@ impl VerterLanguageServer {
                     &target.import_source,
                     &target.binding_name,
                 ) else {
-                    return Ok(None);
+                    return Ok(ChildHoverOutcome::SurfaceUnavailable);
                 };
                 let child_canonical_id = crate::documents::uri_to_canonical_id(&child.uri);
                 let projection = self
                     .documents
                     .host()
                     .get_public_api_projection(&child_canonical_id)?;
-                Ok(Some(hover::build_child_component_hover(
-                    &target.binding_name,
-                    &target.import_source,
-                    &child.analysis,
-                    projection
-                        .as_ref()
-                        .and_then(|projection| projection.contract.as_ref()),
-                    projection
-                        .as_ref()
-                        .map(|projection| projection.response.code.as_ref()),
-                    &[],
-                )))
+                Ok(ChildHoverOutcome::Hover(
+                    hover::build_child_component_hover(
+                        &target.binding_name,
+                        &target.import_source,
+                        &child.analysis,
+                        projection
+                            .as_ref()
+                            .and_then(|projection| projection.contract.as_ref()),
+                        projection
+                            .as_ref()
+                            .map(|projection| projection.response.ts_labeled_code().as_ref()),
+                        &[],
+                    ),
+                ))
             }
             hover::ChildHoverTarget::EventAttribute(target) => {
                 let Some(child) =
                     self.resolve_component_context(parent_uri, &target.import_source, None)
                 else {
-                    return Ok(None);
+                    return Ok(ChildHoverOutcome::SurfaceUnavailable);
                 };
+                // The hover text-parses the TYPE surface (handler props off
+                // the published `$props`), so it reads the TS-labeled
+                // rendering — the same bytes the provider companion holds.
                 let public_api = self
                     .documents
                     .host()
                     .get_public_api(&child.canonical_id)?
-                    .map(|api| api.code.to_string());
+                    .map(|api| api.ts_labeled_code().to_string());
                 Ok(hover::build_child_event_hover(
                     &target.vue_attr,
                     &child.analysis,
                     public_api.as_deref(),
-                ))
+                )
+                .map(ChildHoverOutcome::Hover)
+                .unwrap_or(ChildHoverOutcome::SurfaceAvailableNoMatch))
             }
             hover::ChildHoverTarget::SlotAttribute(target) => {
                 let Some(child) =
                     self.resolve_component_context(parent_uri, &target.import_source, None)
                 else {
-                    return Ok(None);
+                    return Ok(ChildHoverOutcome::SurfaceUnavailable);
                 };
                 Ok(hover::build_child_slot_hover(
                     &target.vue_attr,
                     &target.slot_name,
                     &child.analysis,
-                ))
+                )
+                .map(ChildHoverOutcome::Hover)
+                .unwrap_or(ChildHoverOutcome::SurfaceAvailableNoMatch))
             }
         }
     }
+}
+
+/// Result of resolving a positively classified child-hover target.
+///
+/// The caller represents "not a child target" separately with `None`. Once a
+/// target exists, this keeps a real hover, an authoritative no-match, and a
+/// surface that cannot be read yet from collapsing into the same empty value.
+#[derive(Debug)]
+pub(super) enum ChildHoverOutcome {
+    Hover(Hover),
+    SurfaceAvailableNoMatch,
+    SurfaceUnavailable,
 }
 
 #[cfg(test)]

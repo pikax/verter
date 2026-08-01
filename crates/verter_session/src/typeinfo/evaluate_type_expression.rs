@@ -249,6 +249,9 @@ impl VerterHost {
         let record = RequestAuditRecord {
             request_id,
             canonical_id: req.scope.clone(),
+            target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+                req.scope.clone(),
+            )),
             kind: RequestKind::TypeResolution,
             parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
             from_cache,
@@ -296,6 +299,7 @@ fn noop_evaluate_record(
     RequestAuditRecord {
         request_id,
         canonical_id: scope.to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::registered(scope)),
         kind: RequestKind::TypeResolution,
         parent_request_id: parent_request_id.map(|id| id.to_string()),
         from_cache,

@@ -45,8 +45,8 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
 /// not apply to a generator's verbatim data rows. Scanning them is both
 /// incorrect (a divergence-label or header path is generated data, not a
 /// phase reference) and the bulk of the scanners' cost (thousands of data
-/// rows), so they are excluded by path here. Mirrors the
-/// `no_oversize_files` exemption list, which already names these files.
+/// rows), so they are excluded by path here. The gate runner's advisory
+/// file-size scan also excludes these generated data modules.
 ///
 /// Matched by path SUFFIX so the same set is usable against either a
 /// workspace-relative path or an absolute path string.
@@ -6057,355 +6057,6 @@ mod foundations_guards {
         );
     }
 
-    // ── Guard 6 — no_oversize_files ──
-
-    /// Maximum line count (post-cleanup goal). Files above this
-    /// length are violations unless allow-listed.
-    pub fn guard6_target_line_count() -> usize {
-        1500
-    }
-
-    /// Files that exceed [`guard6_target_line_count`] today and are
-    /// currently exempt while B-C5 / §12.A4 prepares the splits.
-    pub fn guard6_exemptions() -> BTreeSet<&'static str> {
-        BTreeSet::from([
-            // The oracle-query-spec registry co-locates the closed
-            // `LIFTED_ROW_MIGRATIONS` retained-lift table (§Q4) — 44 generated
-            // `original_body_tokens` audit-record token streams — with the
-            // registry it is the migration-fidelity authority for. The two MUST
-            // be one `include!`d unit (the same file is reached as both the lib
-            // `oracle_core::query_specs` module and the `tests/` `oracle_registry`
-            // include); the size is intentional generated audit data.
-            "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_query_specs.rs",
-            // The relation authority — one cohesive engine: the
-            // reentry/assumption frame machinery, the coinductive SCC
-            // discharge + admission routing, the inference-session plumbing,
-            // and the structural reducer share one worklist driver and the
-            // per-transaction state; the transient shapes already live in
-            // the sibling `relation_txn.rs`. The size is intentional
-            // cohesion (same precedent as `expr.rs` / `tokenizer.rs`).
-            "crates/verter_session/src/project_semantic_dispatch/relation.rs",
-            // Block-1.5 substrate split — view-aware prepared-decl
-            // bundle/type/value variants live alongside their base
-            // counterparts so the cache invariants stay in one file.
-            // Pending B-C5 split, this file is exempt.
-            "crates/verter_session/src/host_manage/prepared_decl.rs",
-            "crates/verter_compiler/src/compile/template_data.rs",
-            // The canonical HTML5 named-character-reference table (~2231 entries),
-            // auto-generated from the pinned official svelte `entities.js` by
-            // `scripts/generate-svelte-entities.mjs` and byte-pinned by the
-            // `svelte_entity_table_in_sync` freshness test. The size is intentional
-            // generated data (same precedent as `html_intrinsics_data.rs`); it is a
-            // pure data module with a tiny binary-search lookup.
-            "crates/verter_compiler/src/svelte/runtime/entity_table.rs",
-            // The honest Svelte differential-parity divergence allow-list — one
-            // `DivergenceRow` (fixture + axis + root-cause label + ground-truthed
-            // official-vs-Verter summary) per REAL `(fixture, axis)` divergence the
-            // generated matrix surfaces. GENERATED from the discovery pass
-            // (`enumerate_divergences_discovery`) over the pinned svelte@5.56.3 and
-            // byte-pinned by `known_divergences_are_real` (a stale, non-diverging
-            // row fails the gate). The size is intentional generated data — one row
-            // per divergence — and it is `include!`d into the `*_tests.rs` matrix,
-            // so it is not reachable as a runtime production module (same generated-
-            // data precedent as `entity_table.rs`); it cannot be meaningfully split.
-            "crates/verter_compiler/src/svelte/runtime/diff_oracle_divergences.rs",
-            // The Svelte reactive/lexical analysis core — the script-use scan (the
-            // `ShadowStack` + scope-frame collectors), the `BindingTable` /
-            // `ScopeGraph`, the per-expression reference collector, and the
-            // `should_proxy` / assignment-target analysis the rune classification
-            // depends on. The two collectors (`ScriptUseCollector`,
-            // `ExprReferenceCollector`) and the scope-frame helpers are mutually
-            // dependent and read by every syntax-side scanner; splitting the lexical
-            // model out would create a circular import (the scanners and the model
-            // co-define the shadow semantics). The size is intentional cohesion.
-            "crates/verter_compiler/src/svelte/runtime/expr.rs",
-            // The Svelte byte tokenizer + recursive-descent template parser — one
-            // cohesive forward byte scan. The close-tag well-formedness classifier
-            // (`classify_close_boundary` / `consume_and_classify_close`) and the
-            // strict-parse recovery points are mutually dependent with the scan and share
-            // the PRIVATE byte-cursor primitives (`at` / `len` / `slice` /
-            // `starts_with_ci_at` / the `pos` cursor + the `src` / `text` backings).
-            // Splitting the close-tag logic into a sibling `impl` block would force
-            // widening that byte-cursor surface to `pub(super)` (harming the parser's
-            // encapsulation) for no real cohesion gain — the strict-fact helpers already
-            // live in the sibling `strict_facts.rs` precisely because they are the only
-            // self-contained slice (they touch ONLY `strict_parse_errors`). The size is
-            // intentional cohesion (same precedent as `expr.rs`).
-            "crates/verter_compiler/src/svelte/parser/tokenizer.rs",
-            "crates/verter_compiler/src/ide/template/mod.rs",
-            "crates/verter_compiler/src/template/code_gen/ssr/mod.rs",
-            "crates/verter_compiler/src/template/code_gen/vapor/mod.rs",
-            "crates/verter_compiler/src/template/code_gen/vdom/element.rs",
-            "crates/verter_compiler/src/template/code_gen/vdom/slots.rs",
-            "crates/verter_compiler/src/tsc/script.rs",
-            "crates/verter_ffi/src/convert.rs",
-            "crates/verter_lsp/src/config.rs",
-            "crates/verter_lsp/src/features/completion.rs",
-            "crates/verter_lsp/src/server/sync_orchestration.rs",
-            "crates/verter_lsp/src/workspace_scanner.rs",
-            "crates/verter_mcp/src/server.rs",
-            "crates/verter_napi/src/lib.rs",
-            "crates/verter_parser/src/parser/mod.rs",
-            "crates/verter_parser/src/tokenizer/byte.rs",
-            "crates/verter_parser/src/utils/oxc/bindings/helpers.rs",
-            "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
-            "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
-            "crates/verter_protocol/src/component_meta.rs",
-            "crates/verter_scheduler/src/scheduler.rs",
-            // Cooperative-pump cutover added the caller-aware
-            // `next_ready_for_pump` overload alongside the legacy
-            // `next_ready`; both must live next to the dispatch /
-            // capacity / blocker bookkeeping they consume so the
-            // readiness invariants stay co-located. Splitting the
-            // typed-identity DAG into capacity / readiness / blocker
-            // modules is the eventual cleanup.
-            "crates/verter_scheduler/src/dag.rs",
-            "crates/verter_semantic/src/analysis/build.rs",
-            "crates/verter_semantic/src/analysis/component_meta.rs",
-            "crates/verter_semantic/src/analysis/html_intrinsics_data.rs",
-            "crates/verter_semantic/src/analysis/macros.rs",
-            "crates/verter_semantic/src/analysis/style.rs",
-            "crates/verter_semantic/src/analysis/template.rs",
-            "crates/verter_semantic/src/analysis/type_eval_build.rs",
-            "crates/verter_semantic/src/analysis/type_solver/prepared.rs",
-            "crates/verter_semantic/src/analysis/types.rs",
-            "crates/verter_session/src/component_meta_audit/mod.rs",
-            "crates/verter_session/src/component_meta_caches.rs",
-            "crates/verter_session/src/component_meta_materialize.rs",
-            // Authoritative per-file artifact storage layer —
-            // `FileArtifactKey`, `FileArtifacts`, the content-addressed
-            // + overlay-scoped read/write surface, the per-canonical
-            // retention sweep, and the promotion-aware LRU all live in
-            // one file so the multi-candidate cache invariants stay
-            // co-located. Adding the overlay-scoped key surface pushed
-            // it over the line; a split (key/store/eviction modules)
-            // is the eventual cleanup but is out of scope for the
-            // overlay-detection fix.
-            "crates/verter_session/src/file_artifact_store.rs",
-            "crates/verter_session/src/host_manage.rs",
-            "crates/verter_session/src/host_manage/analysis_io.rs",
-            // Macro-participation classification + cross-file dep
-            // discovery + structural rep walkers. Two iterative
-            // exhaustive TypeExpr walkers (collect /
-            // expr_contains_root_identity) per the W6.1 walker contract
-            // — splitting them across files would either duplicate the
-            // walker logic or force a shared helper crate, neither of
-            // which is cleaner than a co-located walker module.
-            "crates/verter_session/src/host_manage/component_meta_extract.rs",
-            "crates/verter_session/src/host_manage/component_meta_methods.rs",
-            "crates/verter_session/src/host_resolve.rs",
-            // Compile-tier virtual-file producer. Owns the cold-build
-            // `NonCacheable` admission lifecycle: the SetReasonGuard
-            // arming over the cold-compute pass, the scheduler-eviction
-            // guard (`remove_artifact_if_not_newer_than`) that drops
-            // stale artifacts past the compile-start generation, and
-            // the compile-start-generation snapshot threaded from
-            // `sched_snapshot_at_start` into the eviction call. The
-            // cache-runtime substrate hookups (test-only force-overflow
-            // injection block) are co-located so the
-            // admission/eviction contract stays byte-coherent with the
-            // compile pipeline. Splitting the admission lifecycle out
-            // into a sibling helper module is the eventual cleanup.
-            "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
-            // `ValidatedFactCache<K, V>` substrate + multi-candidate
-            // RCU storage + admission guards + per-counter
-            // instrumentation. The cache is the load-bearing
-            // primitive every consumer routes through; splitting it
-            // would either duplicate the substrate or push the API
-            // through a re-export shim with no behavioural gain.
-            "crates/verter_session/src/resolver_core/mod.rs",
-            // Block 7.5 Commit A added per-thread diagnostic
-            // instrumentation (`HOST_STORE_VIEW_FROM_HOST_BUILDS` +
-            // friends) that pushed this file over the 1500-line
-            // budget by ~12 lines. The instrumentation is gated
-            // behind atomic counters and intended to survive the
-            // Block 7.5 cutover for future bypass diagnostics.
-            // Splitting the file along the view-construction
-            // boundary is the eventual cleanup; the diagnostic surface
-            // is the load-bearing motivation for the temporary
-            // exemption.
-            "crates/verter_session/src/resolver_store.rs",
-            "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
-            "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
-            // Projector entry-points module. `ProjectedMember →
-            // ExpandedField` lowering, per-member projection, the
-            // intersection-arm merge handoff, and the published-surface
-            // projector trampoline all live here so the projection
-            // contract stays in one file. Splitting along
-            // expander-vs-projector lines is the eventual cleanup.
-            "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            "crates/verter_session/src/parse.rs",
-            // Per-request state container — owns `RequestContext`, the
-            // cache-attribution counters, the projection budget, the
-            // materialization-cache-suppress sticky flag, and the TLS
-            // install/restore plumbing. Densely documented because
-            // each field is the public API every cache/audit consumer
-            // reads. Splitting along counter / flag / budget lines is
-            // the eventual cleanup.
-            "crates/verter_session/src/request_context.rs",
-            "crates/verter_session/src/project_semantic_dispatch/build.rs",
-            "crates/verter_session/src/project_semantic_dispatch/lower.rs",
-            // Project semantic dispatch entry-points module. The
-            // `ProjectSemanticDispatch::execute` memo, the
-            // `SemanticQueryKey` cooperative-admission dispatcher, and
-            // the per-variant shape walkers are co-located so the
-            // cache invariants stay byte-coherent. Splitting along
-            // dispatch / cooperative-admission lines is the eventual
-            // cleanup.
-            "crates/verter_session/src/project_semantic_dispatch/mod.rs",
-            "crates/verter_session/src/project_semantic_dispatch/raise.rs",
-            "crates/verter_session/src/project_type_store.rs",
-            // The lazy declaration-body memo: the content-addressed
-            // `DeclBodyMemo` cells, the retained-parse demand cells
-            // (typedef / annotation hydration), and the lease plumbing are
-            // co-located so the fence/lease invariants stay byte-coherent.
-            // Splitting along cell-kind lines is the eventual cleanup once
-            // the residual TypeExpr bridge deletion lands.
-            "crates/verter_session/src/decl_body_memo.rs",
-            // Whole-file EvalEnv materialisation: the ordered declaration
-            // groups, augmentation scopes, and per-symbol cells share one
-            // in-file state machine (tests already extracted to the
-            // `eval_env_tests.rs` sibling).
-            "crates/verter_session/src/host_manage/eval_env.rs",
-            // The slot-binding graph builder: one coherent module owning
-            // the synthetic slot-binding carrier construction and the
-            // graph-native binding rows. Splitting would cross-cut the
-            // binding state machine.
-            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
-            // The graph-free fact substrate (`NoTypeExpr` facts + locator
-            // kinds + fingerprints): a single closed vocabulary file by
-            // design — the fact taxonomy is deliberately co-located so the
-            // closed-enum discipline stays reviewable in one place.
-            "crates/verter_type_expr/src/facts.rs",
-            "crates/verter_session/src/resolver_core/component_meta.rs",
-            "crates/verter_session/src/resolver_core/component_meta_registry.rs",
-            "crates/verter_session/src/resolver_core/external_type_frontier.rs",
-            "crates/verter_session/src/resolver_core/fallthrough.rs",
-            "crates/verter_session/src/resolver_core/shallow_file_state.rs",
-            "crates/verter_session/src/semantic_query.rs",
-            "crates/verter_session/src/semantic_query_memo/mod.rs",
-            "crates/verter_session/src/semantic_query_memo/arena.rs",
-            "crates/verter_session/src/semantic_query_memo/derivation.rs",
-            "crates/verter_session/src/semantic_query_memo/family.rs",
-            "crates/verter_session/src/semantic_query_memo/inflight.rs",
-            "crates/verter_session/src/semantic_query_memo/interner.rs",
-            "crates/verter_session/src/semantic_query_memo/stats.rs",
-            "crates/verter_session/src/semantic_query_memo/tests.rs",
-            "crates/verter_session/src/types.rs",
-            // Typeinfo flow-return catalog. Single-file cataloguing the
-            // function-body flow-return inference rules under
-            // `#[cfg(test)]` module hierarchy (`typeinfo::typeinfo_tests`).
-            // Per the typeinfo design these inference rules are gated
-            // behind the cfg-test parent and intentionally co-located
-            // so the rule table stays in one place. The architecture
-            // guard walks `src/` recursively without filtering on
-            // ancestor `*_tests/` directories; this exemption is the
-            // documented escape until the walker grows directory
-            // filtering.
-            "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_catalog.rs",
-            "crates/verter_tsc/src/checker.rs",
-            "crates/verter_type_runtime/src/tsgo/ipc.rs",
-            "crates/verter_type_runtime/src/tsserver/ipc.rs",
-            "crates/verter_workspace/src/resolver.rs",
-            // Dispatch walker — single coherent module owning the
-            // empty-path Shallow surface enumeration, intersection /
-            // union member-level merge, and Pick / Omit / Indexed
-            // route extraction. Splitting would cross-cut the
-            // member-merge state machine.
-            "crates/verter_session/src/project_semantic_dispatch/walk.rs",
-            // verter_wasm FFI glue — same shape as verter_napi/lib.rs:
-            // a single `mod` exposing every WASM-bindgen entry-point
-            // for parity with the NAPI surface. Splitting would force
-            // entry-point fragmentation across multiple bindgen mods.
-            "crates/verter_wasm/src/lib.rs",
-        ])
-    }
-
-    /// Predicate: count newlines in `src` and return the line count.
-    pub fn count_lines(src: &str) -> usize {
-        src.lines().count()
-    }
-
-    /// Walk the production tree; return `(rel_path, line_count)`
-    /// pairs for every file that exceeds `target` lines AND is not
-    /// in `exempt`.
-    pub fn guard6_violations(
-        target: usize,
-        exempt: &BTreeSet<&'static str>,
-    ) -> Vec<(String, usize)> {
-        let crates_root = workspace_root().join("crates");
-        let mut violations = Vec::new();
-        let entries = match fs::read_dir(&crates_root) {
-            Ok(it) => it,
-            Err(_) => return violations,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let src_dir = path.join("src");
-            if !src_dir.exists() {
-                continue;
-            }
-            for file in walk_production_rs(&src_dir) {
-                let src = match fs::read_to_string(&file) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let lines = count_lines(&src);
-                if lines <= target {
-                    continue;
-                }
-                let rel = relative_to_root(&file);
-                if exempt.contains(rel.as_str()) {
-                    continue;
-                }
-                violations.push((rel, lines));
-            }
-        }
-        violations.sort();
-        violations
-    }
-
-    #[test]
-    fn no_oversize_files() {
-        let target = guard6_target_line_count();
-        let violations = guard6_violations(target, &guard6_exemptions());
-        assert!(
-            violations.is_empty(),
-            "Guard 6 (`no_oversize_files`) violations: production source files exceed {target} lines\n\
-             without an explicit exemption:\n  {}\n\n\
-             Either split the file along sensible boundaries (preferred — see B-C5 / §12.A4),\n\
-             or add the file to `guard6_exemptions()` if the size is intentional.",
-            violations
-                .iter()
-                .map(|(rel, n)| format!("{rel} ({n} lines)"))
-                .collect::<Vec<_>>()
-                .join("\n  "),
-        );
-    }
-
-    #[test]
-    fn guard6_predicate_counts_lines_correctly() {
-        assert_eq!(count_lines(""), 0, "empty string has zero lines");
-        assert_eq!(count_lines("a"), 1, "single line without newline");
-        assert_eq!(
-            count_lines("a\n"),
-            1,
-            "trailing newline does not add a line"
-        );
-        assert_eq!(count_lines("a\nb"), 2, "two lines, no trailing newline");
-        assert_eq!(count_lines("a\nb\n"), 2, "two lines with trailing newline");
-        let oversize: String = (0..(guard6_target_line_count() + 1))
-            .map(|i| format!("// line {i}\n"))
-            .collect();
-        assert!(
-            count_lines(&oversize) > guard6_target_line_count(),
-            "guard 6 predicate must report > target lines for an oversized fixture",
-        );
-    }
-
     // ── Guard 7 — no_phase_archaeology_in_production_code ──
     //
     // Production source code must read as final-state. References to plan
@@ -9456,10 +9107,6 @@ mod foundations_guards {
             "LSP unit-test utilities — temp workspace creation and `canonicalize` for fixture path resolution.",
         ),
         (
-            "crates/verter_lsp/src/real_provider_tests/rename.rs",
-            "real-provider rename integration tests (`#[cfg(test)] mod real_provider_tests`) — the `read_file` helper uses `std::fs::read_to_string` to read on-disk fixture content for a CLOSED file and assert the on-disk-vs-LSP-edit contract. Same test-fixture-read category as `test_harness.rs`/`test_utils.rs`; not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
-        ),
-        (
             "crates/verter_lsp/src/type_provider/project_sync.rs",
             "managed-tsgo project-sync tests (`#[cfg(test)] mod tests`) stage temporary dependency packages and carrier paths to assert virtual-fallback and exact-delivery behavior; test fixtures only.",
         ),
@@ -10278,11 +9925,14 @@ fn guard9_predicate_passes_for_known_implementor() {
 // guard supersedes that allowance — the cross-product dependency is
 // removed in full.
 //
-// The companion D26 acceptance test
-// `lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves` then asserts
-// the binary entrypoints actually reflect that boundary AND that
-// `verter_mcp_server` still ships the standalone HTTP launcher so
-// IDE consumers have a separately-shippable transport.
+// The companion structural guard
+// `lsp_binary_compile_graph_cannot_reach_verter_mcp` then asserts the
+// RESOLVED workspace dependency graph reflects that boundary
+// transitively; the standalone HTTP launcher's liveness is owned by the
+// behavioral spawn tests driving the shared serving contract in
+// `crates/verter_mcp/tests/support/http_serving_contract.rs` (one per
+// entry binary: `crates/verter_mcp/tests/cases/http_readiness.rs` and
+// `crates/verter_mcp_server/tests/cases/http_serving.rs`).
 // ===========================================================================
 
 /// Predicate: scan a `Cargo.toml` snippet for any dependency declaration
@@ -10428,97 +10078,136 @@ fn guard10_predicate_rejects_deliberate_cross_product_dep() {
 }
 
 // ===========================================================================
-// D26 — lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves
+// D26 — lsp_binary_compile_graph_cannot_reach_verter_mcp
 //
-// Combined acceptance discriminator for the Tier 3 LSP/MCP product
-// boundary decoupling. The test FAILS for two distinct reasons
-// before Tier 3 lands and PASSES only when both conditions hold:
+// The LSP and MCP products ship as separate processes; the LSP binary
+// must not embed the MCP server. That boundary is held STRUCTURALLY:
+// `cargo metadata` — cargo's own parse of every workspace manifest
+// (every declaration form, renames, dotted tables, target-gated
+// sections) — must show NO dependency path from `verter_lsp` to
+// `verter_mcp` over the dep kinds that link into the compiled binary
+// (normal + build; dev-deps never ship). `verter_mcp` is an
+// unpublished, path-only workspace crate, so any dependency path to it
+// runs entirely through workspace members and the workspace-local BFS
+// below is a complete transitive check. With the dep edge provably
+// absent, the COMPILER rejects any `use verter_mcp` / `verter_mcp::`
+// reference in LSP sources — the retired source-text greps of
+// `verter_lsp/src/main.rs` proved strictly less (one file, direct
+// references only) and are superseded, not weakened.
 //
-//   (a) `verter_lsp` has been fully decoupled from `verter_mcp` —
-//       no Cargo dep, no `serve_mcp_http` function on the binary
-//       entrypoint, no `verter_mcp::` path references, no
-//       `use verter_mcp` import.
-//   (b) `verter_mcp_server` still ships the standalone HTTP launcher
-//       so consumers retain a working out-of-process MCP transport.
-//
-// Per plan §5.2: pre-Tier-3 FAILS for two distinct reasons (Cargo dep
-// present OR HTTP launcher broken); post-Tier-3 PASSES only when
-// both conditions hold.
+// The other half of the original acceptance — "the standalone MCP HTTP
+// launcher still serves" — is owned by the shared BEHAVIORAL serving
+// contract `crates/verter_mcp/tests/support/http_serving_contract.rs`
+// (`assert_http_launcher_binds_announces_and_serves`), which runs a real
+// entry binary with `--transport http --port 0`, requires the canonical
+// readiness record as the FIRST stdout line, then POSTs an MCP
+// `initialize` to the ANNOUNCED `/mcp` URL and requires a completed 200
+// streamable-HTTP response (session id + `serverInfo`) — a launcher that
+// binds and announces but parks before running the HTTP service fails,
+// because the listener backlog alone satisfies only a bare TCP connect.
+// Both shipped entry points delegate to the shared `verter_mcp::run::run`,
+// and EACH is pinned by its own spawn test driving that contract:
+// `crates/verter_mcp/tests/cases/http_readiness.rs` (`verter-mcp`) and
+// `crates/verter_mcp_server/tests/cases/http_serving.rs`
+// (`verter-mcp-server`), so a divergence between the twins is covered.
 // ===========================================================================
 
 #[test]
-#[allow(non_snake_case)]
-fn lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves() {
-    // ── Condition (a) — LSP no longer embeds MCP ──
-    let lsp_cargo = read_workspace_file("crates/verter_lsp/Cargo.toml");
+fn lsp_binary_compile_graph_cannot_reach_verter_mcp() {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let output = std::process::Command::new(cargo)
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run `cargo metadata`");
     assert!(
-        !cargo_toml_declares_dep(&lsp_cargo, "verter_mcp"),
-        "D26 condition (a) violation: `crates/verter_lsp/Cargo.toml` \
-         still declares `verter_mcp` as a dependency. Tier 3 deletes \
-         this dep so the LSP binary cannot embed the MCP server.",
+        output.status.success(),
+        "`cargo metadata` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse `cargo metadata` output");
+    let packages = json
+        .get("packages")
+        .and_then(|v| v.as_array())
+        .expect("cargo metadata reports packages");
+
+    let member_names: BTreeSet<&str> = packages
+        .iter()
+        .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
+        .collect();
+    // The guard must fail LOUDLY if either endpoint vanishes — a silently
+    // empty traversal would prove nothing.
+    assert!(
+        member_names.contains("verter_lsp"),
+        "D26 guard integrity: workspace no longer contains `verter_lsp`; \
+         re-point this guard at the LSP product crate."
+    );
+    assert!(
+        member_names.contains("verter_mcp"),
+        "D26 guard integrity: workspace no longer contains `verter_mcp`; \
+         re-point this guard at the MCP product crate."
     );
 
-    // The LSP binary entrypoint must not host the in-process MCP
-    // server. We assert the absence of the `serve_mcp_http` function
-    // (the embedding point) and any direct `verter_mcp` reference.
-    let lsp_main = read_workspace_file("crates/verter_lsp/src/main.rs");
-    assert!(
-        !lsp_main.contains("fn serve_mcp_http"),
-        "D26 condition (a) violation: `crates/verter_lsp/src/main.rs` \
-         still defines `serve_mcp_http`. Tier 3 deletes this in-process \
-         MCP launcher; consumers must spawn `verter_mcp_server` \
-         instead.",
-    );
-    assert!(
-        !lsp_main.contains("use verter_mcp"),
-        "D26 condition (a) violation: `crates/verter_lsp/src/main.rs` \
-         still imports `verter_mcp`. Tier 3 removes all cross-product \
-         imports from the LSP binary.",
-    );
-    assert!(
-        !lsp_main.contains("verter_mcp::"),
-        "D26 condition (a) violation: `crates/verter_lsp/src/main.rs` \
-         still references `verter_mcp::` symbols on a path. Tier 3 \
-         removes all cross-product references from the LSP binary.",
-    );
+    // Workspace-member dependency edges over LINKING kinds only: `null`
+    // (normal) and `build`. Dev-deps do not enter the shipped binary and
+    // guard 10 (`no_cross_product_binary_imports`) already rejects a direct
+    // declaration of any kind.
+    let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for package in packages {
+        let name = package
+            .get("name")
+            .and_then(|n| n.as_str())
+            .expect("package has a name");
+        let deps = package
+            .get("dependencies")
+            .and_then(|v| v.as_array())
+            .expect("package lists dependencies");
+        for dep in deps {
+            let kind = dep.get("kind").and_then(|k| k.as_str());
+            if kind == Some("dev") {
+                continue;
+            }
+            let dep_name = dep
+                .get("name")
+                .and_then(|n| n.as_str())
+                .expect("dependency has a name");
+            if member_names.contains(dep_name) {
+                edges.entry(name).or_default().push(dep_name);
+            }
+        }
+    }
 
-    // ── Condition (b) — MCP HTTP launcher still serves ──
-    // The standalone `verter_mcp_server` binary must continue to
-    // expose the HTTP transport so consumers that previously routed
-    // through `verter-lsp --mcp-port=...` retain a working
-    // out-of-process replacement. We assert the presence of the
-    // `Transport::Http` arm wired through `axum::serve` on a TCP
-    // listener — the structural shape that proves the launcher
-    // still serves.
-    let mcp_main = read_workspace_file("crates/verter_mcp_server/src/main.rs");
-    assert!(
-        mcp_main.contains("Transport::Http"),
-        "D26 condition (b) violation: \
-         `crates/verter_mcp_server/src/main.rs` no longer matches \
-         `Transport::Http` — the standalone MCP HTTP launcher is \
-         broken. Tier 3 requires this launcher remain operational.",
-    );
-    assert!(
-        mcp_main.contains("axum::serve"),
-        "D26 condition (b) violation: \
-         `crates/verter_mcp_server/src/main.rs` no longer calls \
-         `axum::serve` — the HTTP transport is broken. Tier 3 \
-         requires this launcher remain operational.",
-    );
-    assert!(
-        mcp_main.contains("TcpListener::bind"),
-        "D26 condition (b) violation: \
-         `crates/verter_mcp_server/src/main.rs` no longer binds a \
-         TCP listener — the HTTP transport cannot start. Tier 3 \
-         requires this launcher remain operational.",
-    );
-    assert!(
-        mcp_main.contains("StreamableHttpService"),
-        "D26 condition (b) violation: \
-         `crates/verter_mcp_server/src/main.rs` no longer wires the \
-         `StreamableHttpService` rmcp transport. Tier 3 requires \
-         this launcher remain operational.",
-    );
+    // BFS from `verter_lsp` with predecessor tracking, so a violation
+    // names the exact path that re-embedded MCP.
+    let mut predecessor: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut queue = VecDeque::from(["verter_lsp"]);
+    let mut visited: BTreeSet<&str> = BTreeSet::from(["verter_lsp"]);
+    while let Some(current) = queue.pop_front() {
+        for &next in edges.get(current).into_iter().flatten() {
+            if visited.insert(next) {
+                predecessor.insert(next, current);
+                queue.push_back(next);
+            }
+        }
+    }
+
+    if visited.contains("verter_mcp") {
+        let mut path = vec!["verter_mcp"];
+        while let Some(&prev) = predecessor.get(path[path.len() - 1]) {
+            path.push(prev);
+        }
+        path.reverse();
+        panic!(
+            "D26 violation: the LSP binary's compile graph reaches `verter_mcp` \
+             via {} — the LSP and MCP products must ship as separate processes \
+             with no cross-product compile-graph coupling. Spawn the standalone \
+             `verter-mcp` binary instead.",
+            path.join(" -> "),
+        );
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -16525,30 +16214,36 @@ fn fn_body_span(src: &str, fn_name: &str) -> (usize, usize) {
     panic!("guard anchor moved: unbalanced braces in `fn {fn_name}`");
 }
 
-/// STRUCTURAL guard for the augmentation-index under-invalidation class.
+/// STRUCTURAL guard for the augmentation-index under-invalidation class
+/// AND the artifact retention lease.
 ///
-/// Every path that drops an entry from `self.artifacts` in
-/// `file_artifact_store.rs` MUST route through the single removal
-/// chokepoint `evict_artifact_keys`, which is the only site allowed to
+/// Every path that removes an entry from `self.artifacts` in
+/// `file_artifact_store.rs` MUST route through the single retirement
+/// chokepoint `retire_artifact_keys`, which is the only site allowed to
 /// call `self.artifacts.remove(...)` / `.retain(...)` / `.drain(...)` /
-/// `.swap_remove(...)` / `.pop(...)`. The chokepoint always collects the
-/// removed entries' augmentation facts and feeds them to
-/// `invalidate_augmentation_index_for_augmenter`, so it is impossible by
-/// construction to evict an artifact while leaving a stale `AugmenterSet`
-/// behind. The single exception is the whole-store reset
-/// `self.artifacts.clear()` in `evict_if_schema_mismatch`, which is paired
-/// with `self.augmentation_index.clear()` in the same method (the
-/// strongest possible invalidation).
+/// `.swap_remove(...)` / `.pop(...)` / `.clear(...)`. The chokepoint
+/// always (a) moves the removed version into the retired chain under a
+/// fresh membership epoch, so no `FileArtifactRoot` loses reachability
+/// to a world it captured, and (b) collects the removed entries'
+/// augmentation facts and feeds them to the index invalidation under
+/// that SAME epoch. Both are therefore impossible to bypass by
+/// construction.
 ///
-/// This closes the class as a compile-time invariant: a 3rd, 4th, … future
-/// removal site that bypasses the chokepoint fails this guard instead of
-/// silently reintroducing the round-6 P1 bug.
+/// `self.artifacts.clear()` has NO exception any more: a whole-store
+/// reset (the schema-mismatch path) is a retirement like every other
+/// removal — clearing the map would free versions a live root still
+/// addresses. That is a STRENGTHENING of the previous contract, where
+/// the schema reset was allowed to clear the map outright.
+///
+/// This closes both classes as compile-time invariants: a 3rd, 4th, …
+/// future removal site that bypasses the chokepoint fails this guard
+/// instead of silently reintroducing the round-6 P1 under-invalidation
+/// bug or silently revoking a captured root's lease.
 #[test]
 fn artifact_removal_routes_through_single_chokepoint() {
     let src = read_workspace_file("crates/verter_session/src/file_artifact_store.rs");
 
-    let (choke_start, choke_end) = fn_body_span(&src, "evict_artifact_keys");
-    let (schema_start, schema_end) = fn_body_span(&src, "evict_if_schema_mismatch");
+    let (choke_start, choke_end) = fn_body_span(&src, "retire_artifact_keys");
 
     // Mutating-removal operations that drop entries from the map.
     let removal_ops = [
@@ -16557,6 +16252,7 @@ fn artifact_removal_routes_through_single_chokepoint() {
         "self.artifacts.drain(",
         "self.artifacts.swap_remove(",
         "self.artifacts.pop(",
+        "self.artifacts.clear(",
     ];
     for op in removal_ops {
         let mut search_from = 0usize;
@@ -16566,48 +16262,70 @@ fn artifact_removal_routes_through_single_chokepoint() {
             let inside_chokepoint = at >= choke_start && at < choke_end;
             assert!(
                 inside_chokepoint,
-                "`{op}` at byte {at} is OUTSIDE the `evict_artifact_keys` \
+                "`{op}` at byte {at} is OUTSIDE the `retire_artifact_keys` \
                  chokepoint (bytes {choke_start}..{choke_end}). Every \
                  `self.artifacts` removal MUST route through that chokepoint so \
-                 the augmentation index is invalidated for the removed \
-                 augmenters — otherwise a stale `AugmenterSet` survives an \
+                 (a) the removed version is RETIRED rather than freed — a live \
+                 `FileArtifactRoot` must keep reaching the world it captured — \
+                 and (b) the augmentation index is invalidated for the removed \
+                 augmenters, else a stale `AugmenterSet` survives an \
                  artifact-only eviction (round-6 P1 under-invalidation class). \
-                 Route this removal through `evict_artifact_keys` / \
+                 Route this removal through `retire_artifact_keys` / \
                  `drop_artifact_entry`."
             );
         }
     }
 
-    // `self.artifacts.clear()` is only allowed in the schema-mismatch
-    // whole-store reset, which clears the augmentation index in the same
-    // method.
-    let clear_op = "self.artifacts.clear(";
-    let mut search_from = 0usize;
-    while let Some(rel) = src[search_from..].find(clear_op) {
-        let at = search_from + rel;
-        search_from = at + clear_op.len();
-        let inside_schema_reset = at >= schema_start && at < schema_end;
-        assert!(
-            inside_schema_reset,
-            "`{clear_op}` at byte {at} is OUTSIDE `evict_if_schema_mismatch` \
-             (bytes {schema_start}..{schema_end}). A whole-store clear must be \
-             paired with `self.augmentation_index.clear()` in that method; any \
-             other `self.artifacts.clear()` would orphan the augmentation index."
-        );
-    }
+    // The chokepoint must actually retain AND invalidate — not a
+    // vacuous wrapper in either direction.
+    let choke_body = &src[choke_start..choke_end];
     assert!(
-        src[schema_start..schema_end].contains("self.augmentation_index.clear("),
-        "the `evict_if_schema_mismatch` whole-store reset MUST clear the \
-         augmentation index in the same method, else the clear orphans a \
-         stale index."
+        choke_body.contains("invalidate_augmentation_index_at_epoch"),
+        "`retire_artifact_keys` MUST call \
+         `invalidate_augmentation_index_at_epoch` — the chokepoint exists \
+         precisely to make removal and index-invalidation inseparable, under \
+         ONE membership epoch."
     );
-
-    // The chokepoint must actually invalidate — not a vacuous wrapper.
+    let publish_call = choke_body.find("self.publish_retired_version(");
     assert!(
-        src[choke_start..choke_end].contains("invalidate_augmentation_index_for_augmenter"),
-        "`evict_artifact_keys` MUST call \
-         `invalidate_augmentation_index_for_augmenter` — the chokepoint exists \
-         precisely to make removal and index-invalidation inseparable."
+        publish_call.is_some(),
+        "`retire_artifact_keys` MUST move the removed version into the \
+         retired chain (via `publish_retired_version`) — a removal that frees \
+         the payload revokes the lease every live `FileArtifactRoot` holds on \
+         its captured world."
+    );
+    // PUBLISH BEFORE RETRACT. A version MOVES between two maps and a
+    // root-relative reader consults them in sequence holding neither, so
+    // retracting first opens a window where the version is in NEITHER —
+    // and the first-writer-wins `CanonicalView` memo freezes that
+    // never-existed world into every request the racing view serves.
+    let remove_call = choke_body
+        .find("self.artifacts.remove(")
+        .expect("the chokepoint performs the removal");
+    assert!(
+        publish_call.is_some_and(|publish| publish < remove_call),
+        "`retire_artifact_keys` MUST publish the retired version BEFORE it \
+         removes the live entry — the reverse order lets a concurrent \
+         root-relative read find the version in neither map."
+    );
+    assert!(
+        choke_body.contains("reserve_membership_epoch"),
+        "`retire_artifact_keys` MUST reserve a retirement epoch, else the \
+         retired version has no visibility window and no root can address it."
+    );
+    // The reservation must outlive the application: releasing it before
+    // the last mutation lands would let a capture name a half-applied
+    // epoch.
+    let reserve_at = choke_body
+        .find("reserve_membership_epoch")
+        .expect("checked above");
+    let release_at = choke_body
+        .find("drop(reservation)")
+        .expect("`retire_artifact_keys` MUST release its epoch reservation");
+    assert!(
+        reserve_at < remove_call && remove_call < release_at,
+        "the epoch reservation MUST span the whole application — a capture \
+         may never name an epoch whose mutation is still in flight."
     );
 }
 

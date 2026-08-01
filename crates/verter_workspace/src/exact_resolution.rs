@@ -493,6 +493,13 @@ impl EdgeStore {
             .unwrap_or(false)
     }
 
+    pub(crate) fn exact_resolutions_for_owner(&self, canonical_id: &str) -> Vec<ExactResolution> {
+        self.files
+            .get(canonical_id)
+            .map(|state| state.deps.exact_resolutions.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Surgically remove all state for a file. O(canonical_union +
     /// active_stems) per removal — no global iteration: the
     /// critical-performance contract for per-file invalidation.

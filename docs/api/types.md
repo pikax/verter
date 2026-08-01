@@ -263,7 +263,7 @@ Type-safe slot rendering function. Validates that slot children match the expect
 
 Converts a slot function into a JSX-compatible render callback. Returns a function that accepts a callback and returns `JSX.Element`.
 
-```ts
+```tsx
 import { renderSlotJSX } from '@verter/types'
 
 // slot: (props: { msg: string }) => VNode[]

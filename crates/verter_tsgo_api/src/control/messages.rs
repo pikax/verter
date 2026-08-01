@@ -110,6 +110,13 @@ pub struct WaitInitializedResult {
     pub root_uri: Option<String>,
     /// The `workspaceFolders` the editor sent in `initialize`, if any.
     pub workspace_folders: Option<serde_json::Value>,
+    /// The `capabilities.semanticTokensProvider.legend` the SERVER advertised
+    /// in the observed `initialize` response, if any. The shared lane's
+    /// semantic-token remap is built from this — without it the feature fails
+    /// closed (no tokens). `#[serde(default)]` keeps the wire compatible with
+    /// shims that predate the field.
+    #[serde(default)]
+    pub semantic_tokens_legend: Option<serde_json::Value>,
 }
 
 /// `verter/carrierDidOpenSynced` params: an off-disk carrier overlay to inject.

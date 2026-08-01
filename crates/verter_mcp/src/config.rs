@@ -27,6 +27,13 @@ pub struct Cli {
     #[arg(long)]
     pub no_scan: bool,
 
+    /// Host process id that owns this server's lifetime; the server exits
+    /// when that process dies (the same containment contract as
+    /// `verter-lsp --client-pid`). Omit for standalone agent launches,
+    /// whose lifetime is owned by their transport.
+    #[arg(long)]
+    pub client_pid: Option<u32>,
+
     /// Enable strict slot type checking in IDE/TSX output
     #[arg(long)]
     pub strict_slots: bool,

@@ -1,0 +1,5 @@
+error[E0614]: type `UnavailableScriptFacts` cannot be dereferenced
+ --> tests/cases/compile-fail/script_fact_unavailable_not_deref.rs:5:23
+  |
+5 |         let _facts = &**unavailable;
+  |                       ^^^^^^^^^^^^^ can't be dereferenced

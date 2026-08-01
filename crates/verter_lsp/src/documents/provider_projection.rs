@@ -104,7 +104,7 @@ pub enum ProviderPositionMapper {
     /// edits applied to the exact buffer delivered to TypeScript.
     RewrittenSourceMap {
         base: Arc<PositionMapper>,
-        rewrites: Arc<GeneratedRewriteMapper>,
+        rewrites: Arc<TransformedBufferMap>,
     },
     /// Line-only rewrite-aware mapping (self-file rune module).
     SelfFile(SelfFileProviderMapper),
@@ -119,7 +119,7 @@ impl ProviderPositionMapper {
 
     /// Compose a compiler source map with post-compile provider-buffer edits.
     #[must_use]
-    pub fn rewritten_source_map(mapper: PositionMapper, rewrites: GeneratedRewriteMapper) -> Self {
+    pub fn rewritten_source_map(mapper: PositionMapper, rewrites: TransformedBufferMap) -> Self {
         if rewrites.is_empty() {
             Self::source_map(mapper)
         } else {
@@ -247,28 +247,76 @@ struct RewriteSegment {
     provider_end: u32,
 }
 
-/// Coordinate transform for deterministic same-line edits applied to a
-/// generated provider buffer after compilation.
+/// The generated→provider coordinate transform for a provider buffer produced
+/// by a [`CodeTransform`](verter_compiler::code_transform::CodeTransform).
+///
+/// This map is DERIVED from the transform's own output geometry — the
+/// `GeneratedSourceRange`s of the SAME chunk walk that produced the delivered
+/// bytes — so the bytes and the mapping cannot disagree. It is never a second,
+/// independently maintained model of the same edits: there is no edit list to
+/// re-interpret and no cumulative column delta to re-accumulate. Every provider
+/// column comes from the built output's own line index at the byte offset the
+/// transform reported for that chunk.
 ///
 /// Positions inside replacement text fail closed because those characters have
-/// no faithful one-to-one origin. Positions after a replacement retain their
-/// line and are shifted by the cumulative encoded-width delta on that line.
+/// no faithful one-to-one origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GeneratedRewriteMapper {
+pub struct TransformedBufferMap {
     rewrites: Vec<RewriteSegment>,
 }
 
-impl GeneratedRewriteMapper {
-    /// Build from replacements whose byte spans index into the generated buffer
-    /// before any replacement is applied.
+impl TransformedBufferMap {
+    /// The map for a buffer the provider holds VERBATIM (no transform ran).
     #[must_use]
-    pub fn new(
-        replacements: &[(usize, usize, String)],
-        line_index: &super::line_index::LineIndex,
-    ) -> Self {
-        let mut rewrites = replacement_segments(replacements, line_index);
-        shift_provider_segments(&mut rewrites);
-        Self { rewrites }
+    pub fn identity() -> Self {
+        Self {
+            rewrites: Vec::new(),
+        }
+    }
+
+    /// Derive the map from a transform's built output geometry.
+    ///
+    /// `source_index` indexes the transform's ORIGINAL bytes, `output_index` the
+    /// BUILT bytes, and `ranges` is what `build_string_with_source_ranges`
+    /// returned for that exact build. Only `replacement` ranges can move a
+    /// column; byte-preserved ranges carry their neighbours along and need no
+    /// segment.
+    ///
+    /// Returns `None` when a replacement cannot be expressed in this line-column
+    /// model (an offset the index rejects, or an edit that spans a line
+    /// boundary on either side — which would shift LINES, not just columns).
+    /// Fail-closed by construction: a caller that cannot map a buffer must not
+    /// deliver it, rather than deliver bytes whose positions silently mislead.
+    #[must_use]
+    pub fn from_transform_geometry(
+        source_index: &super::line_index::LineIndex,
+        output_index: &super::line_index::LineIndex,
+        ranges: &[verter_compiler::code_transform::GeneratedSourceRange],
+    ) -> Option<Self> {
+        let mut rewrites = Vec::new();
+        for range in ranges.iter().filter(|range| range.replacement) {
+            let src_start = source_index.offset_to_position(range.source_start)?;
+            let src_end = source_index.offset_to_position(range.source_end)?;
+            let provider_start = output_index.offset_to_position(range.generated_start)?;
+            let provider_end = output_index.offset_to_position(range.generated_end)?;
+            if src_start.line != src_end.line || provider_start.line != provider_end.line {
+                return None;
+            }
+            if src_start.line != provider_start.line {
+                // A preceding edit moved this one onto a different output line:
+                // the model is line-preserving, so it cannot describe the buffer.
+                return None;
+            }
+            rewrites.push(RewriteSegment {
+                line: src_start.line,
+                src_start: src_start.character,
+                src_end: src_end.character,
+                provider_start: provider_start.character,
+                provider_end: provider_end.character,
+            });
+        }
+        rewrites.sort_by_key(|rewrite| (rewrite.line, rewrite.src_start));
+        Some(Self { rewrites })
     }
 
     #[must_use]
@@ -298,56 +346,13 @@ impl GeneratedRewriteMapper {
     }
 }
 
-fn replacement_segments(
-    replacements: &[(usize, usize, String)],
-    line_index: &super::line_index::LineIndex,
-) -> Vec<RewriteSegment> {
-    let mut rewrites = Vec::with_capacity(replacements.len());
-    for (byte_start, byte_end, replacement) in replacements {
-        let Some(start_pos) = line_index.offset_to_position(*byte_start as u32) else {
-            continue;
-        };
-        let Some(end_pos) = line_index.offset_to_position(*byte_end as u32) else {
-            continue;
-        };
-        if start_pos.line != end_pos.line {
-            continue;
-        }
-        let provider_width = encoded_len(replacement, &line_index.encoding());
-        let src_width = end_pos.character.saturating_sub(start_pos.character);
-        rewrites.push(RewriteSegment {
-            line: start_pos.line,
-            src_start: start_pos.character,
-            src_end: start_pos.character + src_width,
-            provider_start: start_pos.character,
-            provider_end: start_pos.character + provider_width,
-        });
-    }
-    rewrites.sort_by_key(|rewrite| (rewrite.line, rewrite.src_start));
-    rewrites
-}
-
-fn shift_provider_segments(rewrites: &mut [RewriteSegment]) {
-    let mut current_line = u32::MAX;
-    let mut line_delta: i64 = 0;
-    for rewrite in rewrites {
-        if rewrite.line != current_line {
-            current_line = rewrite.line;
-            line_delta = 0;
-        }
-        if line_delta != 0 {
-            let shift =
-                |column: u32| u32::try_from(i64::from(column) + line_delta).unwrap_or(column);
-            rewrite.provider_start = shift(rewrite.provider_start);
-            rewrite.provider_end = shift(rewrite.provider_end);
-        }
-        line_delta += i64::from(rewrite.provider_end - rewrite.provider_start)
-            - i64::from(rewrite.src_end - rewrite.src_start);
-    }
-}
-
+/// Map a generated column to its provider column by ANCHORING on the last
+/// transform segment the column sits past: the provider column is that
+/// segment's transform-reported output end plus the untouched bytes since. No
+/// cumulative delta is re-derived — the anchor IS the transform's own output
+/// coordinate.
 fn source_col_to_provider(rewrites: &[RewriteSegment], line: u32, column: u32) -> Option<u32> {
-    let mut delta: i64 = 0;
+    let mut anchor: Option<&RewriteSegment> = None;
     for rewrite in rewrites.iter().filter(|rewrite| rewrite.line == line) {
         if column < rewrite.src_start {
             break;
@@ -355,14 +360,18 @@ fn source_col_to_provider(rewrites: &[RewriteSegment], line: u32, column: u32) -
         if column < rewrite.src_end {
             return None;
         }
-        delta += i64::from(rewrite.provider_end - rewrite.provider_start)
-            - i64::from(rewrite.src_end - rewrite.src_start);
+        anchor = Some(rewrite);
     }
-    u32::try_from(i64::from(column) + delta).ok()
+    match anchor {
+        Some(rewrite) => rewrite.provider_end.checked_add(column - rewrite.src_end),
+        None => Some(column),
+    }
 }
 
+/// The inverse anchor walk: a provider column past a segment maps back to that
+/// segment's source end plus the untouched bytes since.
 fn provider_col_to_source(rewrites: &[RewriteSegment], line: u32, column: u32) -> Option<u32> {
-    let mut delta: i64 = 0;
+    let mut anchor: Option<&RewriteSegment> = None;
     for rewrite in rewrites.iter().filter(|rewrite| rewrite.line == line) {
         if column < rewrite.provider_start {
             break;
@@ -370,10 +379,12 @@ fn provider_col_to_source(rewrites: &[RewriteSegment], line: u32, column: u32) -
         if column < rewrite.provider_end {
             return None;
         }
-        delta += i64::from(rewrite.provider_end - rewrite.provider_start)
-            - i64::from(rewrite.src_end - rewrite.src_start);
+        anchor = Some(rewrite);
     }
-    u32::try_from(i64::from(column) - delta).ok()
+    match anchor {
+        Some(rewrite) => rewrite.src_end.checked_add(column - rewrite.provider_end),
+        None => Some(column),
+    }
 }
 
 fn rewrite_identity_hash16(rewrites: &[RewriteSegment]) -> [u8; 16] {

@@ -188,8 +188,10 @@ fn main() {
     };
     debug_assert_eq!(
         result.public_api_outcomes.len(),
-        config.vue_files.len(),
-        "public API projection must retain exactly one outcome per input carrier"
+        result.admitted_carriers,
+        "public API projection must retain exactly one outcome per ADMITTED carrier \
+         (a refused SFC has no companion to project, and is reported as its own \
+         Verter-native diagnostic instead)"
     );
 
     for diagnostic in &result.diagnostics {

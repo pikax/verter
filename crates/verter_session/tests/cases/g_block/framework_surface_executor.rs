@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use verter_audit::RequestTargetIdentity;
 use verter_protocol::typeinfo::graph::{
     self as wire, FrameworkSurfaceKind, FrameworkSurfaceKindSupport,
 };
@@ -179,6 +180,27 @@ fn framework_schema_version_mismatch_rejected_before_dispatch() {
         ),
         "a sub-minimum framework schema version is a MalformedPayload, got {:?}",
         error.kind
+    );
+}
+
+#[test]
+fn empty_framework_selector_canonical_is_not_applicable_in_rejected_audit() {
+    let host = build_host();
+    let envelope = framework_envelope("", "vue");
+    let result = host.resolve_framework_surface_with_audit(envelope);
+
+    result
+        .as_result()
+        .expect_err("an empty selector canonical must be rejected");
+    assert_eq!(
+        result.audit().canonical_id,
+        "",
+        "the retained legacy projection stays empty for the rejected request"
+    );
+    assert_eq!(
+        result.audit().target_identity,
+        Some(RequestTargetIdentity::NotApplicable),
+        "an empty selector canonical must never be tagged RegisteredCanonical(\"\")"
     );
 }
 

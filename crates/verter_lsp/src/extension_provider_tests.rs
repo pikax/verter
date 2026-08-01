@@ -740,3 +740,762 @@ async fn extension_provider_combined_fix_uses_content_current_as_of_each_respons
          (the line-3 start at byte {line3_start}), not a stale pre-loop snapshot"
     );
 }
+
+// ── `projectRootPath`: the producer half of project-bound resolution ──
+//
+// The extension host resolves each file's TypeScript from the root the provider
+// stamps on `open` / `updateOpen`. These tests drive the PRODUCTION producer
+// (`ExtensionTypeProvider::open_file` / `update_file`) over the real workspace
+// snapshot and assert the emitted envelope, so "the registry binds the declared
+// root" is backed by proof that the declared root is the OWNING PROJECT's.
+//
+// Discrimination: the fixture is a single-folder pnpm monorepo — one workspace
+// folder (`/ws`), a nested configured package (`/ws/packages/app`). Deriving the
+// root from workspace folders yields `/ws` for every file in it, so a provider
+// that stamps a folder-derived root fails every assertion below.
+
+/// The provider as production wires it for a single-folder monorepo: one
+/// workspace folder, and the snapshot-backed configured-owner authority.
+///
+/// `nested_config` is the config FILE that defines the nested package's
+/// configured project. It is a parameter because the project's identity is that
+/// exact file, not the literal name `tsconfig.json` — a package configured by
+/// `jsconfig.json` or `tsconfig.app.json` is just as configured, and must be
+/// declared just as precisely.
+async fn monorepo_provider_with_config(
+    transport: ScriptedTsQueryTransport,
+    nested_config: &str,
+) -> ExtensionTypeProvider<ScriptedTsQueryTransport> {
+    let provider = ExtensionTypeProvider::with_transport(transport, "/ws");
+
+    // Exactly what `background_init` sends: the editor's workspace FOLDERS.
+    provider
+        .update_workspace_folders(vec![json!({ "uri": "file:///ws", "name": "ws" })], vec![])
+        .await
+        .expect("workspace folders sync");
+
+    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            "/ws".to_string(),
+            "/ws".to_string(),
+            Some("/ws/tsconfig.json".to_string()),
+        ),
+        crate::project_resolver::IdeProjectConfig::new(
+            "/ws/packages/app".to_string(),
+            "/ws".to_string(),
+            Some(nested_config.to_string()),
+        ),
+    ]);
+    let snapshot = crate::test_utils::make_test_snapshot(
+        resolver,
+        &[
+            ("/ws", "/ws", Some("/ws/tsconfig.json")),
+            ("/ws/packages/app", "/ws", Some(nested_config)),
+        ],
+    );
+    provider.set_project_ownership(Arc::new(
+        crate::configured_owner::SnapshotOwnerAuthority::new(snapshot),
+    ));
+
+    provider
+}
+
+async fn monorepo_provider(
+    transport: ScriptedTsQueryTransport,
+) -> ExtensionTypeProvider<ScriptedTsQueryTransport> {
+    monorepo_provider_with_config(transport, "/ws/packages/app/tsconfig.json").await
+}
+
+#[tokio::test]
+async fn open_stamps_the_owning_package_root_not_the_workspace_folder() {
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    let provider = monorepo_provider(transport.clone()).await;
+
+    provider
+        .open_file("/ws/packages/app/src/App.vue.tsx", "export const a = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+
+    let args = transport.first_args("open");
+    assert_eq!(
+        args.get("projectRootPath").and_then(|v| v.as_str()),
+        Some("/ws/packages/app"),
+        "the extension host resolves TypeScript from this root: a nested package must be \
+         served from its OWN install, so the producer must send the owning project root — \
+         sending the workspace folder `/ws` is what reports \
+         `/ws/packages/app/node_modules/typescript` absent"
+    );
+}
+
+#[tokio::test]
+async fn update_open_stamps_the_owning_package_root_too() {
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response("updateOpen", json!(true));
+    let provider = monorepo_provider(transport.clone()).await;
+
+    let file = "/ws/packages/app/src/App.vue.tsx";
+    provider
+        .open_file(file, "export const a = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+    provider
+        .update_file(file, "export const a = 2;\n")
+        .await
+        .expect("update_file routes through the mock transport");
+
+    // `updateOpen` carries the root on each open entry; the recorded envelope
+    // must not fall back to the folder for the follow-up sync either.
+    let open_root = transport
+        .first_args("open")
+        .get("projectRootPath")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    assert_eq!(open_root.as_deref(), Some("/ws/packages/app"));
+    let update = transport.first_args("updateOpen");
+    assert!(
+        update.get("changedFiles").is_some(),
+        "the follow-up sync is an updateOpen change: {update}"
+    );
+}
+
+#[tokio::test]
+async fn a_file_outside_every_nested_package_still_stamps_the_root_project() {
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    let provider = monorepo_provider(transport.clone()).await;
+
+    provider
+        .open_file("/ws/src/Root.vue.tsx", "export const a = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+
+    assert_eq!(
+        transport
+            .first_args("open")
+            .get("projectRootPath")
+            .and_then(|v| v.as_str()),
+        Some("/ws"),
+        "a file the root project owns keeps the root project"
+    );
+}
+
+#[tokio::test]
+async fn without_an_ownership_authority_the_workspace_folder_is_the_last_resort() {
+    // Before init publishes a snapshot only folders are known. That is a real
+    // (transient) state and must not panic or emit an empty root.
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/ws");
+    provider
+        .update_workspace_folders(vec![json!({ "uri": "file:///ws", "name": "ws" })], vec![])
+        .await
+        .expect("workspace folders sync");
+
+    provider
+        .open_file("/ws/packages/app/src/App.vue.tsx", "export const a = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+
+    assert_eq!(
+        transport
+            .first_args("open")
+            .get("projectRootPath")
+            .and_then(|v| v.as_str()),
+        Some("/ws"),
+    );
+}
+
+// ── Fail-closed: a refused project must not read as an empty result ──
+//
+// The extension host THROWS when it cannot serve a file's project (no workspace
+// TypeScript, or a library-less install). The provider's promise is that the
+// refusal propagates as a `TypeProviderError`. A feature that maps the refusal
+// to `Ok(None)` / `Ok(vec![])` reports "nothing to say here" for a provider that
+// is actually disabled — a silently wrong answer, and precisely the class the
+// fail-closed contract exists to prevent.
+//
+// Discrimination: the scripted transport has NO queued response, so every
+// primary query errors. Each assertion below fails if its feature swallows it.
+
+#[tokio::test]
+async fn a_refused_project_propagates_instead_of_reading_as_an_empty_result() {
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    let provider = ExtensionTypeProvider::with_transport(transport, "/ws");
+    let file = "/ws/src/App.vue.tsx";
+    // Open first so every assertion below reaches its QUERY: a feature that
+    // short-circuits on missing cached content would otherwise return empty for
+    // a reason unrelated to the refusal.
+    provider
+        .open_file(file, "export const a = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+
+    assert!(
+        provider.get_hover(file, 0).await.is_err(),
+        "hover must propagate the refusal, not answer `no hover here`"
+    );
+    assert!(
+        provider.get_diagnostics(file).await.is_err(),
+        "a refused semantic pass must not report a clean file"
+    );
+    assert!(
+        provider.get_signature_help(file, 0).await.is_err(),
+        "signature help must propagate the refusal"
+    );
+    assert!(
+        provider.get_semantic_tokens(file).await.is_err(),
+        "semantic tokens must propagate the refusal"
+    );
+    assert!(
+        provider.get_document_highlights(file, 0).await.is_err(),
+        "document highlights must propagate the refusal"
+    );
+    assert!(
+        provider.get_inlay_hints(file, 0, 1).await.is_err(),
+        "inlay hints must propagate the refusal"
+    );
+    // A real diagnostic context: an EMPTY one legitimately short-circuits before
+    // any query (no error codes ⇒ nothing to fix), so it would not reach the
+    // refusal at all.
+    let diag = ProviderDiagnosticContext {
+        code: 6133,
+        start: 0,
+        end: 1,
+    };
+    assert!(
+        provider
+            .get_code_actions(file, 0, 1, std::slice::from_ref(&diag))
+            .await
+            .is_err(),
+        "the primary `getCodeFixes` query is what produces the quick fixes: answering \
+         `no fixes available` for a project the host refused hides the refusal behind an \
+         empty lightbulb"
+    );
+}
+
+// ── `projectConfigPath`: the project's IDENTITY, not merely its directory ──
+//
+// A configured project IS its config file. One directory can hold several
+// (`tsconfig.app.json` + `tsconfig.node.json` is the stock Vite layout), each
+// with its own compiler options; and a project configured by `jsconfig.json` has
+// no `tsconfig.json` at all. A consumer given only the directory therefore
+// collapses sibling projects into one service and has to GUESS which config to
+// read — so the producer declares the exact owning config alongside the root.
+//
+// Discrimination: the nested package's config is named in the snapshot and
+// asserted on the envelope. A producer that sends only the root, or that assumes
+// the name `tsconfig.json`, fails these.
+
+#[tokio::test]
+async fn open_declares_the_owning_projects_config_file_alongside_its_root() {
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    let provider = monorepo_provider(transport.clone()).await;
+
+    provider
+        .open_file("/ws/packages/app/src/App.vue.tsx", "export const a = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+
+    let args = transport.first_args("open");
+    assert_eq!(
+        args.get("projectConfigPath").and_then(|v| v.as_str()),
+        Some("/ws/packages/app/tsconfig.json"),
+        "the owning project's config decides its compiler options; the root directory \
+         alone cannot — `/ws/packages/app` is also the directory of every sibling config \
+         that package may declare"
+    );
+}
+
+#[tokio::test]
+async fn open_declares_a_jsconfig_owned_project_by_its_own_config_name() {
+    // `jsconfig.json` is a configured project exactly like `tsconfig.json`; a
+    // consumer that searches for the literal name `tsconfig.json` finds nothing
+    // here and silently falls back to invented default options.
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    let provider =
+        monorepo_provider_with_config(transport.clone(), "/ws/packages/app/jsconfig.json").await;
+
+    provider
+        .open_file("/ws/packages/app/src/main.js", "export const a = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+
+    let args = transport.first_args("open");
+    assert_eq!(
+        args.get("projectRootPath").and_then(|v| v.as_str()),
+        Some("/ws/packages/app"),
+    );
+    assert_eq!(
+        args.get("projectConfigPath").and_then(|v| v.as_str()),
+        Some("/ws/packages/app/jsconfig.json"),
+    );
+}
+
+#[tokio::test]
+async fn update_open_reopen_declares_the_config_too() {
+    // The re-open arm of `update_file` builds its own envelope. A config declared
+    // only on the first `open` would leave the re-opened file bound to a service
+    // built from guessed options.
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response("updateOpen", json!(true));
+    let provider = monorepo_provider(transport.clone()).await;
+
+    // Opened, then its cached content evicted: with the file still open but no
+    // prior text to diff against, `update_file` takes the closedFiles+openFiles
+    // RE-OPEN arm rather than the changedFiles arm.
+    let file = "/ws/packages/app/src/App.vue.tsx";
+    provider
+        .open_file(file, "export const a = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+    provider
+        .contents_handle_for_test()
+        .lock()
+        .await
+        .remove(file);
+    provider
+        .update_file(file, "export const a = 2;\n")
+        .await
+        .expect("update_file routes through the mock transport");
+
+    let args = transport.first_args("updateOpen");
+    let entry = args
+        .get("openFiles")
+        .and_then(|v| v.as_array())
+        .and_then(|entries| entries.first())
+        .expect("the re-open arm carries an openFiles entry");
+    assert_eq!(
+        entry.get("projectRootPath").and_then(|v| v.as_str()),
+        Some("/ws/packages/app"),
+    );
+    assert_eq!(
+        entry.get("projectConfigPath").and_then(|v| v.as_str()),
+        Some("/ws/packages/app/tsconfig.json"),
+    );
+}
+
+#[tokio::test]
+async fn without_an_ownership_authority_no_config_is_invented() {
+    // Before init publishes a snapshot the provider knows folders only. It must
+    // declare no config at all rather than guess `<folder>/tsconfig.json`: the
+    // consumer then discovers one for itself, and a wrong declared identity would
+    // be worse than none.
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/ws");
+    provider
+        .update_workspace_folders(vec![json!({ "uri": "file:///ws", "name": "ws" })], vec![])
+        .await
+        .expect("workspace folders sync");
+
+    provider
+        .open_file("/ws/packages/app/src/App.vue.tsx", "export const a = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+
+    let args = transport.first_args("open");
+    assert_eq!(
+        args.get("projectRootPath").and_then(|v| v.as_str()),
+        Some("/ws"),
+    );
+    assert!(
+        args.get("projectConfigPath")
+            .is_none_or(serde_json::Value::is_null),
+        "no configured owner is known, so no config identity may be asserted: {args}"
+    );
+}
+
+// ── Rebinding: the authority lands AFTER files are already open ──
+//
+// Init opens files as soon as the editor does, but the exact workspace snapshot
+// — and with it the configured-owner authority — is published later. Everything
+// opened in between carries the bootstrap folder identity, which for a nested
+// package is the WRONG project: the extension host then resolves that package's
+// TypeScript from the workspace folder and reports its own install absent.
+//
+// `background_init` calls `resync_open_files` immediately after installing the
+// authority for exactly this reason. The provider must therefore RE-DECLARE
+// every live file with its authoritative binding; an inherited no-op leaves
+// every bootstrap-opened file bound to the folder for the life of the window,
+// and no later edit can fix it (an ordinary `update_file` sends `changedFiles`,
+// which carries no root or config and so cannot change a binding).
+//
+// Discrimination: the fixture opens BEFORE the authority exists and asserts on
+// the envelopes emitted AFTER it lands. A provider that inherits the trait's
+// no-op emits nothing and fails on the recorded-command assertion.
+
+/// The snapshot-backed authority `background_init` installs for the
+/// single-folder monorepo fixture (one folder `/ws`, nested configured package
+/// `/ws/packages/app`).
+fn monorepo_authority() -> Arc<dyn crate::type_provider::traits::ConfiguredOwnerAuthority> {
+    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            "/ws".to_string(),
+            "/ws".to_string(),
+            Some("/ws/tsconfig.json".to_string()),
+        ),
+        crate::project_resolver::IdeProjectConfig::new(
+            "/ws/packages/app".to_string(),
+            "/ws".to_string(),
+            Some("/ws/packages/app/tsconfig.json".to_string()),
+        ),
+    ]);
+    let snapshot = crate::test_utils::make_test_snapshot(
+        resolver,
+        &[
+            ("/ws", "/ws", Some("/ws/tsconfig.json")),
+            (
+                "/ws/packages/app",
+                "/ws",
+                Some("/ws/packages/app/tsconfig.json"),
+            ),
+        ],
+    );
+    Arc::new(crate::configured_owner::SnapshotOwnerAuthority::new(
+        snapshot,
+    ))
+}
+
+/// A provider with the editor's workspace folders and NO ownership authority —
+/// the bootstrap state every file opened before snapshot publication sees.
+async fn bootstrap_provider(
+    transport: ScriptedTsQueryTransport,
+) -> ExtensionTypeProvider<ScriptedTsQueryTransport> {
+    let provider = ExtensionTypeProvider::with_transport(transport, "/ws");
+    provider
+        .update_workspace_folders(vec![json!({ "uri": "file:///ws", "name": "ws" })], vec![])
+        .await
+        .expect("workspace folders sync");
+    provider
+}
+
+#[tokio::test]
+async fn resync_rebinds_a_file_opened_before_the_ownership_authority_landed() {
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response("close", json!({}));
+    transport.push_response("open", json!({}));
+    let provider = bootstrap_provider(transport.clone()).await;
+
+    let file = "/ws/packages/app/src/App.vue.tsx";
+    let content = "export const a = 1;\n";
+    provider
+        .open_file(file, content)
+        .await
+        .expect("open_file routes through the mock transport");
+    assert_eq!(
+        transport
+            .first_args("open")
+            .get("projectRootPath")
+            .and_then(|v| v.as_str()),
+        Some("/ws"),
+        "the bootstrap open can only know the folder — this is the state the resync fixes"
+    );
+
+    // Init publishes the exact snapshot, installs the authority, and resyncs.
+    provider.set_project_ownership(monorepo_authority());
+    provider
+        .resync_open_files()
+        .await
+        .expect("the resync sweep routes through the mock transport");
+
+    assert_eq!(
+        transport.commands(),
+        vec!["open".to_string(), "close".to_string(), "open".to_string()],
+        "the file must be closed on the project it was mis-bound to and re-declared \
+         on its real owner; an inherited no-op emits nothing here"
+    );
+    let reopen = transport
+        .calls()
+        .into_iter()
+        .filter(|call| call.command == "open")
+        .nth(1)
+        .expect("the resync re-declares the file")
+        .arguments;
+    assert_eq!(
+        reopen.get("projectRootPath").and_then(|v| v.as_str()),
+        Some("/ws/packages/app"),
+        "the re-declaration must carry the OWNING package root — that is the whole \
+         point of resyncing after the authority lands: {reopen}"
+    );
+    assert_eq!(
+        reopen.get("projectConfigPath").and_then(|v| v.as_str()),
+        Some("/ws/packages/app/tsconfig.json"),
+        "…and the owning config, or the consumer keys the rebound file by a guess"
+    );
+    assert_eq!(
+        reopen.get("fileContent").and_then(|v| v.as_str()),
+        Some(content),
+        "the re-open carries the live buffer, not a stale disk read"
+    );
+}
+
+#[tokio::test]
+async fn resync_closes_a_file_no_configured_project_owns_instead_of_rebinding_it() {
+    // Opened during bootstrap under the folder last-resort, then found to be
+    // owned by no configured project at all. Terminal `NoProject`: the file must
+    // be closed, not re-declared against an invented owner.
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response("close", json!({}));
+    let provider = bootstrap_provider(transport.clone()).await;
+
+    let file = "/elsewhere/Detached.vue.tsx";
+    provider
+        .open_file(file, "export const a = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+
+    provider.set_project_ownership(monorepo_authority());
+    provider
+        .resync_open_files()
+        .await
+        .expect("the resync sweep routes through the mock transport");
+
+    assert_eq!(
+        transport.commands(),
+        vec!["open".to_string(), "close".to_string()],
+        "an unowned file is closed and left closed: re-opening it would re-assert a \
+         project the authority says does not exist"
+    );
+}
+
+#[tokio::test]
+async fn an_authoritatively_unowned_file_fails_closed_rather_than_binding_an_invented_project() {
+    // `NoProject` is TERMINAL under the Project-Bound External-TS Contract. A
+    // file excluded from every configured program (here by `node_modules/**`)
+    // must not be bound to the nearest configured ancestor, and must not fall
+    // through to the workspace folder either — both invent a project the
+    // authority did not name.
+    let transport = ScriptedTsQueryTransport::new();
+    // A response IS queued: the refusal under test must be the OWNERSHIP
+    // decision, never a transport that had nothing to answer with. A provider
+    // that binds an invented project succeeds here.
+    transport.push_response("open", json!({}));
+    let provider = bootstrap_provider(transport.clone()).await;
+    provider.set_project_ownership(monorepo_authority());
+
+    let file = "/ws/node_modules/dep/index.d.ts";
+    let result = provider.open_file(file, "export const a = 1;\n").await;
+
+    assert!(
+        result.is_err(),
+        "no configured project claims this file, so there is no project to open it in"
+    );
+    assert_eq!(
+        transport.commands(),
+        Vec::<String>::new(),
+        "…and nothing may be declared to the extension host on the way to failing: {:?}",
+        transport.commands()
+    );
+}
+
+#[tokio::test]
+async fn completion_details_propagate_a_refusal_instead_of_returning_the_previous_items() {
+    // The enrichment round-trip is where a project REBIND becomes visible: the
+    // list was produced by the project that owned the file when `completionInfo`
+    // ran, and the details request can land after the file has been re-declared
+    // to a different project (an ownership authority arriving mid-session, a
+    // config change). If that project refuses, returning the original items
+    // serves the OLD project's answer under the new binding — a cross-project
+    // stale result, which is exactly what the project-bound contract forbids.
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response(
+        "completionInfo",
+        json!({ "entries": [{ "name": "answer", "kind": "const", "sortText": "11" }] }),
+    );
+    // No scripted response for `completionEntryDetails` ⇒ the host refuses it,
+    // exactly as a project whose TypeScript cannot serve does.
+    let provider = bootstrap_provider(transport.clone()).await;
+
+    let file = "/ws/src/App.vue.tsx";
+    provider
+        .open_file(file, "export const answer = 1;\n")
+        .await
+        .expect("open_file routes through the mock transport");
+    let completions = provider
+        .get_completions(file, 0, None)
+        .await
+        .expect("the completion list itself succeeded");
+    assert_eq!(completions.items.len(), 1);
+
+    assert!(
+        provider
+            .get_completion_details(file, 0, &completions.items)
+            .await
+            .is_err(),
+        "a refused enrichment must propagate: answering with the items the previous \
+         binding produced hides the refusal and serves another project's result"
+    );
+}
+
+// ── Semantic tokens: TS "2020" classification decode + Verter legend remap ──
+//
+// `encodedSemanticClassifications-full` with `"format": "2020"` packs each
+// span's classification as `((tokenTypeIdx + 1) << 8) | modifierSet` in
+// TypeScript's classifier-2020 legend (types: class=0, enum=1, interface=2,
+// namespace=3, typeParameter=4, type=5, parameter=6, variable=7, enumMember=8,
+// property=9, function=10, method=11; modifier bits: declaration=0, static=1,
+// async=2, readonly=3, defaultLibrary=4, local=5). Tokens cross the
+// `TypeProvider` boundary in VERTER's published legend space, so the provider
+// must decode the 2020 packing (fields are NOT `type | mods << 8` — they are
+// the other way around, plus the `+1` offset) and remap BOTH halves by name.
+//
+// Discrimination: the classification constants below are asymmetric — a decoder
+// that swaps the fields, drops the `+1`, or forwards TS-legend indices produces
+// different numbers for every assertion.
+#[tokio::test]
+async fn semantic_tokens_decode_2020_and_remap_into_verter_legend_space() {
+    let file = "/workspace/src/entry.ts";
+    let content = "interface Shape { area: number }\nconst localCount = 42;\n";
+
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response(
+        "encodedSemanticClassifications-full",
+        json!({
+            "spans": [
+                // "Shape" @ 10, len 5 — TS interface(2) + declaration(bit 0):
+                // ((2 + 1) << 8) | 0b000001 = 769
+                10, 5, 769,
+                // "localCount" @ 39, len 10 — TS variable(7) + declaration(bit 0)
+                // + readonly(bit 3) + local(bit 5):
+                // ((7 + 1) << 8) | 0b101001 = 2089
+                39, 10, 2089,
+            ]
+        }),
+    );
+
+    let provider = ExtensionTypeProvider::with_transport(transport, "/workspace");
+    provider.open_file(file, content).await.expect("open");
+    let tokens = provider
+        .get_semantic_tokens(file)
+        .await
+        .expect("semantic tokens");
+
+    assert_eq!(tokens.len(), 2, "both spans decode: {tokens:?}");
+
+    // Verter legend: interface = type index 4; declaration = modifier bit 0.
+    assert_eq!(tokens[0].start, 10);
+    assert_eq!(tokens[0].length, 5);
+    assert_eq!(
+        tokens[0].token_type, 4,
+        "TS-2020 `interface` (2) must remap to Verter `interface` (4); the \
+         pre-fix inverted decode yields 1 here"
+    );
+    assert_eq!(
+        tokens[0].token_modifiers, 1,
+        "TS-2020 `declaration` (bit 0) must remap to Verter `declaration` (bit 0); \
+         the pre-fix inverted decode reads the type field as modifiers and yields 3"
+    );
+
+    // Verter legend: variable = 8; declaration|readonly|local = bits 0,2,10.
+    assert_eq!(tokens[1].start, 39);
+    assert_eq!(tokens[1].length, 10);
+    assert_eq!(
+        tokens[1].token_type, 8,
+        "TS-2020 `variable` (7) must remap to Verter `variable` (8)"
+    );
+    assert_eq!(
+        tokens[1].token_modifiers,
+        (1 << 0) | (1 << 2) | (1 << 10),
+        "modifier BITS remap individually by name: TS declaration(0)/readonly(3)/\
+         local(5) become Verter declaration(0)/readonly(2)/local(10) — forwarding \
+         the raw bitset (0b101001) is the colors-look-plausible-but-wrong failure"
+    );
+}
+
+/// Fail-closed half: a classification whose decoded type index is outside the
+/// TS-2020 legend must DROP the token, and a zero type field (impossible under
+/// the `+1` packing — only produced by mis-decoding) must not panic or emit.
+#[tokio::test]
+async fn semantic_tokens_drop_unmappable_classifications_instead_of_guessing() {
+    let file = "/workspace/src/entry.ts";
+    let content = "const ok = 1;\n";
+
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response(
+        "encodedSemanticClassifications-full",
+        json!({
+            "spans": [
+                // Type index 12 is outside the 12-entry TS-2020 legend:
+                // ((12 + 1) << 8) | 0 = 3328 → dropped.
+                0, 2, 3328,
+                // A raw zero "type" field (no +1 offset possible) → dropped.
+                3, 2, 0,
+                // "ok" @ 6, len 2 — variable(7) + declaration: survives.
+                6, 2, ((7 + 1) << 8) | 1,
+            ]
+        }),
+    );
+
+    let provider = ExtensionTypeProvider::with_transport(transport, "/workspace");
+    provider.open_file(file, content).await.expect("open");
+    let tokens = provider
+        .get_semantic_tokens(file)
+        .await
+        .expect("semantic tokens");
+
+    assert_eq!(
+        tokens.len(),
+        1,
+        "unmappable classifications are dropped, never emitted with a guessed \
+         kind: {tokens:?}"
+    );
+    assert_eq!(tokens[0].start, 6);
+    assert_eq!(tokens[0].token_type, 8, "Verter `variable`");
+    assert_eq!(tokens[0].token_modifiers, 1, "Verter `declaration`");
+}
+
+#[tokio::test]
+async fn inlay_hints_use_absolute_utf16_request_offsets_and_return_byte_positions() {
+    let file = "/workspace/src/entry.ts";
+    let content = "é\nconst answer = makeValue(42);\n";
+
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response(
+        "provideInlayHints",
+        json!([{
+            "text": "value:",
+            "position": { "line": 2, "offset": 26 },
+            "kind": "Parameter",
+            "whitespaceAfter": true,
+        }]),
+    );
+
+    let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/workspace");
+    provider.open_file(file, content).await.expect("open");
+    let hints = provider
+        .get_inlay_hints(file, 3, content.len() as u32)
+        .await
+        .expect("inlay hints");
+
+    let args = transport.first_args("provideInlayHints");
+    assert_eq!(
+        args["start"],
+        json!(2),
+        "the byte offset after `é\\n` is absolute UTF-16 offset 2, not line 2"
+    );
+    assert_eq!(
+        args["length"],
+        json!(content.encode_utf16().count() - 2),
+        "length is an absolute UTF-16 span, not an approximate line count"
+    );
+
+    assert_eq!(hints.len(), 1, "{hints:?}");
+    assert_eq!(
+        hints[0].position, 28,
+        "tsserver line/offset must convert through the cached text into bytes"
+    );
+    assert!(matches!(hints[0].kind, Some(InlayHintKind::Parameter)));
+    assert_eq!(hints[0].label, "value:");
+}

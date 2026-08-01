@@ -84,6 +84,12 @@ pub enum Submission {
         file_id: String,
         generation: u64,
         task_kind: TaskKind,
+        /// Process-unique id of the `FileNode` the work actually ran
+        /// against. Carried from dispatch rather than re-derived by map
+        /// lookup at completion time: a lookup returns whatever node is
+        /// live NOW, so validating against it compares the replacement
+        /// with itself and passes vacuously.
+        incarnation: u64,
     },
 }
 

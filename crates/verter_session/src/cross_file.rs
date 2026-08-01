@@ -102,14 +102,21 @@ impl VerterHost {
                 }
 
                 let child_canonical = match &component.import_source {
-                    Some(source) => self.resolve_via_vfs(
+                    Some(source) => match self.resolve_via_vfs(
                         parent_id,
                         source,
                         verter_workspace::ResolutionContext {
                             phase: verter_workspace::ResolvePhase::CodegenBlocker,
                             kind: verter_workspace::ResolveRequestKind::EsmImport,
                         },
-                    ),
+                    ) {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => {
+                            return CrossFileResult::default();
+                        }
+                    },
                     None => None,
                 };
 

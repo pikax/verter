@@ -449,11 +449,9 @@ disabled (flaky):
    duplicates none of the tsserver-family mapping, which stays the single owner
    in `verter_type_runtime::tsserver::ipc`.
 
-FOLLOW-UP (`TODO`): the provider-neutral result-merge module
-`crates/verter_lsp/src/type_provider/merge.rs` (4634 lines) carries an
-oversize-file exemption in `no_oversize_files` (Guard 6). It should be split into
-sibling modules along its merge-surface boundaries (per the >400-line extraction
-convention) in a future block so the exemption can be retired.
+The provider-neutral result-merge implementation lives under
+`crates/verter_lsp/src/type_provider/merge/`, split into sibling modules along
+its merge-surface boundaries.
 
 The CI gate runs the Rust unit layer (including the F1 virtual-file
 discriminator above) on every push. The real-provider parity integration test

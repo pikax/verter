@@ -30,7 +30,6 @@ Bug or slowdown in one surface → fix in shared substrate so other consumers be
 | **`@verter/typescript-plugin`** | TypeScript plugin resolving `.vue` imports in TS/JS files. Intercepts module resolution to return transformed TSX | `src/index.ts` |
 | **`verter-vscode`** | VS Code extension. Launches Rust `verter-lsp` binary over stdio, bundles TS plugin, handles extension activation | `src/extension.ts` |
 | **`@verter/unplugin`** | Universal bundler plugin (Vite, Rollup, webpack, esbuild, rspack, Rolldown, Farm). Compiles `.vue` files via `@verter/native`. Supports `preCompile` for build-start cache warming | `src/index.ts` |
-| **`@verter/oxc-bindings`** | Helper for downloading platform-specific OXC parser binaries | `src/index.ts` |
 
 ## Unplugin Configuration (`packages/unplugin/`)
 
@@ -97,6 +96,8 @@ template.rs           # Template element analysis, dynamic class extraction, :st
 ## Analysis MCP Server (`verter_mcp`)
 
 `verter-mcp` binary exposes Verter's full analysis, diagnostics, compilation, and scoring pipeline via MCP for AI agents. `VerterMcpServer` wraps `VerterHost` (with `AnalysisScope::LSP`), `Linter`, and `ActionEngine`. Tools auto-load via `ensure_loaded()`; template analysis triggers `ensure_template_analysis()` transparently. Cross-file tools iterate all loaded files (no `ProjectIndex` exposed from host). Scoring engine computes composite 0-100 quality scores from a11y, lint, template complexity, API surface, CSS health, and reactivity dimensions.
+
+Both binaries (`verter-mcp`, and the LSP-decoupling twin `verter-mcp-server`) run the one shared entry body `verter_mcp::run::run`. The HTTP transport binds before its initial scan and announces the real bound port as a one-line stdout readiness record (`verter_mcp::readiness`, mirrored by `packages/vue-vscode/src/mcpServer.ts`); `--client-pid` arms the same `ClientProcessGuard` containment as the LSP. The VS Code extension spawns this standalone binary per LSP start attempt (`createMcpServerLifecycle`: awaited replacement, bounded crash respawn, provider-registration teardown on death) — see `docs/contributing/lsp-mcp-decoupling.md`.
 
 ## verter_semantic::analysis — Static Analysis Types
 

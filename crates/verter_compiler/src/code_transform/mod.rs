@@ -39,7 +39,7 @@ mod fallible;
 mod source_map;
 
 pub use code_transform::CodeTransform;
-pub(crate) use code_transform::GeneratedSourceRange;
+pub use code_transform::GeneratedSourceRange;
 // The typed refusal surface of the checked (`try_*`) operations, re-exported
 // alongside `CodeTransform` as this module's public error type (the inner
 // module is private, so this is its only public path).

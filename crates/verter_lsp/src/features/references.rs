@@ -6,6 +6,11 @@ use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
+// The positional instance-member rule is DEFINED once, next to the rename
+// classifier that owns rename semantics (`features::rename`). References
+// consumes that same single definition for the references half of the identical
+// symbol-identity question; this module owns NO rename classification.
+use crate::features::rename::offset_is_instance_member_access;
 
 pub use super::sentinel_uris::SAME_FILE_URI;
 pub use super::sentinel_uris::SAME_FILE_URI_STR;
@@ -19,6 +24,11 @@ pub use super::sentinel_uris::SAME_FILE_URI_STR;
 ///    - Template binding occurrences from `TemplateAnalysisSnapshot` (precise spans)
 ///    - Text occurrences in script blocks (word boundary match)
 ///    - Falls back to text search in template blocks if template analysis is unavailable
+///
+/// Instance-member template accesses ([`offset_is_instance_member_access`]) are a
+/// different symbol: the cursor never resolves to the script declaration there,
+/// and a text hit inside such a span is never reported as one of its
+/// occurrences.
 pub fn references_at_position(
     position: &Position,
     source: &str,
@@ -34,6 +44,14 @@ pub fn references_at_position(
         // positional CSS path still owns the position.
         return css_references_at_position(offset, source, blocks, analysis, line_index);
     };
+
+    // The cursor sits on an instance-member access: a same-named script
+    // declaration is a DIFFERENT symbol, and the provider owns this one. Fall
+    // through to the positional CSS owner (which answers `None` here), never to
+    // the name-based branch below.
+    if offset_is_instance_member_access(offset as u32, analysis) {
+        return css_references_at_position(offset, source, blocks, analysis, line_index);
+    }
 
     // Check if this word is a known binding, import, or macro
     let is_binding = analysis.bindings.iter().any(|b| b.name == word);
@@ -122,6 +140,12 @@ pub fn references_at_position(
 
         for occ_offset in find_all_word_occurrences(content, &word) {
             let abs_offset = content_start as usize + occ_offset;
+
+            // A text hit inside an instance-member template access belongs to
+            // that instance property, not to the script symbol under the cursor.
+            if offset_is_instance_member_access(abs_offset as u32, analysis) {
+                continue;
+            }
 
             // Skip if this overlaps a declaration we already added
             let already_present = locations.iter().any(|loc| {

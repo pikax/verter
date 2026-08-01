@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import { pollBudget } from "../lib/timeouts";
 import * as vscode from "vscode";
 import {
   ensureTypeProviderSynced,
@@ -51,7 +52,7 @@ suite(`Import Resolution [${FIXTURE_NAME}]`, function () {
   ) => {
     const settledDiagnostics = await waitForNoDiagnosticsMatching(doc.uri, {
       predicate,
-      timeoutMs: 15_000,
+      timeoutMs: pollBudget("waitForNoDiagnosticsMatching"),
     });
     const forbiddenDiagnostics = settledDiagnostics.filter(predicate);
     expect(

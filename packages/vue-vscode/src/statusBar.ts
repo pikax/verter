@@ -1,9 +1,26 @@
 import type { NotificationParams, NotificationType } from "@verter/language-shared";
 
+import {
+  CARRIER_UNSUPPORTED_TOOLTIP,
+  providerServesFrameworkCarriers,
+} from "./carrierProviderSupport";
+
 export interface StatusBarState {
   text: string;
   tooltip: string;
   warning: boolean;
+}
+
+/**
+ * The CLIENT-side facts the server's status notification does not carry: which
+ * provider the user selected, and whether a framework carrier is currently open.
+ * Together they decide whether the selected provider can serve what is on screen.
+ */
+export interface StatusBarClientContext {
+  /** The active `verter.typeProvider` value. */
+  readonly typeProvider: string;
+  /** Whether at least one `.vue`/`.svelte` document is open. */
+  readonly carrierOpen: boolean;
 }
 
 export interface ProviderRecommendationNoticeOptions {
@@ -46,7 +63,21 @@ function withReason(base: string, reason: string | undefined): string {
  */
 export function computeStatusBarState(
   params: NotificationParams[typeof NotificationType.TypeProviderStatus],
+  client?: StatusBarClientContext,
 ): StatusBarState {
+  // A provider that cannot serve the carrier on screen outranks every serving
+  // state below: an engine answering plain TypeScript while the open `.vue` gets
+  // nothing is not a healthy status, and a check mark there is the fail-open the
+  // containment exists to remove. Scoped to an OPEN carrier, so a plain-TypeScript
+  // session under the same provider still reads as serving — which it is.
+  if (client?.carrierOpen && !providerServesFrameworkCarriers(client.typeProvider)) {
+    return {
+      text: "$(warning) Verter: no Vue/Svelte TS",
+      tooltip: CARRIER_UNSUPPORTED_TOOLTIP,
+      warning: true,
+    };
+  }
+
   // The TOPOLOGY is the honest answer — WHICH engine is serving and who owns
   // it. The engine FAMILY (`kind`) is what behaviour keys on, and two
   // topologies share the "tsgo" family: an attach to the tsgo the editor is

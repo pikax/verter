@@ -194,6 +194,23 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
         verter_workspace::FilesystemOptions::default(),
     ));
 
+    let snapshot = make_test_snapshot(resolver, project_roots);
+
+    let views = crate::workspace_state::build_lsp_views(&*vfs_ws, &snapshot, vec![]);
+    vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
+        snapshot,
+        Box::new(views),
+    ));
+    parking_lot::RwLock::new(Some(vfs_ws))
+}
+
+/// Build a bare `WorkspaceSnapshot` with one project row per `project_roots`
+/// entry — the ownership substrate the VFS helper above publishes, exposed
+/// on its own for tests that need the ownership decision without a workspace.
+pub(crate) fn make_test_snapshot(
+    resolver: verter_workspace::ProjectResolver,
+    project_roots: &[(&str, &str, Option<&str>)], // (root, workspace_root, tsconfig)
+) -> Arc<verter_workspace::WorkspaceSnapshot> {
     let projects: Vec<verter_workspace::workspace_snapshot::OwnershipProject> = project_roots
         .iter()
         .enumerate()
@@ -253,19 +270,12 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
         })
         .collect();
 
-    let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
+    Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects,
         resolver,
         generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
-    });
-
-    let views = crate::workspace_state::build_lsp_views(&*vfs_ws, &snapshot, vec![]);
-    vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
-        snapshot,
-        Box::new(views),
-    ));
-    parking_lot::RwLock::new(Some(vfs_ws))
+    })
 }
 
 /// VerterHost backed by a real `FilesystemWorkspace`.
@@ -343,7 +353,7 @@ mod tests {
         let host = make_filesystem_test_host(&ws);
         let app_id = canonical_test_path(&src.join("App.vue"));
         let child_id = canonical_test_path(&src.join("Child.vue"));
-        let resolved = host.resolve_import_via_workspace(&app_id, "./Child.vue");
+        let resolved = host.resolve_import_transient(&app_id, "./Child.vue");
         // Positive: resolves to Child.vue
         assert_eq!(
             resolved.as_deref(),
@@ -351,7 +361,7 @@ mod tests {
             "filesystem host should resolve relative imports to correct target"
         );
         // Negative: does not resolve to non-existent file
-        let missing = host.resolve_import_via_workspace(&app_id, "./Missing.vue");
+        let missing = host.resolve_import_transient(&app_id, "./Missing.vue");
         assert!(
             missing.is_none(),
             "non-existent relative import should return None"

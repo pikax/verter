@@ -2222,9 +2222,8 @@ const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
             // builder). It mints the cap INTERNALLY in
             // `build_component_meta_output` and drives the per-source terminal
             // (`materialize_output_source`) — output transport only, no
-            // decision on any materialized value. A genuine co-sink split out
-            // of `output_sink.rs` for the file-size gate, NOT a non-sink
-            // helper.
+            // decision on any materialized value. A genuine co-sink separated
+            // by terminal output responsibility, NOT a non-sink helper.
             "crate :: meta_resolve :: projectors :: output_sink :: envelope",
             // The published-field FINALIZE half of the terminal sink (the
             // whole-surface field-type reducer over `ExpandedComponentTypes`,
@@ -2232,8 +2231,8 @@ const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
             // node-start reducer (`reduce_field_value_node`, which mints
             // internally) and publishes content-free sources — publication
             // finalize only, no decision on any materialized value. A genuine
-            // co-sink split out of `output_sink.rs` for the file-size gate,
-            // NOT a non-sink helper.
+            // co-sink separated by terminal output responsibility, NOT a
+            // non-sink helper.
             "crate :: meta_resolve :: projectors :: output_sink :: published_finalize",
         ],
     ),
@@ -2247,8 +2246,8 @@ const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
         &[
             "crate :: typeinfo :: framework_surface :: vue_exec",
             "crate :: typeinfo :: framework_surface :: vue_exec :: normalize",
-            // The slot half of the per-surface normalizers (file-size split
-            // sibling of `normalize`) — the SAME sanctioned slot sinks
+            // The focused slot half of the per-surface normalizers, a sibling
+            // of `normalize` containing the SAME sanctioned slot sinks
             // (`materialize_slot_return_node`, `slot_binding_field`), minting
             // the cap internally at the terminal display renders.
             "crate :: typeinfo :: framework_surface :: vue_exec :: normalize_slots",
@@ -2995,11 +2994,11 @@ fn mint_scope_module_tree_walker_self_test_discriminates() {
     );
     let sink_expected: std::collections::BTreeSet<String> = [
         "crate :: meta_resolve :: projectors :: output_sink",
-        // The sanctioned envelope co-sink (the 11-lane positional
-        // materializer + envelope builder split out for the file-size gate).
+        // The sanctioned envelope co-sink (the focused 11-lane positional
+        // materializer + envelope builder).
         "crate :: meta_resolve :: projectors :: output_sink :: envelope",
-        // The sanctioned published-finalize co-sink (the whole-surface
-        // field-type reducer split out for the file-size gate).
+        // The sanctioned published-finalize co-sink (the focused whole-surface
+        // field-type reducer).
         "crate :: meta_resolve :: projectors :: output_sink :: published_finalize",
     ]
     .iter()
@@ -5147,6 +5146,18 @@ fn type_def_source_files() -> Vec<(String, String)> {
             "../verter_type_expr/src/member_origin.rs",
             "verter_type_expr::member_origin",
         ),
+        // `SignatureAdmission { Cacheable(ReadSetSignature) | NonCacheable(reason) }`
+        // and `ReadSetSignature { facts, overflowed }` are the fact-validation
+        // substrate, owned by `verter_workspace` (the lowest crate that serves
+        // every consumer — `verter_workspace` cannot depend on
+        // `verter_session`). `SignatureAdmission` is returned by the
+        // fact-signature sink fns (`engine_fact_signature_for_exported_type` /
+        // `…_for_materialize_memo`); reading its home lets the closure classify
+        // it as non-bearing structurally, instead of asserting it by ident.
+        (
+            "../verter_workspace/src/fact_cache.rs",
+            "verter_workspace::fact_cache",
+        ),
     ];
     for (rel, module_base) in EXTERNAL {
         let path = crate_root().join(rel);
@@ -5340,6 +5351,12 @@ fn reexport_only_source_files() -> Vec<(String, String)> {
             "../verter_semantic/src/analysis/type_solver/mod.rs",
             "verter_semantic::analysis::type_solver",
         ),
+        // `pub use fact_cache::{ReadSetSignature, SignatureAdmission, …}` —
+        // re-exports the `verter_workspace::fact_cache` def home up to the
+        // crate root, which is the qualifier `verter_session`'s
+        // `cache_runtime` re-export writes (`pub(crate) use
+        // verter_workspace::SignatureAdmission`).
+        ("../verter_workspace/src/lib.rs", "verter_workspace"),
     ];
     let mut out: Vec<(String, String)> = Vec::new();
     for (rel, module_base) in REEXPORT_ONLY {
@@ -13924,10 +13941,8 @@ impl<'a> HotMaterializeScanner<'a> {
             if let Some(k) = set.get(p) {
                 return Some(*k);
             }
-            match p.rfind('.') {
-                Some(i) => p = &p[..i],
-                None => return None,
-            }
+            let i = p.rfind('.')?;
+            p = &p[..i];
         }
     }
     fn is_tainted(&self, id: &str) -> bool {

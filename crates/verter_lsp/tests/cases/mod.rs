@@ -29,5 +29,6 @@ mod shared_provider_live;
 mod single_provider_surface_store;
 mod stale_generation_result_dropped;
 mod stdio_launch_smoke;
+mod test_support_feature_off_in_default_build;
 mod tsgo_virtual_membership;
 mod tsserver_e2e_generated_outputs;

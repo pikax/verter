@@ -687,6 +687,41 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
     }
   });
 
+  test("ide.complete.import-path-carrier", async function () {
+    // Typing an import path in a PLAIN .ts file must offer the carrier file
+    // (`ExposePublic.vue` / `.svelte`) by name. This buffer is served by VS
+    // Code's OWN TypeScript service + @verter/typescript-plugin (not the
+    // Verter LSP), so this is the user-visible lane for the reported defect
+    // "importing in *.ts files never offers the .vue file".
+    const fw = parityFramework();
+    if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
+    this.timeout(30_000);
+    const file = "src/features/ExposePublicConsumer.ts";
+    const carrier = fw === "vue" ? "ExposePublic.vue" : "ExposePublic.svelte";
+    const doc = await openRelative(file);
+    // Caret INSIDE the existing module-specifier literal, right after `./` —
+    // the exact path-completion position the user types through.
+    const needle = 'from "./';
+    const offset = findOffset(doc, needle) + needle.length;
+    const labels = await completionsAtOffsetUntil(file, offset, (l) => l.includes(carrier));
+    if (!labels.includes(carrier)) {
+      throw new Error(
+        `import-path completion in a plain .ts must offer ${carrier}; sample=${labels.slice(0, 30)}`,
+      );
+    }
+    // Fail closed: the offer list must name the AUTHORED specifier only —
+    // never a generated companion / virtual-surface path.
+    const companionShaped = labels.filter(
+      (label) =>
+        label.includes(".vue.") || label.includes(".svelte.") || label.endsWith(".verter.ts"),
+    );
+    if (companionShaped.length > 0) {
+      throw new Error(
+        `import-path completion offered companion/virtual paths: ${companionShaped.join(", ")}`,
+      );
+    }
+  });
+
   test("ide.complete.event-attr-names", async function () {
     const fw = parityFramework();
     if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");

@@ -1,4 +1,7 @@
-use crate::documents::sfc_scanner::{classify_cursor, scan_sfc_blocks, SfcBlock, SfcCursorContext};
+use crate::documents::sfc_scanner::{
+    classify_cursor, find_balanced_close_tag, scan_sfc_blocks_with, BalancedClose,
+    CustomBlockContentKind, SfcBlock, SfcCursorContext,
+};
 
 /// HTML void elements that must not be auto-closed.
 const VOID_TAGS: &[&str] = &[
@@ -66,7 +69,8 @@ pub(crate) fn carrier_kind_for_language(
 ///   * is inside a `{{ }}` interpolation expression (a TS-expression `>`).
 ///
 /// Region classification is driven by the typed SFC block boundaries
-/// ([`scan_sfc_blocks`] / [`classify_cursor`]) — the same structural authority
+/// ([`scan_sfc_blocks_with`] under the carrier's [`CustomBlockContentKind`] /
+/// [`classify_cursor`]) — the same structural authority
 /// the rest of the LSP's SFC-aware features use — not by ad-hoc string sniffing
 /// of the surrounding text. Once the region is confirmed markup, the actual
 /// open-tag validity check is delegated to the carrier-aware
@@ -84,7 +88,10 @@ pub fn auto_close_tag_in_carrier(
         return None;
     }
 
-    let blocks = scan_sfc_blocks(source);
+    // The carrier is already resolved here, so scan with its custom-block
+    // semantics: Svelte root components balance; Vue custom blocks are raw
+    // text (first close), matching `verter_parser`.
+    let blocks = scan_sfc_blocks_with(source, custom_block_kind_for_carrier(carrier));
 
     // The carrier's markup window `[win_start, win_end)`: the OUTER `<template>`
     // content span for Vue (nesting-balanced so a nested slot `<template>` does
@@ -110,6 +117,16 @@ pub fn auto_close_tag_in_carrier(
     }
 
     auto_close_tag_carrier(source, offset, win_start, carrier)
+}
+
+/// The [`CustomBlockContentKind`] for a resolved markup carrier: Svelte root
+/// markup nests same-name components (depth-balanced), Vue custom blocks are
+/// raw text (first close), matching `verter_parser`'s SFC rule.
+fn custom_block_kind_for_carrier(carrier: CarrierKind) -> CustomBlockContentKind {
+    match carrier {
+        CarrierKind::Vue => CustomBlockContentKind::RawText,
+        CarrierKind::Svelte => CustomBlockContentKind::Markup,
+    }
 }
 
 /// The markup window `[start, end)` for the carrier at `gt_pos`, or `None` when
@@ -163,9 +180,7 @@ fn markup_window(
 
 /// The OUTER SFC `<template>` content span `[content_start, content_end)`,
 /// computed by NESTING-BALANCED tag matching so a nested slot
-/// `<template #foo>…</template>` does not truncate it (the flat
-/// [`scan_sfc_blocks`] stops the outer block at the first nested `</template>`,
-/// which strands markup after the slot at root level — F7).
+/// `<template #foo>…</template>` does not truncate it (F7).
 ///
 /// The OUTER `<template>` open tag is located via the STRUCTURAL SFC block scan
 /// ([`scan_sfc_blocks`]), NOT a raw `<template` byte-search: the block scan
@@ -173,111 +188,29 @@ fn markup_window(
 /// within), so a literal `<template>` inside a script comment placed BEFORE the
 /// real template can never be mistaken for the SFC template open (which would
 /// leak the markup window into the script and auto-close a `Box<Foo>` generic).
-/// From the outer template's content start the close is found by balancing
-/// nested `<template …>` / `</template>` (skipping `<!-- -->` comments and
-/// quoted attribute values) so a nested slot template does not truncate the
-/// region (F7). The span runs from just past the outer open tag's `>` to the
-/// `<` of its matching `</template>`. `None` when there is no top-level
-/// `<template>` block (a self-closing `<template/>` has no content, and is not
-/// returned as a block by the scanner).
+/// From the outer template's content start the close comes from the scanner's
+/// shared depth-balanced walk ([`find_balanced_close_tag`] — skipping
+/// `<!-- -->` comments and quoted attribute values), so a nested slot template
+/// does not truncate the region (F7). The span runs from just past the outer
+/// open tag's `>` to the `<` of its matching `</template>`. `None` when there
+/// is no top-level `<template>` block (a self-closing `<template/>` has no
+/// content, and is not returned as a block by the scanner).
 ///
-// TODO(follow-up): the flat `scan_sfc_blocks` still mis-nests same-name tags;
-// the auto-close gate balances the outer-template close locally here rather than
-// changing the shared scanner (which many features consume). If another feature
-// needs nesting-balanced SFC blocks, lift this into the scanner with full
-// regression coverage instead of duplicating the balance walk.
+/// The scanner's own block span balances the same way now, but its MALFORMED
+/// fallback differs deliberately: the scanner fails closed to the first-close
+/// boundary so later blocks stay discoverable, while the auto-close markup
+/// window wants the mid-typing semantics below — hence the direct walk here.
 fn outer_template_content_span(source: &str, blocks: &[SfcBlock]) -> Option<(usize, usize)> {
-    let bytes = source.as_bytes();
-    let len = bytes.len();
-
-    // Locate the OUTER (first top-level) `<template>` block structurally. The
-    // block scanner already skips `<script>` / `<style>` content and quoted
-    // attribute values, so a literal `<template>` in a script comment is not it.
-    // The block's `open_tag_end` is just past the outer open tag's `>` — the
-    // content start. (A self-closing `<template/>` is never returned as a block,
-    // so it correctly yields `None`.)
     let template = blocks.iter().find(|b| b.tag_name == "template")?;
     let content_start = template.open_tag_end as usize;
-    let mut depth = 1i32;
-
-    // Balance nested `<template …>` / `</template>` from content_start.
-    let mut k = content_start;
-    let mut in_quote: Option<u8> = None;
-    while k < len {
-        let b = bytes[k];
-        if let Some(q) = in_quote {
-            if b == q {
-                in_quote = None;
-            }
-            k += 1;
-            continue;
-        }
-        match b {
-            b'"' | b'\'' => {
-                in_quote = Some(b);
-                k += 1;
-            }
-            b'<' => {
-                // Comment?
-                if k + 4 <= len && &bytes[k..k + 4] == b"<!--" {
-                    match source[k + 4..].find("-->") {
-                        Some(off) => k = k + 4 + off + 3,
-                        None => return None,
-                    }
-                    continue;
-                }
-                // Closing `</template>`?
-                if is_template_close_at(bytes, k) {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some((content_start, k));
-                    }
-                    k += "</template".len();
-                } else if is_template_open_at(bytes, k) {
-                    depth += 1;
-                    k += "<template".len();
-                } else {
-                    k += 1;
-                }
-            }
-            _ => k += 1,
-        }
-    }
-    // Unterminated outer template: treat the rest of the document as its
-    // content so markup typed before the (missing) close still classifies.
-    Some((content_start, len))
-}
-
-/// Whether `bytes[at..]` begins a `<template` open tag (case-insensitive) with a
-/// proper tag-name boundary (the next byte is whitespace, `>`, `/`, or EOF), so
-/// `<templatefoo` does not match.
-fn is_template_open_at(bytes: &[u8], at: usize) -> bool {
-    const TAG: &[u8] = b"<template";
-    if at + TAG.len() > bytes.len() {
-        return false;
-    }
-    if !bytes[at..at + TAG.len()].eq_ignore_ascii_case(TAG) {
-        return false;
-    }
-    match bytes.get(at + TAG.len()) {
-        None => true,
-        Some(&b) => b.is_ascii_whitespace() || b == b'>' || b == b'/',
-    }
-}
-
-/// Whether `bytes[at..]` begins a `</template` closing tag (case-insensitive)
-/// with a proper boundary (next byte whitespace or `>`).
-fn is_template_close_at(bytes: &[u8], at: usize) -> bool {
-    const TAG: &[u8] = b"</template";
-    if at + TAG.len() > bytes.len() {
-        return false;
-    }
-    if !bytes[at..at + TAG.len()].eq_ignore_ascii_case(TAG) {
-        return false;
-    }
-    match bytes.get(at + TAG.len()) {
-        None => true,
-        Some(&b) => b.is_ascii_whitespace() || b == b'>',
+    match find_balanced_close_tag(source, content_start, "template") {
+        BalancedClose::Found(close) => Some((content_start, close)),
+        // Unterminated outer template: treat the rest of the document as its
+        // content so markup typed before the (missing) close still classifies.
+        BalancedClose::Unbalanced => Some((content_start, source.len())),
+        // A torn-open opaque region (comment / CDATA) swallows the rest of the
+        // file: no judgement, no markup window (auto-close stays off inside it).
+        BalancedClose::UnterminatedOpaque => None,
     }
 }
 

@@ -31,6 +31,24 @@
 //   macOS and Linux and EXCLUDES the `bash -c "<string>"` wrapper (its argv CONTAINS the sentinels so a
 //   substring search finds it, but its argv[0] basename is `bash`, not `sleep_…`).
 //
+// A RED RUN HERE MAY NOT BE A REGRESSION — check which scenario failed first. Two distinct environment
+// sensitivities are known and tracked as GI-18 in docs/arch/gate-integrity-ledger.md:
+//   (a) `(viii)` asserts a whole-gate budget against an ABSOLUTE ~6s window and IS load-sensitive.
+//       Measured on this 8-core host: green at load 2-27, fails at load 67-102 (12x oversubscription)
+//       with `took 11s ... did NOT bound the sequence near 6s`.
+//   (b) `i-survival`, `vi` and `xvii` spawn processes and observe them in the process table. These are
+//       NOT load-sensitive — they PASSED at that same load 67-102 — but four independent reviewer runs
+//       saw them fail at load 1.6-7.6 inside restricted sandboxes. The mechanism is ESTABLISHED, not
+//       inferred: one reported `mkdtemp` denial, and a later run ABORTED at `(i) MUTEX` with a direct
+//       `EPERM` from `mkdtemp` at load 2.72, never reaching those three at all. If you are in a
+//       container or a sandboxed shell, expect this and do not read it as a gate regression.
+// The two sets are DISJOINT and inversely correlated with load, which is how load was ruled OUT for (b).
+// Neither is a correctness signal about the gate itself: the classifier / verdict / parser scenarios are
+// pure in-process computation with no clock, no spawn and no filesystem, and they are unaffected by both.
+// This note is an INTERIM, and an inadequate one by design — a self-test whose job is detecting exactly
+// this class cannot discharge it by asking the reader to notice. GI-18 owes the real fix: skip under a
+// measured precondition, counted in SKIP and never in PASS.
+//
 // Properties proven (acceptance criteria — they MUST discriminate, not always-pass):
 //   (i)    MUTEX        — a second concurrent run REFUSES with the LOCK-REFUSED code (126).
 //   (ii)   STALE        — a SIGKILL'd holder's lockdir is reclaimed; a fresh run PASSes.
@@ -58,7 +76,7 @@
 //                           env set, NO `node gate.mjs` argv returns the gate success contract without
 //                           running the real gate. The discriminating control: a removed flag exits 127,
 //                           while `--help` (a legitimate non-gate mode) still exits 0.
-//   (ix)   SURFACE-1 NON-FAIL — a crash/leak (SIGABRT/LEAK) or a setup/harness error (non-zero exit, no
+//   (ix)   SURFACE-1 NON-FAIL — a crash (SIGABRT/SIGSEGV/…) or a setup/harness error (non-zero exit, no
 //                           `FAIL [` line) classifies FAIL on both the classifier and the live-aggregation
 //                           hook; the tolerated baseline stays PASS-WITH-TOLERATED.
 //   (x)    FAIL-CLOSED MUTEX — an alive holder with an EMPTY/uncheckable start-identity REFUSES (126); a
@@ -143,6 +161,28 @@
 //                           agreement. Discriminates: pre-fix buildCargoEnv left PATH unchanged, assigned ""
 //                           on all-implicit, KEPT non-dot relative / `..` / drive-relative / Windows root-
 //                           relative entries, and left a `PaTh` key unsanitized.
+//   (GB9)  BUILD-PREREQUISITE PREFLIGHT — the gate distinguishes "the code is broken" from "an artifact was
+//                           never built". Parts of the Rust suite load artifacts cargo does not build (the
+//                           real-provider suites spawn tsserver with `--globalPlugins
+//                           @verter/typescript-plugin`, whose entry is a `tsc -b` output `pnpm install` does
+//                           NOT produce); without them ~64 `*_tsserver` tests failed with `TS2307: Cannot
+//                           find module './Comp.vue'` and the gate reported them as ordinary regressions.
+//                           The oracle is a REAL LOAD of that entry in a child process, so the case a
+//                           stat-based check ACCEPTS is covered: both `index.js` present with one EMITTED
+//                           HELPER missing still throws inside tsserver and must still refuse. Leg 1 drives
+//                           the real `checkBuildPrerequisites` / `runBuildPrerequisiteLoadProbe` in-process
+//                           over injected probe outcomes (incl. every fail-closed shape: spawn error,
+//                           signal, timeout, unparseable output); legs 2-6 drive the REAL PRODUCTION CLI (a
+//                           byte-copy rooted in a SYNTHETIC git repo holding a miniature of the package
+//                           graph, so nothing in the developer's tree is touched and the production gate
+//                           keeps its zero test seams). Discriminates in six directions: nothing built /
+//                           plugin entry missing / language-shared missing / helper missing => exit 127
+//                           carrying the marker, the probe target and the producer command, with NEITHER
+//                           the freshness preflight NOR the archive build reached (the ordering half — the
+//                           freshness preflight's `pnpm install` is what turns the silent-SKIP state into
+//                           the 64-failure state); everything built => no refusal, SATISFIED, and the run
+//                           PROCEEDS. Every plant is stat-PROVEN applied before the run and re-stated
+//                           after it.
 //
 // Exit non-zero if any property fails.
 
@@ -155,6 +195,7 @@ import {
   existsSync,
   mkdirSync,
   realpathSync,
+  statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -164,6 +205,7 @@ import { fileURLToPath } from "node:url";
 import {
   classifyNextestFailures,
   analyzeNextestSurface,
+  parseNextestSummary,
   analyzeLibtestSurface,
   selectSessionSuites,
   ensureRequiredWindowsDebugSidecars,
@@ -190,6 +232,17 @@ import {
   // the CLOSED cwd-independent invariant, no preflight-vs-test disagreement.
   buildCargoEnv,
   sanitizePathValue,
+  // build-prerequisite preflight — the non-cargo artifacts the Rust suite loads from disk (GB9).
+  checkBuildPrerequisites,
+  runBuildPrerequisiteLoadProbe,
+  parseTsserverEnvDenylist,
+  probeBudgetMs,
+  BUILD_PREREQUISITE_PACKAGES,
+  BUILD_PREREQUISITE_PROBE_SEGMENTS,
+  BUILD_PREREQUISITE_PROBE_MAX_MS,
+  BUILD_PREREQUISITE_COMMAND,
+  BUILD_PREREQUISITE_MARKER,
+  TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS,
 } from "./gate-internals.mjs";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -235,6 +288,7 @@ const EXIT_FAIL = 1;
 const EXIT_TIMEOUT = 124;
 const EXIT_STALL = 125;
 const EXIT_LOCK_REFUSED = 126;
+const EXIT_USAGE = 127;
 
 let PASS_COUNT = 0;
 let FAIL_COUNT = 0;
@@ -311,6 +365,25 @@ function runGate(args, env) {
   // spawnSync sets .status (exit code) or .signal. A signalled exit yields null status.
   if (r.status === null && r.signal) return { code: 128, signal: r.signal };
   return { code: r.status === null ? 1 : r.status };
+}
+
+// Run a PRODUCTION gate.mjs CLI (the real file, or a byte-copy of it rooted elsewhere) and CAPTURE its
+// output. Used by (GB9), which drives the real CLI against a SYNTHETIC repo root so it can observe the
+// build-prerequisite refusal in both directions without mutating the developer's tree. Returns
+// { code, out } where `out` is stdout+stderr concatenated.
+function runGateCapture(gatePath, args, env) {
+  const child = { ...process.env, ...env };
+  // The gate honors VERTER_GATE_TARGET_DIR; every (GB9) leg passes --target-dir explicitly, so drop the
+  // ambient value rather than let a developer's export decide where the synthetic run writes.
+  delete child.VERTER_GATE_TARGET_DIR;
+  const r = spawnSync(process.execPath, [gatePath, ...args], {
+    env: child,
+    encoding: "utf8",
+    timeout: 300_000,
+  });
+  const out = `${r.stdout || ""}${r.stderr || ""}`;
+  if (r.status === null && r.signal) return { code: 128, signal: r.signal, out };
+  return { code: r.status === null ? 1 : r.status, out };
 }
 
 // Run the SELF-TEST-ONLY runner synchronously in single-command mode (`--st-cmd`): the given shell command
@@ -981,23 +1054,23 @@ async function main() {
     //     single verter_protocol::main binary: cases::typeinfo_proto_ts_freshness::<fn>.
     writeFileSync(
       A,
-      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
+      "        FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
     );
     // (b) an allowlisted test PLUS a non-allowlisted test failed => FAIL.
     writeFileSync(
       B,
-      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
-        "    FAIL [   0.030s] verter_compiler::main template::vmemo::renders_cached\n",
+      "        FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "        FAIL [   0.030s] verter_compiler::main template::vmemo::renders_cached\n",
     );
     // (c) a NON-allowlisted test whose name merely CONTAINS an allowlisted substring failed => FAIL.
     writeFileSync(
       C,
-      "    FAIL [   0.041s] verter_session::main cases::typeinfo_proto_ts_freshness_lookalike::regresses\n",
+      "        FAIL [   0.041s] verter_session::main cases::typeinfo_proto_ts_freshness_lookalike::regresses\n",
     );
     // (d) a NON-allowlisted test whose exact final token is an ENTIRE allowlisted name PLUS a suffix => FAIL.
     writeFileSync(
       D,
-      "    FAIL [   0.044s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output_extra\n",
+      "        FAIL [   0.044s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output_extra\n",
     );
     const classify = (file) => verdictClassifyNextestFile(file);
     const va = classify(A);
@@ -1140,24 +1213,26 @@ async function main() {
   {
     const fixDir = freshTmpDir("gatetest-nxfix-");
     const sigabrt = join(fixDir, "sigabrt.log");
-    const leakPlusTolerated = join(fixDir, "leak_plus_tolerated.log");
+    const unaccountedPlusTolerated = join(fixDir, "unaccounted_plus_tolerated.log");
     const setupError = join(fixDir, "setup_error.log");
     const tolerated = join(fixDir, "tolerated.log");
     // A SIGABRT crash with NO `FAIL [` line; the summary still counts it as failed and the run exits
     // non-zero. Pre-fix: classified PASS (no FAIL line). Post-fix: FAIL.
     writeFileSync(
       sigabrt,
-      "    PASS [   0.010s] verter_compiler template::renders\n" +
-        "    SIGABRT [   0.204s] verter_other crash::aborts_in_drop\n" +
+      "        PASS [   0.010s] verter_compiler template::renders\n" +
+        "     SIGABRT [   0.204s] verter_other crash::aborts_in_drop\n" +
         "     Summary [   1.230s] 2 tests run: 1 passed, 1 failed, 0 skipped\n",
     );
-    // A tolerated `FAIL` PLUS an unaccounted LEAK: summary failed=2 but only 1 `FAIL` name parses, so the
-    // unaccounted shortfall trips. Pre-fix: classified PASS-WITH-TOLERATED (only the tolerated FAIL name
-    // was checked). Post-fix: FAIL.
+    // A tolerated `FAIL` PLUS a failure the log does NOT name: the summary counts 2 non-passing tests
+    // (3 run, 1 passed) but only 1 status line is present, so the accounting is short by one and the
+    // shortfall trips. This is the realistic shape of a lost / interleaved / truncated status line under
+    // a parallel run — NOT a `LEAK` line, which nextest emits for a test it counts as PASSED (see GB6.6);
+    // pinning the tripwire on a leak claimed the opposite of what nextest does.
+    // Pre-fix: classified PASS-WITH-TOLERATED (only the tolerated FAIL name was checked). Post-fix: FAIL.
     writeFileSync(
-      leakPlusTolerated,
-      "    FAIL [   0.204s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
-        "    LEAK [   0.300s] verter_other::main resource::leaks_a_handle\n" +
+      unaccountedPlusTolerated,
+      "        FAIL [   0.204s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
         "     Summary [   1.500s] 3 tests run: 1 passed, 2 failed, 0 skipped\n",
     );
     // A nextest harness/setup error: non-zero exit, NO `FAIL [` line, NO Summary line. Pre-fix: PASS.
@@ -1166,8 +1241,8 @@ async function main() {
     // The real tolerated baseline shape (the 2 env FAILs, summary failed=2): still PASS-WITH-TOLERATED.
     writeFileSync(
       tolerated,
-      "    FAIL [   0.204s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
-        "    FAIL [   0.207s] verter_protocol::main cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide\n" +
+      "        FAIL [   0.204s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "        FAIL [   0.207s] verter_protocol::main cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide\n" +
         "     Summary [  62.968s] 15543 tests run: 15541 passed, 2 failed, 547 skipped\n",
     );
     const classify = (file) => verdictClassifyNextestFile(file);
@@ -1178,17 +1253,17 @@ async function main() {
     // setup/harness error has NO content markers and is indistinguishable from a clean log WITHOUT the exit
     // code, so it is asserted ONLY on the live-aggregation hook below (which has the code).
     const cSig = classify(sigabrt);
-    const cLeak = classify(leakPlusTolerated);
+    const cUnacc = classify(unaccountedPlusTolerated);
     const cTol = classify(tolerated);
-    note(`classify: sigabrt=${cSig} leak+tol=${cLeak} tolerated=${cTol}`);
+    note(`classify: sigabrt=${cSig} unaccounted+tol=${cUnacc} tolerated=${cTol}`);
     if (cSig !== "FAIL") {
       fail(
         `(ix) classifier: SIGABRT crash => '${cSig}', expected FAIL (a non-FAIL status must not pass)`,
       );
       ok = false;
     }
-    if (cLeak !== "FAIL") {
-      fail(`(ix) classifier: tolerated-FAIL + unaccounted LEAK => '${cLeak}', expected FAIL`);
+    if (cUnacc !== "FAIL") {
+      fail(`(ix) classifier: tolerated-FAIL + an unnamed unaccounted failure => '', expected FAIL`);
       ok = false;
     }
     if (cTol !== "PASS-WITH-TOLERATED") {
@@ -1201,16 +1276,20 @@ async function main() {
     // failures, non-100 on internal errors; a crash run is non-zero either way. This path consults the run
     // exit code, so it ALSO catches a content-less setup/harness error (nonzero exit, no FAIL line).
     const rSig = classifyRun(101, sigabrt);
-    const rLeak = classifyRun(100, leakPlusTolerated);
+    const rUnacc = classifyRun(100, unaccountedPlusTolerated);
     const rSetup = classifyRun(1, setupError);
     const rTol = classifyRun(100, tolerated);
-    note(`live-agg: sigabrt=${rSig} leak+tol=${rLeak} setup-error=${rSetup} tolerated=${rTol}`);
+    note(
+      `live-agg: sigabrt=${rSig} unaccounted+tol=${rUnacc} setup-error=${rSetup} tolerated=${rTol}`,
+    );
     if (rSig !== "FAIL") {
       fail(`(ix) live-agg: SIGABRT (exit 101) => '${rSig}', expected FAIL`);
       ok = false;
     }
-    if (rLeak !== "FAIL") {
-      fail(`(ix) live-agg: tolerated-FAIL + LEAK (exit 100) => '${rLeak}', expected FAIL`);
+    if (rUnacc !== "FAIL") {
+      fail(
+        `(ix) live-agg: tolerated-FAIL + an unnamed unaccounted failure (exit 100) => '', expected FAIL`,
+      );
       ok = false;
     }
     if (rSetup !== "FAIL") {
@@ -1225,7 +1304,7 @@ async function main() {
     }
     if (ok) {
       pass(
-        "(ix) SURFACE-1: SIGABRT crash, unaccounted LEAK, and setup/harness error ALL => FAIL on both the " +
+        "(ix) SURFACE-1: SIGABRT crash, an unnamed unaccounted failure, and a setup/harness error ALL => FAIL on both the " +
           "classifier and the live-aggregation hook; tolerated baseline => PASS-WITH-TOLERATED (discriminating)",
       );
     }
@@ -1850,13 +1929,13 @@ async function main() {
     // One tolerated FAIL line, NO Summary line. A non-zero exit cannot be proven accounted-for => FAIL.
     writeFileSync(
       tolNoSummary,
-      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
+      "        FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
     );
     // The same tolerated FAIL line WITH a matching Summary (failed=1 == 1 parsed FAIL name) => accounted =>
     // PASS-WITH-TOLERATED. Proves the requirement is summary-PRESENCE + exact-count, not a blanket fail.
     writeFileSync(
       tolWithSummary,
-      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+      "        FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
         "     Summary [  62.968s] 15543 tests run: 15542 passed, 1 failed, 547 skipped\n",
     );
     const classifyRun = (code, file) => verdictNextestRunFile(code, file);
@@ -2098,6 +2177,38 @@ async function main() {
       if (IS_WINDOWS) {
         skip(
           "(xix) STUB-INVOKED — POSIX bash cargo-stub + PATH override (no portable Windows cargo-stub stand-in here)",
+        );
+        break posix_xix;
+      }
+      // PRECONDITION, not an assertion. This scenario runs the REAL gate against the REAL repo root and
+      // expects it to reach cargo. The gate's FIRST step is the build-prerequisite preflight, which exits
+      // 127 on a tree whose tsserver plugin cannot be loaded — long before the archive step. On such a
+      // tree this scenario would report "the stub was NOT invoked" and "expected 1, got 127", which says
+      // nothing about the property under test. Worse, it makes the self-test's own verdict depend on the
+      // very tree state the gate is checking for: a green run would only ever be reachable when the
+      // artifacts happen to exist. So the state is measured and declared as a TRUE skip (counted in SKIP,
+      // never in PASS) rather than silently mis-measured.
+      const stubPrereq = checkBuildPrerequisites({ repoRoot: REPO_REALPATH });
+      // The SKIP is allowed for exactly ONE cause: the artifacts are demonstrably absent
+      // (`module-not-found`). Any OTHER failure class — an EPERM/spawn failure, a probe timeout, the
+      // plugin throwing for its own reasons, an unreadable tsserver launcher — means the prerequisite
+      // could not be ANSWERED, not that it is missing, and skipping on those would green-skip a scenario
+      // whose artifacts are present: a narrower version of the very silent pass this precondition was
+      // added to remove. `finish()` exits 0 while FAIL is zero, so a wrong SKIP here is invisible.
+      if (!stubPrereq.ok && stubPrereq.reason === "module-not-found") {
+        skip(
+          "(xix) STUB-INVOKED — SKIPPED: this tree's build prerequisites are absent, so the real gate " +
+            `exits 127 at its build-prerequisite preflight before reaching cargo (${stubPrereq.detail.split("\n")[0]}). ` +
+            `Build them with \`${BUILD_PREREQUISITE_COMMAND}\` and re-run to exercise this scenario.`,
+        );
+        break posix_xix;
+      }
+      if (!stubPrereq.ok) {
+        fail(
+          `(xix) the build-prerequisite probe could not ANSWER (reason=${stubPrereq.reason}): ` +
+            `${stubPrereq.detail.split("\n")[0]}. That is an infrastructure failure, not a missing build, ` +
+            "so this scenario must FAIL rather than skip — a skip here would hide a scenario whose " +
+            "artifacts are present.",
         );
         break posix_xix;
       }
@@ -4825,7 +4936,7 @@ async function main() {
       "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
 
     // (1) nextest content classifier — pair-only FAIL line.
-    const nxPairLog = `    FAIL [   0.012s] ${BIN} ${NX_NAME}\n`;
+    const nxPairLog = `        FAIL [   0.012s] ${BIN} ${NX_NAME}\n`;
     const c1Off = verdictClassifyNextest(nxPairLog, false);
     const c1On = verdictClassifyNextest(nxPairLog, true);
     if (c1Off !== "FAIL") {
@@ -4843,7 +4954,7 @@ async function main() {
 
     // (2) nextest LIVE aggregation — pair FAIL + exit 100 + matching Summary (failed=1).
     const nxPairRun =
-      `    FAIL [   0.012s] ${BIN} ${NX_NAME}\n` +
+      `        FAIL [   0.012s] ${BIN} ${NX_NAME}\n` +
       "     Summary [  62.968s] 15543 tests run: 15542 passed, 1 failed, 547 skipped\n";
     const r2Off = verdictNextestRun(100, nxPairRun, false);
     const r2On = verdictNextestRun(100, nxPairRun, true);
@@ -4888,7 +4999,7 @@ async function main() {
     }
     // Also a nextest crash (SIGABRT status) whose only failure is the pair name => FAIL regardless.
     const nxCrash =
-      `    SIGABRT [   0.204s] ${BIN} ${NX_NAME}\n` +
+      `     SIGABRT [   0.204s] ${BIN} ${NX_NAME}\n` +
       "     Summary [   1.230s] 1 tests run: 0 passed, 1 failed, 0 skipped\n";
     const ncOff = verdictNextestRun(101, nxCrash, false);
     const ncOn = verdictNextestRun(101, nxCrash, true);
@@ -4900,7 +5011,7 @@ async function main() {
     }
 
     // (5) a non-allowlisted FAIL => FAIL regardless of the flag.
-    const nxReal = `    FAIL [   0.030s] verter_compiler::main template::vmemo::renders_cached\n`;
+    const nxReal = `        FAIL [   0.030s] verter_compiler::main template::vmemo::renders_cached\n`;
     const re5Off = verdictClassifyNextest(nxReal, false);
     const re5On = verdictClassifyNextest(nxReal, true);
     if (re5Off !== "FAIL" || re5On !== "FAIL") {
@@ -4916,6 +5027,2094 @@ async function main() {
           "tolerance=true on BOTH the nextest classifier/live-agg AND the libtest analyzer; a crash on the pair " +
           "name and a non-allowlisted FAIL are FAIL regardless of the flag (discriminating — pre-change the " +
           "libtest analyzer had no gate and always tolerated the pair)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6) TERMINAL-OUTCOME ACCOUNTING — a nextest run is accounted for by its SUMMARY, not by its `FAIL [`
+  //       lines. nextest reports several terminal outcomes that are NOT `FAIL`: `N timed out`, `N exec
+  //       failed`, and an interrupted/cancelled run's `A/B tests run` (B-A tests that never ran at all). A
+  //       timed-out test has not passed — it has not even finished — so it MUST count toward the verdict and
+  //       MUST be NAMED with the same visibility as an ordinary failure. Pre-fix the analyzer keyed on
+  //       `summary.failed === parsedFailNames.length`, and nextest's `failed` count EXCLUDES `timed out` /
+  //       `exec failed`; so a run whose ONLY problem was a timeout (or whose plain failures were all
+  //       allowlisted) reported PASS / PASS-WITH-TOLERATED with ZERO named failures, and a run with real
+  //       failures PLUS timeouts named only the failures. The accounting below derives the failure total
+  //       from `runCount - passed`, which is label-INDEPENDENT (a future nextest outcome nextest counts as
+  //       run-but-not-passed is caught without this parser knowing its name).
+  //       DISCRIMINATION: GB6.6 is the inverse control — a `LEAK` line marks a test nextest counts as
+  //       PASSED (leaky, not fatal, outside leak-fail-mode), so a green run with a leak must stay PASS. A
+  //       change that simply failed on every non-`FAIL` status line would fail GB6.6.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write(
+    "\n(GB6) TERMINAL-OUTCOME ACCOUNTING (timed out / exec failed / never ran)\n",
+  );
+  {
+    // The EXACT allowlisted freshness-pair name (the only tolerated name) — reused so the tolerance path is
+    // genuinely reachable in the scenarios that must NOT be tolerated for an unrelated reason.
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const T1 = "cases::g_compile::compile_fail::hot_materialize_structural_rails_smoke";
+    const T2 =
+      "cases::tracked_paths_no_machine_roots::tracked_files_contain_no_machine_specific_path_markers";
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("\n");
+    let ok = true;
+
+    // GB6.1 — REAL-RUN SHAPE: plain failures AND timeouts. Every terminal failure must be NAMED.
+    //   Pre-fix: failures.length === 2 (the two `FAIL` names only) — the timeouts were invisible.
+    const mixed =
+      "        FAIL [   0.204s] ( 1/12) verter_session::main cases::a::alpha\n" +
+      "        FAIL [   0.207s] ( 2/12) verter_session::main cases::b::beta\n" +
+      `     TIMEOUT [ 180.008s] ( 3/12) verter_session::main ${T1}\n` +
+      `     TIMEOUT [ 180.005s] ( 4/12) verter_session::main ${T2}\n` +
+      "     Summary [ 900.014s] 12 tests run: 8 passed, 2 failed, 2 timed out, 5 skipped\n";
+    const rMixed = analyzeNextestSurface(mixed, 100, true);
+    note(`GB6.1 mixed failures=${rMixed.failures.length}\n${names(rMixed)}`);
+    if (rMixed.failures.length !== 4) {
+      fail(
+        `(GB6.1) 2 FAIL + 2 TIMEOUT => ${rMixed.failures.length} named failure(s), expected 4 (a timed-out ` +
+          `test has not passed; it must be counted AND named)`,
+      );
+      ok = false;
+    }
+    for (const t of [T1, T2]) {
+      if (!rMixed.failures.some((f) => f.name === t)) {
+        fail(`(GB6.1) timed-out test '${t}' is NOT in the named failure list: ${names(rMixed)}`);
+        ok = false;
+      }
+    }
+    if (!rMixed.failures.some((f) => /TIMEOUT/.test(f.surface) && f.name === T1)) {
+      fail(
+        `(GB6.1) the timed-out entry does not carry a TIMEOUT-tagged surface (the verdict line must say ` +
+          `WHY it failed): ${names(rMixed)}`,
+      );
+      ok = false;
+    }
+
+    // GB6.2 — THE SILENT PASS (headline). Every plain `FAIL` is allowlisted AND a test timed out. Pre-fix
+    //   the summary `failed` count (1) matched the one parsed `FAIL` name, so the run was "accounted for"
+    //   and the timeout never entered the verdict => PASS-WITH-TOLERATED with a test that never finished.
+    const tolPlusTimeout =
+      `        FAIL [   0.204s] ( 1/12) verter_protocol::main ${TOL}\n` +
+      `     TIMEOUT [ 180.008s] ( 2/12) verter_session::main ${T1}\n` +
+      "     Summary [ 900.014s] 12 tests run: 10 passed, 1 failed, 1 timed out, 5 skipped\n";
+    const vTolTimeout = verdictNextestRun(100, tolPlusTimeout, true);
+    const rTolTimeout = analyzeNextestSurface(tolPlusTimeout, 100, true);
+    note(`GB6.2 tolerated-FAIL + TIMEOUT => ${vTolTimeout}`);
+    if (vTolTimeout !== "FAIL") {
+      fail(
+        `(GB6.2) an allowlisted FAIL plus a TIMEOUT => '${vTolTimeout}', expected FAIL — a timeout is NEVER ` +
+          `tolerated, and a run whose only problem is a timeout must not certify the tree`,
+      );
+      ok = false;
+    }
+    if (!rTolTimeout.failures.some((f) => f.name === T1)) {
+      fail(`(GB6.2) the timed-out test is not named in the verdict: ${names(rTolTimeout)}`);
+      ok = false;
+    }
+
+    // GB6.3 — TIMEOUT ONLY, no `FAIL [` line at all. Pre-fix this did fail, but ONLY through the opaque
+    //   `<run exit …; unaccounted failure(s)>` catch-all — the operator was never told WHICH test hung.
+    const timeoutOnly =
+      `     TIMEOUT [ 180.002s] ( 4/4) verter_session::main ${T2}\n` +
+      "     Summary [ 900.003s] 4 tests run: 3 passed, 1 timed out, 2 skipped\n";
+    const rTimeoutOnly = analyzeNextestSurface(timeoutOnly, 100, true);
+    const vTimeoutOnly = verdictNextestRun(100, timeoutOnly, true);
+    note(`GB6.3 timeout-only => ${vTimeoutOnly}\n${names(rTimeoutOnly)}`);
+    if (vTimeoutOnly !== "FAIL") {
+      fail(`(GB6.3) a timeout-only run => '${vTimeoutOnly}', expected FAIL`);
+      ok = false;
+    }
+    if (!rTimeoutOnly.failures.some((f) => f.name === T2)) {
+      fail(
+        `(GB6.3) a timeout-only run must NAME the timed-out test, not only report an opaque unaccounted ` +
+          `catch-all: ${names(rTimeoutOnly)}`,
+      );
+      ok = false;
+    }
+
+    // GB6.4 — `N exec failed` is a terminal outcome nextest reports SEPARATELY from `N failed`; pre-fix the
+    //   `(\d+)\s+failed` scan never saw it, so a tolerated FAIL alongside an exec-failed test passed.
+    const execFailed =
+      `        FAIL [   0.204s] ( 1/6) verter_protocol::main ${TOL}\n` +
+      "     Summary [  12.000s] 6 tests run: 4 passed, 1 failed, 1 exec failed, 0 skipped\n";
+    const vExec = verdictNextestRun(100, execFailed, true);
+    note(`GB6.4 tolerated-FAIL + exec-failed => ${vExec}`);
+    if (vExec !== "FAIL") {
+      fail(
+        `(GB6.4) an allowlisted FAIL plus an 'exec failed' test => '${vExec}', expected FAIL (the exec-failed ` +
+          `test is unaccounted for by the parsed FAIL names)`,
+      );
+      ok = false;
+    }
+
+    // GB6.5 — INTERRUPTED/CANCELLED run: nextest's `A/B tests run` form means B-A tests NEVER RAN. Pre-fix
+    //   the parser ignored the `A/B` form entirely, so a cancelled run with one tolerated failure certified
+    //   a tree where 39 of 41 tests never executed.
+    const cancelled =
+      `        FAIL [   0.009s] ( 1/41) verter_protocol::main ${TOL}\n` +
+      "  Cancelling due to test failure: 1 test still running\n" +
+      "     Summary [   1.516s] 2/41 tests run: 1 passed, 1 failed, 0 skipped\n";
+    const vCancelled = verdictNextestRun(100, cancelled, true);
+    const rCancelled = analyzeNextestSurface(cancelled, 100, true);
+    note(`GB6.5 cancelled 2/41 => ${vCancelled}\n${names(rCancelled)}`);
+    if (vCancelled !== "FAIL") {
+      fail(
+        `(GB6.5) a cancelled run (2 of 41 tests run) with only an allowlisted failure => '${vCancelled}', ` +
+          `expected FAIL — 39 tests never ran, so the run cannot certify the tree`,
+      );
+      ok = false;
+    }
+    if (!rCancelled.failures.some((f) => /never ran|39/.test(f.name))) {
+      fail(`(GB6.5) the unrun-test count is not surfaced in the verdict: ${names(rCancelled)}`);
+      ok = false;
+    }
+
+    // GB6.6 — INVERSE CONTROL (false-positive guard). `LEAK` is the terminal status of a test nextest counts
+    //   as PASSED (it leaked a handle/subprocess; fatal only under leak-fail-mode, which renders `LEAK-FAIL`).
+    //   A green run containing a LEAK line must stay PASS on BOTH the classifier and the live analyzer.
+    //   This is what stops the fix from degenerating into "any non-FAIL status line fails the gate".
+    const leakyGreen =
+      "        PASS [   0.013s] ( 1/2) verter_session::main cases::ok::fine\n" +
+      "        LEAK [   0.215s] ( 2/2) verter_session::main cases::ok::leaks_a_child\n" +
+      "     Summary [   1.003s] 2 tests run: 2 passed (1 leaky), 0 skipped\n";
+    const cLeaky = verdictClassifyNextest(leakyGreen, true);
+    const rLeaky = verdictNextestRun(0, leakyGreen, true);
+    note(`GB6.6 leaky-but-green: classifier=${cLeaky} live-agg=${rLeaky}`);
+    if (cLeaky !== "PASS" || rLeaky !== "PASS") {
+      fail(
+        `(GB6.6) a GREEN run with a leaky (passed) test => classifier='${cLeaky}' live-agg='${rLeaky}', ` +
+          `expected PASS on both — LEAK marks a test nextest counted as PASSED; only LEAK-FAIL is a failure`,
+      );
+      ok = false;
+    }
+    // …and LEAK-FAIL (leak-fail-mode) IS a failure, named.
+    const leakFail =
+      "   LEAK-FAIL [   0.215s] ( 2/2) verter_session::main cases::ok::leaks_a_child\n" +
+      "     Summary [   1.003s] 2 tests run: 1 passed, 1 failed, 0 skipped\n";
+    const rLeakFail = analyzeNextestSurface(leakFail, 100, true);
+    if (!rLeakFail.failures.some((f) => f.name === "cases::ok::leaks_a_child")) {
+      fail(`(GB6.6) a LEAK-FAIL test must be named as a failure: ${names(rLeakFail)}`);
+      ok = false;
+    }
+
+    // GB6.7 — CLEAN CONTROL: a fully green run stays PASS (the accounting must not blanket-fail).
+    const green =
+      "        PASS [   0.013s] ( 1/2) verter_session::main cases::ok::fine\n" +
+      "     Summary [  63.890s] 15543 tests run: 15543 passed, 547 skipped\n";
+    const vGreen = verdictNextestRun(0, green, true);
+    if (vGreen !== "PASS") {
+      fail(`(GB6.7) a fully green run => '${vGreen}', expected PASS`);
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6) TERMINAL-OUTCOME ACCOUNTING: timed-out and exec-failed tests are COUNTED and NAMED (a " +
+          "timeout is never tolerated, even alongside an allowlisted FAIL), an interrupted run's never-ran " +
+          "tests fail the verdict, and the inverse controls hold — a leaky-but-PASSED test and a fully " +
+          "green run both stay PASS (discriminating: pre-fix the analyzer keyed on nextest's `failed` " +
+          "count, which excludes `timed out`/`exec failed`, so a timeout-only problem reported PASS)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6b) COMPOUND AND RETRY STATUS FIELDS. The (GB6) accounting above is only as good as its NAMING: a
+  //        terminal failure the status parser cannot read still fails the gate (the derived count catches
+  //        it) but surfaces as an opaque `<unaccounted>` line instead of the test's name, which is exactly
+  //        what (GB6) set out to end. nextest's status field is NOT a single uppercase token. Every fixture
+  //        below is a VERBATIM line captured from a real `cargo-nextest 0.9.130` run, not a guess:
+  //
+  //          " FAIL + LEAK [   1.019s] (4/5) gb6status::t leak_and_fail"   — a test that failed AND leaked
+  //          "  TRY 3 FAIL [   0.008s] (2/3) gb6status::t always_fails"    — final attempt under `retries`
+  //          " TRY 3 FL+LK [   1.028s] (3/3) gb6status::t leak_and_fail"   — abbreviated compound + retry
+  //
+  //        A `^([A-Z][A-Z-]*) \[` scan reads NONE of them: `FAIL` is followed by " + LEAK [", and a `TRY N`
+  //        prefix pushes the real status off the line start.
+  //
+  //        DISCRIMINATION — and the reason this cannot be fixed by broad substring matching. A FLAKY test
+  //        renders `TRY 1 FAIL` and then `TRY 2 PASS`, is counted `1 passed (1 flaky)`, and the run EXITS
+  //        0. Any parser that names every line containing "FAIL" reddens that GREEN run. GB6b.4 is that
+  //        control, and GB6b.5 pins the count: intermediate attempts must not each become a failure. The
+  //        terminal status per test is what counts, so the parser keeps the LAST status line per test.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6b) COMPOUND + RETRY STATUS FIELDS (FAIL + LEAK, TRY N …)\n");
+  {
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("\n");
+    let ok = true;
+
+    // GB6b.1 — compound `FAIL + LEAK`: the failing test must be NAMED, not folded into `<unaccounted>`.
+    const compound =
+      "        PASS [   0.015s] (1/5) gb6status::t plain_pass\n" +
+      "        FAIL [   0.016s] (2/5) gb6status::t always_fails_for_retry\n" +
+      "        LEAK [   1.019s] (3/5) gb6status::t leak_and_pass\n" +
+      " FAIL + LEAK [   1.019s] (4/5) gb6status::t leak_and_fail\n" +
+      "     TIMEOUT [   2.004s] (5/5) gb6status::t hangs\n" +
+      "     Summary [   2.004s] 5 tests run: 2 passed (1 leaky), 2 failed, 1 timed out, 0 skipped\n" +
+      "        FAIL [   0.016s] (2/5) gb6status::t always_fails_for_retry\n" +
+      " FAIL + LEAK [   1.019s] (4/5) gb6status::t leak_and_fail\n" +
+      "     TIMEOUT [   2.004s] (5/5) gb6status::t hangs\n";
+    const rCompound = analyzeNextestSurface(compound, 100, true);
+    note(`GB6b.1 compound failures=${rCompound.failures.length}\n${names(rCompound)}`);
+    // 5 run - 2 passed = 3 non-passing: the plain FAIL, the FAIL+LEAK, and the TIMEOUT. All three named,
+    // and NOTHING else (the leaky-but-PASSED test is not a failure, and no `<unaccounted>` filler).
+    if (rCompound.failures.length !== 3) {
+      fail(
+        `(GB6b.1) FAIL + (FAIL + LEAK) + TIMEOUT => ${rCompound.failures.length} named, expected exactly 3`,
+      );
+      ok = false;
+    }
+    if (!rCompound.failures.some((f) => f.name === "leak_and_fail")) {
+      fail(`(GB6b.1) the compound 'FAIL + LEAK' test is not named: ${names(rCompound)}`);
+      ok = false;
+    }
+    if (rCompound.failures.some((f) => f.name === "leak_and_pass")) {
+      fail(`(GB6b.1) a leaky-but-PASSED test was named as a failure: ${names(rCompound)}`);
+      ok = false;
+    }
+    if (rCompound.failures.some((f) => /unaccounted/.test(f.name))) {
+      fail(
+        `(GB6b.1) every failure was nameable, so no opaque <unaccounted> entry may appear: ${names(rCompound)}`,
+      );
+      ok = false;
+    }
+
+    // GB6b.2/3 — `TRY N FAIL` and `TRY N FL+LK` (the `retries` profile). Only the TERMINAL attempt counts.
+    const retried =
+      "        PASS [   0.011s] (1/3) gb6status::t plain_pass\n" +
+      "  TRY 1 FAIL [   0.014s] (───) gb6status::t always_fails_for_retry\n" +
+      "  TRY 2 FAIL [   0.011s] (───) gb6status::t always_fails_for_retry\n" +
+      "  TRY 3 FAIL [   0.008s] (2/3) gb6status::t always_fails_for_retry\n" +
+      " TRY 1 FL+LK [   1.032s] (───) gb6status::t leak_and_fail\n" +
+      " TRY 2 FL+LK [   1.024s] (───) gb6status::t leak_and_fail\n" +
+      " TRY 3 FL+LK [   1.028s] (3/3) gb6status::t leak_and_fail\n" +
+      "     Summary [   3.090s] 3 tests run: 1 passed, 2 failed, 2 skipped\n" +
+      "  TRY 3 FAIL [   0.008s] (2/3) gb6status::t always_fails_for_retry\n" +
+      " TRY 3 FL+LK [   1.028s] (3/3) gb6status::t leak_and_fail\n";
+    const rRetried = analyzeNextestSurface(retried, 100, true);
+    note(`GB6b.2/3 retried failures=${rRetried.failures.length}\n${names(rRetried)}`);
+    for (const t of ["always_fails_for_retry", "leak_and_fail"]) {
+      if (!rRetried.failures.some((f) => f.name === t)) {
+        fail(`(GB6b.2/3) retried failure '${t}' is not named: ${names(rRetried)}`);
+        ok = false;
+      }
+    }
+    // GB6b.5 — COUNT PIN: 3 run - 1 passed = 2 non-passing, so EXACTLY 2 named. Six `TRY` lines plus two
+    // recap lines must not inflate this — a per-line counter would report 8.
+    if (rRetried.failures.length !== 2) {
+      fail(
+        `(GB6b.5) six TRY attempts over two tests => ${rRetried.failures.length} named, expected exactly 2 ` +
+          `(the terminal attempt per test, not one failure per attempt line)`,
+      );
+      ok = false;
+    }
+
+    // GB6b.4 — THE CONTROL. A flaky test fails its first attempt, PASSES its second, is counted
+    // `1 passed (1 flaky)`, and the run EXITS 0. It must stay PASS: naming any line containing "FAIL"
+    // would redden this green run.
+    const flakyGreen =
+      "  TRY 1 FAIL [   0.022s] (───) gb6status::flaky flaky_passes_on_retry\n" +
+      "  TRY 2 PASS [   0.019s] (1/1) gb6status::flaky flaky_passes_on_retry\n" +
+      "     Summary [   0.049s] 1 test run: 1 passed (1 flaky), 5 skipped\n";
+    const vFlaky = verdictNextestRun(0, flakyGreen, true);
+    const cFlaky = verdictClassifyNextest(flakyGreen, true);
+    note(`GB6b.4 flaky-pass: live-agg=${vFlaky} classifier=${cFlaky}`);
+    if (vFlaky !== "PASS" || cFlaky !== "PASS") {
+      fail(
+        `(GB6b.4) a FLAKY test that failed attempt 1 and PASSED attempt 2 (exit 0, '1 passed (1 flaky)') ` +
+          `=> live-agg='${vFlaky}' classifier='${cFlaky}', expected PASS on both — the terminal status is ` +
+          `PASS, and a parser that matches any line containing "FAIL" reddens this green run`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6b) COMPOUND + RETRY STATUS FIELDS: a compound `FAIL + LEAK` and a retried `TRY N FAIL` / " +
+          "`TRY N FL+LK` are each NAMED (not folded into an opaque <unaccounted> entry), the named count " +
+          "equals the summary's non-passing count so retry attempts do not inflate it, and the inverse " +
+          "controls hold — a leaky-but-PASSED test and a FLAKY test that passed on retry both stay PASS " +
+          "(discriminating: a `^([A-Z][A-Z-]*) \\[` scan reads none of these status fields, and broad " +
+          "substring matching reddens the green flaky run)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6c) STATUS-LINE IMPERSONATION. The parser reads a channel that is NOT exclusively the runner's:
+  //        nextest relays a test's CAPTURED OUTPUT on the same stream as its own status lines. So any
+  //        parse that trusts line SHAPE alone is parsing data a test can influence — and the "attacker"
+  //        need only be a test that legitimately prints nextest-shaped text, or a fixture containing one.
+  //
+  //        THE ATTACK, reproduced against the pre-fix parser: because naming resolved last-status-wins
+  //        UNCONDITIONALLY, a captured `PASS` line naming a test that genuinely FAILED overwrote the real
+  //        FAIL. A second captured line naming the ALLOWLISTED test then rebalanced the arithmetic
+  //        (namedCount=1, nonPassed=1, no shortfall), so the run reported PASS-WITH-TOLERATED while a real
+  //        failure sat in the log. Clearing the named set alone does not do this — the count still trips;
+  //        it is BALANCING the count that produces the green verdict.
+  //
+  //        THE LOAD-BEARING LAYER IS THE COUNT, not the transition rule. `nonPassed` comes from nextest's
+  //        own accounting and cannot be lowered by anything printed into the stream, so clearing a failure
+  //        leaves a shortfall that fails the run. The transition rule below only raises the cost of the
+  //        BARE-`PASS` forgery; a forged `TRY n` pair defeats it outright (see GB6d), because captured
+  //        output can supply both sides of the one transition it permits. Two further layers: a named
+  //        count EXCEEDING nextest's non-passing count is surfaced as impersonation; and a status line
+  //        must occupy nextest's exact 12-column status field (verified 44/44 against real runs), which
+  //        the 4-space capture indent breaks for echoed output. The tolerance path - the only route from
+  //        `failures exist` to green - is closed separately in GB6d.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write(
+    "\n(GB6c) STATUS-LINE IMPERSONATION (captured output cannot clear a failure)\n",
+  );
+  {
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const REAL = "cases::real::genuine_failure";
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("  ");
+    let ok = true;
+
+    // GB6c.1 — THE S0. The captured `PASS` is COLUMN-EXACT (8-space pad, the genuine 12-column field), so
+    // the layout check cannot save us here; only the transition rule can. Pre-fix: PASS-WITH-TOLERATED.
+    const impersonated =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n` +
+      "  stdout ───\n" +
+      `        PASS [   0.010s] ( 1/12) verter_session::main ${REAL}\n` +
+      `        FAIL [   0.011s] ( 2/12) verter_protocol::main ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const vImp = verdictNextestRun(100, impersonated, true);
+    const rImp = analyzeNextestSurface(impersonated, 100, true);
+    note(`GB6c.1 impersonated-PASS => ${vImp} | ${names(rImp)}`);
+    if (vImp !== "FAIL") {
+      fail(
+        `(GB6c.1) a CAPTURED 'PASS' line naming a genuinely FAILED test, plus a captured line naming the ` +
+          `allowlisted test to balance the count => '${vImp}', expected FAIL — captured test output must ` +
+          `never be able to clear a real failure`,
+      );
+      ok = false;
+    }
+    if (!rImp.failures.some((f) => f.name === REAL)) {
+      fail(`(GB6c.1) the genuinely failed test is not named in the verdict: ${names(rImp)}`);
+      ok = false;
+    }
+
+    // GB6c.2 — the other half: a captured line ADDING a failure nextest never counted. The named count
+    // exceeds the summary's non-passing count, which is only possible if something impersonated a status
+    // line, so it must be surfaced rather than silently ignored.
+    const overCount =
+      "        FAIL [   0.204s] ( 1/12) verter_session::main cases::real::one_true_failure\n" +
+      "  stdout ───\n" +
+      "        FAIL [   0.010s] ( 2/12) verter_session::main cases::fake::invented_by_stdout\n" +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const rOver = analyzeNextestSurface(overCount, 100, true);
+    note(`GB6c.2 over-count named=${rOver.namedCount} nonPassed=${rOver.summary.nonPassed}`);
+    if (
+      !rOver.failures.some((f) => /nextest counted \d+ non-passing/.test(f.name)) ||
+      !rOver.failures.some((f) => f.name === "cases::real::one_true_failure")
+    ) {
+      fail(
+        `(GB6c.2) the log named ${rOver.namedCount} failures but nextest counted ` +
+          `${rOver.summary.nonPassed} non-passing — that mismatch must be surfaced: ${names(rOver)}`,
+      );
+      ok = false;
+    }
+
+    // GB6c.3 — CONTROL: the genuine retry sequence must survive the transition rule. A blanket
+    // "a PASS may never clear a FAIL" rule would break exactly this, which is why the rule is scoped to
+    // TRY-tagged, strictly-increasing attempts.
+    const genuineRetry =
+      "  TRY 1 FAIL [   0.022s] (───) gb6status::flaky flaky_passes_on_retry\n" +
+      "  TRY 2 PASS [   0.019s] (1/1) gb6status::flaky flaky_passes_on_retry\n" +
+      "     Summary [   0.049s] 1 test run: 1 passed (1 flaky), 5 skipped\n";
+    const vRetry = verdictNextestRun(0, genuineRetry, true);
+    if (vRetry !== "PASS") {
+      fail(
+        `(GB6c.3) a GENUINE retry (TRY 1 FAIL -> TRY 2 PASS, exit 0, '1 passed (1 flaky)') => '${vRetry}', ` +
+          `expected PASS — the transition rule must permit the one legitimate fail-to-pass transition`,
+      );
+      ok = false;
+    }
+
+    // GB6c.4 — CONTROL: a SLOW progress line followed by a real PASS is an ordinary green test.
+    const slowThenPass =
+      "        SLOW [> 60.000s] (───) verter_session::main cases::slow::big_scan\n" +
+      "        PASS [  64.584s] (2/2) verter_session::main cases::slow::big_scan\n" +
+      "     Summary [  64.587s] 2 tests run: 2 passed, 0 skipped\n";
+    const vSlow = verdictNextestRun(0, slowThenPass, true);
+    if (vSlow !== "PASS") {
+      fail(`(GB6c.4) SLOW followed by PASS => '${vSlow}', expected PASS`);
+      ok = false;
+    }
+
+    // GB6c.5 — LAYOUT LAYER. The realistic accidental case: a test echoes a genuine-looking status line,
+    // and nextest indents captured output by 4 spaces, pushing the status field off its 12-column slot.
+    // Such a line must not parse as a status line AT ALL, so it neither clears nor invents a failure.
+    const indentedEcho =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n` +
+      "  stdout ───\n" +
+      `            PASS [   0.010s] ( 1/12) verter_session::main ${REAL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const rEcho = analyzeNextestSurface(indentedEcho, 100, true);
+    note(`GB6c.5 indented-echo named=${rEcho.namedCount} | ${names(rEcho)}`);
+    if (rEcho.failures.length !== 1 || rEcho.failures[0].name !== REAL) {
+      fail(
+        `(GB6c.5) a 4-space-indented captured echo must not parse as a status line; expected exactly the ` +
+          `one real failure, got: ${names(rEcho)}`,
+      );
+      ok = false;
+    }
+
+    // GB6c.6 — [MINOR] identical test NAMES in two different binaries are two distinct tests. Collapsing
+    // them by bare name loses one and leaves an opaque unaccounted entry in its place.
+    const twoBinaries =
+      "        FAIL [   0.204s] ( 1/12) verter_session::main cases::shared::same_name\n" +
+      "        FAIL [   0.207s] ( 2/12) verter_protocol::main cases::shared::same_name\n" +
+      "     Summary [ 900.014s] 12 tests run: 10 passed, 2 failed, 0 skipped\n";
+    const rTwo = analyzeNextestSurface(twoBinaries, 100, true);
+    note(`GB6c.6 two-binaries named=${rTwo.namedCount} failures=${rTwo.failures.length}`);
+    if (rTwo.failures.length !== 2 || rTwo.failures.some((f) => /unaccounted/.test(f.name))) {
+      fail(
+        `(GB6c.6) the same test name in TWO binaries is two failures; expected 2 named and no opaque ` +
+          `unaccounted entry, got: ${names(rTwo)}`,
+      );
+      ok = false;
+    }
+
+    // GB6c.7 — [ENV] the gate must not let an inherited env var disable the signal its parser depends on.
+    // `NEXTEST_FINAL_STATUS_LEVEL=none` suppresses the failure recap; a gate whose correctness silently
+    // depends on that being unset is one `export` away from certifying a broken tree. buildCargoEnv must
+    // OVERRIDE it to a known value, exactly as it already does for CARGO_TARGET_DIR.
+    const hostileEnv = buildCargoEnv(
+      { PATH: "/usr/bin", NEXTEST_FINAL_STATUS_LEVEL: "none", NEXTEST_STATUS_LEVEL: "none" },
+      "/tmp/runner-target",
+      false,
+    );
+    note(
+      `GB6c.7 env: final=${hostileEnv.NEXTEST_FINAL_STATUS_LEVEL} status=${hostileEnv.NEXTEST_STATUS_LEVEL}`,
+    );
+    if (hostileEnv.NEXTEST_FINAL_STATUS_LEVEL === "none") {
+      fail(
+        `(GB6c.7) an inherited NEXTEST_FINAL_STATUS_LEVEL=none survived buildCargoEnv — it suppresses the ` +
+          `failure recap the parser reads, so the gate's correctness would depend on an unset env var`,
+      );
+      ok = false;
+    }
+    if (hostileEnv.NEXTEST_STATUS_LEVEL === "none") {
+      fail(`(GB6c.7) an inherited NEXTEST_STATUS_LEVEL=none survived buildCargoEnv`);
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6c) STATUS-LINE IMPERSONATION: a captured `PASS` cannot clear a genuine FAIL (a fail-to-pass " +
+          "transition requires a TRY-tagged, strictly-increasing retry), a named count exceeding nextest's " +
+          "own non-passing count is surfaced, an indented captured echo does not parse as a status line, " +
+          "one test name in two binaries stays two failures, and buildCargoEnv overrides a hostile " +
+          "NEXTEST_*_STATUS_LEVEL — while the genuine retry and SLOW-then-PASS controls stay PASS",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6d) FORGED RETRY PAIRS, AND WHICH LAYER ACTUALLY BEARS THE LOAD.
+  //
+  //        The (GB6c) transition rule permits ONE fail-to-pass transition: a `TRY <n>`-tagged pair with a
+  //        strictly increasing attempt number. Captured output can supply BOTH SIDES of that pair, so the
+  //        rule's defining case is trivially forgeable and the rule is NOT the load-bearing layer. Two
+  //        reviewer-executed payloads, both of which cleared a genuine failure and reported
+  //        PASS-WITH-TOLERATED:
+  //
+  //          FAIL … genuine_failure / TRY 1 FAIL … genuine_failure / TRY 2 PASS … genuine_failure
+  //          FAIL … genuine_failure / TRY 1 FL   … genuine_failure / TRY 2 LK   … genuine_failure
+  //
+  //        WHAT ACTUALLY BEARS THE LOAD is the COUNT reconciliation: `nonPassed` comes from nextest's own
+  //        accounting and cannot be lowered by anything printed into the stream. Clearing a failure creates
+  //        a shortfall, which fails the run — UNLESS the forger also supplies a replacement name to balance
+  //        the count. And a replacement only produces a GREEN verdict if it is ALLOWLISTED, because any
+  //        other name is itself a named failure. So the entire residual attack surface is the tolerance
+  //        path, and that is where the fail-closed check belongs: tolerance is refused whenever any test's
+  //        failure was superseded by a pass, because the gate cannot prove whether that supersession was a
+  //        genuine retry or a forgery. Refusing costs nothing real (this repo runs `retries = 0`, so no
+  //        genuine supersession occurs) and it closes both payloads.
+  //
+  //        GB6d.3 pins the LAYER ATTRIBUTION rather than asserting it in prose: the same forged pair is
+  //        stopped by tolerance-refusal when column-exact, and by the layout rule when carrying nextest's
+  //        4-space capture indent. GB6d.4/5 are the controls that keep the fix from being a blanket denial.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6d) FORGED RETRY PAIRS (layer attribution)\n");
+  {
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const REAL = "cases::real::genuine_failure";
+    const SUM = "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const realFail = `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n`;
+    const tolFail = `        FAIL [   0.011s] ( 2/12) verter_protocol::main ${TOL}\n`;
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("  ");
+    let ok = true;
+
+    // GB6d.1 / GB6d.2 — both reviewer payloads. Column-exact, so layout cannot stop them.
+    const forgedPass =
+      realFail +
+      `  TRY 1 FAIL [   0.010s] (───) verter_session::main ${REAL}\n` +
+      `  TRY 2 PASS [   0.011s] (1/1) verter_session::main ${REAL}\n` +
+      tolFail +
+      SUM;
+    const forgedAbbrev =
+      realFail +
+      `    TRY 1 FL [   0.010s] (───) verter_session::main ${REAL}\n` +
+      `    TRY 2 LK [   0.011s] (1/1) verter_session::main ${REAL}\n` +
+      tolFail +
+      SUM;
+    for (const [label, log] of [
+      ["GB6d.1 forged TRY n PASS", forgedPass],
+      ["GB6d.2 forged TRY n FL/LK", forgedAbbrev],
+    ]) {
+      const v = verdictNextestRun(100, log, true);
+      const r = analyzeNextestSurface(log, 100, true);
+      note(`${label} => ${v} | ${names(r)}`);
+      if (v !== "FAIL") {
+        fail(
+          `(${label}) a forged retry pair supplying BOTH sides cleared a genuine failure => '${v}', ` +
+            `expected FAIL — captured output can fabricate the one fail-to-pass transition the ` +
+            `transition rule permits, so tolerance must refuse when any failure was superseded by a pass`,
+        );
+        ok = false;
+      }
+    }
+
+    // GB6d.3 — LAYER ATTRIBUTION. Same forged pair, but carrying nextest's real 4-space capture indent:
+    // the layout rule rejects the lines outright, so the genuine FAIL is never cleared and the run fails
+    // by NAME rather than by tolerance-refusal. This is what makes the two layers separately observable.
+    const forgedIndented =
+      realFail +
+      `      TRY 1 FAIL [   0.010s] (───) verter_session::main ${REAL}\n` +
+      `      TRY 2 PASS [   0.011s] (1/1) verter_session::main ${REAL}\n` +
+      SUM;
+    const rIndent = analyzeNextestSurface(forgedIndented, 100, true);
+    note(`GB6d.3 indented forged pair => ${names(rIndent)}`);
+    if (!rIndent.failures.some((f) => f.name === REAL)) {
+      fail(
+        `(GB6d.3) an INDENTED forged retry pair must be rejected by the layout rule, leaving the genuine ` +
+          `failure named: ${names(rIndent)}`,
+      );
+      ok = false;
+    }
+
+    // GB6d.4 — CONTROL: a genuine flaky retry with NO allowlisted name, exit 0. Tolerance is not involved,
+    // so the run stays PASS. A blanket "any supersession fails the run" rule would break this.
+    const flakyGreen =
+      "  TRY 1 FAIL [   0.022s] (───) gb6status::flaky flaky_passes_on_retry\n" +
+      "  TRY 2 PASS [   0.019s] (1/1) gb6status::flaky flaky_passes_on_retry\n" +
+      "     Summary [   0.049s] 1 test run: 1 passed (1 flaky), 5 skipped\n";
+    const vFlaky = verdictNextestRun(0, flakyGreen, true);
+    if (vFlaky !== "PASS") {
+      fail(`(GB6d.4) a genuine flaky retry with no allowlisted name => '${vFlaky}', expected PASS`);
+      ok = false;
+    }
+
+    // GB6d.5 — CONTROL: the ordinary tolerated baseline, with NO supersession anywhere, must still
+    // tolerate. The refusal must be scoped to runs where a failure was actually cleared.
+    const cleanTolerated =
+      `        FAIL [   0.204s] verter_protocol::main ${TOL}\n` +
+      "     Summary [  62.968s] 15543 tests run: 15542 passed, 1 failed, 547 skipped\n";
+    const vClean = verdictNextestRun(100, cleanTolerated, true);
+    if (vClean !== "PASS-WITH-TOLERATED") {
+      fail(
+        `(GB6d.5) the tolerated baseline with NO supersession => '${vClean}', expected ` +
+          `PASS-WITH-TOLERATED — tolerance-refusal must be scoped to runs where a failure was cleared`,
+      );
+      ok = false;
+    }
+
+    // GB6d.6 — ENV. `NEXTEST_NO_OUTPUT_INDENT=1` removes the 4-space capture indent (verified against the
+    // real binary: unset/0/false => 4 spaces, 1 => 0 spaces), which is the layout layer's entire basis.
+    // Leaving it inherited is the same hazard as leaving NEXTEST_FINAL_STATUS_LEVEL inherited.
+    const env = buildCargoEnv(
+      { PATH: "/usr/bin", NEXTEST_NO_OUTPUT_INDENT: "1" },
+      "/tmp/runner-target",
+      false,
+    );
+    note(`GB6d.6 env: NEXTEST_NO_OUTPUT_INDENT=${JSON.stringify(env.NEXTEST_NO_OUTPUT_INDENT)}`);
+    if (env.NEXTEST_NO_OUTPUT_INDENT === "1") {
+      fail(
+        `(GB6d.6) an inherited NEXTEST_NO_OUTPUT_INDENT=1 survived buildCargoEnv — it strips the capture ` +
+          `indent the layout rule depends on, leaving one export between the gate and a forged status line`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6d) FORGED RETRY PAIRS: both reviewer payloads (TRY n PASS and the abbreviated TRY n FL/LK) " +
+          "now FAIL — tolerance is refused whenever a failure was superseded by a pass, since captured " +
+          "output can forge the transition rule's defining case; layer attribution is pinned (column-exact " +
+          "forgery stopped by tolerance-refusal, indented forgery stopped by layout); the genuine flaky " +
+          "control and the no-supersession tolerated baseline both still hold; and buildCargoEnv pins " +
+          "NEXTEST_NO_OUTPUT_INDENT so the layout layer cannot be switched off by an inherited export",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6e) ENVIRONMENT ALLOWLIST, SUMMARY AUTHORSHIP, AND EXPLICIT LAYER ATTRIBUTION.
+  //
+  //        THREE ROUNDS OF THE SAME BUG. Round 1 pinned `NEXTEST_FINAL_STATUS_LEVEL`; round 2 found
+  //        `NEXTEST_NO_OUTPUT_INDENT` unpinned and pinned it; round 3 found `NEXTEST_FAILURE_OUTPUT`,
+  //        `NEXTEST_SUCCESS_OUTPUT` and `NEXTEST_RETRIES` unpinned. Each round pinned the variable the last
+  //        reviewer happened to name. That is a DENYLIST, and it loses by construction: the gate's parse
+  //        depended on an environment it INHERITED. GB6e.1 asserts the inverse — every `NEXTEST_*` is
+  //        stripped and only an explicitly declared set is put back — so the class is closed regardless of
+  //        which variable is discovered next.
+  //
+  //        SUMMARY AUTHORSHIP. The reduction that justifies this whole design was: "`nonPassed` comes from
+  //        nextest's own accounting and cannot be lowered by anything printed into the stream." That
+  //        sentence was FALSE. `parseNextestSummary` took the LAST unanchored `Summary [` match with no
+  //        layout gate, so with `NEXTEST_FAILURE_OUTPUT=final` a failing test's own captured output lands
+  //        AFTER the real Summary and replaces it — `nonPassed` becomes 0 with a real FAIL still in the
+  //        log. The real Summary line occupies the SAME 12-column field as a status line (verified 8/8 on
+  //        real runs), so the same layout gate applies; and since a run emits EXACTLY ONE Summary (also
+  //        8/8), a second layout-valid Summary is itself proof of forgery rather than something to
+  //        disambiguate by position.
+  //
+  //        LAYER ATTRIBUTION, AUTOMATED. GB6e.4-6 pin which layer stops which attack by its DISTINCTIVE
+  //        diagnostic, so the three-way claim rests on in-tree assertions rather than on a mutation probe
+  //        run by hand and reported in prose.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6e) ENV ALLOWLIST + SUMMARY AUTHORSHIP + LAYER ATTRIBUTION\n");
+  {
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const REAL = "cases::real::genuine_failure";
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("  ");
+    let ok = true;
+
+    // GB6e.1 — THE ALLOWLIST, over the FORMAT half of the namespace. Every NEXTEST_* that affects what
+    // the parser SEES must be gone, including ones this file has never heard of — the hostile set below
+    // deliberately includes a fabricated variable to prove the rule is "strip the namespace", not
+    // "strip these names".
+    //
+    // `NEXTEST_PROFILE` is deliberately EXEMPT and is asserted separately in GB6g: it selects which
+    // CONFIGURATION runs rather than how output is formatted, CI depends on it for the junit artifact,
+    // and stripping it broke every green CI run. Keeping it in the hostile input below (while excluding
+    // it from the expected-leak set) pins that the exemption is exactly one variable wide.
+    const hostile = {
+      PATH: "/usr/bin",
+      NEXTEST_FAILURE_OUTPUT: "final",
+      NEXTEST_SUCCESS_OUTPUT: "final",
+      NEXTEST_RETRIES: "3",
+      NEXTEST_PROFILE: "ci",
+      NEXTEST_NO_OUTPUT_INDENT: "1",
+      NEXTEST_FINAL_STATUS_LEVEL: "none",
+      NEXTEST_STATUS_LEVEL: "none",
+      NEXTEST_SOME_FUTURE_KNOB_NOBODY_HAS_NAMED_YET: "hostile",
+      CLICOLOR_FORCE: "1",
+    };
+    const env = buildCargoEnv(hostile, "/tmp/runner-target", false);
+    const FORMAT_EXEMPT = new Set(["NEXTEST_PROFILE"]); // caller intent, not output format — see GB6g
+    const leaked = Object.keys(env).filter(
+      (k) =>
+        k.startsWith("NEXTEST_") &&
+        !FORMAT_EXEMPT.has(k) &&
+        env[k] === hostile[k] &&
+        hostile[k] !== undefined,
+    );
+    note(`GB6e.1 leaked NEXTEST_* = ${JSON.stringify(leaked)}`);
+    if (leaked.length > 0) {
+      fail(
+        `(GB6e.1) inherited format-affecting NEXTEST_* survived buildCargoEnv: ${leaked.join(", ")} — the ` +
+          `child environment must be CONSTRUCTED from an allowlist, not filtered against a list of names ` +
+          `someone remembered`,
+      );
+      ok = false;
+    }
+    // …and the exemption is exactly one variable wide, not a hole someone can widen by habit.
+    if (env.NEXTEST_PROFILE !== "ci") {
+      fail(
+        `(GB6e.1) NEXTEST_PROFILE = ${JSON.stringify(env.NEXTEST_PROFILE)}, expected 'ci' — the format ` +
+          `strip must not swallow which configuration the caller asked to run (see GB6g)`,
+      );
+      ok = false;
+    }
+    // …and the ones the gate genuinely requires are set back, to the values the parser depends on.
+    const required = {
+      NEXTEST_NO_OUTPUT_INDENT: "0",
+      NEXTEST_STATUS_LEVEL: "retry",
+      NEXTEST_FINAL_STATUS_LEVEL: "fail",
+      NEXTEST_RETRIES: "0",
+      NEXTEST_HIDE_PROGRESS_BAR: "1",
+    };
+    for (const [k, v] of Object.entries(required)) {
+      if (env[k] !== v) {
+        fail(`(GB6e.1) required ${k} = ${JSON.stringify(env[k])}, expected ${JSON.stringify(v)}`);
+        ok = false;
+      }
+    }
+    // Captured output must never be able to land AFTER the real Summary.
+    if (env.NEXTEST_SUCCESS_OUTPUT === "final" || env.NEXTEST_FAILURE_OUTPUT === "final") {
+      fail(
+        `(GB6e.1) output placement still allows captured output after the Summary ` +
+          `(success=${env.NEXTEST_SUCCESS_OUTPUT} failure=${env.NEXTEST_FAILURE_OUTPUT})`,
+      );
+      ok = false;
+    }
+
+    // GB6e.2 — SUMMARY AUTHORSHIP. A forged Summary in captured output (indented, as nextest indents it)
+    // must not be read as the run's accounting.
+    const forgedSummaryIndented =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n" +
+      "  stdout ───\n" +
+      "         Summary [   0.001s] 100 tests run: 100 passed, 0 skipped\n";
+    const sumIndented = parseNextestSummary(forgedSummaryIndented);
+    note(`GB6e.2 indented forged Summary => nonPassed=${sumIndented.nonPassed}`);
+    if (sumIndented.nonPassed !== 1) {
+      fail(
+        `(GB6e.2) an INDENTED forged Summary replaced the runner's accounting (nonPassed=` +
+          `${sumIndented.nonPassed}, expected 1) — the Summary line must carry the same layout gate as a ` +
+          `status line`,
+      );
+      ok = false;
+    }
+
+    // GB6e.3 — a COLUMN-EXACT forged Summary cannot be told apart from the real one by shape, but a run
+    // emits EXACTLY ONE Summary, so a second layout-valid Summary is proof of forgery and must fail.
+    const twoSummaries =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n" +
+      "     Summary [   0.001s] 100 tests run: 100 passed, 0 skipped\n";
+    const rTwo = analyzeNextestSurface(twoSummaries, 100, true);
+    const vTwo = verdictNextestRun(100, twoSummaries, true);
+    note(`GB6e.3 two Summary lines => ${vTwo} | ${names(rTwo)}`);
+    if (vTwo !== "FAIL" || !rTwo.failures.some((f) => /Summary/i.test(f.name))) {
+      fail(
+        `(GB6e.3) two layout-valid Summary lines => '${vTwo}' — a run emits exactly one, so a second is ` +
+          `proof the accounting was forged and must fail with a Summary-specific reason: ${names(rTwo)}`,
+      );
+      ok = false;
+    }
+
+    // ---- LAYER ATTRIBUTION: each payload stopped by exactly ONE layer, asserted by its diagnostic. ----
+    const SUM12 = "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const TOLERANCE_MARK = /tolerance refused/;
+    const SHORTFALL_MARK = /unaccounted failure/;
+
+    // GB6e.4 — COUNT-ONLY. The failure is simply ABSENT from the log; the summary still counts it. No
+    // supersession (tolerance-refusal N/A) and no forged line to reject (layout N/A). Only the count
+    // reconciliation can catch this, so it is the exclusive stopper.
+    const countOnly =
+      `        FAIL [   0.204s] ( 1/12) verter_protocol::main ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 10 passed, 2 failed, 0 skipped\n";
+    const rCount = analyzeNextestSurface(countOnly, 100, true);
+    note(`GB6e.4 count-only => ${names(rCount)}`);
+    if (!rCount.failures.some((f) => SHORTFALL_MARK.test(f.name))) {
+      fail(`(GB6e.4) a failure absent from the log must trip the COUNT rail: ${names(rCount)}`);
+      ok = false;
+    }
+    if (rCount.failures.some((f) => TOLERANCE_MARK.test(f.name))) {
+      fail(
+        `(GB6e.4) the count rail must be the stopper here, not tolerance-refusal: ${names(rCount)}`,
+      );
+      ok = false;
+    }
+
+    // GB6e.5 — TOLERANCE-REFUSAL-ONLY. Column-exact forged supersession, count balanced by the allowlisted
+    // name. Layout cannot reject it (correct columns) and the count reconciles, so only tolerance-refusal
+    // stops it.
+    const tolOnly =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n` +
+      `  TRY 1 FAIL [   0.010s] (───) verter_session::main ${REAL}\n` +
+      `  TRY 2 PASS [   0.011s] (1/1) verter_session::main ${REAL}\n` +
+      `        FAIL [   0.011s] ( 2/12) verter_protocol::main ${TOL}\n` +
+      SUM12;
+    const rTol = analyzeNextestSurface(tolOnly, 100, true);
+    note(`GB6e.5 tolerance-only => ${names(rTol)}`);
+    if (!rTol.failures.some((f) => TOLERANCE_MARK.test(f.name))) {
+      fail(
+        `(GB6e.5) a column-exact forged supersession must trip TOLERANCE-REFUSAL: ${names(rTol)}`,
+      );
+      ok = false;
+    }
+    if (rTol.failures.some((f) => SHORTFALL_MARK.test(f.name))) {
+      fail(
+        `(GB6e.5) the count reconciles here, so the count rail must NOT be the stopper: ${names(rTol)}`,
+      );
+      ok = false;
+    }
+
+    // GB6e.6 — LAYOUT-ONLY. The same forgery carrying nextest's 4-space capture indent is rejected before
+    // it can supersede anything, so the genuine failure is simply NAMED and neither other rail fires.
+    const layoutOnly =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n` +
+      `      TRY 1 FAIL [   0.010s] (───) verter_session::main ${REAL}\n` +
+      `      TRY 2 PASS [   0.011s] (1/1) verter_session::main ${REAL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const rLay = analyzeNextestSurface(layoutOnly, 100, true);
+    note(`GB6e.6 layout-only => ${names(rLay)}`);
+    if (!rLay.failures.some((f) => f.name === REAL)) {
+      fail(
+        `(GB6e.6) LAYOUT must reject the indented forgery, leaving the real failure named: ${names(rLay)}`,
+      );
+      ok = false;
+    }
+    if (rLay.failures.some((f) => TOLERANCE_MARK.test(f.name) || SHORTFALL_MARK.test(f.name))) {
+      fail(`(GB6e.6) layout is the exclusive stopper here; no other rail may fire: ${names(rLay)}`);
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6e) ENV ALLOWLIST + SUMMARY AUTHORSHIP + LAYER ATTRIBUTION: every inherited NEXTEST_* is " +
+          "stripped (including a fabricated one, proving the rule is the namespace and not a remembered " +
+          "list) and only the declared set is restored; a forged Summary cannot replace the runner's " +
+          "accounting (indented => layout-rejected, column-exact duplicate => proof of forgery); and each " +
+          "of the three rails is pinned as the EXCLUSIVE stopper for its payload by distinctive diagnostic",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6f) TOLERANCE KEYS ON BINARY IDENTITY, NOT ON A BARE TEST PATH.
+  //
+  //        Named failures were moved to a `<binary-id> <name>` identity so two binaries owning
+  //        `cases::shared::same_name` stay two distinct failures. The TOLERANCE check did not come along:
+  //        it still matched `TOLERATED_TEST_NAMES` against the bare path. So the one deliberately-exempt
+  //        failure in this repo was exempt BY PATH, and any crate that happens to define a test at that
+  //        path inherited the exemption — including several at once, all tolerated together.
+  //
+  //        The allowlist is scoped to the binary that actually owns those tests (`verter_protocol::main`),
+  //        so the exemption cannot be acquired by coincidence of naming.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6f) TOLERANCE IS BINARY-SCOPED\n");
+  {
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("  ");
+    let ok = true;
+
+    // GB6f.1 — the SAME test path in a DIFFERENT binary is a different test, and is not exempt.
+    const impostor =
+      `        FAIL [   0.204s] ( 1/12) unrelated_crate::different_binary ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const vImp = verdictNextestRun(100, impostor, true);
+    const rImp = analyzeNextestSurface(impostor, 100, true);
+    note(`GB6f.1 foreign-binary same-path => ${vImp} | ${names(rImp)}`);
+    if (vImp !== "FAIL") {
+      fail(
+        `(GB6f.1) a genuine failure in unrelated_crate::different_binary whose path merely MATCHES the ` +
+          `allowlisted name => '${vImp}', expected FAIL — tolerance must key on the owning binary, not on ` +
+          `a bare test path any crate can define`,
+      );
+      ok = false;
+    }
+
+    // GB6f.2 — duplicates of that path across several foreign binaries are each a real failure.
+    const manyImpostors =
+      `        FAIL [   0.204s] ( 1/12) crate_a::main ${TOL}\n` +
+      `        FAIL [   0.205s] ( 2/12) crate_b::main ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 10 passed, 2 failed, 0 skipped\n";
+    const rMany = analyzeNextestSurface(manyImpostors, 100, true);
+    note(
+      `GB6f.2 two foreign binaries => failures=${rMany.failures.length} tolerated=${rMany.toleratedCount}`,
+    );
+    if (rMany.failures.length !== 2 || rMany.toleratedCount !== 0) {
+      fail(
+        `(GB6f.2) the same path in two foreign binaries is two real failures; got ` +
+          `${rMany.failures.length} failure(s) / ${rMany.toleratedCount} tolerated: ${names(rMany)}`,
+      );
+      ok = false;
+    }
+
+    // GB6f.3 — CONTROL: in its OWN binary the pair is still tolerated, so the scoping is a narrowing and
+    // not a removal of the exemption.
+    const genuine =
+      `        FAIL [   0.204s] ( 1/12) verter_protocol::main ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const vGen = verdictNextestRun(100, genuine, true);
+    if (vGen !== "PASS-WITH-TOLERATED") {
+      fail(
+        `(GB6f.3) the freshness pair in its OWN binary => '${vGen}', expected PASS-WITH-TOLERATED — the ` +
+          `scoping must narrow the exemption, not delete it`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6f) TOLERANCE IS BINARY-SCOPED: the allowlisted path in a foreign binary is a real failure " +
+          "(singly and in duplicate), while the pair in its own verter_protocol::main binary still " +
+          "tolerates — the exemption cannot be acquired by coincidence of test naming",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6g) THE ALLOWLIST OWNS OUTPUT FORMAT, NOT CALLER INTENT.
+  //
+  //        Stripping the whole `NEXTEST_*` namespace closed the pin-one-variable-per-round treadmill, but
+  //        it also swallowed `NEXTEST_PROFILE`, which is a DIFFERENT category: it selects WHICH
+  //        CONFIGURATION RUNS, not HOW OUTPUT IS FORMATTED. `CARGO_*`, `PATH`, `TMPDIR` and `RUST*` were
+  //        never stripped for exactly that reason; the namespace rule was applied without making the same
+  //        distinction inside it.
+  //
+  //        The cost was a BROKEN GREEN RUN, which is the worse failure direction: CI sets
+  //        `NEXTEST_PROFILE: ci`, `.config/nextest.toml` defines junit ONLY under `[profile.ci.junit]`, and
+  //        the workflow step after the gate locates that file and fails loudly when it is missing. Strip
+  //        the variable and every perfectly green CI run exits 1 on a missing artifact.
+  //
+  //        SAFETY OF PRESERVING IT is earned, not assumed. Measured against the real binary: a hostile
+  //        profile (`status-level`/`final-status-level = none`, `failure-output = final`, `retries = 3`)
+  //        unopposed yields ZERO `FAIL [` lines, and the SAME profile under this gate's env pins yields the
+  //        correct 2 FAIL lines, 1 Summary and 0 TRY lines. The pins beat the profile for every
+  //        parser-facing setting, so the profile cannot alter what the parser sees.
+  //
+  //        THE GUARD IS THE CONTRACT, NOT THE VARIABLE NAME. GB6g.1 derives the profile from the workflow
+  //        and the nextest config rather than hardcoding `ci`, so it follows a rename and still catches a
+  //        future strip.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6g) ENV ALLOWLIST OWNS FORMAT, NOT CALLER INTENT\n");
+  {
+    let ok = true;
+    const repoRoot = join(SELFTEST_DIR, "..");
+    const ciYml = join(repoRoot, ".github", "workflows", "ci.yml");
+    const nextestToml = join(repoRoot, ".config", "nextest.toml");
+
+    // GB6g.1 — TREE-DERIVED CI CONTRACT. Read the profile CI asks for, confirm the artifact contract that
+    // depends on it, then assert the gate preserves it. Nothing here hardcodes the profile NAME.
+    if (!existsSync(ciYml) || !existsSync(nextestToml)) {
+      skip("(GB6g.1) ci.yml / nextest.toml not present — cannot derive the CI profile contract");
+    } else {
+      const yml = readFileSync(ciYml, "utf8");
+      const toml = readFileSync(nextestToml, "utf8");
+      // The profile the workflow sets for the gate step.
+      const m = /NEXTEST_PROFILE:\s*([A-Za-z0-9_-]+)/.exec(yml);
+      if (!m) {
+        skip("(GB6g.1) no NEXTEST_PROFILE in ci.yml — contract not expressed, nothing to guard");
+      } else {
+        const profile = m[1];
+        // The nextest.toml leg: an EXACT section header, not a pattern that could match a neighbour.
+        const junitDeclared = toml.includes(`[profile.${profile}.junit]`);
+        // The workflow leg must bind the `nextest/<profile>/` PATH SEGMENT, not merely mention a junit
+        // file. A bare /junit\.xml/ ALSO matched this workflow's VITEST report
+        // (`test-results/vitest-junit.xml`), so the guard would have passed with the nextest locate step
+        // deleted outright - it read as proving the whole contract while proving one leg of it. Binding
+        // the segment is what makes all three legs move together on a profile rename: the env key, the
+        // `[profile.<x>.junit]` declaration, and the `*/nextest/<x>/junit.xml` the workflow looks for.
+        const profileRe = profile.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`);
+        const locatesJunit = new RegExp(`nextest/${profileRe}/junit\\.xml`).test(yml);
+        note(
+          `GB6g.1 CI asks for profile '${profile}'; [profile.${profile}.junit] declared = ` +
+            `${junitDeclared}; workflow locates nextest/${profile}/junit.xml = ${locatesJunit}`,
+        );
+        // The contract only binds if BOTH halves are present in the tree.
+        if (junitDeclared && locatesJunit) {
+          const env = buildCargoEnv(
+            { PATH: "/usr/bin", NEXTEST_PROFILE: profile },
+            "/tmp/runner-target",
+            false,
+          );
+          if (env.NEXTEST_PROFILE !== profile) {
+            fail(
+              `(GB6g.1) buildCargoEnv dropped NEXTEST_PROFILE (got ${JSON.stringify(env.NEXTEST_PROFILE)}, ` +
+                `expected '${profile}'). CI sets that profile, junit is declared ONLY under ` +
+                `[profile.${profile}.junit], and the workflow step after the gate locates junit.xml and ` +
+                `fails when it is missing — so dropping it breaks every GREEN run. The env allowlist owns ` +
+                `output FORMAT; it must not swallow which CONFIGURATION the caller asked to run.`,
+            );
+            ok = false;
+          }
+          // …and preserving it must NOT reopen the parse: the format pins still apply.
+          const pins = {
+            NEXTEST_STATUS_LEVEL: "retry",
+            NEXTEST_FINAL_STATUS_LEVEL: "fail",
+            NEXTEST_FAILURE_OUTPUT: "immediate",
+            NEXTEST_SUCCESS_OUTPUT: "never",
+            NEXTEST_RETRIES: "0",
+            NEXTEST_NO_OUTPUT_INDENT: "0",
+          };
+          for (const [k, v] of Object.entries(pins)) {
+            if (env[k] !== v) {
+              fail(
+                `(GB6g.1) with NEXTEST_PROFILE preserved, format pin ${k} = ${JSON.stringify(env[k])}, ` +
+                  `expected ${JSON.stringify(v)} — preserving caller intent must not reopen the parse`,
+              );
+              ok = false;
+            }
+          }
+        } else {
+          // Named per leg on purpose: a guard that stops matching must say WHICH half went missing,
+          // otherwise narrowing its pattern silently turns it off - the failure mode this block exists
+          // to prevent.
+          skip(
+            `(GB6g.1) profile '${profile}' does not carry the full junit contract here ` +
+              `(declared in nextest.toml = ${junitDeclared}, workflow locates nextest/${profile}/junit.xml ` +
+              `= ${locatesJunit}) — nothing to guard`,
+          );
+        }
+      }
+    }
+
+    // GB6g.2 — the FORMAT half of the namespace is still stripped, profile preservation notwithstanding.
+    const env2 = buildCargoEnv(
+      {
+        PATH: "/usr/bin",
+        NEXTEST_PROFILE: "ci",
+        NEXTEST_FAILURE_OUTPUT: "final",
+        NEXTEST_STATUS_LEVEL: "none",
+        NEXTEST_SOME_FUTURE_FORMAT_KNOB: "hostile",
+      },
+      "/tmp/runner-target",
+      false,
+    );
+    if (
+      env2.NEXTEST_SOME_FUTURE_FORMAT_KNOB !== undefined ||
+      env2.NEXTEST_STATUS_LEVEL === "none"
+    ) {
+      fail(
+        `(GB6g.2) preserving NEXTEST_PROFILE must not weaken the format strip ` +
+          `(future knob=${JSON.stringify(env2.NEXTEST_SOME_FUTURE_FORMAT_KNOB)}, ` +
+          `status level=${JSON.stringify(env2.NEXTEST_STATUS_LEVEL)})`,
+      );
+      ok = false;
+    }
+
+    // GB6g.3 — FORCE_COLOR is colour-forcing too. ANSI escapes in the status column break the 12-column
+    // field the parser gates on; CLICOLOR_FORCE and CLICOLOR were deleted and this one was missed, which
+    // is exactly the residue an allowlist is supposed to make impossible to have.
+    const env3 = buildCargoEnv(
+      { PATH: "/usr/bin", FORCE_COLOR: "3", CLICOLOR_FORCE: "1", CLICOLOR: "1" },
+      "/tmp/runner-target",
+      false,
+    );
+    const colourLeaks = ["FORCE_COLOR", "CLICOLOR_FORCE", "CLICOLOR"].filter(
+      (k) => env3[k] !== undefined,
+    );
+    note(`GB6g.3 colour-forcing leaks = ${JSON.stringify(colourLeaks)}`);
+    if (colourLeaks.length > 0) {
+      fail(
+        `(GB6g.3) colour-FORCING variables survived buildCargoEnv: ${colourLeaks.join(", ")} — ANSI escapes ` +
+          `in the status column break the 12-column field the parser gates on`,
+      );
+      ok = false;
+    }
+
+    // GB6g.4 — the Summary parser must REFUSE rather than choose. The live path already fails closed on a
+    // dual Summary, but the selection rule inside the parser was still positional (last wins), which is a
+    // choice it has no basis to make.
+    const twoSummaries =
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n" +
+      "     Summary [   0.001s] 100 tests run: 100 passed, 0 skipped\n";
+    const parsed = parseNextestSummary(twoSummaries);
+    note(
+      `GB6g.4 dual-Summary parse => count=${parsed.count} runCountFound=${parsed.runCountFound}`,
+    );
+    if (parsed.runCountFound !== false) {
+      fail(
+        `(GB6g.4) with ${parsed.count} Summary lines the parser still derived accounting positionally ` +
+          `(runCountFound=${parsed.runCountFound}) — it must refuse, not pick one`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6g) ALLOWLIST OWNS FORMAT, NOT CALLER INTENT: NEXTEST_PROFILE is preserved, guarded by all " +
+          "THREE legs of the CI junit contract read from the tree — the NEXTEST_PROFILE value in ci.yml, " +
+          "the [profile.<x>.junit] declaration in nextest.toml, and the nextest/<x>/junit.xml path " +
+          "segment the workflow locates — so a profile rename moves all three together and a future " +
+          "strip is caught; every format variable including a fabricated one stays stripped; FORCE_COLOR " +
+          "joins the colour-forcing deletions; and the Summary parser refuses to choose between duplicate " +
+          "Summary lines instead of taking the last",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6h) THE NAMESPACE STRIP MUST FOLD CASE THE WAY THE PLATFORM DOES.
+  //
+  //        Windows environment variable names fold case-INSENSITIVELY, so `Nextest_Profile` and
+  //        `NEXTEST_PROFILE` are ONE variable to a Windows child. The strip matched with a case-SENSITIVE
+  //        `startsWith("NEXTEST_")` on both platforms, so on Windows every mixed-case spelling survived —
+  //        the allowlist had precisely the hole it exists to close, and the fabricated-variable plant
+  //        proved the namespace rule only in the canonical case. Cross-Platform Portability is a CRITICAL
+  //        rule in CLAUDE.md and says platform-assuming code is a defect rather than a nit; this is that.
+  //
+  //        The fold is PLATFORM-ACCURATE in both directions, mirroring what `buildCargoEnv` already does
+  //        for PATH: Windows collapses every case-variant onto ONE canonical key, while POSIX is
+  //        case-EXACT, because on POSIX `Nextest_Profile` is a genuinely DIFFERENT variable that nextest
+  //        never reads — deleting it there would be this gate reaching outside its own contract.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6h) NAMESPACE STRIP FOLDS CASE PER PLATFORM\n");
+  {
+    let ok = true;
+    const hostile = () => ({
+      PATH: "/usr/bin",
+      Nextest_Profile: "ci",
+      Nextest_Some_Future_Knob: "hostile",
+      nextest_failure_output: "final",
+      NEXTEST_STATUS_LEVEL: "none",
+      Force_Color: "3",
+      CliColor_Force: "1",
+      CLICOLOR: "1",
+    });
+
+    // GB6h.1 — WINDOWS: every case-variant in the namespace is gone, and the caller's profile survives
+    // exactly once under the canonical key (not as two colliding spellings).
+    const win = buildCargoEnv(hostile(), "C:\\runner-target", true);
+    const nsSurvivors = Object.keys(win).filter(
+      (k) => /^nextest_/i.test(k) && !/^NEXTEST_[A-Z_]+$/.test(k),
+    );
+    const colourSurvivors = Object.keys(win).filter((k) =>
+      /^(force_color|clicolor|clicolor_force)$/i.test(k),
+    );
+    note(
+      `GB6h.1 windows: non-canonical NEXTEST_* = ${JSON.stringify(nsSurvivors)}; ` +
+        `colour-forcing = ${JSON.stringify(colourSurvivors)}; profile = ${JSON.stringify(win.NEXTEST_PROFILE)}`,
+    );
+    if (nsSurvivors.length > 0) {
+      fail(
+        `(GB6h.1) mixed-case NEXTEST_* survived the Windows strip: ${nsSurvivors.join(", ")} — Windows env ` +
+          `names fold case-insensitively, so these ARE the variables nextest reads`,
+      );
+      ok = false;
+    }
+    if (colourSurvivors.length > 0) {
+      fail(
+        `(GB6h.1) mixed-case colour-forcing variables survived the Windows strip: ${colourSurvivors.join(", ")}`,
+      );
+      ok = false;
+    }
+    if (win.NEXTEST_PROFILE !== "ci") {
+      fail(
+        `(GB6h.1) the caller's profile must survive the fold under the canonical key; got ` +
+          `${JSON.stringify(win.NEXTEST_PROFILE)}, expected 'ci' (caller spelled it Nextest_Profile)`,
+      );
+      ok = false;
+    }
+    // …and the format pins still win over whatever spelling the caller used.
+    if (win.NEXTEST_STATUS_LEVEL !== "retry" || win.NEXTEST_FAILURE_OUTPUT !== "immediate") {
+      fail(
+        `(GB6h.1) format pins lost to a case-variant: status=${JSON.stringify(win.NEXTEST_STATUS_LEVEL)} ` +
+          `failure-output=${JSON.stringify(win.NEXTEST_FAILURE_OUTPUT)}`,
+      );
+      ok = false;
+    }
+
+    // GB6h.2 — POSIX CONTROL (the discrimination). Case-EXACT: a `Nextest_Profile` on POSIX is a DIFFERENT
+    // variable that nextest never reads, so it is left alone — the same rule buildCargoEnv already applies
+    // to a POSIX `Path`. A blanket case-insensitive strip would fail this.
+    const posix = buildCargoEnv(hostile(), "/tmp/runner-target", false);
+    if (posix.Nextest_Some_Future_Knob !== "hostile" || posix.Nextest_Profile !== "ci") {
+      fail(
+        `(GB6h.2) POSIX must be case-EXACT — a mixed-case name is a different variable nextest never ` +
+          `reads, so this gate must not delete it (knob=${JSON.stringify(posix.Nextest_Some_Future_Knob)}, ` +
+          `profile=${JSON.stringify(posix.Nextest_Profile)})`,
+      );
+      ok = false;
+    }
+    // …while the canonical-case format variable IS stripped on POSIX.
+    if (posix.NEXTEST_STATUS_LEVEL !== "retry") {
+      fail(
+        `(GB6h.2) the canonical NEXTEST_STATUS_LEVEL must still be pinned on POSIX; got ` +
+          `${JSON.stringify(posix.NEXTEST_STATUS_LEVEL)}`,
+      );
+      ok = false;
+    }
+    // The lowercase colour-forcing spellings are left on POSIX for the same reason.
+    if (posix.CLICOLOR !== undefined) {
+      fail(`(GB6h.2) the exact-case CLICOLOR must still be deleted on POSIX`);
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6h) NAMESPACE STRIP FOLDS CASE PER PLATFORM: on Windows every mixed-case NEXTEST_* and " +
+          "colour-forcing spelling is collapsed away and the caller's profile survives once under the " +
+          "canonical key with the format pins intact; on POSIX the strip stays case-EXACT, because a " +
+          "mixed-case name there is a different variable nextest never reads (discriminating — a blanket " +
+          "case-insensitive strip fails the POSIX control, and the previous case-sensitive strip left " +
+          "Nextest_Profile / Nextest_Some_Future_Knob / Force_Color alive on Windows)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB9) BUILD-PREREQUISITE PREFLIGHT — the gate must tell "the code is broken" apart from "an artifact
+  // was never built".
+  //
+  // THE BUG IT GUARDS. Parts of the Rust suite load artifacts cargo does not build: the real-provider
+  // suites spawn the pinned tsserver with `--globalPlugins @verter/typescript-plugin`, whose entry is a
+  // `tsc -b` output that `pnpm install` does NOT produce. In that state ~64 `*_tsserver` tests failed with
+  // `TS2307: Cannot find module './Comp.vue'` and the gate reported them as ordinary test failures.
+  //
+  // THE ORACLE UNDER TEST IS A REAL LOAD, and that is what makes the interesting cases interesting. A
+  // list of `index.js` paths to stat would be a mirror of the emit graph: the plugin entry eagerly
+  // requires its emitted helpers and `@verter/language-shared`'s entry re-exports emitted siblings, so a
+  // tree with BOTH `index.js` files present and ONE HELPER missing satisfies every stat and still throws
+  // inside tsserver. Leg 5 below is exactly that tree, and it is the case a stat-based check accepts.
+  //
+  // HOW IT IS DRIVEN. Leg 1 calls the real `checkBuildPrerequisites` in-process against injected probe
+  // outcomes (including every fail-closed shape: spawn error, signal, timeout, unparseable output). Legs
+  // 2-6 drive the REAL PRODUCTION CLI end-to-end — a byte-copy of `gate.mjs` + `gate-internals.mjs` in a
+  // SYNTHETIC git root holding a faithful MINIATURE of the real package graph (probe dir → package
+  // manifest → emitted entry → emitted helper → language-shared entry → its emitted sibling), so every
+  // artifact can be genuinely present or absent without touching the developer's tree and without a test
+  // seam on the production gate (which has none). The miniature uses absolute `main` fields rather than
+  // symlinks so it is portable to hosts that refuse symlink creation.
+  //
+  // DISCRIMINATION (six directions, so a green run is not vacuous). Each end-to-end leg re-stats its
+  // planted files AFTER the CLI returns, so a run whose verdict was produced against a different tree
+  // state than intended is caught rather than trusted:
+  //   * nothing built            => exit 127, marker + probe target + producer command, and NEITHER the
+  //                                 freshness preflight NOR the archive build was reached (the ordering
+  //                                 half — the freshness preflight's `pnpm install` is what turns the
+  //                                 silent-SKIP state into the 64-failure state).
+  //   * plugin entry missing     => 127.
+  //   * language-shared missing  => 127 (the REVERSE single-missing direction).
+  //   * a transitively-required
+  //     HELPER missing, BOTH
+  //     entries present          => 127 — the case a stat-based check accepts.
+  //   * everything present       => no refusal, SATISFIED, and the run PROCEEDS into the freshness
+  //                                 preflight.
+  // --------------------------------------------------------------------------------------------------
+  {
+    let ok = true;
+
+    // ---- Leg 1: the real checker, in-process, over injected probe outcomes ----
+    const loaded = checkBuildPrerequisites({
+      repoRoot: "/synthetic",
+      loadProbe: () => ({ target: "/synthetic/probe", loaded: true, detail: "" }),
+    });
+    if (!loaded.ok || loaded.lines.length !== 0) {
+      fail(
+        `(GB9.1) a successful load must report ok with NO report lines; got ok=${loaded.ok} ` +
+          `lines=${loaded.lines.length}`,
+      );
+      ok = false;
+    }
+    const failedLoad = checkBuildPrerequisites({
+      repoRoot: "/synthetic",
+      loadProbe: () => ({
+        target: "/synthetic/probe",
+        loaded: false,
+        detail: "MODULE_NOT_FOUND: Cannot find module './helpers/carrierStore'",
+      }),
+    });
+    const failedReport = failedLoad.lines.join("\n");
+    if (
+      failedLoad.ok ||
+      !failedReport.includes(BUILD_PREREQUISITE_MARKER) ||
+      !failedReport.includes("/synthetic/probe") ||
+      !failedReport.includes("./helpers/carrierStore") ||
+      !failedReport.includes(BUILD_PREREQUISITE_COMMAND)
+    ) {
+      fail(
+        `(GB9.1) a failed load must report NOT ok, carrying the marker, the probe target, the load error ` +
+          `and the producer command; got ok=${failedLoad.ok}:\n${failedReport}`,
+      );
+      ok = false;
+    }
+    for (const pkg of BUILD_PREREQUISITE_PACKAGES) {
+      if (!failedReport.includes(pkg.id)) {
+        fail(`(GB9.1) the refusal must name the producing package ${pkg.id}`);
+        ok = false;
+      }
+    }
+    // Every in-process probe call below injects a launcher source. The probe resolves tsserver's env
+    // denylist BEFORE spawning and fail-closes as `environment-unknown` when it cannot, so a call with a
+    // nonexistent `repoRoot` never reaches the spawn at all — the injected `spawnFn` would be dead code and
+    // every "fail-closed" assertion below would pass VACUOUSLY. Each shape therefore also asserts its
+    // expected `reason`, so a future short-circuit cannot quietly re-hollow them.
+    const fakeLauncher = () => 'pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &["NODE_OPTIONS"];';
+
+    // FAIL-CLOSED on every probe shape that is not a clean exit-0. "The probe itself did not work" must
+    // never read as "the prerequisite is present" — each of these is a distinct route into the same
+    // refusal, driven through the REAL `runBuildPrerequisiteLoadProbe` with an injected spawn.
+    const probeShapes = [
+      [
+        "a throwing spawn",
+        "spawn-error",
+        () => {
+          throw new Error("EACCES");
+        },
+      ],
+      ["a null result", "spawn-error", () => null],
+      ["a spawn error", "spawn-error", () => ({ error: new Error("ENOENT") })],
+      ["a killed probe", "signalled", () => ({ signal: "SIGKILL", status: null })],
+      [
+        "an unparseable structured failure",
+        "unknown-exit",
+        () => ({ status: 3, stdout: "not json", stderr: "" }),
+      ],
+      [
+        "an unexpected non-zero exit",
+        "unknown-exit",
+        () => ({ status: 9, stdout: "", stderr: "boom" }),
+      ],
+      [
+        "a MODULE_NOT_FOUND load failure",
+        "module-not-found",
+        () => ({
+          status: 3,
+          stdout: JSON.stringify({ message: "Cannot find module './x'", code: "MODULE_NOT_FOUND" }),
+          stderr: "",
+        }),
+      ],
+      [
+        "an unrelated load error",
+        "load-error",
+        () => ({
+          status: 3,
+          stdout: JSON.stringify({ message: "boom", code: "ERR_SOMETHING" }),
+          stderr: "",
+        }),
+      ],
+      // The REAL timeout shape. Node sets BOTH `error` (code ETIMEDOUT) AND `signal` (the killSignal), so
+      // this row exists to pin the dual shape specifically — the earlier "a spawn error" row carries no
+      // `code` and would not exercise the timeout branch. Previously this case was CLAIMED in the comment
+      // and not injected.
+      [
+        "a timeout (dual error+signal ETIMEDOUT)",
+        "timeout",
+        () => ({
+          error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }),
+          signal: "SIGKILL",
+          status: null,
+        }),
+      ],
+    ];
+    for (const [label, wantReason, spawnFn] of probeShapes) {
+      const probe = runBuildPrerequisiteLoadProbe({
+        repoRoot: "/synthetic",
+        readFileFn: fakeLauncher,
+        spawnFn,
+      });
+      if (probe.loaded) {
+        fail(`(GB9.1) ${label} must NOT report the prerequisite as loaded`);
+        ok = false;
+      }
+      if (!probe.detail) {
+        fail(`(GB9.1) ${label} must carry a diagnostic`);
+        ok = false;
+      }
+      // The reason pins that the intended BRANCH ran. Without it, a probe that short-circuits before the
+      // spawn (as it does when the launcher is unreadable) would satisfy both assertions above while the
+      // injected shape was never evaluated — a vacuous pass this scenario actually hit once.
+      if (probe.reason !== wantReason) {
+        fail(
+          `(GB9.1) ${label} must classify as ${wantReason}; got ${probe.reason} — the injected shape was ` +
+            "not the branch that decided",
+        );
+        ok = false;
+      }
+    }
+    // A timeout must be DIAGNOSED as a timeout, not as a spawn failure. Both fail closed, but a gate's
+    // first step pointing at the wrong cause costs the reader an hour.
+    const timedOut = runBuildPrerequisiteLoadProbe({
+      repoRoot: "/synthetic",
+      readFileFn: fakeLauncher,
+      timeoutMs: 700,
+      spawnFn: () => ({
+        error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }),
+        signal: "SIGKILL",
+        status: null,
+      }),
+    });
+    if (!/TIMED OUT/.test(timedOut.detail) || /could not be spawned/.test(timedOut.detail)) {
+      fail(
+        `(GB9.1) a timeout must be diagnosed as a TIMEOUT, not as a spawn failure; got: ${timedOut.detail}`,
+      );
+      ok = false;
+    }
+    // The timeout must be enforced with an UNIGNORABLE signal. `spawnSync`'s default killSignal is
+    // SIGTERM, which a child can trap — and then `timeout` bounds nothing. The captured options also prove
+    // the denylisted var is absent from the child env, so the equivalence strip is not merely computed.
+    let capturedOpts = null;
+    runBuildPrerequisiteLoadProbe({
+      repoRoot: "/synthetic",
+      readFileFn: fakeLauncher,
+      env: { PATH: "/usr/bin", NODE_OPTIONS: "--require=/tmp/evil.cjs" },
+      spawnFn: (_cmd, _args, options) => {
+        capturedOpts = options;
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    if (!capturedOpts || !capturedOpts.env || "NODE_OPTIONS" in capturedOpts.env) {
+      fail(
+        "(GB9.1) the probe must spawn with the denylisted NODE_OPTIONS REMOVED from the child env; got " +
+          `env keys ${JSON.stringify(Object.keys((capturedOpts && capturedOpts.env) || {}))}`,
+      );
+      ok = false;
+    }
+    if (capturedOpts && capturedOpts.env && capturedOpts.env.PATH !== "/usr/bin") {
+      fail(
+        "(GB9.1) the probe must PRESERVE non-denylisted env vars (equivalence, not sanitization)",
+      );
+      ok = false;
+    }
+    if (!capturedOpts || capturedOpts.killSignal !== "SIGKILL" || !capturedOpts.timeout) {
+      fail(
+        `(GB9.1) the probe spawn must carry a timeout AND killSignal SIGKILL; got ` +
+          `timeout=${capturedOpts && capturedOpts.timeout} killSignal=${JSON.stringify(capturedOpts && capturedOpts.killSignal)}`,
+      );
+      ok = false;
+    }
+    // …and the positive control on the same real probe, so the shapes above prove fail-closed rather than
+    // "this function always returns false".
+    const okProbe = runBuildPrerequisiteLoadProbe({
+      repoRoot: "/synthetic",
+      readFileFn: fakeLauncher,
+      spawnFn: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    if (!okProbe.loaded || okProbe.reason !== "loaded") {
+      fail(
+        `(GB9.1) a clean exit-0 probe must report the prerequisite as loaded; got loaded=${okProbe.loaded} ` +
+          `reason=${okProbe.reason}`,
+      );
+      ok = false;
+    }
+    // stderr on an exit-0 child is NOT a failure — a plugin that warns still loaded.
+    const noisyOk = runBuildPrerequisiteLoadProbe({
+      repoRoot: "/synthetic",
+      readFileFn: fakeLauncher,
+      spawnFn: () => ({ status: 0, stdout: "", stderr: "a deprecation warning" }),
+    });
+    if (!noisyOk.loaded) {
+      fail("(GB9.1) stderr on an exit-0 probe must NOT be read as a load failure");
+      ok = false;
+    }
+    // …and the env resolution's own fail-closed direction, driven through the same real probe: an
+    // unreadable launcher must refuse BEFORE spawning (the spawn must never run).
+    let spawnRan = false;
+    const envUnknown = runBuildPrerequisiteLoadProbe({
+      repoRoot: "/synthetic",
+      readFileFn: () => {
+        throw new Error("ENOENT");
+      },
+      spawnFn: () => {
+        spawnRan = true;
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    if (envUnknown.loaded || envUnknown.reason !== "environment-unknown" || spawnRan) {
+      fail(
+        `(GB9.1) an unreadable tsserver launcher must refuse as environment-unknown WITHOUT spawning; got ` +
+          `loaded=${envUnknown.loaded} reason=${envUnknown.reason} spawnRan=${spawnRan}`,
+      );
+      ok = false;
+    }
+
+    // ---- Leg 1b: the hard kill, with a REAL SIGTERM-IGNORING child ----
+    // The argument-level assertion above proves the option is PASSED; this proves it WORKS, which is the
+    // part a future reader would not think to test. The probe target is a module that traps SIGTERM and
+    // leaves an open handle, so under `spawnSync`'s DEFAULT killSignal the parent is not merely slow — it
+    // blocks until the child chooses to exit, and if the child exits 0 the probe answers `loaded: true`.
+    // Measured pre-fix: 25050ms elapsed, status 0, loaded TRUE (a hang AND a false positive). Post-fix:
+    // ~700ms, ETIMEDOUT, loaded FALSE.
+    //
+    // The child SELF-EXITS after 25s so this scenario always terminates: a pre-fix run FAILS both
+    // assertions (elapsed far past the bound, loaded true) instead of hanging the whole self-test, and no
+    // process is left behind either way. The bound is generous (7s against a 700ms timeout) so a loaded
+    // machine cannot flake it, while the pre-fix 25s is nowhere near it.
+    hardkill: {
+      if (IS_WINDOWS) {
+        skip(
+          "(GB9.1b) hard-kill bound — POSIX-only (SIGTERM-trapping stand-in; the Windows taskkill path is " +
+            "statically reviewed, not exercised here)",
+        );
+        break hardkill;
+      }
+      const hangRoot = mkdtempSync(join(tmpdir(), "gate-selftest-prereq-hang-"));
+      registerClean(hangRoot);
+      const hangProbe = join(hangRoot, ...BUILD_PREREQUISITE_PROBE_SEGMENTS);
+      mkdirSync(hangProbe, { recursive: true });
+      writeFileSync(
+        join(hangProbe, "package.json"),
+        JSON.stringify({ name: "@verter/typescript-plugin", main: "index.js" }),
+      );
+      writeFileSync(
+        join(hangProbe, "index.js"),
+        'process.on("SIGTERM", () => {});\n' +
+          'process.on("SIGINT", () => {});\n' +
+          "setInterval(() => {}, 1000);\n" +
+          "setTimeout(() => process.exit(0), 25000);\n" +
+          "module.exports = function init() {};\n",
+      );
+      // PLANT PROOF: the trapping module must actually be where the probe will resolve it.
+      const hangEntry = join(hangProbe, "index.js");
+      let hangPlanted = false;
+      try {
+        hangPlanted = statSync(hangEntry).isFile();
+      } catch {
+        hangPlanted = false;
+      }
+      if (!hangPlanted) {
+        fail(`(GB9.1b) plant did not apply: ${hangEntry} is not a file`);
+        ok = false;
+        break hardkill;
+      }
+      // The probe needs the repo's tsserver launcher to resolve its env denylist; copy it into the
+      // synthetic root so this leg exercises the real equivalence path rather than the fail-closed one.
+      const hangLauncher = join(hangRoot, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS);
+      mkdirSync(dirname(hangLauncher), { recursive: true });
+      writeFileSync(
+        hangLauncher,
+        readFileSync(join(REPO_REALPATH, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS)),
+      );
+      const startedAt = Date.now();
+      const hangResult = runBuildPrerequisiteLoadProbe({ repoRoot: hangRoot, timeoutMs: 700 });
+      const elapsedMs = Date.now() - startedAt;
+      if (hangResult.loaded) {
+        fail(
+          "(GB9.1b) a probe child that traps SIGTERM and never exits must NOT report the prerequisite as " +
+            "loaded (pre-fix the child's own exit-0 was read as a successful load)",
+        );
+        ok = false;
+      }
+      if (elapsedMs >= 7000) {
+        fail(
+          `(GB9.1b) the probe timeout must be a HARD bound: a SIGTERM-trapping child left the probe ` +
+            `blocked for ${elapsedMs}ms against a 700ms timeout. spawnSync's default killSignal is ` +
+            "SIGTERM, which this child ignores; the timeout must kill with SIGKILL.",
+        );
+        ok = false;
+      }
+      if (hangResult.reason !== "timeout") {
+        fail(
+          `(GB9.1b) a stubborn child must be diagnosed as a timeout; got reason=${hangResult.reason}`,
+        );
+        ok = false;
+      }
+      // VERIFIED REAP. The kill must have actually REMOVED the process, not merely been issued. The child
+      // self-exits only at 25s, so at ~700ms any survivor means the signal did not take.
+      //
+      // Counted by PARSING `ps` in JS and matching argv[0]'s basename `node` AND the unique synthetic root
+      // in the argv — the same argv[0]-basename technique `countArgvSleeps` uses, and for the same reason.
+      // A `sh -c 'ps | grep -c <root>'` count is WRONG: the `sh`, the `ps` and the `grep` each carry the
+      // pattern in their OWN argv, so the floor is 3 rather than 0 — measured against a marker no process
+      // could possibly reference, after that exact mistake produced a false "child SURVIVED" failure here.
+      // This harness's own `node scripts/gate-selftest.mjs` is excluded because the root is a runtime value
+      // that never appears in its argv.
+      //
+      // A ZERO FROM THIS COUNTER IS ONLY MEANINGFUL IF THE COUNTER CAN RETURN NON-ZERO. `ps` failing, or a
+      // matcher that recognises nothing, both yield an empty list — indistinguishable from "nothing
+      // survived", which is the same vacuity shape this scenario has already been bitten by three times.
+      // So the counter reports whether it could LOOK, and the positive control below is COMMITTED rather
+      // than performed once by hand: a real node process holding the marker must be SEEN (>=1) and then,
+      // once killed, must be seen to CLEAR (0). Only after both does a zero from the probe leg mean
+      // anything.
+      const countSurvivors = () => {
+        const psOut = spawnSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8" });
+        if (psOut.error || psOut.status !== 0 || !psOut.stdout) {
+          return {
+            looked: false,
+            lines: [],
+            why: psOut.error
+              ? `ps failed to spawn: ${psOut.error.message}`
+              : `ps exited ${psOut.status} with ${psOut.stdout ? "output" : "NO output"}`,
+          };
+        }
+        const lines = psOut.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.includes(hangRoot))
+          .filter((line) => {
+            const argv0 = (line.split(/\s+/)[1] || "").split("/").pop();
+            return argv0 === "node" || argv0 === "node.exe";
+          });
+        return { looked: true, lines, why: "" };
+      };
+      const pollSurvivors = async (want) => {
+        for (let attempt = 0; attempt < 60; attempt++) {
+          const seen = countSurvivors();
+          if (!seen.looked) return seen;
+          if (want === "present" ? seen.lines.length > 0 : seen.lines.length === 0) return seen;
+          await delay(100);
+        }
+        return countSurvivors();
+      };
+
+      // POSITIVE CONTROL, committed: a live node process carrying the marker must be COUNTED.
+      const sentinel = spawn(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 30000)", join(hangRoot, "reap-counter-sentinel")],
+        { stdio: "ignore" },
+      );
+      const sentinelSeen = await pollSurvivors("present");
+      if (!sentinelSeen.looked) {
+        fail(
+          `(GB9.1b) the survivor counter could not LOOK (${sentinelSeen.why}) — a zero from it is not evidence`,
+        );
+        ok = false;
+      } else if (sentinelSeen.lines.length === 0) {
+        fail(
+          "(GB9.1b) the survivor counter did NOT see a live node process holding the marker, so it cannot " +
+            "distinguish 'nothing survived' from 'I recognised nothing' — every zero below would be vacuous",
+        );
+        ok = false;
+      }
+      sentinel.kill("SIGKILL");
+      const sentinelCleared = await pollSurvivors("absent");
+      if (sentinelCleared.looked && sentinelCleared.lines.length !== 0) {
+        fail(
+          "(GB9.1b) the control sentinel did not clear after SIGKILL, so the probe-leg zero below cannot " +
+            "be attributed to the probe's own reap",
+        );
+        ok = false;
+      }
+
+      const survivors = countSurvivors();
+      const survivorLines = survivors.lines;
+      if (!survivors.looked) {
+        fail(
+          `(GB9.1b) the reap could not be VERIFIED (${survivors.why}) — an unverifiable reap is not a ` +
+            "passing reap",
+        );
+        ok = false;
+      } else if (survivorLines.length > 0) {
+        fail(
+          `(GB9.1b) the probe child SURVIVED its hard kill (${survivorLines.length} node process(es) still ` +
+            `referencing ${hangRoot}) — the timeout issued a signal but did not reap:\n  ` +
+            survivorLines.join("\n  "),
+        );
+        ok = false;
+      }
+      note(
+        `(GB9.1b) SIGTERM-trapping child: loaded=${hangResult.loaded} reason=${hangResult.reason} ` +
+          `elapsed=${elapsedMs}ms survivors=${survivorLines.length} ` +
+          `(counter proven live: sentinel-seen=${sentinelSeen.lines.length} cleared=${sentinelCleared.lines.length})`,
+      );
+    }
+
+    // ---- Leg 1c: environment equivalence — a forged NODE_OPTIONS cannot fake a load ----
+    // The probe's whole claim is "the plugin tsserver is about to load CAN be loaded", so it must run
+    // under the environment tsserver runs under. `TsserverTypeProvider::spawn` strips
+    // `CHILD_PROCESS_ENV_DENYLIST` (NODE_OPTIONS among them); an inheriting probe has strictly more
+    // influence than the process it speaks for, and that gap is exploitable: measured pre-fix, a preload
+    // patching `Module._load` to return a dummy for `process.argv[1]` made the probe exit 0 and report
+    // loaded on a tree whose entry requires a helper that does not exist.
+    //
+    // Both directions are asserted, so this cannot pass by simply breaking node: with the helper ABSENT
+    // the forged env must NOT yield loaded; with the helper PRESENT and the SAME forged env it must.
+    envforge: {
+      const forgeRoot = mkdtempSync(join(tmpdir(), "gate-selftest-prereq-env-"));
+      registerClean(forgeRoot);
+      const forgeProbe = join(forgeRoot, ...BUILD_PREREQUISITE_PROBE_SEGMENTS);
+      mkdirSync(forgeProbe, { recursive: true });
+      writeFileSync(
+        join(forgeProbe, "package.json"),
+        JSON.stringify({ name: "@verter/typescript-plugin", main: "index.js" }),
+      );
+      writeFileSync(
+        join(forgeProbe, "index.js"),
+        'require("./helpers/carrierStore");\nmodule.exports = function init() {};\n',
+      );
+      const forgeLauncher = join(forgeRoot, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS);
+      mkdirSync(dirname(forgeLauncher), { recursive: true });
+      writeFileSync(
+        forgeLauncher,
+        readFileSync(join(REPO_REALPATH, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS)),
+      );
+      const preload = join(forgeRoot, "forge.cjs");
+      writeFileSync(
+        preload,
+        'const Module = require("node:module");\n' +
+          "const real = Module._load;\n" +
+          "Module._load = function (request) {\n" +
+          "  if (request === process.argv[1]) return { forged: true };\n" +
+          "  return real.apply(this, arguments);\n" +
+          "};\n",
+      );
+      // PLANT PROOF: the forging preload and the unloadable entry must both be where they are claimed.
+      const forgePlanted = [preload, join(forgeProbe, "index.js"), forgeLauncher].every((p) => {
+        try {
+          return statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      });
+      const helperPath = join(forgeProbe, "helpers", "carrierStore.js");
+      let helperAbsent = true;
+      try {
+        helperAbsent = !statSync(helperPath).isFile();
+      } catch {
+        helperAbsent = true;
+      }
+      if (!forgePlanted || !helperAbsent) {
+        fail(
+          `(GB9.1c) plant did not apply: preload/entry/launcher present=${forgePlanted} ` +
+            `helperAbsent=${helperAbsent}`,
+        );
+        ok = false;
+        break envforge;
+      }
+      // The forgery is delivered through the AMBIENT environment, NOT through an `env` option.
+      //
+      // This is load-bearing and was got wrong once: passing `env: { ...process.env, NODE_OPTIONS }`
+      // delivers the forgery through the very option the strip uses, so removing the strip ALSO removes
+      // the delivery and this leg passed VACUOUSLY against its own regression. The ambient route is also
+      // the realistic threat model — a developer or runner with `NODE_OPTIONS` exported — and it is what a
+      // reverted strip actually inherits. `process.env` is restored in a `finally`; the probe calls are
+      // synchronous, so nothing else in this single-threaded harness observes the window.
+      const priorNodeOptions = process.env.NODE_OPTIONS;
+      let forged;
+      let forgedButComplete;
+      let unknownEnv;
+      try {
+        process.env.NODE_OPTIONS = `--require=${preload}`;
+        forged = runBuildPrerequisiteLoadProbe({ repoRoot: forgeRoot });
+        // CONTROL: the same ambient forgery with the helper PRESENT must still load, so the assertion
+        // above proves the env was SANITIZED rather than that node was merely broken by it.
+        mkdirSync(dirname(helperPath), { recursive: true });
+        writeFileSync(helperPath, "module.exports = {};\n");
+        forgedButComplete = runBuildPrerequisiteLoadProbe({ repoRoot: forgeRoot });
+        // And the fail-closed half: an unreadable/absent tsserver launcher means the environment tsserver
+        // runs under is UNKNOWN, so no load may be reported even though the tree is complete.
+        rmSync(forgeLauncher, { force: true });
+        unknownEnv = runBuildPrerequisiteLoadProbe({ repoRoot: forgeRoot });
+      } finally {
+        if (priorNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+        else process.env.NODE_OPTIONS = priorNodeOptions;
+      }
+      if (forged.loaded) {
+        fail(
+          "(GB9.1c) a forged ambient NODE_OPTIONS preload must NOT be able to report a load: the probe " +
+            "must run under the environment the tsserver launcher uses, which strips NODE_OPTIONS " +
+            "(CHILD_PROCESS_ENV_DENYLIST). Pre-fix this exited 0 and reported loaded on a tree whose " +
+            "entry requires a missing helper.",
+        );
+        ok = false;
+      }
+      if (!forgedButComplete.loaded) {
+        fail(
+          "(GB9.1c) control failed: with the helper PRESENT the same forged env must still load — " +
+            `otherwise the negative above proves nothing about sanitization (reason=${forgedButComplete.reason})`,
+        );
+        ok = false;
+      }
+      if (unknownEnv.loaded || unknownEnv.reason !== "environment-unknown") {
+        fail(
+          "(GB9.1c) with the tsserver launcher unreadable the probe must FAIL CLOSED as " +
+            `environment-unknown; got loaded=${unknownEnv.loaded} reason=${unknownEnv.reason}`,
+        );
+        ok = false;
+      }
+      note(
+        `(GB9.1c) forged NODE_OPTIONS: loaded=${forged.loaded} (control=${forgedButComplete.loaded}, ` +
+          `launcher-missing=${unknownEnv.reason})`,
+      );
+    }
+
+    // The denylist parser itself: it must read the REAL const out of the REAL launcher, and must return
+    // null (fail-closed) rather than an empty list when the declaration is gone or reshaped.
+    const realLauncher = readFileSync(
+      join(REPO_REALPATH, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS),
+      "utf8",
+    );
+    const parsedDenylist = parseTsserverEnvDenylist(realLauncher);
+    if (!parsedDenylist || !parsedDenylist.includes("NODE_OPTIONS")) {
+      fail(
+        `(GB9.1d) the denylist parser must extract NODE_OPTIONS from the real tsserver launcher; got ` +
+          `${JSON.stringify(parsedDenylist)}`,
+      );
+      ok = false;
+    }
+    for (const [label, source] of [
+      ["a source without the const", "fn main() {}\n"],
+      ["a const with no string literals", "pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &[];\n"],
+      ["a non-string input", 42],
+      // DECLARATION-BOUNDED. A commented-out declaration is DEAD CODE, and latching onto one reintroduces
+      // exactly the drift that reading the live Rust const exists to prevent — silently, with a plausible
+      // list. A bare mention (the `for var in CHILD_PROCESS_ENV_DENYLIST` loop) must not latch either.
+      [
+        "a line-commented declaration only",
+        '// pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &["UNRELATED"];\n',
+      ],
+      [
+        "a block-commented declaration only",
+        '/* pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &["UNRELATED"]; */\n',
+      ],
+      [
+        "a bare mention with an unrelated array nearby",
+        'for var in CHILD_PROCESS_ENV_DENYLIST {\n    let other = ["UNRELATED"];\n}\n',
+      ],
+    ]) {
+      if (parseTsserverEnvDenylist(source) !== null) {
+        fail(`(GB9.1d) ${label} must parse to null (fail-closed), not to a usable list`);
+        ok = false;
+      }
+    }
+    // The decisive case: a commented-out decoy EARLIER in the file must not win over the real declaration
+    // later in it. Pre-fix this returned ["UNRELATED"].
+    const decoyed = parseTsserverEnvDenylist(
+      '// pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &["UNRELATED"];\n' + realLauncher,
+    );
+    if (!decoyed || decoyed.includes("UNRELATED") || !decoyed.includes("NODE_OPTIONS")) {
+      fail(
+        `(GB9.1d) a commented-out decoy before the real declaration must not win; got ` +
+          `${JSON.stringify(decoyed)}`,
+      );
+      ok = false;
+    }
+
+    // The probe budget must be the gate's OWN remaining wallclock, clamped — an independent constant can
+    // outlive the `--timeout` deadline the probe sits inside, which is not a bound.
+    for (const [label, deadline, now, want] of [
+      ["a long deadline clamps to the cap", 10_000_000, 0, BUILD_PREREQUISITE_PROBE_MAX_MS],
+      ["a short deadline shortens the probe", 5_000, 0, 5_000],
+      // NO FLOOR. A floor let an expired deadline buy the probe time to hold the single-flight mutex past
+      // the gate's own wallclock limit; the budget must go non-positive and the probe must then refuse.
+      ["an exhausted deadline yields zero", 10_000, 10_000, 0],
+      ["an already-passed deadline goes negative", 0, 10_000, -10_000],
+    ]) {
+      const got = probeBudgetMs(deadline, now);
+      if (got !== want) {
+        fail(`(GB9.1e) ${label}: probeBudgetMs(${deadline}, ${now}) = ${got}, expected ${want}`);
+        ok = false;
+      }
+    }
+    // …and a non-positive budget must refuse WITHOUT SPAWNING. Launching would hold the mutex past the
+    // deadline, and it would also be UNBOUNDED: Node applies `spawnSync`'s timeout only when it is `> 0`,
+    // so a 0/negative value silently disables it — an expired deadline becoming an unlimited probe.
+    for (const budget of [0, -1, -10_000]) {
+      let spawnAttempted = false;
+      const refused = runBuildPrerequisiteLoadProbe({
+        repoRoot: "/synthetic",
+        readFileFn: fakeLauncher,
+        timeoutMs: budget,
+        spawnFn: () => {
+          spawnAttempted = true;
+          return { status: 0, stdout: "", stderr: "" };
+        },
+      });
+      if (refused.loaded || refused.reason !== "timeout" || spawnAttempted) {
+        fail(
+          `(GB9.1e) a ${budget}ms budget must refuse as a timeout WITHOUT spawning; got ` +
+            `loaded=${refused.loaded} reason=${refused.reason} spawnAttempted=${spawnAttempted}`,
+        );
+        ok = false;
+      }
+    }
+
+    // ---- Legs 2-6: the REAL production CLI against a synthetic repo root ----
+    let gitAvailable = true;
+    const synthRoot = mkdtempSync(join(tmpdir(), "gate-selftest-prereq-"));
+    registerClean(synthRoot);
+    try {
+      execFileSync("git", ["init", "-q", synthRoot], { stdio: "ignore" });
+    } catch {
+      gitAvailable = false;
+    }
+
+    if (!gitAvailable) {
+      // TRUE skip (counted in SKIP, never in PASS): without git the production CLI cannot resolve a
+      // synthetic repo root, so the end-to-end legs cannot run. The in-process leg above still ran.
+      skip(
+        "(GB9.2-6) end-to-end build-prerequisite legs SKIPPED — `git init` is unavailable, so the " +
+          "production CLI cannot resolve a synthetic repo root",
+      );
+    } else {
+      const synthScripts = join(synthRoot, "scripts");
+      mkdirSync(synthScripts, { recursive: true });
+      // A BYTE-COPY of the production CLI and its internals — the real code path, rooted elsewhere.
+      for (const name of ["gate.mjs", "gate-internals.mjs"]) {
+        writeFileSync(join(synthScripts, name), readFileSync(join(SELFTEST_DIR, name)));
+      }
+      const synthGate = join(synthScripts, "gate.mjs");
+      const synthTarget = join(synthRoot, "target", "gate-runner");
+      const gateArgs = ["--timeout", "120s", "--stall", "60s", "--target-dir", synthTarget];
+      const gateEnv = { VERTER_GATE_LOCK: join(synthRoot, "gate.lock.d") };
+
+      // Freshness shims, so the freshness preflight resolves "already-present" and never attempts a
+      // `pnpm install` inside the synthetic root. Both the POSIX (extensionless) and the Windows (.CMD)
+      // spellings are written so the leg is deterministic on either host.
+      const synthBin = join(synthRoot, "node_modules", ".bin");
+      mkdirSync(synthBin, { recursive: true });
+      for (const tool of ["buf", "oxfmt"]) {
+        writeFileSync(join(synthBin, tool), "");
+        writeFileSync(join(synthBin, `${tool}.CMD`), "");
+      }
+
+      // The MINIATURE package graph. Every edge the real chain has, and nothing else:
+      //   <probe dir>/package.json  --main-->  <plugin>/dist/index.js
+      //   <plugin>/dist/index.js    requires   ./helpers/carrierStore   (an EMITTED sibling)
+      //   <plugin>/dist/index.js    requires   @verter/language-shared  (via <plugin>/node_modules)
+      //   <language-shared>/dist/index.js requires ./carrier/store      (an EMITTED sibling)
+      // `main` fields are ABSOLUTE so no symlink is needed (portable to hosts that refuse them); Node
+      // resolves `main` with path.resolve, so an absolute value is honoured.
+      const pluginPkg = join(synthRoot, "packages", "typescript-plugin");
+      const sharedPkg = join(synthRoot, "packages", "language-shared");
+      const pluginEntry = join(pluginPkg, "dist", "index.js");
+      const pluginHelper = join(pluginPkg, "dist", "helpers", "carrierStore.js");
+      const sharedEntry = join(sharedPkg, "dist", "index.js");
+      const sharedSibling = join(sharedPkg, "dist", "carrier", "store.js");
+      const probeDir = join(synthRoot, ...BUILD_PREREQUISITE_PROBE_SEGMENTS);
+      const sharedLink = join(pluginPkg, "node_modules", "@verter", "language-shared");
+
+      const writeFile = (p, body) => {
+        mkdirSync(dirname(p), { recursive: true });
+        writeFileSync(p, body);
+      };
+      const isFile = (p) => {
+        try {
+          return statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      };
+      // The probe resolves the environment tsserver runs under from the Rust launcher, so the miniature
+      // carries a copy: without it every leg would fail closed as `environment-unknown` and leg 6 could
+      // never reach SATISFIED — the legs would still refuse, but for the wrong reason, which is a
+      // vacuous version of this scenario.
+      writeFile(
+        join(synthRoot, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS),
+        readFileSync(join(REPO_REALPATH, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS), "utf8"),
+      );
+      // The static scaffolding: manifests and the emitted siblings that never move between legs.
+      writeFile(
+        join(probeDir, "package.json"),
+        JSON.stringify({ name: "@verter/typescript-plugin", main: pluginEntry }),
+      );
+      writeFile(
+        join(pluginPkg, "package.json"),
+        JSON.stringify({ name: "@verter/typescript-plugin", main: pluginEntry }),
+      );
+      writeFile(
+        join(sharedLink, "package.json"),
+        JSON.stringify({ name: "@verter/language-shared", main: sharedEntry }),
+      );
+      writeFile(
+        join(sharedPkg, "package.json"),
+        JSON.stringify({ name: "@verter/language-shared", main: sharedEntry }),
+      );
+
+      // The four EMITTED files a build produces. `plant(state)` installs exactly the requested subset and
+      // PROVES the resulting tree by stat-ing all four — a plant that silently failed to apply would
+      // otherwise be indistinguishable from correct behavior.
+      const emitted = [
+        [
+          pluginEntry,
+          'require("./helpers/carrierStore");\nrequire("@verter/language-shared");\nmodule.exports = function init() {};\n',
+        ],
+        [pluginHelper, "module.exports = { carrierStore: true };\n"],
+        [sharedEntry, 'require("./carrier/store");\nmodule.exports = { languageShared: true };\n'],
+        [sharedSibling, "module.exports = { store: true };\n"],
+      ];
+      const plant = (label, present) => {
+        for (const [p, body] of emitted) {
+          if (present.includes(p)) writeFile(p, body);
+          else rmSync(p, { force: true });
+        }
+        for (const [p] of emitted) {
+          const want = present.includes(p);
+          if (isFile(p) !== want) {
+            throw new Error(
+              `(GB9) plant "${label}" did not apply: ${p} should be ${want ? "present" : "absent"}`,
+            );
+          }
+        }
+      };
+      // Re-stat AFTER the CLI returns: the verdict must have been produced against the tree we planted.
+      const assertUnchanged = (label, present) => {
+        for (const [p] of emitted) {
+          const want = present.includes(p);
+          if (isFile(p) !== want) {
+            fail(
+              `(GB9.${label}) the tree changed under the run: ${p} is no longer ${want ? "present" : "absent"}`,
+            );
+            ok = false;
+          }
+        }
+      };
+
+      const allEmitted = emitted.map(([p]) => p);
+      const refusalLegs = [
+        ["2", "nothing built", []],
+        ["3", "the plugin entry missing", allEmitted.filter((p) => p !== pluginEntry)],
+        [
+          "4",
+          "language-shared missing (the REVERSE single-missing direction)",
+          allEmitted.filter((p) => p !== sharedEntry),
+        ],
+        [
+          "5",
+          "a transitively-required HELPER missing while BOTH entries are present",
+          allEmitted.filter((p) => p !== pluginHelper),
+        ],
+      ];
+      for (const [id, label, present] of refusalLegs) {
+        plant(label, present);
+        const run = runGateCapture(synthGate, gateArgs, gateEnv);
+        if (run.code !== EXIT_USAGE || !run.out.includes(BUILD_PREREQUISITE_MARKER)) {
+          fail(
+            `(GB9.${id}) with ${label} the gate must FAIL SETUP (127) carrying the marker; got ` +
+              `${run.code}\n${run.out}`,
+          );
+          ok = false;
+        }
+        if (!run.out.includes(probeDir) || !run.out.includes(BUILD_PREREQUISITE_COMMAND)) {
+          fail(`(GB9.${id}) the refusal must name the probe target and the producer command`);
+          ok = false;
+        }
+        // The refusal must be about a MISSING MODULE, not about the probe being unable to answer. Without
+        // this, a miniature that lost its tsserver-launcher copy would refuse as `environment-unknown` and
+        // every leg above would still pass while testing nothing about missing artifacts.
+        if (!run.out.includes("MODULE_NOT_FOUND")) {
+          fail(
+            `(GB9.${id}) the refusal must report MODULE_NOT_FOUND (a missing artifact), not a probe that ` +
+              `could not answer:\n${run.out}`,
+          );
+          ok = false;
+        }
+        // ORDERING, the load-bearing half: the refusal precedes the freshness preflight (whose `pnpm
+        // install` is exactly what turns the silent-skip state into the 64-failure state) and any cargo.
+        if (
+          run.out.includes("freshness-tooling preflight:") ||
+          run.out.includes("archiving workspace test universe")
+        ) {
+          fail(
+            `(GB9.${id}) the refusal must run BEFORE the freshness preflight and before the archive ` +
+              `build; the run reached one of them:\n${run.out}`,
+          );
+          ok = false;
+        }
+        assertUnchanged(id, present);
+      }
+
+      // Leg 6 — EVERYTHING BUILT. The check must pass and the run must PROCEED (not stop quietly).
+      plant("everything built", allEmitted);
+      const allThere = runGateCapture(synthGate, gateArgs, gateEnv);
+      if (allThere.out.includes(BUILD_PREREQUISITE_MARKER)) {
+        fail(`(GB9.6) with the whole closure loadable the refusal must NOT fire:\n${allThere.out}`);
+        ok = false;
+      }
+      if (!allThere.out.includes("build-prerequisite preflight: SATISFIED")) {
+        fail(`(GB9.6) the satisfied preflight must be reported:\n${allThere.out}`);
+        ok = false;
+      }
+      if (!allThere.out.includes("freshness-tooling preflight:")) {
+        fail(
+          `(GB9.6) a satisfied build-prerequisite preflight must let the gate PROCEED into the freshness ` +
+            `preflight; it did not:\n${allThere.out}`,
+        );
+        ok = false;
+      }
+      assertUnchanged("6", allEmitted);
+    }
+
+    if (ok) {
+      pass(
+        "(GB9) BUILD-PREREQUISITE PREFLIGHT: the gate refuses, loudly and as its FIRST step, when the " +
+          "tsserver plugin the real-provider suites load cannot be loaded from this tree — naming the " +
+          "probe target, the load error and the producer command (exit 127), instead of running the suite " +
+          "and reporting ~64 opaque `TS2307: Cannot find module './Comp.vue'` failures. The oracle is a " +
+          "REAL LOAD, so the discriminator a stat-based check FAILS is covered: both entries present with " +
+          "one emitted HELPER missing is still a refusal. Six directions through the REAL production CLI " +
+          "on a synthetic miniature of the package graph — nothing built / plugin entry missing / " +
+          "language-shared missing / helper missing => 127 before the freshness preflight and before " +
+          "cargo; everything built => SATISFIED and the run proceeds — plus every fail-closed probe shape " +
+          "(spawn error, signal, timeout, unparseable output) in-process. Every plant is stat-proven " +
+          "applied and re-stated after the run.",
       );
     }
   }

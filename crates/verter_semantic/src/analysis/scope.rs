@@ -95,6 +95,18 @@ impl AnalysisScope {
 
     /// Build mode: script analysis + direct type deps for macro resolution.
     /// Minimal overhead, enough for compilation + smart invalidation.
+    ///
+    /// Deliberately TEMPLATE-FREE. A template bit here flips ONE boolean
+    /// ([`Self::needs_template_analysis`]) that materialises the WHOLE template
+    /// snapshot — every element, every binding occurrence, slots, refs, events,
+    /// `v-for`/`v-model`, if-chains, plus cross-file reads for `<template src>`
+    /// — for every carrier file this scope ever analyses. Root reachability (the
+    /// one fact the attribute-fallthrough surface needs) is obtained instead as
+    /// a REQUEST-SCOPED demand on the public-API generation path alone; see
+    /// `verter_session::request_context::RootTemplateDemandScope`. Carrier bytes
+    /// therefore still do not vary with the analysis scope
+    /// (`full_vs_batch_carrier_and_stub_byte_parity`) without every BUILD-scope
+    /// consumer paying for a template walk it never reads.
     pub const BUILD: Self = Self::from_bits_truncate(
         Self::IMPORTS.bits()
             | Self::BINDINGS.bits()
@@ -224,6 +236,8 @@ mod tests {
         assert!(scope.contains(AnalysisScope::STYLE_SCOPED));
         // Should NOT have template or cross-file
         assert!(!scope.contains(AnalysisScope::TPL_COMPONENTS));
+        assert!(!scope.contains(AnalysisScope::TPL_BINDINGS));
+        assert!(!scope.contains(AnalysisScope::TPL_SLOTS));
         assert!(!scope.contains(AnalysisScope::CROSS_RENDER_TREE));
         assert!(!scope.contains(AnalysisScope::STYLE_CSS));
         assert!(!scope.contains(AnalysisScope::REACTIVITY));

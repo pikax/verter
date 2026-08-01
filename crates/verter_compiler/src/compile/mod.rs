@@ -1037,28 +1037,15 @@ fn compile_inner(
         let filename_str = options.filename.as_deref().unwrap_or("App.vue");
         let js_component_name = ide::sanitize_js_identifier(filename_str);
 
-        // Determine if this is a JS SFC (needs JSX+JSDoc output instead of TSX)
-        let is_jsx = {
-            use crate::cursor::ScriptLanguage;
-            let has_any_script = parsed.script_setup().is_some() || parsed.script().is_some();
-            let lang = parsed
-                .script_setup()
-                .and_then(|s| s.lang)
-                .or_else(|| parsed.script().and_then(|s| s.lang));
-            match lang {
-                // Explicit TS/TSX → TypeScript mode
-                Some(ScriptLanguage::TypeScript | ScriptLanguage::TSX) => false,
-                // Explicit JS/JSX → JavaScript mode
-                Some(ScriptLanguage::JavaScript | ScriptLanguage::JSX) => true,
-                // No lang attribute but has script blocks → JavaScript mode
-                // (e.g. <script setup> without lang="ts")
-                None if has_any_script => true,
-                // No script blocks → default to TS (template-only SFCs)
-                None => false,
-                // Unknown lang → default to TS
-                Some(_) => false,
-            }
-        };
+        // Determine if this is a JS SFC (needs JSX+JSDoc output instead of TSX),
+        // through the SHARED SFC script-dialect classification — the same one
+        // the public-API surface labels itself with, so the validation carrier
+        // and its API companion can never disagree about a file's ScriptKind.
+        // The carrier is JSX-bearing by construction (the template lowers into
+        // it), so only the JS-vs-TS axis is open here: `.jsx` or `.tsx`.
+        let is_jsx =
+            crate::parser::types::sfc_script_dialect(parsed.script_setup(), parsed.script())
+                .is_javascript();
 
         // Extract CSS module class names for IDE completions
         let css_modules: Vec<ide::CssModuleInfo> = parsed
@@ -1403,6 +1390,13 @@ fn compile_inner(
                 tsc::MacroTscInput::NotRequired,
                 tsc::MacroTscInput::Authoritative,
             ),
+            // The in-crate compile pipeline has no inheritance resolver — that
+            // lives in `verter_session`, above this crate. The type-checked
+            // `.tsc.tsx` a consumer actually sees is rendered by the session's
+            // public-API projector (`get_public_api` / `get_public_api_batch`),
+            // which supplies the resolved surface; this block is the
+            // bundler-facing artifact and widens nothing.
+            &tsc::FallthroughPropsProjection::none(),
         );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;
         if let Some(observer) = verter_audit::current_observer() {

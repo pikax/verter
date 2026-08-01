@@ -93,7 +93,7 @@ npm view @verter/unplugin version  # Should show 0.0.1-beta.1
 npm view @verter/native version
 
 # Verify VS Code marketplace
-# Check https://marketplace.visualstudio.com/items?itemName=verter.vscode
+# Check https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode
 
 # Verify crates.io
 cargo search verter_compiler

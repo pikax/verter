@@ -1,7 +1,7 @@
 //! The Svelte IDE-carrier PUBLIC-FACADE default export.
 //!
-//! Extracted from the projector `mod.rs` to keep that file under the size guard
-//! (`no_oversize_files`). The facade is the component's public type composed on
+//! Extracted from the projector `mod.rs` to keep that file a readable size.
+//! The facade is the component's public type composed on
 //! the IDE (self-diagnostics) carrier `Comp.svelte.tsx`. The bare-import-probe
 //! identity a consumer's `import Comp from "./Comp.svelte"` resolves to is the
 //! DECLARATION carrier (`Comp.d.svelte.ts`, the path tsgo's basename-append

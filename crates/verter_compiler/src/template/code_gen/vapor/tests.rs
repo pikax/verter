@@ -975,6 +975,7 @@ fn element_with_interpolation() {
     let oxc_expr = OxcParsedExpression {
         offset: 0,
         expression: None,
+        multi_statement: false,
         errors: None,
         bindings: None,
         ide_recovery_scope: Vec::new(),

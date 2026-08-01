@@ -591,15 +591,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // result: it MUST invalidate the moment the dependency
                     // appears. The build-layer fence (`WholeHash` /
                     // `RouteGeneration` / `ProjectGeneration`) carries NO
-                    // `DerivedFactKind::ImportRoute` rail — the only rail whose
-                    // hash shifts when a known-miss specifier resolves (a
-                    // synthetic project-generation dep is the wrong correctness
-                    // rail, per the architecture ruling). So when the name is
-                    // import-backed we OBSERVE the owner's `ImportRoute` fact
-                    // into the active tracer (`generation_current_import_route_hash`
-                    // re-resolves the owner's known-miss specifiers against the
-                    // live workspace, so the recorded hash shifts the moment the
-                    // dependency appears) — bubbling it into the outer
+                    // import-route rail — the only rail that moves when a
+                    // known-miss specifier resolves (a synthetic
+                    // project-generation dep is the wrong correctness rail, per
+                    // the architecture ruling). So when the name is
+                    // import-backed we OBSERVE the owner's import-route
+                    // RESOLUTION WITNESS into the active tracer (the sealed
+                    // transaction's exhausted probe set for the miss, which the
+                    // dependency's appearance advances) — bubbling it into the
+                    // outer
                     // component-meta result signature so the warm read misses
                     // after the dependency is added. When the route fact cannot
                     // be produced (no import-route surface to root on), the
@@ -617,26 +617,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         (QueryResult::Error(QueryError::Miss), empty_signature()).into();
                     if is_import_backed {
                         let owner_canonical = value_root.scope.canonical_id.as_ref();
-                        // Best-effort: observe the owner's `ImportRoute` derived
-                        // fact into the active tracer so any consumer cache whose
-                        // validity rail consults import-route facts re-validates
-                        // when the specifier resolves.
-                        if let Some(route_hash) = self
-                            .ctx
+                        // Best-effort: observe the owner's import-route
+                        // resolution witness into the active tracer so any
+                        // consumer cache whose validity rail consults
+                        // import-route facts re-validates when the specifier
+                        // resolves.
+                        self.ctx
                             .host_for_fact_tracer_install()
-                            .generation_current_import_route_hash(owner_canonical)
-                        {
-                            crate::fact_signature_helpers::observe_fact_signature(&[
-                                crate::resolver_core::FactVersionRef::DerivedFactHash {
-                                    canonical_id: owner_canonical.to_string(),
-                                    kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                                    hash: route_hash,
-                                },
-                            ]);
-                        }
-                        // The build-layer fence cannot carry the `ImportRoute`
-                        // rail (no `DepVersion` variant expresses a derived-fact
-                        // hash) and a value-import known-miss may not even surface
+                            .observe_owner_import_route_witness(owner_canonical);
+                        // The build-layer fence cannot carry the import-route
+                        // rail (no `DepVersion` variant expresses a resolution
+                        // witness) and a value-import known-miss may not even surface
                         // in the owner's type-import route table — so the route
                         // fact above is NOT a guaranteed invalidation rail for
                         // EVERY consuming memo (the `TypeOf` memo, the

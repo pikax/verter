@@ -9,14 +9,53 @@ pub(crate) mod slot_summary;
 pub mod types;
 
 use oxc_allocator::Allocator;
+use oxc_ast::ast::{Program, Statement};
 use oxc_span::SourceType;
 
 use crate::common::Span;
 use crate::utils::oxc::{
-    extract_bindings_from_expression, vue::adjust_diagnostics_spans, BindingContext,
+    extract_bindings_from_expression, extract_bindings_from_program, vue::adjust_diagnostics_spans,
+    BindingContext,
 };
 
 use self::types::*;
+
+/// The JavaScript grammar a template value is parsed under.
+///
+/// Every Vue template value is a single expression EXCEPT a `v-on` handler with
+/// an argument, whose value is an inline statement LIST (`@click="a = 1; b = 2"`).
+/// The distinction is load-bearing: OXC's `parse_expression` consumes one
+/// expression and stops at the first `;` WITHOUT reporting an error, so parsing
+/// a handler under the expression grammar silently discards every statement
+/// after the first — their identifiers never reach binding extraction and are
+/// emitted unresolved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ValueGrammar {
+    /// A single expression: interpolations, `:prop`, `v-if`, dynamic args, and
+    /// the argument-less `v-on="{ click: fn }"` object form.
+    Expression,
+    /// An inline statement list: the value of a `v-on` directive with an
+    /// argument (`@click`, `v-on:click`).
+    StatementList,
+}
+
+/// Whether a directive's value is an inline statement list.
+///
+/// True only for `v-on` WITH an argument. The argument-less form
+/// (`v-on="handlers"`) takes an OBJECT of handlers, which is an expression —
+/// parsing `{ click: fn }` as a statement list would read the braces as a block
+/// statement instead of an object literal.
+///
+/// The directive-name token set (`@` / `v-on`) is the parser's, from its
+/// directive tokenization; the argument is a separate span.
+#[inline]
+fn value_grammar(directive_name: &str, has_arg: bool) -> ValueGrammar {
+    if has_arg && (directive_name == "@" || directive_name == "v-on") {
+        ValueGrammar::StatementList
+    } else {
+        ValueGrammar::Expression
+    }
+}
 
 /// Parse a single expression from a source span.
 ///
@@ -32,6 +71,7 @@ fn parse_expression<'alloc>(
     source_type: SourceType,
     ignored: &[&'alloc str],
     ide_completion: bool,
+    grammar: ValueGrammar,
 ) -> OxcParsedExpression<'alloc> {
     let source_slice = &input[span.start as usize..span.end as usize];
     // A whitespace-only span (`{{ }}`, `{{   }}`) is an EMPTY interpolation, not a
@@ -43,11 +83,33 @@ fn parse_expression<'alloc>(
         return OxcParsedExpression {
             offset: span.start,
             expression: None,
+            multi_statement: false,
             errors: None,
             bindings: None,
             ide_recovery_scope: Default::default(),
             dynamism: Dynamism::Static,
         };
+    }
+
+    // A statement-list value is tried as an EXPRESSION first, and only falls
+    // back to the statement grammar when one expression does not span the whole
+    // value. That ordering is what disambiguates the two shapes JavaScript reads
+    // differently at expression vs statement position: `function ($event) {…}`
+    // is a function EXPRESSION handler (not a declaration) and `{ click: fn }`
+    // is an object literal (not a block). Falling back is safe in the other
+    // direction — a value that is one expression statement produces the same
+    // result under either grammar.
+    if grammar == ValueGrammar::StatementList
+        && !expression_spans_whole_value(source_slice, alloc, source_type)
+    {
+        return parse_statement_list(
+            span,
+            source_slice,
+            alloc,
+            source_type,
+            ignored,
+            ide_completion,
+        );
     }
 
     let parser = oxc_parser::Parser::new(alloc, source_slice, source_type);
@@ -64,6 +126,7 @@ fn parse_expression<'alloc>(
             OxcParsedExpression {
                 offset: span.start,
                 expression: Some(expr),
+                multi_statement: false,
                 errors: None,
                 dynamism: bindings.dynamism,
                 bindings: Some(bindings),
@@ -75,6 +138,7 @@ fn parse_expression<'alloc>(
             OxcParsedExpression {
                 offset: span.start,
                 expression: None,
+                multi_statement: false,
                 errors: Some(errors),
                 bindings: None,
                 ide_recovery_scope: if ide_completion {
@@ -85,6 +149,120 @@ fn parse_expression<'alloc>(
                 dynamism: Dynamism::Static,
             }
         }
+    }
+}
+
+/// Whether a single expression covers the whole directive value.
+///
+/// Used to decide whether a `v-on` value needs the statement grammar at all.
+/// The tail is allowed to be whitespace and statement terminators, so
+/// `@click="a = 1;"` is still one expression while `@click="a = 1; b = 2"` is
+/// not. Anything else in the tail (including a trailing comment) takes the
+/// statement path, which re-derives the identical result for a lone expression
+/// statement.
+fn expression_spans_whole_value(
+    source_slice: &str,
+    alloc: &Allocator,
+    source_type: SourceType,
+) -> bool {
+    use oxc_span::GetSpan;
+
+    let Ok(expr) = oxc_parser::Parser::new(alloc, source_slice, source_type).parse_expression()
+    else {
+        return false;
+    };
+    source_slice
+        .get(expr.span().end as usize..)
+        .is_some_and(|tail| {
+            tail.trim_matches(|c: char| c.is_whitespace() || c == ';')
+                .is_empty()
+        })
+}
+
+/// Parse a `v-on` handler value as an inline statement LIST.
+///
+/// A handler that reduces to exactly one expression statement yields the same
+/// [`OxcParsedExpression`] the expression grammar would produce — same
+/// `expression`, same bindings — so every existing single-expression consumer
+/// (handler-shape classification, `$event` detection, codegen) is unaffected.
+///
+/// A genuine statement list keeps `expression: None` (there is no single
+/// expression to classify) and sets `multi_statement`, and its bindings are
+/// extracted across ALL statements so identifiers after the first `;` are
+/// resolved like any other template reference.
+fn parse_statement_list<'alloc>(
+    span: Span,
+    source_slice: &'alloc str,
+    alloc: &'alloc Allocator,
+    source_type: SourceType,
+    ignored: &[&'alloc str],
+    ide_completion: bool,
+) -> OxcParsedExpression<'alloc> {
+    let binding_ctx = BindingContext::with_ignored(span.start, ignored.iter().copied())
+        .completion_aware(ide_completion);
+
+    let ret = oxc_parser::Parser::new(alloc, source_slice, source_type).parse();
+
+    if ret.panicked || !ret.errors.is_empty() {
+        let mut errors = ret.errors;
+        adjust_diagnostics_spans(&mut errors, span.start);
+        return OxcParsedExpression {
+            offset: span.start,
+            expression: None,
+            // This path is reached ONLY because one expression did not span the
+            // whole value, so the value is definitively not a single expression
+            // even though the statement grammar could not read it either. Saying
+            // `false` here would claim a single-expression shape the parse never
+            // established, and codegen would put the unreadable text inside a
+            // `(…)` container: `@click="a = 1; return"` is a parse error as a
+            // Program (an illegal top-level `return`) yet is perfectly valid as
+            // the BODY of the emitted arrow.
+            multi_statement: true,
+            errors: Some(errors),
+            bindings: None,
+            ide_recovery_scope: if ide_completion {
+                ignored.to_vec()
+            } else {
+                Default::default()
+            },
+            dynamism: Dynamism::Static,
+        };
+    }
+
+    let mut program = ret.program;
+
+    // One expression statement → indistinguishable from the expression grammar.
+    // Take the expression out of the program so downstream shape classification
+    // sees exactly what `parse_expression` would have produced.
+    if program.body.len() == 1 && matches!(program.body[0], Statement::ExpressionStatement(_)) {
+        if let Some(Statement::ExpressionStatement(stmt)) = program.body.pop() {
+            let expr = stmt.unbox().expression;
+            let bindings = extract_bindings_from_expression(&expr, source_slice, binding_ctx);
+            return OxcParsedExpression {
+                offset: span.start,
+                expression: Some(expr),
+                multi_statement: false,
+                errors: None,
+                dynamism: bindings.dynamism,
+                bindings: Some(bindings),
+                ide_recovery_scope: Default::default(),
+            };
+        }
+    }
+
+    // A real statement list. The program must outlive this call for binding
+    // extraction to borrow identifier names out of the parse arena.
+    let program: &'alloc Program<'alloc> = alloc.alloc(program);
+    let bindings = extract_bindings_from_program(program, source_slice, binding_ctx);
+
+    OxcParsedExpression {
+        offset: span.start,
+        expression: None,
+        multi_statement: true,
+        errors: None,
+        dynamism: bindings.dynamism,
+        bindings: Some(bindings),
+        ide_recovery_scope: Default::default(),
     }
 }
 
@@ -158,6 +336,7 @@ fn parse_element<'alloc>(
                     source_type,
                     active_locals!(),
                     ide_completion,
+                    ValueGrammar::Expression,
                 );
                 if parsed.dynamism == Dynamism::Static {
                     expression_flag = expression_flag.add(ExpressionFlags::StaticCondition);
@@ -223,6 +402,7 @@ fn parse_element<'alloc>(
                                 source_type,
                                 active_locals!(),
                                 ide_completion,
+                                ValueGrammar::Expression,
                             )
                         })
                     }
@@ -268,6 +448,7 @@ fn parse_element<'alloc>(
         // Parse directive value expression
         let exp = match (prop.value_start, prop.value_end) {
             (Some(vs), Some(ve)) => {
+                let directive_name = &input[prop.start as usize..prop.name_end as usize];
                 let parsed = parse_expression(
                     Span::new(vs, ve),
                     input,
@@ -275,6 +456,7 @@ fn parse_element<'alloc>(
                     source_type,
                     active_locals!(),
                     ide_completion,
+                    value_grammar(directive_name, prop.arg_start.is_some()),
                 );
 
                 // Check for expression flag based on arg name
@@ -313,6 +495,7 @@ fn parse_element<'alloc>(
                 source_type,
                 active_locals!(),
                 ide_completion,
+                ValueGrammar::Expression,
             )),
             _ => None,
         };
@@ -439,6 +622,7 @@ pub fn parse_template_expressions<'alloc>(
                     source_type,
                     parent_locals,
                     ide_completion,
+                    ValueGrammar::Expression,
                 );
 
                 // If non-static, remove AllInterpolationsStatic from parent.

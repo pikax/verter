@@ -1346,10 +1346,10 @@ where
 // ============================================================================
 // D3.2 admission-control gating tests + joiner view-validation discriminators.
 //
-// Extracted to the sibling `singleflight_tests.rs` (kept as a
-// child `mod` via `#[path]` so the thread-coordinated discriminators
+// The sibling `singleflight_tests.rs` is kept as a child `mod` via `#[path]`
+// so the thread-coordinated discriminators
 // reach the substrate's private `InflightSlot` / `InflightTable`
-// internals). Splitting keeps this file under the file-size guard cap.
+// internals). The split keeps the state machine and its tests independently readable.
 // ============================================================================
 
 #[cfg(test)]

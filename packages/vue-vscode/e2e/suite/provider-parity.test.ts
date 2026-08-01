@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import { pollBudget } from "../lib/timeouts";
 import * as vscode from "vscode";
 import {
   openReadyCached,
@@ -183,7 +184,7 @@ suite(`Provider Parity [${FIXTURE_NAME}]`, function () {
     // Wait for TS diagnostics referencing the unknown prop
     const diags = await waitForDiagnostics(invalidDoc.uri, {
       source: "ts",
-      timeoutMs: 30_000,
+      timeoutMs: pollBudget("waitForDiagnostics"),
       predicate: (d) => d.message.includes("thisDoesNotExist"),
     });
 

@@ -21,11 +21,17 @@ on:
 permissions:
   contents: write
 
+# Comment-triggered runs can stack; keep one run per issue/ref.
+concurrency:
+  group: lsp-benchmark-${{ github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Check if workflow should run (for PR comments)
   check-trigger:
     if: github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '/lsp-benchmark')
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       pull-requests: write
       issues: write
@@ -141,13 +147,18 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version-file: .nvmrc
+          # setup-node@v5 enables package-manager caching by DEFAULT and
+          # auto-detects pnpm from the root package.json `packageManager`
+          # field, failing unless pnpm is already on PATH. This job either
+          # needs no pnpm or caches the pnpm store itself.
+          package-manager-cache: false
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Cache pnpm store
         uses: actions/cache@v5
@@ -208,6 +219,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: write
       pull-requests: write

@@ -94,11 +94,24 @@ const VUE_INTRINSIC_ALLOWLIST: &[&str] = &[
     // check that lives in `verter_session`; referenced by name in carrier
     // docs/tests).
     "is_vue",
+    // The Vue SFC root-block RCDATA rule (owned by `verter_parser`'s SFC
+    // tokenizer and shared with the LSP block scanner's
+    // `CustomBlockContentKind::RawText` arm): at a Vue SFC root only
+    // `<template>` hosts markup; custom blocks are raw text. It is the VUE
+    // carrier's semantics, not a carrier-generic primitive — the Svelte arm
+    // uses its own `Markup` rule.
+    "vue_sfc_root_block_is_raw_text",
     // The `CarrierKind::Vue` carrier-DISCRIMINANT variant (a per-framework enum
     // value on the neutral `CarrierKind` type — names WHICH carrier a markup
     // region belongs to, exactly as the `Svelte` sibling variant does; it is a
     // discriminant value, not a carrier-generic routing primitive).
     "Vue",
+    // The Vue arm of the per-framework managed-tsgo JSX-asset pair, mirrored
+    // exactly by `svelte_assets::prepare_managed_tsgo_svelte_carrier` — it
+    // adapts Vue-SFC JSX runtime assets only, so a `carrier_*` name would
+    // falsely advertise it as carrier-generic.
+    "prepare_managed_tsgo_vue_carrier",
+    "vue_assets",
 ];
 
 fn crate_src() -> PathBuf {
@@ -166,6 +179,40 @@ enum StrState {
     Regular(u8),
     /// Inside a raw `r#…"…"#…` string with the given number of `#` hashes.
     Raw(usize),
+}
+
+/// Whether the apostrophe at `i` opens a LIFETIME (`'a`, `'_`, `'static`,
+/// `'r#foo`) rather than a char literal (`'x'`, `'\n'`, `'\''`, `'\u{1F600}'`).
+///
+/// Rust disambiguates the two by what FOLLOWS the tick: a lifetime is a tick
+/// plus an identifier that is NOT closed by a second tick. Concretely — the
+/// tick opens a char literal unless the next byte is an identifier start AND
+/// the identifier it begins is longer than one character or is not immediately
+/// followed by a closing tick. (`'a'` and `'_'` are one-character bodies closed
+/// by a tick, so they are literals; `'a`, `'_` and `'static` are not.)
+///
+/// Treating a lifetime as a char literal is not cosmetic: the literal never
+/// closes, so the stripper blanks the remainder of the line — and, with the
+/// state carried forward, the remainder of the FILE. Every identifier after any
+/// `<'a>` signature then becomes invisible to the scan.
+fn opens_lifetime(bytes: &[u8], i: usize) -> bool {
+    debug_assert_eq!(bytes[i], b'\'');
+    let start = i + 1;
+    if start >= bytes.len() {
+        return false;
+    }
+    let first = bytes[start];
+    // An escape (`'\n'`), digit (`'0'`), punctuation (`'{'`) or non-ASCII
+    // (`'😀'`) body is always a char literal.
+    if !(first == b'_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    let mut end = start;
+    while end < bytes.len() && (bytes[end] == b'_' || bytes[end].is_ascii_alphanumeric()) {
+        end += 1;
+    }
+    // A single identifier character closed by a tick is a char literal.
+    !(end == start + 1 && end < bytes.len() && bytes[end] == b'\'')
 }
 
 fn strip_comments_and_strings(code: &str, state: StrState) -> (String, StrState) {
@@ -243,6 +290,14 @@ fn strip_comments_and_strings(code: &str, state: StrState) -> (String, StrState)
             }
             // Not a raw-string opener — fall through (treat `r`/`b` as ident).
         }
+        if b == b'\'' && opens_lifetime(bytes, i) {
+            // Blank the tick and let the lifetime's identifier flow through the
+            // normal identifier path (a lifetime IS a named identifier, so a
+            // `'vue_*` lifetime is still scanned).
+            out.push(' ');
+            i += 1;
+            continue;
+        }
         if b == b'"' || b == b'\'' {
             st = StrState::Regular(b);
             out.push(' ');
@@ -285,6 +340,10 @@ fn code_opens_block_comment(line: &str) -> Option<bool> {
             if b == q {
                 in_str = None;
             }
+            i += 1;
+            continue;
+        }
+        if b == b'\'' && opens_lifetime(bytes, i) {
             i += 1;
             continue;
         }
@@ -593,6 +652,93 @@ fn multiline_raw_string_braces_do_not_tear_scope() {
         closes, 0,
         "no `}}` should survive from the raw fixture: {all:?}"
     );
+}
+
+#[test]
+fn lifetimes_are_not_char_literals_and_do_not_mask_following_code() {
+    // A lifetime apostrophe must NOT open a char/string literal. If it does,
+    // the stripper blanks the rest of the line (and, unterminated, the rest of
+    // the FILE) — silently hiding every identifier after any `<'a>` signature.
+    // Each of these lines carries a generic Vue-named primitive AFTER a
+    // lifetime; all must still flag.
+    assert!(
+        !flags(
+            "fn prepare_tsx_surface<'a>(src: &'a str) -> PreparedTsxContent<'a> { vue_resync() }"
+        )
+        .is_empty(),
+        "a `vue_`-named call after `<'a>` lifetimes must still flag"
+    );
+    assert!(
+        !flags("    let s: &'_ str = vue_borrowed();").is_empty(),
+        "the `'_` anonymous lifetime must not mask the rest of the line"
+    );
+    assert!(
+        !flags("pub struct S<'a, 'b> { pub vue_field: &'a str, pub other: &'b str }").is_empty(),
+        "a multi-lifetime generic list must not mask the struct body"
+    );
+    assert!(
+        !flags("fn g<T: for<'a> Fn(&'a u8)>() { vue_hof(); }").is_empty(),
+        "a HRTB `for<'a>` must not mask the function body"
+    );
+    assert!(
+        !flags("    let d: Box<dyn Routing + 'static> = vue_boxed();").is_empty(),
+        "a `dyn Trait + 'static` bound must not mask the initializer"
+    );
+    // And the stripper must not be left in an open-string state by a lifetime —
+    // otherwise every SUBSEQUENT line of the file is skipped wholesale.
+    let (_, st) = strip_comments_and_strings("fn f<'a>(x: &'a str) -> Out<'a> {", StrState::None);
+    assert!(
+        st == StrState::None,
+        "a line of lifetimes must leave the stripper OUTSIDE any literal"
+    );
+}
+
+#[test]
+fn genuine_char_literals_are_still_stripped() {
+    // The lifetime fix must not regress char-literal stripping: a char literal
+    // body is blanked, and a quote/brace INSIDE one must not leak out and open
+    // a real string or tear the brace-depth counter.
+    let (code, st) = strip_comments_and_strings("    let c = 'v';", StrState::None);
+    assert!(
+        !code.contains('v'),
+        "a char-literal body must be blanked: {code:?}"
+    );
+    assert!(st == StrState::None);
+
+    // `'"'` — the quote is char-literal CONTENT, not a string opener. If it
+    // leaked, `vue_after_quote` would be masked.
+    assert!(
+        !flags("    let q = '\"'; let vue_after_quote = 1;").is_empty(),
+        "a `'\"'` char literal must not open a string and mask what follows"
+    );
+    // `'\''` — an escaped quote inside a char literal.
+    assert!(
+        !flags("    let e = '\\''; let vue_after_escape = 2;").is_empty(),
+        "a `'\\''` escaped-quote char literal must close correctly"
+    );
+    // `'\n'` and `'\u{1F600}'` — escapes, incl. one whose body carries braces
+    // that must never reach the brace-depth counter.
+    assert!(!flags("    let n = '\\n'; let vue_after_newline = 3;").is_empty());
+    let (code, st) = strip_comments_and_strings("    let u = '\\u{1F600}';", StrState::None);
+    assert!(
+        !code.contains('{') && !code.contains('}'),
+        "a unicode-escape char literal must not leak braces: {code:?}"
+    );
+    assert!(st == StrState::None);
+    // `'{'` as a literal brace must likewise not reach the counter.
+    let (code, _) = strip_comments_and_strings("    if c == '{' {", StrState::None);
+    assert_eq!(
+        code.matches('{').count(),
+        1,
+        "only the STRUCTURAL brace survives, not the char literal: {code:?}"
+    );
+    // `'_'` is the underscore CHAR literal, not the `'_` lifetime.
+    let (code, st) = strip_comments_and_strings("    let u = '_';", StrState::None);
+    assert!(
+        !code.contains('_'),
+        "`'_'` is a char literal, not a lifetime: {code:?}"
+    );
+    assert!(st == StrState::None);
 }
 
 #[test]

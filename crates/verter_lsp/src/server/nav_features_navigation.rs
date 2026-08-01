@@ -13,16 +13,22 @@ use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::documents::uri_to_canonical_id;
 use crate::features::definition::definition_at_position;
 use crate::features::references::references_at_position;
-use crate::features::rename::{is_css_rename_position, rename_at_position};
 use crate::type_provider::merge;
 
 use super::child_prop_rename::{ChildPropDeclarationProof, ChildPropRenameClass};
 use super::handler_guard::{block_in_place_if_available, HandlerGuard};
-use super::rename_prepare::multi_claimant_rename_unavailable_error;
+use super::provider_recovery::provider_query_with_bounded_recovery;
+use super::rename_plan::{
+    ownership_changed_during_rename_error, rename_request_admission, RenameAdmission,
+    RenameTargetResolution, SameFileProof,
+};
+use super::rename_prepare::{
+    public_component_prop_rename_unavailable_error, rename_incompleteness_error,
+};
 use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
 
@@ -151,13 +157,13 @@ pub(super) async fn handle_goto_definition(
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let canonical_id = uri_to_canonical_id(uri);
         let resolve_path = {
             let canonical_id = canonical_id.clone();
             let host = &server.documents.host;
             move |specifier: &str| -> Option<String> {
-                host.resolve_import_via_workspace(&canonical_id, specifier)
+                host.resolve_import_transient(&canonical_id, specifier)
             }
         };
         #[allow(clippy::type_complexity)]
@@ -274,218 +280,231 @@ pub(super) async fn handle_goto_definition(
     // to blocking the request behind publication.
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = server.type_provider.as_ref() {
-        if let Some(ctx) = server.repaired_type_provider_context(uri).await {
+        if let Some(initial_ctx) = server.repaired_type_provider_context(uri).await {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
-            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
+            if let Some(initial_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.carrier_line_index,
-                &ctx.mapper,
-                &ctx.tsx_line_index,
+                &initial_ctx.carrier_line_index,
+                &initial_ctx.mapper,
+                &initial_ctx.tsx_line_index,
             ) {
-                tracing::debug!(
-                    "definition: querying type provider at tsx offset {}",
-                    tsx_offset
-                );
-                // Pin the FOREIGN carrier IDE surfaces BEFORE the query, so a
-                // returned foreign location maps through the generation the
-                // request began against (never the merge-time current one).
-                let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                let foreign_api_set = server
-                    .documents
-                    .provider_surfaces()
-                    .capture_current_carrier_api_set();
-                match tp.get_definition(&ctx.tsx_path, tsx_offset).await {
-                    Ok(type_defs) => {
-                        // Post-await validation: a response produced against a
-                        // surface that no longer matches must be DROPPED (fail
-                        // closed), never mapped through a superseded context.
-                        if !server.provider_context_still_valid(uri, &ctx) {
-                            tracing::debug!(
-                                "definition: dropping provider locations — captured surface \
+                // No-silent-empty (D7), definition half: a FAILED provider query
+                // must never surface as a silently dead CTRL+CLICK. Route the
+                // query through the ONE shared bounded recovery (resync + retry
+                // once + the retry identity fence) that hover and
+                // type-definition also run — see `provider_recovery`. Without
+                // it, any provider perturbation leaves member positions empty
+                // (object/interface members have no native definition leg)
+                // while hover at the same cursor self-heals: the user-visible
+                // "hover shows the type but the property never navigates"
+                // asymmetry.
+                let outcome = provider_query_with_bounded_recovery(
+                    "definition",
+                    position,
+                    initial_ctx,
+                    initial_offset,
+                    |tsx_path: String, offset: u32| async move {
+                        // Pin the FOREIGN carrier IDE surfaces BEFORE the query
+                        // (per attempt — a retry re-pins under the surface it
+                        // queries), so a returned foreign location maps through
+                        // the generation the attempt began against (never the
+                        // merge-time current one).
+                        let foreign_ide_set = server.capture_foreign_carrier_ide_set();
+                        let foreign_api_set = server
+                            .documents
+                            .provider_surfaces()
+                            .capture_current_carrier_api_set();
+                        let type_defs = tp.get_definition(&tsx_path, offset).await?;
+                        Ok((type_defs, foreign_ide_set, foreign_api_set))
+                    },
+                    || server.ensure_current_file_synced(uri),
+                    || server.type_provider_context(uri),
+                )
+                .await;
+                let ctx = outcome.ctx;
+                if let Some((type_defs, foreign_ide_set, foreign_api_set)) = outcome.value {
+                    // Post-await validation: a response produced against a
+                    // surface that no longer matches must be DROPPED (fail
+                    // closed), never mapped through a superseded context.
+                    if !server.provider_context_still_valid(uri, &ctx) {
+                        tracing::debug!(
+                            "definition: dropping provider locations — captured surface \
                                  no longer valid"
-                            );
-                            return Ok(verter_result);
-                        }
-                        tracing::debug!(
-                            "definition: type provider returned {} locations",
-                            type_defs.len()
                         );
-                        let carrier_source_exists =
-                            |p: &str| server.documents.host().get_source(p).is_some();
-                        let barrel_resolver =
-                            |path: &str, start: u32, end: u32| -> Option<Location> {
-                                server.resolve_barrel_type_provider_location(path, start, end)
-                            };
-                        let negotiated_encoding = server.position_encoding.read().clone();
-                        let api_resolver = |api_path: &str| {
-                            crate::provider_surface_store::classify_captured_api_surface(
-                                &foreign_api_set,
-                                api_path,
-                                negotiated_encoding.clone(),
+                        return Ok(verter_result);
+                    }
+                    tracing::debug!(
+                        "definition: type provider returned {} locations",
+                        type_defs.len()
+                    );
+                    let carrier_source_exists =
+                        |p: &str| server.documents.host().get_source(p).is_some();
+                    let barrel_resolver = |path: &str, start: u32, end: u32| -> Option<Location> {
+                        server.resolve_barrel_type_provider_location(path, start, end)
+                    };
+                    let negotiated_encoding = server.position_encoding.read().clone();
+                    let api_resolver = |api_path: &str| {
+                        crate::provider_surface_store::classify_captured_api_surface(
+                            &foreign_api_set,
+                            api_path,
+                            negotiated_encoding.clone(),
+                        )
+                    };
+                    let provider_had_defs = !type_defs.is_empty();
+                    // GlobalComponents fallback-const NAV PROBE offsets for
+                    // any same-file synthetic targets, located through the
+                    // compiler-owned emission-contract reader BEFORE the
+                    // merge consumes the response (fail-closed `None` for
+                    // every non-fallback-const target).
+                    let nav_probe_offsets: Vec<u32> = type_defs
+                        .iter()
+                        .filter(|d| d.path == ctx.tsx_path)
+                        .filter_map(|d| {
+                            verter_session::global_component_nav_probe_offset(
+                                &ctx.tsx_content,
+                                d.start,
+                                d.end,
                             )
-                        };
-                        let provider_had_defs = !type_defs.is_empty();
-                        // GlobalComponents fallback-const NAV PROBE offsets for
-                        // any same-file synthetic targets, located through the
-                        // compiler-owned emission-contract reader BEFORE the
-                        // merge consumes the response (fail-closed `None` for
-                        // every non-fallback-const target).
-                        let nav_probe_offsets: Vec<u32> = type_defs
-                            .iter()
-                            .filter(|d| d.path == ctx.tsx_path)
-                            .filter_map(|d| {
-                                verter_session::global_component_nav_probe_offset(
-                                    &ctx.tsx_content,
-                                    d.start,
-                                    d.end,
-                                )
+                        })
+                        .collect();
+                    let merged = merge::merge_definitions_with_barrel_resolver(
+                        verter_result,
+                        type_defs,
+                        &ctx.tsx_path,
+                        &ctx.tsx_line_index,
+                        &ctx.mapper,
+                        &ctx.carrier_line_index,
+                        Some(&|ide_path: &str| {
+                            server.foreign_ide_context(&foreign_ide_set, ide_path)
+                        }),
+                        Some(&api_resolver),
+                        uri,
+                        &carrier_source_exists,
+                        Some(&barrel_resolver),
+                        negotiated_encoding.clone(),
+                        &|p: &str| {
+                            block_in_place_if_available(|| {
+                                server.documents.host().workspace_read().read_file(p)
                             })
-                            .collect();
-                        let merged = merge::merge_definitions_with_barrel_resolver(
-                            verter_result,
-                            type_defs,
-                            &ctx.tsx_path,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| {
-                                server.foreign_ide_context(&foreign_ide_set, ide_path)
-                            }),
-                            Some(&api_resolver),
-                            uri,
-                            &carrier_source_exists,
-                            Some(&barrel_resolver),
-                            negotiated_encoding.clone(),
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
-                        );
-                        // If the type provider resolved to a barrel file, follow
-                        // re-exports to the terminal declaration.
-                        let resolved = server.resolve_barrel_locations(merged);
+                        },
+                    );
+                    // If the type provider resolved to a barrel file, follow
+                    // re-exports to the terminal declaration.
+                    let resolved = server.resolve_barrel_locations(merged);
 
-                        // Synthetic-target fallback: the provider RESOLVED the
-                        // identifier, but every returned declaration was dropped
-                        // by the fail-closed merge — the targets live in
-                        // unmapped generated text. When those targets are
-                        // GlobalComponents fallback consts (a template tag whose
-                        // binding is a synthesized const), re-issue `definition`
-                        // at the const's NAV PROBE member — the
-                        // (augmentation-merged) `GlobalComponents` interface
-                        // member — so the tag jumps to the user's real
-                        // registration declaration. An unregistered tag has no
-                        // member symbol: the probe yields nothing and the result
-                        // stays fail-closed EMPTY. Positions whose definition
-                        // the provider could not resolve at all (`type_defs`
-                        // empty) never enter this branch.
-                        let resolved_is_empty = match &resolved {
-                            None => true,
-                            Some(GotoDefinitionResponse::Array(locs)) => locs.is_empty(),
-                            Some(GotoDefinitionResponse::Link(links)) => links.is_empty(),
-                            Some(GotoDefinitionResponse::Scalar(_)) => false,
-                        };
-                        if !(provider_had_defs && resolved_is_empty) {
-                            return Ok(resolved);
-                        }
-                        tracing::debug!(
-                            "definition: all provider targets were synthetic — retrying {} \
+                    // Synthetic-target fallback: the provider RESOLVED the
+                    // identifier, but every returned declaration was dropped
+                    // by the fail-closed merge — the targets live in
+                    // unmapped generated text. When those targets are
+                    // GlobalComponents fallback consts (a template tag whose
+                    // binding is a synthesized const), re-issue `definition`
+                    // at the const's NAV PROBE member — the
+                    // (augmentation-merged) `GlobalComponents` interface
+                    // member — so the tag jumps to the user's real
+                    // registration declaration. An unregistered tag has no
+                    // member symbol: the probe yields nothing and the result
+                    // stays fail-closed EMPTY. Positions whose definition
+                    // the provider could not resolve at all (`type_defs`
+                    // empty) never enter this branch.
+                    let resolved_is_empty = match &resolved {
+                        None => true,
+                        Some(GotoDefinitionResponse::Array(locs)) => locs.is_empty(),
+                        Some(GotoDefinitionResponse::Link(links)) => links.is_empty(),
+                        Some(GotoDefinitionResponse::Scalar(_)) => false,
+                    };
+                    if !(provider_had_defs && resolved_is_empty) {
+                        return Ok(resolved);
+                    }
+                    tracing::debug!(
+                        "definition: all provider targets were synthetic — retrying {} \
                              GlobalComponents nav probe(s)",
-                            nav_probe_offsets.len()
-                        );
-                        let mut probe_defs = Vec::new();
-                        for probe_offset in nav_probe_offsets {
-                            match tp.get_definition(&ctx.tsx_path, probe_offset).await {
-                                Ok(defs) => probe_defs.extend(defs),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "definition: GlobalComponents nav-probe query error: {e}"
-                                    );
-                                }
+                        nav_probe_offsets.len()
+                    );
+                    let mut probe_defs = Vec::new();
+                    for probe_offset in nav_probe_offsets {
+                        match tp.get_definition(&ctx.tsx_path, probe_offset).await {
+                            Ok(defs) => probe_defs.extend(defs),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "definition: GlobalComponents nav-probe query error: {e}"
+                                );
                             }
                         }
-                        // Post-await validation (fail closed), same as above.
-                        if !server.provider_context_still_valid(uri, &ctx) {
-                            return Ok(None);
+                    }
+                    // Post-await validation (fail closed), same as above.
+                    if !server.provider_context_still_valid(uri, &ctx) {
+                        return Ok(None);
+                    }
+                    if probe_defs.is_empty() {
+                        return Ok(None);
+                    }
+                    // A provider may follow the augmentation member THROUGH
+                    // `typeof C` to the component's synthesized API carrier
+                    // (`{name}.vue.verter.ts`) — a virtual path whose byte
+                    // offsets the fail-closed merge cannot map. Resolve that
+                    // leg natively: normalize the carrier path back to its
+                    // REAL source file and take the component's
+                    // default-export declaration span from the host's export
+                    // tables. Unresolvable legs drop (fail closed).
+                    let mut native_locations: Vec<Location> = Vec::new();
+                    probe_defs.retain(|d| {
+                        let normalized =
+                            merge::normalize_carrier_path_owned(&d.path, &carrier_source_exists);
+                        if normalized == d.path {
+                            return true;
                         }
-                        if probe_defs.is_empty() {
-                            return Ok(None);
+                        if let Some(loc) = host_export_location(server, &normalized, "default") {
+                            native_locations.push(loc);
                         }
-                        // A provider may follow the augmentation member THROUGH
-                        // `typeof C` to the component's synthesized API carrier
-                        // (`{name}.vue.verter.ts`) — a virtual path whose byte
-                        // offsets the fail-closed merge cannot map. Resolve that
-                        // leg natively: normalize the carrier path back to its
-                        // REAL source file and take the component's
-                        // default-export declaration span from the host's export
-                        // tables. Unresolvable legs drop (fail closed).
-                        let mut native_locations: Vec<Location> = Vec::new();
-                        probe_defs.retain(|d| {
-                            let normalized = merge::normalize_carrier_path_owned(
-                                &d.path,
-                                &carrier_source_exists,
-                            );
-                            if normalized == d.path {
-                                return true;
-                            }
-                            if let Some(loc) = host_export_location(server, &normalized, "default")
-                            {
-                                native_locations.push(loc);
-                            }
-                            false
-                        });
-                        if probe_defs.is_empty() {
-                            return Ok(if native_locations.is_empty() {
-                                None
-                            } else {
-                                Some(GotoDefinitionResponse::Array(native_locations))
-                            });
-                        }
-                        let merged = merge::merge_definitions_with_barrel_resolver(
-                            None,
-                            probe_defs,
-                            &ctx.tsx_path,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| {
-                                server.foreign_ide_context(&foreign_ide_set, ide_path)
-                            }),
-                            Some(&api_resolver),
-                            uri,
-                            &carrier_source_exists,
-                            Some(&barrel_resolver),
-                            negotiated_encoding.clone(),
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
-                        );
-                        let mut locations = match server.resolve_barrel_locations(merged) {
-                            Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
-                            Some(GotoDefinitionResponse::Array(locs)) => locs,
-                            Some(GotoDefinitionResponse::Link(links)) => links
-                                .into_iter()
-                                .map(|link| Location {
-                                    uri: link.target_uri,
-                                    range: link.target_selection_range,
-                                })
-                                .collect(),
-                            None => Vec::new(),
-                        };
-                        locations.extend(native_locations);
-                        return Ok(if locations.is_empty() {
+                        false
+                    });
+                    if probe_defs.is_empty() {
+                        return Ok(if native_locations.is_empty() {
                             None
                         } else {
-                            Some(GotoDefinitionResponse::Array(locations))
+                            Some(GotoDefinitionResponse::Array(native_locations))
                         });
                     }
-                    Err(e) => {
-                        tracing::warn!("definition: type provider error: {e}");
-                    }
+                    let merged = merge::merge_definitions_with_barrel_resolver(
+                        None,
+                        probe_defs,
+                        &ctx.tsx_path,
+                        &ctx.tsx_line_index,
+                        &ctx.mapper,
+                        &ctx.carrier_line_index,
+                        Some(&|ide_path: &str| {
+                            server.foreign_ide_context(&foreign_ide_set, ide_path)
+                        }),
+                        Some(&api_resolver),
+                        uri,
+                        &carrier_source_exists,
+                        Some(&barrel_resolver),
+                        negotiated_encoding.clone(),
+                        &|p: &str| {
+                            block_in_place_if_available(|| {
+                                server.documents.host().workspace_read().read_file(p)
+                            })
+                        },
+                    );
+                    let mut locations = match server.resolve_barrel_locations(merged) {
+                        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+                        Some(GotoDefinitionResponse::Array(locs)) => locs,
+                        Some(GotoDefinitionResponse::Link(links)) => links
+                            .into_iter()
+                            .map(|link| Location {
+                                uri: link.target_uri,
+                                range: link.target_selection_range,
+                            })
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                    locations.extend(native_locations);
+                    return Ok(if locations.is_empty() {
+                        None
+                    } else {
+                        Some(GotoDefinitionResponse::Array(locations))
+                    });
                 }
             } else {
                 tracing::debug!(
@@ -594,79 +613,87 @@ pub(super) async fn handle_goto_type_definition(
     // phase. Capture-only readiness above heals missing dependencies in the
     // background; it never delays this provider query.
     if let Some(tp) = server.type_provider.as_ref() {
-        if let Some(ctx) = server.repaired_type_provider_context(uri).await {
-            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
+        if let Some(initial_ctx) = server.repaired_type_provider_context(uri).await {
+            if let Some(initial_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.carrier_line_index,
-                &ctx.mapper,
-                &ctx.tsx_line_index,
+                &initial_ctx.carrier_line_index,
+                &initial_ctx.mapper,
+                &initial_ctx.tsx_line_index,
             ) {
-                tracing::debug!(
-                    "type_definition: querying type provider at tsx offset {}",
-                    tsx_offset
-                );
-                // Pin the FOREIGN carrier IDE surfaces BEFORE the query (see
-                // handle_goto_definition).
-                let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                let foreign_api_set = server
-                    .documents
-                    .provider_surfaces()
-                    .capture_current_carrier_api_set();
-                match tp.get_type_definition(&ctx.tsx_path, tsx_offset).await {
-                    Ok(type_defs) => {
-                        // Post-await validation: a response produced against a
-                        // surface that no longer matches must be DROPPED (fail
-                        // closed), never mapped through a superseded context.
-                        if !server.provider_context_still_valid(uri, &ctx) {
-                            tracing::debug!(
-                                "type_definition: dropping provider locations — captured \
-                                 surface no longer valid"
-                            );
-                            return Ok(None);
-                        }
+                // The governing surface principle names definition AND
+                // type-definition: both run the SAME shared bounded recovery
+                // (resync + retry once + the retry identity fence) — see
+                // `provider_recovery`.
+                let outcome = provider_query_with_bounded_recovery(
+                    "type_definition",
+                    position,
+                    initial_ctx,
+                    initial_offset,
+                    |tsx_path: String, offset: u32| async move {
+                        // Pin the FOREIGN carrier IDE surfaces BEFORE the query
+                        // (per attempt — see handle_goto_definition).
+                        let foreign_ide_set = server.capture_foreign_carrier_ide_set();
+                        let foreign_api_set = server
+                            .documents
+                            .provider_surfaces()
+                            .capture_current_carrier_api_set();
+                        let type_defs = tp.get_type_definition(&tsx_path, offset).await?;
+                        Ok((type_defs, foreign_ide_set, foreign_api_set))
+                    },
+                    || server.ensure_current_file_synced(uri),
+                    || server.type_provider_context(uri),
+                )
+                .await;
+                let ctx = outcome.ctx;
+                if let Some((type_defs, foreign_ide_set, foreign_api_set)) = outcome.value {
+                    // Post-await validation: a response produced against a
+                    // surface that no longer matches must be DROPPED (fail
+                    // closed), never mapped through a superseded context.
+                    if !server.provider_context_still_valid(uri, &ctx) {
                         tracing::debug!(
-                            "type_definition: type provider returned {} locations",
-                            type_defs.len()
+                            "type_definition: dropping provider locations — captured \
+                                 surface no longer valid"
                         );
-                        let carrier_source_exists =
-                            |p: &str| server.documents.host().get_source(p).is_some();
-                        let barrel_resolver =
-                            |path: &str, start: u32, end: u32| -> Option<Location> {
-                                server.resolve_barrel_type_provider_location(path, start, end)
-                            };
-                        let negotiated_encoding = server.position_encoding.read().clone();
-                        let api_resolver = |api_path: &str| {
-                            crate::provider_surface_store::classify_captured_api_surface(
-                                &foreign_api_set,
-                                api_path,
-                                negotiated_encoding.clone(),
-                            )
-                        };
-                        return Ok(merge::merge_definitions_with_barrel_resolver(
-                            None,
-                            type_defs,
-                            &ctx.tsx_path,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| {
-                                server.foreign_ide_context(&foreign_ide_set, ide_path)
-                            }),
-                            Some(&api_resolver),
-                            uri,
-                            &carrier_source_exists,
-                            Some(&barrel_resolver),
+                        return Ok(None);
+                    }
+                    tracing::debug!(
+                        "type_definition: type provider returned {} locations",
+                        type_defs.len()
+                    );
+                    let carrier_source_exists =
+                        |p: &str| server.documents.host().get_source(p).is_some();
+                    let barrel_resolver = |path: &str, start: u32, end: u32| -> Option<Location> {
+                        server.resolve_barrel_type_provider_location(path, start, end)
+                    };
+                    let negotiated_encoding = server.position_encoding.read().clone();
+                    let api_resolver = |api_path: &str| {
+                        crate::provider_surface_store::classify_captured_api_surface(
+                            &foreign_api_set,
+                            api_path,
                             negotiated_encoding.clone(),
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::warn!("type_definition: type provider error: {e}");
-                    }
+                        )
+                    };
+                    return Ok(merge::merge_definitions_with_barrel_resolver(
+                        None,
+                        type_defs,
+                        &ctx.tsx_path,
+                        &ctx.tsx_line_index,
+                        &ctx.mapper,
+                        &ctx.carrier_line_index,
+                        Some(&|ide_path: &str| {
+                            server.foreign_ide_context(&foreign_ide_set, ide_path)
+                        }),
+                        Some(&api_resolver),
+                        uri,
+                        &carrier_source_exists,
+                        Some(&barrel_resolver),
+                        negotiated_encoding.clone(),
+                        &|p: &str| {
+                            block_in_place_if_available(|| {
+                                server.documents.host().workspace_read().read_file(p)
+                            })
+                        },
+                    ));
                 }
             } else {
                 tracing::debug!(
@@ -768,7 +795,7 @@ pub(super) async fn handle_references(
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
+        let blocks = scan_sfc_blocks_for_document(&doc);
         let mut locations = references_at_position(
             position,
             &doc.source,
@@ -950,28 +977,23 @@ pub(super) async fn handle_rename(
     let position = &params.text_document_position.position;
     let new_name = &params.new_name;
 
-    // Virtual file: not supported (renaming in generated code isn't meaningful)
-    if server.documents.get_virtual_source_uri(uri).is_some() {
-        return Ok(None);
-    }
+    // The SHARED admission gate — the same one `prepare_rename` runs, so the
+    // handshake cannot advertise a rename this handler would refuse: an
+    // editor-owned carrier rename and a generated virtual buffer answer nothing,
+    // and a multi-claimant carrier fails closed with a user-visible reason.
+    let ownership_witness = match rename_request_admission(server, uri) {
+        RenameAdmission::Decline => return Ok(None),
+        RenameAdmission::Refuse(error) => return Err(error),
+        RenameAdmission::Serve { ownership_witness } => ownership_witness,
+    };
 
-    if server.editor_owns_carrier_rename() {
-        return Ok(None);
-    }
-
-    // A carrier owned by MULTIPLE configured projects now resolves to a single tsgo
-    // default owner for per-file features (hover / definition / completion /
-    // references all serve), but a PROVIDER rename runs only within that one owner
-    // project. Renaming a symbol that ESCAPES the owner (exported + imported by a
-    // sibling configured project) would silently leave it dangling in the
-    // siblings — a partial cross-project rename. Cheaply proving escape is not
-    // feasible without the cross-project rename fan-out (not yet implemented), so rename
-    // FAILS CLOSED here with a clear message rather than shipping a partial edit;
-    // every other IDE feature still serves from the resolved owner. A
-    // uniquely-owned carrier renames normally. (Checked AFTER the editor-owned
-    // yield so an editor-plugin route still defers to the editor's own rename.)
-    if server.carrier_is_multi_claimant(uri) {
-        return Err(multi_claimant_rename_unavailable_error());
+    // Resolve the target before any provider synchronization/query. A public
+    // component prop is categorically unavailable until complete workspace
+    // usage proof exists, so it must not reach the provider rename path at all.
+    // This is the same one-shot resolution used by every later rename gate.
+    let resolution = RenameTargetResolution::resolve(server, uri, position).await;
+    if resolution.is_public_component_prop() {
+        return Err(public_component_prop_rename_unavailable_error());
     }
 
     // `didChange` never performs provider I/O. A rename is an interactive
@@ -986,56 +1008,32 @@ pub(super) async fn handle_rename(
     // which background publication delivers and receipts as DependencyReady.
     // The handler only captures a committed receipt. On a miss it enqueues
     // background publication but may still query the provider for symbols whose
-    // project graph is already complete (notably local/script bindings). A
-    // cross-carrier child-prop edit still has to pass the exact declaration +
-    // usage completeness gate below, so missing API publication cannot leak a
-    // partial edit. The request never joins the background lane.
+    // project graph is already complete (notably local/script bindings). Public
+    // prop cursors are normally refused above. If classification ever misses one
+    // and the child-prop classifier returns `Confirmed`, finalization refuses it
+    // unconditionally; readiness cannot authorize a partial prop edit. The
+    // request never joins the background lane.
     let dependency_readiness = server.dependency_readiness_capture(uri);
 
-    let verter_result = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let mut edit = rename_at_position(
-            position,
-            new_name,
-            &doc.source,
-            &blocks,
-            analysis.as_ref(),
-            &doc.line_index,
-        )?;
+    // ONE classification of the cursor, from ONE document snapshot, through the
+    // SHARED rename-plan owner — the same classifier `prepare_rename` consumed.
+    // Verter's own edit, the same-file completeness expectation, and the
+    // native-CSS exemption are projections of this single value, so a mid-flight
+    // edit cannot make them disagree. The resolution is captured under the
+    // document-commit fence and refuses a source/analysis revision mismatch, so
+    // the offsets it measures and the spans it reads describe one revision.
+    // Re-resolved HERE, per request: a prepare that said yes is not authority
+    // transferable across a race.
+    let verter_result = resolution.native_workspace_edit(uri, new_name);
+    let same_file_proof = resolution.same_file_proof();
+    let native_rename_is_css = resolution.is_css();
 
-        // Fix up sentinel URIs in workspace edit
-        if let Some(ref mut changes) = edit.changes {
-            let sentinel = crate::features::rename::SAME_FILE_URI.clone();
-            if let Some(edits) = changes.remove(&sentinel) {
-                changes.insert(uri.clone(), edits);
-            }
-        }
-
-        Some(edit)
-    })();
-    let native_rename_is_css = server
-        .documents
-        .get(uri)
-        .and_then(|doc| {
-            let analysis = server.documents.get_analysis(uri)?;
-            Some(is_css_rename_position(
-                position,
-                &doc.source,
-                &analysis,
-                &doc.line_index,
-            ))
-        })
-        .unwrap_or(false);
-
-    // Classify the cursor with respect to the cross-file `<Child prop=…>` rename
-    // ONCE, up front — so the MERGED-EDIT COMPLETENESS GATE applies on EVERY return
-    // path (the provider-query success branch, the verter-only fallthrough, AND the
-    // provider-Err branch), never only on provider success. A SELF-FILE rune-module
-    // projection never participates (its edits are deferred), so it stays
-    // `NotChildProp` (ungated). Sync resolution covers the INLINE case; the imported
-    // case is upgraded async below.
+    // Classify the cursor with respect to a cross-file `<Child prop=…>` rename
+    // ONCE, up front. Any `Confirmed` result is refused at finalization on every
+    // return path as defense in depth behind the public-prop resolution above.
+    // A SELF-FILE rune-module projection never participates (its edits are
+    // deferred), so it stays `NotChildProp` (ungated). Sync resolution covers
+    // the INLINE case; the imported case is upgraded async below.
     let mut rename_class = if server.is_self_file_projection(uri) {
         ChildPropRenameClass::NotChildProp
     } else {
@@ -1051,9 +1049,9 @@ pub(super) async fn handle_rename(
     // CORRUPT the module. Rename stays DEFERRED for the self-file projection —
     // a clean no-op, never a wrong/unmapped edit. (Carrier rename unchanged.)
     //
-    // The merged/available result is captured into `result` and the gate is applied
-    // ONCE at the end over `rename_class`, so a confirmed child-prop rename cannot
-    // escape the gate on any branch.
+    // The merged/available result is captured into `result` and finalization is
+    // applied ONCE at the end over `rename_class`, so a `Confirmed` child-prop
+    // rename cannot escape the unconditional refusal on any branch.
     let mut result = verter_result.clone();
     let mut provider_rename_complete = server.type_provider.is_none()
         || server.is_self_file_projection(uri)
@@ -1065,7 +1063,11 @@ pub(super) async fn handle_rename(
             );
         }
         if let Some(tp) = &server.type_provider {
-            if let Some(ctx) = server.repaired_type_provider_context(uri).await {
+            // The rename consistency boundary above already ran this request's
+            // repair. Capture directly so one request cannot retry the same
+            // projection-less failure twice; a later request remains free to
+            // retry.
+            if let Some(ctx) = server.type_provider_context(uri) {
                 if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                     position,
                     &ctx.carrier_line_index,
@@ -1125,11 +1127,35 @@ pub(super) async fn handle_rename(
                         // locations are consumed ONLY while the captured surface is
                         // still honored and the open document still matches it.
                         Ok(mut type_locs) if server.provider_context_still_valid(uri, &ctx) => {
-                            provider_rename_complete = true;
-                            // PROVIDER-AGNOSTIC inline child-declaration synthesis. A
-                            // cross-file `<Child prop=…>` rename must edit BOTH the
-                            // parent usage AND the prop declaration. For an INLINE
-                            // `defineProps` declaration the provider's own
+                            // An EMPTY location set is NOT evidence of completeness.
+                            // It is what a carrier DENIED by provider-feature
+                            // admission serves (`TsgoCompositeProvider::
+                            // get_rename_locations` answers `Ok(vec![])` on denial,
+                            // deferring to exactly this gate), and it is
+                            // indistinguishable from a provider that resolved
+                            // nothing at the cursor. Verter's own half is SAME-FILE
+                            // ONLY — it cannot see an importer of an exported
+                            // symbol, and on a Svelte carrier it does not see the
+                            // MARKUP occurrences at all (`TemplateAnalysisSnapshot::
+                            // binding_occurrences` is empty for `.svelte`). Shipping
+                            // that half as authoritative is a SUCCESSFUL rename that
+                            // leaves the source referencing a name that no longer
+                            // exists — the write-side of the same fail-open family
+                            // the multi-claimant refusal above closes. A provider
+                            // that resolves the symbol always reports at least the
+                            // occurrence under the cursor, so an empty set means the
+                            // completeness question was never answered: REFUSE.
+                            //
+                            // This only ADDS provider-backed completeness, never
+                            // revokes an exemption already established before the
+                            // query: a Verter-native CSS class/id rename has no
+                            // TypeScript correlate at all, so its provider answer is
+                            // legitimately empty and its native surface IS the
+                            // complete one.
+                            provider_rename_complete =
+                                provider_rename_complete || !type_locs.is_empty();
+                            // PROVIDER-AGNOSTIC inline child-declaration normalization.
+                            // For an INLINE `defineProps` declaration the provider's own
                             // `textDocument/rename` does not reliably enumerate the
                             // child-declaration leg across the synthesized
                             // `{carrier}.ts` API surface (tsgo does not), so Verter
@@ -1139,7 +1165,9 @@ pub(super) async fn handle_rename(
                             // providers. (The imported-member declaration is the
                             // provider's own native edit; nothing is synthesized for
                             // it.) Only a `Known` declaration with an `inline_decl_span`
-                            // synthesizes.
+                            // synthesizes. This normalization cannot authorize a
+                            // child-prop rename: finalization refuses every
+                            // `Confirmed` result regardless of its edit legs.
                             if let ChildPropRenameClass::Confirmed(target) = &rename_class {
                                 if let ChildPropDeclarationProof::Known {
                                     uri: child_decl_uri,
@@ -1209,7 +1237,7 @@ pub(super) async fn handle_rename(
                                     negotiated_encoding.clone(),
                                 )
                             };
-                            result = merge::merge_rename_locations(
+                            let merged = merge::merge_rename_locations(
                                 verter_result,
                                 type_locs,
                                 new_name,
@@ -1229,17 +1257,63 @@ pub(super) async fn handle_rename(
                                     })
                                 },
                             );
-                            // INITIATING-USAGE LEG SYNTHESIS (provider-agnostic,
-                            // same doctrine as the child-declaration leg): the
-                            // provider's own usage edit maps back through the
+                            // CROSS-FILE COMPLETENESS GATE. The merge reports every
+                            // provider location it could not map onto authored bytes.
+                            // A drop in a file no other gate covers is an occurrence
+                            // the provider named and this transaction will NOT edit, so
+                            // the remainder is a PARTIAL rename that leaves that file
+                            // bound to a name which no longer exists — a dangling
+                            // reference the editor applies as a success. The same-file
+                            // gate cannot see it: it proves THIS file's authored
+                            // occurrences, which the surviving edits cover. So refuse
+                            // the WHOLE transaction — no partial, not the same-file
+                            // half, and never the verter-only remainder. A drop on the
+                            // CURRENT companion is delegated to that same-file gate ONLY
+                            // when the gate's proof enumerates this file's WHOLE authored
+                            // occurrence set — otherwise the delegation covers nothing
+                            // and the drop stays unguarded. See
+                            // `unguarded_rename_drops`.
+                            let unguarded =
+                                nav_features_navigation_rename_gate::unguarded_rename_drops(
+                                    &merged.dropped,
+                                    &ctx.tsx_path,
+                                    &same_file_proof,
+                                );
+                            if !unguarded.is_empty() {
+                                tracing::warn!(
+                                    "rename: refusing an incomplete edit set — {} provider \
+                                     location(s) in files this transaction does not edit could \
+                                     not be mapped to a source edit: {:?}",
+                                    unguarded.len(),
+                                    unguarded
+                                );
+                                // Same refusal either way — no edit ships. But a
+                                // drop stays unguarded precisely BECAUSE Verter's
+                                // own same-file inventory does not cover this
+                                // file, and where that shortfall has a terminal,
+                                // author-fixable cause, say so: a rename that
+                                // silently no-ops leaves the user with no way to
+                                // tell refusal from "nothing to rename".
+                                if let Some(error) =
+                                    rename_incompleteness_error(resolution.unenumerated_region())
+                                {
+                                    return Err(error);
+                                }
+                                return Ok(None);
+                            }
+                            result = merged.edit;
+                            // INITIATING-USAGE LEG NORMALIZATION (provider-agnostic,
+                            // same source-exactness doctrine as the child declaration):
+                            // the provider's own usage edit maps back through the
                             // case-mapped tsx token (kebab `my-prop` → camel
                             // `myProp`) and lands a PREFIX of the authored
-                            // kebab name — a corrupt edit the completeness gate
-                            // rightly rejects. Verter owns the exact authored
+                            // kebab name. Verter owns the exact authored
                             // usage span, so it re-anchors the initiating usage
                             // edit itself. For exact-case names this rewrites
                             // the provider's correct edit with the identical
-                            // range — a deterministic no-op.
+                            // range — a deterministic no-op. The normalized edit
+                            // still cannot ship: finalization refuses every
+                            // `Confirmed` child-prop result.
                             if let ChildPropRenameClass::Confirmed(target) = &rename_class {
                                 if let Some(usage_range) = target.expected_parent_usage_range {
                                     synthesize_parent_usage_rename_edit(
@@ -1254,9 +1328,8 @@ pub(super) async fn handle_rename(
                         // Post-await validation failed (STRICT for rename: a corrupt
                         // edit is worse than no edit): drop the WHOLE provider edit
                         // set. The verter-only result (already in `result`) still
-                        // passes through the completeness gate below, so a confirmed
-                        // child-prop rename fails closed rather than shipping a
-                        // usage-only partial.
+                        // reaches finalization below, where any `Confirmed`
+                        // child-prop classification is refused unconditionally.
                         Ok(_) => {
                             tracing::warn!(
                                 "rename: dropping provider rename locations — captured \
@@ -1265,10 +1338,9 @@ pub(super) async fn handle_rename(
                         }
                         Err(e) => {
                             // The provider rename failed: fall back to the verter-only
-                            // result (already in `result`). It is STILL run through the
-                            // gate below — a confirmed child-prop rename whose merged
-                            // edit lacks the declaration leg fails closed here too,
-                            // never a usage-only partial on the Err path.
+                            // result (already in `result`). It is STILL finalized
+                            // below, so a `Confirmed` child-prop rename is refused on
+                            // the error path regardless of which edit legs remain.
                             tracing::warn!("rename: type provider error: {e}");
                         }
                     }
@@ -1284,19 +1356,26 @@ pub(super) async fn handle_rename(
         return Ok(None);
     }
 
-    // MERGED-EDIT COMPLETENESS GATE (fail-closed) — applied ONCE over the final
-    // result, so it covers the provider-success, provider-Err, and verter-only
-    // fallthrough paths uniformly. For a CONFIRMED cross-file child-prop rename the
-    // EMITTED `WorkspaceEdit` must edit BOTH the prop declaration AND the parent
-    // `.vue` usage at their EXACT full ranges, or the whole rename fails closed
-    // (returns no edit) — never a usage-only / decl-only partial. A `NotChildProp`
-    // result is returned untouched. See `gate_cross_file_child_prop_rename`.
-    Ok(
-        gate_cross_file_child_prop_rename(result, &rename_class, new_name).map(|mut edit| {
-            merge::dedupe_rename_workspace_edit_with_preferred(&mut edit, Some(uri));
-            edit
-        }),
-    )
+    // The provider ownership authority is installed before a rebuilt workspace
+    // root publishes. A response may therefore have been computed after the
+    // provider crossed generations while admission still saw the previous ready
+    // root. Consume no edit unless the root/provider pair captured at admission
+    // still names both live authorities after the provider work returns.
+    if ownership_witness.is_some_and(|witness| !server.ownership_generation_still_current(witness))
+    {
+        return Err(ownership_changed_during_rename_error());
+    }
+
+    // The two fail-closed completeness gates, applied ONCE over the final result
+    // so they cover the provider-success, provider-Err, and verter-only
+    // fallthrough paths uniformly. See `finalize_rename_transaction`.
+    Ok(finalize_rename_transaction(
+        result,
+        &rename_class,
+        new_name,
+        uri,
+        &same_file_proof,
+    ))
 }
 
 /// Upsert the EXACT authored parent-usage rename edit for a confirmed
@@ -1388,72 +1467,14 @@ fn inject_synthesized_carrier_rename_location(
     });
 }
 
-/// Whether the merged cross-file rename `WorkspaceEdit` actually contains the
-/// SOURCE edits a confirmed `<Child prop=…>` rename MUST produce — the MERGED-EDIT
-/// COMPLETENESS GATE.
-///
-/// A confirmed child-prop rename is incomplete unless the EMITTED `WorkspaceEdit`
-/// edits BOTH:
-///   1. the prop DECLARATION at `expected_decl_range` in `expected_decl_uri` with
-///      `new_text == new_name` — the child component's `.vue` macro field (inline
-///      case) OR a `defineProps<ImportedType>()` member declaration in a THIRD file
-///      (imported case); AND
-///   2. the parent's `.vue` prop USAGE at `expected_parent_range` with
-///      `new_text == new_name`.
-///
-/// PROVIDER-AGNOSTIC by construction: it inspects only the merged, mapped source
-/// `WorkspaceEdit` (`changes: HashMap<Uri, Vec<TextEdit>>`) — it does NOT care
-/// whether the declaration edit came from Verter's inline synthesis or from the
-/// provider's own native leg (tsserver enumerates it; tsgo does not; the imported
-/// member is the provider's native edit for both). So a result whose declaration
-/// leg is present passes even when Verter's own synthesis could not locate it — no
-/// `is_tsgo`/`is_tsserver` branch, no regression.
-///
-/// Each `expected_*` range is `None` when the originating span did not resolve to
-/// a position; the gate then cannot prove that leg precisely and FAILS CLOSED
-/// (returns `false`) — the fail-closed boundary for an unmappable edit.
-///
-/// Range match is FULL-RANGE EXACT (both `start` AND `end`): an edit at the right
-/// anchor but a WRONG span (e.g. the provider ranged the whole `name: type` member,
-/// or the wrong end) does NOT satisfy the leg — a start-only check is too weak. A
-/// `new_text` mismatch (a stray edit at the same anchor with different text) does
-/// NOT satisfy the leg either.
-fn workspace_edit_satisfies_child_prop_rename(
-    merged: &WorkspaceEdit,
-    expected_decl_uri: &Uri,
-    expected_decl_range: Option<Range>,
-    expected_parent_uri: &Uri,
-    expected_parent_range: Option<Range>,
-    new_name: &str,
-) -> bool {
-    let has_edit_at = |uri: &Uri, expected: Option<Range>| -> bool {
-        let Some(expected) = expected else {
-            // No precise range to assert → cannot prove this leg → fail closed.
-            return false;
-        };
-        let Some(changes) = merged.changes.as_ref() else {
-            return false;
-        };
-        let expected_path = crate::documents::uri_to_canonical_id(uri);
-        // FULL-RANGE equality (start AND end) — a right-anchor wrong-span edit must
-        // NOT pass (the start-only check this replaced was too weak).
-        changes.iter().any(|(edited_uri, edits)| {
-            let edited_path = crate::documents::uri_to_canonical_id(edited_uri);
-            verter_span::path::fs_paths_equal(&edited_path, &expected_path)
-                && edits
-                    .iter()
-                    .any(|e| e.range == expected && e.new_text == new_name)
-        })
-    };
-
-    has_edit_at(expected_decl_uri, expected_decl_range)
-        && has_edit_at(expected_parent_uri, expected_parent_range)
-}
-
 #[path = "nav_features_navigation_rename_gate.rs"]
 mod nav_features_navigation_rename_gate;
-use nav_features_navigation_rename_gate::gate_cross_file_child_prop_rename;
+use nav_features_navigation_rename_gate::finalize_rename_transaction;
 
 #[cfg(test)]
 #[path = "nav_features_navigation_tests.rs"]
 mod nav_features_navigation_tests;
+
+#[cfg(test)]
+#[path = "nav_features_rename_completeness_tests.rs"]
+mod nav_features_rename_completeness_tests;

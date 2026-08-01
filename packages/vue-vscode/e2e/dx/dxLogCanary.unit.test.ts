@@ -10,12 +10,14 @@ import {
 } from "./dxLogCanary";
 
 // Faithful captured-log fragments mirroring the real product output: the extension's
-// hooked `log.info` `[buildServerOptions]` line (extension.ts:1066) and the server's
+// hooked `log.info` `[buildServerOptions]` line (extension.ts:1748) and the server's
 // MCP-deprecation WARN (crates/verter_lsp/src/main.rs:63). The proof line carries every
 // forced arg, exactly as `buildServerOptions` serializes them via JSON.stringify(args).
+// With no `verter.typescript.tsdk` setting the launch emits NO `--tsdk` flag (the
+// extension no longer injects a bundled TypeScript), so the line reads `tsdk=<unset>`.
 const PROOF_LINE =
-  `[INFO] [buildServerOptions] typeProvider=${CANARY_TYPE_PROVIDER}, tsdk=/x/lib (bundled), ` +
-  `args=["--type-provider=${CANARY_TYPE_PROVIDER}","--tsdk=/x/lib",` +
+  `[INFO] [buildServerOptions] typeProvider=${CANARY_TYPE_PROVIDER}, tsdk=<unset>, ` +
+  `args=["--type-provider=${CANARY_TYPE_PROVIDER}",` +
   `"--plugin-path=/x/node_modules","--mcp-port=0","--mcp-lint-preset=recommended"]`;
 const WARN_LINE =
   "[WARN] --mcp-port is no longer honoured by verter-lsp. The LSP binary no longer embeds the MCP server.";
@@ -31,7 +33,7 @@ describe("summarizeCanaryLog", () => {
   it("does NOT mark configForced when --mcp-port=0 is absent (a partial proof line)", () => {
     const partial =
       `[INFO] [buildServerOptions] typeProvider=${CANARY_TYPE_PROVIDER}, ` +
-      `args=["--type-provider=${CANARY_TYPE_PROVIDER}","--tsdk=/x/lib"]`;
+      `args=["--type-provider=${CANARY_TYPE_PROVIDER}"]`;
     expect(summarizeCanaryLog(partial).configForced).toBe(false);
   });
 

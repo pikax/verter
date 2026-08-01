@@ -1,0 +1,60 @@
+name: Release Check
+
+# A release REHEARSAL. This is deliberately a thin caller rather than its own
+# copy of the release pipeline: it invokes release.yml itself with
+# `dry_run: true`, so what gets rehearsed is the EXACT job graph that will run
+# on a real tag — validation, the blocking test job, the full cross-OS editor
+# matrix, and every native/tsc/lsp/mcp/wasm build — with only the publishing
+# and post-publish integration jobs skipped.
+#
+# A duplicated matrix would drift from the real pipeline and give false
+# confidence, which is worse than no rehearsal at all.
+#
+# Defence in depth: this caller grants READ-ONLY permissions and passes NO
+# secrets. Even if a `dry-run` conditional in release.yml were wrong, the
+# publish jobs have no registry token, no VSCE PAT, and no write scope, so a
+# rehearsal cannot ship anything.
+
+#
+# COST: this rehearsal runs the FULL release job graph, including the twelve
+# macOS (10x) and Windows (2x) artifact-build legs. Those are the most
+# expensive minutes in the estate, so the triggers are kept deliberately
+# narrow: on demand, plus PRs that touch the release machinery ITSELF.
+#
+# Deliberately NOT triggered by:
+#   - a schedule — a weekly cron would pay for the whole paid matrix every week
+#     for a tree nobody is about to release;
+#   - lockfile/manifest churn (`Cargo.lock`, `pnpm-lock.yaml`, `package.json`,
+#     `packages/*/package.json`) — ordinary dependency work would drag the paid
+#     matrix in on routine PRs. A version bump does rewrite those manifests, but
+#     it is immediately followed by a tag, which runs the real release anyway;
+#     rehearse it by hand first via workflow_dispatch.
+on:
+  # Rehearse on demand — run this before cutting a release tag.
+  workflow_dispatch:
+  # Auto-rehearse when the release machinery itself changes, which is the change
+  # class a rehearsal exists to de-risk.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-check.yml"
+      - ".github/workflows/integration-test.yml"
+      - "scripts/check-versions.mjs"
+      - "scripts/verify-packages.mjs"
+      - "scripts/bump.mjs"
+      - "packages/vue-vscode/package.mjs"
+
+# Never let a rehearsal cancel or queue behind a real release.
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: Release dry run
+    uses: ./.github/workflows/release.yml
+    with:
+      dry_run: true

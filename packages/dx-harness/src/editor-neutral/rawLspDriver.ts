@@ -11,9 +11,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
+  EDITOR_NEUTRAL_SERVER_PROFILES,
   LspClient,
   type EditorNeutralContractDriver,
   type EditorNeutralProviderRoute,
+  type EditorNeutralServerProfile,
   type LspDiagnostic,
   type LspPosition,
   type LspWorkspaceEdit,
@@ -48,6 +50,14 @@ export interface RawEditorNeutralLspDriverOptions {
   readonly tsgoBin?: string;
   readonly tsdk?: string;
   readonly pluginPath?: string;
+  /**
+   * Server configuration this driver's `initialize` requests. Defaults to
+   * `"default"` — a bare `initialize` with NO `initializationOptions`, which is
+   * what an editor that wires nothing sends. The options for each profile come
+   * from the shared `EDITOR_NEUTRAL_SERVER_PROFILES` table, so a case's declared
+   * profile and the server it talks to cannot drift apart.
+   */
+  readonly serverProfile?: EditorNeutralServerProfile;
 }
 
 interface StatusNotification {
@@ -84,6 +94,59 @@ function requireFile(label: string, candidate: string): string {
     throw new Error(`${label} is required and must be a file: ${resolved}`);
   }
   return resolved;
+}
+
+/** A validated tsserver plugin probe location and the entry it will load. */
+export interface ResolvedPluginProbe {
+  /** The directory handed to `verter-lsp` as `--plugin-path`. */
+  readonly probeLocation: string;
+  /** The package directory tsserver resolves under it. */
+  readonly packageDirectory: string;
+  /** The built entry that package's `main` points at. */
+  readonly entry: string;
+}
+
+/**
+ * Validate a tsserver plugin PROBE LOCATION, returning what tsserver will resolve.
+ *
+ * The value travels to tsserver as `--pluginProbeLocations <dir>` alongside
+ * `--globalPlugins @verter/typescript-plugin`, and tsserver resolves the package
+ * NAME out of `<dir>/node_modules`. A probe is therefore a directory CONTAINING
+ * `node_modules/@verter/typescript-plugin` — not the package's own `dist` output
+ * directory, and not the package root.
+ *
+ * The check is a DIRECT hit under the probe, deliberately not a `require.resolve`:
+ * Node's resolver walks ANCESTOR `node_modules`, so a wrong probe still resolves —
+ * through pnpm's private `.pnpm/node_modules` hoist dir, an unguaranteed layout
+ * detail — and a resolve-based check would pass while the declared probe
+ * contributed nothing. Checking only `<probe>/index.js` is the same blind spot from
+ * the other side: it passes whenever the package happens to be built and says
+ * nothing about the probe.
+ *
+ * Exported so the preflight can be tested for SUCCESS as well as refusal. A control
+ * that merely observes the absence of two error strings still passes when the
+ * preflight rejects a valid probe for a third reason, which makes it no control at
+ * all; returning the resolved paths lets a test assert acceptance positively.
+ *
+ * @throws {Error} if the probe holds no such package, or the package is unbuilt.
+ */
+export function resolvePluginProbeLocation(candidate: string): ResolvedPluginProbe {
+  const probeLocation = path.resolve(candidate);
+  const packageDirectory = path.join(probeLocation, "node_modules", "@verter", "typescript-plugin");
+  if (!existsSync(packageDirectory)) {
+    throw new Error(
+      `plugin probe location holds no @verter/typescript-plugin: ${packageDirectory} does not ` +
+        `exist, so tsserver cannot resolve the plugin from ${probeLocation}. Run: pnpm install`,
+    );
+  }
+  const entry = path.join(packageDirectory, "dist", "index.js");
+  if (!existsSync(entry)) {
+    throw new Error(
+      `@verter/typescript-plugin build is missing its entry: ${entry}. Produce it with: ` +
+        "pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build",
+    );
+  }
+  return { probeLocation, packageDirectory, entry };
 }
 
 function platformBinary(root: string, stem: string): string {
@@ -270,12 +333,9 @@ export class RawEditorNeutralLspDriver implements EditorNeutralContractDriver {
     if (!existsSync(path.join(tsdk, "tsserver.js"))) {
       throw new Error(`tsserver SDK is missing tsserver.js: ${tsdk}`);
     }
-    const pluginPath = path.resolve(
-      options.pluginPath ?? path.join(repoRoot, "packages", "typescript-plugin", "dist"),
-    );
-    if (!existsSync(path.join(pluginPath, "index.js"))) {
-      throw new Error(`TypeScript plugin build is missing index.js: ${pluginPath}`);
-    }
+    const pluginPath = resolvePluginProbeLocation(
+      options.pluginPath ?? path.join(repoRoot, "packages", "vue-vscode"),
+    ).probeLocation;
 
     const rootUri = pathToFileURL(workspaceRoot).href;
     let relay: LspClient | undefined;
@@ -364,12 +424,22 @@ export class RawEditorNeutralLspDriver implements EditorNeutralContractDriver {
       },
     });
 
+    const serverProfile = options.serverProfile ?? "default";
+    const profileOptions = EDITOR_NEUTRAL_SERVER_PROFILES[serverProfile];
+    if (profileOptions === undefined) {
+      throw new Error(`unknown editor-neutral server profile: ${String(serverProfile)}`);
+    }
+
     try {
       await client.initialize(
         {
           processId: process.pid,
           rootUri,
           workspaceFolders: [{ uri: rootUri, name: "editor-neutral-contract" }],
+          // The `default` profile contributes an EMPTY object, which the server
+          // reads exactly as an absent one (every option parser defaults to
+          // `false`), so the default lane stays a bare `initialize`.
+          initializationOptions: profileOptions,
           capabilities: {
             general: { positionEncodings: ["utf-16", "utf-8", "utf-32"] },
             workspace: {

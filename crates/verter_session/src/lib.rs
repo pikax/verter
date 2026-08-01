@@ -95,7 +95,7 @@ mod overlay_promotion_isolation_tests;
 #[cfg(test)]
 mod overlay_template_conversion_isolation_tests;
 #[cfg(test)]
-mod prepared_decl_import_route_hash_alignment_tests;
+mod prepared_decl_import_route_witness_tests;
 #[cfg(test)]
 mod raw_snapshot_template_source_move_tests;
 #[cfg(test)]
@@ -296,6 +296,8 @@ pub mod meta;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod runtime_render_lane_tests;
 
+#[cfg(test)]
+mod artifact_root_retention_tests;
 pub mod meta_resolve;
 #[cfg(test)]
 mod negative_import_route_tests;
@@ -327,9 +329,12 @@ pub mod session_view;
 mod shared;
 pub(crate) mod source_map_remap;
 #[cfg(test)]
+mod source_root_retention_tests;
+#[cfg(test)]
 mod store_view_manager_tests;
 #[cfg(test)]
 mod store_view_non_current_contract_tests;
+mod store_view_roots;
 pub(crate) mod structural_carrier_producer;
 pub(crate) mod template_convert;
 /// Test-only re-exports for integration tests in `tests/`.
@@ -616,18 +621,6 @@ pub struct VerterHost {
     #[cfg(test)]
     pub(crate) compile_input_seam_hook:
         parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
-    /// Test-only seam fired inside `ensure_indexed_ready_serve`'s
-    /// singleflight body AFTER the edge-refresh parse-env reuse gate
-    /// passes and BEFORE the refresh flight runs. Fence tests install a
-    /// parse-env-moving mutation here ([`Self::parse_env_override`] flip
-    /// plus a `project_generation` bump) to land deterministically in
-    /// the reuse-gate→publish window and assert the refresh publish
-    /// declines (ReturnOnly) instead of stamping a current
-    /// `project_generation` onto a payload parsed under the superseded
-    /// env. **Compiled out in production builds.**
-    #[cfg(test)]
-    pub(crate) edge_refresh_gate_seam_hook:
-        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     /// Test-only seam fired inside the raw-analysis-snapshot scheduler
     /// lane AFTER the lane's analysis snapshot is captured and BEFORE
     /// the template-analysis source join. Fence tests install a content
@@ -698,9 +691,8 @@ pub struct VerterHost {
     /// Host-owned framework script-fact caches — the resolved-validation half
     /// of the script-fact seam. The content-addressed candidate store + the
     /// resolved-fact store the registry's active providers write through.
-    /// Empty for every adapter in this program (no production provider
-    /// registers; the fixture provider exercises the path). See
-    /// `framework::script_facts::FrameworkScriptCaches`.
+    /// Svelte uses this path in production; partial and unavailable results are
+    /// never admitted. See `framework::script_facts::FrameworkScriptCaches`.
     ///
     /// PROVISIONAL: a fact-validated cache family OUTSIDE the single
     /// `ProjectTypeStore`, to be consolidated onto `ProjectTypeStore` at block

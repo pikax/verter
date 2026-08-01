@@ -159,6 +159,9 @@ fn lib_env_hash_change_does_not_invalidate_resolved_import_facts() {
         RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
     };
 
+    use verter_session::resolver_core::PermissiveStoreView;
+    use verter_workspace::FactVersionRef;
+
     let db = ResolvedImportFactsDb::new();
     let key = ResolvedImportFactsKey {
         canonical: Arc::from("/a.ts"),
@@ -166,34 +169,43 @@ fn lib_env_hash_change_does_not_invalidate_resolved_import_facts() {
         parse_env_hash: [2u8; 16],
         resolve_env_hash: [3u8; 16],
         resolver_version: RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
-        known_miss_generation: [0u8; 16],
     };
+    let witness = vec![FactVersionRef::FileWholeHash {
+        canonical_id: "/a.ts".to_string(),
+        hash: [9u8; 16],
+    }];
+    let view = PermissiveStoreView;
 
-    let admitted = db.insert_if_absent(key.clone(), Arc::new(ResolvedImportFacts::new()));
-    assert!(admitted, "first writer MUST win the admission race");
+    let admitted = db.insert_if_absent(
+        key.clone(),
+        Arc::new(ResolvedImportFacts::new()),
+        witness.clone(),
+    );
+    assert!(admitted, "the first admission MUST retain the candidate");
 
-    let warm = db.get(&key);
+    let warm = db.get_if_valid(&key, &view);
     assert!(warm.is_some(), "warm entry under env A MUST hit");
 
     // The key does NOT carry `lib_env_hash` as a field — R21 scoping
     // rule. So any "lib change" maps to the same key value and the
-    // same cache entry, by structural construction. The negative
-    // assertion is therefore: the struct literal for the key is
-    // exhaustive (no `lib_env_hash` field exists to vary).
+    // same slot, by structural construction. The negative assertion is
+    // therefore: the struct literal for the key is exhaustive (no
+    // `lib_env_hash` field exists to vary).
     let _exhaustive_field_check = ResolvedImportFactsKey {
         canonical: Arc::clone(&key.canonical),
         content_hash: key.content_hash,
         parse_env_hash: key.parse_env_hash,
         resolve_env_hash: key.resolve_env_hash,
         resolver_version: key.resolver_version,
-        known_miss_generation: key.known_miss_generation,
         // intentionally NO `lib_env_hash: …` here — adding one would
-        // be a compile error, which is the R21 invariant.
+        // be a compile error, which is the R21 invariant. Likewise no
+        // resolution-currency dimension: currency rides on the
+        // candidate witness, not the key.
     };
 
     // The original entry still hits — confirms it survived without
     // any "lib change" producing a cache invalidation.
-    let still_warm = db.get(&key);
+    let still_warm = db.get_if_valid(&key, &view);
     assert!(
         still_warm.is_some(),
         "lib change MUST NOT invalidate ResolvedImportFacts (R21 — base \

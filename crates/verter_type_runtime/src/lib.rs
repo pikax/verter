@@ -38,6 +38,7 @@ pub mod discovery;
 pub mod protocol;
 pub mod provider_adapter;
 pub mod resilient;
+pub mod semantic_tokens;
 pub mod trace;
 pub mod traits;
 pub mod tsgo;

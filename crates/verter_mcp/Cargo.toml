@@ -22,6 +22,7 @@ verter_audit = { path = "../verter_audit" }
 verter_session = { path = "../verter_session" }
 verter_semantic = { path = "../verter_semantic" }
 verter_workspace = { path = "../verter_workspace" }
+verter_tsgo_api = { path = "../verter_tsgo_api" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 verter_protocol = { path = "../verter_protocol" }

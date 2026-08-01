@@ -1,4 +1,4 @@
-//! `ResolvedImportFacts` — resolve-domain import-resolution cache.
+//! `ResolvedImportFacts` — resolve-domain import-resolution store.
 //!
 //! The resolve-domain authoritative store for resolved import / re-export
 //! bindings (`FactKey::ResolvedImportClause`,
@@ -10,7 +10,7 @@
 //!
 //! [`ResolvedImportFactsKey`] is content-addressed and scoped to:
 //! `(canonical, content_hash, parse_env_hash, resolve_env_hash,
-//! resolver_version, known_miss_generation)`.
+//! resolver_version)`.
 //!
 //! - `content_hash` (R5): two parses of the same source coexist; an
 //!   edit re-keys the entry.
@@ -21,15 +21,6 @@
 //!   a given specifier.
 //! - `resolver_version`: substrate bump invalidates (R28). Bumped when
 //!   the resolved-import producer changes shape.
-//! - `known_miss_generation`: stable tag over the owner's
-//!   `DerivedRawState::import_routes_known_miss_recorded_at_generation`
-//!   sidecar. When `set_import_dependencies` is called again for the
-//!   same owner whose source/env did not change but a previously-
-//!   missing target file has now been created, the workspace
-//!   `content_generation` advances and the producer admits under a
-//!   new key value — the stale negative bundle is naturally
-//!   superseded (rather than being pinned by first-writer-wins
-//!   admission on the prior key). Empty known-miss map → `[0u8; 16]`.
 //!
 //! **`lib_env_hash` is intentionally absent.** R21 scoping rule: base
 //! import-target resolution does not depend on TS lib data. A change in
@@ -38,17 +29,33 @@
 //!
 //! # Storage shape
 //!
-//! Two concurrent resolve envs reading the same parsed file coexist as
-//! two entries in [`ResolvedImportFactsDb`]. The store is
-//! [`DashMap`]-backed; shards split on the key so per-key access is
-//! wait-free under contention. Admission is first-writer-wins
-//! ([`ResolvedImportFactsDb::insert_if_absent`]) so concurrent
-//! recomputations on the same key collapse to one `Arc` value.
+//! The store is one [`ValidatedFactCache`] slot per key: the shared
+//! bounded multi-candidate substrate, the standard per-slot
+//! [`CANDIDATE_CAP`](crate::resolver_core::CANDIDATE_CAP) FIFO policy,
+//! and per-reader [`ReadSetSignature`](verter_workspace::ReadSetSignature)
+//! validation. Each candidate roots on the owner's own content
+//! (`FileWholeHash`) — the bundle describes exactly one owner's import
+//! clauses — and two concurrent resolve envs reading the same parsed
+//! file stay in distinct keys.
+//!
+//! Nothing about resolution CURRENCY lives in the key either. The
+//! producer owns an owner's slot: it runs on every fresh route batch
+//! and SUPERSEDES its own retained bundle when the batch resolves
+//! differently (see
+//! `VerterHost::admit_resolved_import_facts_for_owner`), so a
+//! re-resolution never needs a fresh key to escape its predecessor and
+//! a byte-identical recomputation is skipped rather than churning the
+//! slot.
+//!
+//! Reads go through [`ResolvedImportFactsDb::get_if_valid`] against the
+//! caller's own view — there is no unvalidated read of this store.
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use verter_semantic::analysis::Hash16;
+use verter_workspace::FactVersionRef;
+
+use crate::resolver_core::{StoreView, ValidatedFactCache};
 use verter_semantic::facts::registry::{Fact, InternedName, InternedSpecifier, SymbolSpace};
 
 #[cfg(any(test, feature = "test-support"))]
@@ -76,17 +83,11 @@ pub const RESOLVED_IMPORT_FACTS_RESOLVER_VERSION: u32 = 1;
 ///   baseUrl, resolution extensions, package conditions).
 /// - `resolver_version` — substrate version (see
 ///   [`RESOLVED_IMPORT_FACTS_RESOLVER_VERSION`]).
-/// - `known_miss_generation` — stable 16-byte tag derived from the
-///   owner's
-///   [`DerivedRawState::import_routes_known_miss_recorded_at_generation`](crate::types::DerivedRawState)
-///   map via [`compute_known_miss_generation_tag`]. Empty map →
-///   `[0u8; 16]`. Lets a later `set_import_dependencies` call that
-///   re-resolves a previously-missing specifier (after the target
-///   file is created and the workspace `content_generation` has
-///   advanced) admit under a NEW key instead of being silently
-///   discarded by `insert_if_absent` against a stale negative entry.
-///   Both producer and validator/lookup must read the SAME sidecar
-///   map and derive the same tag for cache-key determinism.
+///
+/// Resolution CURRENCY is deliberately not a key dimension: a
+/// re-resolution supersedes the owner's retained bundle in place
+/// rather than needing a fresh key to escape the previous entry (see
+/// the module docs).
 ///
 /// `lib_env_hash` is NOT a key dimension by design (R21 scoping
 /// rule). Tests pin this absence in
@@ -98,47 +99,6 @@ pub struct ResolvedImportFactsKey {
     pub parse_env_hash: Hash16,
     pub resolve_env_hash: Hash16,
     pub resolver_version: u32,
-    pub known_miss_generation: Hash16,
-}
-
-/// Compute a stable 16-byte tag from the owner's
-/// `import_routes_known_miss_recorded_at_generation` sidecar.
-///
-/// Used by both the resolved-import-facts producer
-/// ([`crate::VerterHost::admit_resolved_import_facts_for_owner`])
-/// and the validator/lookup sites
-/// ([`crate::resolver_store::HostStoreView::validates_resolve_imports_domain`],
-/// [`crate::session_view::SessionView::resolved_import_facts`])
-/// when composing [`ResolvedImportFactsKey`]. Determinism (and
-/// therefore cache-key reachability between producer and lookup)
-/// requires:
-///
-/// 1. Sort `(specifier, generation)` pairs lexicographically by
-///    specifier so iteration order of the underlying `FxHashMap` is
-///    not observable in the tag.
-/// 2. Use `[u8; 16]` `xxh3_128` (via [`crate::hash::hash_16`]) so the
-///    tag width matches the rest of the key's `Hash16` fields.
-/// 3. Empty map → `[0u8; 16]` so the owner with no known-misses
-///    composes the SAME tag value at producer time and at lookup
-///    time, regardless of whether the `DerivedRawState` entry exists
-///    yet.
-#[must_use]
-pub fn compute_known_miss_generation_tag(
-    known_miss_generations: &rustc_hash::FxHashMap<String, u64>,
-) -> Hash16 {
-    if known_miss_generations.is_empty() {
-        return [0u8; 16];
-    }
-    let mut pairs: Vec<(&String, &u64)> = known_miss_generations.iter().collect();
-    pairs.sort_by(|a, b| a.0.cmp(b.0));
-    let mut buf: Vec<u8> = Vec::with_capacity(pairs.len() * 32);
-    for (specifier, generation) in pairs {
-        buf.push(0xFE);
-        buf.extend_from_slice(specifier.as_bytes());
-        buf.push(0xFD);
-        buf.extend_from_slice(&generation.to_le_bytes());
-    }
-    crate::hash::hash_16(&buf)
 }
 
 /// One per-specifier resolution entry.
@@ -257,37 +217,37 @@ impl ResolvedImportFacts {
     }
 }
 
-/// Per-host resolved-import facts cache.
+/// Per-host resolved-import facts store.
 ///
-/// Sharded by key via [`DashMap`]; concurrent readers for different
-/// keys are wait-free. Admission is via
-/// [`Self::insert_if_absent`] (first-writer-wins). The store hands
-/// out `Arc<ResolvedImportFacts>` so consumers cheaply clone
-/// references without re-validating.
+/// One [`ValidatedFactCache`] slot per key: the shared bounded
+/// multi-candidate substrate with the standard
+/// [`CANDIDATE_CAP`](crate::resolver_core::CANDIDATE_CAP) FIFO policy
+/// and per-reader signature validation. Concurrent resolution states
+/// of the same parsed file coexist as candidates and are told apart by
+/// the witness each one recorded, not by a key dimension.
 ///
 /// The production producer
 /// (`VerterHost::admit_resolved_import_facts_for_owner`) reads the
-/// owner's `script_analysis.imports` + admitted route-resolutions
-/// and constructs one [`ResolvedImportClauseEntry`] per
-/// `(binding, space)` pair, then admits the bundle through
-/// [`Self::insert_if_absent`].
+/// owner's `script_analysis.imports` + admitted route-resolutions,
+/// constructs one [`ResolvedImportClauseEntry`] per `(binding, space)`
+/// pair, and admits the bundle together with the owner's import-route
+/// witness through [`Self::admit`].
 #[derive(Debug, Default)]
 pub struct ResolvedImportFactsDb {
-    entries: DashMap<ResolvedImportFactsKey, Arc<ResolvedImportFacts>>,
+    entries: ValidatedFactCache<ResolvedImportFactsKey, ResolvedImportFacts>,
     /// Producer-admission provenance counter — positive (resolved)
-    /// entries successfully admitted (first-writer-wins).
+    /// entries successfully admitted.
     ///
     /// Test-only: counter exists exclusively to discriminate the
     /// producer in DISCRIMINATING tests. Bumped from
     /// `VerterHost::admit_resolved_import_facts_for_owner` after a
-    /// successful `insert_if_absent`. Snapshot via
-    /// [`Self::positive_admissions`].
+    /// successful admission. Snapshot via
+    /// [`Self::resolved_import_facts_positive_admissions`].
     #[cfg(any(test, feature = "test-support"))]
     positive_admissions: AtomicU64,
     /// Producer-admission provenance counter — negative (unresolved)
     /// entries admitted as facts so the validator can detect when a
-    /// previously unresolved binding becomes resolved on workspace
-    /// bump.
+    /// previously unresolved binding becomes resolved.
     #[cfg(any(test, feature = "test-support"))]
     negative_admissions: AtomicU64,
     /// Producer-admission provenance counter — namespace
@@ -297,8 +257,12 @@ pub struct ResolvedImportFactsDb {
     namespace_admissions: AtomicU64,
 }
 
+/// Cache-kind label carried on strict admissions so a refused
+/// admission is attributable in the audit stream.
+pub(crate) const RESOLVED_IMPORT_FACTS_CACHE_KIND: &str = "resolved_import_facts";
+
 impl ResolvedImportFactsDb {
-    /// Construct an empty cache. Wired into
+    /// Construct an empty store. Wired into
     /// [`crate::project_type_store::ProjectTypeStore`] at host
     /// construction time.
     #[must_use]
@@ -306,55 +270,92 @@ impl ResolvedImportFactsDb {
         Self::default()
     }
 
-    /// Lookup a resolved-import-facts entry by full key. `None` is
-    /// a cold miss — the caller computes the resolved facts and
-    /// admits the entry via [`Self::insert_if_absent`].
-    #[must_use]
-    pub fn get(&self, key: &ResolvedImportFactsKey) -> Option<Arc<ResolvedImportFacts>> {
-        self.entries.get(key).map(|v| Arc::clone(&*v))
-    }
-
-    /// Owner-controlled cold admission. The build closure executes only for
-    /// the vacant key while the owner holds the DashMap entry authority; the
-    /// raw map write is not exposed to production callers. `Some(metadata)`
-    /// means this call built and admitted the value, while `None` means an
-    /// existing deterministic value won the race.
-    pub(crate) fn get_or_compute<M, F>(
-        &self,
-        key: ResolvedImportFactsKey,
-        compute: F,
-    ) -> (Arc<ResolvedImportFacts>, Option<M>)
-    where
-        F: FnOnce() -> (Arc<ResolvedImportFacts>, M),
-    {
-        match self.entries.entry(key) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => (Arc::clone(entry.get()), None),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let (value, metadata) = compute();
-                entry.insert(Arc::clone(&value));
-                (value, Some(metadata))
-            }
-        }
-    }
-
-    /// Admit a freshly-resolved payload. Returns `true` when the
-    /// caller's entry won the admission race, `false` when an
-    /// existing entry was already present.
+    /// The single read of this store: return the bundle for `key`
+    /// whose recorded witness still validates under `view`.
     ///
-    /// First-writer-wins semantics: an identical key MUST be a
-    /// deterministic recomputation, so the existing entry is
-    /// preserved to keep `Arc` identity stable for consumers
-    /// already holding a clone.
+    /// `None` is either a cold key or a slot whose every candidate went
+    /// stale — both mean "recompute through the producer". There is no
+    /// unvalidated sibling read: a caller that cannot present a view
+    /// cannot serve a resolved-import bundle.
+    #[must_use]
+    pub fn get_if_valid<TView>(
+        &self,
+        key: &ResolvedImportFactsKey,
+        view: &TView,
+    ) -> Option<Arc<ResolvedImportFacts>>
+    where
+        TView: StoreView + ?Sized,
+    {
+        self.entries.get_if_valid(key, view)
+    }
+
+    /// The bundle currently retained for `key`, whatever its witness.
+    ///
+    /// Producer-only: used to recognise a byte-identical recomputation
+    /// and skip it. Readers must go through [`Self::get_if_valid`] —
+    /// this deliberately performs no validation and never serves a
+    /// consumer.
+    #[must_use]
+    pub(crate) fn retained_bundle(
+        &self,
+        key: &ResolvedImportFactsKey,
+    ) -> Option<Arc<ResolvedImportFacts>> {
+        self.entries.lookup_any_candidate(key)
+    }
+
+    /// `true` when the slot already retains a candidate admitted under
+    /// exactly `facts`.
+    ///
+    /// Producer-only: a recomputation that reproduces both the retained
+    /// payload and its witness is pure churn, and re-admitting it would
+    /// age a genuinely distinct concurrent candidate out of the bounded
+    /// slot.
+    #[must_use]
+    pub(crate) fn holds_candidate_with_signature(
+        &self,
+        key: &ResolvedImportFactsKey,
+        facts: &[FactVersionRef],
+    ) -> bool {
+        self.entries.holds_candidate_with_signature(key, facts)
+    }
+
+    /// Test-support seeding: admit `value` under `facts` unless a
+    /// candidate with that exact witness is already retained.
+    ///
+    /// Fixtures compose `facts` through
+    /// [`VerterHost::resolved_import_facts_witness_for`](crate::VerterHost::resolved_import_facts_witness_for)
+    /// so a seeded bundle validates under exactly the same rail as a
+    /// produced one.
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_if_absent(
         &self,
         key: ResolvedImportFactsKey,
         value: Arc<ResolvedImportFacts>,
+        facts: Vec<FactVersionRef>,
     ) -> bool {
-        self.get_or_compute(key, || (value, ())).1.is_some()
+        if self.entries.holds_candidate_with_signature(&key, &facts) {
+            return false;
+        }
+        self.admit(key, value, facts)
     }
 
-    /// Number of cached entries. Used by tests + diagnostics.
+    /// Admit a freshly-resolved payload under the witness the producer
+    /// observed. Returns `true` when the candidate entered the slot.
+    ///
+    /// Strict admission: an empty or over-cap witness is refused
+    /// (`ReturnOnly`) rather than admitted unrooted.
+    pub(crate) fn admit(
+        &self,
+        key: ResolvedImportFactsKey,
+        value: Arc<ResolvedImportFacts>,
+        facts: Vec<FactVersionRef>,
+    ) -> bool {
+        self.entries
+            .insert_arc_with_kind(key, value, facts, RESOLVED_IMPORT_FACTS_CACHE_KIND)
+            .is_some()
+    }
+
+    /// Number of occupied slots. Used by tests + diagnostics.
     ///
     /// Mirrors the
     /// [`MaterializeStructureDb::entry_count`](crate::component_meta_caches::MaterializeStructureDb::entry_count)
@@ -364,13 +365,13 @@ impl ResolvedImportFactsDb {
         self.entries.len()
     }
 
-    /// `true` when no entries are cached.
+    /// `true` when no slot is occupied.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Drop every cached entry. Used by GC sweeps and test setup.
+    /// Drop every cached candidate. Used by GC sweeps and test setup.
     pub fn clear(&self) {
         self.entries.clear();
     }

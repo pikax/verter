@@ -4,9 +4,9 @@
 //! These are pure, allocation-free predicates over an identifier / expression
 //! slice — they decide whether a directive local / tag name / `bind:this` lvalue
 //! is safe to emit as a bare identifier or interpolate into a synthesised type
-//! query, so the projection never produces invalid-identifier residue. Extracted
-//! from `projector/mod.rs` for file size; re-exported through `mod` so the
-//! sibling continuation modules reach them via `use super::*`.
+//! query, so the projection never produces invalid-identifier residue. Re-exported
+//! through `mod` so the sibling continuation modules share one focused predicate
+//! implementation via `use super::*`.
 
 /// Advance `chars` past the body of a string / template / char literal opened
 /// by `quote`, honouring backslash escapes. Used by the function-binding

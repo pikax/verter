@@ -17,7 +17,9 @@ use crate::template::oxc::types::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::super::shared::helpers::{self, is_member_expression, VdomHelper};
+use super::super::shared::helpers::{
+    self, is_member_expression, is_multi_statement_handler, trim_handler_body, VdomHelper,
+};
 use super::super::types::{ChildKind, ChildRecord, CodeGenOutput};
 use super::super::TemplateCodeGenOptions;
 use super::children::add_children_separators;
@@ -201,13 +203,13 @@ fn emit_merged_event_handler_value(
             if is_function_expression_value(value, oxc_exp) {
                 // Already a function — emit as-is (no double-wrap no-op).
                 buf.push_str(&resolved);
-            } else if value.contains(';') || contains_assignment_operator(value) {
+            } else if is_multi_statement_handler(oxc_exp) || contains_assignment_operator(value) {
                 buf.push_str("$event => {");
                 buf.push_str(&resolved);
                 buf.push('}');
             } else if !is_member_expression(value) {
                 buf.push_str("$event => (");
-                buf.push_str(&resolved);
+                buf.push_str(trim_handler_body(&resolved));
                 buf.push(')');
             } else {
                 buf.push_str(&resolved);
@@ -328,6 +330,13 @@ fn is_keyboard_event_arg(arg_name: &str) -> bool {
 /// a block whose body is an unused expression statement (no-op at runtime). This
 /// is the reka-ui SliderImpl / DateField inline-handler pattern.
 fn is_function_expression_value(value: &str, oxc_exp: Option<&OxcParsedExpression<'_>>) -> bool {
+    // A statement LIST is never a single function expression, whatever its text
+    // looks like. The parse fact overrides the text fallback below, which scans
+    // for a top-level `=>` and would read `a = 1; b = () => 2` as a bare handler
+    // — emitting the statement list unwrapped into the props object literal.
+    if is_multi_statement_handler(oxc_exp) {
+        return false;
+    }
     if let Some(oxc) = oxc_exp {
         if let Some(expr) = oxc.expression.as_ref() {
             use oxc_ast::ast::Expression;
@@ -1733,16 +1742,18 @@ pub(crate) fn build_props_object_into(
                             // Inline arrow/function is already the handler.
                             // Do not wrap — `$event => { (e) => {…} }` is a no-op.
                             buf.push_str(&resolved);
-                        } else if value.contains(';') || contains_assignment_operator(value) {
-                            // Multi-statement handlers (`;`) or assignment
-                            // expressions (`dialog = true`) need wrapping.
+                        } else if is_multi_statement_handler(oxc_exp)
+                            || contains_assignment_operator(value)
+                        {
+                            // Statement lists and assignment expressions
+                            // (`dialog = true`) need a statement body.
                             buf.push_str("$event => {");
                             buf.push_str(&resolved);
                             buf.push('}');
                         } else if !is_member_expression(value) {
                             // Inline call: @click="onClick(tab)"
                             buf.push_str("$event => (");
-                            buf.push_str(&resolved);
+                            buf.push_str(trim_handler_body(&resolved));
                             buf.push(')');
                         } else {
                             buf.push_str(&resolved);

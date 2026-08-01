@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import { pollBudget } from "../lib/timeouts";
 import * as vscode from "vscode";
 import {
   ensureFixtureWarm,
@@ -32,7 +33,7 @@ suite(`Binding Color Decorations [${FIXTURE_NAME}]`, function () {
 
     // Poll up to 15s for decorations to populate (analysis can be slow on cold start)
     const pollStart = Date.now();
-    while (Date.now() - pollStart < 15_000) {
+    while (Date.now() - pollStart < pollBudget("decorationSettle")) {
       // Trigger a no-op edit to force decoration providers to re-request analysis
       await triggerDecorationRefresh();
       await sleep(600);
@@ -126,7 +127,7 @@ suite(`Vue API Decorations [${FIXTURE_NAME}]`, function () {
 
     // Poll up to 15s for Vue API decorations to populate
     const pollStart = Date.now();
-    while (Date.now() - pollStart < 15_000) {
+    while (Date.now() - pollStart < pollBudget("decorationSettle")) {
       await triggerDecorationRefresh();
       await sleep(600);
       state = await getDecorationState();
@@ -185,7 +186,7 @@ suite(`Prop Constness Decorations [${FIXTURE_NAME}]`, function () {
 
     // Poll up to 20s for prop constness decorations to populate
     const pollStart = Date.now();
-    while (Date.now() - pollStart < 20_000) {
+    while (Date.now() - pollStart < pollBudget("decorationSettleSlow")) {
       await triggerDecorationRefresh();
       await sleep(600);
       state = await getDecorationState();

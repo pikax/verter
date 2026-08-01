@@ -2931,11 +2931,13 @@ fn surface_view_carries_call_signatures_and_construct_signatures() {
 /// `SemanticQueryKey::Expand`, `ExpandMode`, `SemanticQueryApi::expand`,
 /// `build_expand`, and `ExpandMode::` are absent across the workspace's
 /// Rust crate sources and TypeScript packages. These identifiers are not
-/// part of the four-mode surface; this test fails loudly if any survive.
+/// part of the projection-mode surface; this test fails loudly if any
+/// survive.
 ///
-/// The terminology script (`tools/check-four-mode-terminology.sh`) also
-/// catches this at CI time, but the in-repo test surfaces the failure
-/// inside `cargo test` on the same change that introduces a regression.
+/// This is the sole enforcement point. The retired-terminology CI scanner
+/// that used to cover it alongside this test has been removed: it guarded
+/// vocabulary from a completed refactor, and a name-keyed text scanner is
+/// exactly the guard shape the landed-scanner bar forbids.
 #[test]
 fn expand_variant_and_expand_mode_absent_from_workspace() {
     use std::path::{Path, PathBuf};

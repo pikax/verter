@@ -43,6 +43,7 @@ pub(super) struct BackgroundInitArgs {
     pub(super) workspace_scanner:
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
     pub(super) init_generation: Arc<std::sync::atomic::AtomicU64>,
+    pub(super) ownership_generation_fence: Arc<crate::configured_owner::OwnershipGenerationFence>,
     pub(super) project_sync: Option<ProjectSync>,
     pub(super) documents: Arc<DocumentRegistry>,
     pub(super) provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
@@ -82,6 +83,10 @@ struct PublishedWorkspaceBuild {
     root: verter_workspace::PublishedRoot,
     trust_required: Vec<verter_workspace::ViteConfigTrustInfo>,
     configured_projects: Vec<(String, String)>,
+    /// The exact snapshot, retained so init can install the configured-owner
+    /// authority a provider stamps per-file project roots from. Workspace
+    /// FOLDERS cannot answer that question in a monorepo.
+    ownership: Arc<crate::configured_owner::SnapshotOwnerAuthority>,
 }
 
 fn build_published_workspace(
@@ -124,10 +129,15 @@ fn build_published_workspace(
         })
         .collect();
 
+    let ownership = Arc::new(crate::configured_owner::SnapshotOwnerAuthority::new(
+        Arc::clone(&snapshot),
+    ));
+
     PublishedWorkspaceBuild {
         root: verter_workspace::PublishedRoot::with_ext(snapshot, Box::new(views)),
         trust_required,
         configured_projects,
+        ownership,
     }
 }
 
@@ -151,6 +161,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         type_provider,
         workspace_scanner,
         init_generation,
+        ownership_generation_fence,
         project_sync,
         documents,
         provider_sync_states,
@@ -226,6 +237,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         root: published_root,
         trust_required,
         configured_projects,
+        ownership,
     } = match published_build {
         Ok(build) => build,
         Err(e) => {
@@ -250,6 +262,15 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
     // 3. Type provider: workspace folder sync + path config (async, non-blocking)
     if let Some(tp) = &type_provider {
+        // Ownership FIRST, before any folder sync or file re-open: a provider
+        // that stamps a per-file `projectRootPath` must have the configured
+        // owner available before it stamps one, or every file opened in the
+        // meantime carries a folder-derived root and a monorepo package is
+        // resolved against the wrong `node_modules`.
+        ownership_generation_fence.begin_provider_install(published_root.snapshot.generation);
+        tp.set_project_ownership(Arc::clone(&ownership)
+            as Arc<dyn verter_type_runtime::traits::ConfiguredOwnerAuthority>);
+
         let added: Vec<serde_json::Value> = roots
             .iter()
             .map(|uri| {
@@ -435,6 +456,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let init_generation = Arc::clone(&init_generation);
         let vfs_workspace = Arc::clone(&vfs_workspace);
         let provider_sync_states = Arc::clone(&provider_sync_states);
+        let project_sync = project_sync.clone();
         tokio::spawn(async move {
             // Level 2 of the readiness ladder is emitted only after level 1: a fast
             // scan on a small workspace finishes before this init reaches its ready
@@ -468,18 +490,24 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     continue;
                 };
 
+                let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+                // The SAME complete Verter-owned set the debounced coordinator
+                // publishes. This sweep REPLACES the client's whole list for the
+                // document, so a narrower set here would erase categories the
+                // coordinator had already surfaced.
                 let verter_diags = {
                     let vfs_ws = vfs_workspace.read();
-                    compute_verter_diagnostics_for_with_views(
+                    crate::server::verter_owned_diagnostics(
                         &documents,
                         &uri,
+                        &canonical_id,
                         &cached_verter_diags,
                         vfs_ws.as_deref(),
+                        project_sync.as_ref(),
                     )
                 };
 
                 let diagnostics = if let Some(tp) = &type_provider {
-                    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
                     let encoding = position_encoding.read().clone();
                     crate::sync_coordinator::carrier_provider_diagnostics(
                         &documents,
@@ -530,18 +558,24 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 continue;
             };
 
+            let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+            // The SAME complete Verter-owned set the debounced coordinator
+            // publishes. This sweep REPLACES the client's whole list for the
+            // document, so a narrower set here would erase categories the
+            // coordinator had already surfaced.
             let verter_diags = {
                 let vfs_ws = vfs_workspace.read();
-                compute_verter_diagnostics_for_with_views(
+                crate::server::verter_owned_diagnostics(
                     &documents,
                     &uri,
+                    &canonical_id,
                     &cached_verter_diags,
                     vfs_ws.as_deref(),
+                    project_sync.as_ref(),
                 )
             };
 
             let diagnostics = if let Some(tp) = &type_provider {
-                let canonical_id = crate::documents::uri_to_canonical_id(&uri);
                 let encoding = position_encoding.read().clone();
                 crate::sync_coordinator::carrier_provider_diagnostics(
                     &documents,

@@ -93,21 +93,35 @@ import { RequestType } from "@verter/language-shared";
 | `GetCompiledCode` | `$/getCompiledCode`      | `string` (document URI)                | `{ js, css, wasm }` each with `{ code: string; map: any }` |
 | `GetStatistics`   | `$/verter/getStatistics` | `StatisticsRequestParams \| undefined` | `StatisticsSnapshot`                                       |
 
+### `VIRTUAL_FILE_NAMING`
+
+The per-framework naming table for Verter's generated companion files. It is the
+single authority for each adapter's IDE / API / testing-API / sidecar suffixes,
+and is generated from the Rust `VirtualFileNaming` descriptor column.
+
+```typescript
+import { VIRTUAL_FILE_NAMING } from "@verter/language-shared";
+
+const vue = VIRTUAL_FILE_NAMING["FRAMEWORK_TAG_VUE"];
+
+vue.carrierExtension; // ".vue"
+vue.ide; // { kind: "jsxConditional", jsx: ".jsx", nonJsx: ".tsx" }
+vue.importSurface; // { kind: "suffix", suffix: ".verter.ts" }
+vue.testingApiSuffix; // ".__verter_test.ts"
+vue.sidecarSuffixes; // string[]
+vue.declarationSurface; // { kind: "extensionMiddleTs" }
+```
+
 ### `VirtualFiles`
 
-Utilities for working with Verter's virtual sub-document URIs:
+The `VirtualFiles` namespace re-exports the TypeScript helper preamble that is
+injected into generated IDE surfaces:
 
 ```typescript
 import { VirtualFiles } from "@verter/language-shared";
 
-// Check if a URI points to a virtual sub-document
-VirtualFiles.isVirtual(uri); // boolean
-
-// Get the parent .vue file URI from a virtual URI
-VirtualFiles.getParentUri(virtualUri); // string
-
-// Create a virtual URI for a sub-document
-VirtualFiles.createUri(parentUri, type); // string
+// The helper source text embedded in generated virtual files.
+VirtualFiles.helper; // string
 ```
 
 ### Statistics Types
@@ -143,9 +157,11 @@ import { patchClient, RequestType, NotificationType } from "@verter/language-sha
 const connection = createConnection(ProposedFeatures.all);
 const typed = patchClient(connection);
 
-// Handle a custom request -- params and return type are fully typed
-typed.onRequest(RequestType.GetCompiledCode, async (uri) => {
-  const compiled = await compileVueFile(uri);
+// Handle a custom request -- params and return type are fully typed.
+// NOTE: `onRequest` handlers are declared synchronous (`RequestResponse[T] | null`),
+// so resolve any async work before returning.
+typed.onRequest(RequestType.GetCompiledCode, ({ uri }) => {
+  const compiled = compileVueFileSync(uri);
   return {
     js: { code: compiled.js, map: compiled.jsMap },
     css: { code: compiled.css, map: compiled.cssMap },

@@ -16,7 +16,10 @@ use verter_audit::{
 fn empty_envelope(kind: RequestKind, kind_payload: RequestKindPayload) -> RequestAuditRecord {
     RequestAuditRecord {
         request_id: 1,
-        canonical_id: String::new(),
+        canonical_id: "/fixture.vue".to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            "/fixture.vue".to_string(),
+        )),
         kind,
         parent_request_id: None,
         from_cache: false,

@@ -114,6 +114,10 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
         (
             super::PublishedResolverSnapshot {
                 resolver: published.snapshot.resolver.clone(),
+                resolution_view: Some(super::PublishedResolutionView {
+                    workspace: Arc::clone(ws),
+                    published: Arc::clone(&published),
+                }),
                 ownership_ready: published.ownership_ready,
             },
             Arc::clone(ws),
@@ -216,6 +220,10 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             Some((
                 super::PublishedResolverSnapshot {
                     resolver: published.snapshot.resolver.clone(),
+                    resolution_view: Some(super::PublishedResolutionView {
+                        workspace: Arc::clone(ws),
+                        published: Arc::clone(&published),
+                    }),
                     ownership_ready: published.ownership_ready,
                 },
                 Arc::clone(ws),
@@ -266,20 +274,25 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         };
 
         // Static imports (same pipeline as did_open line 6103)
-        let ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
+        let ids = match collect_imported_carrier_priority_ids_from_imports_for_publication(
             &analysis.imports,
             Some(&canonical_id),
             |parent, specifier| resolve_import_specifier_standalone(host, parent, specifier),
-        );
+        ) {
+            Ok(ids) => ids,
+            Err(_) => return false,
+        };
 
         // Dynamic imports via module_references
         let reader = LspProjectResolverReader::new(documents);
-        let dynamic_ids = collect_priority_carrier_public_api_targets_from_module_references(
+        let Some(dynamic_ids) = collect_priority_carrier_public_api_targets_from_module_references(
             Some(&snapshot),
             &reader,
             &canonical_id,
             &analysis.module_references,
-        );
+        ) else {
+            return false;
+        };
 
         for id in ids.into_iter().chain(dynamic_ids) {
             if seen.insert(id.clone()) {
@@ -423,11 +436,16 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 let Some(import_source) = component.import_source.as_deref() else {
                     continue;
                 };
-                let Some(resolved) =
-                    resolve_import_specifier_standalone(host, &canonical_id, import_source)
-                else {
-                    continue;
-                };
+                let resolved =
+                    match resolve_import_specifier_standalone(host, &canonical_id, import_source) {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            let Some(resolved) = admitted.into_result() else {
+                                continue;
+                            };
+                            resolved
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return false,
+                    };
                 if verter_workspace::path_is_carrier(&resolved) {
                     continue; // a directly-resolved carrier is already handled by the carrier pass
                 }
@@ -445,14 +463,23 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                     for module_ref in barrel_analysis.module_references.iter() {
                         if let Some(specifier) = &module_ref.literal_specifier {
                             if verter_workspace::path_is_carrier(specifier) {
-                                if let Some(carrier_id) =
-                                    resolve_import_specifier_standalone(host, &resolved, specifier)
-                                {
-                                    if verter_workspace::path_is_carrier(&carrier_id)
-                                        && seen_barrel_carrier.insert(carrier_id.clone())
-                                    {
-                                        barrel_carrier_deps.push(carrier_id);
+                                let carrier_id = match resolve_import_specifier_standalone(
+                                    host, &resolved, specifier,
+                                ) {
+                                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                                        let Some(carrier_id) = admitted.into_result() else {
+                                            continue;
+                                        };
+                                        carrier_id
                                     }
+                                    verter_workspace::ResolutionPublication::Refused(_) => {
+                                        return false;
+                                    }
+                                };
+                                if verter_workspace::path_is_carrier(&carrier_id)
+                                    && seen_barrel_carrier.insert(carrier_id.clone())
+                                {
+                                    barrel_carrier_deps.push(carrier_id);
                                 }
                             }
                         }
@@ -662,6 +689,11 @@ pub(super) async fn sync_pending_carrier_provider_file(
     let _ =
         block_in_place_if_available(|| documents.host.ensure_ide_compiled(canonical_id, &profile));
     let ide = block_in_place_if_available(|| documents.host.get_ide(canonical_id, &profile));
+    // The drain's compile is the OTHER path that can recover a carrier left
+    // without a provider projection (the document commit never compiles). Cache
+    // read only — the compile just above already ran — and a no-op once a
+    // projection exists.
+    documents.install_missing_carrier_projection(canonical_id);
     // Route through the SINGLE carrier-sync gateway: tsserver PUBLISHES the carrier
     // companions into the on-disk store the plugin reads (the configured-project
     // membership), tsgo opens the companions directly, and an owner loss RETRACTS the
@@ -803,18 +835,17 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
         Ok(()) => {
             // Record a fresh generation pinning the EXACT IDE bytes just synced
             // (interactive queries capture this surface).
-            let provider_code = sync
-                .synced_tsx_content(&ide_path)
-                .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
-            crate::provider_surface_store::record_carrier_ide_surface(
-                provider_surfaces,
-                Some(documents),
-                documents.host(),
-                canonical_id,
-                &ide_path,
-                provider_code.as_ref(),
-                ide.source_map.as_deref(),
-            );
+            if let Some(delivered) = sync.carrier_provider_surface(&ide_path, &ide.code) {
+                crate::provider_surface_store::record_carrier_ide_surface(
+                    provider_surfaces,
+                    Some(documents),
+                    documents.host(),
+                    canonical_id,
+                    &ide_path,
+                    &delivered,
+                    ide.source_map.as_deref(),
+                );
+            }
             true
         }
         Err(error) => {
@@ -946,6 +977,7 @@ async fn apply_owner_resolved_carrier_sync(
         provider_sync_states,
         provider_surfaces: documents.provider_surfaces(),
         documents: Some(documents),
+        project_sync: sync,
         canonical_id,
         is_jsx,
         ide,
@@ -1014,14 +1046,18 @@ async fn apply_owner_resolved_carrier_sync(
                 };
             if let (Some(api), Some(dts_path)) = (api.as_ref(), committed_state.api_path.clone()) {
                 attempted.push(ProviderPathKind::Api);
+                // Destination-keyed rendering (the `.verter.ts` companion is
+                // TypeScript-labeled whatever the SFC's dialect); stamp/record
+                // the SAME bytes that were delivered.
+                let api_code = api.code_for_companion_path(&dts_path);
                 let result = if committed_state.api_background_loaded {
-                    sync.sync_dts(&dts_path, &api.code).await
+                    sync.sync_dts(&dts_path, api_code).await
                 } else {
-                    sync.open_dts(&dts_path, &api.code).await
+                    sync.open_dts(&dts_path, api_code).await
                 };
                 match result {
                     Ok(()) => {
-                        committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                        committed_state.mark_api_delivered(api_code);
                         synced.push(ProviderPathKind::Api);
                         crate::provider_surface_store::record_carrier_api_surface(
                             documents.provider_surfaces(),
@@ -1029,7 +1065,7 @@ async fn apply_owner_resolved_carrier_sync(
                             documents.host(),
                             canonical_id,
                             &dts_path,
-                            &api.code,
+                            api_code,
                             api.source_map.as_deref(),
                         );
                     }
@@ -1053,18 +1089,18 @@ async fn apply_owner_resolved_carrier_sync(
                         synced.push(ProviderPathKind::Ide);
                         // Record a fresh generation pinning the EXACT IDE bytes just
                         // synced (interactive queries capture this surface).
-                        let provider_code = sync
-                            .synced_tsx_content(&ide_path)
-                            .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
-                        crate::provider_surface_store::record_carrier_ide_surface(
-                            documents.provider_surfaces(),
-                            Some(documents),
-                            documents.host(),
-                            canonical_id,
-                            &ide_path,
-                            provider_code.as_ref(),
-                            ide.source_map.as_deref(),
-                        );
+                        if let Some(delivered) = sync.carrier_provider_surface(&ide_path, &ide.code)
+                        {
+                            crate::provider_surface_store::record_carrier_ide_surface(
+                                documents.provider_surfaces(),
+                                Some(documents),
+                                documents.host(),
+                                canonical_id,
+                                &ide_path,
+                                &delivered,
+                                ide.source_map.as_deref(),
+                            );
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -1146,7 +1182,11 @@ async fn apply_owner_resolved_carrier_sync(
                     }
                     CarrierApplyOutcome::Unresolved
                 }
-                crate::external_ts::SettleClass::Pending => CarrierApplyOutcome::Pending,
+                // Both non-advertising classes keep the carrier queued and commit nothing;
+                // `RetractFailed` additionally means the cross-process store may still
+                // advertise it, so it is never treated as a settled disposition.
+                crate::external_ts::SettleClass::Pending
+                | crate::external_ts::SettleClass::RetractFailed => CarrierApplyOutcome::Pending,
             }
         }
     }
@@ -1200,6 +1240,7 @@ pub(super) async fn sync_api_to_provider_background_task(
             provider_sync_states: &provider_sync_states,
             provider_surfaces: &provider_surfaces,
             documents: None,
+            project_sync: Some(&sync),
             canonical_id: &canonical_id,
             is_jsx,
             ide: None,
@@ -1252,14 +1293,16 @@ pub(super) async fn sync_api_to_provider_background_task(
     let mut committed_state = transition.next;
     let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
 
+    // Destination-keyed rendering; delivered/stamped/recorded consistently.
+    let api_code = api.code_for_companion_path(&dts_path);
     let result = if committed_state.api_background_loaded {
-        sync.sync_dts(&dts_path, &api.code).await
+        sync.sync_dts(&dts_path, api_code).await
     } else {
-        sync.open_dts(&dts_path, &api.code).await
+        sync.open_dts(&dts_path, api_code).await
     };
     match result {
         Ok(()) => {
-            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+            committed_state.mark_api_delivered(api_code);
             synced_kinds.push(ProviderPathKind::Api);
             // Record a fresh generation pinning the synced content + its
             // same-content source map. This spawned task has no
@@ -1270,7 +1313,7 @@ pub(super) async fn sync_api_to_provider_background_task(
                 &host,
                 &canonical_id,
                 &dts_path,
-                &api.code,
+                api_code,
                 api.source_map.as_deref(),
             );
         }
@@ -1377,7 +1420,7 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
         .await
     {
         Ok(()) => {
-            committed_state.set_background_loaded(ProviderPathKind::Shadow, true);
+            committed_state.mark_shadow_delivered(&source);
             commit_sync_transition(provider_sync_states, canonical_id, committed_state);
             documents.host.set_import_dependencies(
                 canonical_id,

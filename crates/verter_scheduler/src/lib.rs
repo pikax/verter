@@ -12,6 +12,7 @@
 //! - [`ReverseIndex`](edges::ReverseIndex) — concurrent reverse-dep index
 //! - [`OverlayMap`](overlay::OverlayMap) — concurrent editor buffer storage
 //! - [`SourceLoader`](source_loader::SourceLoader) — file loading trait (memory/disk)
+//! - [`SchedulerSourceDirectory`](source_root::SchedulerSourceDirectory) — the epoch-indexed MVCC SOURCE authority: every lifecycle transition that changes what `try_get_source` logically answers publishes a version atomically with the transition, and a consumer captures an O(1) leased [`SchedulerSourceRoot`](source_root::SchedulerSourceRoot) to read that world as-of
 //!
 //! # Worker pools
 //!
@@ -119,6 +120,7 @@ pub mod pool;
 pub mod request_context;
 pub mod scheduler;
 pub mod source_loader;
+pub mod source_root;
 pub mod stage;
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -134,8 +134,34 @@ pub struct OxcParsedExpression<'alloc> {
     pub offset: u32,
 
     /// Parsed OXC expression AST. Spans are substring-relative (0-based).
-    /// `None` if parsing failed or the span was empty.
+    /// `None` if parsing failed, the span was empty, or the value parsed under
+    /// the statement-list grammar into something other than one expression
+    /// (see [`OxcParsedExpression::multi_statement`]).
     pub expression: Option<Expression<'alloc>>,
+
+    /// The value took the STATEMENT-LIST grammar (a `v-on` handler) and did not
+    /// reduce to a single expression — `@click="a = 1; b = 2"`.
+    ///
+    /// This is the compiler's SOLE notion of "multi-statement". Every backend —
+    /// VDOM, Vapor and the IDE/TSX projection — decides handler wrapping from
+    /// this one fact, so they cannot disagree about the same input. A raw-source
+    /// `value.contains(';')` probe is NOT equivalent: it misses a
+    /// newline-separated list (which has no `;` at all) and fires on a `;` that
+    /// is merely inside a string literal.
+    ///
+    /// Such a value is never a bare handler reference: it is not a simple
+    /// identifier, a member expression, a function expression or an object
+    /// literal, whatever its resolved text happens to look like. Consumers must
+    /// give it a statement body.
+    ///
+    /// Also `true` when the statement grammar could not READ the value, because
+    /// that path is reached only after one expression failed to span the whole
+    /// value — the shape is unknown, but "single expression" has been ruled out,
+    /// and a statement body accepts strictly more shapes than `(…)`.
+    ///
+    /// Always `false` for a single-expression value, so a directive value that
+    /// is one expression classifies exactly as before.
+    pub multi_statement: bool,
 
     /// Parse errors, if any. Spans are **file-relative** (adjusted for reporting).
     #[allow(dead_code)] // Read by tests and downstream consumers
@@ -512,6 +538,7 @@ mod iter_expressions_tests {
         OxcParsedExpression {
             offset,
             expression: None,
+            multi_statement: false,
             errors: None,
             bindings: None,
             ide_recovery_scope: Vec::new(),

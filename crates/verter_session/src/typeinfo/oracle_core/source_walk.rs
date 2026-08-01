@@ -298,7 +298,8 @@ fn resolve_defining<C: ResolverContext>(
 
         // (a) An import-local name — follow to the imported module + export name.
         if let Some(target) = shallow.import_targets.get(&cur_name) {
-            cur_canonical = target.canonical_id.clone();
+            cur_canonical =
+                ctx.resolve_type_dependency_canonical(&cur_canonical, &target.source_specifier)?;
             cur_name = target.imported_name.clone();
             continue;
         }
@@ -306,13 +307,15 @@ fn resolve_defining<C: ResolverContext>(
         // (b) An explicit reexport (`export { X } from "./leaf"`) — follow to the
         //     source module + original export name.
         if let Some(ExportTarget::Reexport {
-            canonical_id,
+            source_specifier,
             original_name,
             ..
         }) = shallow.exports.get(&cur_name)
         {
-            cur_canonical = canonical_id.clone();
-            cur_name = original_name.clone();
+            let original_name = original_name.clone();
+            cur_canonical =
+                ctx.resolve_type_dependency_canonical(&cur_canonical, source_specifier)?;
+            cur_name = original_name;
             continue;
         }
 

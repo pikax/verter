@@ -1,0 +1,9 @@
+error[E0451]: fields `code` and `ts_carrier_code` of struct `TscResponse` are private
+  --> tests/cases/compile-fail/tsc_response_struct_literal_outside_child_module.rs:24:13
+   |
+23 |         TscResponse {
+   |         ----------- in this type
+24 |             code: std::sync::Arc::from(""),
+   |             ^^^^ private field
+25 |             ts_carrier_code: None,
+   |             ^^^^^^^^^^^^^^^ private field

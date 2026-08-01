@@ -2447,6 +2447,7 @@ fn two_prop_cond_oxc(
     crate::template::oxc::types::OxcParsedExpression {
         offset: inner_start,
         expression: None,
+        multi_statement: false,
         errors: None,
         bindings: Some(BindingExtractionResult {
             bindings: vec![mk(a.0, a.1), mk(b.0, b.1)],

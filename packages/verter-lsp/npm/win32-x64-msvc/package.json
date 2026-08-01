@@ -1,0 +1,22 @@
+{
+  "name": "@verter/lsp-win32-x64-msvc",
+  "version": "0.0.1-beta.3",
+  "description": "verter-lsp server binary for Windows x64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "files": [
+    "verter-lsp.exe"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=22"
+  }
+}

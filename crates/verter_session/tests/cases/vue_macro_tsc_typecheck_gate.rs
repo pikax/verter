@@ -115,18 +115,54 @@ fn locate_type_checker() -> Option<PathBuf> {
     None
 }
 
-fn install_vue_contract(project_root: &Path) {
+fn install_vue_contract(project_root: &Path, index_dts_override: Option<&str>) {
     let destination = project_root.join("node_modules/vue");
     std::fs::create_dir_all(&destination).expect("create hermetic Vue package directory");
-    for file in ["package.json", "index.d.ts"] {
-        std::fs::copy(fixture_dir().join("vue").join(file), destination.join(file))
-            .unwrap_or_else(|error| panic!("copy hermetic Vue contract {file}: {error}"));
-    }
+    std::fs::copy(
+        fixture_dir().join("vue").join("package.json"),
+        destination.join("package.json"),
+    )
+    .unwrap_or_else(|error| panic!("copy hermetic Vue contract package.json: {error}"));
+    let index_dts = match index_dts_override {
+        Some(contents) => contents.to_string(),
+        None => std::fs::read_to_string(fixture_dir().join("vue").join("index.d.ts"))
+            .expect("read hermetic Vue contract index.d.ts"),
+    };
+    std::fs::write(destination.join("index.d.ts"), index_dts)
+        .expect("write hermetic Vue contract index.d.ts");
 }
 
 fn typecheck_project(launcher: &Path, files: &[(&str, &str)]) -> (bool, String) {
+    typecheck_project_with_vue_contract(launcher, files, None)
+}
+
+fn typecheck_project_with_vue_contract(
+    launcher: &Path,
+    files: &[(&str, &str)],
+    vue_index_dts: Option<&str>,
+) -> (bool, String) {
+    typecheck_project_impl(launcher, files, vue_index_dts, false)
+}
+
+/// [`typecheck_project_with_vue_contract`] with `allowJs` — for fixtures that
+/// include a JavaScript carrier (the JSDoc-widened Options-API stub), which
+/// the default tsconfig neither includes nor admits.
+fn typecheck_project_with_vue_contract_allowing_js(
+    launcher: &Path,
+    files: &[(&str, &str)],
+    vue_index_dts: Option<&str>,
+) -> (bool, String) {
+    typecheck_project_impl(launcher, files, vue_index_dts, true)
+}
+
+fn typecheck_project_impl(
+    launcher: &Path,
+    files: &[(&str, &str)],
+    vue_index_dts: Option<&str>,
+    allow_js: bool,
+) -> (bool, String) {
     let project = tempfile::tempdir().expect("create TypeScript checker project");
-    install_vue_contract(project.path());
+    install_vue_contract(project.path(), vue_index_dts);
 
     for (relative, contents) in files {
         let path = project.path().join(relative);
@@ -136,8 +172,26 @@ fn typecheck_project(launcher: &Path, files: &[(&str, &str)]) -> (bool, String) 
         std::fs::write(path, contents).expect("write checker fixture");
     }
 
-    std::fs::write(
-        project.path().join("tsconfig.json"),
+    let tsconfig = if allow_js {
+        // `checkJs` stays OFF, as in a consumer project that has not opted in:
+        // the JS stub's own JSDoc payloads must still type its EXPORT for the
+        // consumers (TypeScript reads JSDoc types from JS files regardless of
+        // `checkJs`; `checkJs` only gates diagnostics INSIDE them).
+        r#"{
+  "compilerOptions": {
+    "module": "esnext",
+    "target": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "types": [],
+    "lib": ["esnext"],
+    "allowJs": true
+  },
+  "include": ["**/*.ts", "**/*.tsx", "**/*.js"]
+}"#
+    } else {
         r#"{
   "compilerOptions": {
     "module": "esnext",
@@ -150,9 +204,9 @@ fn typecheck_project(launcher: &Path, files: &[(&str, &str)]) -> (bool, String) 
     "lib": ["esnext"]
   },
   "include": ["**/*.ts", "**/*.tsx"]
-}"#,
-    )
-    .expect("write checker tsconfig");
+}"#
+    };
+    std::fs::write(project.path().join("tsconfig.json"), tsconfig).expect("write checker tsconfig");
 
     let output = Command::new("node")
         .arg(launcher)
@@ -418,6 +472,27 @@ declarationInstance.emit
 // @ts-expect-error Declaration mode excludes the setup model binding
 declarationInstance.model
 
+// ── attribute-fallthrough surface (issue #97) ──────────────────────────────
+// The component's template is a single native <div> root, so its parent-facing
+// props surface is widened with that element's OWN props type. These are KEY
+// assertions rather than value assignments because `Props` carries required
+// members that the consumer cannot cheaply construct.
+type PublicPropsSurface = PublicInstance['$props']
+// A real member of the hermetic <div> contract reaches the parent surface.
+type WidenedWithElementAttr = Expect<'title' extends keyof PublicPropsSurface ? true : false>
+// `data-*` is universally valid HTML and Vue forwards it verbatim.
+type WidenedWithDataAttr = Expect<'data-testid' extends keyof PublicPropsSurface ? true : false>
+// LOAD-BEARING NEGATIVE: the widened arm is the element's real, CLOSED member
+// set — never an index signature. If the hermetic `HTMLAttributes` regained a
+// `[name: string]: unknown`, or the carrier degraded to an open surface, this
+// flips to `Expect<false>` and the gate fails.
+type UnknownAttrStillRejected = Expect<
+  'notARealThing' extends keyof PublicPropsSurface ? false : true
+>
+// class/style reach a component through AllowedComponentProps and are excluded
+// from the widening, so they must NOT be present via this arm.
+type ClassExcludedFromWidening = Expect<'class' extends keyof PublicPropsSurface ? false : true>
+
 void publicPayloadNotAny
 void publicLiteral
 void publicMethodResult
@@ -682,9 +757,9 @@ fn host_owner_scopes_select_setup_shadow_and_companion_fallback_with_ts7() {
     );
 
     for (mode, code) in [
-        ("Public", public.code.as_ref()),
-        ("Testing", testing.code.as_ref()),
-        ("Declaration", declaration.code.as_ref()),
+        ("Public", public.ts_labeled_code().as_ref()),
+        ("Testing", testing.ts_labeled_code().as_ref()),
+        ("Declaration", declaration.ts_labeled_code().as_ref()),
     ] {
         assert!(
             code.contains("setupMarker: number"),
@@ -723,9 +798,12 @@ fn host_owner_scopes_select_setup_shadow_and_companion_fallback_with_ts7() {
     let (success, diagnostics) = typecheck_project(
         &checker,
         &[
-            ("owner-public.ts", public.code.as_ref()),
-            ("owner-testing.ts", testing.code.as_ref()),
-            ("owner-declaration.d.ts", declaration.code.as_ref()),
+            ("owner-public.ts", public.ts_labeled_code().as_ref()),
+            ("owner-testing.ts", testing.ts_labeled_code().as_ref()),
+            (
+                "owner-declaration.d.ts",
+                declaration.ts_labeled_code().as_ref(),
+            ),
             ("owner-setup.ts", OWNER_SETUP_EXTERNAL),
             ("owner-companion.ts", OWNER_COMPANION_EXTERNAL),
             ("owner-consumer.ts", OWNER_SCOPE_CONSUMER),
@@ -735,7 +813,9 @@ fn host_owner_scopes_select_setup_shadow_and_companion_fallback_with_ts7() {
         success,
         "owner-scoped Vue macro carriers failed TypeScript >= 7:\n{diagnostics}\n\
          --- Public ---\n{}\n--- Testing ---\n{}\n--- Declaration ---\n{}",
-        public.code, testing.code, declaration.code,
+        public.ts_labeled_code(),
+        testing.ts_labeled_code(),
+        declaration.ts_labeled_code(),
     );
 }
 
@@ -755,8 +835,12 @@ fn public_result_reports_owner_body_value_dependency_as_structured_failure() {
         PublicApiMode::Testing,
         "owner-only value dependency",
     );
-    assert!(testing.code.contains("type Props = { seed: typeof seed }"));
-    assert!(!testing.code.contains("companionMarker: string"));
+    assert!(testing
+        .ts_labeled_code()
+        .contains("type Props = { seed: typeof seed }"));
+    assert!(!testing
+        .ts_labeled_code()
+        .contains("companionMarker: string"));
 
     for mode in [PublicApiMode::Public, PublicApiMode::Declaration] {
         let outer = host.get_public_api_with_mode(CANONICAL, mode, None);
@@ -764,7 +848,7 @@ fn public_result_reports_owner_body_value_dependency_as_structured_failure() {
             Err(error) => error,
             Ok(Some(response)) => panic!(
                 "owner-only value dependency {mode:?}: expected structured outer Err, got Some:\n{}",
-                response.code,
+                response.ts_labeled_code(),
             ),
             Ok(None) => panic!(
                 "owner-only value dependency {mode:?}: expected structured outer Err, got inner None"
@@ -838,19 +922,27 @@ fn host_vue_macro_outputs_typecheck_in_all_modes_with_ts7() {
         "macro class/enum matrix",
     );
 
-    assert!(public.code.contains("declare class Payload"));
-    assert!(public.code.contains("declare enum Kind"));
-    assert!(public.code.contains("const __comp = defineComponent"));
-    assert!(testing.code.contains("class Payload<T extends string>"));
-    assert!(testing.code.contains("enum Kind"));
-    assert!(testing.code.contains("const props = defineProps<Props>()"));
-    assert!(declaration.code.contains("declare class Payload"));
-    assert!(declaration.code.contains("declare enum Kind"));
-    assert!(!declaration.code.contains("const __comp"));
-    assert!(!declaration.code.contains("defineComponent("));
+    assert!(public.ts_labeled_code().contains("declare class Payload"));
+    assert!(public.ts_labeled_code().contains("declare enum Kind"));
+    assert!(public
+        .ts_labeled_code()
+        .contains("const __comp = defineComponent"));
+    assert!(testing
+        .ts_labeled_code()
+        .contains("class Payload<T extends string>"));
+    assert!(testing.ts_labeled_code().contains("enum Kind"));
+    assert!(testing
+        .ts_labeled_code()
+        .contains("const props = defineProps<Props>()"));
+    assert!(declaration
+        .ts_labeled_code()
+        .contains("declare class Payload"));
+    assert!(declaration.ts_labeled_code().contains("declare enum Kind"));
+    assert!(!declaration.ts_labeled_code().contains("const __comp"));
+    assert!(!declaration.ts_labeled_code().contains("defineComponent("));
     for (mode, code) in [
-        ("Public", public.code.as_ref()),
-        ("Declaration", declaration.code.as_ref()),
+        ("Public", public.ts_labeled_code().as_ref()),
+        ("Declaration", declaration.ts_labeled_code().as_ref()),
     ] {
         for binding in ["importedValue", "ImportedBase"] {
             assert!(
@@ -868,9 +960,12 @@ fn host_vue_macro_outputs_typecheck_in_all_modes_with_ts7() {
     let (success, diagnostics) = typecheck_project(
         &checker,
         &[
-            ("macro-public.ts", public.code.as_ref()),
-            ("macro-testing.ts", testing.code.as_ref()),
-            ("macro-declaration.d.ts", declaration.code.as_ref()),
+            ("macro-public.ts", public.ts_labeled_code().as_ref()),
+            ("macro-testing.ts", testing.ts_labeled_code().as_ref()),
+            (
+                "macro-declaration.d.ts",
+                declaration.ts_labeled_code().as_ref(),
+            ),
             ("external.ts", EXTERNAL_SOURCE),
             ("consumer.ts", CONSUMER),
         ],
@@ -879,6 +974,449 @@ fn host_vue_macro_outputs_typecheck_in_all_modes_with_ts7() {
         success,
         "host-generated Vue macro carriers failed TypeScript >= 7:\n{diagnostics}\n\
          --- Public ---\n{}\n--- Testing ---\n{}\n--- Declaration ---\n{}",
-        public.code, testing.code, declaration.code,
+        public.ts_labeled_code(),
+        testing.ts_labeled_code(),
+        declaration.ts_labeled_code(),
+    );
+}
+
+/// A Vue whose types do NOT export `IntrinsicElementAttributes`.
+///
+/// The export only exists from Vue 3.3 onward; on 3.0–3.2 the interface is an
+/// internal, non-exported declaration, and a custom `vue` contract without
+/// `@vue/runtime-dom`'s map has it nowhere at all. This is that world: the
+/// contract is byte-identical to the hermetic one except that the map — and
+/// only the map — is gone.
+const VUE_CONTRACT_WITHOUT_INTRINSIC_ELEMENT_ATTRIBUTES: &str = r#"
+export type PublicProps = {
+  key?: PropertyKey;
+  ref?: unknown;
+};
+
+export interface HTMLAttributes {
+  class?: unknown;
+  style?: unknown;
+  id?: string;
+  title?: string;
+  tabindex?: number;
+  onClick?: (event: unknown) => void;
+}
+
+export interface Ref<T = unknown> {
+  value: T;
+}
+
+export type ShallowUnwrapRef<T> = {
+  [K in keyof T]: T[K] extends Ref<infer Value> ? Value : T[K];
+};
+
+export type ExtractPropTypes<RuntimeProps extends Record<string, unknown>> = {
+  [K in keyof RuntimeProps]?: unknown;
+};
+
+export declare function defineComponent<const Options extends object>(
+  options: Options,
+): Options & { new (): {} };
+"#;
+
+/// A component with a native root, whose carrier therefore WIDENS.
+const WIDENING_COMPONENT_SOURCE: &str = r#"<script setup lang="ts">
+defineProps<{ label: string }>()
+</script>
+<template><div>{{ label }}</div></template>"#;
+
+/// The widened carrier must still be VALID TypeScript on a Vue whose types
+/// export no `IntrinsicElementAttributes`.
+///
+/// A bare `import("vue").IntrinsicElementAttributes` reference is a hard TS2694
+/// ("namespace 'vue' has no exported member") there — on EVERY widened carrier,
+/// which would break Vue 3.0–3.2 projects entirely. The conditional in
+/// `__Verter_RootElementAttrs` protects an unknown TAG, not a missing MAP, so
+/// the carrier carries an introduce-on-absence `declare module "vue" { interface
+/// IntrinsicElementAttributes {} }` augmentation: where the map exists it merges
+/// as a no-op, and where it does not the interface has no keys, so every tag
+/// takes the `{}` branch and the widening VANISHES instead of erroring.
+///
+/// Mutation recipe: delete the augmentation from
+/// `push_fallthrough_helpers` — this test fails with TS2694 while the main gate
+/// (whose contract DOES export the map) stays green, so only this leg
+/// discriminates the degradation.
+#[test]
+fn widened_carrier_degrades_instead_of_erroring_without_the_vue_intrinsic_map() {
+    let Some(checker) = locate_type_checker() else {
+        skip_note("widened carrier on a Vue without IntrinsicElementAttributes");
+        return;
+    };
+
+    let host = VerterHost::new_standalone(HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    });
+    const CANONICAL: &str = "/src/Widened.vue";
+    upsert_vue(&host, CANONICAL, WIDENING_COMPONENT_SOURCE);
+
+    let public = require_projection(&host, CANONICAL, PublicApiMode::Public, "widened carrier");
+    assert!(
+        public
+            .ts_labeled_code()
+            .contains("__Verter_RootElementAttrs<\"div\">"),
+        "this fixture must actually widen, or the degradation below is vacuous:\n{}",
+        public.ts_labeled_code()
+    );
+    assert!(
+        public
+            .ts_labeled_code()
+            .contains("declare module \"vue\" {\n  interface IntrinsicElementAttributes {}\n}"),
+        "the widened carrier must carry the introduce-on-absence augmentation:\n{}",
+        public.ts_labeled_code()
+    );
+
+    // CONTROL: the same carrier against the FULL hermetic contract (the map is
+    // exported) type-checks, so a failure below is about the missing map and
+    // not about the carrier being broken in general.
+    let (control_ok, control_diagnostics) = typecheck_project(
+        &checker,
+        &[("widened.ts", public.ts_labeled_code().as_ref())],
+    );
+    assert!(
+        control_ok,
+        "control: the widened carrier must type-check against a Vue that DOES \
+         export IntrinsicElementAttributes:\n{control_diagnostics}\n--- carrier ---\n{}",
+        public.ts_labeled_code()
+    );
+
+    let (success, diagnostics) = typecheck_project_with_vue_contract(
+        &checker,
+        &[("widened.ts", public.ts_labeled_code().as_ref())],
+        Some(VUE_CONTRACT_WITHOUT_INTRINSIC_ELEMENT_ATTRIBUTES),
+    );
+    assert!(
+        success,
+        "a widened carrier must DEGRADE (the widening resolves to `{{}}`), never \
+         error, on a Vue whose types export no `IntrinsicElementAttributes` — \
+         Vue 3.0-3.2 and any custom `vue` contract without runtime-dom's map:\n\
+         {diagnostics}\n--- carrier ---\n{}",
+        public.ts_labeled_code()
+    );
+
+    // And the degradation must be a real degradation: with no map, the widened
+    // arm contributes nothing, so an element attribute is NOT on the surface.
+    let (widening_vanished, vanish_diagnostics) = typecheck_project_with_vue_contract(
+        &checker,
+        &[
+            ("widened.ts", public.ts_labeled_code().as_ref()),
+            (
+                "probe.ts",
+                "import Widened from './widened'\n\
+                 type Surface = InstanceType<typeof Widened>['$props']\n\
+                 type Expect<C extends true> = C\n\
+                 type NoElementAttr = Expect<'title' extends keyof Surface ? false : true>\n\
+                 declare const _n: NoElementAttr\n",
+            ),
+        ],
+        Some(VUE_CONTRACT_WITHOUT_INTRINSIC_ELEMENT_ATTRIBUTES),
+    );
+    assert!(
+        widening_vanished,
+        "without the map the widening must VANISH, not silently stay open:\n{vanish_diagnostics}"
+    );
+}
+
+/// The old-Vue contract for the JAVASCRIPT (JSDoc-widened) Options-API stub:
+/// no exported `IntrinsicElementAttributes`, but a `defineComponent` whose
+/// instance carries `$props` (real Vue 3.0–3.2 did), because the JSDoc
+/// rendering reads `InstanceType<typeof C>["$props"]` — an instance without
+/// the member would poison BOTH arms of the test below with an unrelated
+/// error type.
+const VUE_CONTRACT_OLD_INSTANCE_WITHOUT_INTRINSIC_MAP: &str = r#"
+export type PublicProps = {
+  key?: PropertyKey;
+  ref?: unknown;
+};
+
+export declare function defineComponent<const Options extends object>(
+  options: Options,
+): Options & (abstract new () => { $props: {} });
+"#;
+
+/// A JavaScript Options-API component with a native `<a>` root, whose carrier
+/// therefore WIDENS — in JSDoc, its only JavaScript-legal spelling.
+const JS_OPTIONS_WIDENING_SOURCE: &str = r#"<script>
+export default { name: 'JsWidened' }
+</script>
+<template><a>x</a></template>"#;
+
+/// A consumer typing against the JS stub's construct signature: the typo must
+/// be rejected while the closed `data-${string}` domain stays accepted, so a
+/// failure is attributable to the surface being OPEN, never to the stub being
+/// broken outright.
+const JS_OPTIONS_OLD_VUE_CONSUMER: &str = "\
+import JsWidened from './js-widened.vue.js'\n\
+type Props = NonNullable<ConstructorParameters<typeof JsWidened>[0]>\n\
+const typo: Props = { notARealThing: 'x' }\n\
+const data: Props = { 'data-probe': 1 }\n\
+export { typo, data }\n";
+
+/// JSDoc cannot express `declare module "vue"`, so the JavaScript-carrier
+/// widening depends on the PROGRAM carrying the introduce-on-absence
+/// augmentation — `verter-tsc` ships it as the `vue-intrinsic-map-augment.d.ts`
+/// ambient shim built from `FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION`. This
+/// pins BOTH halves of that dependency on an old-`vue` contract (no exported
+/// `IntrinsicElementAttributes`):
+///
+/// * WITH the ambient text, the JSDoc reference resolves to the empty merged
+///   interface and the widening degrades CLOSED — the typo is rejected exactly
+///   as the TypeScript twin's in-file augmentation behaves.
+/// * WITHOUT it — the state deleting the shim recreates — the reference is a
+///   silent error type (`checkJs` off suppresses the in-stub diagnostic) and
+///   the surface degrades OPEN: the typo is ACCEPTED and the project checks
+///   clean. This arm is the DISCRIMINATOR: it fails if the closed behaviour
+///   ever stops depending on the ambient (in which case the shim — and this
+///   test — should be retired together).
+#[test]
+fn js_options_jsdoc_widening_is_fail_closed_only_with_the_ambient_augmentation() {
+    let Some(checker) = locate_type_checker() else {
+        return skip_note(
+            "js_options_jsdoc_widening_is_fail_closed_only_with_the_ambient_augmentation",
+        );
+    };
+    let host = VerterHost::new_standalone(HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    });
+    const CANONICAL: &str = "/src/JsWidened.vue";
+    upsert_vue(&host, CANONICAL, JS_OPTIONS_WIDENING_SOURCE);
+
+    let public = require_projection(&host, CANONICAL, PublicApiMode::Public, "JSDoc widening");
+    let jsdoc = public.dialect_labeled_code();
+    assert!(
+        jsdoc.contains("@typedef") && !jsdoc.contains("declare const"),
+        "this fixture must produce the JSDoc rendering, or both arms below are \
+         vacuous:\n{jsdoc}"
+    );
+
+    let ambient = format!(
+        "import \"vue\";\n{}\nexport {{}};\n",
+        verter_compiler::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION
+    );
+
+    // CLOSED: with the ambient augmentation the typo is rejected — the run
+    // FAILS, on exactly the typo and not on the data-* probe.
+    let (closed_ok, closed_diagnostics) = typecheck_project_with_vue_contract_allowing_js(
+        &checker,
+        &[
+            ("js-widened.vue.js", jsdoc.as_ref()),
+            ("consumer.ts", JS_OPTIONS_OLD_VUE_CONSUMER),
+            ("vue-intrinsic-map-augment.d.ts", ambient.as_str()),
+        ],
+        Some(VUE_CONTRACT_OLD_INSTANCE_WITHOUT_INTRINSIC_MAP),
+    );
+    assert!(
+        !closed_ok,
+        "with the ambient augmentation, the old-Vue degrade is CLOSED and the \
+         consumer's typo must be rejected — a clean run means the surface \
+         degraded open despite the shim:\n--- stub ---\n{jsdoc}"
+    );
+    assert!(
+        closed_diagnostics.contains("notARealThing"),
+        "the failure must be the typo rejection:\n{closed_diagnostics}"
+    );
+    assert!(
+        !closed_diagnostics.contains("data-probe"),
+        "the closed `data-${{string}}` domain stays accepted — a data-probe \
+         error means the stub broke outright rather than degrading:\n{closed_diagnostics}"
+    );
+
+    // OPEN (the discriminator): without the ambient text, the JSDoc reference
+    // to the missing export is a silent error type and the surface accepts
+    // everything — the project checks clean. Deleting the verter-tsc shim
+    // recreates exactly this state.
+    let (open_ok, open_diagnostics) = typecheck_project_with_vue_contract_allowing_js(
+        &checker,
+        &[
+            ("js-widened.vue.js", jsdoc.as_ref()),
+            ("consumer.ts", JS_OPTIONS_OLD_VUE_CONSUMER),
+        ],
+        Some(VUE_CONTRACT_OLD_INSTANCE_WITHOUT_INTRINSIC_MAP),
+    );
+    assert!(
+        open_ok,
+        "without the ambient augmentation the JSDoc widening must degrade OPEN \
+         (this is the defect class the shim exists to prevent; if this arm ever \
+         rejects the typo, the ambient dependency is gone and the shim should \
+         be retired with this test):\n{open_diagnostics}"
+    );
+}
+
+// ── Augmentable `ComponentCustomProps` (issue #97) ──────────────────────────
+
+/// The hermetic contract with `ComponentCustomProps` MERGED INTO `PublicProps`,
+/// carrying a member (`title`) the hermetic `HTMLAttributes` also declares — at
+/// an INCOMPATIBLE type.
+///
+/// This is the real Vue shape: `PublicProps` is
+/// `VNodeProps & AllowedComponentProps & ComponentCustomProps`, and that last
+/// interface is AUGMENTABLE — `declare module 'vue' { interface
+/// ComponentCustomProps { title?: number } }` in a project's `.d.ts` makes
+/// `title: number` valid on every component in that project. Derived from the
+/// shared fixture rather than copied, so the rest of the contract cannot drift.
+fn vue_contract_with_augmented_custom_props() -> String {
+    let base = std::fs::read_to_string(fixture_dir().join("vue").join("index.d.ts"))
+        .expect("read hermetic Vue contract index.d.ts");
+    let anchor = "export type PublicProps = {\n  key?: PropertyKey;\n  ref?: unknown;\n};";
+    assert!(
+        base.contains(anchor),
+        "the hermetic contract's PublicProps shape moved; this override must be \
+         re-anchored or it would silently stop augmenting anything"
+    );
+    base.replace(
+        anchor,
+        "export interface ComponentCustomProps {\n  \
+           title?: number;\n\
+         }\n\
+         export type PublicProps = {\n  \
+           key?: PropertyKey;\n  \
+           ref?: unknown;\n\
+         } & ComponentCustomProps;",
+    )
+}
+
+const CUSTOM_PROPS_SETUP_SOURCE: &str = r#"<script setup lang="ts">
+defineProps<{ label: string }>()
+</script>
+<template><div>{{ label }}</div></template>"#;
+
+const CUSTOM_PROPS_OPTIONS_SOURCE: &str = r#"<script lang="ts">
+import { defineComponent } from 'vue'
+export default defineComponent({ props: { label: { type: String } } })
+</script>
+<template><div>options</div></template>"#;
+
+const CUSTOM_PROPS_SCRIPTLESS_SOURCE: &str = "<template><div>scriptless</div></template>";
+
+/// A key the props type ALREADY carries must never be re-constrained by the
+/// inherited element arm.
+///
+/// `ComponentCustomProps` is augmentable, so a project can make `title` a
+/// globally valid prop typed `number` while the intrinsic `<div>` types it
+/// `string`. Both meet under `&` in the parent-facing props type, and an
+/// incompatible pair collapses to `never` — so a value Vue accepts on EVERY
+/// component in that project is rejected everywhere. The widening therefore
+/// subtracts `keyof import("vue").PublicProps` from each arm (the shared
+/// `render` path) and, in the stub generators, `keyof` of the RAW
+/// `InstanceType<C>["$props"]` — raw precisely because that is what carries the
+/// augmented member.
+///
+/// All three generation paths are covered because each computes its exclusion
+/// set from a different operand, and the two production rails are separately
+/// load-bearing. VERIFIED mutation recipes:
+///
+/// * drop `| keyof import("vue").PublicProps` from
+///   `FallthroughPropsProjection::render` ⇒ the `<script setup>` and
+///   `scriptless` legs fail (`Type '1' is not assignable to type 'undefined'`)
+///   while the Options leg STAYS GREEN — its own raw `keyof $props` operand
+///   covers it independently;
+/// * that mutation PLUS restoring
+///   `Omit<InstanceType<C>["$props"], keyof import("vue").PublicProps>` as the
+///   Options-API stub's `declared_keys` ⇒ the Options leg fails too.
+///
+/// The conditioning is the point: the second recipe is what proves the raw
+/// `$props` operand is doing work, because the `render` term otherwise masks
+/// it. The two rails overlap by design; neither is decoration.
+#[test]
+fn augmented_custom_props_are_not_re_constrained_by_the_inherited_element() {
+    let Some(checker) = locate_type_checker() else {
+        skip_note("augmented ComponentCustomProps against the inherited element");
+        return;
+    };
+
+    let host = VerterHost::new_standalone(HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        ..HostConfig::default()
+    });
+    upsert_vue(&host, "/src/SetupRoot.vue", CUSTOM_PROPS_SETUP_SOURCE);
+    upsert_vue(&host, "/src/OptionsRoot.vue", CUSTOM_PROPS_OPTIONS_SOURCE);
+    upsert_vue(
+        &host,
+        "/src/ScriptlessRoot.vue",
+        CUSTOM_PROPS_SCRIPTLESS_SOURCE,
+    );
+
+    let setup = require_projection(&host, "/src/SetupRoot.vue", PublicApiMode::Public, "setup");
+    let options = require_projection(
+        &host,
+        "/src/OptionsRoot.vue",
+        PublicApiMode::Public,
+        "options",
+    );
+    let scriptless = require_projection(
+        &host,
+        "/src/ScriptlessRoot.vue",
+        PublicApiMode::Public,
+        "scriptless",
+    );
+
+    // PRECONDITION: all three must actually widen, or every leg below passes
+    // vacuously against a carrier that inherits nothing.
+    for (label, code) in [
+        ("setup", setup.ts_labeled_code().as_ref()),
+        ("options", options.ts_labeled_code().as_ref()),
+        ("scriptless", scriptless.ts_labeled_code().as_ref()),
+    ] {
+        assert!(
+            code.contains("__Verter_RootElementAttrs<\"div\">"),
+            "precondition: the {label} carrier must widen with its <div> root, \
+             or the collision below cannot arise:\n{code}"
+        );
+    }
+
+    let probe = "import SetupRoot from './setup'\n\
+         import OptionsRoot from './options'\n\
+         import ScriptlessRoot from './scriptless'\n\
+         type SetupProps = InstanceType<typeof SetupRoot>['$props']\n\
+         type OptionsProps = InstanceType<typeof OptionsRoot>['$props']\n\
+         type ScriptlessProps = InstanceType<typeof ScriptlessRoot>['$props']\n\
+         // The globally-declared `title: number` survives on all three.\n\
+         const setupTitle: SetupProps['title'] = 1\n\
+         const optionsTitle: OptionsProps['title'] = 1\n\
+         const scriptlessTitle: ScriptlessProps['title'] = 1\n\
+         // NEGATIVE: the augmented member is the AUTHORITY, so the element's\n\
+         // own `title?: string` must NOT have been unioned in.\n\
+         // @ts-expect-error `title` is `number` here, not the intrinsic string\n\
+         const setupTitleWrong: SetupProps['title'] = 'a string'\n\
+         // NEGATIVE: subtracting a key set must not open the surface.\n\
+         type Expect<C extends true> = C\n\
+         type UnknownStillRejected = Expect<\n  \
+           'notARealThing' extends keyof SetupProps ? false : true\n\
+         >\n\
+         // An element attribute the augmentation does NOT claim still arrives.\n\
+         type ElementAttrStillArrives = Expect<'tabindex' extends keyof SetupProps ? true : false>\n\
+         declare const _u: UnknownStillRejected\n\
+         declare const _e: ElementAttrStillArrives\n\
+         void setupTitle\nvoid optionsTitle\nvoid scriptlessTitle\nvoid setupTitleWrong\n";
+
+    let (success, diagnostics) = typecheck_project_with_vue_contract(
+        &checker,
+        &[
+            ("setup.ts", setup.ts_labeled_code().as_ref()),
+            ("options.ts", options.ts_labeled_code().as_ref()),
+            ("scriptless.ts", scriptless.ts_labeled_code().as_ref()),
+            ("probe.ts", probe),
+        ],
+        Some(&vue_contract_with_augmented_custom_props()),
+    );
+    assert!(
+        success,
+        "a key `ComponentCustomProps` declares globally must survive the \
+         fallthrough widening on every generation path — re-constraining it with \
+         the intrinsic element's own member collapses it to `never` and rejects \
+         a value Vue accepts on every component in the project:\n{diagnostics}\n\
+         --- setup ---\n{}\n--- options ---\n{}\n--- scriptless ---\n{}",
+        setup.ts_labeled_code(),
+        options.ts_labeled_code(),
+        scriptless.ts_labeled_code(),
     );
 }

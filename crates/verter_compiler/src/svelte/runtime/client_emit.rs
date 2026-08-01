@@ -1,6 +1,5 @@
 //! The EULER-TOUR after-update linearization / post-walk op emission for the
-//! `ClientEmitter`, extracted from `client.rs` to keep the emitter core under
-//! the file-size guard.
+//! `ClientEmitter`, kept separate from `client.rs` so the emitter core stays focused.
 //!
 //! Owns the region op-emission driver ([`ClientEmitter::emit_ops`]): the single
 //! combined `$.template_effect`, the global-host init emission, and the

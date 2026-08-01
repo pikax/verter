@@ -306,20 +306,30 @@ impl VerterLanguageServer {
             return ImportSyncOutcome::Complete;
         };
 
-        let mut import_ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
-            &ingress.imports,
-            Some(&canonical_id),
-            |parent, specifier| self.resolve_import_specifier(parent, specifier),
-        );
+        let mut import_ids =
+            match collect_imported_carrier_priority_ids_from_imports_for_publication(
+                &ingress.imports,
+                Some(&canonical_id),
+                |parent, specifier| {
+                    self.resolve_import_specifier_for_publication(parent, specifier)
+                },
+            ) {
+                Ok(import_ids) => import_ids,
+                Err(_) => {
+                    return ImportSyncOutcome::Retry;
+                }
+            };
 
         let snapshot = self.published_resolver();
         let reader = LspProjectResolverReader::new(&self.documents);
-        let dynamic_ids = collect_priority_carrier_public_api_targets_from_module_references(
+        let Some(dynamic_ids) = collect_priority_carrier_public_api_targets_from_module_references(
             snapshot.as_ref(),
             &reader,
             &canonical_id,
             &ingress.module_references,
-        );
+        ) else {
+            return ImportSyncOutcome::Retry;
+        };
         let mut seen: HashSet<String> = import_ids.iter().cloned().collect();
         for import_id in dynamic_ids {
             if seen.insert(import_id.clone()) {
@@ -345,9 +355,9 @@ impl VerterLanguageServer {
     /// provider-surface generation (failing a concurrent request's post-await
     /// surface validation into an empty answer) and, on tsserver, re-publish
     /// the store + fire a store-changed notification for content the engine
-    /// already holds. Skip iff the committed state says the companion kinds
-    /// are live AND the recorded surface still byte-matches the child's live
-    /// source — an edited child (hash mismatch) always takes the full sync.
+    /// already holds. Skip iff the committed state says both companion kinds are
+    /// live AND current for the child's live bytes — an edited child always
+    /// takes the full sync.
     fn imported_carrier_already_delivered(&self, canonical_id: &str) -> bool {
         let Some(state) = self.provider_sync_state_for_source(canonical_id) else {
             return false;
@@ -357,20 +367,26 @@ impl VerterLanguageServer {
         // API-only state with no `ide_path` at all, and a skip keyed on that
         // state would silently complete — and mint DependencyReady — over an
         // undelivered IDE companion.
-        if !state.api_background_loaded || !state.ide_background_loaded {
+        if !state.ide_background_loaded {
+            return false;
+        }
+        // The API companion's own delivery witness decides whether it is still
+        // current — NEVER a recorded provider surface. The store publication
+        // re-records BOTH companion surfaces whenever the carrier gateway
+        // advertises, including on the tsgo route where the direct API buffer
+        // was NOT reopened; a skip keyed on that recording would leave the
+        // provider holding the pre-edit declarations with nothing left to
+        // re-deliver them, and a fail-closed consumer would then wait forever.
+        if !state.api_companion_is_live_and_current() {
             return false;
         }
         let store = self.documents.provider_surfaces();
+        // The IDE half stays surface-keyed: it carries no separate witness, and
+        // its surface is recorded only after a successful direct sync.
         let recorded = state
-            .api_path
+            .ide_path
             .as_deref()
-            .and_then(|path| store.current_snapshot(path))
-            .or_else(|| {
-                state
-                    .ide_path
-                    .as_deref()
-                    .and_then(|path| store.current_snapshot(path))
-            });
+            .and_then(|path| store.current_snapshot(path));
         let Some(snapshot) = recorded else {
             return false;
         };
@@ -450,9 +466,18 @@ impl VerterLanguageServer {
         // Direct carriers are already handled by carrier sync.
         let mut frontier: Vec<String> = Vec::new();
         for import in ingress.imports.iter() {
-            let Some(resolved) = self.resolve_import_specifier(&canonical_id, &import.source)
-            else {
-                continue;
+            let resolved = match self
+                .resolve_import_specifier_for_publication(&canonical_id, &import.source)
+            {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    let Some(resolved) = admitted.into_result() else {
+                        continue;
+                    };
+                    resolved
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => {
+                    return ImportSyncOutcome::Retry;
+                }
             };
             if verter_workspace::path_is_carrier(&resolved) {
                 continue;
@@ -492,9 +517,18 @@ impl VerterLanguageServer {
                     let Some(specifier) = module_ref.literal_specifier.as_deref() else {
                         continue;
                     };
-                    let Some(target) = self.resolve_import_specifier(barrel_id, specifier) else {
-                        continue;
-                    };
+                    let target =
+                        match self.resolve_import_specifier_for_publication(barrel_id, specifier) {
+                            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                                let Some(target) = admitted.into_result() else {
+                                    continue;
+                                };
+                                target
+                            }
+                            verter_workspace::ResolutionPublication::Refused(_) => {
+                                return ImportSyncOutcome::Retry;
+                            }
+                        };
                     if verter_workspace::path_is_carrier(&target) {
                         if seen_barrel_carrier.insert(target.clone()) {
                             barrel_carrier_deps.push(target);
@@ -586,7 +620,13 @@ impl VerterLanguageServer {
                         prepared.provider_path
                     );
                 } else {
-                    self.commit_provider_sync_state(barrel_id, transition.next);
+                    // The rewritten buffer IS delivered here, so this state must
+                    // say so: a barrel published only by this leg would otherwise
+                    // read as undelivered to every consumer of the committed
+                    // state (the workspace-symbol import closure included).
+                    let mut committed = transition.next;
+                    committed.mark_shadow_delivered(&source);
+                    self.commit_provider_sync_state(barrel_id, committed);
                 }
             } else {
                 let result = sync

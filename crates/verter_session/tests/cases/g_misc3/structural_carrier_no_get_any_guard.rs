@@ -157,14 +157,21 @@ fn structural_carrier_producers_use_no_permissive_get_any() {
         },
         // Route-fact production moved from the retired
         // `current_route_surface_hash` helper onto the store-view
-        // snapshot builders: the base builder (`HostStoreView::build`)
-        // and the session-overlay builder (the `mut self`
-        // `with_session_overlay`) both derive the Route hash through the
-        // edge-currency gate + `hash_route_surface`, and the digest
-        // itself must stay permissive-read-free.
+        // snapshot builders, and then off the BASE builder entirely: the
+        // base `HostStoreView::build` seals roots and derives no
+        // per-canonical answer at all, so its Route derivation now lives
+        // at demand time in `StoreViewRoots::base_canonical_view`, which
+        // reads root-relative (`artifacts_at_root`) behind the same
+        // edge-currency gate. All three sites — the base builder, the
+        // demand-time derivation, and the session-overlay builder — plus
+        // the digest itself must stay permissive-read-free.
         Scanned {
             file: "resolver_store.rs",
-            signature: "fn build(host: &VerterHost",
+            signature: "fn build(pre: &PreBuildTokenInputs",
+        },
+        Scanned {
+            file: "store_view_roots.rs",
+            signature: "fn base_canonical_view(",
         },
         Scanned {
             file: "resolver_store.rs",

@@ -152,17 +152,24 @@ impl Clone for RouteSurfaceHashMemo {
     }
 }
 
-/// A wildcard `export * from ‘...’` reexport with its resolved canonical target.
+/// A wildcard `export * from ‘...’` reexport — the AUTHORED specifier only.
+///
+/// Parse domain: the resolved target is NOT retained here. Resolution is
+/// a resolve-domain answer owned by the workspace resolution authority
+/// and demanded live by consumers; baking it into this content-addressed
+/// artifact is what made the artifact go stale on an unrelated
+/// dependency-set change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WildcardReexport {
     pub owner: TopLevelOwnerId,
     /// The raw source specifier (e.g., `./types`).
     pub source_specifier: String,
-    /// The resolved canonical file ID of the target.
-    pub canonical_id: String,
 }
 
-/// An import target with both the raw specifier and resolved canonical ID.
+/// An import target — the AUTHORED specifier and imported name only.
+///
+/// Parse domain: no resolved canonical is retained (see
+/// [`WildcardReexport`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportTarget {
     /// The raw source specifier (e.g., `./types`).
@@ -171,8 +178,6 @@ pub struct ImportTarget {
     pub imported_name: String,
     /// Whether the local binding is a namespace import (`import * as NS`).
     pub is_namespace: bool,
-    /// The resolved canonical file ID of the target.
-    pub canonical_id: String,
 }
 
 /// Narrow type-resolution view over [`ShallowFileState`].
@@ -198,8 +203,6 @@ pub enum ExportTarget {
     Reexport {
         source_specifier: String,
         original_name: String,
-        /// The resolved canonical file ID of the target.
-        canonical_id: String,
         /// Whether this is a type-only reexport (`export type { ... }`).
         /// Used by the export graph to choose type vs. value resolution.
         is_type: bool,
@@ -369,19 +372,8 @@ pub struct ExternalSymbolRef {
     pub source_specifier: String,
     /// The original exported name in the source module.
     pub imported_name: String,
-    /// The resolved canonical file ID of the target; `None` when the
-    /// specifier did not resolve (construction without a host resolver,
-    /// or a genuinely unresolvable specifier).
-    pub canonical_id: Option<Arc<str>>,
     /// The remaining route demand on the imported symbol.
     pub route: RouteDemand,
-}
-
-/// Lift an [`ImportTarget`]'s resolved canonical onto the typed
-/// resolved/unresolved carrier (the import table keeps the empty-string
-/// miss sentinel internally; external refs carry the explicit `Option`).
-pub(crate) fn external_canonical(target: &ImportTarget) -> Option<Arc<str>> {
-    (!target.canonical_id.is_empty()).then(|| Arc::<str>::from(target.canonical_id.as_str()))
 }
 
 // ---------------------------------------------------------------------------
@@ -504,32 +496,6 @@ pub struct LocalClosureResult {
 // Construction
 // ---------------------------------------------------------------------------
 
-/// Trait for resolving import specifiers to canonical file IDs during
-/// shallow state construction.
-pub trait ShallowImportResolver {
-    /// Resolve an import specifier from the file being analyzed to its
-    /// canonical file ID.  Returns `None` if the specifier cannot be resolved.
-    fn resolve_canonical(&self, specifier: &str) -> Option<String>;
-
-    /// Classify a direct reexport as type-only.  Returns `true` if the reexport
-    /// was declared with `export type { ... } from '...'`.
-    fn is_type_reexport(&self, _exported_name: &str, _specifier: &str) -> bool {
-        false
-    }
-}
-
-/// A no-op resolver that cannot resolve any specifiers.
-/// Used for test construction where canonical IDs are not needed.
-#[cfg(any(test, feature = "test-support"))]
-struct NullResolver;
-
-#[cfg(any(test, feature = "test-support"))]
-impl ShallowImportResolver for NullResolver {
-    fn resolve_canonical(&self, _specifier: &str) -> Option<String> {
-        None
-    }
-}
-
 impl ShallowFileState {
     /// Test-only HEADER/ROUTING-ONLY constructor: build the routing tables
     /// (exports / imports / wildcard reexports) from an existing route
@@ -547,22 +513,7 @@ impl ShallowFileState {
         route_inventory: Arc<ScriptRouteInventory>,
     ) -> Self {
         let memo = Self::empty_header_only_memo(whole_hash);
-        Self::from_route_inventory_with_memo(whole_hash, route_inventory, memo, &NullResolver)
-    }
-
-    /// [`Self::header_routing_only_for_test`] resolving cross-file edges
-    /// through the supplied resolver (canonical IDs populated on the
-    /// reexport / import / wildcard edges). Same header-only contract:
-    /// EMPTY serviceless memo, no bodies, callers provably never demand
-    /// a declaration body.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn header_routing_only_with_resolver_for_test(
-        whole_hash: Hash16,
-        route_inventory: Arc<ScriptRouteInventory>,
-        resolver: &dyn ShallowImportResolver,
-    ) -> Self {
-        let memo = Self::empty_header_only_memo(whole_hash);
-        Self::from_route_inventory_with_memo(whole_hash, route_inventory, memo, resolver)
+        Self::from_route_inventory_with_memo(whole_hash, route_inventory, memo)
     }
 
     /// The EMPTY serviceless memo backing the header/routing-only test
@@ -617,7 +568,7 @@ impl ShallowFileState {
         canonical: &str,
         source: &str,
     ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
-        Self::service_backed_with_provenance_and_resolver_for_test(canonical, source, &NullResolver)
+        Self::service_backed_core_for_test(canonical, source, None, None)
     }
 
     /// [`Self::service_backed_for_test_at`] with a caller-supplied
@@ -630,8 +581,7 @@ impl ShallowFileState {
         source: &str,
         whole_hash: Hash16,
     ) -> Arc<Self> {
-        Self::service_backed_core_for_test(canonical, source, Some(whole_hash), &NullResolver, None)
-            .0
+        Self::service_backed_core_for_test(canonical, source, Some(whole_hash), None).0
     }
 
     /// [`Self::service_backed_for_test`] with an exact lexical owner for
@@ -642,28 +592,7 @@ impl ShallowFileState {
         source: &str,
         statement_owners: &[TopLevelOwnerId],
     ) -> Arc<Self> {
-        Self::service_backed_core_for_test(
-            canonical,
-            source,
-            None,
-            &NullResolver,
-            Some(statement_owners),
-        )
-        .0
-    }
-
-    /// Full-parameter service-backed test builder: caller-chosen canonical,
-    /// import resolver for cross-file canonical edges, and the provenance
-    /// handle. `whole_hash` derives from the source content (production
-    /// shape: same content ⇒ same hash, different content ⇒ different
-    /// hash) and keys BOTH the memo snapshot and the state.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn service_backed_with_provenance_and_resolver_for_test(
-        canonical: &str,
-        source: &str,
-        resolver: &dyn ShallowImportResolver,
-    ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
-        Self::service_backed_core_for_test(canonical, source, None, resolver, None)
+        Self::service_backed_core_for_test(canonical, source, None, Some(statement_owners)).0
     }
 
     /// The ONE service-backed construction core every `service_backed_*`
@@ -673,7 +602,6 @@ impl ShallowFileState {
         canonical: &str,
         source: &str,
         whole_hash: Option<Hash16>,
-        resolver: &dyn ShallowImportResolver,
         statement_owners: Option<&[TopLevelOwnerId]>,
     ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
         let allocator = oxc_allocator::Allocator::default();
@@ -721,11 +649,10 @@ impl ShallowFileState {
             None,
         ));
         (
-            Arc::new(Self::from_route_inventory_with_resolver(
+            Arc::new(Self::from_route_inventory(
                 whole_hash,
                 route_inventory,
                 memo,
-                resolver,
             )),
             provenance,
         )
@@ -748,12 +675,8 @@ impl ShallowFileState {
         route_inventory: Arc<ScriptRouteInventory>,
     ) -> Self {
         let memo = Self::empty_header_only_memo(whole_hash);
-        let mut state = Self::assemble_from_route_inventory_with_memo(
-            whole_hash,
-            route_inventory,
-            memo,
-            &NullResolver,
-        );
+        let mut state =
+            Self::assemble_from_route_inventory_with_memo(whole_hash, route_inventory, memo);
         state.exports = exports;
         state.wildcard_reexports = wildcard_reexports;
         state.import_locals = import_locals;
@@ -781,39 +704,37 @@ impl ShallowFileState {
     }
 
     /// Build from the syntax-only route inventory + the lazy declaration-body
-    /// memo, with a resolver that canonicalizes all cross-file edges.
+    /// memo.
     ///
     /// This is the production construction path: HEADER work only —
-    /// export/import routing tables, no body lowering. Symbol bodies
-    /// materialise on first demand through the memo.
-    pub fn from_route_inventory_with_resolver(
+    /// export/import routing tables, no body lowering, NO resolution.
+    /// Symbol bodies materialise on first demand through the memo; import
+    /// specifiers resolve on demand through the workspace resolution
+    /// authority.
+    pub fn from_route_inventory(
         whole_hash: Hash16,
         route_inventory: Arc<ScriptRouteInventory>,
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
-        resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        Self::from_route_inventory_with_memo(whole_hash, route_inventory, decl_bodies, resolver)
+        Self::from_route_inventory_with_memo(whole_hash, route_inventory, decl_bodies)
     }
 
     /// Shared routing-table builder for every `ShallowFileState`
     /// constructor: it reads the ALREADY-extracted route inventory and
-    /// the SUPPLIED lazy declaration-body `decl_bodies` memo, canonicalizes
-    /// cross-file edges through `resolver`, and assembles the
-    /// export/import/wildcard routing tables. It performs NO reparse, NO
-    /// `parse_and_build_env`, and NO eval-env build — every body materialises
-    /// later on demand through the supplied memo.
+    /// the SUPPLIED lazy declaration-body `decl_bodies` memo and assembles
+    /// the export/import/wildcard routing tables from the AUTHORED
+    /// specifiers. It performs NO reparse, NO `parse_and_build_env`, NO
+    /// eval-env build, and NO import resolution — every body materialises
+    /// later on demand through the supplied memo, and every specifier
+    /// resolves later on demand through the workspace resolution
+    /// authority.
     fn from_route_inventory_with_memo(
         whole_hash: Hash16,
         route_inventory: Arc<ScriptRouteInventory>,
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
-        resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        let state = Self::assemble_from_route_inventory_with_memo(
-            whole_hash,
-            route_inventory,
-            decl_bodies,
-            resolver,
-        );
+        let state =
+            Self::assemble_from_route_inventory_with_memo(whole_hash, route_inventory, decl_bodies);
         state.install_shallow_lens_from_final_state();
         state
     }
@@ -829,7 +750,6 @@ impl ShallowFileState {
         whole_hash: Hash16,
         route_inventory: Arc<ScriptRouteInventory>,
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
-        resolver: &dyn ShallowImportResolver,
     ) -> Self {
         // Capacity bounds are exact per-source counts (cheap header-inventory
         // walks, no allocation); `entry` collisions across the export sources
@@ -879,15 +799,10 @@ impl ShallowFileState {
             };
 
         for target in &route_inventory.reexports {
-            let canonical_id = resolver
-                .resolve_canonical(&target.source)
-                .unwrap_or_default();
-            let is_type = matches!(target.capability, RouteCapability::TypeOnly)
-                || resolver.is_type_reexport(&target.exported, &target.source);
+            let is_type = matches!(target.capability, RouteCapability::TypeOnly);
             let route = ExportTarget::Reexport {
                 source_specifier: target.source.clone(),
                 original_name: target.imported.clone(),
-                canonical_id,
                 is_type,
             };
             insert_export(
@@ -912,16 +827,12 @@ impl ShallowFileState {
 
         // Wildcard reexport sources (in declaration order) with canonical targets
         for wildcard in &route_inventory.wildcard_reexports {
-            let canonical_id = resolver
-                .resolve_canonical(&wildcard.source)
-                .unwrap_or_default();
             if let Some(exported_namespace) = &wildcard.exported_namespace {
                 insert_export(
                     exported_namespace.clone(),
                     ExportTarget::Reexport {
                         source_specifier: wildcard.source.clone(),
                         original_name: exported_namespace.clone(),
-                        canonical_id: canonical_id.clone(),
                         is_type: matches!(wildcard.capability, RouteCapability::TypeOnly),
                     },
                     &mut exports,
@@ -931,15 +842,11 @@ impl ShallowFileState {
             wildcard_reexports.push(WildcardReexport {
                 owner: wildcard.owner,
                 source_specifier: wildcard.source.clone(),
-                canonical_id,
             });
         }
 
         // Import locals and targets
         for binding in &route_inventory.imports {
-            let canonical_id = resolver
-                .resolve_canonical(&binding.source)
-                .unwrap_or_default();
             let target = ImportTarget {
                 source_specifier: binding.source.clone(),
                 imported_name: match &binding.imported {
@@ -947,7 +854,6 @@ impl ShallowFileState {
                     RouteImportedName::Name(name) => name.clone(),
                 },
                 is_namespace: matches!(binding.form, RouteImportForm::Namespace),
-                canonical_id,
             };
             let key = DeclBindingKey::new(binding.owner, binding.local.as_str());
             if ambiguous_imports.contains(&key) {
@@ -1898,7 +1804,6 @@ impl ShallowFileState {
                     local_name: root.to_string(),
                     source_specifier: target.source_specifier.clone(),
                     imported_name,
-                    canonical_id: external_canonical(target),
                     route,
                 });
                 continue;
@@ -1979,7 +1884,6 @@ impl ShallowFileState {
                         local_name: root.to_string(),
                         source_specifier: target.source_specifier.clone(),
                         imported_name,
-                        canonical_id: external_canonical(target),
                         route,
                     });
                     break;
@@ -2131,7 +2035,6 @@ impl ShallowFileState {
                     local_name: root.to_string(),
                     source_specifier: target.source_specifier.clone(),
                     imported_name: target.imported_name.clone(),
-                    canonical_id: external_canonical(target),
                     route: RouteDemand::Whole,
                 };
                 if !external_deps
@@ -2152,7 +2055,6 @@ impl ShallowFileState {
                         local_name: root.to_string(),
                         source_specifier: target.source_specifier.clone(),
                         imported_name: target.imported_name.clone(),
-                        canonical_id: external_canonical(target),
                         route: RouteDemand::Whole,
                     });
                 }
@@ -2383,34 +2285,31 @@ impl ShallowFileState {
             .get(&DeclBindingKey::new(owner, local_name))
     }
 
-    /// Return the unique local import binding in `owner` whose resolved target
-    /// is exactly `(canonical_id, imported_name)`.
+    /// Every non-namespace local import binding in `owner` importing
+    /// exactly `imported_name`, as `(local_name, source_specifier)`.
     ///
-    /// Reverse lookup is intentionally fail-closed: an absent target, a
-    /// namespace import, or two different local bindings for the same target
-    /// returns `None`. Callers must never recover a local spelling by scanning
-    /// another owner or by matching only the exported symbol name.
-    pub(crate) fn unique_local_import_for_resolved_target_in(
-        &self,
+    /// PARSE DOMAIN only. The reverse lookup "which local alias names
+    /// this resolved target?" needs a resolved canonical, which this
+    /// artifact no longer retains; the caller resolves each returned
+    /// specifier through the workspace resolution authority and applies
+    /// the fail-closed uniqueness rule itself (an absent target, a
+    /// namespace import, or two distinct locals resolving to the same
+    /// target must yield no alias — a local spelling is never recovered
+    /// by scanning another owner or by matching only the exported symbol
+    /// name).
+    pub(crate) fn local_imports_of_name_in<'a>(
+        &'a self,
         owner: TopLevelOwnerId,
-        canonical_id: &str,
-        imported_name: &str,
-    ) -> Option<&str> {
-        let mut unique = None;
-        for (local, target) in &self.owner_import_targets {
-            if local.owner != owner
-                || target.is_namespace
-                || target.canonical_id != canonical_id
-                || target.imported_name != imported_name
-            {
-                continue;
-            }
-            if unique.is_some() {
-                return None;
-            }
-            unique = Some(local.name.as_ref());
-        }
-        unique
+        imported_name: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+        self.owner_import_targets
+            .iter()
+            .filter(move |(local, target)| {
+                local.owner == owner
+                    && !target.is_namespace
+                    && target.imported_name == imported_name
+            })
+            .map(|(local, target)| (local.name.as_ref(), target.source_specifier.as_str()))
     }
 
     // -----------------------------------------------------------------------
@@ -2521,7 +2420,6 @@ impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
             local_name: name.to_string(),
             source_specifier: target.source_specifier.clone(),
             imported_name: target.imported_name.clone(),
-            canonical_id: external_canonical(target),
             route: RouteDemand::Whole,
         })
     }
@@ -2647,7 +2545,6 @@ fn external_ref_to_fact(ext: &ExternalSymbolRef) -> verter_type_expr::facts::Ext
         local_name: ext.local_name.clone(),
         source_specifier: ext.source_specifier.clone(),
         imported_name: ext.imported_name.clone(),
-        canonical_id: ext.canonical_id.clone(),
         route: ext.route.clone(),
     }
 }
@@ -2659,7 +2556,6 @@ fn external_fact_to_ref(fact: verter_type_expr::facts::ExternalRouteRefFact) -> 
         local_name: fact.local_name,
         source_specifier: fact.source_specifier,
         imported_name: fact.imported_name,
-        canonical_id: fact.canonical_id,
         route: fact.route,
     }
 }
@@ -2945,11 +2841,10 @@ mod tests {
             source,
             &owners,
         );
-        let state = ShallowFileState::from_route_inventory_with_resolver(
+        let state = ShallowFileState::from_route_inventory(
             memo_state.whole_hash,
             Arc::new(index.routes),
             Arc::clone(memo_state.decl_bodies()),
-            &NullResolver,
         );
 
         assert_eq!(
@@ -2981,56 +2876,53 @@ mod tests {
     }
 
     #[test]
-    fn reverse_import_target_lookup_is_owner_exact_and_ambiguity_safe() {
-        struct HelpersResolver;
-
-        impl ShallowImportResolver for HelpersResolver {
-            fn resolve_canonical(&self, specifier: &str) -> Option<String> {
-                (specifier == "./helpers").then(|| "/resolved/helpers.ts".to_string())
-            }
-        }
-
-        let unique = ShallowFileState::service_backed_with_provenance_and_resolver_for_test(
+    fn local_import_candidate_lookup_is_owner_exact_and_enumerates_every_alias() {
+        // The shallow surface names AUTHORED specifiers, so the reverse
+        // "which local alias names this resolved target?" question is
+        // answered by the CALLER: this helper enumerates the candidate
+        // aliases (owner-exact, namespace imports excluded) and the
+        // caller resolves each specifier and applies the fail-closed
+        // uniqueness rule. Both halves of that contract are pinned here:
+        // owner-exactness, and the fact that TWO aliases for one
+        // specifier are BOTH surfaced (so the caller can see the
+        // ambiguity and fail closed — an enumeration that silently
+        // returned one of them would hide it).
+        let unique = ShallowFileState::service_backed_for_test_at(
             "/ws/owner.ts",
             "import type { ComponentConfig as LocalConfig } from './helpers';\n",
-            &HelpersResolver,
-        )
-        .0;
+        );
+        let module_candidates: Vec<(&str, &str)> = unique
+            .local_imports_of_name_in(TopLevelOwnerId::module(0), "ComponentConfig")
+            .collect();
         assert_eq!(
-            unique.unique_local_import_for_resolved_target_in(
-                TopLevelOwnerId::module(0),
-                "/resolved/helpers.ts",
-                "ComponentConfig",
-            ),
-            Some("LocalConfig"),
+            module_candidates,
+            vec![("LocalConfig", "./helpers")],
+            "the owner's alias is surfaced with its AUTHORED specifier — no resolved target",
         );
         assert_eq!(
-            unique.unique_local_import_for_resolved_target_in(
-                TopLevelOwnerId::instance(0),
-                "/resolved/helpers.ts",
-                "ComponentConfig",
-            ),
-            None,
-            "the reverse lookup must never cross lexical owners",
+            unique
+                .local_imports_of_name_in(TopLevelOwnerId::instance(0), "ComponentConfig")
+                .count(),
+            0,
+            "the candidate lookup must never cross lexical owners",
         );
 
-        let ambiguous = ShallowFileState::service_backed_with_provenance_and_resolver_for_test(
+        let ambiguous = ShallowFileState::service_backed_for_test_at(
             "/ws/owner.ts",
             concat!(
                 "import type { ComponentConfig as First } from './helpers';\n",
                 "import type { ComponentConfig as Second } from './helpers';\n",
             ),
-            &HelpersResolver,
-        )
-        .0;
+        );
+        let mut ambiguous_locals: Vec<&str> = ambiguous
+            .local_imports_of_name_in(TopLevelOwnerId::module(0), "ComponentConfig")
+            .map(|(local, _)| local)
+            .collect();
+        ambiguous_locals.sort_unstable();
         assert_eq!(
-            ambiguous.unique_local_import_for_resolved_target_in(
-                TopLevelOwnerId::module(0),
-                "/resolved/helpers.ts",
-                "ComponentConfig",
-            ),
-            None,
-            "two local names for one resolved target are ambiguous and must fail closed",
+            ambiguous_locals,
+            vec!["First", "Second"],
+            "both aliases must be surfaced so the caller can fail closed on ambiguity",
         );
     }
 
@@ -4153,108 +4045,68 @@ export interface Props {
         );
     }
 
+    /// Inverted-polarity successor to the deleted
+    /// `canonical_edges_populated_by_resolver`: the shallow routing
+    /// surface is PURE PARSE DOMAIN. Every cross-file edge retains the
+    /// AUTHORED specifier and the imported name; NO resolved canonical
+    /// is retained anywhere on it (structurally — the fields do not
+    /// exist — and behaviourally, since construction performs no
+    /// resolution at all).
     #[test]
-    fn canonical_edges_populated_by_resolver() {
-        use crate::resolver_core::ShallowImportResolver;
-
-        struct TestResolver;
-
-        impl ShallowImportResolver for TestResolver {
-            fn resolve_canonical(&self, specifier: &str) -> Option<String> {
-                match specifier {
-                    "./bar" => Some("/resolved/bar.ts".to_string()),
-                    "./types" => Some("/resolved/types.ts".to_string()),
-                    _ => None,
-                }
-            }
-        }
-
+    fn shallow_edges_retain_authored_specifiers_and_resolve_nothing() {
         let source = r#"
 import type { Foo } from './bar'
 export { Foo } from './bar'
 export * from './types'
 export interface Props { child: Foo }
 "#;
-        let (state, _) = ShallowFileState::service_backed_with_provenance_and_resolver_for_test(
-            "/ws/fixture.ts",
-            source,
-            &TestResolver,
-        );
+        let state = ShallowFileState::service_backed_for_test_at("/ws/fixture.ts", source);
 
-        // Wildcard reexport should have the resolved canonical ID
         assert_eq!(
             state.wildcard_reexports.len(),
             1,
             "should have exactly one wildcard reexport"
         );
         assert_eq!(
-            state.wildcard_reexports[0].canonical_id, "/resolved/types.ts",
-            "wildcard reexport canonical ID should be resolved"
-        );
-        assert_eq!(
             state.wildcard_reexports[0].source_specifier, "./types",
-            "wildcard reexport source specifier should be preserved"
+            "wildcard reexport retains its authored source specifier"
         );
 
-        // Reexport target should carry the resolved canonical ID
         match state.export_target("Foo") {
             Some(ExportTarget::Reexport {
-                canonical_id,
                 original_name,
                 source_specifier,
                 ..
             }) => {
-                assert_eq!(
-                    canonical_id, "/resolved/bar.ts",
-                    "reexport canonical ID should be resolved"
-                );
                 assert_eq!(original_name, "Foo");
                 assert_eq!(source_specifier, "./bar");
             }
             other => panic!("expected Reexport for Foo, got {other:?}"),
         }
 
-        // Import target should carry the resolved canonical ID
         let foo_target = state
             .import_target("Foo")
             .expect("Foo import target should exist");
-        assert_eq!(
-            foo_target.canonical_id, "/resolved/bar.ts",
-            "import target canonical ID should be resolved"
-        );
         assert_eq!(foo_target.source_specifier, "./bar");
         assert_eq!(foo_target.imported_name, "Foo");
 
-        // External symbol refs on Props should carry the resolved canonical ID
         let props_deps = state.type_deps("Props").expect("Props symbol should exist");
         let foo_ext = props_deps
             .external_deps
             .iter()
             .find(|dep| dep.local_name == "Foo")
             .expect("Props should have Foo as an external dep");
-        assert_eq!(
-            foo_ext.canonical_id.as_deref(),
-            Some("/resolved/bar.ts"),
-            "external symbol ref canonical ID should be resolved"
-        );
         assert_eq!(foo_ext.imported_name, "Foo");
         assert_eq!(foo_ext.source_specifier, "./bar");
 
-        // Negative: no unresolved canonical IDs (empty strings) on known specifiers
-        for wc in &state.wildcard_reexports {
-            assert!(
-                !wc.canonical_id.is_empty(),
-                "wildcard reexport canonical ID should not be empty"
-            );
-        }
-        for (name, target) in &state.import_targets {
-            if target.source_specifier == "./bar" || target.source_specifier == "./types" {
-                assert!(
-                    !target.canonical_id.is_empty(),
-                    "import target {name} canonical ID should not be empty"
-                );
-            }
-        }
+        // The digest a `Route` derived fact publishes is likewise pure
+        // parse domain: it is computable from this state alone, with no
+        // resolver, host, or workspace in scope.
+        assert_eq!(
+            crate::resolver_store::hash_route_surface(&state),
+            crate::resolver_store::hash_route_surface(&state),
+            "the route-surface digest is a pure function of the authored surface"
+        );
     }
 
     #[test]

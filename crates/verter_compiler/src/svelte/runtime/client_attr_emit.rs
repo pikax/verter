@@ -1,5 +1,5 @@
-//! The dynamic-ATTRIBUTE / `class` / `style` `ClientEmitter` write helpers, extracted from
-//! `client.rs` to keep the emitter core under the file-size guard.
+//! The dynamic-ATTRIBUTE / `class` / `style` `ClientEmitter` write helpers, kept
+//! separate from `client.rs` so the emitter core stays focused.
 //!
 //! These build the coalesced `$.set_attribute` / property-write / `$.autofocus` /
 //! `$.set_class` / `$.set_style` call bodies from the structured op pieces, routing each

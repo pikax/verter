@@ -32,7 +32,7 @@ Top-level envelope and shared sub-records (substrate):
 
 | Rust type (`verter_audit::…`)                | Summary                                                                                |
 | -------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `record::RequestAuditRecord`                 | Top-level envelope. Carries kind + typed payload, timings, store/memory, footprint, scheduler audit, files, waits. |
+| `record::RequestAuditRecord`                 | Top-level envelope. Carries additive `target_identity`, kind + typed payload, timings, store/memory, footprint, scheduler audit, files, waits. |
 | `record::RequestKind`                        | Producer-surface discriminant — `ComponentMeta`, `TypeResolution`, `SemanticAnalysis`, `Compile { target }`, `Workspace { op }`, `Lsp { method }`, `Mcp { tool }`, `BundlerBatch { kind }`, `Custom { name }`. |
 | `record::RequestKindPayload`                 | Strongly-typed payload paired with `RequestKind` (variant tag matches kind discriminant). |
 | `record::RequestPhaseAudit`                  | Per-phase timing record (name + ms).                                                   |
@@ -57,9 +57,9 @@ arm. The payload structs live under
 | `semantic::SemanticAnalysisPayload`          | `SemanticAnalysis`                | Counters for an `AnalysisReady` build.                                                         |
 | `compile::CompilePayload`                    | `Compile { target }`              | Per-phase compile timings, codegen counts, `code_transform_ops`.                               |
 | `workspace::WorkspacePayload`                | `Workspace { op }`                | `WorkspaceOp` is one of `AuditResolve { specifier, from }`, `DepGraphTraverse { root }`, `ResolverWalk { specifier }`. |
-| `lsp::LspRequestPayload`                     | `Lsp { method }`                  | Per-request LSP method counters; carries `PositionInfo` when applicable.                       |
-| `mcp::McpToolPayload`                        | `Mcp { tool }`                    | Tool name, arg/result sizes, optional error message.                                           |
-| `bundler::BundlerBatchPayload`               | `BundlerBatch { kind }`           | Aggregated batch summary; carries `SlowRecordSummary` entries.                                 |
+| `lsp::LspRequestPayload`                     | `Lsp { method }`                  | Per-request LSP method counters; carries `PositionInfo` with the same tagged target identity when applicable. |
+| `mcp::McpToolPayload`                        | `Mcp { tool }`                    | Tool name, arg/result sizes, optional error message. Non-empty host targets are `RegisteredCanonical`; an empty optional target is `NotApplicable`. |
+| `bundler::BundlerBatchPayload`               | `BundlerBatch { kind }`           | Aggregated batch summary; each `SlowRecordSummary` carries additive `target_identity` plus the retained legacy `canonical_id`. |
 
 `RequestKindPayload::None` is used when the producer has not
 populated a typed payload yet — the envelope still carries the
@@ -287,7 +287,7 @@ underlying operation, finalise the registration, return the record:
 | `compile_with_audit_options(canonical_id, target, force_js)`            | Compile with explicit options (no defaults).                                            |
 | `analyze_with_audit(canonical_id)`                                      | Materialise `AnalysisReady` for the canonical.                                          |
 | `audit_workspace_op(op: WorkspaceOp)`                                   | Drive a workspace traversal under audit (`AuditResolve` / `DepGraphTraverse` / `ResolverWalk`). |
-| `lsp_audit_begin(method, canonical_id) -> LspAuditSession`              | Open an audited LSP handler session — the handler drives finalize through the returned session. |
+| `lsp_audit_begin(method, target_identity) -> LspAuditSession`           | Open an audited LSP handler session — the handler drives finalize through the returned session. |
 | `audit_mcp_tool_call(tool_name, canonical_id, args_size, f)`            | Wrap an MCP tool invocation; the closure returns `McpToolOutcome<T>`.                   |
 | `take_audit_record(request_id) -> Option<RequestAuditRecord>`           | Drain a published record by id.                                                         |
 

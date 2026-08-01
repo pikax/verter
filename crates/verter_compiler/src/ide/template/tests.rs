@@ -2840,10 +2840,65 @@ fn dynamic_event_name_with_binding() {
 
 /// Helper: generate TSX template with bindings AND return source map tokens.
 /// Returns (output_string, Vec<(dst_line, dst_col, src_col)>).
+///
+/// Single-authored-line fixtures only. A fixture whose authored expression spans
+/// several lines must use [`gen_tsx_template_with_line_map`], which also reports the
+/// token's source LINE.
 fn gen_tsx_template_with_map(
     source: &str,
     bindings: &[(&str, BindingType)],
 ) -> (String, Vec<(u32, u32, u32)>) {
+    let (output, tokens) = gen_tsx_template_with_line_map(source, bindings);
+    (
+        output,
+        tokens
+            .into_iter()
+            .map(|(dst_line, dst_col, _src_line, src_col)| (dst_line, dst_col, src_col))
+            .collect(),
+    )
+}
+
+/// Helper: generate TSX template with bindings AND return FULL source map tokens.
+/// Returns (output_string, Vec<(dst_line, dst_col, src_line, src_col)>).
+///
+/// MAPPED tokens only. A run's EXTENT also depends on the UNMAPPED tokens that bound
+/// it, so an extent assertion must go through
+/// [`gen_tsx_template_with_raw_tokens`] instead.
+fn gen_tsx_template_with_line_map(
+    source: &str,
+    bindings: &[(&str, BindingType)],
+) -> (String, Vec<(u32, u32, u32, u32)>) {
+    let (output, tokens) = gen_tsx_template_with_raw_tokens(source, bindings);
+    (
+        output,
+        tokens
+            .into_iter()
+            .filter_map(|t| {
+                t.src
+                    .map(|(src_line, src_col)| (t.dst_line, t.dst_col, src_line, src_col))
+            })
+            .collect(),
+    )
+}
+
+/// One emitted source-map token, mapped or not.
+///
+/// `src` is `None` for a token an UNMAPPED chunk emitted. Those tokens carry no
+/// mapping of their own but they BOUND the preceding mapped run's extent, so they
+/// are load-bearing for any extent assertion (see [`RunMap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawToken {
+    dst_line: u32,
+    dst_col: u32,
+    src: Option<(u32, u32)>,
+}
+
+/// Helper: generate TSX template with bindings AND return EVERY emitted source-map
+/// token, mapped or unmapped.
+fn gen_tsx_template_with_raw_tokens(
+    source: &str,
+    bindings: &[(&str, BindingType)],
+) -> (String, Vec<RawToken>) {
     let alloc = Allocator::new();
     let bytes = source.as_bytes();
 
@@ -2901,13 +2956,230 @@ fn gen_tsx_template_with_map(
     let full = tpl_ct.build_string();
     let map =
         tpl_ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"));
-    let tokens: Vec<(u32, u32, u32)> = map
+    let tokens: Vec<RawToken> = map
         .get_tokens()
-        .filter(|t| t.get_source_id().is_some())
-        .map(|t| (t.get_dst_line(), t.get_dst_col(), t.get_src_col()))
+        .map(|t| RawToken {
+            dst_line: t.get_dst_line(),
+            dst_col: t.get_dst_col(),
+            src: t
+                .get_source_id()
+                .map(|_| (t.get_src_line(), t.get_src_col())),
+        })
         .collect();
 
     (full, tokens)
+}
+
+/// One mapped run reconstructed from the emitted tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OracleRun {
+    dst_line: u32,
+    dst_col: u32,
+    /// Exclusive generated-column end.
+    dst_end: u32,
+    src_line: u32,
+    src_col: u32,
+    /// Exclusive source-column end. `src_end - src_col == dst_end - dst_col` ALWAYS.
+    src_end: u32,
+    /// Compatibility-component label: only runs sharing one may compose a range.
+    component: u32,
+}
+
+/// The mapped runs a conformant consumer builds from the emitted source-map tokens —
+/// the test-side mirror of `verter_lsp::documents::position_map::PositionMapper`,
+/// whose contract is documented on `MappedRun` there.
+///
+/// Three properties of that contract are what these tests exercise:
+///
+///  1. **A run maps 1:1 within itself.** A source-map token is a POINT mapping, so a
+///     run's generated extent and its source extent are the SAME length
+///     (`dst_end - dst_col == src_end - src_col`) and a position resolves by adding
+///     the in-run offset to the other side. This is not a policy choice — it is the
+///     limit of what one token can express, and it is why a LENGTH-CHANGING rewrite
+///     cannot ride a single run.
+///  2. **The extent is bounded, not open-ended.** It is
+///     `min(next-token-column-on-this-generated-line - dst_col,
+///     source-line-length - src_col)`. The first bound counts the next token of ANY
+///     kind, so an UNMAPPED token right after a mapped run caps it — which is why
+///     [`gen_tsx_template_with_raw_tokens`] must not filter unmapped tokens away.
+///  3. **Lookups are strictly in-run and ranges must compose.** A query in a gap maps
+///     to NOTHING (no extrapolation, no snap-to-nearest), and a RANGE resolves only
+///     when both endpoints land in runs linked by an unbroken chain contiguous in
+///     BOTH spaces (`prev.dst_end == cur.dst_col && prev.src_end == cur.src_col`).
+///
+/// Columns are UTF-16 code units on both sides, matching the emitter. Two deliberate
+/// simplifications, both of which make this oracle STRICTER than the consumer (never
+/// more permissive, so it cannot manufacture a false green):
+///  - the multiline line-wrap contiguity arm is not modelled, so a run never joins
+///    across a generated newline here;
+///  - the content-less extent arms are not modelled, because the emitted map always
+///    embeds the authored source.
+struct RunMap {
+    runs: Vec<OracleRun>,
+}
+
+impl RunMap {
+    fn build(source: &str, tokens: &[RawToken]) -> Self {
+        let src_line_lens: Vec<u32> = source
+            .split('\n')
+            .map(|line| line.chars().map(|c| c.len_utf16() as u32).sum())
+            .collect();
+
+        let mut runs: Vec<OracleRun> = Vec::new();
+        let mut next_component = 0u32;
+        for (i, tok) in tokens.iter().enumerate() {
+            let Some((src_line, src_col)) = tok.src else {
+                continue; // unmapped: no run of its own, it only BOUNDS the previous one
+            };
+            let next_dst_bound = tokens[i + 1..]
+                .iter()
+                .take_while(|t| t.dst_line == tok.dst_line)
+                .find(|t| t.dst_col > tok.dst_col)
+                .map(|t| t.dst_col - tok.dst_col);
+            let src_remaining = src_line_lens
+                .get(src_line as usize)
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(src_col);
+            let run_len = match next_dst_bound {
+                Some(bound) => bound.min(src_remaining),
+                None => src_remaining,
+            };
+            if run_len == 0 {
+                continue;
+            }
+            let run = OracleRun {
+                dst_line: tok.dst_line,
+                dst_col: tok.dst_col,
+                dst_end: tok.dst_col + run_len,
+                src_line,
+                src_col,
+                src_end: src_col + run_len,
+                component: 0,
+            };
+            let component = match runs.last() {
+                Some(prev)
+                    if prev.dst_line == run.dst_line
+                        && prev.dst_end == run.dst_col
+                        && prev.src_line == run.src_line
+                        && prev.src_end == run.src_col =>
+                {
+                    prev.component
+                }
+                _ => {
+                    let fresh = next_component;
+                    next_component += 1;
+                    fresh
+                }
+            };
+            runs.push(OracleRun { component, ..run });
+        }
+        Self { runs }
+    }
+
+    fn run_at_dst(&self, line: u32, col: u32) -> Option<&OracleRun> {
+        self.runs
+            .iter()
+            .find(|r| r.dst_line == line && col >= r.dst_col && col < r.dst_end)
+    }
+
+    fn run_at_src(&self, line: u32, col: u32) -> Option<&OracleRun> {
+        self.runs
+            .iter()
+            .find(|r| r.src_line == line && col >= r.src_col && col < r.src_end)
+    }
+
+    /// generated (line, col) → authored (line, col). Strictly in-run.
+    fn to_source(&self, line: u32, col: u32) -> Option<(u32, u32)> {
+        let run = self.run_at_dst(line, col)?;
+        Some((run.src_line, run.src_col + (col - run.dst_col)))
+    }
+
+    /// authored (line, col) → generated (line, col). Strictly in-run.
+    fn to_generated(&self, line: u32, col: u32) -> Option<(u32, u32)> {
+        let run = self.run_at_src(line, col)?;
+        Some((run.dst_line, run.dst_col + (col - run.src_col)))
+    }
+
+    /// A half-open generated range `[start, end)` on one generated line → the authored
+    /// range a provider edit derived from it would splice, or `None` when the range
+    /// does not compose (the fail-closed answer — no edit is produced).
+    fn range_to_source(&self, line: u32, start: u32, end: u32) -> Option<((u32, u32), (u32, u32))> {
+        let start_run = self.run_at_dst(line, start)?;
+        let start_src = (
+            start_run.src_line,
+            start_run.src_col + (start - start_run.dst_col),
+        );
+        // Half-open end exactly at a run's exclusive generated end: the last INCLUDED
+        // column is `end - 1`, and the composed authored end is that run's mapped
+        // exclusive end.
+        if end > 0 {
+            if let Some(end_run) = self.run_at_dst(line, end - 1) {
+                if end_run.dst_end == end && end_run.component == start_run.component {
+                    return Some((start_src, (end_run.src_line, end_run.src_end)));
+                }
+            }
+        }
+        let end_run = self.run_at_dst(line, end)?;
+        if end_run.component != start_run.component {
+            return None;
+        }
+        Some((
+            start_src,
+            (end_run.src_line, end_run.src_col + (end - end_run.dst_col)),
+        ))
+    }
+}
+
+/// The BYTE offset in `text` of 0-based `(line, col)` — the inverse of
+/// [`gen_line_col`]. ASCII only (asserted), so a column is a byte within its line.
+fn byte_of_line_col(text: &str, line: u32, col: u32) -> usize {
+    assert!(
+        text.is_ascii(),
+        "byte_of_line_col assumes an ASCII fixture so a UTF-16 column is a byte offset"
+    );
+    let line_start = text
+        .split_inclusive('\n')
+        .take(line as usize)
+        .map(str::len)
+        .sum::<usize>();
+    line_start + col as usize
+}
+
+/// The generated BYTE offset the authored byte `src_off` maps to, or `None` when that
+/// authored byte has no generated correlate at all (the fail-closed answer).
+///
+/// ASCII single-authored-line fixtures only: the authored byte offset is then the
+/// column on authored line 0, and a generated column is a byte within its line.
+fn authored_byte_to_generated_byte(
+    source: &str,
+    output: &str,
+    map: &RunMap,
+    src_off: usize,
+) -> Option<usize> {
+    assert!(
+        source.is_ascii() && !source.contains('\n'),
+        "this helper takes the authored byte offset as a column on authored line 0"
+    );
+    let (line, col) = map.to_generated(0, src_off as u32)?;
+    Some(byte_of_line_col(output, line, col))
+}
+
+/// The authored BYTE offset the generated byte `gen_off` maps back to, or `None`.
+fn generated_byte_to_authored_byte(
+    source: &str,
+    output: &str,
+    map: &RunMap,
+    gen_off: usize,
+) -> Option<usize> {
+    assert!(
+        source.is_ascii() && !source.contains('\n'),
+        "this helper reports the authored byte offset as a column on authored line 0"
+    );
+    let (line, col) = gen_line_col(output, gen_off);
+    let (src_line, src_col) = map.to_source(line, col)?;
+    assert_eq!(src_line, 0, "single-authored-line fixture");
+    Some(src_col as usize)
 }
 
 #[test]
@@ -6113,14 +6385,37 @@ fn custom_directive_modifiers() {
         result.contains(r#"directiveAccessor["vTest"]"#),
         "should reference vTest: {result}"
     );
+    // Identifier-shaped modifiers are BARE keys: TypeScript anchors the
+    // excess-property diagnostic at the property-name node, and a quoted key would
+    // start at the synthetic quote, so the invalid-modifier squiggle would have no
+    // carrier position at all.
     assert!(
-        result.contains(r#""bar":true"#),
-        "should have bar modifier: {result}"
+        result.contains("bar:true"),
+        "should have bar modifier as a bare key: {result}"
     );
     assert!(
-        result.contains(r#""baz":true"#),
-        "should have baz modifier: {result}"
+        result.contains("baz:true"),
+        "should have baz modifier as a bare key: {result}"
     );
+    assert!(
+        !result.contains(r#""bar":true"#),
+        "an identifier-shaped modifier must not be emitted as a quoted key: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_non_identifier_modifier_stays_quoted() {
+    // A modifier that is not a valid JS identifier must stay a quoted key to be
+    // legal JavaScript; its name is still individually mapped.
+    let source = r#"<template><div v-test.some-mod="val" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[]);
+
+    assert!(
+        output.contains(r#""some-mod":true"#),
+        "a non-identifier modifier must stay a quoted key: {output}"
+    );
+    let src = source.find(".some-mod").unwrap() + 1;
+    assert_mapped_run(&output, &tokens, "some-mod", src, "non-identifier modifier");
 }
 
 #[test]
@@ -6197,7 +6492,7 @@ fn custom_directive_full_combo() {
         "should reference vTest: {result}"
     );
     assert!(
-        result.contains(r#"baz,"foo",{"bar":true}"#),
+        result.contains(r#"baz,"foo",{bar:true}"#),
         "should have value, static arg, and modifier object: {result}"
     );
 
@@ -6224,6 +6519,754 @@ fn custom_directive_on_component() {
     assert!(
         result.contains(r#"directiveAccessor["vFocus"]"#),
         "should reference vFocus: {result}"
+    );
+}
+
+// ── Custom-directive carrier mapping ───────────────────────
+//
+// A custom directive relocates its whole payload into a synthetic
+// `___VERTER___runCustomDirective(...)` call. Every AUTHORED token inside that
+// payload — the directive name, the value expression, the argument, and each
+// modifier — must carry its own mapped run back to the authored span, or the
+// resulting diagnostics/hover/definition land nowhere (an unmapped generated
+// position has no original position and a conformant consumer fails closed).
+
+/// Convert a byte offset in `s` into the 0-based `(line, col)` the source map uses.
+fn gen_line_col(s: &str, byte_off: usize) -> (u32, u32) {
+    let mut line = 0u32;
+    let mut line_start = 0usize;
+    for (i, b) in s.as_bytes().iter().enumerate().take(byte_off) {
+        if *b == b'\n' {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    (line, (byte_off - line_start) as u32)
+}
+
+/// Assert `gen_token` occurs EXACTLY once in `output` and that a source-map token
+/// is anchored at its first byte pointing back to `src_offset`.
+///
+/// Asserting the PAIR (generated position ↔ source offset) is what discriminates:
+/// a `contains()` check stays green when the mapping drifts, and a bare
+/// "some token has this src_col" check stays green when the run is anchored on the
+/// wrong generated token.
+fn assert_mapped_run(
+    output: &str,
+    tokens: &[(u32, u32, u32)],
+    gen_token: &str,
+    src_offset: usize,
+    what: &str,
+) {
+    let occurrences = output.matches(gen_token).count();
+    assert_eq!(
+        occurrences, 1,
+        "{what}: expected exactly one occurrence of {gen_token:?} in the generated \
+         output so the mapping assertion is unambiguous, found {occurrences}: {output}"
+    );
+    let gen_off = output.find(gen_token).unwrap();
+    let (line, col) = gen_line_col(output, gen_off);
+    let found = tokens
+        .iter()
+        .any(|&(l, c, src)| l == line && c == col && src == src_offset as u32);
+    assert!(
+        found,
+        "{what}: generated {gen_token:?} at {line}:{col} must carry a mapped run back \
+         to authored offset {src_offset}. Tokens on that generated line: {:?}\n{output}",
+        tokens
+            .iter()
+            .filter(|&&(l, _, _)| l == line)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn custom_directive_modifier_key_maps_to_authored_modifier() {
+    // The invalid-modifier diagnostic TypeScript raises on the generated modifier
+    // key must be able to land on the authored `green` token.
+    let source = r#"<template><div v-color.green="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let green_src = source.find("green").unwrap();
+    assert_mapped_run(&output, &tokens, "green", green_src, "modifier key");
+}
+
+#[test]
+fn custom_directive_each_modifier_maps_to_its_own_authored_span() {
+    // MIXED valid + invalid modifiers: each generated key owns its OWN authored
+    // span. A single collapsed run would make the invalid-modifier diagnostic land
+    // on the wrong modifier — the failure mode a `contains()` check cannot see.
+    let source = r#"<template><div v-color.blue.green="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let blue_src = source.find(".blue").unwrap() + 1;
+    let green_src = source.find(".green").unwrap() + 1;
+    assert_ne!(blue_src, green_src);
+
+    assert_mapped_run(&output, &tokens, "blue", blue_src, "first modifier");
+    assert_mapped_run(&output, &tokens, "green", green_src, "second modifier");
+}
+
+/// Assert a source-map token is anchored exactly at generated byte `gen_off` and
+/// points back to authored offset `src_offset`.
+///
+/// The PAIR is what discriminates: a token merely existing somewhere for that
+/// source offset stays green when the run is anchored on the wrong generated byte,
+/// and a token merely existing at that generated byte stays green when it points
+/// at the wrong authored offset.
+fn assert_token_at(
+    output: &str,
+    tokens: &[(u32, u32, u32)],
+    gen_off: usize,
+    src_offset: usize,
+    what: &str,
+) {
+    let (line, col) = gen_line_col(output, gen_off);
+    assert!(
+        tokens
+            .iter()
+            .any(|&(l, c, src)| l == line && c == col && src == src_offset as u32),
+        "{what}: generated {line}:{col} must carry a mapped run anchored at authored \
+         offset {src_offset}. Tokens on that generated line: {:?}\n{output}",
+        tokens
+            .iter()
+            .filter(|&&(l, _, _)| l == line)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A COMPOUND value expression must map back across its WHOLE extent, not only at
+/// its identifiers.
+///
+/// TypeScript reports the argument-type error (`TS2345`) over the COMPLETE
+/// `1 + count` expression, and a strict range mapper composes a carrier range only
+/// from runs contiguous in BOTH the generated and the source space. The relocated
+/// sink used to emit the leading `1 + ` operand+operator UNMAPPED, so the
+/// diagnostic RANGE started in a hole and was dropped whole — the user saw no
+/// squiggle on a real type error. Asserting only the identifier ANCHOR (as the
+/// pre-existing value-mapping test does) cannot see that.
+#[test]
+fn custom_directive_compound_value_expression_maps_across_its_whole_extent() {
+    let source = r#"<template><div v-color="1 + count" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("vColor", BindingType::SetupConst),
+            ("count", BindingType::SetupConst),
+        ],
+    );
+
+    let expr_src = source.find("1 + count").expect("fixture expression");
+    // The leading `1 + ` run — where the diagnostic RANGE starts.
+    assert_mapped_run(
+        &output,
+        &tokens,
+        "1 + count",
+        expr_src,
+        "compound value expression start",
+    );
+
+    // …and `count` owns its OWN run, anchored so the two runs are contiguous in
+    // BOTH spaces (generated +4 ↔ authored +4). Without that the range still
+    // fails to compose and the diagnostic is still dropped.
+    let gen_off = output.find("1 + count").expect("relocated expression");
+    assert_token_at(
+        &output,
+        &tokens,
+        gen_off + "1 + ".len(),
+        expr_src + "1 + ".len(),
+        "compound value expression identifier",
+    );
+}
+
+/// Assert a source-map token is anchored exactly at generated byte `gen_off` and
+/// points back to the authored `(line, col)` of `src_off` — the LINE-aware form.
+///
+/// [`assert_token_at`] compares the source COLUMN only, which cannot see a token
+/// that lands on the right column of the WRONG authored line. A multiline
+/// expression needs the full pair.
+fn assert_token_at_lc(
+    output: &str,
+    source: &str,
+    tokens: &[(u32, u32, u32, u32)],
+    gen_off: usize,
+    src_off: usize,
+    what: &str,
+) {
+    let (dst_line, dst_col) = gen_line_col(output, gen_off);
+    let (src_line, src_col) = gen_line_col(source, src_off);
+    assert!(
+        tokens.iter().any(|&(dl, dc, sl, sc)| dl == dst_line
+            && dc == dst_col
+            && sl == src_line
+            && sc == src_col),
+        "{what}: generated {dst_line}:{dst_col} must carry a mapped run anchored at \
+         authored {src_line}:{src_col}. Tokens on that generated line: {:?}\n{output}",
+        tokens
+            .iter()
+            .filter(|&&(dl, _, _, _)| dl == dst_line)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A MULTILINE value expression must own a mapped run on EVERY generated line it
+/// spans, not only the first.
+///
+/// A source-map token anchors ONE generated line: mapping state does not carry
+/// across a generated newline. A relocated verbatim slice emitted as a SINGLE
+/// `InsertMapped` chunk therefore produces one token on its first line and leaves
+/// every later generated line of the SAME authored expression starting unmapped.
+/// The strict range mapper joins two runs across a newline only when the later run
+/// begins at column 0 of BOTH the next generated line and the next source line, so
+/// the trailing operand lands in a DIFFERENT compatibility component and the
+/// whole-expression `TS2345` range is dropped — the user sees no squiggle on a real
+/// type error. The single-line sibling test above cannot see this: it never crosses
+/// a generated newline.
+#[test]
+fn custom_directive_multiline_value_expression_maps_on_every_generated_line() {
+    let source = "<template><div v-color=\"\n    1 +\n    count\n  \" /></template>";
+    let (output, tokens) = gen_tsx_template_with_line_map(
+        source,
+        &[
+            ("vColor", BindingType::SetupConst),
+            ("count", BindingType::SetupConst),
+        ],
+    );
+
+    // The authored line break survives into the generated output verbatim. Collapsing
+    // the expression onto one generated line would sidestep the mapping bug by
+    // changing the emitted code shape, so pin the two-line emission first.
+    let gen_expr = output
+        .find("1 +\n    count")
+        .expect("the relocated expression keeps its authored line break");
+
+    let src_expr = source.find("1 +").expect("fixture first operand");
+    let src_line2 = source
+        .find("    count")
+        .expect("fixture second authored line");
+    let src_count = src_line2 + "    ".len();
+
+    // Generated line 1 of the expression: the leading operand+operator.
+    assert_token_at_lc(
+        &output,
+        source,
+        &tokens,
+        gen_expr,
+        src_expr,
+        "multiline expression first line",
+    );
+
+    // Generated line 2 STARTS with the authored indentation — it must own its own
+    // mapped run anchored at column 0 of the next AUTHORED line. Without it the
+    // generated line begins unmapped and the run chain breaks across the newline.
+    assert_token_at_lc(
+        &output,
+        source,
+        &tokens,
+        gen_expr + "1 +\n".len(),
+        src_line2,
+        "multiline expression continuation line start",
+    );
+
+    // …and the trailing identifier still anchors at its own authored token, so the
+    // continuation run and the identifier run stay contiguous in BOTH spaces.
+    assert_token_at_lc(
+        &output,
+        source,
+        &tokens,
+        gen_expr + "1 +\n    ".len(),
+        src_count,
+        "multiline expression trailing identifier",
+    );
+}
+
+/// A NON-IDENTIFIER modifier must stay a quoted key to be legal JavaScript, and
+/// TypeScript anchors the excess-property diagnostic (`TS2353`) at the WHOLE
+/// string-literal key — the opening quote through the closing quote.
+///
+/// Synthetic, unmapped quotes therefore drop the invalid-modifier diagnostic
+/// entirely: its range both starts and ends outside any mapped run. Each quote
+/// owns the authored delimiter it stands for (`.` before the modifier, and the
+/// token that terminates it), so the quoted key composes ONE contiguous carrier
+/// range covering the authored `.some-mod`.
+#[test]
+fn custom_directive_quoted_modifier_key_maps_including_its_quotes() {
+    let source = r#"<template><div v-color.some-mod="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let dot_src = source.find(".some-mod").expect("fixture modifier");
+    let name_src = dot_src + 1;
+    let after_name_src = name_src + "some-mod".len();
+
+    // The OPENING quote — where the TS2353 range STARTS — owns the authored `.`.
+    assert_mapped_run(
+        &output,
+        &tokens,
+        r#""some-mod""#,
+        dot_src,
+        "quoted modifier key opening quote",
+    );
+
+    let key_gen = output.find(r#""some-mod""#).expect("quoted modifier key");
+    // The modifier name keeps its own run (hover / definition on the modifier).
+    assert_token_at(
+        &output,
+        &tokens,
+        key_gen + 1,
+        name_src,
+        "quoted modifier key name",
+    );
+    // The CLOSING quote — where the TS2353 range ENDS — owns the authored token
+    // that terminates the modifier, so the range's exclusive end resolves.
+    assert_token_at(
+        &output,
+        &tokens,
+        key_gen + 1 + "some-mod".len(),
+        after_name_src,
+        "quoted modifier key closing quote",
+    );
+}
+
+/// Assert the WHOLE kebab→camel projection of a directive name, column by column,
+/// in BOTH directions.
+///
+/// `authored` is the authored `v-…` name and `generated` the camel identifier it
+/// projects to. The correspondence is derived here from the two spellings rather
+/// than restated per fixture: dropping each `-` and pairing what remains gives the
+/// authored column each generated column stands for. Every non-hyphen authored
+/// column must reach the generated character it actually became, and every hyphen
+/// — which the transform DELETES, so it has no generated correlate — must map to
+/// nothing.
+///
+/// This asserts the EXTENT, not an anchor. A test that checks only the run's first
+/// column stays green while the run is six columns long over a seven-column authored
+/// token; that is exactly how the truncated extent shipped.
+fn assert_directive_name_projection(
+    source: &str,
+    output: &str,
+    map: &RunMap,
+    authored: &str,
+    generated: &str,
+    what: &str,
+) {
+    // The correspondence below pairs authored characters with generated characters
+    // one for one, which holds only while every case change is length-preserving —
+    // true for ASCII. A non-ASCII name whose initial expands (`ß` → `SS`) must be
+    // asserted through the unit-level projection tests instead, so refuse it here
+    // rather than derive a wrong expectation from it.
+    assert!(
+        authored.is_ascii() && generated.is_ascii(),
+        "{what}: this helper derives the column correspondence from the two ASCII spellings"
+    );
+    let name_src = source
+        .find(authored)
+        .unwrap_or_else(|| panic!("{what}: fixture must contain the authored name {authored:?}"));
+    assert_eq!(
+        source.matches(authored).count(),
+        1,
+        "{what}: the authored name {authored:?} must occur once so the offsets are unambiguous"
+    );
+    assert_eq!(
+        output.matches(generated).count(),
+        1,
+        "{what}: the generated identifier {generated:?} must occur once in the output so the \
+         mapping assertions are unambiguous:\n{output}"
+    );
+    let name_gen = output.find(generated).expect("checked just above");
+
+    // Pair each authored column with the generated column it became, skipping the
+    // hyphens the transform deletes.
+    let mut expected: Vec<(usize, Option<usize>)> = Vec::new();
+    let mut gen_idx = 0usize;
+    for (i, ch) in authored.char_indices() {
+        if ch == '-' {
+            expected.push((i, None));
+        } else {
+            expected.push((i, Some(gen_idx)));
+            gen_idx += 1;
+        }
+    }
+    assert_eq!(
+        gen_idx,
+        generated.len(),
+        "{what}: {authored:?} minus its hyphens must have as many characters as {generated:?}"
+    );
+
+    for (src_rel, gen_rel) in expected {
+        let src_off = name_src + src_rel;
+        let want = gen_rel.map(|g| name_gen + g);
+        let got = authored_byte_to_generated_byte(source, output, map, src_off);
+        assert_eq!(
+            got,
+            want,
+            "{what}: authored byte {src_off} ({:?}) must map to {}, got {got:?}. \
+             The kebab→camel hop is LENGTH-CHANGING, so one linear run cannot carry it: \
+             it covers only its own generated length of authored columns and shifts every \
+             column past the deleted hyphen. Runs: {:?}\n{output}",
+            &authored[src_rel..src_rel + 1],
+            match want {
+                Some(g) => format!("generated byte {g} ({:?})", &output[g..g + 1]),
+                None => "NOTHING (the hyphen has no generated correlate)".to_string(),
+            },
+            map.runs,
+        );
+
+        // …and the reverse direction, which is what a provider-reported position and
+        // the endpoints of a provider-reported RANGE resolve through.
+        if let Some(gen_off) = want {
+            let back = generated_byte_to_authored_byte(source, output, map, gen_off);
+            assert_eq!(
+                back,
+                Some(src_off),
+                "{what}: generated byte {gen_off} ({:?}) must map BACK to authored byte \
+                 {src_off} ({:?}), got {back:?}. Runs: {:?}\n{output}",
+                &output[gen_off..gen_off + 1],
+                &authored[src_rel..src_rel + 1],
+                map.runs,
+            );
+        }
+    }
+
+    // A provider edit derived from the generated identifier's full range must never
+    // splice a STRICT PREFIX of the authored token: that is the corrupting partial
+    // edit (rename `vColor` → `vHighlight` replacing `v-colo` and leaving a dangling
+    // `r`). The kebab→camel hop deletes bytes, and a run chain contiguous in both
+    // spaces preserves total length, so no token layout can compose the COMPLETE
+    // authored token from the shorter generated one — the range must fail CLOSED.
+    let (gen_line, gen_col) = gen_line_col(output, name_gen);
+    let composed = map.range_to_source(gen_line, gen_col, gen_col + generated.len() as u32);
+    assert_eq!(
+        composed,
+        None,
+        "{what}: the generated identifier's range [{gen_col}, {}) must NOT compose an \
+         authored range — it is shorter than the authored token, so anything it composes is a \
+         PARTIAL token and an edit derived from it corrupts the source. It composed \
+         {composed:?} (authored token is [{name_src}, {})). Runs: {:?}\n{output}",
+        gen_col + generated.len() as u32,
+        name_src + authored.len(),
+        map.runs,
+    );
+}
+
+#[test]
+fn custom_directive_reference_maps_to_authored_directive_name() {
+    // Template `v-color` ↔ script `vColor`: the generated reference must map back
+    // to the authored directive name so hover / go-to-definition / find-references
+    // bridge the kebab↔camel hop.
+    let source = r#"<template><div v-color="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let name_src = source.find("v-color").unwrap();
+    assert_mapped_run(&output, &tokens, "vColor", name_src, "directive reference");
+
+    // …and the run's EXTENT, not just its first anchor: the anchor assertion above
+    // stays green with a six-column run over the seven-column authored `v-color`,
+    // which is how the truncated extent shipped.
+    let (output, raw) =
+        gen_tsx_template_with_raw_tokens(source, &[("vColor", BindingType::SetupConst)]);
+    let map = RunMap::build(source, &raw);
+    assert_directive_name_projection(
+        source,
+        &output,
+        &map,
+        "v-color",
+        "vColor",
+        "resolved directive reference",
+    );
+}
+
+#[test]
+fn custom_directive_accessor_reference_maps_to_authored_directive_name() {
+    // An UNRESOLVED directive resolves through the instance accessor; the mapped
+    // token is the directive name inside the string index.
+    let source = r#"<template><div v-focus /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[]);
+
+    let name_src = source.find("v-focus").unwrap();
+    assert_mapped_run(&output, &tokens, "vFocus", name_src, "accessor reference");
+
+    // …and the run's EXTENT. The accessor form is the same projection inside a string
+    // index, so it truncates identically and the anchor assertion above cannot see it.
+    let (output, raw) = gen_tsx_template_with_raw_tokens(source, &[]);
+    let map = RunMap::build(source, &raw);
+    assert_directive_name_projection(
+        source,
+        &output,
+        &map,
+        "v-focus",
+        "vFocus",
+        "accessor directive reference",
+    );
+}
+
+/// The authored `v-color` is SEVEN characters and the generated `vColor` is SIX. One
+/// linear mapped run anchored at the authored `v` therefore covers six authored
+/// columns — `v-colo` — so the trailing `r` maps to nothing, and worse, the five
+/// columns it does cover are shifted by the deleted hyphen and resolve onto the WRONG
+/// authored character.
+///
+/// Consequences of the shipped shape: hover / references with the cursor on the final
+/// `r` fail; every returned range omits that character; and a rename derived from the
+/// generated `vColor` range replaces `v-colo` and leaves a dangling `r` — a corrupting
+/// partial edit.
+#[test]
+fn custom_directive_name_maps_every_authored_column_including_the_last() {
+    let source = r#"<template><div v-color="'red'" /></template>"#;
+    let (output, raw) =
+        gen_tsx_template_with_raw_tokens(source, &[("vColor", BindingType::SetupConst)]);
+    let map = RunMap::build(source, &raw);
+
+    let name_src = source.find("v-color").expect("fixture directive name");
+    let name_gen = output
+        .find("vColor")
+        .expect("relocated directive reference");
+
+    // The defect, stated on its own: the LAST authored character must participate.
+    assert_eq!(
+        authored_byte_to_generated_byte(source, &output, &map, name_src + "v-colo".len()),
+        Some(name_gen + "vColo".len()),
+        "the final authored `r` of `v-color` must map to the generated `r` of `vColor`; \
+         a single linear run stops one column short of it. Runs: {:?}\n{output}",
+        map.runs,
+    );
+
+    assert_directive_name_projection(
+        source,
+        &output,
+        &map,
+        "v-color",
+        "vColor",
+        "single-hyphen directive name",
+    );
+}
+
+/// MULTI-hyphen: `v-click-outside` (15) → `vClickOutside` (13). The deficit is TWO,
+/// so a single run drops `de` and shifts by a different amount than the single-hyphen
+/// case — proving the defect is the mechanism, not one input's arithmetic.
+#[test]
+fn custom_directive_multi_hyphen_name_maps_every_authored_column() {
+    let source = r#"<template><div v-click-outside="'x'" /></template>"#;
+    let (output, raw) =
+        gen_tsx_template_with_raw_tokens(source, &[("vClickOutside", BindingType::SetupConst)]);
+    let map = RunMap::build(source, &raw);
+
+    assert_directive_name_projection(
+        source,
+        &output,
+        &map,
+        "v-click-outside",
+        "vClickOutside",
+        "multi-hyphen directive name",
+    );
+}
+
+/// SINGLE-CHARACTER segment: `v-a` (3) → `vA` (2). The whole authored name is the
+/// prefix, one hyphen and one letter, so the generated identifier is two columns and
+/// a single run covers `v-` only — the sole letter of the directive maps to nothing.
+#[test]
+fn custom_directive_single_char_name_maps_its_only_letter() {
+    let source = r#"<template><div v-a="'x'" /></template>"#;
+    let (output, raw) =
+        gen_tsx_template_with_raw_tokens(source, &[("vA", BindingType::SetupConst)]);
+    let map = RunMap::build(source, &raw);
+
+    assert_directive_name_projection(source, &output, &map, "v-a", "vA", "single-char directive");
+}
+
+/// A directive name carrying an ARGUMENT and MODIFIERS: the name projection is
+/// independent of them, and the name's mapped runs must not bleed into the argument
+/// or modifier spans that follow (each of those owns its own runs).
+#[test]
+fn custom_directive_name_with_arg_and_modifiers_maps_only_the_name() {
+    let source = r#"<template><div v-click-outside:foo.bar="'x'" /></template>"#;
+    let (output, raw) =
+        gen_tsx_template_with_raw_tokens(source, &[("vClickOutside", BindingType::SetupConst)]);
+    let map = RunMap::build(source, &raw);
+
+    assert_directive_name_projection(
+        source,
+        &output,
+        &map,
+        "v-click-outside",
+        "vClickOutside",
+        "directive name with arg and modifiers",
+    );
+
+    // The authored `:` that terminates the name is NOT part of the name projection: it
+    // is owned by the argument's opening-quote run, which maps it deliberately.
+    let colon_src = source.find(":foo").expect("fixture argument");
+    let quote_gen = output.find(r#""foo""#).expect("quoted static argument");
+    assert_eq!(
+        authored_byte_to_generated_byte(source, &output, &map, colon_src),
+        Some(quote_gen),
+        "the authored `:` belongs to the argument's opening quote, not to the name run. \
+         Runs: {:?}\n{output}",
+        map.runs,
+    );
+}
+
+/// The corrupting-rename guard, stated as its own test so it cannot be lost in a
+/// helper refactor: a provider edit derived from the generated identifier's range must
+/// never splice a PARTIAL authored token, and the individual authored columns must
+/// still map (so "unmap the whole name" is not a passing answer).
+#[test]
+fn custom_directive_name_range_never_composes_a_partial_authored_token() {
+    let source = r#"<template><div v-color="'red'" /></template>"#;
+    let (output, raw) =
+        gen_tsx_template_with_raw_tokens(source, &[("vColor", BindingType::SetupConst)]);
+    let map = RunMap::build(source, &raw);
+
+    let name_src = source.find("v-color").expect("fixture directive name");
+    let name_gen = output
+        .find("vColor")
+        .expect("relocated directive reference");
+    let (gen_line, gen_col) = gen_line_col(&output, name_gen);
+
+    // Both endpoints of the generated identifier resolve individually…
+    assert!(
+        map.to_source(gen_line, gen_col).is_some(),
+        "the identifier's first generated column must map. Runs: {:?}",
+        map.runs,
+    );
+    assert!(
+        map.to_source(gen_line, gen_col + "vColor".len() as u32 - 1)
+            .is_some(),
+        "the identifier's last generated column must map — unmapping the name is not the \
+         fix. Runs: {:?}",
+        map.runs,
+    );
+
+    // …but they must not COMPOSE, because 6 generated columns cannot span the 7
+    // authored ones and a partial splice corrupts the source.
+    let composed = map.range_to_source(gen_line, gen_col, gen_col + "vColor".len() as u32);
+    assert_eq!(
+        composed,
+        None,
+        "a range over the generated `vColor` must fail CLOSED. It composed {composed:?}; the \
+         authored token is [{name_src}, {}). Splicing a rename's `vHighlight` over a partial \
+         `v-colo` leaves a dangling `r`. Runs: {:?}\n{output}",
+        name_src + "v-color".len(),
+        map.runs,
+    );
+}
+
+#[test]
+fn custom_directive_value_identifier_maps_to_authored_expression() {
+    let source = r#"<template><div v-color="msg" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("vColor", BindingType::SetupConst),
+            ("msg", BindingType::SetupRef),
+        ],
+    );
+
+    let msg_src = source.find("\"msg\"").unwrap() + 1;
+    assert_mapped_run(&output, &tokens, "msg", msg_src, "value identifier");
+}
+
+#[test]
+fn custom_directive_static_arg_maps_to_authored_arg() {
+    let source = r#"<template><div v-color:foo="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let arg_src = source.find(":foo").unwrap() + 1;
+    assert_mapped_run(&output, &tokens, "foo", arg_src, "static argument");
+}
+
+/// A STATIC directive argument is emitted as a QUOTED string literal
+/// (`…,"theArg",{…}`), and TypeScript anchors an argument-type diagnostic
+/// (`TS2345`) on the WHOLE string literal — the opening quote through the closing
+/// quote.
+///
+/// Synthetic, unmapped quotes therefore drop the invalid-argument diagnostic
+/// entirely: its range both starts and ends outside any mapped run, so a strict
+/// range mapper (which composes a carrier range only from runs contiguous in BOTH
+/// spaces) rejects it and the user sees no squiggle on a real type error. Each
+/// quote owns the authored delimiter it stands for — the `:` that introduces the
+/// argument and the token that terminates it — so the quoted argument composes ONE
+/// contiguous carrier range covering the authored `:theArg`.
+///
+/// The sibling `custom_directive_static_arg_maps_to_authored_arg` asserts only the
+/// NAME anchor, so it stays green while the diagnostic is still being dropped —
+/// which is exactly how this defect survived the first mapping pass.
+#[test]
+fn custom_directive_static_arg_maps_including_its_quotes() {
+    let source = r#"<template><div v-color:theArg="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let colon_src = source.find(":theArg").expect("fixture argument");
+    let name_src = colon_src + 1;
+    let after_name_src = name_src + "theArg".len();
+
+    // The OPENING quote — where the TS2345 range STARTS — owns the authored `:`.
+    assert_mapped_run(
+        &output,
+        &tokens,
+        r#""theArg""#,
+        colon_src,
+        "static argument opening quote",
+    );
+
+    let arg_gen = output
+        .find(r#""theArg""#)
+        .expect("quoted static argument in the relocated payload");
+    // The argument name keeps its own run (hover / definition on the argument).
+    assert_token_at(
+        &output,
+        &tokens,
+        arg_gen + 1,
+        name_src,
+        "static argument name",
+    );
+    // The CLOSING quote — where the TS2345 range ENDS — owns the authored token
+    // that terminates the argument, so the range's exclusive end resolves.
+    assert_token_at(
+        &output,
+        &tokens,
+        arg_gen + 1 + "theArg".len(),
+        after_name_src,
+        "static argument closing quote",
+    );
+}
+
+#[test]
+fn custom_directive_dynamic_arg_identifier_maps_to_authored_expression() {
+    let source = r#"<template><div v-color:[dyn]="'red'" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("vColor", BindingType::SetupConst),
+            ("dyn", BindingType::SetupRef),
+        ],
+    );
+
+    let dyn_src = source.find("[dyn]").unwrap() + 1;
+    assert_mapped_run(&output, &tokens, "dyn", dyn_src, "dynamic argument");
+}
+
+#[test]
+fn custom_directive_callback_parameter_is_explicitly_typed() {
+    // The synthetic `v-directive` callback parameter has no contextual type, so an
+    // unannotated parameter raises TS7006 (`implicitly has an 'any' type`) under
+    // `noImplicitAny` on EVERY custom directive — including correct ones. The
+    // parameter must carry an explicit annotation.
+    let result = gen_tsx_template(r#"<template><div v-focus /></template>"#);
+
+    assert!(
+        result.contains("(___VERTER___slotInstance: any)"),
+        "the v-directive callback parameter must be explicitly annotated so it does \
+         not raise TS7006 under noImplicitAny: {result}"
+    );
+    assert!(
+        !result.contains("(___VERTER___slotInstance)"),
+        "no unannotated v-directive callback parameter may remain: {result}"
     );
 }
 
@@ -8096,9 +9139,18 @@ fn vmodel_source_to_generated_selects_read_occurrence() {
 
 #[test]
 fn vmodel_modifier_maps_to_source() {
-    // <input v-model.trim="x"/> → the `trim` modifier token maps to its source span.
-    let source = r#"<template><input v-model.trim="x"/></template>"#;
-    let (output, tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupRef)]);
+    // <MyComp v-model.trim="x"/> → the `trim` modifier token maps to its source span.
+    // The host is a COMPONENT because `modelModifiers` is a component prop; a native
+    // element publishes no modifiers prop at all (see
+    // `intrinsic_vmodel_does_not_emit_model_modifiers_prop`).
+    let source = r#"<template><MyComp v-model.trim="x"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("x", BindingType::SetupRef),
+            ("MyComp", BindingType::SetupConst),
+        ],
+    );
 
     assert!(
         output.contains("Modifiers={{"),
@@ -8252,16 +9304,19 @@ fn emit_codegen_crlf_and_tabs() {
 
 #[test]
 fn vmodel_dynamic_arg_modifier_maps_and_is_valid() {
-    // <input v-model:[eventName].trim="val"/> — dynamic arg + modifier.
+    // <MyComp v-model:[eventName].trim="val"/> — dynamic arg + modifier.
     // The modifiers prop name must be the COMPUTED `[`${...}Modifiers`]` name with
     // the arg expression embedded, NOT an empty JSX attribute name (` ={{`), which
     // is invalid TSX. The embedded arg `eventName` must map back to its source span.
-    let source = r#"<template><input v-model:[eventName].trim="val"/></template>"#;
+    // The host is a COMPONENT: an argument-bearing v-model is a component-only Vue
+    // form, and `modelModifiers` is a component prop.
+    let source = r#"<template><MyComp v-model:[eventName].trim="val"/></template>"#;
     let (output, tokens) = gen_tsx_template_with_map(
         source,
         &[
             ("eventName", BindingType::SetupConst),
             ("val", BindingType::SetupRef),
+            ("MyComp", BindingType::SetupConst),
         ],
     );
 
@@ -8854,23 +9909,85 @@ fn static_ref_emits_unmapped_string_literal() {
     );
 }
 
-/// Q4 — native v-model whose value/event generation is redundant
+/// Q4 — a v-model whose value/event generation is redundant
 /// (`has_explicit_prop && has_explicit_handler`) but which carries MODIFIERS. The
 /// modifiers prop MUST still be emitted. Pre-refactor `empty_replacement = true`
 /// suppressed the whole emission INCLUDING modifiers — the modifier was silently
 /// dropped.
+///
+/// The redundancy detection is native-element-only, and a native element no longer
+/// receives a `modelModifiers` prop at all (see
+/// `intrinsic_vmodel_does_not_emit_model_modifiers_prop`), so the surviving
+/// invariant is the COMPONENT one: modifiers are published independently of the
+/// value/event pieces.
 #[test]
 fn vmodel_redundant_still_emits_modifiers() {
-    // <input v-model.trim="x" :value="..." @input="..."> — both the value prop and
-    // the input handler are explicitly present, so value/event generation is
-    // redundant; only the `.trim` modifier prop should be emitted.
-    let source = r#"<template><input v-model.trim="x" :value="x" @input="e => x = e.target.value"/></template>"#;
-    let (output, _tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupRef)]);
+    let source = r#"<template><MyComp v-model.trim="x" :modelValue="x" @update:modelValue="v => x = v"/></template>"#;
+    let (output, _tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("x", BindingType::SetupRef),
+            ("MyComp", BindingType::SetupConst),
+        ],
+    );
 
-    // The modifiers prop must survive even though value/event are suppressed.
     assert!(
         output.contains("modelModifiers={{"),
-        "redundant native v-model with modifiers MUST still emit the modifiers prop: {output}"
+        "a component v-model with modifiers MUST emit the modifiers prop: {output}"
+    );
+    assert!(
+        output.contains("trim: true"),
+        "the `.trim` modifier must be emitted as `trim: true`: {output}"
+    );
+}
+
+/// RULING — `modelModifiers` is a COMPONENT prop (the name `defineModel()`
+/// synthesizes), not a DOM attribute. Vue's own compiler handles native-element
+/// v-model modifiers inside the generated `vModelText`/`vModelDynamic` runtime
+/// directive; it never passes a `modelModifiers` prop to an intrinsic element.
+/// Emitting one made `<input v-model.number.trim="count">` — valid Vue — fail with
+/// `TS2322: Property 'modelModifiers' does not exist on type 'InputHTMLAttributes &
+/// ReservedProps'`, a red squiggle on correct code.
+///
+/// `.number` / `.trim` on a native element are compiler-level modifiers with no TS
+/// correlate, so they lower to nothing and stay unmapped — the fail-closed side of
+/// the Carrier IDE TS Surface Principle, not a silently wrong prop.
+#[test]
+fn intrinsic_vmodel_does_not_emit_model_modifiers_prop() {
+    let source = r#"<template><input v-model.number.trim="count" /></template>"#;
+    let (output, _tokens) = gen_tsx_template_with_map(source, &[("count", BindingType::SetupRef)]);
+
+    assert!(
+        !output.contains("modelModifiers"),
+        "a native element must not receive the component-only `modelModifiers` prop: {output}"
+    );
+    // The value/event pieces are unaffected by the ruling.
+    assert!(
+        output.contains("value={"),
+        "native v-model must still emit the DOM value prop: {output}"
+    );
+    assert!(
+        output.contains("onInput={"),
+        "native v-model must still emit the input handler: {output}"
+    );
+}
+
+/// The control for the ruling above: a COMPONENT still publishes `modelModifiers`,
+/// because that is a real prop on a component using `defineModel`.
+#[test]
+fn component_vmodel_still_emits_model_modifiers_prop() {
+    let source = r#"<template><MyComp v-model.trim="x" /></template>"#;
+    let (output, _tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("x", BindingType::SetupRef),
+            ("MyComp", BindingType::SetupConst),
+        ],
+    );
+
+    assert!(
+        output.contains("modelModifiers={{"),
+        "a component v-model MUST still publish modelModifiers: {output}"
     );
     assert!(
         output.contains("trim: true"),
@@ -9664,4 +10781,67 @@ mod spread_event_typing_matrix {
             "unresolved component $event must be EXPLICIT any, never implicit: {result}"
         );
     }
+}
+
+// =========================================================================
+// Multi-statement v-on handlers (IDE/TSX path)
+//
+// A `v-on` value is an inline STATEMENT LIST. Two invariants follow:
+//   1. EVERY statement is binding-resolved, not just the first.
+//   2. A multi-statement value is never a bare handler reference — it must be
+//      wrapped in a handler body, or the JSX expression container holds a
+//      statement list and the emitted TSX does not parse.
+// =========================================================================
+
+#[test]
+fn multi_statement_handler_resolves_every_statement_tsx() {
+    let output = gen_tsx_template_with_bindings(
+        r#"<template><button @click="a = p; zzUnknown = 2">x</button></template>"#,
+        &[("p", BindingType::Props), ("a", BindingType::SetupConst)],
+    );
+    assert!(
+        output.contains("__props.p"),
+        "first statement must resolve the prop: {output}"
+    );
+    assert!(
+        output.contains("___VERTER___instance.zzUnknown"),
+        "an unresolved identifier in the SECOND statement must take the instance prefix: {output}"
+    );
+    assert!(
+        !output.contains("; zzUnknown = 2"),
+        "bare unprefixed second statement must not be emitted: {output}"
+    );
+}
+
+#[test]
+fn multi_statement_handler_is_wrapped_not_treated_as_member_expression() {
+    // `obj.a = 1; obj.b = 2` resolves to a string containing `.` and no `(`.
+    // A text-shaped member-expression probe classifies that as a bare handler
+    // reference and emits `onClick={obj.a = 1; obj.b = 2}` — a JSX expression
+    // container holding two statements, which does not parse.
+    let output = gen_tsx_template_with_bindings(
+        r#"<template><button @click="obj.a = 1; obj.b = 2">x</button></template>"#,
+        &[("obj", BindingType::SetupConst)],
+    );
+    assert!(
+        output.contains("onClick={() => {"),
+        "multi-statement handler must be wrapped in a handler body: {output}"
+    );
+    assert!(
+        !output.contains("onClick={obj.a = 1"),
+        "multi-statement handler must not be emitted as a bare handler reference: {output}"
+    );
+}
+
+#[test]
+fn single_statement_member_handler_stays_a_bare_reference() {
+    // Control: a genuine member-expression handler keeps the unwrapped shape.
+    let output = gen_tsx_template_with_bindings(
+        r#"<template><button @click="obj.handler">x</button></template>"#,
+        &[("obj", BindingType::SetupConst)],
+    );
+    assert!(
+        output.contains("onClick={obj.handler}"),
+        "member-expression handler must stay a bare reference: {output}"
+    );
 }

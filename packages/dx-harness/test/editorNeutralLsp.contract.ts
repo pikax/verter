@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  contractServerProfile,
   createEditorNeutralContractInventory,
   EditorNeutralContractFailure,
   executeEditorNeutralContractCase,
@@ -188,65 +189,86 @@ describe.sequential("TypeScript >=7 authority control", () => {
   });
 });
 
+// A case declares the server configuration it needs. Verter's native markup/CSS
+// intelligence is a documented OPT-IN (`hover.nativeSemantics` + `analysis.enabled`,
+// both shipped off), so those cases cannot share a server with the ones that assert
+// what the DEFAULT configuration does — the two answers are contradictory by design.
+// Profiles are discovered from the inventory rather than listed here, so adding a
+// case on a new profile spawns its server instead of silently running on the wrong one.
+const PROFILES_IN_USE = [...new Set(INVENTORY.map(contractServerProfile))].sort();
+
 for (const route of ROUTES) {
-  describe.sequential(`editor-neutral LSP contract [${route}]`, () => {
-    let driver: RawEditorNeutralLspDriver;
+  for (const profile of PROFILES_IN_USE) {
+    const profileCases = INVENTORY.filter(
+      (candidate) =>
+        candidate.providers.includes(route) && contractServerProfile(candidate) === profile,
+    );
+    if (profileCases.length === 0) continue;
 
-    beforeAll(async () => {
-      try {
-        driver = await RawEditorNeutralLspDriver.create({
-          route,
-          repoRoot: REPO_ROOT,
-          workspaceRoot: WORKSPACE_ROOT,
-        });
-      } catch (error) {
-        counters.setupFailures.push(`${route}: ${String(error)}`);
-        throw error;
-      }
-    }, 180_000);
+    describe.sequential(`editor-neutral LSP contract [${route}] (${profile})`, () => {
+      let driver: RawEditorNeutralLspDriver;
 
-    afterAll(async () => {
-      if (driver) {
-        await driver.dispose();
-      }
-    }, 30_000);
-
-    for (const testCase of INVENTORY.filter((candidate) => candidate.providers.includes(route))) {
-      it(`${testCase.surface}: ${testCase.id}`, async () => {
-        counters.attempted += 1;
-        const startedAt = performance.now();
+      beforeAll(async () => {
         try {
-          const evidence = await executeEditorNeutralContractCase(testCase, driver, driver.sources);
-          counters.passed += 1;
-          outcomes.push({
+          driver = await RawEditorNeutralLspDriver.create({
             route,
-            id: testCase.id,
-            surface: testCase.surface,
-            feature: testCase.feature,
-            status: "passed",
-            durationMs: Math.round(performance.now() - startedAt),
-            localDefinitionDurationsMs: evidence?.localDefinitionDurationsMs,
+            repoRoot: REPO_ROOT,
+            workspaceRoot: WORKSPACE_ROOT,
+            serverProfile: profile,
           });
         } catch (error) {
-          counters.failed += 1;
-          outcomes.push({
-            route,
-            id: testCase.id,
-            surface: testCase.surface,
-            feature: testCase.feature,
-            status: "failed",
-            durationMs: Math.round(performance.now() - startedAt),
-            localDefinitionDurationsMs:
-              error instanceof EditorNeutralContractFailure
-                ? error.evidence.localDefinitionDurationsMs
-                : undefined,
-            error: error instanceof Error ? error.message : String(error),
-          });
+          counters.setupFailures.push(`${route}/${profile}: ${String(error)}`);
           throw error;
         }
-      }, 60_000);
-    }
-  });
+      }, 180_000);
+
+      afterAll(async () => {
+        if (driver) {
+          await driver.dispose();
+        }
+      }, 30_000);
+
+      for (const testCase of profileCases) {
+        it(`${testCase.surface}: ${testCase.id}`, async () => {
+          counters.attempted += 1;
+          const startedAt = performance.now();
+          try {
+            const evidence = await executeEditorNeutralContractCase(
+              testCase,
+              driver,
+              driver.sources,
+            );
+            counters.passed += 1;
+            outcomes.push({
+              route,
+              id: testCase.id,
+              surface: testCase.surface,
+              feature: testCase.feature,
+              status: "passed",
+              durationMs: Math.round(performance.now() - startedAt),
+              localDefinitionDurationsMs: evidence?.localDefinitionDurationsMs,
+            });
+          } catch (error) {
+            counters.failed += 1;
+            outcomes.push({
+              route,
+              id: testCase.id,
+              surface: testCase.surface,
+              feature: testCase.feature,
+              status: "failed",
+              durationMs: Math.round(performance.now() - startedAt),
+              localDefinitionDurationsMs:
+                error instanceof EditorNeutralContractFailure
+                  ? error.evidence.localDefinitionDurationsMs
+                  : undefined,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+          }
+        }, 60_000);
+      }
+    });
+  }
 }
 
 afterAll(() => {
@@ -326,13 +348,18 @@ afterAll(() => {
   //        tsgo-preferred provider-recommendation case.
   //   +7  → 89: the B4 CSS class-intel cases (class hover/definition/references +
   //        v-bind) across the applicable routes.
+  //   +1  → 90: `vue-css.class.default-off`. The CSS class-intel family moved onto
+  //        the `verter-native-semantics` profile (it is a documented opt-in, off by
+  //        default in the server AND the shipped client), which would have left
+  //        NOTHING asserting the default. This pins the default's actual behaviour
+  //        on the same anchor, so a flip in either direction fails the gate.
   // EXPECTED_EXECUTIONS is COMPUTED from per-route applicability (see ROUTES.reduce
-  // above), never hardcoded; the .toBe(265) below is a drift-guard on that computation.
-  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(89);
+  // above), never hardcoded; the .toBe(274) below is a drift-guard on that computation.
+  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(92);
   expect(
     EXPECTED_EXECUTIONS,
     "standard + custom on each applicable route, plus shared topology",
-  ).toBe(265);
+  ).toBe(274);
   expect(
     counters.setupFailures,
     "every provider route must start; no route may be skipped",
@@ -349,7 +376,7 @@ afterAll(() => {
   ).toBe(EXPECTED_EXECUTIONS);
   expect(outcomes.filter((outcome) => outcome.status === "passed")).toHaveLength(counters.passed);
   expect(outcomes.filter((outcome) => outcome.status === "failed")).toHaveLength(counters.failed);
-  expect(inventoryGroups.byRoute).toEqual({ tsserver: 88, tsgo: 88, "shared-tsgo": 89 });
+  expect(inventoryGroups.byRoute).toEqual({ tsserver: 91, tsgo: 91, "shared-tsgo": 92 });
   expect(
     typeScriptCliControls,
     "both TypeScript >=7 authority controls must execute",

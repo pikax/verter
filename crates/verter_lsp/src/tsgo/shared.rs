@@ -594,6 +594,21 @@ impl TsgoSharedProvider {
 
         let control = Arc::new(control);
         let features = Arc::new(start_feature_bridge(Arc::clone(&control)));
+        // Hand the feature bridge the semantic-token legend the relay observed
+        // in-band on the EDITOR's `initialize` response — the shared attach
+        // never re-initializes the editor-owned engine, so this witness is the
+        // only source of the legend the engine's token indices refer to.
+        // Without it `get_semantic_tokens` fails closed (no tokens) instead of
+        // forwarding raw engine-space indices.
+        match witness.semantic_tokens_legend.as_ref().and_then(
+            verter_type_runtime::semantic_tokens::SemanticTokenLegendMap::from_legend_json,
+        ) {
+            Some(map) => features.set_semantic_token_legend(map),
+            None => tracing::warn!(
+                "shared tsgo attach: the initialize witness carried no usable semantic-token \
+                 legend — semantic tokens will fail closed (empty) on this lane"
+            ),
+        }
         let controller = SharedModeController {
             version_gate,
             attach,

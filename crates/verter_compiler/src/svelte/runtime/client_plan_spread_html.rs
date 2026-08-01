@@ -1,7 +1,7 @@
 //! The element-spread `$.attribute_effect` fold + the `{@html}` `$.html` op projection.
 //!
-//! Extracted from `client_plan.rs` (the file-size guard boundary): these are the
-//! [`SupportedClientIr`] projection methods for the two coalesced runtime surfaces a
+//! This focused sibling contains the [`SupportedClientIr`] projection methods for
+//! the two coalesced runtime surfaces a
 //! spread element / a `{@html}` tag produces — the single `$.attribute_effect(el, () =>
 //! ({ <fold> }))` and the `$.html(node, () => h [, true])`. They drive everything off the
 //! typed IR + the shared expression rewriter (no string scan), reusing the shared

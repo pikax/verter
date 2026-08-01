@@ -441,7 +441,14 @@ pub struct ProjectOverviewStats {
 /// Cached verter diagnostic entry: (document_version, diagnostics_generation, diagnostics).
 /// The `diagnostics_generation` comes from `VerterHost::get_diagnostics_generation()` and
 /// detects host-driven recompiles (e.g., dependency hydration) without a document version change.
-pub(crate) type CachedVerterDiagEntry = (i32, u64, Vec<Diagnostic>);
+///
+/// The epoch is stored as the host reports it — `Option<u64>`, never collapsed
+/// onto an in-range integer. `None` ("the host has recorded no epoch for this
+/// canonical") is a value no host-side advance can produce, so an entry stamped
+/// before an advance can never compare equal to one read after it. Collapsing
+/// it onto `0` made the sentinel collide with a real stamp and silently
+/// disarmed the fence for any file with no compile row.
+pub(crate) type CachedVerterDiagEntry = (i32, Option<u64>, Vec<Diagnostic>);
 
 // ─────────────────────────────────────────────────────────────────
 // Component-meta selective API (D32 / D102 / D104 / D113)

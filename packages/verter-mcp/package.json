@@ -1,0 +1,60 @@
+{
+  "name": "verter-mcp",
+  "version": "0.0.1-beta.3",
+  "description": "Model Context Protocol server exposing Verter's Vue and Svelte analysis to AI agents",
+  "keywords": [
+    "ai",
+    "mcp",
+    "model-context-protocol",
+    "svelte",
+    "vue"
+  ],
+  "homepage": "https://verterjs.dev/",
+  "license": "MIT",
+  "author": "pikax",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "bin": {
+    "verter-mcp": "./bin/run.js"
+  },
+  "files": [
+    "bin",
+    "index.js",
+    "index.d.ts",
+    "platforms.js",
+    "platforms.d.ts"
+  ],
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "scripts": {
+    "build": "echo 'no build step — the server binary is distributed via optionalDependencies'",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@verter/binary-launcher": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "vitest": "^4.1.7"
+  },
+  "optionalDependencies": {
+    "@verter/mcp-darwin-arm64": "workspace:*",
+    "@verter/mcp-darwin-x64": "workspace:*",
+    "@verter/mcp-linux-arm64-gnu": "workspace:*",
+    "@verter/mcp-linux-arm64-musl": "workspace:*",
+    "@verter/mcp-linux-x64-gnu": "workspace:*",
+    "@verter/mcp-linux-x64-musl": "workspace:*",
+    "@verter/mcp-win32-x64-msvc": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

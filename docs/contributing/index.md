@@ -9,8 +9,9 @@ How to contribute to Verter.
 ## Prerequisites
 
 - **Node.js** 18+ and **pnpm** 9+
-- **Rust** stable toolchain via [rustup](https://rustup.rs/), including
-  `rustfmt`, `clippy`, and `cargo-nextest`
+- **[rustup](https://rustup.rs/)** — `rust-toolchain.toml` pins the exact compiler plus
+  `rustfmt`, `clippy`, and the `wasm32-unknown-unknown` target, and rustup installs all of
+  them on your first `cargo` invocation in the repo. Install `cargo-nextest` separately.
 - **VS Code** (for extension development)
 
 ## Setup
@@ -55,8 +56,14 @@ Run these checks after making changes:
 
 ```bash
 cargo clippy --workspace -- -D warnings
+cargo check --workspace --release                                            # release-only compile errors
+cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings   # target-gated code
 cargo fmt --all --check
 ```
+
+The last two cover build configurations no other local check compiles: host clippy builds debug
+only and cannot see `#[cfg(target_arch = "wasm32")]` code at all. CI runs both in the
+`rust-build-configs` job.
 
 TypeScript formatting follows the project's existing style. There is no separate formatter command -- maintain consistency with surrounding code.
 

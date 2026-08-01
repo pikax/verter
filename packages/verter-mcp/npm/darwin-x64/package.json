@@ -1,0 +1,22 @@
+{
+  "name": "@verter/mcp-darwin-x64",
+  "version": "0.0.1-beta.3",
+  "description": "verter-mcp server binary for macOS x64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "files": [
+    "verter-mcp"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=22"
+  }
+}

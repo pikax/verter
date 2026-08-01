@@ -4,7 +4,7 @@ You are operating in a tight **fix → test → commit → continue** loop.
 
 > **Primary entrypoint**: Use `scripts/verter-compare-matrix.mjs` for automated 4-mode matrix comparison.
 > This document describes the manual/legacy single-mode comparison workflow.
-> See also: `cargo run -p verter_core --example check_matrix` for the Rust comparator.
+> See also: `cargo run -p verter_bench --example check_matrix` for the Rust comparator.
 
 This document instructs an AI agent to **systematically** compare Verter's compiled output against Vue's official compiler output, fix differences via **TDD**, and **loop until every file is processed**.
 
@@ -65,7 +65,7 @@ If a file has **too many distinct differences** (see “Too many differences” 
 ### Directory Layout
 
 ```
-crates/verter_core/examples/check/
+crates/verter_bench/examples/check/
 ├── source/                      # .vue source files (numbered 1_ to N_)
 ├── generated/                   # Compiled output from both compilers
 │   ├── {name}.{block}.{mode}.vue.js        # Vue output (SOURCE OF TRUTH)
@@ -85,42 +85,48 @@ crates/verter_core/examples/check/
 
 ## Key Source Files
 
-| File                                                     | Purpose                                                         |
-| -------------------------------------------------------- | --------------------------------------------------------------- |
-| `crates/verter_core/src/builder/codegen.rs`              | `generate_for_vite()`, options, test helpers, and all E2E tests |
-| `crates/verter_core/src/codegen/vue/template_plugin.rs`  | Template codegen plugin (render output)                         |
-| `crates/verter_core/src/codegen/vue/script_plugin.rs`    | Script codegen plugin (script output)                           |
-| `crates/verter_core/src/codegen/vue/style_plugin.rs`     | Style codegen plugin                                            |
-| `crates/verter_core/src/codegen/vue/template/element.rs` | Element processing, patch flags, dynamic props                  |
-| `crates/verter_core/src/codegen/vue/template/types.rs`   | `TemplateCodegenState` + helper flags                           |
-| `crates/verter_core/examples/check.rs`                   | Generates Vue & Verter outputs + runs AST comparison            |
-| `crates/verter_core/examples/check.js`                   | Vue compiler reference (Node)                                   |
-| `CLAUDE_IMPLEMENTATION_GUIDE.md`                         | TDD patterns, conventions                                       |
+| File                                                        | Purpose                                              |
+| ----------------------------------------------------------- | ----------------------------------------------------- |
+| `crates/verter_compiler/src/compile/mod.rs`                 | Pipeline orchestrator, options, result types         |
+| `crates/verter_compiler/src/template/code_gen/mod.rs`       | Template codegen entry point (render output)         |
+| `crates/verter_compiler/src/template/code_gen/vdom/element.rs` | Element processing, patch flags, dynamic props    |
+| `crates/verter_compiler/src/script/mod.rs`                  | Script codegen (script output)                       |
+| `crates/verter_compiler/src/style/mod.rs`                   | Style codegen                                        |
+| `crates/verter_compiler/src/compile_tests.rs`               | Compile-level tests and helpers                      |
+| `crates/verter_bench/examples/check_matrix.rs`              | Rust comparator (Vue vs Verter, AST comparison)      |
+| `crates/verter_bench/examples/check.js`                     | Vue compiler reference (Node)                        |
+| `CLAUDE.md`                                                 | TDD patterns, conventions                            |
 
 ---
 
 ## Verter API for Tests
 
 ```rust
-use verter_core::builder::codegen::{generate_for_vite, ViteCodegenOptions};
+use verter_compiler::compile::{compile, CodegenOptions, VerterCompileOptions, VueMacroSemanticInput};
 
 let allocator = oxc_allocator::Allocator::new();
-let options = ViteCodegenOptions {
+let options = CodegenOptions {
     filename: Some("test.vue".to_string()),
-    is_production: false,  // dev mode
-    ssr: false,
-    component_id: None,
-    sourcemap: false,
+    ..Default::default()
 };
-let result = generate_for_vite(source, &options, &allocator);
+let verter_opts = VerterCompileOptions {
+    force_js: true,
+    ..Default::default()
+};
+let result = compile(
+    source,
+    &options,
+    &verter_opts,
+    &VueMacroSemanticInput::Unavailable,
+    &allocator,
+);
 
 // result.script   → Option<BlockOutput>
 // result.template → Option<BlockOutput>
 // result.styles   → Vec<StyleBlock>
-// result.custom   → Vec<CustomBlock>
 ```
 
-### Existing Test Helpers (`codegen.rs` `#[cfg(test)]`)
+### Existing Test Helpers (`compile_tests.rs` `#[cfg(test)]`)
 
 - `assert_valid_js(code, context)` — validates JS syntax via OXC parser (**MANDATORY**)
 - `gen_and_validate(source) -> String` — generates monolithic output + validates JS
@@ -337,7 +343,7 @@ Date: YYYY-MM-DD
 Read `source/{name}.vue` and reduce to the smallest `.vue` source that reproduces the specific difference.
 
 ### 4b. Add a NEW failing test (mandatory)
-Add a test to `crates/verter_core/src/builder/codegen.rs` (`#[cfg(test)]` module). Do not edit existing tests.
+Add a test to `crates/verter_compiler/src/compile_tests.rs` (`#[cfg(test)]` module). Do not edit existing tests.
 
 Render example:
 ```rust
@@ -398,7 +404,7 @@ fn e2e_{feature}_{detail}_script_matches_vue() {
 ### 4c. Verify the test fails
 
 ```bash
-cargo test -p verter_core e2e_{name} 2>&1 | tail -50
+cargo test -p verter_compiler e2e_{name} 2>&1 | tail -50
 ```
 
 ### 4d. Implement the smallest fix
@@ -422,7 +428,7 @@ Identify likely module:
 1. Targeted test:
 
 ```bash
-cargo test -p verter_core e2e_{name}
+cargo test -p verter_compiler e2e_{name}
 ```
 
 2. **Full tests** (required):
@@ -544,7 +550,7 @@ cargo run --example check
 cargo test
 
 # run a specific E2E test
-cargo test -p verter_core e2e_test_name
+cargo test -p verter_compiler e2e_test_name
 
 # quick diff for one file
 diff generated/{name}.render.dev.vue.js generated/{name}.render.dev.verter.js

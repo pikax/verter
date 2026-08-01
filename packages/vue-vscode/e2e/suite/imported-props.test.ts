@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import { sequenceParent, waitForCompletionsMatching, waitForHoverMatching } from "../helpers";
 import * as vscode from "vscode";
 import {
   assertLogNotContains,
@@ -27,39 +28,28 @@ suite(`Imported Props [${FIXTURE_NAME}]`, function () {
 
   // @ai-generated - Locks the opened-.vue imported-props regression from VS Code.
   test("hover and completions work for imported defineProps with withDefaults", async function () {
+    // A hover AND a completion, in series on the same cold document, so the test
+    // carries a deadline that can hold both (`POLL_SEQUENCES`). Two 20s loops
+    // under the default 15s deadline meant neither could ever reach its own.
+    this.timeout(sequenceParent("importedPropsHoverThenCompletion"));
     const hoverPos = findPosition(doc, "{{ title }}", 3);
     expect(hoverPos, "should find title usage").to.exist;
 
-    let hovers: vscode.Hover[] = [];
-    const hoverDeadline = Date.now() + 20_000;
-    while (Date.now() < hoverDeadline) {
-      ({ hovers } = await measureHover(doc.uri, hoverPos!));
-      if (hovers.length > 0 && hovers[0].contents.length > 0) {
-        break;
-      }
-      await sleep(200);
-    }
+    const hovers = await waitForHoverMatching(doc.uri, hoverPos!, {
+      predicate: (candidates) => candidates.length > 0 && candidates[0].contents.length > 0,
+    });
     expect(hovers.length, "hover should resolve on imported prop").to.be.greaterThan(0);
     expect(hovers[0].contents.length, "hover should have content").to.be.greaterThan(0);
 
     const completionPos = findPosition(doc, "props.cou", "props.".length);
     expect(completionPos, "should find partial imported prop member usage").to.exist;
 
-    let completions: vscode.CompletionList | undefined;
-    let countCompletion: vscode.CompletionItem | undefined;
-    const completionDeadline = Date.now() + 20_000;
-    while (Date.now() < completionDeadline) {
-      completions = await getCompletions(doc.uri, completionPos!);
-      countCompletion = completions?.items.find((item) => item.label === "count");
-      if (
-        countCompletion &&
-        countCompletion.kind !== undefined &&
-        countCompletion.kind !== vscode.CompletionItemKind.Text
-      ) {
-        break;
-      }
-      await sleep(200);
-    }
+    const isTypedCount = (item: vscode.CompletionItem | undefined): boolean =>
+      item !== undefined && item.kind !== undefined && item.kind !== vscode.CompletionItemKind.Text;
+    const completions = await waitForCompletionsMatching(doc.uri, completionPos!, {
+      predicate: (list) => isTypedCount(list?.items.find((item) => item.label === "count")),
+    });
+    const countCompletion = completions?.items.find((item) => item.label === "count");
 
     expect(completions, "should return completions").to.exist;
     expect(countCompletion, "should include the imported count prop").to.exist;

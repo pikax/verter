@@ -1,7 +1,7 @@
 {
-  "name": "vscode",
+  "name": "verter-vscode",
   "displayName": "Verter VSCode",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.2",
   "private": true,
   "description": "Verter VSCode Extension",
   "categories": [
@@ -28,7 +28,9 @@
     "watch": "node esbuild.mjs --watch",
     "test": "vitest run --dir src && pnpm run test:e2e:lib:unit && pnpm run test:e2e:acceptance:unit",
     "vscode:prepublish": "node esbuild.mjs --production",
-    "prepare:e2e": "cargo build -p verter_lsp -p verter_relay_shim --manifest-path ../../Cargo.toml && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm run build:dev && tsc -p tsconfig.test.json && pnpm run attest:e2e:build",
+    "prepare:e2e:rust": "cargo build -p verter_lsp -p verter_relay_shim -p verter_mcp --manifest-path ../../Cargo.toml",
+    "prepare:e2e:ts": "pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm run build:dev && tsc -p tsconfig.test.json && pnpm run attest:e2e:build",
+    "prepare:e2e": "pnpm run prepare:e2e:rust && pnpm run prepare:e2e:ts",
     "attest:e2e:build": "node e2e/scripts/write-suite-build-manifest.mjs",
     "pretest:e2e": "pnpm run prepare:e2e",
     "test:e2e": "pnpm run test:e2e:run",
@@ -36,6 +38,7 @@
     "test:e2e:matrix": "pnpm run prepare:e2e && node out-test/e2e/runTests.js",
     "test:e2e:lib:unit": "vitest run -c e2e/lib/vitest.config.mts",
     "test:e2e:acceptance:unit": "vitest run -c e2e/acceptance/vitest.config.ts",
+    "test:e2e:fixtures:clean-quarantine": "node e2e/scripts/clean-fixture-quarantine.mjs",
     "pretest:e2e:acceptance": "pnpm run prepare:e2e",
     "test:e2e:acceptance": "node out-test/e2e/acceptance/launch.js",
     "prepare:e2e:dx": "pnpm --filter @verter/dx-harness build && pnpm run prepare:e2e",
@@ -55,7 +58,7 @@
   },
   "dependencies": {
     "@verter/typescript-plugin": "workspace:^",
-    "typescript": "^6.0.3"
+    "verter-mcp": "workspace:^"
   },
   "devDependencies": {
     "@types/chai": "^4.3.20",
@@ -75,6 +78,7 @@
     "minimatch": "^10.2.5",
     "mocha": "^11.7.6",
     "source-map": "^0.7.6",
+    "typescript": "^6.0.3",
     "vite": "^8.0.14",
     "vscode-css-languageservice": "^6.3.10",
     "vscode-jsonrpc": "^8.2.1",
@@ -145,7 +149,7 @@
         "verter.analysis.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Enable the Verter Analysis sidebar and isolated background semantic enrichment. TypeScript IDE features remain independent."
+          "description": "Enable the Verter Analysis sidebar and isolated background semantic enrichment. TypeScript IDE features remain independent. Changing this setting restarts the language server."
         },
         "verter.decorations.vueApiCalls": {
           "type": "boolean",
@@ -257,12 +261,12 @@
         "verter.mcp.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Start an HTTP MCP endpoint alongside the LSP, providing Vue analysis tools to AI agents."
+          "description": "Spawn the standalone verter-mcp HTTP server alongside the LSP, providing Vue analysis tools to AI agents."
         },
         "verter.mcp.port": {
           "type": "number",
-          "default": 6772,
-          "description": "Port for the MCP HTTP endpoint. Set to 0 for auto-assign."
+          "default": 0,
+          "description": "Port for the MCP HTTP endpoint. 0 (the default) auto-assigns a free port, which is then registered with VS Code's MCP provider API and mirrored into .mcp.json."
         },
         "verter.mcp.lintPreset": {
           "type": "string",
@@ -300,7 +304,7 @@
             "Use a separately managed TSGO process (operator override)",
             "Use workspace TypeScript version (tsserver)",
             "Serve carriers from Verter's plugin inside VS Code's own tsserver instead of a Verter-managed engine. Avoids a second TypeScript process, but only serves when your tsserver keeps each carrier in a configured project",
-            "Host TypeScript language service in the extension process (experimental)",
+            "Plain .ts/.js only — .vue and .svelte files are NOT served under this provider and get no diagnostics, no hover and no completion; choose auto, tsserver or tsgo for Vue and Svelte support. Verter warns when you open a carrier here rather than answering nothing. For plain TypeScript it hosts a language service in the extension process (experimental): each project is served from the TypeScript it installed, so a monorepo package uses its own version. That means the project's own node_modules chain and nothing else: unlike tsserver, this mode has no global tier, so a TypeScript reachable only through NODE_PATH or a legacy global folder is a compiler the project never chose and is not used. There is no bundled fallback either: a project with no resolvable TypeScript, one whose install carries no lib.*.d.ts default libraries, or one on the native (7.x/tsgo) TypeScript this service cannot drive, is not served — Verter tells you what to install or which provider to pick, and sibling projects keep working",
             "Disable TypeScript type checking"
           ],
           "description": "TypeScript type provider for Vue files. Changing this setting restarts the server."
@@ -333,12 +337,12 @@
         "verter.hover.nativeSemantics": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Enable Verter's native semantic and framework-structural hover contribution. Disabled by default so the selected TypeScript provider exclusively owns the hover hot path."
+          "markdownDescription": "Enable Verter's native semantic and framework-structural hover contribution. Disabled by default so the selected TypeScript provider exclusively owns the hover hot path. Changing this setting restarts the language server."
         },
         "verter.hover.provenance": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "**Experimental**: Append a **Provenance** markdown section to hover responses, listing files loaded during the hover's component-meta resolution and key derivation counters. The first hover returns the legacy payload; subsequent hovers at the same position include the cached enriched section. Cache is LRU-bounded to 100 entries and invalidates on `didChange` for the hovered file (transitive dependency changes do NOT invalidate — codified limitation). Requires the LSP host to have `audit_enabled` + `footprint_capture` enabled for the enrichment to populate."
+          "markdownDescription": "**Experimental**: Append a **Provenance** markdown section to hover responses, listing files loaded during the hover's component-meta resolution and key derivation counters. The first hover returns the legacy payload; subsequent hovers at the same position include the cached enriched section. Cache is LRU-bounded to 100 entries and invalidates on `didChange` for the hovered file (transitive dependency changes do NOT invalidate — codified limitation). Requires the LSP host to have `audit_enabled` + `footprint_capture` enabled for the enrichment to populate. Changing this setting restarts the language server."
         }
       }
     },

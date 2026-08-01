@@ -95,22 +95,193 @@ impl VerterHost {
         self.resolve_fallthrough_surface_internal(canonical_id, &mut visiting)
     }
 
+    /// [`Self::resolve_fallthrough_surface`] pinned to a caller-owned store
+    /// view.
+    ///
+    /// A caller that already holds a request-bound capture (the public-API
+    /// render's per-batch `BatchFixedView`) passes it here so the resolve
+    /// shares that snapshot instead of opening its own — one read for the
+    /// whole batch rather than one per item. Passing `None` is identical to
+    /// [`Self::resolve_fallthrough_surface`].
+    ///
+    /// The capture's own fence travels WITH it: `(view, captured_fingerprint,
+    /// is_current)`. The request executor stamps that CAPTURED fingerprint —
+    /// never a fresh live read — and compares it against the live fingerprint
+    /// before promoting, so an external mutation landing between the caller's
+    /// capture and the promotion fence makes the result return-only instead of
+    /// warming a shared entry computed from a superseded view. A non-current
+    /// capture likewise suppresses the warm peek rather than being laundered
+    /// into "current".
+    pub(crate) fn resolve_fallthrough_surface_pinned(
+        &self,
+        canonical_id: &str,
+        fixed_store_view: Option<(&crate::resolver_store::HostStoreView, u64, bool)>,
+    ) -> Option<crate::types::FallthroughResolution> {
+        let _ctx_guard = self.install_request_budget_context_if_none(
+            self.next_request_id(),
+            canonical_id,
+            false,
+        );
+        let mut visiting = rustc_hash::FxHashSet::default();
+        self.resolve_fallthrough_surface_internal_pinned(
+            canonical_id,
+            fixed_store_view,
+            &mut visiting,
+        )
+    }
+
+    /// The `(module specifier, namespace member)` pair `owner_canonical_id`'s
+    /// OWN source reaches `child_canonical_id` through, or `None` when the owner
+    /// reaches it through no import binding at all.
+    ///
+    /// This is the exact INVERSE of the resolution the fallthrough resolver
+    /// itself performed. That resolution is NOT "resolve the specifier": it is
+    /// `resolve_loaded_dependency_canonical` (the module) followed by
+    /// `resolve_value_export_target` on the binding's REQUESTED EXPORT NAME,
+    /// which follows re-exports (`resolve_child_component_canonical`). So the
+    /// inversion runs both halves, per BINDING rather than per specifier:
+    ///
+    /// * `import Child from "./Child.vue"` — the module IS the child, the
+    ///   member is `default`;
+    /// * `import { Child } from "./barrel"` — the module is the barrel, whose
+    ///   own resolution lands on the child; the member is `Child`. Matching only
+    ///   the module (the previous behaviour) recovers NOTHING here, and the
+    ///   channel is then dropped without a trace. Assuming `default` would name
+    ///   a member the barrel does not have — silently `{}`.
+    ///
+    /// Namespace bindings are skipped, and that skip is a CONSEQUENCE rather
+    /// than a cause: a `<Ns.Child/>` root never reaches this function at all.
+    /// `template_convert::convert_raw_to_analysis` attaches an import source by
+    /// matching the COMPLETE tag against an import's local name, and `Ns.Child`
+    /// never equals `Ns`, so the resolver classifies the root target
+    /// `UnresolvedRootTargetReason::UnresolvedImport` and the projection is
+    /// zeroed before any recovery happens. Accepting namespace bindings here
+    /// would therefore change nothing; the shape is pinned as unsupported by
+    /// `a_namespace_member_root_fails_closed_with_a_typed_unresolved_reason`.
+    ///
+    /// Candidate order is deterministic and downstream-aware: RELATIVE
+    /// specifiers first (every consumer of the generated carrier resolves them —
+    /// a bare or aliased specifier depends on the consumer's own path mapping),
+    /// then lexicographic on `(specifier, member)`. An owner may legitimately
+    /// import the same module twice, and the carrier must be byte-stable.
+    ///
+    /// Reads through `get_script_ingress` — the source-stage import facts —
+    /// rather than `get_analysis`: this needs only the authored import list,
+    /// and the ingress read triggers no analysis completion and no lazy
+    /// semantic / template / style work.
+    pub(crate) fn owner_import_reference_for(
+        &self,
+        owner_canonical_id: &str,
+        child_canonical_id: &str,
+    ) -> Option<(String, String)> {
+        use verter_semantic::analysis::types::ImportBindingKind;
+
+        let ingress = self.get_script_ingress(owner_canonical_id)?;
+        let mut best: Option<(bool, String, String)> = None;
+        for import in ingress.imports.iter() {
+            if import.is_type_only {
+                continue;
+            }
+            let dep_canonical = match self.resolve_loaded_dependency_canonical(
+                owner_canonical_id,
+                import.source.as_str(),
+                verter_workspace::ResolveRequestKind::EsmImport,
+            ) {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    let Some(dep_canonical) = admitted.into_result() else {
+                        continue;
+                    };
+                    dep_canonical
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => return None,
+            };
+            for binding in import.bindings.iter() {
+                if binding.is_type_only || matches!(binding.kind, ImportBindingKind::Namespace) {
+                    continue;
+                }
+                let export_name = match binding.kind {
+                    ImportBindingKind::Default => binding
+                        .imported_name
+                        .as_deref()
+                        .unwrap_or("default")
+                        .to_string(),
+                    ImportBindingKind::Named => binding
+                        .imported_name
+                        .as_deref()
+                        .unwrap_or(binding.name.as_str())
+                        .to_string(),
+                    ImportBindingKind::Namespace => continue,
+                };
+                // Same two-step the resolver took. The direct hit short-circuits
+                // the export walk for the overwhelmingly common
+                // `import Child from "./Child.vue"` shape.
+                let reaches_child = dep_canonical == child_canonical_id
+                    || self
+                        .resolve_value_export_target(dep_canonical.as_str(), export_name.as_str())
+                        .is_some_and(|target| target.canonical_id == child_canonical_id);
+                if !reaches_child {
+                    continue;
+                }
+                let is_relative =
+                    verter_workspace::resolver::is_relative_specifier(import.source.as_str());
+                let candidate = (!is_relative, import.source.clone(), export_name);
+                if best.as_ref().is_none_or(|known| candidate < *known) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        best.map(|(_, specifier, export_name)| (specifier, export_name))
+    }
+
     /// Internal recursive method with cycle detection.
     pub(super) fn resolve_fallthrough_surface_internal(
         &self,
         canonical_id: &str,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<crate::types::FallthroughResolution> {
-        self.resolve_fallthrough_surface_internal_with_overrides(canonical_id, None, visiting)
+        self.resolve_fallthrough_surface_internal_with_overrides(canonical_id, None, None, visiting)
+    }
+
+    fn resolve_fallthrough_surface_internal_pinned(
+        &self,
+        canonical_id: &str,
+        fixed_store_view: Option<(&crate::resolver_store::HostStoreView, u64, bool)>,
+        visiting: &mut rustc_hash::FxHashSet<String>,
+    ) -> Option<crate::types::FallthroughResolution> {
+        self.resolve_fallthrough_surface_internal_with_overrides(
+            canonical_id,
+            None,
+            fixed_store_view,
+            visiting,
+        )
     }
 
     pub(super) fn resolve_fallthrough_surface_internal_with_overrides(
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
+        fixed_store_view: Option<(&crate::resolver_store::HostStoreView, u64, bool)>,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<crate::types::FallthroughResolution> {
         use verter_semantic::analysis::component_meta::*;
+        // Root reachability is a TEMPLATE fact, and `AnalysisScope::BUILD`
+        // deliberately carries no template flag — one bit there materialises the
+        // WHOLE template snapshot (elements, binding occurrences, slots, refs,
+        // events, `v-for`/`v-model`, if-chains, `<template src>` cross-file
+        // reads) for every carrier file every BUILD-scope consumer analyses, to
+        // obtain the one fact the inheritance resolver reads.
+        //
+        // The demand belongs HERE, at the resolver's own funnel, not at any one
+        // consumer: the resolved surface has TWO consumers (the parent-facing
+        // carrier props type and the Verter-owned `verter/unknown-prop` lint),
+        // and a demand opened at one of them would make the other disagree with
+        // the resolver it reads. Fan-out is bounded by the resolve itself — the
+        // owner plus, recursively, only the components on its ROOT chain — and
+        // the computed snapshot persists into the shared generation-keyed
+        // raw-template slot, so a later resolve of the same file version reuses
+        // it instead of walking again. Re-entrant, and a no-op under a scope
+        // that already asks for template analysis.
+        let _root_template_demand = crate::request_context::RootTemplateDemandScope::enter();
         let started = component_meta_debug_enabled().then(Instant::now);
         component_meta_trace_custom!(
             "resolve_fallthrough_surface",
@@ -191,7 +362,7 @@ impl VerterHost {
             canonical_id,
             prop_type_overrides,
             visiting,
-            None,
+            fixed_store_view,
             STORE_VIEW_STABILITY_MAX_ATTEMPTS,
         );
 

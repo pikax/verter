@@ -5,8 +5,66 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::protocol::*;
+
+/// The configured project that owns a file: its root directory AND the config
+/// file that defines it.
+///
+/// Both halves are load-bearing, and neither derives the other. The ROOT is
+/// where the project's dependencies are installed (`node_modules/typescript`).
+/// The CONFIG is the project's identity: one directory routinely holds several
+/// configured projects (`tsconfig.app.json` + `tsconfig.node.json`), each with
+/// its own compiler options, and a project may be configured by `jsconfig.json`
+/// or any `tsconfig.*.json` — so a consumer given only the root has to guess
+/// which config to read, and collapses siblings onto one identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredOwner {
+    /// Project root directory (canonical).
+    pub root: String,
+    /// The exact config file that defines the project (canonical).
+    pub config_path: String,
+}
+
+/// What an ownership authority says about one file.
+///
+/// The two answers are DIFFERENT KINDS OF ANSWER, so they are different
+/// variants rather than `Some`/`None`. "No configured project claims this file"
+/// is an authoritative, TERMINAL decision (`NoProject` in the Project-Bound
+/// External-TS Contract): the consumer must not serve external-TS results for
+/// the file, and must not substitute a project of its own. Collapsing it into
+/// `None` makes it indistinguishable from "no authority has been published yet"
+/// — a TRANSIENT bootstrap state where a last-resort binding IS legitimate — and
+/// a consumer that cannot tell them apart necessarily treats one of them wrongly.
+///
+/// The transient state is expressed by the ABSENCE of an authority (the consumer
+/// holds `Option<Arc<dyn ConfiguredOwnerAuthority>>`); an authority that exists
+/// always answers one of these two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectOwnership {
+    /// A configured project owns the file.
+    Owned(ConfiguredOwner),
+    /// No configured project's program contains the file. TERMINAL: no
+    /// external-TS results, no invented owner, no folder-derived substitute.
+    NoProject,
+}
+
+/// The configured-project ownership authority a provider consults to stamp a
+/// per-file project binding.
+///
+/// Deliberately dependency-free (one canonical path in, one canonical
+/// [`ProjectOwnership`] out) so the provider layer never grows a
+/// workspace-snapshot dependency and never re-derives ownership itself. The
+/// single production implementation is backed by
+/// `WorkspaceSnapshot::default_configured_owner_for_file` — the same
+/// provider-neutral decision the tsserver, managed-tsgo, and shared-tsgo carrier
+/// routes consume — so there is exactly one owner-selection engine.
+pub trait ConfiguredOwnerAuthority: Send + Sync {
+    /// The configured project that owns `canonical_id`, or the terminal
+    /// [`ProjectOwnership::NoProject`] when none does.
+    fn configured_owner(&self, canonical_id: &str) -> ProjectOwnership;
+}
 
 /// Priority tiers for type provider operations.
 ///
@@ -352,6 +410,24 @@ pub trait TypeProvider: Send + Sync {
     ) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
+
+    /// Publish the configured-project ownership authority.
+    ///
+    /// Workspace FOLDERS are an editor concept, not a project identity: a
+    /// single-folder pnpm monorepo has one folder and many configured projects,
+    /// each with its own `tsconfig.json` and its own `node_modules`. A provider
+    /// that stamps a per-file project root from folder membership alone
+    /// therefore names the WRONG project for every nested package, which is
+    /// exactly what makes a package-local TypeScript install look absent.
+    ///
+    /// Init installs the workspace snapshot's configured-owner authority here
+    /// once the exact snapshot is built, so per-file project bindings come from
+    /// the shared provider-neutral ownership decision rather than a folder
+    /// prefix. The binding carries the owning CONFIG as well as the root: one
+    /// directory can hold several configured projects with different options, so
+    /// a consumer handed only the root would have to guess which config applies.
+    /// Providers that do not stamp a per-file project binding ignore it.
+    fn set_project_ownership(&self, _authority: Arc<dyn ConfiguredOwnerAuthority>) {}
 
     /// Return the PID of the child process, if any.
     fn child_pid(&self) -> Option<u32> {

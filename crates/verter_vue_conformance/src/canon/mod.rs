@@ -39,10 +39,9 @@
 //! pattern slot, binding kind)` — references carry the same key as their
 //! declaration, preserving shadowing and closure-capture topology.
 
-// Module split (file-size guard): `types + driver` here, `classify` for the
-// Exact-vs-Alpha identifier classification, `comments` for semantic-comment
-// anchoring, and `canonize` for the exhaustive canonicalizer. Behavior is
-// identical to the single-file `canon.rs` — pure extraction.
+// Module layout: `types + driver` here, `classify` for Exact-vs-Alpha identifier
+// classification, `comments` for semantic-comment anchoring, and `canonize` for
+// the exhaustive canonicalizer. Each responsibility stays independently readable.
 
 mod canonize;
 mod classify;

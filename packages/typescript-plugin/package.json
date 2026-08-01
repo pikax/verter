@@ -1,6 +1,6 @@
 {
   "name": "@verter/typescript-plugin",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "Vue TypeScript Plugin powered by Verter",
   "keywords": [
     "language-service",
@@ -25,6 +25,12 @@
       "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./verter-types-stub": {
+      "types": "./dist/helpers/verterTypesStub.d.ts",
+      "require": "./dist/helpers/verterTypesStub.js",
+      "import": "./dist/helpers/verterTypesStub.js",
+      "default": "./dist/helpers/verterTypesStub.js"
     }
   },
   "scripts": {
@@ -42,6 +48,6 @@
     "vitest": "^4.1.7"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

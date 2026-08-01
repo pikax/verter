@@ -136,8 +136,8 @@ const cargoToml = readFileSync(join(ROOT, "Cargo.toml"), "utf8");
 const cargoVersionMatch = cargoToml.match(/version\s*=\s*"([^"]+)"/);
 const cargoVersion = cargoVersionMatch ? cargoVersionMatch[1] : null;
 
-/** Crates published to crates.io, in dependency order */
-const PUBLISHED_CRATES = ["verter_span", "verter_core"];
+/** Crates published to crates.io, in dependency order (see .github/workflows/release.yml) */
+const PUBLISHED_CRATES = ["verter_span", "verter_compiler"];
 
 const rustCrates = [];
 for (const crate of PUBLISHED_CRATES) {

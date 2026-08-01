@@ -35,30 +35,28 @@ use crate::svelte::parser::{
 };
 use store::rewrite_store_sub;
 
-/// The `bind:` directive projection (F4/F5) — a continuation of the
-/// `TemplateProjector` impl, extracted for file size.
+/// The `bind:` directive projection (F4/F5), isolated as a focused
+/// continuation of the `TemplateProjector` impl.
 mod bind;
 mod directive;
 
 /// The block-construct projection (`{#if}`/`{#each}`/`{#await}`/`{#key}`/
-/// `{#snippet}`) — a continuation of the `TemplateProjector` impl, extracted for
-/// file size.
+/// `{#snippet}`), isolated as a focused continuation of the `TemplateProjector` impl.
 mod block;
 
-/// The `<svelte:*>` special-element + namespace projection (F8/F9/F10) — a
-/// continuation of the `TemplateProjector` impl, extracted for file size.
+/// The `<svelte:*>` special-element + namespace projection (F8/F9/F10), isolated
+/// as a focused continuation of the `TemplateProjector` impl.
 mod special;
 
-/// The F11 store auto-subscription rewrite — a continuation of the projector,
-/// extracted for file size.
+/// The F11 store auto-subscription rewrite, isolated as a focused continuation
+/// of the projector.
 mod store;
 
 /// Small syntactic identifier / literal-scanning helpers shared across the
-/// continuation modules — extracted for file size.
+/// continuation modules.
 mod ident;
 
-/// The IDE-carrier PUBLIC-FACADE default-export synthesiser — extracted for
-/// file size.
+/// The focused IDE-carrier PUBLIC-FACADE default-export synthesiser.
 mod facade;
 
 /// Framework-owned TypeScript inference for named DOM handlers in a Svelte 5

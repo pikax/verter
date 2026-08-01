@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,7 +14,12 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { canonicalizePath, joinCanonical } from "../src/paths.js";
-import { readTypescriptVersionFromDisk, resolveToolRoots } from "../src/toolRoots.js";
+import {
+  normalizeToolPath,
+  readTypescriptVersionFromDisk,
+  resolveToolRoots,
+  toolRootMatchesPin,
+} from "../src/toolRoots.js";
 
 const tmps: string[] = [];
 afterEach(() => {
@@ -184,5 +197,88 @@ describe("readTypescriptVersionFromDisk", () => {
   it("returns undefined when the package.json is absent", () => {
     const root = tmp();
     expect(readTypescriptVersionFromDisk(join(root, "missing", "lib"))).toBeUndefined();
+  });
+});
+
+/**
+ * Mirrors `crates/verter_dx_baseline/src/provider_tests.rs` — the same two
+ * properties C proves for `normalize_tool_path` / `enforce_tsserver_path_match`:
+ * one file under two spellings collapses to one value, and two files that really
+ * are different stay different.
+ */
+describe("toolRootMatchesPin", () => {
+  /**
+   * Build `<tmp>/store/typescript/lib/tsserver.js` plus the pnpm-shaped link
+   * `<tmp>/pkg/node_modules/typescript -> <tmp>/store/typescript`.
+   * Returns `undefined` when the platform refuses the symlink (Windows without
+   * developer mode), so the caller can skip rather than assert on a link that
+   * was never created.
+   */
+  function pnpmShapedLink(): { spelled: string; real: string } | undefined {
+    const root = tmp();
+    const realTs = join(root, "store", "typescript");
+    mkdirSync(join(realTs, "lib"), { recursive: true });
+    const real = join(realTs, "lib", "tsserver.js");
+    writeFileSync(real, "// tsserver");
+
+    const linkParent = join(root, "pkg", "node_modules");
+    mkdirSync(linkParent, { recursive: true });
+    const link = join(linkParent, "typescript");
+    try {
+      symlinkSync(realTs, link, "junction");
+    } catch {
+      return undefined;
+    }
+    return { spelled: join(link, "lib", "tsserver.js"), real };
+  }
+
+  it("matches the pnpm-linked pinned tsdk against the real path the bridge reports", (ctx) => {
+    const paths = pnpmShapedLink();
+    if (!paths) {
+      // REPORTED as a skip, never a silent pass: a platform that refuses the
+      // symlink has not exercised the resolution, and a green tick would claim
+      // it had.
+      ctx.skip("platform refused to create the symlink");
+      return;
+    }
+
+    // Positive control for the fixture itself: if these two spellings were equal,
+    // every assertion below would pass without the symlink resolution under test
+    // ever running. This is the divergence that made the CI gate unpassable.
+    expect(canonicalizePath(paths.spelled)).not.toBe(canonicalizePath(paths.real));
+
+    expect(normalizeToolPath(paths.spelled)).toBe(normalizeToolPath(paths.real));
+    expect(toolRootMatchesPin(paths.real, paths.spelled)).toBe(true);
+    expect(toolRootMatchesPin(paths.spelled, paths.real)).toBe(true);
+  });
+
+  it("still rejects two tsserver.js files that really are different files", () => {
+    const root = tmp();
+    mkdirSync(join(root, "pinned"), { recursive: true });
+    mkdirSync(join(root, "ambient"), { recursive: true });
+    const pinned = join(root, "pinned", "tsserver.js");
+    const ambient = join(root, "ambient", "tsserver.js");
+    writeFileSync(pinned, "// pinned");
+    writeFileSync(ambient, "// ambient");
+
+    // BOTH exist, so realpath succeeds for each — resolution must not collapse
+    // them. Without this the gate would "pass" by matching everything, which is
+    // the exact drift it exists to catch.
+    expect(normalizeToolPath(pinned)).not.toBe(normalizeToolPath(ambient));
+    expect(toolRootMatchesPin(ambient, pinned)).toBe(false);
+  });
+
+  it("falls back to string canonicalisation for a path with no filesystem identity", () => {
+    const missing = join(tmp(), "gone", "lib", "tsserver.js");
+    expect(normalizeToolPath(missing)).toBe(canonicalizePath(missing));
+    expect(toolRootMatchesPin(missing, missing)).toBe(true);
+    expect(toolRootMatchesPin(missing, join(tmp(), "other", "tsserver.js"))).toBe(false);
+  });
+
+  it("never treats a missing report as a match", () => {
+    expect(toolRootMatchesPin(undefined, "/pinned/tsserver.js")).toBe(false);
+    expect(toolRootMatchesPin(null, "/pinned/tsserver.js")).toBe(false);
+    expect(toolRootMatchesPin("", "/pinned/tsserver.js")).toBe(false);
+    expect(toolRootMatchesPin("/pinned/tsserver.js", "")).toBe(false);
   });
 });

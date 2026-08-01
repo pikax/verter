@@ -189,24 +189,22 @@ pub trait SessionView: Send + Sync {
         false
     }
 
-    /// Cached resolved-import facts for a canonical id under this
-    /// view, if present.
+    /// Resolved-import facts for a canonical id under this view.
     ///
-    /// Looks up the
-    /// [`crate::resolved_import_facts::ResolvedImportFactsDb`]
-    /// slot keyed by
+    /// Reads the one resolve-domain store
+    /// ([`crate::resolved_import_facts::ResolvedImportFactsDb`]) at the
     /// `(canonical, content_hash_for(canonical),
-    /// env_hashes().parse_env_hash,
-    /// env_hashes().resolve_env_hash,
-    /// RESOLVED_IMPORT_FACTS_RESOLVER_VERSION)`. Returns `None`
-    /// when the cache has not been populated for that quintuple —
-    /// the resolver populates entries on first demand and
-    /// downstream consumers re-read from here instead of
+    /// env_hashes().parse_env_hash, env_hashes().resolve_env_hash,
+    /// RESOLVED_IMPORT_FACTS_RESOLVER_VERSION)` slot and serves the
+    /// candidate whose recorded import-route witness still validates.
+    /// `None` means the slot is cold or every retained bundle predates a
+    /// resolution change — either way the resolver repopulates on
+    /// demand and downstream consumers re-read from here instead of
     /// re-walking the AST.
     ///
-    /// `lib_env_hash` is intentionally absent from the cache key
-    /// (R21 scoping rule — base import-target resolution does not
-    /// depend on TS lib data).
+    /// `lib_env_hash` is intentionally absent from the key (R21 scoping
+    /// rule — base import-target resolution does not depend on TS lib
+    /// data).
     fn resolved_import_facts(
         &self,
         canonical: &str,
@@ -271,104 +269,6 @@ pub trait SessionView: Send + Sync {
     }
 }
 
-/// Shared lookup helper used by the base-only views
-/// ([`HostView`], [`HostViewRef`]).
-///
-/// Resolves the `(canonical, content_hash, parse_env_hash,
-/// resolve_env_hash, resolver_version)` quintuple from the host's
-/// scheduler-cached source data + the supplied env hashes, then
-/// reads from [`crate::resolved_import_facts::ResolvedImportFactsDb`].
-///
-/// The `content_hash` source mirrors the producer
-/// (`admit_resolved_import_facts_for_owner`): both read the
-/// scheduler-authoritative `parse.whole_hash` so the producer's
-/// admission key and the view's lookup key reach the same `DashMap`
-/// slot immediately after `upsert`, without waiting for the lazy
-/// `IndexedReady` materialization through `ensure_indexed_ready_serve`. The
-/// source is strict — [`current_content_hash_from_scheduler`] — with
-/// no permissive `FileArtifactStore` fallback: a scan-derived stale
-/// hash would resolve a stale `ResolvedImportFacts` entry instead of
-/// missing.
-///
-/// Returns `None` when the scheduler has no current content hash for
-/// `canonical` (unloaded / evicted / deleted), or when the cache has
-/// not been populated for the resolved quintuple.
-fn resolved_import_facts_via_host(
-    base: &VerterHost,
-    canonical: &str,
-    env_hashes: &EnvHashes,
-) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
-    let content_hash = current_content_hash_from_scheduler(base, canonical)?;
-    let known_miss_generation = known_miss_generation_tag_for_owner(base, canonical);
-    let key = crate::resolved_import_facts::ResolvedImportFactsKey {
-        canonical: Arc::from(canonical),
-        content_hash,
-        parse_env_hash: env_hashes.parse_env_hash,
-        resolve_env_hash: env_hashes.resolve_env_hash,
-        resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
-        known_miss_generation,
-    };
-    base.project_type_store().resolved_import_facts().get(&key)
-}
-
-/// Resolve the owner's known-miss generation tag for composing
-/// [`crate::resolved_import_facts::ResolvedImportFactsKey`].
-///
-/// Reads
-/// [`DerivedRawState::import_routes_known_miss_recorded_at_generation`](crate::types::DerivedRawState)
-/// and folds it via
-/// [`crate::resolved_import_facts::compute_known_miss_generation_tag`].
-/// When no `DerivedRawState` entry exists yet for the canonical (the
-/// owner has never had its routes recorded), returns `[0u8; 16]` so
-/// the lookup composes the same tag value as the producer's "no
-/// known-misses" first call.
-///
-/// Used by the base-only views ([`HostView`], [`HostViewRef`]) AND
-/// the base-fallthrough branch of the overlay views ([`OverlaidView`],
-/// [`OverlaidViewRef`]) so the lookup key matches the producer
-/// (`admit_resolved_import_facts_for_owner`) byte-for-byte
-/// regardless of overlay state.
-fn known_miss_generation_tag_for_owner(
-    base: &VerterHost,
-    canonical: &str,
-) -> verter_semantic::analysis::Hash16 {
-    let entry = base.derived_raw_cache().get(canonical);
-    match entry {
-        Some(e) => crate::resolved_import_facts::compute_known_miss_generation_tag(
-            &e.import_routes_known_miss_recorded_at_generation,
-        ),
-        None => [0u8; 16],
-    }
-}
-
-/// Resolve `canonical`'s **current** content hash from the scheduler
-/// authority — the sole parse authority, available immediately
-/// post-`upsert`.
-///
-/// Strict by contract: this delegates to
-/// [`VerterHost::authoritative_current_content_hash`] (scheduler
-/// `HostSourceData.parse.whole_hash`, gated on the `DerivedRawState`
-/// entry being non-evicted) and has **no permissive fallback**. It
-/// never derives a hash from a `FileArtifactStore` scan: a scan can
-/// surface a stale pre-edit artifact's own hash, and feeding that into
-/// a content-pinned `ResolvedImportFacts` lookup would resolve the
-/// stale resolution instead of yielding a miss. When only a stale
-/// artifact could answer — the canonical was evicted / deleted while
-/// its `IndexedReady` lingers — this returns `None`, which is correct:
-/// `ResolvedImportFacts` is produced keyed from the same scheduler
-/// `parse.whole_hash`, so a `None` here is a true miss, not a lost
-/// cache hit.
-///
-/// Used by `resolved_import_facts_via_host` to match the producer
-/// (`admit_resolved_import_facts_for_owner`) on cache-key
-/// `content_hash` composition.
-fn current_content_hash_from_scheduler(
-    base: &VerterHost,
-    canonical: &str,
-) -> Option<verter_semantic::analysis::Hash16> {
-    base.authoritative_current_content_hash(canonical)
-}
-
 // ---------------------------------------------------------------------------
 // HostView — direct passthrough to `VerterHost`.
 // ---------------------------------------------------------------------------
@@ -418,6 +318,57 @@ impl HostView {
     }
 }
 
+/// The one validated read of the resolve-domain store, shared by every
+/// [`SessionView`] implementation.
+///
+/// `content_hash` is the view's own (overlay-aware) hash, so a session
+/// buffer and the base bytes address distinct slots. The candidate is
+/// then validated against the host's store view, exactly as the
+/// resolve-imports fact validator does — the store has one read, and
+/// that read roots the bundle's import-route witness.
+fn resolved_import_facts_for_view(
+    base: &VerterHost,
+    canonical: &str,
+    content_hash: verter_semantic::analysis::Hash16,
+    env_hashes: &EnvHashes,
+) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+    let key = crate::resolved_import_facts::ResolvedImportFactsKey {
+        canonical: Arc::from(canonical),
+        content_hash,
+        parse_env_hash: env_hashes.parse_env_hash,
+        resolve_env_hash: env_hashes.resolve_env_hash,
+        resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+    };
+    let (view, _is_current) = base.resolver_store_view_with_currentness();
+    base.project_type_store()
+        .resolved_import_facts()
+        .get_if_valid(&key, &view)
+}
+
+/// Resolve `canonical`'s **current** content hash from the scheduler
+/// authority — the sole parse authority, available immediately
+/// post-`upsert`.
+///
+/// Strict by contract: this delegates to
+/// [`VerterHost::authoritative_current_content_hash`] (scheduler
+/// `HostSourceData.parse.whole_hash`, gated on the `DerivedRawState`
+/// entry being non-evicted) and has **no permissive fallback**. It
+/// never derives a hash from a `FileArtifactStore` scan: a scan can
+/// surface a stale pre-edit artifact's own hash, and feeding that into
+/// a content-pinned `ResolvedImportFacts` lookup would resolve the
+/// stale resolution instead of yielding a miss. When only a stale
+/// artifact could answer — the canonical was evicted / deleted while
+/// its `IndexedReady` lingers — this returns `None`, which is correct:
+/// `ResolvedImportFacts` is produced keyed from the same scheduler
+/// `parse.whole_hash`, so a `None` here is a true miss, not a lost
+/// cache hit.
+fn current_content_hash_from_scheduler(
+    base: &VerterHost,
+    canonical: &str,
+) -> Option<verter_semantic::analysis::Hash16> {
+    base.authoritative_current_content_hash(canonical)
+}
+
 impl SessionView for HostView {
     fn source(&self, canonical: &str) -> Option<Arc<str>> {
         self.base.get_source(canonical)
@@ -439,15 +390,21 @@ impl SessionView for HostView {
         self.base.host_view_project_identity()
     }
 
-    fn env_hashes(&self) -> &EnvHashes {
-        &self.env_hashes
-    }
-
     fn resolved_import_facts(
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
-        resolved_import_facts_via_host(self.base.as_ref(), canonical, &self.env_hashes)
+        let content_hash = current_content_hash_from_scheduler(self.base.as_ref(), canonical)?;
+        resolved_import_facts_for_view(
+            self.base.as_ref(),
+            canonical,
+            content_hash,
+            &self.env_hashes,
+        )
+    }
+
+    fn env_hashes(&self) -> &EnvHashes {
+        &self.env_hashes
     }
 }
 
@@ -601,48 +558,28 @@ impl SessionView for OverlaidView {
         self.base.host_view_project_identity()
     }
 
-    fn env_hashes(&self) -> &EnvHashes {
-        &self.env_hashes
-    }
-
     fn resolved_import_facts(
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
-        // The resolved-import facts cache keys on `content_hash`,
-        // which is overlay-aware: an overlay that differs from the
-        // base source yields a distinct cache slot. The lookup
-        // reads the overlay's content hash when an overlay covers
-        // the canonical and falls through to the base host's
-        // strict scheduler-authoritative current hash otherwise.
-        // `current_content_hash_from_scheduler` matches the producer
-        // (`admit_resolved_import_facts_for_owner`), which admits
-        // keyed from the same scheduler `parse.whole_hash`.
+        // Overlay-aware read: when an overlay covers the canonical use
+        // its precomputed hash; otherwise fall through to the base
+        // host's strict scheduler-authoritative current hash.
         let content_hash = if let Some(hash) = self.overlay_hashes.get(canonical) {
             *hash
         } else {
             current_content_hash_from_scheduler(self.base.as_ref(), canonical)?
         };
-        // `known_miss_generation`: read the owner's
-        // sidecar so the lookup composes the same tag value as the
-        // producer; lets a later route snapshot that re-resolves a
-        // previously-missing specifier reach a fresh cache slot
-        // instead of being pinned by an earlier first-writer-wins
-        // negative entry.
-        let known_miss_generation =
-            known_miss_generation_tag_for_owner(self.base.as_ref(), canonical);
-        let key = crate::resolved_import_facts::ResolvedImportFactsKey {
-            canonical: Arc::from(canonical),
+        resolved_import_facts_for_view(
+            self.base.as_ref(),
+            canonical,
             content_hash,
-            parse_env_hash: self.env_hashes.parse_env_hash,
-            resolve_env_hash: self.env_hashes.resolve_env_hash,
-            resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
-            known_miss_generation,
-        };
-        self.base
-            .project_type_store()
-            .resolved_import_facts()
-            .get(&key)
+            &self.env_hashes,
+        )
+    }
+
+    fn env_hashes(&self) -> &EnvHashes {
+        &self.env_hashes
     }
 
     fn fingerprint(&self) -> u64 {
@@ -720,15 +657,16 @@ impl SessionView for HostViewRef<'_> {
         self.base.host_view_project_identity()
     }
 
-    fn env_hashes(&self) -> &EnvHashes {
-        &self.env_hashes
-    }
-
     fn resolved_import_facts(
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
-        resolved_import_facts_via_host(self.base, canonical, &self.env_hashes)
+        let content_hash = current_content_hash_from_scheduler(self.base, canonical)?;
+        resolved_import_facts_for_view(self.base, canonical, content_hash, &self.env_hashes)
+    }
+
+    fn env_hashes(&self) -> &EnvHashes {
+        &self.env_hashes
     }
 }
 
@@ -890,10 +828,6 @@ impl SessionView for OverlaidViewRef<'_> {
         self.base.host_view_project_identity()
     }
 
-    fn env_hashes(&self) -> &EnvHashes {
-        &self.env_hashes
-    }
-
     fn resolved_import_facts(
         &self,
         canonical: &str,
@@ -903,32 +837,19 @@ impl SessionView for OverlaidViewRef<'_> {
         if self.overlay_tombstones.contains(canonical) {
             return None;
         }
-        // Overlay-bearing read: when an overlay covers the
-        // canonical use its precomputed hash; otherwise fall
-        // through to the base host's strict scheduler-authoritative
-        // current hash. `current_content_hash_from_scheduler`
-        // matches the producer (`admit_resolved_import_facts_for_owner`),
-        // which admits keyed from the same scheduler `parse.whole_hash`.
+        // Overlay-aware read: when an overlay covers the canonical use
+        // its precomputed hash; otherwise fall through to the base
+        // host's strict scheduler-authoritative current hash.
         let content_hash = if let Some(hash) = self.overlay_hashes.get(canonical) {
             *hash
         } else {
             current_content_hash_from_scheduler(self.base, canonical)?
         };
-        // `known_miss_generation`: read the owner's
-        // sidecar to match the producer's key.
-        let known_miss_generation = known_miss_generation_tag_for_owner(self.base, canonical);
-        let key = crate::resolved_import_facts::ResolvedImportFactsKey {
-            canonical: Arc::from(canonical),
-            content_hash,
-            parse_env_hash: self.env_hashes.parse_env_hash,
-            resolve_env_hash: self.env_hashes.resolve_env_hash,
-            resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
-            known_miss_generation,
-        };
-        self.base
-            .project_type_store()
-            .resolved_import_facts()
-            .get(&key)
+        resolved_import_facts_for_view(self.base, canonical, content_hash, &self.env_hashes)
+    }
+
+    fn env_hashes(&self) -> &EnvHashes {
+        &self.env_hashes
     }
 
     fn fingerprint(&self) -> u64 {

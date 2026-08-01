@@ -6,9 +6,11 @@ Thank you for your interest in contributing to Verter! This guide will help you 
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 26 (the version pinned in `.nvmrc`; `nvm use` / `fnm use` picks it up)
 - pnpm 10+
-- Rust stable toolchain with `rustfmt`, `clippy`, and `cargo-nextest`
+- [rustup](https://rustup.rs/) — the compiler version, `rustfmt`, `clippy` and the
+  `wasm32-unknown-unknown` target are pinned in `rust-toolchain.toml` and installed
+  automatically on your first `cargo` invocation. Install `cargo-nextest` separately.
 - VS Code (for extension development)
 
 ### Setup

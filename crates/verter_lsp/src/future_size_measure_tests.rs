@@ -259,7 +259,7 @@ async fn measure_wrapper_layer_sizes() {
     let audit_on = crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::GotoDefinition,
-        "file:///tmp/x.vue".into(),
+        verter_audit::RequestTargetIdentity::RegisteredCanonical("file:///tmp/x.vue".into()),
         Some(Position {
             line: 0,
             character: 0,
@@ -278,7 +278,7 @@ async fn measure_wrapper_layer_sizes() {
     let audit_off = crate::audit_harness::run_with_audit(
         &host_off,
         verter_audit::payloads::tags::LspMethodTag::GotoDefinition,
-        "file:///tmp/x.vue".into(),
+        verter_audit::RequestTargetIdentity::RegisteredCanonical("file:///tmp/x.vue".into()),
         Some(Position {
             line: 0,
             character: 0,

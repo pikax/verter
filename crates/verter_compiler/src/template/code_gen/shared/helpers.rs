@@ -990,6 +990,7 @@ pub fn debug_assert_element_bounds(
 
 // ======================== Directive helpers (shared by VDOM + Vapor) ========================
 
+use crate::template::oxc::types::OxcParsedExpression;
 use crate::types::NodeProp;
 
 /// Extract the directive value from source using NodeProp value span.
@@ -1126,6 +1127,35 @@ pub fn is_member_expression(s: &str) -> bool {
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+}
+
+/// Whether a `v-on` handler value is an inline STATEMENT LIST rather than a
+/// single expression (`@click="a = 1; b = 2"`).
+///
+/// This is the compiler's SOLE notion of "multi-statement": the parse fact the
+/// template front-end records on [`OxcParsedExpression::multi_statement`] after
+/// reading the value under the statement-list grammar. Every backend — VDOM,
+/// Vapor and the IDE/TSX projection — asks this one question, so they cannot
+/// disagree about the same input.
+///
+/// A raw-source `value.contains(';')` probe is NOT equivalent and must not be
+/// reintroduced. It misses a newline-separated list (`@click="a = 1\nb = 2"` has
+/// no `;` at all, yet is two statements) and fires on a `;` that is merely
+/// inside a string literal (`@click="a = 'x;y'"` is one statement).
+pub fn is_multi_statement_handler(exp: Option<&OxcParsedExpression<'_>>) -> bool {
+    exp.is_some_and(|e| e.multi_statement)
+}
+
+/// Narrow a resolved handler body to the text an EXPRESSION container (`(…)`)
+/// can hold, by dropping trailing whitespace and statement terminators.
+///
+/// The resolved text is the value's source slice with binding prefixes spliced
+/// in, so a terminator the author wrote (`@click="foo();"`) survives into the
+/// output and would make `$event => (foo();)` unparseable. Trimming is an
+/// EMISSION concern, not a classification one: whether the body needs a
+/// statement container is answered solely by [`is_multi_statement_handler`].
+pub fn trim_handler_body(resolved: &str) -> &str {
+    resolved.trim_end().trim_end_matches(';').trim_end()
 }
 
 // ======================== Template literal escaping ========================

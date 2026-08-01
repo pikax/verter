@@ -33,6 +33,7 @@
 
 mod dependency_resolution;
 mod external_type_resolution;
+pub(crate) mod fallthrough_props;
 mod frontier_engine;
 mod frontier_helpers;
 mod route_surface;

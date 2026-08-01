@@ -302,15 +302,16 @@ fn userland_snippet_lookalike_is_not_classified_snippet_typed() {
     );
 
     // Drive the resolved-validation half via the host's script-facts seam: the
-    // Svelte provider rejects the userland candidate, so no resolved snippet
-    // facts are produced.
-    let facts = host.resolve_svelte_script_facts("/Userland.svelte");
+    // Svelte provider proves that the userland candidate contributes no
+    // resolved snippet facts.
+    let facts = host
+        .resolve_svelte_script_facts("/Userland.svelte")
+        .expect_exact("the userland look-alike is an exact negative");
+    let members = &facts.resolution().validated_snippet_members;
     assert!(
-        facts
-            .as_ref()
-            .is_none_or(|f| f.validated_snippet_members.is_empty()),
+        members.is_empty(),
         "a userland `Snippet` look-alike must NOT be classified snippet-typed, got {:?}",
-        facts.map(|f| f.validated_snippet_members.clone())
+        members
     );
 }
 
@@ -339,13 +340,30 @@ fn real_svelte_snippet_is_classified_snippet_typed() {
     // discriminator either way. Assert the validated set is EITHER exactly
     // `["row"]` (resolved) OR empty (unresolved) — NEVER a different member, and
     // NEVER a userland member.
-    if let Some(facts) = facts {
-        assert!(
-            facts.validated_snippet_members.is_empty()
-                || facts.validated_snippet_members.as_ref() == ["row".to_string()].as_slice(),
-            "the only validatable snippet member is `row` (or none when `svelte` did not resolve), got {:?}",
-            facts.validated_snippet_members
-        );
+    match facts {
+        crate::framework::script_facts::ScriptFactEvidence::Exact(exact) => {
+            let members = &exact.facts().resolution().validated_snippet_members;
+            assert!(
+                members.is_empty() || members.as_ref() == ["row".to_string()].as_slice(),
+                "the only exact snippet member is `row` (or none when the import resolved \
+                 conclusively elsewhere), got {members:?}"
+            );
+        }
+        crate::framework::script_facts::ScriptFactEvidence::Partial(partial) => partial
+            .conservative_svelte_observations()
+            .validated_snippet_members()
+            .visit(|member| {
+                assert_eq!(
+                    member, "row",
+                    "a partial payload may retain only the positive `row` observation"
+                );
+            }),
+        crate::framework::script_facts::ScriptFactEvidence::Unavailable(_) => {
+            panic!("the Svelte provider unexpectedly returned unavailable facts")
+        }
+        crate::framework::script_facts::ScriptFactEvidence::NotApplicable(_) => {
+            panic!("the Svelte provider unexpectedly returned not-applicable facts")
+        }
     }
 }
 
@@ -591,7 +609,7 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
         .get_public_api("/Shim.svelte")
         .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
-    let code = api.code.as_ref();
+    let code = api.ts_labeled_code().as_ref();
 
     // The authored-name public value implements Svelte 5's native Component
     // contract without a constructable compatibility intersection.
@@ -635,6 +653,33 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
     assert!(
         !code.contains("./module-props") && !code.contains("wrongOwner"),
         "the instance props reference must never resolve through the same-name module owner:\n{code}"
+    );
+}
+
+#[test]
+fn svelte_public_api_recovered_script_never_claims_exact_empty_bindings() {
+    let host = host();
+    upsert_svelte(
+        &host,
+        "/RecoveredBindings.svelte",
+        "<script lang=\"ts\">\n\
+         let { title }: { title: string } = $props();\n\
+         return;\n\
+         </script>\n",
+    );
+
+    let api = host
+        .get_public_api("/RecoveredBindings.svelte")
+        .expect("Svelte public API projection")
+        .expect("the recovered component still projects its conservative API");
+    let code = api.ts_labeled_code().as_ref();
+    assert!(
+        code.contains(",\n  string\n>;"),
+        "partial script facts must keep Svelte's permissive binding generic:\n{code}"
+    );
+    assert!(
+        !code.contains(",\n  \"\"\n>;"),
+        "only exact-empty evidence may claim that the component has no bindable props:\n{code}"
     );
 }
 
@@ -684,7 +729,7 @@ fn svelte_runes_state_export_projects_the_native_component_exports_generic() {
         .get_public_api_with_mode("/ExposePublic.svelte", PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("the runes component projects a public declaration")
-        .code
+        .ts_labeled_code()
         .to_string();
 
     assert!(
@@ -735,7 +780,7 @@ fn svelte_public_api_resolves_local_props_interface_from_macro_locator() {
             .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
             .expect("Svelte declaration projection")
             .expect("a local Props interface projects a public declaration")
-            .code
+            .ts_labeled_code()
             .to_string();
 
         assert!(
@@ -812,7 +857,7 @@ let { title, count = 0 } = $props();
         .get_public_api_with_mode("/JsCard.svelte", PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("a JavaScript Svelte component projects a declaration import surface")
-        .code
+        .ts_labeled_code()
         .to_string();
 
     assert!(
@@ -878,7 +923,7 @@ fn svelte_get_public_api_renders_native_event_and_snippet_props() {
         .get_public_api("/EventsSlots.svelte")
         .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
-    let code = api.code.as_ref();
+    let code = api.ts_labeled_code().as_ref();
 
     assert!(
         code.contains("import(\"svelte\").Component<"),
@@ -938,7 +983,7 @@ fn svelte_get_public_api_declaration_mode_is_strictly_declaration_safe() {
         .get_public_api_with_mode("/Card.svelte", PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("svelte declaration output")
-        .code
+        .ts_labeled_code()
         .to_string();
 
     // POSITIVE: the declaration surface is present and complete.
@@ -971,7 +1016,7 @@ fn svelte_get_public_api_declaration_mode_is_strictly_declaration_safe() {
         .get_public_api_with_mode("/Card.svelte", PublicApiMode::Public, None)
         .expect("Svelte public projection")
         .expect("svelte public output")
-        .code
+        .ts_labeled_code()
         .to_string();
     assert_eq!(
         decl, public,
@@ -1021,7 +1066,7 @@ fn svelte_public_api_keeps_same_name_module_and_instance_exports_typed() {
         .get_public_api_with_mode("/OwnerExact.svelte", PublicApiMode::Public, None)
         .expect("Svelte public projection")
         .expect("Svelte public output")
-        .code
+        .ts_labeled_code()
         .to_string();
 
     assert!(
@@ -1169,8 +1214,9 @@ fn stored_macro_payload_locator_anchors_absolutize_to_the_producing_canonical() 
     let facts = crate::framework::script_facts::resolve_script_facts::<
         verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
     >(&host, registration, "/Widget.svelte")
-    .expect("the runes component resolves script facts");
+    .expect_exact("the runes component resolves script facts");
     let props_ref = facts
+        .syntax()
         .props_type
         .as_ref()
         .expect("the annotation payload ref");
@@ -1249,7 +1295,7 @@ fn svelte_public_api_source_map_links_prop_names_to_authored_annotation() {
         .get_public_api("/DirectChild.svelte")
         .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
-    let code = api.code.as_ref();
+    let code = api.ts_labeled_code().as_ref();
     let map_json = api
         .source_map
         .as_deref()
@@ -1321,7 +1367,7 @@ fn svelte_public_api_source_map_covers_every_local_interface_prop_member() {
         .get_public_api("/EditorContract.svelte")
         .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
-    let code = api.code.as_ref();
+    let code = api.ts_labeled_code().as_ref();
     let map_json = api
         .source_map
         .as_deref()
@@ -1372,7 +1418,7 @@ fn svelte_public_api_source_map_links_legacy_export_let_prop_name() {
         .get_public_api("/LegacyCounter.svelte")
         .expect("Svelte public API projection")
         .expect("a legacy component with props projects a public API");
-    let code = api.code.as_ref();
+    let code = api.ts_labeled_code().as_ref();
     let map_json = api
         .source_map
         .as_deref()

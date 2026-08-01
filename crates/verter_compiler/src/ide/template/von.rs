@@ -34,6 +34,7 @@ use crate::ide::{
     TemplateComponentBindings,
 };
 use crate::template::code_gen::binding::BindingResolver;
+use crate::template::code_gen::shared::helpers::is_multi_statement_handler;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
 use crate::template::oxc::types::{OxcParsedExpression, OxcParsedProp};
@@ -236,9 +237,14 @@ pub(super) fn process_v_on<'alloc>(
                 None => resolver.resolve_simple_expr(value_expr),
             };
             let resolved_expr = resolved_expr.trim();
-            let is_simple_ident =
-                crate::template::code_gen::binding::is_simple_ident(resolved_expr);
-            let is_member_expr = resolved_expr.contains('.') && !resolved_expr.contains('(');
+            // A multi-statement handler is never a bare reference, whatever its
+            // resolved text looks like — the parse fact overrides the text probes.
+            let is_multi_statement =
+                is_multi_statement_handler(oxc_prop.and_then(|p| p.exp.as_ref()));
+            let is_simple_ident = !is_multi_statement
+                && crate::template::code_gen::binding::is_simple_ident(resolved_expr);
+            let is_member_expr =
+                !is_multi_statement && resolved_expr.contains('.') && !resolved_expr.contains('(');
             // Arrow / function-expression handlers are classified from the OXC expression
             // KIND, never a `starts_with("(")` / `contains("=>")` text probe — a string
             // literal or member expression that happens to contain `=>` can never be
@@ -373,13 +379,20 @@ pub(super) fn process_v_on<'alloc>(
         };
         let resolved_expr = resolved_expr.trim();
 
-        // Determine if the handler needs wrapping
-        let is_simple_ident = crate::template::code_gen::binding::is_simple_ident(resolved_expr);
-        let is_member_expr = resolved_expr.contains('.') && !resolved_expr.contains('(');
-        let is_fn_expr = resolved_expr.starts_with("(")
-            || resolved_expr.starts_with("function")
-            || resolved_expr.contains("=>");
-        let is_object_expr = resolved_expr.starts_with('{') && resolved_expr.ends_with('}');
+        // Determine if the handler needs wrapping. A multi-statement handler is
+        // never a bare reference, whatever its resolved text looks like — the
+        // parse fact overrides the text probes below.
+        let is_multi_statement = is_multi_statement_handler(oxc_prop.and_then(|p| p.exp.as_ref()));
+        let is_simple_ident = !is_multi_statement
+            && crate::template::code_gen::binding::is_simple_ident(resolved_expr);
+        let is_member_expr =
+            !is_multi_statement && resolved_expr.contains('.') && !resolved_expr.contains('(');
+        let is_fn_expr = !is_multi_statement
+            && (resolved_expr.starts_with("(")
+                || resolved_expr.starts_with("function")
+                || resolved_expr.contains("=>"));
+        let is_object_expr =
+            !is_multi_statement && resolved_expr.starts_with('{') && resolved_expr.ends_with('}');
         let has_event_param =
             references_event_param(value_expr, oxc_prop.and_then(|p| p.exp.as_ref()));
 

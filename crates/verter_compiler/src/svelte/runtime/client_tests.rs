@@ -2119,7 +2119,7 @@ fn euler_parent_transition_precedes_after_child_modern_event() {
     // anywhere before the child's event (a flat source-order model would put the
     // parent's authored-first transition first).
     assert!(
-        js[..event].find("$.transition(").is_none(),
+        !js[..event].contains("$.transition("),
         "no $.transition may precede the child's modern event:\n{js}"
     );
     // NEGATIVE: the modern event stays a BARE direct registration — never
@@ -2154,7 +2154,7 @@ fn euler_parent_bind_emits_after_child_modern_event() {
     // NEGATIVE: the reverse order does NOT hold — no bind registration is emitted
     // anywhere before the child's event.
     assert!(
-        js[..event].find("$.bind_element_size(").is_none(),
+        !js[..event].contains("$.bind_element_size("),
         "no $.bind_element_size may precede the child's modern event:\n{js}"
     );
     // NEGATIVE: neither registration effect-wraps (no `use:` host anywhere).
@@ -2190,7 +2190,7 @@ fn euler_parent_modern_event_precedes_child_transition() {
     // anywhere before the parent's event (a child-batch-always-first model would
     // put the span's transition first).
     assert!(
-        js[..event].find("$.transition(").is_none(),
+        !js[..event].contains("$.transition("),
         "no $.transition may precede the parent's modern event:\n{js}"
     );
 }
@@ -2220,7 +2220,7 @@ fn euler_sibling_transition_precedes_sibling_modern_event() {
     // NEGATIVE: the reverse order does NOT hold — no modern-event registration is
     // emitted anywhere before the transition.
     assert!(
-        js[..transition].find("$.event('mouseenter'").is_none(),
+        !js[..transition].contains("$.event('mouseenter'"),
         "no $.event may precede the sibling transition:\n{js}"
     );
 }

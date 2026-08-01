@@ -18,7 +18,7 @@ importers:
   packages/app:
     dependencies:
       '@monorepo/shared':
-        specifier: workspace:*
+        specifier: file:../shared
         version: link:../shared
       vue:
         specifier: ^3.5.0

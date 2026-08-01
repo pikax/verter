@@ -193,7 +193,24 @@ pub struct FileNode {
     /// Generation-scoped pending source buffer. Set during admission for
     /// source-providing requests. The Source job reads from this slot.
     pub(crate) pending_source: ArcSwap<Option<(u64, Arc<str>)>>,
+    /// Process-unique id for THIS node object.
+    ///
+    /// The generation identifies a version of a file's content; the
+    /// incarnation identifies the node OBJECT serving it. Two different
+    /// nodes for the same canonical can coexist at the SAME generation
+    /// (a replacement publishes a fresh node starting at generation 0/
+    /// floor), so a generation comparison alone cannot tell a dispatched
+    /// node from its replacement. Work carries this id from dispatch so
+    /// its completion can prove it is still publishing for the
+    /// incarnation it actually ran against.
+    ///
+    /// Monotonic and never reused, so it cannot ABA the way a reclaimed
+    /// pointer address can.
+    incarnation_id: u64,
 }
+
+/// Source of process-unique [`FileNode::incarnation_id`] values.
+static NEXT_INCARNATION_ID: AtomicU64 = AtomicU64::new(1);
 
 impl FileNode {
     /// Create a new file node with generation 0.
@@ -206,7 +223,14 @@ impl FileNode {
             analysis: ArcSwap::new(Arc::new(None)),
             artifacts: DashMap::new(),
             pending_source: ArcSwap::new(Arc::new(None)),
+            incarnation_id: NEXT_INCARNATION_ID.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    /// Process-unique id of this node object. See
+    /// [`FileNode::incarnation_id`].
+    pub fn incarnation_id(&self) -> u64 {
+        self.incarnation_id
     }
 
     /// Current generation (acquire ordering for cross-thread visibility).
@@ -249,14 +273,8 @@ impl FileNode {
     /// Coherence: `artifact.generation == analysis.generation == source.generation == node.generation`.
     pub fn current_artifact(&self, profile_hash: u64) -> Option<Arc<ArtifactSnapshot>> {
         let node_gen = self.generation.load(Ordering::Acquire);
-        let src_gen = match self.source.load().as_ref() {
-            Some(s) => s.generation,
-            None => return None,
-        };
-        let analysis_gen = match self.analysis.load().as_ref() {
-            Some(a) => a.generation,
-            None => return None,
-        };
+        let src_gen = self.source.load().as_deref()?.generation;
+        let analysis_gen = self.analysis.load().as_deref()?.generation;
         if src_gen != node_gen || analysis_gen != node_gen {
             return None;
         }

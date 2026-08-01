@@ -29,10 +29,10 @@ Each test workspace is a self-contained fixture in `e2e/fixtures/`:
 ```bash
 # Prerequisites
 pnpm run build:lsp                     # Build Rust LSP binary
-pnpm --filter vscode build:dev  # Bundle extension
+pnpm --filter verter-vscode build:dev  # Bundle extension
 
 # Run single fixture (fast, targeted)
-E2E_FIXTURE=single-project pnpm --filter vscode test:e2e
+E2E_FIXTURE=single-project pnpm --filter verter-vscode test:e2e
 
 # Run from monorepo root
 pnpm run test:e2e
@@ -65,17 +65,62 @@ All three are **idempotent** — safe to call again in individual suites (they r
 | `openReadyCached(path, options?)` | Opens a `.vue` file and waits for file readiness. Caches result — second call with same path returns immediately. |
 | `invalidateFileCache(path)`       | Clears cached readiness for a file (use after mutation tests modify it on disk).                                  |
 
-### Timeout Policy
+### Timeout Policy — the deadline hierarchy
 
-| Category                                                              | Timeout | How                                                       |
-| --------------------------------------------------------------------- | ------- | --------------------------------------------------------- |
-| Mocha default                                                         | 15s     | Set in `suite/index.ts` `new Mocha({ timeout: 15_000 })`  |
-| Root bootstrap                                                        | 60s     | `this.timeout(60_000)` in root `beforeAll`                |
-| Feature suites (completion, hover, definition, rename, etc.)          | 15s     | Inherit default — no explicit `this.timeout()`            |
-| Mutation test suites (diagnostics insert/undo, external-file-changes) | 60s     | Explicit `this.timeout(60_000)` on suite or test          |
-| Benchmark suites                                                      | 90–120s | Explicit `this.timeout(90_000)` / `this.timeout(120_000)` |
+A polling helper is a **child deadline** of the Mocha runnable awaiting it. When the child's
+budget meets or exceeds the parent's, Mocha kills the child first and the run reports
+`Timeout of Nms exceeded` instead of the assertion the test wrote — a *different* failure, not
+a slower one, and one that hides a legitimately empty result behind what looks like a hang.
 
-**Rule**: Only add `this.timeout()` when a suite or test genuinely needs more than 15s. Most warm feature tests complete in 1–5s.
+| Category                                                     | Deadline | How                                                                    |
+| ------------------------------------------------------------ | -------- | ---------------------------------------------------------------------- |
+| Mocha default (`SUITE_TIMEOUT_MS`)                           | 30s      | `suite/index.ts` builds Mocha with it                                  |
+| One polling wait (`DEFAULT_POLL_BUDGET_MS`)                  | 12s      | Stated outright, **not** derived from the suite deadline               |
+| Margin (`POLL_BUDGET_MARGIN_MS`)                             | 3s       | Room for the final poll, the assertions, and the report                |
+| Root bootstrap                                               | 90s      | `this.timeout(sequenceParent("rootBeforeAll"))` — a **derived** value  |
+| Mutation / acceptance suites                                 | 60s      | Suite-level `this.timeout(60_000)`, inherited by everything after it   |
+| Benchmark suites                                             | 90s      | Suite-level `this.timeout(90_000)`                                     |
+
+30s is deliberate: **composition is the normal shape**. Almost every test opens a document
+(one readiness wait) and then waits for a feature. At 15s only ONE 12s budget could be spent,
+so the second wait was inverted by construction. Two default waits plus the margin is 27s.
+Deriving the budget from the deadline instead would consume all of it and reproduce the bug.
+
+**Mocha inheritance matters and is easy to get wrong.** `Suite.prototype.addTest` and
+`_createHook` copy the suite's *current* timeout into every test and hook created afterwards.
+So a suite-level `this.timeout(60_000)` gives all its tests 60s, and a test's own
+`this.timeout()` may raise **or lower** that. Never assume a site runs under the 30s default —
+read the enclosing suite.
+
+### The budget registry (`e2e/lib/timeouts.ts`)
+
+Every polling default lives in `POLL_BUDGETS` and is consumed via `pollBudget("name")`. Never
+spell a literal deadline in a helper or a test: the literal is invisible to the invariant, and
+that is exactly how a 20s budget survived under a 15s deadline.
+
+Each entry declares `parentTimeoutMs` — the **smallest** deadline that budget is declared to
+run under — plus a `reason` when it exceeds the suite default. It is a lower bound, not an
+equality, because a shared budget legitimately runs under many parents.
+
+That claim is **load-bearing and checked at runtime.** The suite runner hands the registry
+Mocha's current runnable, and `pollBudget` refuses two things: a runnable whose real deadline
+is *below* the claim (the claim is wrong, and everything measured against it — including any
+sequence containing that budget — was measured against a deadline that does not exist), and a
+budget that cannot fit the real deadline. Both fail at the call site naming every number
+involved.
+
+Waits that run **one after another** under a single deadline go in `POLL_SEQUENCES`, which is
+checked as a **sum**, not a maximum: the root hook once awaited 45s + 30s + 12s under 60s,
+where every member "fit" individually and the series never could. A test that composes waits
+takes its deadline from `sequenceParent("name")`.
+
+Every declared sequence is **bound** by its host with `this.timeout(sequenceParent("name"))`,
+so the claimed parent IS the deadline in force rather than one matching by coincidence. Do the
+same for any new sequence: a sequence that is declared and never bound has its total checked
+against a parent no runnable carries.
+
+**Adding a wait:** register its budget, name the smallest parent it truly runs under, and if
+the block already awaits something else, declare the sequence and bind the block to it.
 
 ## Test Suites
 
@@ -107,7 +152,32 @@ Cross-platform: Windows gets `.exe` suffix, Unix gets `chmod 755`.
 
 ## Fixture Dependency Installation
 
-Fixtures with `package.json` need `node_modules/vue` for type resolution. Both `runTests.ts` and `.vscode-test.mjs` run `npm install --no-package-lock --ignore-scripts` in fixtures that have `package.json` but no `node_modules/`. For monorepo fixtures, workspace sub-packages are also installed.
+Fixtures with `package.json` need `node_modules/vue` for type resolution. Every launcher — `runTests.ts`, `.vscode-test.mjs`, `startupBenchmark.mjs`, `completionBenchmark.mjs` — goes through `e2e/lib/fixtureDeps.ts`, which installs by PROVENANCE rather than by whether `node_modules/` exists. A tree that exists says nothing about which manifest produced it: a four-month-old `@verter/types` in one fixture once shadowed the workspace package and decided eight test outcomes.
+
+An install records a stamp (`node_modules/.verter-e2e-install.json`) covering the manifest bytes AND a fingerprint of the installed tree, so editing `package.json` reinstalls and so does a package added, removed, or re-pointed inside `node_modules` without touching the manifest.
+
+What happens to the tree already there:
+
+| State | Action |
+| --- | --- |
+| Stamped, manifest and tree both match | Reused, untouched |
+| Stamped, only the manifest changed | Renamed aside, installed clean, predecessor deleted **after** success (restored if the install fails) |
+| Unstamped, legacy stamp, or tree changed | **Moved to a quarantine**, absolute recovery path printed, then installed clean |
+| Undecidable (unreadable current-format stamp, unreadable tree, `node_modules` is a symlink, move fails) | **Refuses**, having changed nothing |
+
+Nothing is ever deleted outright except a predecessor proven to be this module's own output. Quarantines live in `.verter-e2e-quarantine/` at the **repository root**, which is gitignored: the move is a `rename` and a rename cannot cross filesystems, so anchoring it to the temp directory made whether it worked at all a property of the machine's disk layout. `VERTER_E2E_FIXTURE_QUARANTINE_DIR` still overrides it and must name a path on the repository's own filesystem. They are removed only on request:
+
+```bash
+pnpm --filter verter-vscode test:e2e:fixtures:clean-quarantine
+```
+
+`VERTER_E2E_ADOPT_FIXTURE_DEPS=<fixture>[,<fixture>]` uses an existing tree as-is without installing or stamping, printing a `NON-HERMETIC` banner. It is per-fixture (no wildcards) and is REJECTED under CI. A `node_modules.verter-rollback-*` holding a killed run left inside the fixture is still recovered to the quarantine, in adopt mode too — that is a PREVIOUS tree rather than the one being adopted, and TypeScript's default `exclude` matches the literal name `node_modules`, so leaving it puts the whole holding in the fixture's program.
+
+The decide → displace → install → stamp sequence runs under a cross-process lock (`e2e/lib/fixtureLock.ts`) and re-decides once it owns one, so two concurrent runs cannot both replace one fixture. A wedged lock surfaces as a timeout naming the file to remove. The lock is published with `link`, which is exclusive and atomic in one step; an exclusive create takes over only where hard links are POSITIVELY classified as unavailable (a probe that fails every attempt of a bounded retry, with an errno that says the capability is absent). A link failure that is transient or unexplained is retried and then REFUSES — the fallback is not atomic on NFSv3, so an unexplained failure is never read as licence to use it.
+
+An install failure is FATAL, not a warning — a fixture nobody finished assembling produces results about nothing. A `file:`/`link:` dependency whose target is missing is diagnosed before anything moves, naming the absolute path (`ecosystem-parity` points at a sibling `verter-release-clean` checkout that most machines do not have).
+
+`E2E_FIXTURE` is validated against the canonical route inventory before it is joined onto a path. For monorepo and multi-root fixtures, sub-packages are installed too.
 
 ## File Opening Triggers LSP
 
@@ -156,7 +226,7 @@ After ANY change to:
 Run the E2E suite to verify no regressions:
 
 ```bash
-pnpm run build:lsp && pnpm --filter vscode build:dev && E2E_FIXTURE=single-project pnpm --filter vscode test:e2e
+pnpm run build:lsp && pnpm --filter verter-vscode build:dev && E2E_FIXTURE=single-project pnpm --filter verter-vscode test:e2e
 ```
 
 This is non-negotiable. LSP changes directly affect user-facing IDE behavior. Manual testing is never sufficient as the sole verification step.
@@ -252,7 +322,7 @@ Never use `sleep()` to wait for:
 
 1. Create `e2e/fixtures/<name>/` with `.vue` files and config
 2. Update `FIXTURES` array in `e2e/runTests.ts`
-3. Run `E2E_FIXTURE=<name> pnpm --filter vscode test:e2e` to verify
+3. Run `E2E_FIXTURE=<name> pnpm --filter verter-vscode test:e2e` to verify
 
 ## Adding a New Test Suite
 

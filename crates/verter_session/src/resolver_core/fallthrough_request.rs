@@ -118,7 +118,16 @@ struct FallthroughRequestExecutor<'a, 'b, 'p, H: FallthroughRequestHost> {
     /// at the store site would never see the compute's fenced serve / broken
     /// lease / unrootable route.
     probe: &'p CacheabilityProbe<'p>,
-    fixed_store_view: Option<H::View>,
+    /// A caller-owned snapshot to pin this request to, as
+    /// `(view, captured_external_supersession_fingerprint, is_current)`.
+    ///
+    /// The fingerprint is the caller's CAPTURE-time reading, carried here so
+    /// the promotion fence compares captured-vs-live. Dropping it and
+    /// re-sampling the live fingerprint at snapshot time would defeat the
+    /// fence: the resampled value always equals itself, so a mutation that
+    /// landed after the caller's capture but before this request would go
+    /// undetected and the result would warm the shared cache anyway.
+    fixed_store_view: Option<(H::View, u64, bool)>,
     /// EXTERNAL-supersession fingerprint of the snapshot the current
     /// attempt was taken under. Gates stable promotion on the COMPLETE
     /// external-token dimensions (epoch / project-generation / env /
@@ -186,8 +195,9 @@ impl<'a, 'b, 'p, H: FallthroughRequestHost> FallthroughRequestExecutor<'a, 'b, '
         }
     }
 
-    fn with_fixed_view(mut self, store_view: Option<&H::View>) -> Self {
-        self.fixed_store_view = store_view.cloned();
+    fn with_fixed_view(mut self, store_view: Option<(&H::View, u64, bool)>) -> Self {
+        self.fixed_store_view = store_view
+            .map(|(view, captured_fp, is_current)| (view.clone(), captured_fp, is_current));
         self
     }
 }
@@ -219,13 +229,27 @@ where
         // THIS attempt's fallback was incoherent — mirroring how
         // `last_snapshot_supersession_fp` is re-stamped on every path.
         self.fallback_snapshot_incoherent = false;
-        // A fixed view is supplied by a caller that already owns a current
-        // request-bound snapshot; treat it as current for the warm peek.
+        // Default for the per-attempt path below; the fixed-view branch
+        // overrides it with the capture's proven currentness.
         self.snapshot_view_current = true;
 
-        if let Some(view) = self.fixed_store_view.as_ref() {
-            self.last_snapshot_supersession_fp =
-                Some(self.host.current_view_supersession_fingerprint());
+        if let Some((view, captured_fp, is_current)) = self.fixed_store_view.as_ref() {
+            // Record the CAPTURED external-supersession fingerprint (taken by
+            // the caller when it acquired the fixed view), NOT a fresh live
+            // read here. The promotion fence then compares this captured value
+            // against the live fingerprint: a mismatch proves an external
+            // mutation landed since the caller captured the view, so the
+            // result is return-only. Sampling the live fingerprint here would
+            // defeat the fence — it always equals itself when re-read with no
+            // intervening mutation, but a mutation that landed BEFORE this
+            // snapshot (yet after the caller's capture) would go undetected.
+            self.last_snapshot_supersession_fp = Some(*captured_fp);
+            // The fixed view carries the capture's currentness. A non-current
+            // capture (`ReturnOnly` under sustained churn) must suppress the
+            // warm preflight peek and force the cold compute's nested probes
+            // closed — exactly as a non-current per-attempt snapshot does. It
+            // must NOT be laundered to `true` here.
+            self.snapshot_view_current = *is_current;
             return view.clone();
         }
 
@@ -306,9 +330,14 @@ where
     }
 
     fn is_stable(&mut self, _view: &Self::View) -> bool {
-        if self.fixed_store_view.is_some() {
-            return true;
-        }
+        // A fixed view is NOT unconditionally stable. It carries the caller's
+        // CAPTURE-time fingerprint, and the tail of this function compares
+        // exactly that against the live one — so a mutation that landed
+        // between the caller's capture and here blocks promotion, the same way
+        // it does on the per-attempt path. Short-circuiting to `true` here
+        // would let a result computed from an old route view under new source
+        // and new fact hashes warm the shared cache.
+        //
         // A fallback snapshot whose coherence could not be proven (the
         // external fingerprint moved across the fallback build) is NEVER
         // stable: the returned view and the recorded fingerprint may
@@ -401,7 +430,7 @@ pub(crate) fn run_fallthrough_request<H>(
     canonical_id: &str,
     prop_type_overrides: Option<&FallthroughPropOverrideSet>,
     visiting: &mut FxHashSet<String>,
-    fixed_store_view: Option<&H::View>,
+    fixed_store_view: Option<(&H::View, u64, bool)>,
     max_attempts: usize,
 ) -> RequestRunResult<Option<H::Resolution>>
 where
@@ -433,7 +462,7 @@ fn run_fallthrough_request_in_scope<H>(
     canonical_id: &str,
     prop_type_overrides: Option<&FallthroughPropOverrideSet>,
     visiting: &mut FxHashSet<String>,
-    fixed_store_view: Option<&H::View>,
+    fixed_store_view: Option<(&H::View, u64, bool)>,
     probe: &CacheabilityProbe<'_>,
     max_attempts: usize,
 ) -> RequestRunResult<Option<H::Resolution>>
@@ -1341,6 +1370,181 @@ mod tests {
             "the COMPLETE second attempt MUST warm the shared fallthrough cache exactly once — its \
              `store_stable` reads a Complete scope (the discarded attempt-1 partial was popped \
              without bubbling)",
+        );
+    }
+
+    /// Positive fixed-view control: a caller (the public-API batch render)
+    /// captures ONE store view plus its external-supersession fingerprint and
+    /// threads BOTH in. With no external mutation between capture and the
+    /// promotion fence the captured fingerprint still equals the live one, so
+    /// the fixed-view result IS promoted. This is what proves the fence below
+    /// is a fence and not a blanket suppression of the pinned route.
+    #[test]
+    fn fixed_view_promotes_when_the_captured_fingerprint_is_still_live() {
+        let host = MockHost {
+            live_fp: Cell::new(0xAAAA),
+            flip_on_every_snapshot: Cell::new(false),
+            snapshot_flip_budget: Cell::new(0),
+            promotions: std::cell::RefCell::new(Vec::new()),
+            lookups: std::cell::RefCell::new(Vec::new()),
+            mark_hazard: Cell::new(false),
+        };
+        let singleflight = SingleflightGroup::<
+            FallthroughNodeKey,
+            StableExecutionValue<Option<usize>>,
+            (),
+        >::default();
+        let mut visiting = FxHashSet::default();
+
+        let result = run_fallthrough_request(
+            &host,
+            &singleflight,
+            "/proj/Child.vue",
+            None,
+            &mut visiting,
+            // Captured when the live fingerprint was 0xAAAA — and it still is.
+            Some((&StubView, 0xAAAA, true)),
+            1,
+        );
+
+        assert_eq!(result.value, Some(42));
+        assert_eq!(
+            host.promotions.borrow().as_slice(),
+            ["/proj/Child.vue".to_string()],
+            "an unsuperseded fixed-view capture MUST still warm the shared cache",
+        );
+    }
+
+    /// THE fixed-view soundness case for the public-API render route.
+    ///
+    /// The batch coordinator checks `payload_promotion_admissible` ONCE, then
+    /// pins the capture for every item it renders. An import/root edit landing
+    /// after that one-shot precheck advances the live external-supersession
+    /// fingerprint while the pinned view still describes the OLD routes — and
+    /// the cold compute meanwhile reads LIVE source snapshots and LIVE
+    /// dependency hashes. Promoting that result warms a shared entry built from
+    /// an old route view under NEW fact hashes: a poisoned entry that
+    /// revalidates forever.
+    ///
+    /// Mutation recipe: restore the `if self.fixed_store_view.is_some() { return
+    /// true }` short-circuit at the top of `is_stable`, or stamp
+    /// `current_view_supersession_fingerprint()` instead of the captured value
+    /// in `snapshot_view`'s fixed-view branch. Either makes this test's
+    /// promotion assertion fail while the positive control above stays green.
+    #[test]
+    fn mid_batch_supersession_after_the_capture_makes_the_fixed_view_result_return_only() {
+        let host = MockHost {
+            // The live fingerprint has ALREADY moved past the caller's capture
+            // — the edit landed between the batch's admissibility precheck and
+            // this item's render.
+            live_fp: Cell::new(0xBBBB),
+            flip_on_every_snapshot: Cell::new(false),
+            snapshot_flip_budget: Cell::new(0),
+            promotions: std::cell::RefCell::new(Vec::new()),
+            lookups: std::cell::RefCell::new(Vec::new()),
+            mark_hazard: Cell::new(false),
+        };
+        let singleflight = SingleflightGroup::<
+            FallthroughNodeKey,
+            StableExecutionValue<Option<usize>>,
+            (),
+        >::default();
+        let mut visiting = FxHashSet::default();
+
+        let result = run_fallthrough_request(
+            &host,
+            &singleflight,
+            "/proj/Child.vue",
+            None,
+            &mut visiting,
+            // Captured when the live fingerprint was 0xAAAA.
+            Some((&StubView, 0xAAAA, true)),
+            1,
+        );
+
+        // The result is still HANDED to the caller — the render still produces
+        // a carrier…
+        assert_eq!(
+            result.value,
+            Some(42),
+            "the pinned render still gets an answer; only the promotion is dropped",
+        );
+        // …but it MUST NOT warm the shared cache.
+        assert!(
+            host.promotions.borrow().is_empty(),
+            "an external mutation landing after the caller's capture MUST make the \
+             fixed-view result return-only — warming here publishes a surface \
+             computed from a superseded route view under the live fact hashes",
+        );
+    }
+
+    /// A NON-CURRENT capture (`StoreViewRead::ReturnOnly` under sustained
+    /// churn) must not be laundered into "current" by the fixed-view branch:
+    /// its warm preflight peek is suppressed, exactly as a non-current
+    /// per-attempt snapshot's is.
+    #[test]
+    fn non_current_fixed_view_capture_suppresses_the_warm_peek() {
+        let host = MockHost {
+            live_fp: Cell::new(0xAAAA),
+            flip_on_every_snapshot: Cell::new(false),
+            snapshot_flip_budget: Cell::new(0),
+            promotions: std::cell::RefCell::new(Vec::new()),
+            lookups: std::cell::RefCell::new(Vec::new()),
+            mark_hazard: Cell::new(false),
+        };
+        let singleflight = SingleflightGroup::<
+            FallthroughNodeKey,
+            StableExecutionValue<Option<usize>>,
+            (),
+        >::default();
+        let mut visiting = FxHashSet::default();
+
+        let _ = run_fallthrough_request(
+            &host,
+            &singleflight,
+            "/proj/Child.vue",
+            None,
+            &mut visiting,
+            Some((&StubView, 0xAAAA, false)),
+            1,
+        );
+        assert!(
+            host.lookups.borrow().is_empty(),
+            "a known-stale capture must never serve a warm preflight hit; got {:?}",
+            host.lookups.borrow(),
+        );
+
+        // CONTROL: the SAME capture proven current DOES take the warm peek.
+        let current_host = MockHost {
+            live_fp: Cell::new(0xAAAA),
+            flip_on_every_snapshot: Cell::new(false),
+            snapshot_flip_budget: Cell::new(0),
+            promotions: std::cell::RefCell::new(Vec::new()),
+            lookups: std::cell::RefCell::new(Vec::new()),
+            mark_hazard: Cell::new(false),
+        };
+        let current_singleflight = SingleflightGroup::<
+            FallthroughNodeKey,
+            StableExecutionValue<Option<usize>>,
+            (),
+        >::default();
+        let mut current_visiting = FxHashSet::default();
+        let _ = run_fallthrough_request(
+            &current_host,
+            &current_singleflight,
+            "/proj/Child.vue",
+            None,
+            &mut current_visiting,
+            Some((&StubView, 0xAAAA, true)),
+            1,
+        );
+        assert!(
+            current_host
+                .lookups
+                .borrow()
+                .iter()
+                .any(|id| id == "/proj/Child.vue"),
+            "control: a proven-current capture DOES probe the warm cache",
         );
     }
 }
