@@ -316,10 +316,33 @@ impl DocumentRegistry {
 }
 
 /// Recursively convert semantic byte spans to the client-negotiated encoding.
+///
+/// One document publish rewrites every span in the analysis payload, so the
+/// source is indexed once (shared `verter_ffi` owner) and every span converts
+/// against that index instead of rescanning the prefix per span.
 pub(super) fn convert_analysis_spans_json(
     value: &mut serde_json::Value,
     source: &str,
     encoding: &PositionEncodingKind,
+) {
+    let encoding = if *encoding == PositionEncodingKind::UTF16 {
+        verter_ffi::convert::OffsetEncoding::Utf16
+    } else if *encoding == PositionEncodingKind::UTF32 {
+        verter_ffi::convert::OffsetEncoding::Utf32
+    } else {
+        verter_ffi::convert::OffsetEncoding::Utf8
+    };
+    if encoding == verter_ffi::convert::OffsetEncoding::Utf8 {
+        return;
+    }
+    let index = verter_ffi::convert::OffsetIndex::new(source);
+    convert_analysis_spans_with_index(value, &index, encoding);
+}
+
+fn convert_analysis_spans_with_index(
+    value: &mut serde_json::Value,
+    index: &verter_ffi::convert::OffsetIndex<'_>,
+    encoding: verter_ffi::convert::OffsetEncoding,
 ) {
     match value {
         serde_json::Value::Object(map) => {
@@ -328,48 +351,20 @@ pub(super) fn convert_analysis_spans_json(
                     .as_u64()
                     .filter(|_| key == "spanStart" || key == "spanEnd")
                 {
-                    let converted = convert_byte_offset(source, byte_offset as u32, encoding);
+                    let converted = index.convert(byte_offset as u32, encoding);
                     *val = serde_json::Value::Number(serde_json::Number::from(converted));
                 } else {
-                    convert_analysis_spans_json(val, source, encoding);
+                    convert_analysis_spans_with_index(val, index, encoding);
                 }
             }
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                convert_analysis_spans_json(value, source, encoding);
+                convert_analysis_spans_with_index(value, index, encoding);
             }
         }
         _ => {}
     }
-}
-
-fn convert_byte_offset(source: &str, byte_offset: u32, encoding: &PositionEncodingKind) -> u32 {
-    if *encoding == PositionEncodingKind::UTF16 {
-        byte_offset_to_utf16(source, byte_offset)
-    } else if *encoding == PositionEncodingKind::UTF32 {
-        byte_offset_to_utf32(source, byte_offset)
-    } else {
-        byte_offset
-    }
-}
-
-fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> u32 {
-    let clamped = clamp_to_char_boundary(source, byte_offset as usize);
-    source[..clamped].encode_utf16().count() as u32
-}
-
-fn byte_offset_to_utf32(source: &str, byte_offset: u32) -> u32 {
-    let clamped = clamp_to_char_boundary(source, byte_offset as usize);
-    source[..clamped].chars().count() as u32
-}
-
-fn clamp_to_char_boundary(source: &str, offset: usize) -> usize {
-    let mut position = offset.min(source.len());
-    while position > 0 && !source.is_char_boundary(position) {
-        position -= 1;
-    }
-    position
 }
 
 #[cfg(test)]

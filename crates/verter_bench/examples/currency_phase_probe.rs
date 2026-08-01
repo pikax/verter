@@ -705,6 +705,215 @@ fn run_meta_mode() {
     print_probe(n);
 }
 
+// ───────────────── R1: napi-shape lint wrapper accounting ─────────────────
+//
+// The NAPI `lint` entry-point does strictly more per call than the in-process
+// probe: it builds a fresh `Linter` (187-rule registry) per call, re-fetches the
+// source, rewrites every diagnostic span from UTF-8 bytes to UTF-16 units, and
+// materialises an owned result struct (Debug-formatted tags + span kind, cloned
+// strings). This mode times each of those steps separately, in-process, so the
+// NAPI wall can be split into "extra Rust work the wrapper does" and "the FFI
+// crossing itself".
+
+/// Byte offset → UTF-16 unit offset, mirroring `verter_ffi::convert::offset`.
+fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> u32 {
+    let mut clamped = (byte_offset as usize).min(source.len());
+    while clamped > 0 && !source.is_char_boundary(clamped) {
+        clamped -= 1;
+    }
+    source[..clamped].encode_utf16().count() as u32
+}
+
+/// Mirrors `NapiLintDiagnostic` construction (owned strings + Debug formats).
+#[derive(Debug)]
+struct OwnedDiagnostic {
+    rule: String,
+    category: String,
+    severity: String,
+    message: String,
+    span_start: u32,
+    span_end: u32,
+    tags: Vec<String>,
+    span_kind: String,
+}
+
+fn run_napi_shape_mode() {
+    let files = load_fixture_files(&fixtures_dir(), None);
+    let n = files.len();
+    println!("\n===== R1 NAPI-SHAPE LINT WRAPPER ACCOUNTING (MemoryWorkspace) =====");
+    println!("fixtures: {} ({n} files)", fixtures_dir().display());
+    println!("runs={} warmup={}\n", runs(), warmup());
+
+    let mut construct = Series::default();
+    let mut upsert_cold = Series::default();
+    let mut upsert_same = Series::default();
+    let mut analysis_cold = Series::default();
+    let mut analysis_warm = Series::default();
+    let mut linter_new = Series::default();
+    let mut script_build = Series::default();
+    let mut lint_run = Series::default();
+    let mut get_source = Series::default();
+    let mut utf16 = Series::default();
+    let mut owned_build = Series::default();
+    let mut diag_count = 0usize;
+
+    for i in 0..(runs() + warmup()) {
+        let record = i >= warmup();
+
+        let t0 = Instant::now();
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let c_ms = ms(t0.elapsed());
+
+        let t0 = Instant::now();
+        for f in &files {
+            upsert_one(&host, f);
+        }
+        let u_cold = ms(t0.elapsed());
+
+        // Identical re-upsert: the Rust-side cost when content did not change.
+        let t0 = Instant::now();
+        for f in &files {
+            upsert_one(&host, f);
+        }
+        let u_same = ms(t0.elapsed());
+
+        // Cold analysis pass.
+        let t0 = Instant::now();
+        for f in &files {
+            let _ = host.get_analysis(&f.id);
+        }
+        let a_cold = ms(t0.elapsed());
+
+        // Warm analysis pass.
+        let t0 = Instant::now();
+        let mut snaps = Vec::with_capacity(n);
+        for f in &files {
+            snaps.push(host.get_analysis(&f.id));
+        }
+        let a_warm = ms(t0.elapsed());
+
+        // 200x Linter::new (what the NAPI wrapper pays per call).
+        let t0 = Instant::now();
+        let mut linters = Vec::with_capacity(n);
+        for _ in 0..n {
+            linters.push(Linter::new(LintConfig::default()));
+        }
+        let l_new = ms(t0.elapsed());
+
+        // 200x script snapshot projection.
+        let t0 = Instant::now();
+        let mut scripts = Vec::with_capacity(n);
+        for s in &snaps {
+            scripts.push(s.as_ref().map(script_from_host));
+        }
+        let s_build = ms(t0.elapsed());
+
+        // 200x pure lint run (hoisted linter, as the probe does).
+        let linter = Linter::new(LintConfig::default());
+        let t0 = Instant::now();
+        let mut all_diags = Vec::with_capacity(n);
+        for (s, script) in snaps.iter().zip(scripts.iter()) {
+            match (s, script) {
+                (Some(snapshot), Some(script)) => all_diags.push(
+                    linter
+                        .lint(Some(script), snapshot.template.as_deref(), &snapshot.styles)
+                        .into_diagnostics(),
+                ),
+                _ => all_diags.push(Vec::new()),
+            }
+        }
+        let l_run = ms(t0.elapsed());
+
+        // 200x get_source.
+        let t0 = Instant::now();
+        let mut sources = Vec::with_capacity(n);
+        for f in &files {
+            sources.push(host.get_source(&f.id));
+        }
+        let g_src = ms(t0.elapsed());
+
+        // 200x UTF-16 span rewrite over the produced diagnostics.
+        let t0 = Instant::now();
+        let mut sink = 0u32;
+        for (diags, src) in all_diags.iter().zip(sources.iter()) {
+            if let Some(src) = src.as_deref() {
+                for d in diags {
+                    sink = sink
+                        .wrapping_add(byte_offset_to_utf16(src, d.span.start))
+                        .wrapping_add(byte_offset_to_utf16(src, d.span.end));
+                }
+            }
+        }
+        let u16_ms = ms(t0.elapsed());
+        std::hint::black_box(sink);
+
+        // 200x owned-result construction (Debug formats + string clones).
+        let t0 = Instant::now();
+        let mut owned = Vec::with_capacity(n);
+        for diags in &all_diags {
+            let mut row = Vec::with_capacity(diags.len());
+            for d in diags {
+                row.push(OwnedDiagnostic {
+                    rule: d.rule.clone(),
+                    category: d.category.clone(),
+                    severity: format!("{:?}", d.severity),
+                    message: d.message.clone(),
+                    span_start: d.span.start,
+                    span_end: d.span.end,
+                    tags: d.tags.iter().map(|t| format!("{:?}", t)).collect(),
+                    span_kind: format!("{:?}", d.span_kind),
+                });
+            }
+            owned.push(row);
+        }
+        let o_ms = ms(t0.elapsed());
+        std::hint::black_box(&owned);
+
+        let total_diags: usize = all_diags.iter().map(|d| d.len()).sum();
+        std::hint::black_box(&linters);
+
+        host.close();
+        drop(host);
+
+        if record {
+            construct.push(c_ms);
+            upsert_cold.push(u_cold);
+            upsert_same.push(u_same);
+            analysis_cold.push(a_cold);
+            analysis_warm.push(a_warm);
+            linter_new.push(l_new);
+            script_build.push(s_build);
+            lint_run.push(l_run);
+            get_source.push(g_src);
+            utf16.push(u16_ms);
+            owned_build.push(o_ms);
+            diag_count = total_diags;
+        }
+    }
+
+    let row = |label: &str, s: &Series| {
+        println!(
+            "  {:<28} {}   -> {:>8.1} us/file",
+            label,
+            s.fmt(),
+            s.median() / n as f64 * 1000.0
+        );
+    };
+    println!("── per-step, in-process, {n} files ──");
+    row("host construct (1x)", &construct);
+    row("upsert x200 (cold)", &upsert_cold);
+    row("upsert x200 (identical)", &upsert_same);
+    row("get_analysis x200 (cold)", &analysis_cold);
+    row("get_analysis x200 (warm)", &analysis_warm);
+    row("Linter::new x200", &linter_new);
+    row("script snapshot x200", &script_build);
+    row("linter.lint x200", &lint_run);
+    row("get_source x200", &get_source);
+    row("utf16 span rewrite x200", &utf16);
+    row("owned result build x200", &owned_build);
+    println!("  diagnostics produced: {diag_count}");
+}
+
 // ─────────────────────────── M3: four cells ───────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -893,6 +1102,7 @@ fn main() {
         "lint" => run_lint_mode(),
         "meta" => run_meta_mode(),
         "cells" => run_cells_mode(),
+        "napi-shape" => run_napi_shape_mode(),
         "all" => {
             run_lint_mode();
             reset_probe();
@@ -901,7 +1111,7 @@ fn main() {
             run_cells_mode();
         }
         other => {
-            eprintln!("unknown mode {other}; expected lint|meta|cells|all");
+            eprintln!("unknown mode {other}; expected lint|meta|cells|napi-shape|all");
             std::process::exit(2);
         }
     }
