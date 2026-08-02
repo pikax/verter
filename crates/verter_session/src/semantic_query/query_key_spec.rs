@@ -982,6 +982,31 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "classify_materialization_cycle_gate_keys_do_not_warm_hit_across_env_axes",
             admission: AdmissionSpec::Singleflight,
         },
+        // FlowReturn(key: FlowReturnKey) — the whole-function return
+        // producer: evaluates the demanded function's complete body
+        // through the flow IR and admits the canonical whole-return node
+        // (+ fallthrough bit) ONLY on a complete evaluation. The full
+        // `P R T L J` env rides on `FlowReturnContext` (no slot —
+        // whole-function program analysis is the widest-env operation);
+        // the substitution axis is the TYPE-ONLY
+        // `CanonicalTypeSubstitution` on the same context; overload
+        // ordinal and function part ride on the function slot identity.
+        // No mode / demand axis (`allowed_demand` empty), so the family
+        // lives in the `Single` slot. Value domain is `FlowReturn` (NOT
+        // `TypeNode` — the canonical whole-return carrier + fallthrough
+        // bit; consumers project afterward under their own mode). Every
+        // degraded shape (Unsupported / Missing / Budget / EmptyCycle /
+        // Unresolved) is ReturnOnly and never admits.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::FlowReturn,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "FlowReturnContext",
+            value_domain: SemanticQueryValueTag::FlowReturn,
+            env_dims: EnvDimSpec::Static(env_full()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "flow_return_keys_do_not_warm_hit_across_env_axes",
+            admission: AdmissionSpec::Singleflight,
+        },
     ]
 }
 
@@ -1018,6 +1043,7 @@ fn render_value_domain(tag: SemanticQueryValueTag) -> &'static str {
         SemanticQueryValueTag::Relation => "Relation",
         SemanticQueryValueTag::BroadRuntime => "BroadRuntime",
         SemanticQueryValueTag::MaterializationCycleGate => "MaterializationCycleGate",
+        SemanticQueryValueTag::FlowReturn => "FlowReturn",
         SemanticQueryValueTag::DiagnosticAnalysis => "DiagnosticAnalysis",
     }
 }

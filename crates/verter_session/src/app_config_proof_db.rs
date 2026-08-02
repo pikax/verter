@@ -79,6 +79,11 @@ fn fact_references_canonical(fact: &FactVersionRef, canonical_id: &str) -> bool 
         FactVersionRef::FileSourceEnv {
             canonical_id: c, ..
         } => c.as_str() == canonical_id,
+        FactVersionRef::ProgramAnalysis(fact) => match fact {
+            crate::resolver_core::ProgramAnalysisFactRef::FlowBody { function, .. } => {
+                function.canonical_id.as_ref() == canonical_id
+            }
+        },
         FactVersionRef::ProjectGeneration { .. } => false,
     }
 }

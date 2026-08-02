@@ -232,6 +232,14 @@ pub trait StoreView {
         false
     }
 
+    /// Validate a program-analysis-domain fact reference (R26).
+    /// Default impl returns `false` (fail closed); the production
+    /// [`crate::resolver_store::HostStoreView`] overrides with the live
+    /// `FunctionProgramIndex` whole-body hash comparison.
+    fn validates_program_analysis_domain(&self, _fact: &ProgramAnalysisFactRef) -> bool {
+        false
+    }
+
     /// Validate a recorded contributor source-env identity
     /// ([`FactVersionRef::FileSourceEnv`]) STRICTLY against the
     /// view-current artifact identity.
@@ -418,6 +426,10 @@ impl<T: StoreView + ?Sized> StoreView for &T {
         (**self).validates_route_surface_domain(fact)
     }
     #[inline]
+    fn validates_program_analysis_domain(&self, fact: &ProgramAnalysisFactRef) -> bool {
+        (**self).validates_program_analysis_domain(fact)
+    }
+    #[inline]
     fn validates_file_source_env(
         &self,
         canonical_id: &str,
@@ -509,7 +521,8 @@ pub struct ResolveRequest {
 }
 
 pub use verter_workspace::{
-    DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef,
+    DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
+    ProgramAnalysisFunctionRef, ResolveImportsFactRef, RouteSurfaceFactRef,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -974,7 +974,13 @@ impl VerterHost {
                         anchor: member_anchor(mac, payload_index, member_name),
                     });
                 }
-                let scope = match tsc_scope_requirements(mac, scope_inventory) {
+                let scope = match tsc_scope_requirements(
+                    mac,
+                    scope_inventory,
+                    ctx,
+                    dispatch,
+                    owner_canonical,
+                ) {
                     Ok(scope) => scope,
                     Err(failure) => return failure.tsc(),
                 };
@@ -1029,7 +1035,13 @@ impl VerterHost {
                     Ok(events) => events,
                     Err(failure) => return failure.tsc(),
                 };
-                let mut scope = match tsc_scope_requirements(mac, scope_inventory) {
+                let mut scope = match tsc_scope_requirements(
+                    mac,
+                    scope_inventory,
+                    ctx,
+                    dispatch,
+                    owner_canonical,
+                ) {
                     Ok(scope) => scope,
                     Err(failure) => return failure.tsc(),
                 };
@@ -1065,7 +1077,13 @@ impl VerterHost {
                     .prop_fields
                     .first()
                     .is_none_or(|field| field.is_optional);
-                let scope = match tsc_scope_requirements(mac, scope_inventory) {
+                let scope = match tsc_scope_requirements(
+                    mac,
+                    scope_inventory,
+                    ctx,
+                    dispatch,
+                    owner_canonical,
+                ) {
                     Ok(scope) => scope,
                     Err(failure) => return failure.tsc(),
                 };

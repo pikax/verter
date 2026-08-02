@@ -523,6 +523,23 @@ pub struct DeclBodyMemo {
     aug_type_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), TypeCell>,
     aug_value_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), ValueCell>,
     whole_env: OnceLock<Arc<EvalEnv>>,
+    /// The per-file function program index — a DEMAND product: exact
+    /// function identities + body locators, binding/reference inventory,
+    /// return sites, writes/effects, the control-region skeleton, exact
+    /// direct local call targets, and whole-function stable hashes.
+    /// Arena-free, no lowered types; built once through the retained
+    /// snapshot on first Flow demand.
+    function_program_index:
+        OnceLock<Arc<verter_semantic::analysis::function_program::FunctionProgramIndex>>,
+    /// The memoized whole-function flow IR nodes — the OWNED lazy body
+    /// artifact of the flow-return substrate, one per demanded function
+    /// program key, content-addressed by the owning snapshot (a content
+    /// edit produces a fresh memo). Locator misses are typed `None`s at
+    /// the call site and are never memoized.
+    flow_ir_entries: DashMap<
+        verter_semantic::analysis::function_program::FunctionProgramKey,
+        Arc<crate::flow_ir::WholeFunctionFlowIrNode>,
+    >,
     raw_surfaces: DashMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
 }
 
@@ -580,6 +597,8 @@ impl DeclBodyMemo {
             aug_type_entries: DashMap::default(),
             aug_value_entries: DashMap::default(),
             whole_env: OnceLock::new(),
+            function_program_index: OnceLock::new(),
+            flow_ir_entries: DashMap::default(),
             raw_surfaces: DashMap::default(),
         }
     }
@@ -613,6 +632,8 @@ impl DeclBodyMemo {
             aug_type_entries: DashMap::default(),
             aug_value_entries: DashMap::default(),
             whole_env: OnceLock::new(),
+            function_program_index: OnceLock::new(),
+            flow_ir_entries: DashMap::default(),
             raw_surfaces: DashMap::default(),
         };
 
@@ -1136,6 +1157,111 @@ impl DeclBodyMemo {
         }
         // Commit only the REAL env (idempotent — a cold race loses harmlessly).
         self.whole_env.get_or_init(|| Arc::new(env)).clone()
+    }
+
+    /// The per-file function program index — a DEMAND product built ONCE
+    /// through the retained parse snapshot (the same lease-only run every
+    /// other body product uses) and memoized. The semantic walk returns
+    /// structural per-function hashes; this boundary folds the parser /
+    /// language / parse-env identity into each entry's
+    /// `flow_body_stable_hash` so a parse-env move or a parser/language
+    /// flip misses exactly the affected artifact slots. Unrelated
+    /// functions are not lowered — the index is structural only.
+    pub fn function_program_index(
+        &self,
+    ) -> Arc<verter_semantic::analysis::function_program::FunctionProgramIndex> {
+        if let Some(cached) = self.function_program_index.get() {
+            return cached.clone();
+        }
+        let Some(service) = self.service.as_ref() else {
+            // Seeded memos carry no parse to walk; the empty index is the
+            // CORRECT value (a genuine miss, not a lease-pin break).
+            return self
+                .function_program_index
+                .get_or_init(Default::default)
+                .clone();
+        };
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let owner_table = Arc::clone(&self.owner_table);
+        let Some(index) = service.run_leased(&self.key, move |program| {
+            program.map(|p| {
+                verter_semantic::analysis::function_program::build_function_program_index(
+                    p.borrow_dependent(),
+                    p.source_str(),
+                    owner_table.as_ref(),
+                )
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly. NEVER memoize
+            // the empty index — a retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: function_program_index's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
+            );
+            return Arc::new(Default::default());
+        };
+        let Some(index) = index else {
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: function_program_index's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
+            );
+            return Arc::new(Default::default());
+        };
+        let folded = fold_flow_body_env_identity(index, &self.key.parse_env_hash, self.source_type);
+        self.function_program_index
+            .get_or_init(|| Arc::new(folded))
+            .clone()
+    }
+
+    /// The whole-function flow IR for one indexed function — the OWNED,
+    /// arena-free lazy body artifact of the flow-return substrate. Built
+    /// ONCE per function through the same lease-only retained-snapshot run
+    /// every other body product uses (pure job, owned output, no host
+    /// re-entry) and memoized per function program key. Returns `None` on
+    /// a locator miss (a typed miss, never a panic) or on a seeded memo /
+    /// broken lease pin; misses are never memoized.
+    pub fn whole_function_flow_ir(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    ) -> Option<Arc<crate::flow_ir::WholeFunctionFlowIrNode>> {
+        if let Some(cached) = self.flow_ir_entries.get(&entry.key) {
+            return Some(Arc::clone(&cached));
+        }
+        let service = self.service.as_ref()?;
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let key = entry.key.clone();
+        let entry = entry.clone();
+        let Some(node) = service.run_leased(&self.key, move |program| {
+            program.and_then(|p| {
+                crate::flow_ir::build_whole_function_flow_ir(
+                    p.borrow_dependent(),
+                    p.source_str(),
+                    &entry,
+                )
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: whole_function_flow_ir's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return None;
+        };
+        let node = node?;
+        Some(
+            self.flow_ir_entries
+                .entry(key)
+                .or_insert_with(|| Arc::new(node))
+                .clone(),
+        )
     }
 
     /// Whether the whole-file env has already been materialised (test
@@ -1754,6 +1880,10 @@ pub(crate) struct TransientValueParts {
     pub(crate) type_annotation: Option<TypeExpr>,
     pub(crate) object_shape: Option<ObjectExpr>,
     pub(crate) signatures: Vec<LoweredSignatureParts>,
+    /// The owning declaration's kind (strict last-wins, the annotation rule)
+    /// — the whole-signature recovery reads it to name the served function
+    /// position of a body-derived return (declaration body vs initializer).
+    pub(crate) kind: Option<verter_semantic::analysis::type_eval::ValueDeclKind>,
     /// The owning declaration's HEADER type parameters — populated for a
     /// dual-space declaration (a `class K<T>` whose VALUE side's constructor
     /// shape references `T`) from the SAME statements' type-side parts,
@@ -2287,6 +2417,7 @@ impl DeclBodyMemo {
                     merged.type_annotation = decl.type_annotation.clone();
                     merged.object_shape = decl.object_shape.clone();
                     merged.signatures.extend(decl.signatures.iter().cloned());
+                    merged.kind = Some(decl.kind);
                 }
                 // A dual-space declaration's HEADER type parameters (a
                 // `class K<T>` constructor shape references `T`) ride the
@@ -2806,8 +2937,9 @@ fn fold_lowered_value_decl(
 /// classification for a type with no authored `TSType` node): authored member
 /// payloads inside it stay content-free locators lowered on demand through
 /// the one dispatch, never eagerly. The construct signature is honest to the
-/// vocabulary: no parameters, no type parameters, and `return_ty: None` (the
-/// return is the synthesized annotation source, not an authored position).
+/// vocabulary: no parameters, no type parameters, and an ABSENT return source
+/// (the return is the synthesized annotation source, not an authored
+/// position).
 ///
 /// Fingerprinting routes through the SAME shared fold as the group producer:
 /// a transient-less record with a classified annotation carries the honest
@@ -2835,8 +2967,7 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
         vec![FunctionSignature {
             type_parameters: Arc::from(Vec::new().into_boxed_slice()),
             parameters: Arc::from(Vec::new().into_boxed_slice()),
-            return_ty: None,
-            return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
+            return_source: verter_type_expr::facts::FunctionReturnSource::Absent,
             has_implementation_body: true,
             spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
         }],
@@ -2894,5 +3025,38 @@ fn collect_augmentation_statement_dependencies(
                 .or_default()
                 .extend(deps);
         }
+    }
+}
+
+/// Fold the parser / language / parse-env identity into a freshly built
+/// function program index's structural per-function hashes. The semantic
+/// walk's `flow_body_stable_hash` covers body content only; this boundary
+/// mix is what makes a parse-env move or a parser/language flip miss
+/// exactly the affected artifact slots without re-walking the body.
+fn fold_flow_body_env_identity(
+    index: verter_semantic::analysis::function_program::FunctionProgramIndex,
+    parse_env_hash: &crate::types::Hash16,
+    source_type: oxc_span::SourceType,
+) -> verter_semantic::analysis::function_program::FunctionProgramIndex {
+    const SALT: &[u8] = b"verter-flow-body-env-identity:v1";
+    let entries: Vec<verter_semantic::analysis::function_program::FunctionProgramEntry> = index
+        .entries
+        .iter()
+        .map(|entry| {
+            let mut buf = Vec::with_capacity(64);
+            buf.extend_from_slice(SALT);
+            buf.extend_from_slice(&entry.flow_body_stable_hash);
+            buf.extend_from_slice(parse_env_hash);
+            buf.extend_from_slice(
+                &crate::file_artifact_store::CURRENT_PARSER_VERSION.to_le_bytes(),
+            );
+            buf.extend_from_slice(format!("{source_type:?}").as_bytes());
+            let mut folded = entry.clone();
+            folded.flow_body_stable_hash = crate::hash::hash_16(&buf);
+            folded
+        })
+        .collect();
+    verter_semantic::analysis::function_program::FunctionProgramIndex {
+        entries: Arc::from(entries.into_boxed_slice()),
     }
 }

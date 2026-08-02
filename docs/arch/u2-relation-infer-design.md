@@ -1,5 +1,18 @@
 # U2.RELATION_INFER — Relation-cache substrate + coinductive dispatch (LOCKED design)
 
+> Runtime note (present behavior): the relation reentry topology this design
+> describes (assumption stack, lowlinks, watermarks, SCC drain, batched
+> admission) now runs on the shared TAGGED mixed-domain obligation runtime
+> `CheckerDispatchTransaction` (`crates/verter_session/src/project_semantic_dispatch/dispatch_txn.rs`)
+> with `ObligationIdentity::{Relate, FlowReturn}` — relation keeps this
+> design's verdict algebra and inference-session semantics; the tagged
+> runtime decides root-vs-inline generically, propagates lowlinks through
+> flow frames, drains the pending ledger by push-time watermark, and admits
+> the tagged component atomically. Body-derived function returns are served
+> by the whole-function `FlowReturn` producer through the same runtime:
+> served function positions are identified by `FunctionProgramIndex` and
+> answered through one sealed consumer helper (`FunctionReturnSource`).
+>
 > Block: `U2.RELATION_INFER` (`docs/arch/semantic-db-overhaul-unified-remaining-plan.md`, the
 > `U2.RELATION_INFER` gate). Design gate deliverable — design #1 (relation-caching category) + design #2
 > (coinductive cycle discharge) together, as ONE coupled problem, plus the inference-session admission

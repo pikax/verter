@@ -11,13 +11,13 @@ use crate::analysis::types::{
 };
 use std::sync::Arc;
 use verter_type_expr::facts::{
-    ClosedTypeFact, EnumPrimitiveDomain, EnumScalar, FunctionSignatureFact,
-    InferenceUnavailableReason, LeafTypeFact, ObjectMemberFact, ObjectShapeFact,
-    ReturnInferenceCompleteness, ReturnInferenceUnsupported, SemanticTypeSource,
-    ValueAnnotationClass,
+    ClosedTypeFact, EnumPrimitiveDomain, EnumScalar, FunctionPartIdentity, FunctionReturnSource,
+    FunctionSignatureFact, InferenceUnavailableReason, LeafTypeFact, ObjectMemberFact,
+    ObjectShapeFact, SemanticTypeSource, ValueAnnotationClass,
 };
 use verter_type_expr::locators::{
-    AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeParamBoundPosition,
+    AuthoredBodyLocator, FunctionReturnLocator, LocatorSymbolSpace, TypeBodyPathStep,
+    TypeParamBoundPosition,
 };
 use verter_type_expr::*;
 
@@ -1345,7 +1345,11 @@ fn extracts_function_declaration() {
             TypeBodyPathStep::FunctionParam { ordinal: 0 },
         ],
     );
-    let return_ty = fact.return_ty.as_ref().expect("authored return slot");
+    let FunctionReturnSource::Declared(FunctionReturnLocator::Authored(return_ty)) =
+        &fact.return_source
+    else {
+        panic!("authored return slot, got {:?}", fact.return_source);
+    };
     assert_eq!(
         &*return_ty.path,
         &[
@@ -1358,265 +1362,106 @@ fn extracts_function_declaration() {
 }
 
 #[test]
-fn inferred_return_mints_semantic_replay_without_an_authored_span() {
+fn inferred_return_names_its_served_position_without_an_authored_span() {
     // `function inferred() { return "" }` has NO authored return annotation:
     // the transient lowering still INFERS the return type and the stored fact
-    // keeps a content-free replay locator. Span recovery remains independent,
-    // so no authored return-type source site is fabricated.
+    // names the served function position the whole-function producer answers.
+    // Span recovery remains independent, so no authored return-type source
+    // site is fabricated.
     let source = r#"function inferred(name: string) { return name }"#;
     let parts = lowered(source);
     let sig = &parts.value_decl("inferred").expect("lowered").signatures[0];
-    assert!(
-        sig.return_type.is_some(),
-        "the transient lowering still infers the return type"
+    assert_eq!(
+        sig.return_type, None,
+        "a block-bodied return carries no authored carrier"
     );
     assert!(!sig.has_authored_return);
 
     let env = parse_and_build_env(source);
     let fact = &env.value_symbols["inferred"].primary().signatures[0];
-    let inferred = fact
-        .return_ty
-        .as_ref()
-        .expect("an inferred return keeps its semantic replay slot");
-    assert_eq!(
-        &*inferred.path,
-        &[
-            TypeBodyPathStep::ValueSignature { ordinal: 0 },
-            TypeBodyPathStep::FunctionReturn,
-        ]
-    );
+    let FunctionReturnSource::Flow(identity) = &fact.return_source else {
+        panic!(
+            "a body-derived return names its served function position, got {:?}",
+            fact.return_source
+        );
+    };
+    assert!(matches!(
+        identity.function_part,
+        FunctionPartIdentity::DeclarationBody
+    ));
+    assert_eq!(identity.overload_ordinal, 0);
+    assert_eq!(&*identity.anchor.symbol, "inferred");
     // The authored parameter still mints its slot.
     assert_eq!(fact.parameters.len(), 1);
     assert!(fact.parameters[0].has_ts_annotation);
 }
 
 #[test]
-fn empty_implementation_infers_void_without_fabricating_an_authored_slot() {
+fn empty_implementation_carries_no_authored_return_slot() {
+    // An unannotated empty body has no authored return carrier; the
+    // whole-function producer supplies the `void` fallthrough seed.
     let source = "export function focus() {}";
     let parts = lowered(source);
     let signature = &parts.value_decl("focus").expect("lowered focus").signatures[0];
-    assert_eq!(
-        signature.return_type,
-        Some(TypeExpr::Primitive(PrimitiveName::Void))
-    );
+    assert_eq!(signature.return_type, None);
     assert!(!signature.has_authored_return);
 
     let env = parse_and_build_env(source);
     let stored = &env.value_symbols["focus"].primary().signatures[0];
     assert!(
-        stored.return_ty.is_some(),
-        "the inferred void result remains replayable through the semantic body locator"
+        matches!(stored.return_source, FunctionReturnSource::Flow(_)),
+        "the inferred void result is served by the whole-function producer"
     );
 }
 
 #[test]
-fn return_inference_flow_if_without_else_includes_fallthrough_undefined() {
+fn body_derived_function_carries_no_authored_return_carrier() {
+    // An unannotated function's return is body-derived: the transient
+    // signature carries NO return carrier and the stored fact names the
+    // served function position the whole-function producer answers.
     let source = "function choose(flag: boolean, value: string) { if (flag) return value; }";
     let parts = lowered(source);
     let signature = &parts
         .value_decl("choose")
         .expect("lowered choose")
         .signatures[0];
-    assert_eq!(
-        signature.return_type,
-        Some(TypeExpr::union(vec![
-            TypeExpr::Primitive(PrimitiveName::String),
-            TypeExpr::Primitive(PrimitiveName::Undefined),
-        ]))
-    );
-    assert_eq!(
-        signature.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: true,
-        }
-    );
+    assert_eq!(signature.return_type, None, "no authored return carrier");
+    assert!(!signature.has_authored_return);
+    assert!(signature.has_implementation_body);
 
     let env = parse_and_build_env(source);
     let fact = &env.value_symbols["choose"].primary().signatures[0];
-    assert_eq!(fact.return_inference, signature.return_inference);
     assert!(
-        fact.return_ty.is_some(),
-        "complete inference stays replayable"
+        matches!(fact.return_source, FunctionReturnSource::Flow(_)),
+        "a body-derived return names its served position"
     );
 }
 
 #[test]
-fn return_inference_flow_if_else_and_following_return_close_every_path() {
-    let if_else = lowered(
-        "function choose(flag: boolean, yes: string, no: number) { \
-         if (flag) return yes; else return no; }",
-    );
-    let if_else = &if_else
-        .value_decl("choose")
-        .expect("lowered if/else")
-        .signatures[0];
-    assert_eq!(
-        if_else.return_type,
-        Some(TypeExpr::union(vec![
-            TypeExpr::Primitive(PrimitiveName::String),
-            TypeExpr::Primitive(PrimitiveName::Number),
-        ]))
-    );
-    assert_eq!(
-        if_else.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: false,
-        }
-    );
-
-    let following = lowered(
-        "function choose(flag: boolean, yes: string, no: number) { \
-         if (flag) return yes; return no; }",
-    );
-    let following = &following
-        .value_decl("choose")
-        .expect("lowered following return")
-        .signatures[0];
-    assert_eq!(following.return_type, if_else.return_type);
-    assert_eq!(following.return_inference, if_else.return_inference);
-}
-
-#[test]
-fn return_inference_flow_bare_return_is_complete_undefined() {
-    let source = "function stop() { return; }";
-    let parts = lowered(source);
-    let signature = &parts.value_decl("stop").expect("lowered stop").signatures[0];
-    assert_eq!(
-        signature.return_type,
-        Some(TypeExpr::Primitive(PrimitiveName::Undefined))
-    );
-    assert_eq!(
-        signature.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: false,
-        }
-    );
-}
-
-#[test]
-fn return_inference_flow_rejects_unsupported_instead_of_narrowing() {
-    let cases = [
-        (
-            "function choose(value: number) { switch (value) { case 1: return 'a'; default: return 'b'; } }",
-            ReturnInferenceUnsupported::Switch,
-        ),
-        (
-            "function choose() { while (true) { return 'a'; } }",
-            ReturnInferenceUnsupported::Loop,
-        ),
-        (
-            "function choose() { try { return 'a'; } finally {} }",
-            ReturnInferenceUnsupported::Try,
-        ),
-    ];
-
-    for (source, unsupported) in cases {
+fn control_flow_heavy_bodies_still_name_their_served_position() {
+    // A switch / return-bearing loop / try body is not modeled by the
+    // whole-function producer — but the transient signature and the stored
+    // fact still name the exact served position; the producer degrades it,
+    // never narrows.
+    for source in [
+        "function choose(value: number) { switch (value) { case 1: return 'a'; default: return 'b'; } }",
+        "function choose() { while (true) { return 'a'; } }",
+        "function choose() { try { return 'a'; } finally {} }",
+    ] {
         let parts = lowered(source);
         let signature = &parts
             .value_decl("choose")
-            .expect("lowered unsupported function")
+            .expect("lowered function")
             .signatures[0];
-        assert_eq!(
-            signature.return_type, None,
-            "unsupported flow must not narrow"
-        );
-        assert_eq!(
-            signature.return_inference,
-            ReturnInferenceCompleteness::Unsupported(unsupported)
-        );
+        assert_eq!(signature.return_type, None, "no authored return carrier");
 
         let env = parse_and_build_env(source);
         let fact = &env.value_symbols["choose"].primary().signatures[0];
-        assert_eq!(
-            fact.return_ty, None,
-            "unsupported inference has no replay slot"
+        assert!(
+            matches!(fact.return_source, FunctionReturnSource::Flow(_)),
+            "the body names its served position"
         );
-        assert_eq!(fact.return_inference, signature.return_inference);
     }
-}
-
-#[test]
-fn return_inference_flow_keeps_nested_unsafe_shape_visible_to_typeinfo() {
-    let source = "function nested() { return { values: [] }; }";
-    let parts = lowered(source);
-    let signature = &parts
-        .value_decl("nested")
-        .expect("lowered nested")
-        .signatures[0];
-    assert_eq!(
-        signature.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: false,
-        }
-    );
-    let TypeExpr::Object(object) = signature.return_type.as_ref().expect("inferred object") else {
-        panic!("expected inferred object return")
-    };
-    let ObjectMember::Property(values) = &object.properties[0] else {
-        panic!("expected values property")
-    };
-    assert!(matches!(
-        &values.ty,
-        TypeExpr::Array {
-            element,
-            readonly: false,
-        } if matches!(element.as_ref(), TypeExpr::Primitive(PrimitiveName::Any))
-    ));
-}
-
-#[test]
-fn return_inference_flow_class_method_fact_uses_exact_member_address() {
-    let source = "class Service { choose(flag: boolean, value: string) { if (flag) return value; } unsupported() { while (true) { return 1; } } }";
-    let env = parse_and_build_env(source);
-    let declaration = env.type_symbols["Service"].primary();
-    let member_origin = |owner, contributor_index, ordinal| {
-        verter_type_expr::span_origins::FunctionSpansOrigin::Member {
-            anchor: verter_type_expr::span_origins::DeclContributorAnchor {
-                contributor_index,
-                owner,
-                owner_local_ordinal: 0,
-            },
-            member_path: Arc::from(vec![ordinal]),
-        }
-    };
-    let ordinary = TopLevelOwnerId::ordinary_file();
-
-    assert_eq!(
-        declaration.return_inference_for_member(&member_origin(ordinary, 0, 0)),
-        Some(ReturnInferenceCompleteness::Complete {
-            can_fall_through: true,
-        })
-    );
-    assert_eq!(
-        declaration.return_inference_for_member(&member_origin(ordinary, 0, 1)),
-        Some(ReturnInferenceCompleteness::Unsupported(
-            ReturnInferenceUnsupported::Loop,
-        ))
-    );
-    assert_eq!(
-        declaration.return_inference_for_member(&member_origin(ordinary, 0, 2)),
-        None,
-        "member lookup is path-exact"
-    );
-    assert_eq!(
-        declaration.return_inference_for_member(&member_origin(ordinary, 1, 0)),
-        None,
-        "member lookup is contributor-exact"
-    );
-    assert_eq!(
-        declaration.return_inference_for_member(&member_origin(TopLevelOwnerId::module(1), 0, 0)),
-        None,
-        "member lookup is owner-exact"
-    );
-    assert_eq!(
-        declaration.return_inference_for_member(
-            &verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
-                verter_type_expr::span_origins::SourceSynthetic,
-            )
-        ),
-        None,
-        "a missing member origin cannot fall back to shape matching"
-    );
 }
 
 fn static_class_method_fact<'a>(
@@ -1650,13 +1495,21 @@ fn static_class_method_return_inference_normal_control_is_exact() {
     );
     let fact = static_class_method_fact(&env, "Service", "choose");
 
+    let FunctionReturnSource::Flow(identity) = &fact.return_source else {
+        panic!(
+            "a body-derived static method names its served position, got {:?}",
+            fact.return_source
+        );
+    };
     assert_eq!(
-        fact.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: true,
-        }
+        identity.function_part,
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![0].into_boxed_slice()),
+        },
+        "the served member path is the raw ClassBody ordinal"
     );
-    assert!(fact.return_ty.is_some());
+    assert_eq!(identity.overload_ordinal, 0);
+    assert_eq!(&*identity.anchor.symbol, "Service");
     assert_eq!(
         fact.spans_origin,
         verter_type_expr::span_origins::FunctionSpansOrigin::Member {
@@ -1678,10 +1531,9 @@ fn static_class_method_return_inference_budget_unavailable_is_exact() {
     ));
     let fact = static_class_method_fact(&env, "Service", "deep");
 
-    assert_eq!(fact.return_ty, None);
-    assert_eq!(
-        fact.return_inference,
-        ReturnInferenceCompleteness::Unavailable(InferenceUnavailableReason::DepthBudgetExceeded,)
+    assert!(
+        matches!(fact.return_source, FunctionReturnSource::Flow(_)),
+        "a budget-stopped body still names its served position"
     );
 }
 
@@ -1692,10 +1544,9 @@ fn static_class_method_return_inference_unsupported_is_exact() {
     );
     let fact = static_class_method_fact(&env, "Service", "unsupported");
 
-    assert_eq!(fact.return_ty, None);
-    assert_eq!(
-        fact.return_inference,
-        ReturnInferenceCompleteness::Unsupported(ReturnInferenceUnsupported::Loop)
+    assert!(
+        matches!(fact.return_source, FunctionReturnSource::Flow(_)),
+        "an unsupported body still names its served position"
     );
 }
 
@@ -1706,7 +1557,6 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
     let env = parse_and_build_env(
         "class Collision { pad = 0; collide() { while (true) { return 1; } } static collide() { return 1; } }",
     );
-    let instance = env.type_symbols["Collision"].primary();
     let shared_origin = verter_type_expr::span_origins::FunctionSpansOrigin::Member {
         anchor: verter_type_expr::span_origins::DeclContributorAnchor {
             contributor_index: 0,
@@ -1715,29 +1565,25 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
         },
         member_path: Arc::from(vec![1]),
     };
-    assert_eq!(
-        instance.return_inference_for_member(&shared_origin),
-        Some(ReturnInferenceCompleteness::Unsupported(
-            ReturnInferenceUnsupported::Loop,
-        ))
-    );
-    assert_eq!(
-        instance.return_inference_for_member_path(&[1]),
-        Some(ReturnInferenceCompleteness::Unsupported(
-            ReturnInferenceUnsupported::Loop,
-        )),
-        "path lookup is valid only after selecting the exact type contributor"
-    );
 
     let static_fact = static_class_method_fact(&env, "Collision", "collide");
     assert_eq!(static_fact.spans_origin, shared_origin);
+    let FunctionReturnSource::Flow(identity) = &static_fact.return_source else {
+        panic!(
+            "the value-side static served position must not name-rematch, got {:?}",
+            static_fact.return_source
+        );
+    };
+    // The instance `collide` (raw ClassBody ordinal 1) and the static
+    // `collide` (raw ClassBody ordinal 2) are DISTINCT served positions
+    // even though they share a name.
     assert_eq!(
-        static_fact.return_inference,
-        ReturnInferenceCompleteness::Complete {
-            can_fall_through: false,
-        },
-        "the value-side static verdict must not name-rematch the type-side instance verdict"
+        identity.function_part,
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![2].into_boxed_slice()),
+        }
     );
+    assert_eq!(identity.overload_ordinal, 0);
 
     let shape = env.value_symbols["Collision"]
         .primary()
@@ -1759,8 +1605,7 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
     else {
         unreachable!("matched method")
     };
-    method.function.return_inference =
-        ReturnInferenceCompleteness::Unsupported(ReturnInferenceUnsupported::Switch);
+    method.function.return_source = FunctionReturnSource::Absent;
     assert_ne!(serde_json::to_vec(&changed).unwrap(), encoded);
 
     let fingerprint = |shape: &ObjectShapeFact| {
@@ -1841,7 +1686,10 @@ fn semantic_inference_budget_rejects_deep_function_initializer() {
 }
 
 #[test]
-fn semantic_inference_budget_rejects_deep_return_expression() {
+fn semantic_inference_budget_deep_return_expression_stays_a_served_position() {
+    // The extraction carries no return carrier for an unannotated body —
+    // the budget edge of a deeply nested return expression surfaces at the
+    // whole-function producer's evaluation, not at signature extraction.
     let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
     let source = format!("function deep() {{ return {expression}; }}");
     let parts = lowered(&source);
@@ -1850,10 +1698,6 @@ fn semantic_inference_budget_rejects_deep_return_expression() {
         .expect("lowered function")
         .signatures[0];
     assert_eq!(signature.return_type, None);
-    assert_eq!(
-        signature.return_inference,
-        ReturnInferenceCompleteness::Unavailable(InferenceUnavailableReason::DepthBudgetExceeded,)
-    );
 }
 
 #[test]

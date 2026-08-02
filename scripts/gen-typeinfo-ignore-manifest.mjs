@@ -5,7 +5,7 @@
  * Emits three checked-in, generated-not-hand-maintained files:
  *
  * 1. `crates/verter_session/tests/cases/manifest_data/typeinfo_ignored_test_manifest_rows.rs`
- *    — the 355 `IgnoredTestRow`s, each with the full 13-column schema.
+ *    — the 348 `IgnoredTestRow`s, each with the full 13-column schema.
  * 2. `crates/verter_session/tests/cases/manifest_data/typeinfo_additional_proof_rows.rs`
  *    — the CLOSED set of 7 coverage-only `AdditionalProofRow`s.
  * 3. `crates/verter_session/tests/cases/manifest_data/typeinfo_parity_blocks.rs`
@@ -16,7 +16,7 @@
  * authoritative machine-readable row→block partition in
  * `scripts/manifests/typeinfo-row-block-partition.json` joined with the live
  * `#[ignore = "..."]` discovery + the Capability Map — NOT hand-typed
- * 355 times. The `AdditionalProofRow` table (file 2) and the
+ * 348 times. The `AdditionalProofRow` table (file 2) and the
  * `TYPEINFO_PARITY_BLOCKS` DAG (file 3, with each block's
  * `required_guards`/`verification_labels`/prereqs/mechanisms) are
  * authored in this generator's own data maps (`buildAdditionalRows`,
@@ -200,6 +200,7 @@ const FILE_TO_SUBSTRATE = new Map([
   ["expansion_boundaries.rs", "ExpansionBoundaries"],
   ["flow_invalidations.rs", "FlowNarrowing"],
   ["flow_return_catalog.rs", "FlowNarrowing"],
+  ["flow_return_substrate.rs", "ValueInference"],
   ["footprint.rs", "AuditFootprint"],
   ["function_advanced.rs", "CallResolution"],
   ["index_signatures.rs", "IndexSignatures"],
@@ -3014,8 +3015,8 @@ function main(checkOnly = false) {
     });
   }
 
-  if (rows.length !== 351) {
-    process.stderr.write(`error: expected 351 IgnoredTestRows, built ${rows.length}\n`);
+  if (rows.length !== 348) {
+    process.stderr.write(`error: expected 348 IgnoredTestRows, built ${rows.length}\n`);
     return 5;
   }
 

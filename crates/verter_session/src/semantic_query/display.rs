@@ -122,6 +122,11 @@ pub fn display(
         }
         SemanticQueryValue::DeclarationAnalysis(d) => display_declaration_analysis(store, d, needs),
         SemanticQueryValue::ProgramAnalysis(p) => display_program_analysis(store, p, needs),
+        SemanticQueryValue::FlowReturn(result) => DisplayString(format!(
+            "{} (can_fall_through: {})",
+            display_type_node(store, result.return_type, needs, MAX_DISPLAY_DEPTH, &mut Vec::new()).0,
+            result.can_fall_through,
+        )),
         // §14.1: the reserved native-checker seam. No producer constructs it,
         // so reaching it here is a logic error. Matched explicitly — NOT via a
         // `_` wildcard — so any future live `SemanticQueryValue` arm forces a

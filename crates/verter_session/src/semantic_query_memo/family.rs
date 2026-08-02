@@ -511,6 +511,20 @@ pub(super) enum FamilyKey {
     ClassifyMaterializationCycleGate {
         key: Box<crate::semantic_query::MaterializationCycleGateKey>,
     },
+    /// Mode-erased `FlowReturn` identity. The family fields are EXACTLY
+    /// the full [`crate::semantic_query::FlowReturnKey`] — function slot
+    /// identity (declaration slot + part + overload ordinal), normalized
+    /// type args, and the env/substitution/policy context — and NOTHING
+    /// else: no demand path, projection mode, content hash, generation,
+    /// or budget (R6); version-rooting lives on the cached value's
+    /// `ProgramAnalysisFactRef::FlowBody` fact + consumed subquery facts
+    /// + self roots.
+    ///
+    /// BOXED (mirroring [`Self::Relate`]): the key composite would
+    /// inflate EVERY entry of the hot keyspace.
+    FlowReturn {
+        key: Box<crate::semantic_query::FlowReturnKey>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -598,6 +612,7 @@ impl FamilyKey {
             FamilyKey::ClassifyMaterializationCycleGate { .. } => {
                 "ClassifyMaterializationCycleGate"
             }
+            FamilyKey::FlowReturn { .. } => "FlowReturn",
         }
     }
 
@@ -630,7 +645,8 @@ impl FamilyKey {
             | FamilyKey::TypeOf { .. }
             | FamilyKey::Conditional { .. }
             | FamilyKey::MappedType { .. }
-            | FamilyKey::ProjectObjectSpread { .. } => 8,
+            | FamilyKey::ProjectObjectSpread { .. }
+            | FamilyKey::FlowReturn { .. } => 8,
             FamilyKey::ResolveDecl(_) => 4,
             FamilyKey::ProjectMember { .. } => 4,
             FamilyKey::IndexedAccess { .. } => 4,
@@ -1827,6 +1843,13 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
+        // FlowReturn — LIVE whole-function producer with a mode-erased
+        // key: the full `FlowReturnKey` IS the family identity (function
+        // slot + type args + env/substitution/policy), so the family
+        // uses the `Single` slot.
+        SemanticQueryKey::FlowReturn(key) => {
+            (FamilyKey::FlowReturn { key: key.clone() }, ModeSlot::Single)
+        }
     }
 }
 
@@ -1893,6 +1916,11 @@ pub(super) fn carrier_facts_reference_canonical(
         crate::resolver_core::FactVersionRef::FileSourceEnv {
             canonical_id: c, ..
         } => c.as_str() == canonical_id,
+        crate::resolver_core::FactVersionRef::ProgramAnalysis(fact) => match fact {
+            crate::resolver_core::ProgramAnalysisFactRef::FlowBody { function, .. } => {
+                function.canonical_id.as_ref() == canonical_id
+            }
+        },
         // Not file-scoped — references no canonical.
         crate::resolver_core::FactVersionRef::ProjectGeneration { .. } => false,
     })

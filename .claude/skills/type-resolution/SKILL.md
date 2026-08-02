@@ -996,3 +996,8 @@ The **macro hot mirror** (`crate::structural_carrier_producer::macro_arg_produce
 ## Frontier Engine Tests
 
 Tests in `crates/verter_session/src/frontier_tests.rs` cover diamond dedup, barrel ordering, cycle termination, budget enforcement, export routing, and store-view consistency. Run with `cargo test --package verter_session frontier_tests`.
+
+## Flow-Return Substrate (U6) Debt Notes
+
+- **Optional-parameter body widening (U6.VALUE_INFERENCE debt).** Inside a body, a parameter declared `x?: T` evaluates to `T | undefined`. That is CORRECT under strict null checks (TS 5.8 / 6.0 semantics): a caller may omit the argument, so every body read sees the `undefined` arm. The non-strict branch (plain `T`, e.g. `number`) is NOT modeled by the flow-return substrate and remains U6.VALUE_INFERENCE debt — do not "fix" the strict branch to the non-strict answer.
+- **Hoisted nested-function call recovery (U6.CALL_RESOLVE debt).** A bare-identifier call to a name bound by a hoisted nested function declaration in the same body (`function f() { function g() { … } return g(); }`, including the self-shadowing `function f() { function f(): number { … } return f(); }`) shadows every outer same-name callee, but the nested declaration's own return is beyond the direct-call inventory. The flow IR lowers such a call to `FlowIrExpr::LocalFunctionShadow` and the evaluator FAILS CLOSED (`FlowReturnFailure::Unresolved` → ReturnOnly, never admitted) — it never binds the outer callee and never treats the call as a self-recursion hold. Exact recovery (evaluating the nested declaration's own body) is U6.CALL_RESOLVE debt; the fail-closed ReturnOnly stands.

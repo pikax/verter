@@ -874,6 +874,26 @@ pub(in crate::project_semantic_dispatch) fn project_node_shallow_member_output(
     })
 }
 
+/// The node-domain declaration facts of `node` in ONE facts-only fold:
+/// whether every rendered leaf is declaration-safe (no implicit `any` /
+/// unknown / synthetic slot binding / return-less function) AND the
+/// reachable `typeof <value>` dependency paths. `None` when the whole raise
+/// is `None`. A terminal splice pipeline decides on THIS — it never
+/// materializes a `TypeExpr` to make the same decision; it materializes at
+/// most once afterwards, solely for display.
+pub(in crate::project_semantic_dispatch) fn project_node_declaration_facts(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<(
+    bool,
+    std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
+)> {
+    let mut alg = node_domain::DeclarationFactsAlg;
+    let mut active = FxHashSet::default();
+    let out = fold_node(&mut alg, dispatch, node, &mut active)?;
+    Some((out.safe, out.typeof_paths))
+}
+
 /// Whether `node`'s OWN raised root term is an unmaterialised sentinel — the
 /// node-domain equivalent of `type_expr_root_is_unmaterialized_sentinel(raise(node))`.
 /// Reads `root_unmaterialized_sentinel` off the ROOT-ONLY projection

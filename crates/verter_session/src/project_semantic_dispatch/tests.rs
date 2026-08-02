@@ -1,4 +1,4 @@
-use super::relation_txn::RelationStep;
+use super::dispatch_txn::RelationStep;
 use super::*;
 use crate::semantic_query::{
     IndexSignature, NodeScopeId, OriginEdgeKind, PathSegment, ProjectionMode,
@@ -453,7 +453,7 @@ fn macro_hot_script_setup_infer_bounds_share_eager_authored_identities() {
     };
 
     let concurrent = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..4).map(|_| scope.spawn(&macro_members)).collect();
+        let handles: Vec<_> = (0..4).map(|_| scope.spawn(macro_members)).collect();
         handles
             .into_iter()
             .map(|handle| handle.join().expect("concurrent macro-hot lowering"))
@@ -11821,7 +11821,7 @@ fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
     let result = dispatch.execute_relate(key.clone());
     drop(abort);
     assert!(
-        matches!(result, super::relation_txn::RelationStep::Assignable { .. }),
+        matches!(result, super::dispatch_txn::RelationStep::Assignable { .. }),
         "the raced cold result still returns to its owning request"
     );
     assert!(
@@ -19646,6 +19646,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             ContextualTypeAt { .. } => "ContextualTypeAt",
             LowerLocator { .. } => "LowerLocator",
             ClassifyMaterializationCycleGate(_) => "ClassifyMaterializationCycleGate",
+            FlowReturn(_) => "FlowReturn",
         }
     }
     // Sanity probe: each variant carries a distinct label and the

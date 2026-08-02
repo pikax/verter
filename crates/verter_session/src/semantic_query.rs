@@ -1345,6 +1345,198 @@ impl ResolvedDeclSlotIdentity {
     }
 }
 
+/// The full program identity of one served function position — the
+/// `FlowReturn` family's function axis. Content-free: the declaration
+/// slot is content-free (R7), the part identity is ordinal schema, and
+/// the overload ordinal is the source-order signature ordinal inside an
+/// overload group (explicit even where a locator also carries an
+/// ordinal). The whole-body content hash lives on the
+/// `ProgramAnalysisFactRef::FlowBody` fact rail, never in this identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowFunctionSlotIdentity {
+    /// The owning declaration's slot.
+    pub declaration_slot: ResolvedDeclSlotIdentity,
+    /// Which authored position of the declaration this callable occupies.
+    pub function_part: verter_type_expr::facts::FunctionPartIdentity,
+    /// Source-order signature ordinal inside an overload group (the
+    /// trailing implementation is the last ordinal). Zero outside
+    /// overload groups.
+    pub overload_ordinal: u32,
+}
+
+impl FlowFunctionSlotIdentity {
+    /// The env-free program-analysis fact identity of this function —
+    /// the `ProgramAnalysisFactRef::FlowBody` rail is content-free and
+    /// env-free like every fact reference, so the slot's env tail is
+    /// dropped here (validation compares against the env-free live
+    /// `FunctionProgramIndex`).
+    #[must_use]
+    pub fn program_analysis_ref(&self) -> crate::resolver_core::ProgramAnalysisFunctionRef {
+        crate::resolver_core::ProgramAnalysisFunctionRef {
+            canonical_id: Arc::clone(&self.declaration_slot.defining_canonical),
+            owner: self.declaration_slot.owner,
+            merged_symbol_name: Arc::clone(&self.declaration_slot.merged_symbol_name),
+            symbol_space: match self.declaration_slot.symbol_space {
+                SemanticSymbolSpace::Type => verter_semantic::facts::SymbolSpace::Type,
+                SemanticSymbolSpace::Value => verter_semantic::facts::SymbolSpace::Value,
+                SemanticSymbolSpace::Namespace => verter_semantic::facts::SymbolSpace::Namespace,
+            },
+            function_part: self.function_part.clone(),
+            overload_ordinal: self.overload_ordinal,
+        }
+    }
+}
+
+/// A TYPE-ONLY canonical substitution for a `FlowReturn` context:
+/// type-parameter → node bindings, sorted and deduplicated by the bound
+/// parameter node. Locals, value bindings, `this`, and reaching
+/// definitions NEVER enter this map — only type parameters bound by the
+/// demanding instantiation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct CanonicalTypeSubstitution(Arc<[(SemanticNodeId, SemanticNodeId)]>);
+
+impl CanonicalTypeSubstitution {
+    /// The empty substitution.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self(Arc::from(Vec::new().into_boxed_slice()))
+    }
+
+    /// Canonicalize `(type_parameter, bound)` pairs: sorted and
+    /// deduplicated by the parameter node (first binding wins).
+    #[must_use]
+    pub fn new(mut bindings: Vec<(SemanticNodeId, SemanticNodeId)>) -> Self {
+        bindings.sort_by_key(|(param, _)| param.0);
+        bindings.dedup_by_key(|(param, _)| param.0);
+        Self(Arc::from(bindings.into_boxed_slice()))
+    }
+
+    /// The canonical bindings.
+    #[must_use]
+    pub fn bindings(&self) -> &[(SemanticNodeId, SemanticNodeId)] {
+        &self.0
+    }
+}
+
+/// The behavioral policy axes of a `FlowReturn` query. EMPTY today — the
+/// whole-return producer has no policy fork; the struct exists so a later
+/// policy axis lands as key data, never as an implicit global.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct FlowReturnPolicy {}
+
+/// Env a [`SemanticQueryKey::FlowReturn`] value depends on: the full
+/// `P R T L J` set (whole-function program analysis is the widest-env
+/// operation in the key surface), the TYPE-ONLY substitution axis, and the
+/// (empty) policy axis.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowReturnContext {
+    /// Parse-env dimension (`P`) — the value is a function of the parsed
+    /// body the flow IR lowers.
+    pub parse_env_hash: HashValue,
+    /// Import / name-resolution dimension (`R`) — symbolic call carriers
+    /// resolve imported callees on this step.
+    pub resolve_env_hash: HashValue,
+    /// Type-env dimension (`T`).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (`L`).
+    pub lib_env_hash: HashValue,
+    /// Project-identity dimension (`J`).
+    pub project_identity: HashValue,
+    /// The active TYPE-ONLY substitution environment (type-parameter →
+    /// node). Value bindings, locals, and `this` never enter it.
+    pub type_substitution: CanonicalTypeSubstitution,
+    /// The policy axis (no forks today).
+    pub policy: FlowReturnPolicy,
+}
+
+/// The full identity of one whole-function `FlowReturn` demand. Reentry
+/// identity on the obligation runtime IS this key exactly. Content-free:
+/// the function slot is content-free (R7), the whole-body content hash
+/// lives on the `ProgramAnalysisFactRef::FlowBody` fact rail, never in
+/// this key. There is NO demand path, projection mode, callback input,
+/// content hash, generation, budget, or slice hash.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowReturnKey {
+    /// The served function position.
+    pub function: FlowFunctionSlotIdentity,
+    /// Normalized type arguments of the demanding instantiation
+    /// (concatenation order matters).
+    pub normalized_type_args: Arc<[SemanticNodeId]>,
+    /// Env + substitution + policy.
+    pub context: FlowReturnContext,
+}
+
+/// The admitted value of a `FlowReturn` query. Only a COMPLETE evaluation
+/// produces this — unsupported, missing, budgeted, cyclic-empty, torn, or
+/// otherwise partial results are typed `FlowReturnFailure`s through
+/// `ReturnOnly` and never enter the family memo. The whole-return node is
+/// canonical and carrier-preserving; consumers project or publish it
+/// afterward under their own mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowReturnResult {
+    /// The whole-function return type (widened join of every contributor).
+    pub return_type: SemanticNodeId,
+    /// Whether execution can reach the end of the body without a return.
+    pub can_fall_through: bool,
+}
+
+/// A typed `FlowReturn` failure — carried through `ReturnOnly` (never
+/// admitted, never `never`, never a fabricated miss node).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlowReturnFailure {
+    /// The function position has no served body (missing declaration,
+    /// bodiless overload, anonymous / computed-name position).
+    Missing,
+    /// The body's control surface is not modeled: a return-bearing loop
+    /// or labeled construct, a `switch`, a `try`, `with`, an abrupt
+    /// cross-function jump, or a module-level statement in the body.
+    Unsupported(FlowReturnUnsupported),
+    /// An in-flight dependency could not be decided (a torn view, a
+    /// missing non-cycle edge, or a nonconverging recursive component).
+    Unresolved,
+    /// The recursive component has no concrete semantic seed (an empty
+    /// recursive cycle — holds only).
+    EmptyCycle,
+    /// A budget edge stopped the evaluation (the shallow expression
+    /// lowering's depth / work budget, or the obligation runtime's
+    /// connected-demand cap — surfaced as the work budget).
+    Budget(verter_type_expr::facts::InferenceUnavailableReason),
+}
+
+/// The control surface a `FlowReturn` evaluation does not model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlowReturnUnsupported {
+    /// A loop whose statement subtree contains a `return`.
+    Loop,
+    /// Any `switch` statement.
+    Switch,
+    /// Any `try` statement.
+    Try,
+    /// A labeled statement whose subtree contains a `return`.
+    Labeled,
+    /// A `break` / `continue` crossing the modeled region.
+    Jump,
+    /// A `with` statement.
+    With,
+    /// A module-level statement inside the body.
+    ModuleDeclaration,
+}
+
+/// The engine-internal step result of one `FlowReturn` obligation —
+/// the obligation runtime's caller-return shape, never a cache value.
+#[derive(Debug, Clone)]
+pub(crate) enum FlowReturnStep {
+    /// Complete evaluation: the admitted result.
+    #[allow(dead_code)] // the caller-return payload; consumed by the sealed helper
+    Complete(FlowReturnResult),
+    /// A recursive backedge hold: the target obligation is already in
+    /// flight on this transaction — neither a contributor nor a failure.
+    #[allow(dead_code)] // the hold identity is carried for the close's record
+    Hold(Box<FlowReturnKey>),
+    /// Typed failure — `ReturnOnly`, never admitted.
+    Degraded(FlowReturnFailure),
+}
+
 /// The env-free declaration-slot SEED — exactly the four env-free
 /// identity fields of the landed five-field
 /// [`ResolvedDeclSlotIdentity`], with every env dimension deliberately
@@ -4061,6 +4253,10 @@ pub enum SemanticQueryValue {
     /// runtime lowering. The classifier is a semantic query, not a consumer-
     /// local graph walk.
     BroadRuntime(BroadRuntimeClassification),
+    /// The whole-function return produced by a `FlowReturn` query — only
+    /// a COMPLETE evaluation reaches this domain; every degraded shape is
+    /// a typed `FlowReturnFailure` through `ReturnOnly` and never admits.
+    FlowReturn(Arc<FlowReturnResult>),
     /// The sealed materialization cycle-gate outcome — the LIVE value domain
     /// of [`SemanticQueryKey::ClassifyMaterializationCycleGate`], the sole
     /// authority for "does this declaration transitively reach a cycle
@@ -4087,6 +4283,7 @@ pub enum SemanticQueryValueTag {
     Relation,
     BroadRuntime,
     MaterializationCycleGate,
+    FlowReturn,
     DiagnosticAnalysis,
 }
 
@@ -4103,6 +4300,7 @@ impl SemanticQueryValue {
             Self::Relation(_) => SemanticQueryValueTag::Relation,
             Self::BroadRuntime(_) => SemanticQueryValueTag::BroadRuntime,
             Self::MaterializationCycleGate(_) => SemanticQueryValueTag::MaterializationCycleGate,
+            Self::FlowReturn(_) => SemanticQueryValueTag::FlowReturn,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
     }
@@ -6207,6 +6405,30 @@ pub enum SemanticQueryKey {
     ///
     /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     ClassifyMaterializationCycleGate(MaterializationCycleGateKey),
+    /// Resolve the WHOLE-function return type of one authored function
+    /// position — the demanded function's complete body evaluated through
+    /// the flow IR: return sites, `if` reachability, bare return,
+    /// fallthrough, primitive widening, unions, parameters and simple
+    /// local reaching definitions, object returns (spread delegated to
+    /// [`ProjectObjectSpread`](Self::ProjectObjectSpread)), symbolic call
+    /// returns (`ReturnType<typeof …>` / `any` carriers), return-free loop
+    /// transparency, and direct same-slot recursion through the shared
+    /// obligation runtime's coinductive holds.
+    ///
+    /// The payload is the full [`FlowReturnKey`] identity: the function
+    /// slot (declaration slot + function part + overload ordinal),
+    /// normalized type args, and the env/substitution/policy context.
+    /// Reentry identity on the obligation runtime IS this key exactly.
+    /// There is NO demand path, projection mode, budget, or content hash
+    /// in the key — the whole-body identity rides the
+    /// `ProgramAnalysisFactRef::FlowBody` fact rail. Value domain:
+    /// [`SemanticQueryValueTag::FlowReturn`]; only a COMPLETE evaluation
+    /// admits — every degraded shape (`Unsupported` / `Missing` /
+    /// `Budget` / `EmptyCycle` / `Unresolved`) is `ReturnOnly` and never
+    /// enters the family memo.
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    FlowReturn(Box<FlowReturnKey>),
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -6249,6 +6471,7 @@ pub enum SemanticQueryKeyTag {
     ContextualTypeAt,
     LowerLocator,
     ClassifyMaterializationCycleGate,
+    FlowReturn,
 }
 
 impl SemanticQueryKeyTag {
@@ -6281,6 +6504,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::ContextualTypeAt,
         SemanticQueryKeyTag::LowerLocator,
         SemanticQueryKeyTag::ClassifyMaterializationCycleGate,
+        SemanticQueryKeyTag::FlowReturn,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -6317,6 +6541,7 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::ClassifyMaterializationCycleGate => {
                 "ClassifyMaterializationCycleGate"
             }
+            SemanticQueryKeyTag::FlowReturn => "FlowReturn",
         }
     }
 
@@ -6328,7 +6553,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 25 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 26 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -6406,6 +6631,7 @@ impl SemanticQueryKey {
             SemanticQueryKey::ClassifyMaterializationCycleGate(_) => {
                 SemanticQueryKeyTag::ClassifyMaterializationCycleGate
             }
+            SemanticQueryKey::FlowReturn(_) => SemanticQueryKeyTag::FlowReturn,
         }
     }
 }
@@ -8206,6 +8432,13 @@ mod tests {
                 SemanticQueryValueTag::MaterializationCycleGate,
             ),
             (
+                SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult {
+                    return_type: node,
+                    can_fall_through: false,
+                })),
+                SemanticQueryValueTag::FlowReturn,
+            ),
+            (
                 SemanticQueryValue::DiagnosticAnalysis(DiagnosticAnalysisShell),
                 SemanticQueryValueTag::DiagnosticAnalysis,
             ),
@@ -8213,13 +8446,17 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: nine cases, nine unique tags. Sort before dedup so
+        // Distinctness: ten cases, ten unique tags. Sort before dedup so
         // non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
         tags.sort_by_key(|t| *t as u8);
         tags.dedup();
-        assert_eq!(tags.len(), 9, "every value domain must have a distinct tag");
+        assert_eq!(
+            tags.len(),
+            10,
+            "every value domain must have a distinct tag"
+        );
     }
 
     /// Taint shape: every `ResultTaint` / `BrokenInputClass` variant is

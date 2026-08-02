@@ -148,7 +148,6 @@ fn value_inference_static_member_expression_typeof_path_resolves_terminal() {
 }
 
 #[test]
-#[ignore = "typeinfo currently preserves numeric literals from unannotated object return properties instead of applying TypeScript return-property widening; keep as the future body-return widening contract"]
 fn value_inference_function_body_return_union_from_return_statements() {
     let host = make_host_with_footprint();
     upsert_value_fixture(&host);
@@ -167,7 +166,6 @@ fn value_inference_function_body_return_union_from_return_statements() {
 }
 
 #[test]
-#[ignore = "typeinfo currently preserves boolean literals from unannotated arrow return object properties instead of applying TypeScript return-property widening; keep as the future arrow-return widening contract"]
 fn value_inference_arrow_expression_body_publishes_return_shape() {
     // TS7 contract: directArrow is inferred as
     //   (input: string, count?: number) => { input: string; count: number | undefined; ok: boolean }
@@ -201,7 +199,6 @@ fn value_inference_arrow_expression_body_publishes_return_shape() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not resolve function-body identifier references back to parameter types inside inferred return object literals; keep as the future parameter-flow return inference contract"]
 fn value_inference_arrow_expression_body_substitutes_parameter_references() {
     let host = make_host_with_footprint();
     upsert_value_fixture(&host);

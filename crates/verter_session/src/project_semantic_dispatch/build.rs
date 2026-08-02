@@ -833,8 +833,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // trailing implementation signature. Each visible signature lowers
             // through the located body source at its GROUP-level
             // `ValueSignature` ordinal (the whole-signature deref recovers the
-            // function IR from the retained snapshot); the composed
-            // constructor-like object is interned directly.
+            // function IR from the retained snapshot — binding the signature's
+            // own type parameters — and names a body-derived return's served
+            // function position so the lowering demands it from the
+            // whole-function producer through the sealed helper); the
+            // composed constructor-like object is interned directly.
             let is_class =
                 prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
             let visible: Vec<usize> = if prepared.signatures.len() == 1 {
@@ -5231,21 +5234,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // (`execute(Relate)`); an undecided arm defers the whole
                     // reduction, never treated as negative.
                     match self.execute_relate_pair(arm, filter_resolved) {
-                        crate::project_semantic_dispatch::relation_txn::RelationStep::Assignable {
+                        crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable {
                             ..
                         } => {
                             if keep_assignable {
                                 survivors.push(arm);
                             }
                         }
-                        crate::project_semantic_dispatch::relation_txn::RelationStep::NotAssignable => {
+                        crate::project_semantic_dispatch::dispatch_txn::RelationStep::NotAssignable => {
                             if !keep_assignable {
                                 survivors.push(arm);
                             }
                         }
-                        crate::project_semantic_dispatch::relation_txn::RelationStep::Unknown
-                        | crate::project_semantic_dispatch::relation_txn::RelationStep::BudgetExceeded(..)
-                        | crate::project_semantic_dispatch::relation_txn::RelationStep::Assumed => {
+                        crate::project_semantic_dispatch::dispatch_txn::RelationStep::Unknown
+                        | crate::project_semantic_dispatch::dispatch_txn::RelationStep::BudgetExceeded(..)
+                        | crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assumed => {
                             // Any undecidable arm forces the whole
                             // utility result to defer — partial
                             // reduction would silently drop
@@ -5398,7 +5401,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// deferred shells. Bounded carrier-chain unwrap; an unresolvable
     /// carrier returns itself so the utility falls through to its
     /// deferred `Opaque(Miss)` shell.
-    fn resolve_signature_source_carrier(
+    pub(super) fn resolve_signature_source_carrier(
         &self,
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
@@ -5657,7 +5660,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Returns `None` when the shape carries no signature in the requested
     /// bucket — callers fall through to the utility's `Opaque(Miss)` shell.
-    fn select_signature_function(
+    pub(super) fn select_signature_function(
         &self,
         node: SemanticNodeId,
         bucket: SignatureBucket,
@@ -5761,7 +5764,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `unknown`. Each discovered binder node substitutes through the
     /// shared binder-identity substitution (never a name-rewrite of the
     /// subtree).
-    fn instantiate_free_signature_params_at_unknown(
+    pub(super) fn instantiate_free_signature_params_at_unknown(
         &self,
         function_node: SemanticNodeId,
         extracted: SemanticNodeId,
@@ -8354,14 +8357,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // relation for ANY check (`any` included — the pre-any-guard
             // placement is load-bearing).
             return match self.execute_relate_pair(check, extends) {
-                super::relation_txn::RelationStep::Assignable { bindings } => (
+                super::dispatch_txn::RelationStep::Assignable { bindings } => (
                     ConditionalBranchSelection::True,
                     Some(super::relation::RelationInferBindings {
                         shape: super::relation::InferPatternShape::Bare,
                         bindings,
                     }),
                 ),
-                super::relation_txn::RelationStep::NotAssignable => {
+                super::dispatch_txn::RelationStep::NotAssignable => {
                     (ConditionalBranchSelection::False, None)
                 }
                 _ => (ConditionalBranchSelection::Deferred, None),
@@ -8377,7 +8380,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // every consumer rides. A binding-producing judgement's returned
         // bindings substitute into the selected (true) branch.
         match self.execute_relate_pair(check, extends) {
-            super::relation_txn::RelationStep::Assignable { bindings } => {
+            super::dispatch_txn::RelationStep::Assignable { bindings } => {
                 let infer = match route {
                     ConditionalInferRoute::InScopePattern(shape) => {
                         Some(super::relation::RelationInferBindings { shape, bindings })
@@ -8386,7 +8389,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 (ConditionalBranchSelection::True, infer)
             }
-            super::relation_txn::RelationStep::NotAssignable => {
+            super::dispatch_txn::RelationStep::NotAssignable => {
                 (ConditionalBranchSelection::False, None)
             }
             _ => (ConditionalBranchSelection::Deferred, None),

@@ -869,18 +869,24 @@ fn signature_fact(has_authored_return: bool) -> FunctionSignature {
     FunctionSignature {
         type_parameters: Arc::from(Vec::<NarrowTypeParam>::new().into_boxed_slice()),
         parameters: Arc::from(Vec::<FunctionParamFact>::new().into_boxed_slice()),
-        return_ty: has_authored_return.then(|| TypeBodySlot {
-            anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/ws/a.ts"),
-                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("f"),
-                space: LocatorSymbolSpace::Value,
-            },
-            path: Arc::from(
-                Vec::<verter_type_expr::locators::TypeBodyPathStep>::new().into_boxed_slice(),
-            ),
-        }),
-        return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
+        return_source: if has_authored_return {
+            verter_type_expr::facts::FunctionReturnSource::Declared(
+                verter_type_expr::locators::FunctionReturnLocator::Authored(TypeBodySlot {
+                    anchor: AuthoredAnchor {
+                        canonical_id: Arc::from("/ws/a.ts"),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: Arc::from("f"),
+                        space: LocatorSymbolSpace::Value,
+                    },
+                    path: Arc::from(
+                        Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
+                            .into_boxed_slice(),
+                    ),
+                }),
+            )
+        } else {
+            verter_type_expr::facts::FunctionReturnSource::Absent
+        },
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::AliasBody {
             anchor: DeclContributorAnchor {

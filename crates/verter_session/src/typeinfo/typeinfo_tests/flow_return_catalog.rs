@@ -634,12 +634,13 @@ future_catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::Void)
 );
 
-future_catalog_contract!(
-    flow_return_bl13_models_unannotated_throw_only_as_void,
-    "BL13",
-    "typeinfo currently has no TypeScript-compatible no-return-expression fallback for unannotated throw-only bodies; keep as the future BL13 throw-only fallback contract",
-    |expr| assert_primitive(expr, PrimitiveName::Void)
-);
+#[test]
+fn flow_return_bl13_throw_only_body_is_never() {
+    // A body that terminates with NO contribution and no hold is `never`
+    // (tsc's answer for a throw-only function) — not the empty-cycle
+    // failure, not `void`.
+    assert_catalog_alias("BL13", |expr| assert_primitive(expr, PrimitiveName::Never));
+}
 
 future_catalog_contract!(
     flow_return_bl15_models_divergent_loop_as_void,
@@ -1048,12 +1049,10 @@ future_catalog_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
-future_catalog_contract!(
-    flow_return_cg10_terminates_recursive_return_inference,
-    "CG10",
-    "typeinfo currently does not use an in-flight function-return memo or recursion sentinel for self-recursive calls; keep as the future CG10 recursion contract",
-    |expr| assert_primitive(expr, PrimitiveName::Number)
-);
+#[test]
+fn flow_return_cg10_terminates_recursive_return_inference() {
+    assert_catalog_alias("CG10", |expr| assert_primitive(expr, PrimitiveName::Number));
+}
 
 future_catalog_contract!(
     flow_return_cg11_lowers_constructor_call_to_instance_type,

@@ -999,18 +999,6 @@
     },
     {
       "file": "value_inference.rs",
-      "function": "value_inference_arrow_expression_body_publishes_return_shape",
-      "block": "U6.FLOW_RETURN_SUBSTRATE",
-      "capability": "ValueInference"
-    },
-    {
-      "file": "value_inference.rs",
-      "function": "value_inference_arrow_expression_body_substitutes_parameter_references",
-      "block": "U6.FLOW_RETURN_SUBSTRATE",
-      "capability": "ValueInference"
-    },
-    {
-      "file": "value_inference.rs",
       "function": "value_inference_computed_block_callback_value_resolves_local_return_shape",
       "block": "U6.FLOW_RETURN_SUBSTRATE",
       "capability": "ValueInference"
@@ -1030,12 +1018,6 @@
     {
       "file": "value_inference.rs",
       "function": "value_inference_flow_variables_narrow_return_value_by_branch",
-      "block": "U6.FLOW_RETURN_SUBSTRATE",
-      "capability": "ValueInference"
-    },
-    {
-      "file": "value_inference.rs",
-      "function": "value_inference_function_body_return_union_from_return_statements",
       "block": "U6.FLOW_RETURN_SUBSTRATE",
       "capability": "ValueInference"
     },

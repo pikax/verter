@@ -2209,19 +2209,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         span: param.span,
                     })
                     .collect();
-                let return_type = match func.return_type.as_deref() {
-                    Some(ret) => self.lower_type_expr_with_infer_factory(
-                        infer_binders,
-                        ret,
-                        env,
-                        scope,
-                        name_resolution,
-                        scope_payload,
-                        shadowing,
-                        substitutions,
-                        reduction_context,
-                    ),
-                    None => self.opaque(QueryError::Miss),
+                let return_type = match &func.flow_return {
+                    // A body-derived return is demanded from the
+                    // whole-function producer through the sealed helper:
+                    // the extractor marked the served position with the
+                    // declaration name; canonical / owner fill from THIS
+                    // lowering scope (the defining file's).
+                    Some(identity) => {
+                        let mut identity = identity.as_ref().clone();
+                        let scope_canonical = match scope {
+                            NodeScopeId::File {
+                                canonical_id,
+                                owner,
+                                ..
+                            } => {
+                                identity.anchor.canonical_id = Arc::clone(canonical_id);
+                                identity.anchor.owner = *owner;
+                                Some(Arc::clone(canonical_id))
+                            }
+                            _ => None,
+                        };
+                        match scope_canonical {
+                            Some(scope_canonical) => match self.execute_function_return_source(
+                                &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                                scope_canonical.as_ref(),
+                            ) {
+                                super::flow_return::FunctionReturnNode::Flow(result) => {
+                                    result.return_type
+                                }
+                                _ => self.opaque(QueryError::Miss),
+                            },
+                            None => self.opaque(QueryError::Miss),
+                        }
+                    }
+                    None => match func.return_type.as_deref() {
+                        Some(ret) => self.lower_type_expr_with_infer_factory(
+                            infer_binders,
+                            ret,
+                            env,
+                            scope,
+                            name_resolution,
+                            scope_payload,
+                            shadowing,
+                            substitutions,
+                            reduction_context,
+                        ),
+                        None => self.opaque(QueryError::Miss),
+                    },
                 };
                 let type_parameters: Vec<TypeParamDecl> = func
                     .type_parameters

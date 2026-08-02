@@ -35,6 +35,7 @@ oxc_parser = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }
 oxc_span = { workspace = true }
+oxc_syntax = { workspace = true }
 sha2 = { workspace = true }
 bitflags = "2.11"
 

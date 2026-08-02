@@ -17,8 +17,8 @@ use verter_semantic::analysis::type_eval_build::LoweredSignatureParts;
 use verter_semantic::analysis::MacroFieldPayloadLowering;
 use verter_type_expr::facts::NarrowTypeParam;
 use verter_type_expr::locators::{
-    AuthoredAugmentationScope, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadPosition,
-    TypeBodyPathStep, TypeParamBoundPosition, TypeParamVisibility,
+    AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator, LocatorSymbolSpace,
+    MacroPayloadPosition, TypeBodyPathStep, TypeParamBoundPosition, TypeParamVisibility,
 };
 use verter_type_expr::{FunctionExpr, ObjectMember, TypeExpr, TypeParam};
 
@@ -314,7 +314,7 @@ impl DeclBodyMemo {
                         let owner = slot.anchor.owner;
                         let (lowered, aug_scope) = match self.type_decl_outcome_in(owner, symbol) {
                             DemandOutcome::LeaseMiss => {
-                                return Err(LocatorBodyDerefError::LeaseMiss)
+                                return Err(LocatorBodyDerefError::LeaseMiss);
                             }
                             DemandOutcome::Ready(Some(lowered)) => (lowered, None),
                             DemandOutcome::Ready(None) => {
@@ -324,13 +324,13 @@ impl DeclBodyMemo {
                                     symbol,
                                 ) {
                                     DemandOutcome::LeaseMiss => {
-                                        return Err(LocatorBodyDerefError::LeaseMiss)
+                                        return Err(LocatorBodyDerefError::LeaseMiss);
                                     }
                                     DemandOutcome::Ready(Some(lowered)) => {
                                         (lowered, Some(AugmentationScopeKind::Global))
                                     }
                                     DemandOutcome::Ready(None) => {
-                                        return Err(LocatorBodyDerefError::UnknownSymbol)
+                                        return Err(LocatorBodyDerefError::UnknownSymbol);
                                     }
                                 }
                             }
@@ -418,7 +418,7 @@ impl DeclBodyMemo {
                             slot.anchor.owner,
                             slot.anchor.symbol.as_ref(),
                         ))?;
-                        let expr = navigate_value_parts(&parts, &slot.path)?;
+                        let expr = navigate_value_parts(&parts, &slot.path, &slot.anchor)?;
                         Ok(DerefedAuthoredBody {
                             shape: DerefedBodyShape::Single(expr),
                             // A plain value annotation position binds no
@@ -465,11 +465,11 @@ impl DeclBodyMemo {
                             symbol,
                         ) {
                             DemandOutcome::LeaseMiss => {
-                                return Err(LocatorBodyDerefError::LeaseMiss)
+                                return Err(LocatorBodyDerefError::LeaseMiss);
                             }
                             DemandOutcome::Ready(Some(lowered)) => lowered,
                             DemandOutcome::Ready(None) => {
-                                return Err(LocatorBodyDerefError::UnknownSymbol)
+                                return Err(LocatorBodyDerefError::UnknownSymbol);
                             }
                         };
                         let parts = transient_outcome(self.transient_augmentation_type_parts_in(
@@ -748,6 +748,7 @@ fn navigate_type_body(
 fn navigate_value_parts(
     parts: &TransientValueParts,
     path: &[TypeBodyPathStep],
+    anchor: &AuthoredAnchor,
 ) -> Result<TypeExpr, LocatorBodyDerefError> {
     match path.first() {
         Some(TypeBodyPathStep::ValueSignature { ordinal }) => {
@@ -755,7 +756,7 @@ fn navigate_value_parts(
                 .signatures
                 .get(*ordinal as usize)
                 .ok_or(LocatorBodyDerefError::PathUnresolved)?;
-            navigate_signature_parts(signature, &path[1..])
+            navigate_signature_parts(signature, &path[1..], anchor, parts.kind, *ordinal)
         }
         Some(TypeBodyPathStep::Member { .. }) if parts.object_shape.is_some() => {
             let shape = parts
@@ -783,17 +784,47 @@ fn navigate_value_parts(
 
 /// Navigate the remainder of a `[ValueSignature { k }, …]` path over one
 /// transient signature's typed IR. An empty remainder recovers the WHOLE
-/// signature as its function type.
+/// signature as its function type — a body-derived return then names its
+/// served function position (declaration body vs initializer at the group
+/// ordinal) so the lowering demands it from the whole-function producer.
 fn navigate_signature_parts(
     signature: &LoweredSignatureParts,
     rest: &[TypeBodyPathStep],
+    anchor: &AuthoredAnchor,
+    kind: Option<verter_semantic::analysis::type_eval::ValueDeclKind>,
+    signature_ordinal: u32,
 ) -> Result<TypeExpr, LocatorBodyDerefError> {
     match rest.first() {
-        None => Ok(TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
-            signature.parameters.clone(),
-            signature.return_type.clone().map(Arc::new),
-            signature.type_parameters.clone(),
-        )))),
+        None => {
+            let mut function = FunctionExpr::synthetic(
+                signature.parameters.clone(),
+                signature.return_type.clone().map(Arc::new),
+                signature.type_parameters.clone(),
+            );
+            if signature.has_implementation_body
+                && !signature.has_authored_return
+                && !signature.jsdoc_return
+            {
+                function.flow_return = Some(Box::new(
+                    verter_type_expr::facts::FlowFunctionReturnIdentity {
+                        anchor: anchor.clone(),
+                        function_part: if matches!(
+                            kind,
+                            Some(
+                                verter_semantic::analysis::type_eval::ValueDeclKind::Function
+                                    | verter_semantic::analysis::type_eval::ValueDeclKind::AsyncFunction
+                            )
+                        ) {
+                            verter_type_expr::facts::FunctionPartIdentity::DeclarationBody
+                        } else {
+                            verter_type_expr::facts::FunctionPartIdentity::Initializer
+                        },
+                        overload_ordinal: signature_ordinal,
+                    },
+                ));
+            }
+            Ok(TypeExpr::Function(Arc::new(function)))
+        }
         Some(TypeBodyPathStep::FunctionParam { ordinal }) => {
             let param = signature
                 .parameters
@@ -964,7 +995,7 @@ fn navigate_expr(
             // one here means it appeared mid-path — fail closed with the
             // distinct misplaced error rather than a generic path miss.
             (_, TypeBodyPathStep::TypeParamBound { .. }) => {
-                return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced)
+                return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced);
             }
             _ => return Err(LocatorBodyDerefError::PathUnresolved),
         };

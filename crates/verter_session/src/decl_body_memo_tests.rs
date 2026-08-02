@@ -1968,3 +1968,127 @@ fn non_annotated_value_leading_bound_is_misplaced() {
         "the up-front placement check must fire before the annotation-absent path"
     );
 }
+
+const FLOW_FIXTURE: &str = "export function alpha(n: number) {\n\
+     \x20 if (n <= 0) return 0;\n\
+     \x20 return alpha(n - 1);\n\
+     }\n\
+     export const beta = () => ({ ok: \"yes\" });\n\
+     export class Gamma {\n\
+     \x20 run() { return 1; }\n\
+     }\n";
+
+#[test]
+fn function_program_index_builds_once_and_covers_every_function_position() {
+    let (memo, _provenance) = memo_for(FLOW_FIXTURE);
+    let first = memo.function_program_index();
+    let names: Vec<&str> = first
+        .entries
+        .iter()
+        .map(|entry| entry.key.declaration.name.as_ref())
+        .collect();
+    assert_eq!(names, vec!["alpha", "beta", "Gamma"]);
+
+    let alpha = first
+        .value_function(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "alpha",
+            &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            0,
+        )
+        .expect("alpha is indexed");
+    assert_eq!(alpha.return_sites.len(), 2);
+    assert_eq!(alpha.direct_calls.len(), 1, "the self-call is exact");
+    assert_eq!(
+        alpha.direct_calls[0].target.declaration.name.as_ref(),
+        "alpha"
+    );
+
+    // One structural artifact for the file: a second demand — even a
+    // demand targeting another function's facts — never rebuilds.
+    let second = memo.function_program_index();
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "the index builds once per file artifact"
+    );
+}
+
+#[test]
+fn function_program_index_hash_folds_parse_env_identity() {
+    let (memo, _provenance) = memo_for(FLOW_FIXTURE);
+    let index = memo.function_program_index();
+    let alpha = index
+        .value_function(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "alpha",
+            &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            0,
+        )
+        .expect("alpha is indexed");
+
+    let env_a = crate::hash::hash_16(b"env-a");
+    let env_b = crate::hash::hash_16(b"env-b");
+    let refolded_a = fold_flow_body_env_identity(
+        verter_semantic::analysis::function_program::FunctionProgramIndex {
+            entries: Arc::from(vec![alpha.clone()].into_boxed_slice()),
+        },
+        &env_a,
+        oxc_span::SourceType::ts(),
+    );
+    let refolded_a2 = fold_flow_body_env_identity(
+        verter_semantic::analysis::function_program::FunctionProgramIndex {
+            entries: Arc::from(vec![alpha.clone()].into_boxed_slice()),
+        },
+        &env_a,
+        oxc_span::SourceType::ts(),
+    );
+    let refolded_b = fold_flow_body_env_identity(
+        verter_semantic::analysis::function_program::FunctionProgramIndex {
+            entries: Arc::from(vec![alpha.clone()].into_boxed_slice()),
+        },
+        &env_b,
+        oxc_span::SourceType::ts(),
+    );
+    assert_eq!(
+        refolded_a.entries[0].flow_body_stable_hash, refolded_a2.entries[0].flow_body_stable_hash,
+        "the fold is deterministic"
+    );
+    assert_ne!(
+        refolded_a.entries[0].flow_body_stable_hash, refolded_b.entries[0].flow_body_stable_hash,
+        "a parse-env move changes the folded hash"
+    );
+    assert_ne!(
+        refolded_a.entries[0].flow_body_stable_hash, alpha.flow_body_stable_hash,
+        "the folded hash is the artifact-boundary identity, not the memo-folded one"
+    );
+}
+
+#[test]
+fn function_program_index_hash_tracks_body_content_across_files() {
+    let (memo_a, _) = memo_for_canonical("/ws/flow-a.ts", FLOW_FIXTURE);
+    let (memo_b, _) = memo_for_canonical("/ws/flow-b.ts", FLOW_FIXTURE);
+    let hash_of = |memo: &Arc<DeclBodyMemo>| {
+        memo.function_program_index()
+            .value_function(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "alpha",
+                &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                0,
+            )
+            .expect("alpha is indexed")
+            .flow_body_stable_hash
+    };
+    assert_eq!(
+        hash_of(&memo_a),
+        hash_of(&memo_b),
+        "identical bodies hash identically across files"
+    );
+
+    let edited = FLOW_FIXTURE.replacen("return 0;", "return 1;", 1);
+    let (memo_c, _) = memo_for_canonical("/ws/flow-c.ts", &edited);
+    assert_ne!(
+        hash_of(&memo_a),
+        hash_of(&memo_c),
+        "a literal body edit changes the hash"
+    );
+}

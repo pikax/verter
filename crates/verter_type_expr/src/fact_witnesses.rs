@@ -302,8 +302,7 @@ fn empty_fn() -> FunctionSignatureFact {
     FunctionSignatureFact {
         type_parameters: std::sync::Arc::from(Vec::<NarrowTypeParam>::new().into_boxed_slice()),
         parameters: std::sync::Arc::from(Vec::<FunctionParamFact>::new().into_boxed_slice()),
-        return_ty: None,
-        return_inference: ReturnInferenceCompleteness::NotInferred,
+        return_source: crate::facts::FunctionReturnSource::Absent,
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::AliasBody {
             anchor: DeclContributorAnchor {

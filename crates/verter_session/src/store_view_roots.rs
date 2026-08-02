@@ -420,6 +420,11 @@ pub(crate) struct CanonicalView {
     pub(crate) source_env: Option<SourceEnvIdentity>,
     pub(crate) file_facts: Option<Arc<FileFacts>>,
     pub(crate) route_hash: Option<Hash16>,
+    /// Program-analysis-domain authority: the view-current
+    /// `IndexedReady` for the canonical's tracked content. The
+    /// `FlowBody` validator reads the artifact's `FunctionProgramIndex`
+    /// through this handle — a structural index read, never a re-lower.
+    pub(crate) flow_body_indexed: Option<Arc<crate::project_type_store::IndexedReady>>,
     /// The view's world CONTAINED this canonical, but its content
     /// authority withdrew the answer — see [`WholeHashAuthority`].
     ///
@@ -681,6 +686,9 @@ impl StoreViewRoots {
             }
             if view.file_facts.is_none() {
                 view.file_facts = Some(Arc::clone(&artifacts.facts));
+            }
+            if view.flow_body_indexed.is_none() {
+                view.flow_body_indexed = Some(Arc::clone(&artifacts.indexed));
             }
             if view.route_hash.is_none() {
                 let indexed = &artifacts.indexed;

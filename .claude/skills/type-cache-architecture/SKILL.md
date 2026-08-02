@@ -1096,12 +1096,17 @@ trait StoreView {
     fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool;
     fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool;
     fn validates_route_surface_domain(&self, fact: &RouteSurfaceFactRef) -> bool;
+    fn validates_program_analysis_domain(&self, fact: &ProgramAnalysisFactRef) -> bool;
 }
 ```
 
-The dispatch table is bounded by `FactDomain` (3 variants), not by `FactKey`.
+The dispatch table is bounded by `FactDomain` (4 variants), not by `FactKey`.
 Adding a new `FactKey` extends the per-domain `*FactRef` enum but does NOT
-widen the trait.
+widen the trait. The fourth variant, `ProgramAnalysis`, is the whole-function
+`FlowBody` rail: candidates root on
+`ProgramAnalysisFactRef::FlowBody { function, flow_body_stable_hash }` and
+warm validation compares the indexed whole-body hash — it never re-lowers or
+reruns reachability.
 
 The resolve-imports domain is a CLOSED two-arm enum under ONE validator, not
 two rails: `ResolveImportsFactRef::Semantic { .. }` (the session's

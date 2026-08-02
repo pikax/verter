@@ -462,8 +462,7 @@ pub(crate) fn slot_field_function_source(
         parameters: std::sync::Arc::from(parameters.into_boxed_slice()),
         // The return position has no addressable authored slot on a
         // payload-less slot — the typed miss, recovered on demand.
-        return_ty: None,
-        return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
+        return_source: verter_type_expr::facts::FunctionReturnSource::Absent,
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
     }))

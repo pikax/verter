@@ -286,16 +286,18 @@ fn manifest_block_counts_reflect_lifts() {
          lifting block as U2.CLASS_SURFACES",
     );
 
-    // Total ignored (status: Ignored) rows after 46 lifts. (351 table rows:
+    // Total ignored (status: Ignored) rows after 46 lifts. (348 table rows:
     // the 6 guard-backed footprint-attach / cache-invalidation edit-cycle
     // rows left the partition when their `#[ignore]`s were removed — a
     // guard-backed row lands as an always-running test rather than an
-    // oracle-backed `Lifted` row — and the relation-activation
+    // oracle-backed `Lifted` row — the relation-activation
     // optional-to-required rejection row left the same way, backed by the
-    // parity-enforced `relation_optional_to_required` oracle row.)
+    // parity-enforced `relation_optional_to_required` oracle row, and the
+    // 14 U6.FLOW_RETURN_SUBSTRATE producer-routing / value-inference rows
+    // left as always-running tests served by the whole-function producer.)
     assert_eq!(
         count("status: IgnoreStatus::Ignored"),
-        305,
-        "exactly 305 IgnoredTestRows must remain `Ignored` (351 total − 46 lifted)",
+        302,
+        "exactly 302 IgnoredTestRows must remain `Ignored` (348 total − 46 lifted)",
     );
 }

@@ -1,38 +1,53 @@
-//! `CheckerTransaction` — the transient per-relation-root cold-compute frame
-//! of the ONE resolver (design `docs/arch/u2-relation-infer-design.md` §2.1).
+//! `CheckerDispatchTransaction` — the transient per-obligation-root
+//! cold-compute frame of the ONE resolver (design `docs/arch/u2-relation-infer-design.md`
+//! §2.1), laid out as ONE tagged obligation runtime plus per-domain
+//! runtimes:
+//!
+//! ```text
+//! CheckerDispatchTransaction
+//! ├── ObligationRuntime          (tagged identities, generic frames/
+//! │   │                            backedges/lowlinks, the generic pending
+//! │   │                            ledger + watermarks, the tagged
+//! │   │                            provisional substitution table)
+//! │   ├── ObligationIdentity::{Relate}
+//! │   ├── ObligationReentryStack (frames + tagged index)
+//! │   └── ObligationPendingLedger
+//! └── RelationDomainRuntime      (inference sessions, relation
+//!                                 provisional payloads, relation
+//!                                 redischarge/fixation state)
+//! ```
 //!
 //! The persistent relation cache lives in the family memo's `Relate` family,
 //! keyed by the full §2.7 identity; EVERYTHING in this module is TRANSIENT
-//! per-`CheckerTransaction` state and is NEVER a cache key, NEVER thread-local,
-//! NEVER process-wide. The transaction rides the dispatch
+//! per-`CheckerDispatchTransaction` state and is NEVER a cache key, NEVER
+//! thread-local, NEVER process-wide. The transaction rides the dispatch
 //! ([`crate::project_semantic_dispatch::ProjectSemanticDispatch`]) as a
 //! `RefCell`, exactly like the dispatch's other cold-compute cycle guards
 //! (`instantiate_active`, `carrier_normalizing`, `build_local_taint`).
 //!
 //! Shapes:
 //!
-//! - [`CheckerReentryStack`] — the ONE shared re-entry / cycle-id space. At
-//!   U2 only `Relate` is wired onto it (the `Instantiate` Skeleton BFS reuse
-//!   is RI-8; `FlowReturn` / `ResolveCall` land at U6). Each node is keyed by
-//!   its full normalized identity (a `Relate` node by the full §2.7 key).
-//! - [`RelationAssumptionStack`] — the typed VIEW over the reentry stack:
-//!   assumption-edge recording plus the lowlink (min open-target) tracking
-//!   the coinductive SCC discharge consumes. It cannot diverge from the
-//!   reentry stack because it IS the same storage.
+//! - [`ObligationReentryStack`] — the ONE shared re-entry / cycle-id space.
+//!   Each node is keyed by its full normalized tagged identity (a `Relate`
+//!   node by the full §2.7 key plus its transient inference occurrence).
+//! - Assumption-edge recording plus the lowlink (min open-target) tracking
+//!   lives on the GENERIC frame — a coinductive SCC whose members span
+//!   domains discharges through the same storage, so the per-engine cycle
+//!   spaces cannot diverge.
 //! - [`InferenceSession`] / [`SessionAdmissionLedger`] — the in-flight
-//!   inference substrate (RI-6 scope): a binding-producing relation opens a
+//!   relation inference substrate: a binding-producing relation opens a
 //!   session whose SETUP is fully determined by the infer pattern it serves
 //!   (see [`InferenceSession`]), so the content-free [`InferenceContextKey`]
 //!   fingerprint is well-defined at session OPEN — the transient `SessionId`
 //!   stand-in of design §2.2 is not needed for this subset (the setup never
 //!   mutates mid-flight; fixation is a single deterministic pass).
-//! - [`SccLedger`] — popped-but-unpublished SCC members awaiting their SCC
-//!   root's close (PROVISIONAL verdicts — caller-return values + deferral
-//!   metadata, NEVER the published payload).
+//! - [`ObligationPendingLedger`] — popped-but-unpublished SCC members
+//!   awaiting their SCC root's close (PROVISIONAL verdicts — caller-return
+//!   values + deferral metadata, NEVER the published payload).
 //!
 //! Execution model (single-threaded per transaction): frames nest strictly,
-//! so assumption edges ALWAYS point from a deeper frame to an ancestor on the
-//! current stack. The SCC of the frame being popped is therefore the
+//! so assumption edges ALWAYS point from a deeper frame to an ancestor on
+//! the current stack. The SCC of the frame being popped is therefore the
 //! contiguous stack suffix from the minimum open-assumption target — the
 //! Tarjan lowlink specialised to a path graph (design §2.3 step 1 "Tarjan
 //! over the assumption edges"). Discharge (§2.3 step 3): a member decided
@@ -47,10 +62,10 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::semantic_query::{
-    ConstParamPolicy, ContextualInferenceMode, IndexSignature, InferBinding, InferableParamSetId,
-    InferenceCandidatePriority, InferenceContextKey, InferencePassKind, NoInferMask,
-    RecursionOrBudgetCap, RelateMemoKey, RelationPayload, SemanticNodeId, SurfaceMember,
-    TupleElement, VariancePhase, VariancePolicy,
+    ConstParamPolicy, ContextualInferenceMode, FlowReturnFailure, FlowReturnKey, FlowReturnResult,
+    IndexSignature, InferBinding, InferableParamSetId, InferenceCandidatePriority,
+    InferenceContextKey, InferencePassKind, NoInferMask, RecursionOrBudgetCap, RelateMemoKey,
+    RelationPayload, SemanticNodeId, SurfaceMember, TupleElement, VariancePhase, VariancePolicy,
 };
 use crate::semantic_query_memo::InlineRelationFlight;
 
@@ -161,14 +176,109 @@ pub(crate) enum RelationStep {
     Assumed,
 }
 
-/// One in-flight relation frame on the reentry stack — a full-identity
-/// `Relate` node plus the coinductive bookkeeping its SCC discharge needs.
+// ---------------------------------------------------------------------------
+// Tagged obligation identity + generic frame/pending machinery
+// ---------------------------------------------------------------------------
+
+/// The tagged full identity of one in-flight obligation on the shared
+/// reentry stack. Reentry identity IS this value exactly: a `Relate`
+/// obligation is the full §2.7 key plus its transient inference occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ObligationIdentity {
+    /// A relation judgement in flight.
+    Relate {
+        /// The full §2.7 identity.
+        key: RelateMemoKey,
+        /// The transient occurrence axis (session-local orientation).
+        occurrence: InferenceOccurrence,
+    },
+    /// A whole-function `FlowReturn` evaluation in flight. Reentry
+    /// identity IS the `FlowReturnKey` exactly.
+    FlowReturn(FlowReturnKey),
+}
+
+impl ObligationIdentity {
+    /// The relation identity parts, when this obligation is a relation.
+    pub(crate) fn as_relate(&self) -> Option<(&RelateMemoKey, InferenceOccurrence)> {
+        match self {
+            Self::Relate { key, occurrence } => Some((key, *occurrence)),
+            Self::FlowReturn(_) => None,
+        }
+    }
+
+    /// The flow-return key, when this obligation is a flow evaluation.
+    pub(crate) fn as_flow_return(&self) -> Option<&FlowReturnKey> {
+        match self {
+            Self::Relate { .. } => None,
+            Self::FlowReturn(key) => Some(key),
+        }
+    }
+
+    /// The relation identity parts. Panics when the obligation is not a
+    /// relation — callers on a relation-only code path uphold that the
+    /// frames they pop are relation frames.
+    pub(crate) fn expect_relate(&self) -> (&RelateMemoKey, InferenceOccurrence) {
+        self.as_relate()
+            .expect("relation code path popped a non-relation obligation frame")
+    }
+}
+
+/// The relation-domain payload of one in-flight frame.
 #[derive(Debug)]
-pub(crate) struct ReentryFrame {
-    /// The full §2.7 identity this frame computes.
-    pub(crate) key: RelateMemoKey,
-    /// Session-local occurrence axes for deposits made by this frame.
-    pub(crate) occurrence: InferenceOccurrence,
+pub(crate) struct RelationFrameState {
+    /// This frame deposited inference candidates into the active session
+    /// (a session-local delta — admission row 7: ReturnOnly, never
+    /// published).
+    pub(crate) session_delta: bool,
+    /// The session this frame OPENED (it is the binding root), if any.
+    pub(crate) opened_session: Option<SessionId>,
+    /// Store-owned family admission claimed for a non-binding inline
+    /// relation. It follows the member through SCC deferral and is either
+    /// completed by the root's batched publish or explicitly aborted.
+    pub(crate) inline_flight: Option<InlineRelationFlight>,
+}
+
+impl RelationFrameState {
+    fn new() -> Self {
+        Self {
+            session_delta: false,
+            opened_session: None,
+            inline_flight: None,
+        }
+    }
+}
+
+/// The flow-return-domain payload of one in-flight frame. The ordered
+/// return-site contributor map is evaluated inside the frame's compute
+/// and decided at pop: a recursive same-slot edge records as a
+/// coinductive hold (never a contributor, never a failure), so the
+/// outcome is final when the frame closes.
+#[derive(Debug, Default)]
+pub(crate) struct FlowReturnFrameState {
+    /// Store-owned family admission claimed for a non-root inline flow
+    /// evaluation. It follows the member through SCC deferral and is
+    /// either completed by the root's batched publish or explicitly
+    /// aborted.
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
+}
+
+/// The domain payload of one in-flight frame.
+#[derive(Debug)]
+pub(crate) enum ObligationFrameDomain {
+    /// Relation frame state.
+    Relate(RelationFrameState),
+    /// Flow-return frame state.
+    FlowReturn(FlowReturnFrameState),
+}
+
+/// One in-flight obligation frame on the reentry stack — a tagged
+/// full identity plus the GENERIC coinductive bookkeeping its SCC
+/// discharge needs (assumption edges + lowlink + drain watermark) and its
+/// domain payload.
+#[derive(Debug)]
+pub(crate) struct ObligationFrame {
+    /// The tagged full identity this frame computes.
+    pub(crate) identity: ObligationIdentity,
     /// Assumption edges recorded by this frame's subtree: stack indices of
     /// the frames this subtree ASSUMED hold (back-edges).
     pub(crate) assumption_targets: Vec<usize>,
@@ -176,47 +286,61 @@ pub(crate) struct ReentryFrame {
     /// this frame's subtree targets. `Some(own)` or `None` at pop ⇒ this
     /// frame is its SCC's root.
     pub(crate) min_open_target: Option<usize>,
-    /// This frame deposited inference candidates into the active session
-    /// (a session-local delta — admission row 7: ReturnOnly, never
-    /// published).
-    pub(crate) session_delta: bool,
     /// This frame's reducer consumed a budget edge — the typed cap that
-    /// stopped the relate. Poisons the whole SCC (ReturnOnly); the ROOT
+    /// stopped the obligation. Poisons the whole SCC (ReturnOnly); the ROOT
     /// surfaces the public `BudgetExceeded` payload.
     pub(crate) budget_cap: Option<RecursionOrBudgetCap>,
-    /// The session this frame OPENED (it is the binding root), if any.
-    pub(crate) opened_session: Option<SessionId>,
-    /// Store-owned family admission claimed for a non-binding inline
-    /// relation. It follows the member through SCC deferral and is either
-    /// completed by the root's batched publish or explicitly aborted.
-    pub(crate) inline_flight: Option<InlineRelationFlight>,
-    /// The `SccLedger` pending length at this frame's PUSH — the drain
-    /// watermark. Everything deposited at `pending[watermark..]` was
-    /// deposited by THIS frame's subtree (frames nest strictly), so an
+    /// The `ObligationPendingLedger` pending length at this frame's PUSH —
+    /// the drain watermark. Everything deposited at `pending[watermark..]`
+    /// was deposited by THIS frame's subtree (frames nest strictly), so an
     /// SCC-root close drains exactly its own suffix. Stack indices
     /// recycle after pops; this watermark does not, so a sibling frame
     /// that reuses a popped member's stack index can never steal that
     /// member from a still-open outer SCC.
     pub(crate) pending_watermark: usize,
+    /// The domain payload.
+    pub(crate) domain: ObligationFrameDomain,
+}
+
+impl ObligationFrame {
+    /// The relation frame state, when this is a relation frame.
+    pub(crate) fn relation(&self) -> Option<&RelationFrameState> {
+        match &self.domain {
+            ObligationFrameDomain::Relate(state) => Some(state),
+            ObligationFrameDomain::FlowReturn(_) => None,
+        }
+    }
+
+    /// The relation frame state mutably, when this is a relation frame.
+    pub(crate) fn relation_mut(&mut self) -> Option<&mut RelationFrameState> {
+        match &mut self.domain {
+            ObligationFrameDomain::Relate(state) => Some(state),
+            ObligationFrameDomain::FlowReturn(_) => None,
+        }
+    }
+
+    /// The flow-return frame state mutably, when this is a flow frame.
+    pub(crate) fn flow_return_mut(&mut self) -> Option<&mut FlowReturnFrameState> {
+        match &mut self.domain {
+            ObligationFrameDomain::Relate(_) => None,
+            ObligationFrameDomain::FlowReturn(state) => Some(state),
+        }
+    }
 }
 
 /// The ONE shared re-entry / cycle-id space (design §2.1). Heap-backed,
-/// per-`CheckerTransaction`, keyed by full normalized identity.
+/// per-`CheckerDispatchTransaction`, keyed by tagged full identity.
 #[derive(Debug, Default)]
-pub(crate) struct CheckerReentryStack {
-    frames: Vec<ReentryFrame>,
-    index: FxHashMap<(RelateMemoKey, InferenceOccurrence), usize>,
+pub(crate) struct ObligationReentryStack {
+    frames: Vec<ObligationFrame>,
+    index: FxHashMap<ObligationIdentity, usize>,
 }
 
-impl CheckerReentryStack {
-    /// The stack index of `(key, occurrence)` when that transient relation
-    /// identity is already in flight on THIS transaction.
-    pub(crate) fn find(
-        &self,
-        key: &RelateMemoKey,
-        occurrence: InferenceOccurrence,
-    ) -> Option<usize> {
-        self.index.get(&(key.clone(), occurrence)).copied()
+impl ObligationReentryStack {
+    /// The stack index of `identity` when that tagged obligation is already
+    /// in flight on THIS transaction.
+    pub(crate) fn find(&self, identity: &ObligationIdentity) -> Option<usize> {
+        self.index.get(identity).copied()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -227,39 +351,59 @@ impl CheckerReentryStack {
         self.frames.len()
     }
 
-    /// Push a fresh frame for `key` with the SCC ledger's current pending
-    /// length as its drain watermark; returns its stack index.
-    pub(crate) fn push(
+    /// Push a fresh RELATION frame for `(key, occurrence)` with the pending
+    /// ledger's current length as its drain watermark; returns its stack
+    /// index.
+    pub(crate) fn push_relate(
         &mut self,
         key: RelateMemoKey,
         occurrence: InferenceOccurrence,
         pending_watermark: usize,
     ) -> usize {
+        let identity = ObligationIdentity::Relate { key, occurrence };
         let idx = self.frames.len();
-        self.frames.push(ReentryFrame {
-            key: key.clone(),
-            occurrence,
+        self.frames.push(ObligationFrame {
+            identity: identity.clone(),
             assumption_targets: Vec::new(),
             min_open_target: None,
-            session_delta: false,
             budget_cap: None,
-            opened_session: None,
-            inline_flight: None,
             pending_watermark,
+            domain: ObligationFrameDomain::Relate(RelationFrameState::new()),
         });
-        self.index.insert((key, occurrence), idx);
+        self.index.insert(identity, idx);
+        idx
+    }
+
+    /// Push a fresh FLOW-RETURN frame for `key` with the pending ledger's
+    /// current length as its drain watermark; returns its stack index.
+    pub(crate) fn push_flow_return(
+        &mut self,
+        key: FlowReturnKey,
+        pending_watermark: usize,
+    ) -> usize {
+        let identity = ObligationIdentity::FlowReturn(key);
+        let idx = self.frames.len();
+        self.frames.push(ObligationFrame {
+            identity: identity.clone(),
+            assumption_targets: Vec::new(),
+            min_open_target: None,
+            budget_cap: None,
+            pending_watermark,
+            domain: ObligationFrameDomain::FlowReturn(FlowReturnFrameState::default()),
+        });
+        self.index.insert(identity, idx);
         idx
     }
 
     /// Pop the top frame. Callers uphold strict LIFO nesting (the
     /// transaction's execution model).
-    pub(crate) fn pop(&mut self) -> ReentryFrame {
+    pub(crate) fn pop(&mut self) -> ObligationFrame {
         let frame = self.frames.pop().expect("reentry stack underflow");
-        self.index.remove(&(frame.key.clone(), frame.occurrence));
+        self.index.remove(&frame.identity);
         frame
     }
 
-    pub(crate) fn top_mut(&mut self) -> Option<&mut ReentryFrame> {
+    pub(crate) fn top_mut(&mut self) -> Option<&mut ObligationFrame> {
         self.frames.last_mut()
     }
 
@@ -272,57 +416,191 @@ impl CheckerReentryStack {
         }
     }
 
-    /// The top frame's key (the current frame's relation axes template
-    /// for sub-relation key construction).
-    pub(crate) fn frames_top_key(&self) -> Option<&RelateMemoKey> {
-        self.frames.last().map(|frame| &frame.key)
+    /// The frame at `idx`, when in range.
+    pub(crate) fn frame(&self, idx: usize) -> Option<&ObligationFrame> {
+        self.frames.get(idx)
     }
 
-    pub(crate) fn frames_top_occurrence(&self) -> Option<InferenceOccurrence> {
-        self.frames.last().map(|frame| frame.occurrence)
+    /// The frame at `idx` mutably, when in range.
+    pub(crate) fn frame_mut_for_update(&mut self, idx: usize) -> Option<&mut ObligationFrame> {
+        self.frames.get_mut(idx)
     }
 
-    /// The session the frame at `idx` opened, if any.
-    pub(crate) fn frame_opened_session(&self, idx: usize) -> Option<SessionId> {
-        self.frames.get(idx).and_then(|frame| frame.opened_session)
-    }
-
-    /// Mark the frame at `idx` as having opened session `session`.
-    pub(crate) fn note_opened_session(&mut self, idx: usize, session: SessionId) {
-        if let Some(frame) = self.frames.get_mut(idx) {
-            frame.opened_session = Some(session);
-        }
-    }
-
-    pub(crate) fn note_inline_flight(&mut self, idx: usize, flight: Option<InlineRelationFlight>) {
-        if let Some(frame) = self.frames.get_mut(idx) {
-            frame.inline_flight = flight;
-        }
-    }
-
-    pub(crate) fn note_session_delta_range(&mut self, start: usize, end: usize) {
-        for frame in self.frames.get_mut(start..end).into_iter().flatten() {
-            frame.session_delta = true;
-        }
+    /// The nearest open RELATION frame's identity parts, walking from the
+    /// top of the GENERIC stack down. Relation subkeys inherit their axes
+    /// from the nearest open `Relate` ancestor — never the untyped top of
+    /// a mixed stack (a non-relation frame between two relation frames
+    /// carries no relation axes to inherit).
+    pub(crate) fn nearest_relate(&self) -> Option<(&RelateMemoKey, InferenceOccurrence)> {
+        self.frames
+            .iter()
+            .rev()
+            .find_map(|frame| frame.identity.as_relate())
     }
 }
 
-/// The typed VIEW over the reentry stack that records coinductive
-/// assumption edges and tracks the discharge lowlink (design §2.1: the
-/// relation assumption stack is a projection of the one reentry stack —
-/// same storage, so the per-engine cycle spaces cannot diverge).
+/// A popped SCC member awaiting its SCC root's close — the PROVISIONAL
+/// deferral record (design §2.3 step 4): a caller-return value plus
+/// deferral metadata, NEVER the published payload. The published payload
+/// is produced at the batched-publish instant by the discharge against
+/// converged state.
+#[derive(Debug)]
+pub(crate) struct PendingObligation {
+    /// The member's tagged full identity.
+    pub(crate) identity: ObligationIdentity,
+    /// The domain deferral payload.
+    pub(crate) domain: PendingObligationDomain,
+}
+
+/// The relation-domain deferral payload of a popped member.
+#[derive(Debug)]
+pub(crate) struct RelationPendingState {
+    /// The member's provisional discharged verdict at pop.
+    pub(crate) verdict: PendingVerdict,
+    /// Session-local delta (row 7) — never publishes.
+    pub(crate) session_delta: bool,
+    /// The member opened session `Some(..)` (a binding member).
+    pub(crate) opened_session: Option<SessionId>,
+    /// Store-owned admission for this inline non-binding member.
+    pub(crate) inline_flight: Option<InlineRelationFlight>,
+}
+
+/// The decided outcome of a popped flow-return member. Decided at pop:
+/// a same-slot recursive backedge is a coinductive hold, so the
+/// contributor set is complete when the frame closes — the seed check
+/// runs once, at pop.
+#[derive(Debug, Clone)]
+pub(crate) enum FlowReturnPendingOutcome {
+    /// Complete evaluation (the admitted shape).
+    Complete(FlowReturnResult),
+    /// Typed failure — `ReturnOnly`, never admitted.
+    Degraded(FlowReturnFailure),
+}
+
+/// The flow-return-domain deferral payload of a popped member.
+#[derive(Debug)]
+pub(crate) struct FlowReturnPendingState {
+    /// The member's decided outcome at pop.
+    pub(crate) outcome: FlowReturnPendingOutcome,
+    /// Store-owned admission for this inline member.
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
+    /// The coinductive hold targets the member's evaluation met (in-flight
+    /// callees and direct self-calls) — the SCC close discharges an
+    /// empty-cycle member on its targets' admitted returns.
+    pub(crate) holds: Vec<FlowReturnKey>,
+    /// The member's own file roots — the published component's self-roots
+    /// are the UNION of every drained member's roots, so a cross-file edit
+    /// invalidates the whole component.
+    pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+}
+
+/// The domain deferral payload of a popped member.
+#[derive(Debug)]
+pub(crate) enum PendingObligationDomain {
+    /// Relation deferral state.
+    Relate(RelationPendingState),
+    /// Flow-return deferral state.
+    FlowReturn(FlowReturnPendingState),
+}
+
+/// The per-`CheckerDispatchTransaction` pending ledger (design §2.3 step 4
+/// R-a): accumulates popped-but-unpublished TAGGED members; the SCC root's
+/// close computes each member's published outcome and routes the batch.
 #[derive(Debug, Default)]
-pub(crate) struct RelationAssumptionStack {
-    reentry: CheckerReentryStack,
+pub(crate) struct ObligationPendingLedger {
+    pending: Vec<PendingObligation>,
 }
 
-impl RelationAssumptionStack {
-    pub(crate) fn reentry(&self) -> &CheckerReentryStack {
-        &self.reentry
+impl ObligationPendingLedger {
+    pub(crate) fn deposit(&mut self, member: PendingObligation) {
+        self.pending.push(member);
     }
 
-    pub(crate) fn reentry_mut(&mut self) -> &mut CheckerReentryStack {
-        &mut self.reentry
+    /// The current pending length — recorded as a frame's drain watermark
+    /// at push.
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Drain every member deposited at or after `watermark` — exactly the
+    /// closing frame's own subtree deposits (frames nest strictly and
+    /// deposits append, so the suffix from the frame's push-time watermark
+    /// IS its SCC membership; stack indices recycle and MUST NOT identify
+    /// membership). The drained members are in pop order: deepest-popped
+    /// first.
+    pub(crate) fn drain_scc(&mut self, watermark: usize) -> Vec<PendingObligation> {
+        let split = watermark.min(self.pending.len());
+        self.pending.split_off(split)
+    }
+}
+
+/// One entry of the tagged provisional substitution table an SCC close
+/// installs for its members' re-discharge (design §2.3 step 4 — the
+/// converged verdicts a re-running member consults instead of re-entering
+/// the SCC).
+#[derive(Debug, Clone)]
+pub(crate) enum ProvisionalVerdict {
+    /// A relation step verdict.
+    Relate(RelationStep),
+}
+
+/// The ONE tagged provisional substitution table: SCC members re-discharge
+/// deepest-first/root-last against it across domains.
+pub(crate) type ProvisionalSubstitution = FxHashMap<ObligationIdentity, ProvisionalVerdict>;
+
+/// Read a RELATION verdict from the tagged table.
+pub(crate) fn provisional_relate_step<'a>(
+    substitution: &'a ProvisionalSubstitution,
+    key: &RelateMemoKey,
+    occurrence: InferenceOccurrence,
+) -> Option<&'a RelationStep> {
+    match substitution.get(&ObligationIdentity::Relate {
+        key: key.clone(),
+        occurrence,
+    }) {
+        Some(ProvisionalVerdict::Relate(step)) => Some(step),
+        None => None,
+    }
+}
+
+/// The generic obligation runtime: tagged identities, generic frames /
+/// backedges / lowlinks, the generic pending ledger + watermarks, and the
+/// tagged provisional substitution table. Domain runtimes own their
+/// verdict algebra; this runtime owns the SCC topology.
+#[derive(Debug, Default)]
+pub(crate) struct ObligationRuntime {
+    stack: ObligationReentryStack,
+    pending: ObligationPendingLedger,
+    substitution: ProvisionalSubstitution,
+}
+
+impl ObligationRuntime {
+    pub(crate) fn stack(&self) -> &ObligationReentryStack {
+        &self.stack
+    }
+
+    pub(crate) fn stack_mut(&mut self) -> &mut ObligationReentryStack {
+        &mut self.stack
+    }
+
+    pub(crate) fn pending(&self) -> &ObligationPendingLedger {
+        &self.pending
+    }
+
+    pub(crate) fn pending_mut(&mut self) -> &mut ObligationPendingLedger {
+        &mut self.pending
+    }
+
+    pub(crate) fn substitution(&self) -> &ProvisionalSubstitution {
+        &self.substitution
+    }
+
+    /// Whether the next obligation push is a ROOT push (the generic stack
+    /// is empty). Root versus inline is decided HERE, at the generic
+    /// transaction — a nested obligation of any domain under an open frame
+    /// is inline because the generic root owns its eventual drain.
+    pub(crate) fn decides_root(&self) -> bool {
+        self.stack.is_empty()
     }
 
     /// Record an assumption edge `top → target` (the coinductive "assume
@@ -330,7 +608,7 @@ impl RelationAssumptionStack {
     /// `OpenAssumption(target)` — transient, NEVER written to a published
     /// `ReadSetSignature.facts`.
     pub(crate) fn record_assumption(&mut self, target: usize) {
-        if let Some(frame) = self.reentry.top_mut() {
+        if let Some(frame) = self.stack.top_mut() {
             frame.assumption_targets.push(target);
             frame.min_open_target = Some(
                 frame
@@ -342,12 +620,14 @@ impl RelationAssumptionStack {
 
     /// Fold a popped child's still-open lowlink into the (new) top frame:
     /// an assumption the child recorded against a frame BELOW it stays
-    /// open against the parent after the child pops.
+    /// open against the parent after the child pops. This folds through
+    /// EVERY generic frame, including non-relation frames between two
+    /// relation frames.
     pub(crate) fn propagate_lowlink(&mut self, child_min_open: Option<usize>) {
         let Some(child_min_open) = child_min_open else {
             return;
         };
-        if let Some(frame) = self.reentry.top_mut() {
+        if let Some(frame) = self.stack.top_mut() {
             frame.min_open_target = Some(
                 frame
                     .min_open_target
@@ -355,7 +635,27 @@ impl RelationAssumptionStack {
             );
         }
     }
+
+    /// Install one SCC re-discharge context (the tagged substitution table)
+    /// and return the complete previous context so a nested re-discharge
+    /// can restore its caller exactly. The relation occurrence rail rides
+    /// the relation domain runtime; this installs the tagged table only.
+    pub(crate) fn replace_substitution(
+        &mut self,
+        substitution: ProvisionalSubstitution,
+    ) -> ProvisionalSubstitution {
+        std::mem::replace(&mut self.substitution, substitution)
+    }
+
+    /// Restore a previously saved substitution table.
+    pub(crate) fn restore_substitution(&mut self, saved: ProvisionalSubstitution) {
+        self.substitution = saved;
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Relation domain runtime
+// ---------------------------------------------------------------------------
 
 /// Lifecycle of an in-flight inference session (design Decision 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -881,27 +1181,6 @@ pub(crate) fn select_inference_candidates(
     }
 }
 
-/// A popped SCC member awaiting its SCC root's close — the PROVISIONAL
-/// deferral record (design §2.3 step 4): a caller-return value plus
-/// deferral metadata, NEVER the published payload. The published payload
-/// is produced at the batched-publish instant by the discharge against
-/// converged state.
-#[derive(Debug)]
-pub(crate) struct PendingSccMember {
-    /// The member's full §2.7 identity.
-    pub(crate) key: RelateMemoKey,
-    /// Transient inference occurrence used if the member re-discharges.
-    pub(crate) occurrence: InferenceOccurrence,
-    /// The member's provisional discharged verdict at pop.
-    pub(crate) verdict: PendingVerdict,
-    /// Session-local delta (row 7) — never publishes.
-    pub(crate) session_delta: bool,
-    /// The member opened session `Some(..)` (a binding member).
-    pub(crate) opened_session: Option<SessionId>,
-    /// Store-owned admission for this inline non-binding member.
-    pub(crate) inline_flight: Option<InlineRelationFlight>,
-}
-
 /// The decided provisional verdict of a popped member.
 #[derive(Debug, Clone)]
 pub(crate) enum PendingVerdict {
@@ -931,37 +1210,6 @@ pub(crate) fn redischarge_is_stable(
         ) => provisional == redischarge,
         (PendingVerdict::NotAssignable, PendingVerdict::NotAssignable) => true,
         _ => false,
-    }
-}
-
-/// The per-`CheckerTransaction` SCC ledger (design §2.3 step 4 R-a):
-/// accumulates popped-but-unpublished members; the SCC root's close
-/// computes each member's published outcome and routes the batch.
-#[derive(Debug, Default)]
-pub(crate) struct SccLedger {
-    pending: Vec<PendingSccMember>,
-}
-
-impl SccLedger {
-    pub(crate) fn deposit(&mut self, member: PendingSccMember) {
-        self.pending.push(member);
-    }
-
-    /// The current pending length — recorded as a frame's drain watermark
-    /// at push.
-    pub(crate) fn pending_len(&self) -> usize {
-        self.pending.len()
-    }
-
-    /// Drain every member deposited at or after `watermark` — exactly the
-    /// closing frame's own subtree deposits (frames nest strictly and
-    /// deposits append, so the suffix from the frame's push-time watermark
-    /// IS its SCC membership; stack indices recycle and MUST NOT identify
-    /// membership). The drained members are in pop order: deepest-popped
-    /// first.
-    pub(crate) fn drain_scc(&mut self, watermark: usize) -> Vec<PendingSccMember> {
-        let split = watermark.min(self.pending.len());
-        self.pending.split_off(split)
     }
 }
 
@@ -998,15 +1246,11 @@ pub(crate) struct CompletedSccMember {
     pub(crate) inline_flight: Option<InlineRelationFlight>,
 }
 
-/// The per-relation-root cold-compute frame (design §2.1 /
-/// `native-typeinfo-parity.md` §4.2). Transient; NEVER a cache key.
+/// The relation domain runtime: inference sessions, relation provisional
+/// payloads, and relation redischarge/fixation state. The SCC topology it
+/// runs on lives in the generic [`ObligationRuntime`].
 #[derive(Debug, Default)]
-pub(crate) struct CheckerTransaction {
-    /// The ONE shared re-entry / cycle-id space (only `Relate` wired at
-    /// U2) with its relation-assumption typed view.
-    pub(crate) assumptions: RelationAssumptionStack,
-    /// Popped-but-unpublished SCC members awaiting their root's close.
-    pub(crate) scc_ledger: SccLedger,
+pub(crate) struct RelationDomainRuntime {
     /// The active inference-session stack.
     pub(crate) sessions: Vec<InferenceSession>,
     /// Per-session deferred-admission ledger.
@@ -1015,11 +1259,6 @@ pub(crate) struct CheckerTransaction {
     pub(crate) completed_members: Vec<CompletedSccMember>,
     /// The normalized strict-family configuration in force (RI-10).
     pub(crate) strict: Option<StrictFamilyConfig>,
-    /// The discharge substitution table of an in-flight re-discharge
-    /// (design §2.3 step 4 — the converged verdicts a re-running member
-    /// consults instead of re-entering the SCC).
-    pub(crate) discharge_substitution:
-        FxHashMap<(RelateMemoKey, InferenceOccurrence), RelationStep>,
     /// Virtual root occurrence used while an SCC member re-discharges after
     /// its real frame has been popped. The recorded stack depth lets nested
     /// frames take over normally while preserving the popped member's
@@ -1035,37 +1274,143 @@ pub(crate) struct CheckerTransaction {
 /// identity is unaffected; this restores only the virtual occurrence and
 /// substitution rails used by the enclosing re-discharge.
 pub(crate) struct SavedRedischargeContext {
-    substitution: FxHashMap<(RelateMemoKey, InferenceOccurrence), RelationStep>,
+    substitution: ProvisionalSubstitution,
     occurrence: Option<(usize, InferenceOccurrence)>,
 }
 
-impl CheckerTransaction {
-    pub(crate) fn reentry(&self) -> &CheckerReentryStack {
-        self.assumptions.reentry()
+/// The per-obligation-root cold-compute frame (design §2.1 /
+/// `native-typeinfo-parity.md` §4.2): ONE tagged obligation runtime plus
+/// the per-domain runtimes. Transient; NEVER a cache key.
+/// A flow member whose SCC closed cleanly, queued for the batched
+/// publish the relation ROOT performs after its family-memo publish
+/// lands (the member entries ride the ROOT's SCC-union carrier — the
+/// published fact set is the UNION of all SCC members' observed facts).
+#[derive(Debug)]
+pub(crate) struct CompletedFlowReturnMember {
+    pub(crate) key: FlowReturnKey,
+    pub(crate) result: FlowReturnResult,
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
+    /// The member's own file roots (the SCC-union carrier's self-roots
+    /// include them even when the ROOT is a relation obligation).
+    pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+}
+
+/// The flow-return domain runtime: the completed flow members queued
+/// for the relation root's batched publish. Contributor maps ride the
+/// in-flight frames and the tagged pending ledger (a popped member's
+/// decided outcome is final at pop — same-slot recursive edges are
+/// coinductive holds, never unresolved failures), so the domain owns
+/// no parallel contributor ledger.
+#[derive(Debug, Default)]
+pub(crate) struct FlowReturnDomainRuntime {
+    /// SCC-closed flow members queued for the root's batched publish
+    /// drain.
+    pub(crate) completed_members: Vec<CompletedFlowReturnMember>,
+    /// The typed failure of the in-flight machinery ROOT's close — the
+    /// caller-return payload channel: the family memo admits only COMPLETE
+    /// values, so a degraded root's typed failure rides the transaction to
+    /// the demanding caller (never admitted, never a cache value).
+    pub(crate) last_root_failure: Option<crate::semantic_query::FlowReturnFailure>,
+}
+
+/// The per-obligation-root cold-compute frame (design §2.1 /
+/// `native-typeinfo-parity.md` §4.2): ONE tagged obligation runtime plus
+/// the per-domain runtimes. Transient; NEVER a cache key.
+#[derive(Debug, Default)]
+pub(crate) struct CheckerDispatchTransaction {
+    /// The generic obligation runtime (tagged identities, frames, pending
+    /// ledger, watermarks, the tagged provisional substitution table).
+    pub(crate) obligations: ObligationRuntime,
+    /// The relation domain runtime.
+    pub(crate) relation: RelationDomainRuntime,
+    /// The flow-return domain runtime.
+    pub(crate) flow: FlowReturnDomainRuntime,
+}
+
+/// One entry of a tagged flow component awaiting its equation fixed
+/// point: the member's current outcome (a Complete outcome IS its
+/// concrete seed join; a hold-only EmptyCycle has no seed) and the
+/// coinductive hold targets its evaluation met.
+#[derive(Debug)]
+pub(super) struct FlowDischargeEntry {
+    /// The member's flow identity.
+    pub(super) key: crate::semantic_query::FlowReturnKey,
+    /// The member's outcome (updated in place by the discharge).
+    pub(super) outcome: FlowReturnPendingOutcome,
+    /// The member's coinductive hold targets.
+    pub(super) holds: Vec<crate::semantic_query::FlowReturnKey>,
+}
+
+impl CheckerDispatchTransaction {
+    pub(crate) fn reentry(&self) -> &ObligationReentryStack {
+        self.obligations.stack()
     }
 
-    pub(crate) fn reentry_mut(&mut self) -> &mut CheckerReentryStack {
-        self.assumptions.reentry_mut()
+    pub(crate) fn reentry_mut(&mut self) -> &mut ObligationReentryStack {
+        self.obligations.stack_mut()
     }
 
     pub(crate) fn alloc_session_id(&mut self) -> SessionId {
-        self.next_session_id += 1;
-        SessionId(self.next_session_id)
+        self.relation.next_session_id += 1;
+        SessionId(self.relation.next_session_id)
     }
 
     /// The active (innermost `InProgress`) session, if any.
     pub(crate) fn active_session_mut(&mut self) -> Option<&mut InferenceSession> {
-        self.sessions
+        self.relation
+            .sessions
             .iter_mut()
             .rev()
             .find(|s| s.state == InferenceSessionState::InProgress)
     }
 
     pub(crate) fn active_session(&self) -> Option<&InferenceSession> {
-        self.sessions
+        self.relation
+            .sessions
             .iter()
             .rev()
             .find(|s| s.state == InferenceSessionState::InProgress)
+    }
+
+    /// The session the frame at `idx` opened, if any.
+    pub(crate) fn frame_opened_session(&self, idx: usize) -> Option<SessionId> {
+        self.reentry()
+            .frame(idx)
+            .and_then(|frame| frame.relation())
+            .and_then(|state| state.opened_session)
+    }
+
+    /// Mark the frame at `idx` as having opened session `session`.
+    pub(crate) fn note_opened_session(&mut self, idx: usize, session: SessionId) {
+        if let Some(state) = self
+            .reentry_mut()
+            .frame_mut_for_update(idx)
+            .and_then(ObligationFrame::relation_mut)
+        {
+            state.opened_session = Some(session);
+        }
+    }
+
+    pub(crate) fn note_inline_flight(&mut self, idx: usize, flight: Option<InlineRelationFlight>) {
+        if let Some(state) = self
+            .reentry_mut()
+            .frame_mut_for_update(idx)
+            .and_then(ObligationFrame::relation_mut)
+        {
+            state.inline_flight = flight;
+        }
+    }
+
+    pub(crate) fn note_session_delta_range(&mut self, start: usize, end: usize) {
+        for idx in start..end {
+            if let Some(state) = self
+                .reentry_mut()
+                .frame_mut_for_update(idx)
+                .and_then(ObligationFrame::relation_mut)
+            {
+                state.session_delta = true;
+            }
+        }
     }
 
     /// Mark every active non-owner frame when an accepted candidate write
@@ -1076,26 +1421,26 @@ impl CheckerTransaction {
             return;
         }
         let owner = (0..depth).rev().find(|index| {
-            self.reentry()
-                .frame_opened_session(*index)
+            self.frame_opened_session(*index)
                 .is_some_and(|opened| Some(opened) == active_id)
         });
         let first_non_owner = owner.map_or(0, |index| index + 1);
-        self.reentry_mut()
-            .note_session_delta_range(first_non_owner, depth);
+        self.note_session_delta_range(first_non_owner, depth);
     }
 
     /// Install one SCC re-discharge context and return the complete previous
     /// context so a nested re-discharge can restore its caller exactly.
     pub(crate) fn replace_redischarge_context(
         &mut self,
-        substitution: FxHashMap<(RelateMemoKey, InferenceOccurrence), RelationStep>,
+        substitution: ProvisionalSubstitution,
         occurrence: InferenceOccurrence,
     ) -> SavedRedischargeContext {
-        let previous_substitution =
-            std::mem::replace(&mut self.discharge_substitution, substitution);
+        let previous_substitution = self.obligations.replace_substitution(substitution);
         let depth = self.reentry().depth();
-        let previous_occurrence = self.redischarge_occurrence.replace((depth, occurrence));
+        let previous_occurrence = self
+            .relation
+            .redischarge_occurrence
+            .replace((depth, occurrence));
         SavedRedischargeContext {
             substitution: previous_substitution,
             occurrence: previous_occurrence,
@@ -1103,347 +1448,11 @@ impl CheckerTransaction {
     }
 
     pub(crate) fn restore_redischarge_context(&mut self, saved: SavedRedischargeContext) {
-        self.discharge_substitution = saved.substitution;
-        self.redischarge_occurrence = saved.occurrence;
+        self.obligations.restore_substitution(saved.substitution);
+        self.relation.redischarge_occurrence = saved.occurrence;
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn setup(
-        param_node: SemanticNodeId,
-        variance_phase: VariancePhase,
-        pass_kind: InferencePassKind,
-        candidate_priority: InferenceCandidatePriority,
-        no_infer_mask: NoInferMask,
-        const_param_policy: ConstParamPolicy,
-        contextual_inference_mode: ContextualInferenceMode,
-    ) -> InferenceSessionSetup {
-        InferenceSessionSetup::new(
-            Arc::from(vec![InferenceInfoSetup::new(param_node, Arc::from("T"))].into_boxed_slice()),
-            variance_phase,
-            pass_kind,
-            candidate_priority,
-            no_infer_mask,
-            const_param_policy,
-            contextual_inference_mode,
-        )
-    }
-
-    #[test]
-    fn inference_context_key_projects_every_session_setup_axis() {
-        let active_param = SemanticNodeId(101);
-        let baseline = setup(
-            active_param,
-            VariancePhase::Covariant,
-            InferencePassKind::Ordinary,
-            InferenceCandidatePriority::Argument,
-            NoInferMask::empty(),
-            ConstParamPolicy::NonConst,
-            ContextualInferenceMode::None,
-        );
-        let baseline_key = baseline.context_key().clone();
-
-        // Exhaustive patterns make a new field on either authoritative setup
-        // record a compile error until this behavioral guard classifies it.
-        let InferenceSessionSetup {
-            context_key: _,
-            infos,
-        } = baseline.clone();
-        let [info] = infos.as_ref() else {
-            panic!("the fixture has exactly one inferable parameter");
-        };
-        let InferenceInfoSetup {
-            param_node: _,
-            param_name: _,
-        } = info;
-        let InferenceContextKey {
-            inferable_params: _,
-            variance_phase: _,
-            pass_kind: _,
-            candidate_priority: _,
-            no_infer_mask: _,
-            const_param_policy: _,
-            contextual_inference_mode: _,
-        } = baseline_key.clone();
-
-        let variants = [
-            setup(
-                SemanticNodeId(102),
-                VariancePhase::Covariant,
-                InferencePassKind::Ordinary,
-                InferenceCandidatePriority::Argument,
-                NoInferMask::empty(),
-                ConstParamPolicy::NonConst,
-                ContextualInferenceMode::None,
-            ),
-            setup(
-                active_param,
-                VariancePhase::Contravariant,
-                InferencePassKind::Ordinary,
-                InferenceCandidatePriority::Argument,
-                NoInferMask::empty(),
-                ConstParamPolicy::NonConst,
-                ContextualInferenceMode::None,
-            ),
-            setup(
-                active_param,
-                VariancePhase::Covariant,
-                InferencePassKind::ReverseHomomorphicMapped,
-                InferenceCandidatePriority::Argument,
-                NoInferMask::empty(),
-                ConstParamPolicy::NonConst,
-                ContextualInferenceMode::None,
-            ),
-            setup(
-                active_param,
-                VariancePhase::Covariant,
-                InferencePassKind::Ordinary,
-                InferenceCandidatePriority::ReturnType,
-                NoInferMask::empty(),
-                ConstParamPolicy::NonConst,
-                ContextualInferenceMode::None,
-            ),
-            setup(
-                active_param,
-                VariancePhase::Covariant,
-                InferencePassKind::Ordinary,
-                InferenceCandidatePriority::Argument,
-                NoInferMask(1),
-                ConstParamPolicy::NonConst,
-                ContextualInferenceMode::None,
-            ),
-            setup(
-                active_param,
-                VariancePhase::Covariant,
-                InferencePassKind::Ordinary,
-                InferenceCandidatePriority::Argument,
-                NoInferMask::empty(),
-                ConstParamPolicy::Const,
-                ContextualInferenceMode::None,
-            ),
-            setup(
-                active_param,
-                VariancePhase::Covariant,
-                InferencePassKind::Ordinary,
-                InferenceCandidatePriority::Argument,
-                NoInferMask::empty(),
-                ConstParamPolicy::NonConst,
-                ContextualInferenceMode::Contextual,
-            ),
-        ];
-        for variant in &variants {
-            assert_ne!(
-                variant.context_key(),
-                &baseline_key,
-                "changing any setup axis must select a distinct relation key"
-            );
-        }
-        let distinct: std::collections::HashSet<_> = std::iter::once(baseline_key.clone())
-            .chain(variants.iter().map(|variant| variant.context_key().clone()))
-            .collect();
-        assert_eq!(
-            distinct.len(),
-            variants.len() + 1,
-            "each setup-axis mutation must have a distinct fingerprint"
-        );
-
-        let mut session = InferenceSession::new(SessionId(1), baseline, None);
-        assert_eq!(session.context_key(), &baseline_key);
-        assert!(session.deposit(
-            active_param,
-            SemanticNodeId(201),
-            InferenceCandidatePriority::Argument,
-            VariancePhase::Covariant,
-        ));
-        assert!(
-            !session.deposit(
-                SemanticNodeId(999),
-                SemanticNodeId(202),
-                InferenceCandidatePriority::Argument,
-                VariancePhase::Covariant,
-            ),
-            "an infer absent from the frozen setup must not accept a candidate"
-        );
-        assert_eq!(
-            session.context_key(),
-            &baseline_key,
-            "candidate collection cannot mutate the frozen setup key"
-        );
-        let _bindings =
-            session.fixate(|nodes, _| nodes.first().copied().unwrap_or(SemanticNodeId(0)));
-        assert_eq!(
-            session.context_key(),
-            &baseline_key,
-            "fixation cannot mutate the frozen setup key"
-        );
-    }
-
-    fn relation_key(seed: u64) -> RelateMemoKey {
-        RelateMemoKey::assignable(
-            SemanticNodeId(seed),
-            SemanticNodeId(seed + 1),
-            crate::semantic_query::RelationContext::default(),
-        )
-    }
-
-    #[test]
-    fn repeated_infer_sites_share_one_setup_record_and_one_fixed_binding() {
-        let param = SemanticNodeId(501);
-        let setup = InferenceSessionSetup::new(
-            Arc::from(
-                vec![
-                    InferenceInfoSetup::new(param, Arc::from("T")),
-                    InferenceInfoSetup::new(param, Arc::from("T")),
-                ]
-                .into_boxed_slice(),
-            ),
-            VariancePhase::Covariant,
-            InferencePassKind::Ordinary,
-            InferenceCandidatePriority::Argument,
-            NoInferMask::empty(),
-            ConstParamPolicy::NonConst,
-            ContextualInferenceMode::None,
-        );
-        assert_eq!(
-            setup.infos.len(),
-            1,
-            "the immutable setup authority must deduplicate repeated sites by exact param"
-        );
-        let mut session = InferenceSession::new(SessionId(17), setup, None);
-        assert!(session.deposit(
-            param,
-            SemanticNodeId(601),
-            InferenceCandidatePriority::Argument,
-            VariancePhase::Covariant,
-        ));
-        assert!(session.deposit(
-            param,
-            SemanticNodeId(602),
-            InferenceCandidatePriority::ReturnType,
-            VariancePhase::Contravariant,
-        ));
-        let fixed = session.fixate(|nodes, _| nodes[0]);
-        assert_eq!(
-            fixed.len(),
-            1,
-            "fixation must emit one binding for one exact infer parameter"
-        );
-        assert_eq!(fixed[0].param, param);
-    }
-
-    #[test]
-    fn redischarge_stability_requires_same_polarity_and_binding_snapshot() {
-        let binding = |bound| InferBinding {
-            param: SemanticNodeId(710),
-            name: Arc::from("T"),
-            bound: SemanticNodeId(bound),
-        };
-        let original = PendingVerdict::Assignable {
-            bindings: Arc::from(vec![binding(810)].into_boxed_slice()),
-        };
-        let same = PendingVerdict::Assignable {
-            bindings: Arc::from(vec![binding(810)].into_boxed_slice()),
-        };
-        let changed_binding = PendingVerdict::Assignable {
-            bindings: Arc::from(vec![binding(811)].into_boxed_slice()),
-        };
-        assert!(redischarge_is_stable(&original, &same));
-        assert!(
-            !redischarge_is_stable(&original, &PendingVerdict::NotAssignable),
-            "a polarity flip must refuse publication"
-        );
-        assert!(
-            !redischarge_is_stable(&original, &changed_binding),
-            "a changed fixed-binding snapshot must refuse publication"
-        );
-        assert!(redischarge_is_stable(
-            &PendingVerdict::NotAssignable,
-            &PendingVerdict::NotAssignable,
-        ));
-    }
-
-    #[test]
-    fn candidate_writes_mark_every_non_owner_ancestor_mutating_an_outer_session() {
-        let mut txn = CheckerTransaction::default();
-        let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
-        let session = SessionId(7);
-        let owner = txn.reentry_mut().push(relation_key(301), occurrence, 0);
-        txn.reentry_mut().note_opened_session(owner, session);
-        txn.note_candidate_write(Some(session));
-
-        txn.reentry_mut().push(relation_key(303), occurrence, 0);
-        txn.reentry_mut().push(relation_key(305), occurrence, 0);
-        txn.note_candidate_write(Some(session));
-
-        let leaf = txn.reentry_mut().pop();
-        let middle = txn.reentry_mut().pop();
-        let owner = txn.reentry_mut().pop();
-        assert!(
-            leaf.session_delta,
-            "the leaf frame writing the outer session must be ReturnOnly"
-        );
-        assert!(
-            middle.session_delta,
-            "every non-owner ancestor between the writer and session owner must be ReturnOnly"
-        );
-        assert!(
-            !owner.session_delta,
-            "the frame that owns the session may publish its fixed bindings"
-        );
-    }
-
-    #[test]
-    fn nested_redischarge_restores_the_enclosing_substitution_and_occurrence() {
-        let mut txn = CheckerTransaction::default();
-        let outer_occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
-        let inner_occurrence = InferenceOccurrence {
-            priority: InferenceCandidatePriority::ReturnType,
-            variance: VariancePhase::Contravariant,
-        };
-        let deepest_occurrence = InferenceOccurrence {
-            priority: InferenceCandidatePriority::NakedTypeParameter,
-            variance: VariancePhase::Covariant,
-        };
-        let outer_key = relation_key(401);
-        let inner_key = relation_key(403);
-        let deepest_key = relation_key(405);
-
-        txn.discharge_substitution.insert(
-            (outer_key.clone(), outer_occurrence),
-            RelationStep::NotAssignable,
-        );
-        txn.redischarge_occurrence = Some((1, outer_occurrence));
-
-        let mut inner_substitution = FxHashMap::default();
-        inner_substitution.insert((inner_key.clone(), inner_occurrence), RelationStep::Unknown);
-        let saved_outer = txn.replace_redischarge_context(inner_substitution, inner_occurrence);
-
-        let mut deepest_substitution = FxHashMap::default();
-        deepest_substitution.insert(
-            (deepest_key.clone(), deepest_occurrence),
-            RelationStep::Assumed,
-        );
-        let saved_inner = txn.replace_redischarge_context(deepest_substitution, deepest_occurrence);
-        txn.restore_redischarge_context(saved_inner);
-
-        assert_eq!(txn.redischarge_occurrence, Some((0, inner_occurrence)));
-        assert!(matches!(
-            txn.discharge_substitution
-                .get(&(inner_key, inner_occurrence)),
-            Some(RelationStep::Unknown)
-        ));
-        assert_eq!(txn.discharge_substitution.len(), 1);
-
-        txn.restore_redischarge_context(saved_outer);
-        assert_eq!(txn.redischarge_occurrence, Some((1, outer_occurrence)));
-        assert!(matches!(
-            txn.discharge_substitution
-                .get(&(outer_key, outer_occurrence)),
-            Some(RelationStep::NotAssignable)
-        ));
-        assert_eq!(txn.discharge_substitution.len(), 1);
-    }
-}
+#[path = "dispatch_txn_tests.rs"]
+mod dispatch_txn_tests;

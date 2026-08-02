@@ -14,7 +14,7 @@ use verter_type_expr::facts::DeclarationOrigin;
 use verter_type_expr::facts::{
     ClosedTypeFact, FactOrLocator, FunctionParamFact, FunctionSignatureFact, LeafTypeFact,
     ObjectMemberFact, ObjectPropertyFact, ObjectShapeFact, ProjectedMemberFact, ProjectedTypeFact,
-    ResolvedLocalShape, ReturnInferenceCompleteness, SemanticTypeSource, SynthesizedMemberFact,
+    ResolvedLocalShape, SemanticTypeSource, SynthesizedMemberFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,
@@ -185,8 +185,9 @@ fn projected_member_and_function_positions_absolutize_deeply() {
                 }]
                 .into_boxed_slice(),
             ),
-            return_ty: Some(slot("/lib/keep.ts")),
-            return_inference: ReturnInferenceCompleteness::NotInferred,
+            return_source: verter_type_expr::facts::FunctionReturnSource::Declared(
+                verter_type_expr::locators::FunctionReturnLocator::Authored(slot("/lib/keep.ts")),
+            ),
             has_implementation_body: false,
             spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
         }));
@@ -205,13 +206,14 @@ fn projected_member_and_function_positions_absolutize_deeply() {
         "a producer-local function-parameter slot must absolutize"
     );
     assert_eq!(
-        signature
-            .return_ty
-            .as_ref()
-            .expect("return slot kept")
-            .anchor
-            .canonical_id
-            .as_ref(),
+        match &signature.return_source {
+            verter_type_expr::facts::FunctionReturnSource::Declared(locator) => locator,
+            other => panic!("return source kept, got {other:?}"),
+        }
+        .slot()
+        .anchor
+        .canonical_id
+        .as_ref(),
         "/lib/keep.ts",
         "an absolute return-type anchor must NOT be rewritten"
     );

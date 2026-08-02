@@ -651,7 +651,10 @@ fn jsdoc_block_offsets_immediately_before(source: &str, start: usize) -> Option<
 /// declaration whose name token starts at `target_start` — the offset-returning
 /// sibling of [`find_leading_jsdoc_near_offset`] (same modifier / declaration-
 /// keyword skip logic). `None` when no leading JSDoc block governs the offset.
-fn find_leading_jsdoc_block_offsets(source: &str, target_start: u32) -> Option<(usize, usize)> {
+pub(crate) fn find_leading_jsdoc_block_offsets(
+    source: &str,
+    target_start: u32,
+) -> Option<(usize, usize)> {
     let start = target_start as usize;
     if let Some(offsets) = jsdoc_block_offsets_immediately_before(source, start) {
         return Some(offsets);

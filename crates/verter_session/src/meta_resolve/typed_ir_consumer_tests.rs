@@ -83,7 +83,13 @@ fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
         signature.parameters[0].ty.is_none(),
         "the synthesized props object has no authored slot — the typed miss"
     );
-    assert!(signature.return_ty.is_none(), "return recovered on demand");
+    assert!(
+        matches!(
+            signature.return_source,
+            verter_type_expr::facts::FunctionReturnSource::Absent
+        ),
+        "return recovered on demand"
+    );
 
     // (c) Raising the closed fact through the shared bridge interns a REAL
     // `Function` carrier node — the demand-driven node synthesis.

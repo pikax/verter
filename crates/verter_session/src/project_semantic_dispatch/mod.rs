@@ -101,6 +101,10 @@ pub(crate) mod output_materialization;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
+pub(crate) mod dispatch_txn;
+pub(crate) mod flow_return;
+#[cfg(test)]
+mod flow_return_tests;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 mod output_materialization_guards;
@@ -109,7 +113,6 @@ pub(crate) mod raise_sentinel;
 pub(crate) mod relation;
 pub(crate) mod relation_excess;
 pub(crate) mod relation_predicates;
-pub(crate) mod relation_txn;
 pub(crate) mod semantic_source;
 mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
@@ -339,14 +342,14 @@ pub struct ProjectSemanticDispatch<'a> {
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
     pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
-    /// The transient per-relation-root cold-compute frame (design
+    /// The transient per-obligation-root cold-compute frame (design
     /// `docs/arch/u2-relation-infer-design.md` §2.1): the ONE shared
-    /// re-entry / cycle-id space (only `Relate` wired at U2) with its
-    /// relation-assumption typed view, the SCC ledger, the inference
+    /// tagged re-entry / cycle-id space with its generic frame /
+    /// lowlink machinery, the tagged pending ledger, the inference
     /// session stack, and the deferred-admission ledger. TRANSIENT, never
     /// a cache key, never thread-local — it rides this dispatch exactly
     /// like the other cold-compute cycle guards above.
-    pub(super) relation_txn: std::cell::RefCell<relation_txn::CheckerTransaction>,
+    pub(super) dispatch_txn: std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
     connected_demand: ConnectedDemandState,
     #[cfg(test)]
     connected_work_limit_for_tests: std::cell::Cell<usize>,
@@ -452,7 +455,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
-            relation_txn: std::cell::RefCell::new(relation_txn::CheckerTransaction::default()),
+            dispatch_txn: std::cell::RefCell::new(
+                dispatch_txn::CheckerDispatchTransaction::default(),
+            ),
             connected_demand: ConnectedDemandState::new(
                 MAX_CONNECTED_PROJECTION_WORK,
                 MAX_CONNECTED_QUERY_DEPTH,
@@ -2175,6 +2180,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &key_for_build,
                 ));
             }
+            if let SemanticQueryKey::FlowReturn(key) = &key_for_build {
+                return self.build_flow_return(key);
+            }
             if let SemanticQueryKey::ProjectObjectSpread {
                 program,
                 selector,
@@ -2361,6 +2369,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // build: worker-side lease-only deref of the authored body,
                 // then the carrier-only role-free graph lowering.
                 SemanticQueryKey::LowerLocator { key } => self.build_lower_locator(key),
+                // FlowReturn is a typed producer handled by the early
+                // if-let arm above (with the other non-node-domain
+                // producers); it never reaches the node-domain match.
+                SemanticQueryKey::FlowReturn(_) => unreachable!(
+                    "FlowReturn builds through the early typed-producer arm"
+                ),
             }
             };
             let output = build_node();

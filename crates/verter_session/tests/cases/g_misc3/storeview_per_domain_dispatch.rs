@@ -6,6 +6,7 @@
 //! - `validates_parse_domain(parse_fact)` — producer overrides.
 //! - `validates_resolve_imports_domain(resolve_fact)` — producer overrides.
 //! - `validates_route_surface_domain(route_fact)` — producer overrides.
+//! - `validates_program_analysis_domain(flow_fact)` — producer overrides.
 //!
 //! The default `validates` impl routes each per-domain variant to
 //! the matching per-domain method. This test exercises every arm
@@ -16,7 +17,7 @@
 //! 2. Constructing one `FactVersionRef` per domain.
 //! 3. Asserting `validates(fact)` returns the right per-domain
 //!    value — proving the dispatch table is keyed by
-//!    `FactDomain` (3 variants), not by `FactKey`.
+//!    `FactDomain` (4 variants), not by `FactKey`.
 //!
 //! R26: "Adding a new `FactKey` extends the per-domain `*FactRef`
 //! enum but does NOT widen the trait".
@@ -24,8 +25,8 @@
 use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 use verter_session::file_artifact_store::InternedName;
 use verter_session::resolver_core::{
-    FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef, StoreView,
-    StoreViewCompatToken,
+    FactVersionRef, ParseFactRef, ProgramAnalysisFactRef, ResolveImportsFactRef,
+    RouteSurfaceFactRef, StoreView, StoreViewCompatToken,
 };
 
 /// Test view that returns one of three distinct values depending on
@@ -35,6 +36,7 @@ struct TestView {
     parse_returns: bool,
     resolve_imports_returns: bool,
     route_surface_returns: bool,
+    program_analysis_returns: bool,
 }
 
 impl StoreView for TestView {
@@ -57,6 +59,7 @@ impl StoreView for TestView {
             FactVersionRef::Parse(p) => self.validates_parse_domain(p),
             FactVersionRef::ResolveImports(r) => self.validates_resolve_imports_domain(r),
             FactVersionRef::RouteSurface(r) => self.validates_route_surface_domain(r),
+            FactVersionRef::ProgramAnalysis(fact) => self.validates_program_analysis_domain(fact),
             // Contributor source-env identity — routes to the
             // dedicated strict per-arm validator. This external view
             // does not override it, so the trait default (`false`,
@@ -90,6 +93,10 @@ impl StoreView for TestView {
 
     fn validates_route_surface_domain(&self, _fact: &RouteSurfaceFactRef) -> bool {
         self.route_surface_returns
+    }
+
+    fn validates_program_analysis_domain(&self, _fact: &ProgramAnalysisFactRef) -> bool {
+        self.program_analysis_returns
     }
 }
 
@@ -129,6 +136,20 @@ fn route_surface_fact() -> FactVersionRef {
     })
 }
 
+fn program_analysis_fact() -> FactVersionRef {
+    FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
+        function: verter_session::resolver_core::ProgramAnalysisFunctionRef {
+            canonical_id: std::sync::Arc::from("/a.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            merged_symbol_name: std::sync::Arc::from("flow"),
+            symbol_space: SymbolSpace::Value,
+            function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        },
+        flow_body_stable_hash: [4u8; 16],
+    })
+}
+
 #[test]
 fn validates_routes_parse_variant_to_parse_validator() {
     // Distinct per-domain returns force the dispatch to discriminate.
@@ -136,6 +157,7 @@ fn validates_routes_parse_variant_to_parse_validator() {
         parse_returns: true,
         resolve_imports_returns: false,
         route_surface_returns: false,
+        program_analysis_returns: false,
     };
     let fact = parse_fact();
     assert!(
@@ -146,6 +168,7 @@ fn validates_routes_parse_variant_to_parse_validator() {
     // same view, proving dispatch is by domain not blanket.
     assert!(!view.validates(&resolve_imports_fact()));
     assert!(!view.validates(&route_surface_fact()));
+    assert!(!view.validates(&program_analysis_fact()));
 }
 
 #[test]
@@ -154,6 +177,7 @@ fn validates_routes_resolve_imports_variant_to_resolve_imports_validator() {
         parse_returns: false,
         resolve_imports_returns: true,
         route_surface_returns: false,
+        program_analysis_returns: false,
     };
     let fact = resolve_imports_fact();
     assert!(
@@ -170,6 +194,7 @@ fn validates_routes_route_surface_variant_to_route_surface_validator() {
         parse_returns: false,
         resolve_imports_returns: false,
         route_surface_returns: true,
+        program_analysis_returns: false,
     };
     let fact = route_surface_fact();
     assert!(
@@ -190,6 +215,7 @@ fn default_validates_returns_false_for_legacy_variants_on_minimal_view() {
         parse_returns: true,
         resolve_imports_returns: true,
         route_surface_returns: true,
+        program_analysis_returns: false,
     };
     let legacy_whole = FactVersionRef::FileWholeHash {
         canonical_id: "/a.ts".into(),
@@ -211,6 +237,7 @@ fn dispatch_table_bound_by_fact_domain_not_fact_key() {
         parse_returns: true,
         resolve_imports_returns: false,
         route_surface_returns: false,
+        program_analysis_returns: false,
     };
 
     let fact_export = FactVersionRef::Parse(ParseFactRef {
@@ -249,4 +276,22 @@ fn dispatch_table_bound_by_fact_domain_not_fact_key() {
     assert!(view.validates(&fact_export));
     assert!(view.validates(&fact_member_presence));
     assert!(view.validates(&fact_module_aug));
+}
+
+#[test]
+fn validates_routes_program_analysis_variant_to_program_analysis_validator() {
+    let view = TestView {
+        parse_returns: false,
+        resolve_imports_returns: false,
+        route_surface_returns: false,
+        program_analysis_returns: true,
+    };
+    let fact = program_analysis_fact();
+    assert!(
+        view.validates(&fact),
+        "validates(ProgramAnalysis) MUST dispatch to validates_program_analysis_domain"
+    );
+    assert!(!view.validates(&parse_fact()));
+    assert!(!view.validates(&resolve_imports_fact()));
+    assert!(!view.validates(&route_surface_fact()));
 }

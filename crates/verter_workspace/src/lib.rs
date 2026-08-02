@@ -145,8 +145,8 @@ pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 pub use fact_cache::{
     DerivedFactKind, FactHash16, FactVersionRef, FactVersionValidator, ParseEnvHash, ParseFactRef,
-    ReadSetSignature, ResolveImportsFactRef, RouteSurfaceFactRef, SignatureAdmission,
-    CANDIDATE_CAP,
+    ProgramAnalysisFactRef, ProgramAnalysisFunctionRef, ReadSetSignature, ResolveImportsFactRef,
+    RouteSurfaceFactRef, SignatureAdmission, CANDIDATE_CAP,
 };
 pub use fact_read_set::{
     FactReadSet, FactReadSetCell, FactReadSetFinalise, NonCacheablePropagation, FACT_SIGNATURE_CAP,

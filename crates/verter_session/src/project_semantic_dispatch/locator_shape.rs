@@ -1143,9 +1143,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 span: p.span,
             })
             .collect();
-        let return_type = match func.return_type.as_deref() {
-            Some(ret) => self.lower_locator_shape_node(ret, &inner_ctx),
-            None => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        let return_type = match &func.flow_return {
+            // A body-derived return is demanded from the whole-function
+            // producer through the sealed helper: the extractor marked the
+            // served position with the declaration name; canonical / owner
+            // fill from THIS lowering scope (the defining file's).
+            Some(identity) => {
+                let mut identity = identity.as_ref().clone();
+                let scope_canonical = match ctx.scope {
+                    NodeScopeId::File {
+                        canonical_id,
+                        owner,
+                        ..
+                    } => {
+                        identity.anchor.canonical_id = Arc::clone(canonical_id);
+                        identity.anchor.owner = *owner;
+                        Some(Arc::clone(canonical_id))
+                    }
+                    _ => None,
+                };
+                match scope_canonical {
+                    Some(scope_canonical) => match self.execute_function_return_source(
+                        &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                        scope_canonical.as_ref(),
+                    ) {
+                        super::flow_return::FunctionReturnNode::Flow(result) => result.return_type,
+                        _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                    },
+                    None => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                }
+            }
+            None => match func.return_type.as_deref() {
+                Some(ret) => self.lower_locator_shape_node(ret, &inner_ctx),
+                None => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            },
         };
         graph.intern_node_with_scope(
             SemanticNodeData::Signature {

@@ -345,7 +345,7 @@ mod spread_program_wire_tests {
             effect
                 .property_key
                 .as_ref()
-                .and_then(|k| k.key.clone())
+                .and_then(|k| k.key)
                 .unwrap_or_else(|| panic!("effect {index} carries a key"))
         };
         assert_eq!(

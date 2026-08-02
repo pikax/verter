@@ -629,9 +629,7 @@ fn valid_relation_snapshot() -> Value {
         spec.target_text,
         &identity.binder_layout,
     );
-    let hover_contents = format!(
-        "```typescript\ntype __oracle_probe__0 = readonly [true, readonly [readonly [0, \"V\", number]]];\n```"
-    );
+    let hover_contents = "```typescript\ntype __oracle_probe__0 = readonly [true, readonly [readonly [0, \"V\", number]]];\n```".to_string();
     let env = PinnedEnv {
         tsgo_version: TSGO_VERSION.to_string(),
         oracle_schema_version: ORACLE_SCHEMA_VERSION,

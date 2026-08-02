@@ -10405,7 +10405,31 @@ mod prepared_identity_bijection {
                     },
                 ),
             ),
+            SemanticQueryKeyTag::FlowReturn => (
+                flow_return_test_key("FlowA", 0),
+                flow_return_test_key("FlowB", 0),
+            ),
         }
+    }
+
+    fn flow_return_test_key(name: &str, overload_ordinal: u32) -> SemanticQueryKey {
+        SemanticQueryKey::FlowReturn(Box::new(crate::semantic_query::FlowReturnKey {
+            function: crate::semantic_query::FlowFunctionSlotIdentity {
+                declaration_slot: type_slot(name),
+                function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                overload_ordinal,
+            },
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: crate::semantic_query::FlowReturnContext {
+                parse_env_hash: h16(0),
+                resolve_env_hash: h16(0),
+                type_env_hash: h16(0),
+                lib_env_hash: h16(0),
+                project_identity: h16(0),
+                type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
+                policy: crate::semantic_query::FlowReturnPolicy {},
+            },
+        }))
     }
 
     fn std_hash(handle: &PreparedKeyHandle) -> u64 {

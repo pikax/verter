@@ -4010,7 +4010,7 @@ dependencies = [
 
 [[package]]
 name = "verter_ecma"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 
 [[package]]
 name = "verter_ffi"
@@ -4295,6 +4295,7 @@ dependencies = [
  "oxc_ast_visit",
  "oxc_parser",
  "oxc_span",
+ "oxc_syntax",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",

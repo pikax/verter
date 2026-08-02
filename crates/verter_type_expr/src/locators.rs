@@ -256,6 +256,48 @@ pub struct TypeBodySlot {
     pub path: Arc<[TypeBodyPathStep]>,
 }
 
+/// Locator for a DECLARED function return type — an authored TS `(): T`
+/// annotation or a JSDoc `@returns {T}` recovery. Both arms address the same
+/// decl-body `FunctionReturn` slot and deref through the same replay rail;
+/// the tag records WHICH declared recovery produced the carrier so consumers
+/// never rematch by shape.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum FunctionReturnLocator {
+    /// An authored TS return annotation (`(): T`).
+    Authored(TypeBodySlot),
+    /// A JSDoc `@returns {T}` recovery (no authored TS annotation present).
+    Jsdoc(TypeBodySlot),
+}
+
+impl FunctionReturnLocator {
+    /// The addressed decl-body slot (both arms share the deref rail).
+    #[must_use]
+    pub fn slot(&self) -> &TypeBodySlot {
+        match self {
+            Self::Authored(slot) | Self::Jsdoc(slot) => slot,
+        }
+    }
+
+    /// The addressed decl-body slot, mutably (overload-group ordinal
+    /// rebasing re-points the first path step in place).
+    #[must_use]
+    pub fn slot_mut(&mut self) -> &mut TypeBodySlot {
+        match self {
+            Self::Authored(slot) | Self::Jsdoc(slot) => slot,
+        }
+    }
+}
+
 /// Locator for a resolvable symbol body — the frontier / shallow escape for any
 /// body that resolves to a named declaration.
 #[derive(

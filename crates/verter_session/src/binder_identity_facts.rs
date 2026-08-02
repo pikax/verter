@@ -60,7 +60,9 @@ use verter_semantic::facts::SymbolSpace as FactSymbolSpace;
 #[cfg(any(test, feature = "test-support"))]
 use verter_semantic::facts::{FactKey, FactLane};
 
-use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt as _};
+use crate::fact_signature_helpers::ReadSetSignature;
+#[cfg(any(test, feature = "test-support"))]
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::project_type_store::IndexedReady;
 use crate::semantic_query::{BinderScopeId, DeclarationSlotSeed, SemanticSymbolSpace};
 

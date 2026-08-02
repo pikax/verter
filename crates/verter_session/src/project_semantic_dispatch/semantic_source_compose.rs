@@ -687,14 +687,39 @@ impl ProjectSemanticDispatch<'_> {
                 span: None,
             })
             .collect();
-        let return_type = match signature.return_ty.as_ref() {
-            Some(slot) => self.raise_required_interior(
-                ctx,
-                &scope,
-                crate::meta_resolve::InteriorSourceStep::ReturnType,
-                || self.raise_body_slot(slot, ctx.scope_canonical_id),
-            ),
-            None => self.miss_node(&scope),
+        let return_type = match &signature.return_source {
+            verter_type_expr::facts::FunctionReturnSource::Declared(locator) => self
+                .raise_required_interior(
+                    ctx,
+                    &scope,
+                    crate::meta_resolve::InteriorSourceStep::ReturnType,
+                    || self.raise_body_slot(locator.slot(), ctx.scope_canonical_id),
+                ),
+            // A body-derived return is demanded from the whole-function
+            // producer through the sealed helper — NEVER the absent-slot
+            // arm. A degraded evaluation marks the enclosing composition
+            // partial / ReturnOnly.
+            verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
+                match ctx.with_interior_step(
+                    crate::meta_resolve::InteriorSourceStep::ReturnType,
+                    || {
+                        self.execute_function_return_source(
+                            &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                            ctx.scope_canonical_id,
+                        )
+                    },
+                ) {
+                    super::flow_return::FunctionReturnNode::Flow(result) => result.return_type,
+                    super::flow_return::FunctionReturnNode::Declared(hot) => hot.node(),
+                    super::flow_return::FunctionReturnNode::DeclaredMiss
+                    | super::flow_return::FunctionReturnNode::Degraded(_) => {
+                        ctx.record_interior_failure();
+                        self.miss_node(&scope)
+                    }
+                    super::flow_return::FunctionReturnNode::Absent => self.miss_node(&scope),
+                }
+            }
+            verter_type_expr::facts::FunctionReturnSource::Absent => self.miss_node(&scope),
         };
         let type_parameters: Vec<crate::semantic_query::TypeParamDecl> =
             signature

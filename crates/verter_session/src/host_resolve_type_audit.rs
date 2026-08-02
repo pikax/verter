@@ -495,6 +495,10 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::TemplateLiteralReduce { .. }
         | SemanticQueryKey::FlowNarrowingAt { .. }
         | SemanticQueryKey::ContextualTypeAt { .. }
+        // FlowReturn is the whole-function return evaluation — mode-free by
+        // design (the canonical whole-return node; consumers project under
+        // their own mode).
+        | SemanticQueryKey::FlowReturn(_)
         // LowerLocator is the fixed locator-shape lowering — mode-free by
         // design (no projection demand to consume a budget).
         | SemanticQueryKey::LowerLocator { .. }

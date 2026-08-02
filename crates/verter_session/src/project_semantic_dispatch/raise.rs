@@ -292,6 +292,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::ContextualTypeAt { .. } => "ContextualTypeAt",
         SemanticQueryKey::LowerLocator { .. } => "LowerLocator",
         SemanticQueryKey::ClassifyMaterializationCycleGate(_) => "ClassifyMaterializationCycleGate",
+        SemanticQueryKey::FlowReturn(_) => "FlowReturn",
     }
 }
 
@@ -4533,6 +4534,22 @@ pub(crate) fn node_contains_semantic_miss_with_dispatch(
     node: SemanticNodeId,
 ) -> Option<bool> {
     shape_engine::project_node_contains_semantic_miss(dispatch, node)
+}
+
+/// The node-domain declaration facts of `node` in ONE fold: whether every
+/// rendered leaf is declaration-safe (no implicit `any` / unknown /
+/// synthetic slot binding / return-less function) AND the reachable
+/// `typeof <value>` dependency paths. `None` when the whole raise is
+/// `None`. The terminal splice pipeline decides on this — it materializes
+/// at most once afterwards, solely for display.
+pub(crate) fn node_declaration_facts_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<(
+    bool,
+    std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
+)> {
+    shape_engine::project_node_declaration_facts(dispatch, node)
 }
 
 /// CTX-taking convenience over `node_raised_shape_facts_with_dispatch`.

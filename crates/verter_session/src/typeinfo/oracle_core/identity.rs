@@ -452,7 +452,7 @@ impl RelationPolicyRecord {
         }
     }
 
-    fn to_canonical_json(&self) -> Value {
+    fn to_canonical_json(self) -> Value {
         json!({
             "overload_selection": self.overload_selection.tag(),
             "excess_property_check": self.excess_property_check,

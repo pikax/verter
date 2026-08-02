@@ -30,11 +30,10 @@ use crate::analysis::top_level_owners::DeclMap;
 
 use verter_type_expr::facts::{
     EnumMemberEntry, EnumMemberFact, EnumMemberNamesFact, EnumPrimitiveDomain, EnumScalar,
-    FunctionSignatureFact, MemberHeaderFact, MemberReturnInferenceFact, ObjectShapeFact,
-    ReturnInferenceCompleteness, TypeParamDeclFact, ValueTypeAnnotationFact,
+    FunctionSignatureFact, MemberHeaderFact, ObjectShapeFact, TypeParamDeclFact,
+    ValueTypeAnnotationFact,
 };
 use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
-use verter_type_expr::span_origins::FunctionSpansOrigin;
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 pub type DeclarationId = u64;
@@ -76,45 +75,6 @@ pub struct TypeDeclInfo {
     /// [`DeclHeaderIndex`](crate::analysis::decl_headers::DeclHeaderIndex)
     /// mirror) read THIS inventory; they never walk a body.
     pub direct_member_headers: Arc<[MemberHeaderFact]>,
-    /// Exact, non-deduplicated return-inference facts for authored methods.
-    /// Detached `FunctionExpr` values are never used as a lookup key.
-    pub direct_member_return_inference: Arc<[MemberReturnInferenceFact]>,
-}
-
-impl TypeDeclInfo {
-    /// Read one method verdict by its declaration contributor and produced
-    /// member path. No name/span/shape rematching is permitted.
-    #[must_use]
-    pub fn return_inference_for_member(
-        &self,
-        origin: &FunctionSpansOrigin,
-    ) -> Option<ReturnInferenceCompleteness> {
-        self.direct_member_return_inference
-            .iter()
-            .find(|fact| &fact.origin == origin)
-            .map(|fact| fact.return_inference)
-    }
-
-    /// Read one method verdict by the produced member path after the caller has
-    /// already selected this exact declaration contributor. This is a
-    /// contributor-local join: it never rematches a member name or searches a
-    /// sibling declaration/symbol space.
-    #[must_use]
-    pub fn return_inference_for_member_path(
-        &self,
-        member_path: &[u32],
-    ) -> Option<ReturnInferenceCompleteness> {
-        self.direct_member_return_inference
-            .iter()
-            .find(|fact| match &fact.origin {
-                FunctionSpansOrigin::Member {
-                    member_path: candidate,
-                    ..
-                } => candidate.as_ref() == member_path,
-                FunctionSpansOrigin::AliasBody { .. } | FunctionSpansOrigin::Synthetic(_) => false,
-            })
-            .map(|fact| fact.return_inference)
-    }
 }
 
 /// An ordered group of same-name type declaration contributors, in
@@ -1088,8 +1048,17 @@ fn rebase_value_signature_ordinals(decl: &mut ValueDeclInfo, base: u32) -> bool 
                 slot.path = path.into();
             }
         };
-        if let Some(return_ty) = &mut signature.return_ty {
-            repoint(return_ty);
+        if let verter_type_expr::facts::FunctionReturnSource::Declared(locator) =
+            &mut signature.return_source
+        {
+            repoint(locator.slot_mut());
+        }
+        if let verter_type_expr::facts::FunctionReturnSource::Flow(identity) =
+            &mut signature.return_source
+        {
+            // The served overload ordinal is the group-level ordinal — it
+            // rebases exactly like the locator path's first step.
+            identity.overload_ordinal = ordinal;
         }
         let mut parameters = signature.parameters.to_vec();
         for parameter in &mut parameters {

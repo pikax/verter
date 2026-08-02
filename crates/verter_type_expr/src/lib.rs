@@ -1136,6 +1136,15 @@ pub struct FunctionExpr {
     /// OXC signature / return spans (in-memory provenance; not serialized).
     #[serde(skip)]
     pub spans: FunctionSpans,
+    /// The served function position of a BODY-DERIVED return (in-memory
+    /// producer provenance; not serialized). Present exactly when the
+    /// function's return comes from its body rather than an authored /
+    /// JSDoc annotation: the session's whole-function producer answers the
+    /// return for this position. The anchor is producer-local (the owning
+    /// declaration's name is filled at extraction; canonical / owner fill
+    /// at the lowering scope).
+    #[serde(skip)]
+    pub flow_return: Option<Box<crate::facts::FlowFunctionReturnIdentity>>,
 }
 
 impl FunctionExpr {
@@ -1151,6 +1160,7 @@ impl FunctionExpr {
             return_type,
             type_parameters,
             spans: FunctionSpans::default(),
+            flow_return: None,
         }
     }
 
@@ -1167,6 +1177,7 @@ impl FunctionExpr {
             return_type,
             type_parameters,
             spans,
+            flow_return: None,
         }
     }
 }

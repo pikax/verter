@@ -99,7 +99,12 @@ pub struct AnalysisArtifactKey {
 ///
 /// The OXC parse arena is transient — `IndexedReady` stores only owned
 /// `Send + Sync` data so long-lived host-owned caches do not carry borrowed
-/// AST pointers.
+/// AST pointers. Its declaration-body memo (`shallow_state.decl_bodies()`)
+/// also serves the arena-free `FunctionProgramIndex` demand product:
+/// function identities + body locators, binding/reference inventory,
+/// return sites, writes/effects, the control-region skeleton, exact direct
+/// local call targets, and whole-function stable hashes — structural only,
+/// never a lowered type tree.
 ///
 /// `IndexedReady` is the single canonical post-parse artifact: every
 /// consumer reads it from [`FileArtifactStore`] through

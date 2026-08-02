@@ -1470,7 +1470,7 @@ fn relate_fresh_excess(
     dispatch: &ProjectSemanticDispatch<'_>,
     source: SemanticNodeId,
     target: SemanticNodeId,
-) -> crate::project_semantic_dispatch::relation_txn::RelationStep {
+) -> crate::project_semantic_dispatch::dispatch_txn::RelationStep {
     let mut key = dispatch.relate_key_for(source, target);
     key.source_freshness = crate::semantic_query::FreshnessKey::Fresh;
     key.policy.excess_property_check = true;
@@ -1519,7 +1519,7 @@ fn generic_spread_excess_suppression_matrix_with_closed_contrast_and_healing() {
         assert!(
             matches!(
                 step,
-                crate::project_semantic_dispatch::relation_txn::RelationStep::Unknown
+                crate::project_semantic_dispatch::dispatch_txn::RelationStep::Unknown
             ),
             "{label}: generic suppression must not reject, got {step:?}"
         );
@@ -1549,7 +1549,7 @@ fn generic_spread_excess_suppression_matrix_with_closed_contrast_and_healing() {
         assert!(
             matches!(
                 step,
-                crate::project_semantic_dispatch::relation_txn::RelationStep::NotAssignable
+                crate::project_semantic_dispatch::dispatch_txn::RelationStep::NotAssignable
             ),
             "{label}: a closed spread keeps the direct candidate eligible, got {step:?}"
         );
@@ -1561,7 +1561,7 @@ fn generic_spread_excess_suppression_matrix_with_closed_contrast_and_healing() {
     assert!(
         matches!(
             step,
-            crate::project_semantic_dispatch::relation_txn::RelationStep::Assignable { .. }
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. }
         ),
         "spread-provided keys are spread-tainted, not fresh candidates: {step:?}"
     );
@@ -1580,7 +1580,7 @@ fn generic_spread_excess_suppression_matrix_with_closed_contrast_and_healing() {
     assert!(
         matches!(
             step,
-            crate::project_semantic_dispatch::relation_txn::RelationStep::Unknown
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::Unknown
         ),
         "indeterminate eligibility falls back to Unknown, got {step:?}"
     );
@@ -1599,7 +1599,7 @@ fn generic_spread_excess_suppression_matrix_with_closed_contrast_and_healing() {
     assert!(
         matches!(
             step,
-            crate::project_semantic_dispatch::relation_txn::RelationStep::NotAssignable
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::NotAssignable
         ),
         "substitution healing restores direct-candidate rejection, got {step:?}"
     );
@@ -1623,7 +1623,7 @@ fn identical_unresolved_program_relation_is_unknown_and_never_published() {
     assert!(
         matches!(
             step,
-            crate::project_semantic_dispatch::relation_txn::RelationStep::Unknown
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::Unknown
         ),
         "identical unresolved programs stay Unknown, got {step:?}"
     );
@@ -2175,7 +2175,7 @@ fn path_projection_joins_closed_absent_alternatives_as_optional() {
     let SemanticNodeData::Union(arms) = &*value_data else {
         panic!(
             "a key present in only one alternative must project as a union, got {:?}",
-            &*value_data
+            *value_data
         )
     };
     let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
@@ -3296,9 +3296,7 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
     };
     let fact_key = numeric_property_key(1);
     assert!(
-        direct_candidates
-            .iter()
-            .any(|candidate| *candidate == fact_key),
+        direct_candidates.contains(&fact_key),
         "the candidacy must contain the FACT key spelling (the getter's numeric key); \
          observed {direct_candidates:?}"
     );
@@ -3551,7 +3549,7 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
     let SemanticNodeData::Intersection(arms) = &*value_data else {
         panic!(
             "intersection rule: a same-key collision intersects the values; observed {:?}",
-            &*value_data
+            *value_data
         )
     };
     assert!(
@@ -3626,7 +3624,7 @@ fn macro_union_merge_collapses_dual_spelling_members() {
     let SemanticNodeData::Union(arms) = &*value_data else {
         panic!(
             "the union merge unions the colliding values; observed {:?}",
-            &*value_data
+            *value_data
         )
     };
     assert!(
@@ -3736,7 +3734,7 @@ fn union_common_member_merge_collapses_dual_spelling_members() {
     let SemanticNodeData::Union(arms) = &*value_data else {
         panic!(
             "the common member's value unions both spellings' values; observed {:?}",
-            &*value_data
+            *value_data
         )
     };
     assert!(
@@ -3784,7 +3782,7 @@ fn intersection_merge_collapses_dual_spelling_members() {
     let SemanticNodeData::Intersection(arms) = &*value_data else {
         panic!(
             "the collision INTERSECTS the values; observed {:?}",
-            &*value_data
+            *value_data
         )
     };
     assert!(
@@ -3877,7 +3875,7 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
     let SemanticNodeData::Union(arms) = &*data else {
         panic!(
             "a closed program's keyof enumerates the exact literal union; observed {:?}",
-            &*data
+            *data
         )
     };
     let mut names: Vec<String> = arms
@@ -3924,7 +3922,7 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
             SemanticNodeData::KeyOf { base } if *base == open_program
         ),
         "an open program's keyof is the deferred carrier, not a bare Miss; observed {:?}",
-        &*data
+        *data
     );
 }
 
@@ -3991,7 +3989,7 @@ fn typeinfo_join_collapses_dual_spelling_members() {
     let SemanticNodeData::Union(arms) = &*value_data else {
         panic!(
             "the joined value unions both spellings' values; observed {:?}",
-            &*value_data
+            *value_data
         )
     };
     assert!(

@@ -467,7 +467,7 @@ fn materialization_cycle_gate_key_is_content_free_slot_keyed() {
     let forbidden: Vec<&str> = FORBIDDEN_KEY_MARKERS
         .iter()
         .copied()
-        .chain(["DeclIdentity", "generation", "version"].into_iter())
+        .chain(["DeclIdentity", "generation", "version"])
         .collect();
     let violations = key_shape_violations(&body, required, &forbidden);
     assert!(

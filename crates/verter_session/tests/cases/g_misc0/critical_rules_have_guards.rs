@@ -167,6 +167,10 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // env-bearing `type_slot_for` / `builtin_type_slot`; the
             // zero-env fixture-only constructors are a forbidden bypass.
             "no_production_caller_of_zero_env_slot_constructors",
+            // No depth sentinel on the whole-function FlowReturn
+            // evaluation path (recursion discharges coinductively; the
+            // only budget is the shallow leaf lowering's own).
+            "no_depth_sentinel_on_flow_return_path",
             // §3.4 materialised-record-point satisfaction: the two-gate
             // warm hit keys on a candidate's RECORDED `satisfied_projection`
             // (path-exact dominance), never its nominal slot mode; backfill

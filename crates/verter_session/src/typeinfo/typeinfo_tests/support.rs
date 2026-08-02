@@ -43,6 +43,7 @@ pub(super) const EXPANSION_SELECTED: &str = include_str!("fixtures/expansion_sel
 pub(super) const EXPANSION_UNSELECTED: &str = include_str!("fixtures/expansion_unselected.ts");
 pub(super) const VALUE_INFERENCE: &str = include_str!("fixtures/value_inference.ts");
 pub(super) const FLOW_RETURN_CATALOG: &str = include_str!("fixtures/flow_return_catalog.ts");
+pub(super) const FLOW_RETURN_SUBSTRATE: &str = include_str!("fixtures/flow_return_substrate.ts");
 pub(super) const FLOW_RETURN_EDGE_CATALOG: &str =
     include_str!("fixtures/flow_return_edge_catalog.ts");
 pub(super) const FLOW_RETURN_EDGE_CROSS: &str = include_str!("fixtures/flow_return_edge_cross.ts");

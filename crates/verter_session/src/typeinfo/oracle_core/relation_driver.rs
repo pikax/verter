@@ -111,7 +111,7 @@ pub(crate) enum EngineObservation {
 /// constructor `execute_relate_pair`) under its actual supported identity
 /// (assignable, default policy, regular source, no inference context).
 pub(crate) fn observe_engine(spec: &RelationQuerySpec) -> EngineObservation {
-    use crate::project_semantic_dispatch::relation_txn::RelationStep;
+    use crate::project_semantic_dispatch::dispatch_txn::RelationStep;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::ProjectionMode;
     use crate::typeinfo::typeinfo_tests::support::{make_host_with_footprint, upsert_ts};

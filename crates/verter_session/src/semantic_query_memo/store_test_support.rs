@@ -68,6 +68,23 @@ impl SemanticGraphStore {
             .map(|entry| entry.read_set_signature)
     }
 
+    /// Test-only accessor: read the entry's `self_root_canonicals` for
+    /// `key` (the content-version rail of the files the entry's value was
+    /// built from). Returns `None` when no entry is present.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn entry_self_root_canonicals_for_tests(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<Arc<[Arc<str>]>> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .and_then(|slots| slots.slot_peek_any(slot).cloned())
+            .map(|entry| entry.self_root_canonicals)
+    }
+
     /// Test-only probe: the §3.4 `satisfied_projection` (materialised
     /// record set) of the FIRST candidate in `key`'s `(family, slot)`.
     /// Lets a guard assert backfill writes the RECORDED points verbatim

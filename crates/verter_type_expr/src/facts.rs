@@ -18,8 +18,8 @@ use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
 use crate::locators::{
-    AuthoredAnchor, AuthoredBodyLocator, AuthoredTypePayloadRef, MacroPayloadLocator,
-    SymbolBodyLocator, TypeArgLocator, TypeBodySlot,
+    AuthoredAnchor, AuthoredBodyLocator, AuthoredTypePayloadRef, FunctionReturnLocator,
+    MacroPayloadLocator, SymbolBodyLocator, TypeArgLocator, TypeBodySlot,
 };
 use crate::span_origins::{
     FunctionParamSpanOrigin, FunctionSpansOrigin, IndexSignatureSpansOrigin, MemberSpansOrigin,
@@ -1683,15 +1683,57 @@ pub struct FunctionParamFact {
     pub span_origin: FunctionParamSpanOrigin,
 }
 
-/// Why an implementation body's return type is absent instead of inferred.
-///
-/// These statement families require a richer control-flow model than the
-/// semantic producer currently supports. They are persisted explicitly so a
-/// consumer cannot mistake an incomplete scan for a safely narrowed return.
+/// Which authored position of a declaration one callable body occupies.
+/// Combined with a declaration slot identity and an overload ordinal this
+/// addresses every served function position in a file: the declaration's own
+/// callable, a function-valued member surface, the initializer arrow /
+/// function expression, or another authored function position.
 #[derive(
     Debug,
     Clone,
-    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum FunctionPartIdentity {
+    /// The declaration's own callable body (`function f` declarations and
+    /// value signature groups). The overload ordinal selects the signature
+    /// inside the group in source order (the trailing implementation is the
+    /// last ordinal).
+    DeclarationBody,
+    /// A function-valued member of a class or object surface (methods,
+    /// accessors, object-literal methods), addressed by member ordinals from
+    /// the declaration surface.
+    Member {
+        /// Member ordinal path from the declaration to the callable member.
+        member_path: Arc<[u32]>,
+    },
+    /// The arrow / function expression that IS the declaration's
+    /// initializer (`const f = () => { .. }`, `const f = function () { .. }`).
+    Initializer,
+    /// Another authored function position (a nested function expression in
+    /// an initializer surface), addressed by source-order ordinal.
+    Other {
+        /// Source-order ordinal among same-kind positions.
+        ordinal: u32,
+    },
+}
+
+/// The env-free program identity of one served function position whose
+/// return is BODY-DERIVED. This is the fact-side seed of the session's
+/// `FlowFunctionSlotIdentity`: content-free and env-free (the env-bearing
+/// slot derives at demand through the session's single slot-finalization
+/// choke point), carrying exactly the declaration anchor, the part
+/// identity, and the overload ordinal.
+#[derive(
+    Debug,
+    Clone,
     PartialEq,
     Eq,
     Hash,
@@ -1700,26 +1742,26 @@ pub struct FunctionParamFact {
     NoTypeExpr,
     NoStoredSpan,
 )]
-pub enum ReturnInferenceUnsupported {
-    Loop,
-    Switch,
-    Try,
-    Jump,
-    Labeled,
-    With,
-    ModuleDeclaration,
+pub struct FlowFunctionReturnIdentity {
+    /// The owning declaration's content-free anchor.
+    pub anchor: AuthoredAnchor,
+    /// Which authored position of the declaration this callable occupies.
+    pub function_part: FunctionPartIdentity,
+    /// Source-order signature ordinal inside an overload group (the
+    /// trailing implementation is the last ordinal). Zero outside overload
+    /// groups.
+    pub overload_ordinal: u32,
 }
 
-/// Producer verdict for body-derived function return inference.
-///
-/// `NotInferred` covers authored/JSDoc returns, bodiless declarations, and
-/// synthesized signatures. `Complete` means every reachable statement was
-/// modeled and records whether execution can reach the end of the body.
-/// `Unsupported` is a fail-closed verdict and never carries a narrowed return.
+/// Where one served function position's return type comes from. A DECLARED
+/// return replays the retained declaration lowering through its locator; a
+/// body-derived return is served by the whole-function `FlowReturn`
+/// producer through the session's sealed consumer helper; `Absent` means
+/// the signature has no recoverable return carrier (a bodiless overload or
+/// a synthesized signature) — never "inferred".
 #[derive(
     Debug,
     Clone,
-    Copy,
     Default,
     PartialEq,
     Eq,
@@ -1729,35 +1771,14 @@ pub enum ReturnInferenceUnsupported {
     NoTypeExpr,
     NoStoredSpan,
 )]
-pub enum ReturnInferenceCompleteness {
+pub enum FunctionReturnSource {
+    /// A declared return (an authored TS annotation or a JSDoc recovery).
+    Declared(FunctionReturnLocator),
+    /// A body-derived return, served by the `FlowReturn` producer.
+    Flow(FlowFunctionReturnIdentity),
+    /// No recoverable return carrier.
     #[default]
-    NotInferred,
-    Complete {
-        can_fall_through: bool,
-    },
-    Unsupported(ReturnInferenceUnsupported),
-    Unavailable(InferenceUnavailableReason),
-}
-
-/// Exact declaration-member address and return-inference verdict for one
-/// authored method. This inventory remains separate from open `FunctionExpr`
-/// typed IR so facts have one authority and consumers never rematch by shape.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    NoTypeExpr,
-    NoStoredSpan,
-)]
-pub struct MemberReturnInferenceFact {
-    /// Exact member origin: declaration contributor plus produced-shape path.
-    pub origin: FunctionSpansOrigin,
-    /// Producer verdict for this member's return inference.
-    pub return_inference: ReturnInferenceCompleteness,
+    Absent,
 }
 
 /// A narrowed function signature (an overload-group member). `FunctionExpr`
@@ -1778,16 +1799,13 @@ pub struct FunctionSignatureFact {
     pub type_parameters: Arc<[NarrowTypeParam]>,
     /// Ordered parameter facts.
     pub parameters: Arc<[FunctionParamFact]>,
-    /// The return type body locator. Authored and inferred return types both
-    /// use this content-free path: the locator replays the retained declaration
-    /// lowering, while [`Self::spans_origin`] independently determines whether
-    /// an authored return-type source span exists. `None` therefore means the
-    /// signature has no recoverable return carrier, not merely "inferred".
-    pub return_ty: Option<TypeBodySlot>,
-    /// Whether body-derived return inference was complete and, when it was,
-    /// whether an implicit fallthrough return remains reachable.
+    /// Where the return type comes from. A DECLARED return (authored TS
+    /// annotation or JSDoc recovery) replays its content-free locator; a
+    /// body-derived return names the served function position the session's
+    /// whole-function producer answers; `Absent` means the signature has no
+    /// recoverable return carrier.
     #[serde(default)]
-    pub return_inference: ReturnInferenceCompleteness,
+    pub return_source: FunctionReturnSource,
     /// Overload-visibility fact: hide the trailing implementation signature.
     pub has_implementation_body: bool,
     /// Origin locator recovering `FunctionSpans`.
@@ -3546,18 +3564,41 @@ impl FunctionSignatureFact {
         let type_parameters =
             absolutize_fact_slice(&self.type_parameters, |p| p.absolutize(canonical_id));
         let parameters = absolutize_fact_slice(&self.parameters, |p| p.absolutize(canonical_id));
-        let return_ty = absolutize_slot_opt(&self.return_ty, canonical_id);
-        if type_parameters.is_none() && parameters.is_none() && return_ty.is_none() {
+        let return_source = self.return_source.absolutize(canonical_id);
+        if type_parameters.is_none() && parameters.is_none() && return_source.is_none() {
             return None;
         }
         Some(Self {
             type_parameters: type_parameters.unwrap_or_else(|| Arc::clone(&self.type_parameters)),
             parameters: parameters.unwrap_or_else(|| Arc::clone(&self.parameters)),
-            return_ty: return_ty.unwrap_or_else(|| self.return_ty.clone()),
-            return_inference: self.return_inference,
+            return_source: return_source.unwrap_or_else(|| self.return_source.clone()),
             has_implementation_body: self.has_implementation_body,
             spans_origin: self.spans_origin.clone(),
         })
+    }
+}
+
+impl FunctionReturnSource {
+    /// `Some(rewritten)` when a producer-local (empty-canonical) anchor is
+    /// rewritten to the owning canonical; `None` when already absolute.
+    fn absolutize(&self, canonical_id: &str) -> Option<Self> {
+        match self {
+            Self::Declared(locator) => {
+                let slot = locator.slot().absolutize(canonical_id)?;
+                Some(Self::Declared(match locator {
+                    FunctionReturnLocator::Authored(_) => FunctionReturnLocator::Authored(slot),
+                    FunctionReturnLocator::Jsdoc(_) => FunctionReturnLocator::Jsdoc(slot),
+                }))
+            }
+            Self::Flow(identity) => identity.anchor.absolutize(canonical_id).map(|anchor| {
+                Self::Flow(FlowFunctionReturnIdentity {
+                    anchor,
+                    function_part: identity.function_part.clone(),
+                    overload_ordinal: identity.overload_ordinal,
+                })
+            }),
+            Self::Absent => None,
+        }
     }
 }
 
@@ -3955,7 +3996,11 @@ fn function_fact_scope_relative(signature: &FunctionSignatureFact) -> bool {
         .parameters
         .iter()
         .any(|param| slot_opt_scope_relative(&param.ty))
-        || slot_opt_scope_relative(&signature.return_ty)
+        || match &signature.return_source {
+            FunctionReturnSource::Declared(locator) => slot_scope_relative(locator.slot()),
+            FunctionReturnSource::Flow(identity) => anchor_scope_relative(&identity.anchor),
+            FunctionReturnSource::Absent => false,
+        }
 }
 
 fn object_member_scope_relative(member: &ObjectMemberFact) -> bool {

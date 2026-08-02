@@ -46,6 +46,7 @@ use crate::semantic_query::{PathSegment, ProjectionMode, SemanticGraphStats};
 mod arena;
 mod derivation;
 mod family;
+mod flow_return_memo;
 mod hash_cons_memos;
 mod inflight;
 mod interner;
@@ -54,6 +55,7 @@ mod prepared;
 mod relation_memo;
 mod reverse_index;
 
+pub(crate) use flow_return_memo::InlineFlowReturnFlight;
 pub(crate) use relation_memo::InlineRelationFlight;
 
 mod stats;
@@ -137,19 +139,19 @@ pub fn family_variant_label_for_tests(
 
 /// Whether the family's warm reads additionally hard-gate on
 /// `validated_at_generation` equality with the LIVE project generation.
-/// The `Relate` family carries this gate (the retired dedicated relation
-/// memo's contract): a `ProjectGeneration` reset (tsconfig / path-alias /
-/// SDK / workspace-folder change) bumps no file content, so the carrier
-/// alone would miss it — a stale relation judgement must not warm-serve
-/// across a project-shape boundary. The `ClassifyMaterializationCycleGate`
-/// family carries the same gate: its walk reads cross-file declaration
-/// bodies whose reachability can shift with a project-shape change that
-/// touches no tracked file content, so a bare generation bump must reject
-/// the warm candidate.
+/// A `ProjectGeneration` reset bumps no file content, so the carrier
+/// alone would miss it — a stale judgement must not warm-serve across a
+/// project-shape boundary. The gated families all read cross-file state
+/// that can shift with a project-shape change touching no tracked file
+/// content: `Relate` (cross-file judgements),
+/// `ClassifyMaterializationCycleGate` (cross-file declaration bodies),
+/// and `FlowReturn` (cross-file callees and object-spread programs).
 fn family_requires_live_generation_gate(family: &FamilyKey) -> bool {
     matches!(
         family,
-        FamilyKey::Relate { .. } | FamilyKey::ClassifyMaterializationCycleGate { .. }
+        FamilyKey::Relate { .. }
+            | FamilyKey::ClassifyMaterializationCycleGate { .. }
+            | FamilyKey::FlowReturn { .. }
     )
 }
 

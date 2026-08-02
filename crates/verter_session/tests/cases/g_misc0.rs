@@ -94,6 +94,8 @@ mod mcp_audit_e2e;
 mod mcp_audit_tls_propagation;
 #[path = "g_misc0/no_default_env_hashes_in_production.rs"]
 mod no_default_env_hashes_in_production;
+#[path = "g_misc0/no_depth_sentinel_on_flow_return_path.rs"]
+mod no_depth_sentinel_on_flow_return_path;
 #[path = "g_misc0/no_legacy_compile_many_upsert_fanout.rs"]
 mod no_legacy_compile_many_upsert_fanout;
 #[path = "g_misc0/no_legacy_walker.rs"]

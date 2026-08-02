@@ -270,10 +270,10 @@ fn substitute_binder_refs(
 
     // Collect every TSInferType span (the extends-clause binder positions),
     // each with its constraint span when present.
-    let mut spans: Vec<(u32, u32, String, Option<(u32, u32)>, bool)> = Vec::new();
+    let mut spans: Vec<InferSpanRecord> = Vec::new();
     collect_infer_spans(alias, &mut spans);
     // Splice right-to-left so earlier spans stay valid.
-    spans.sort_by(|a, b| b.0.cmp(&a.0));
+    spans.sort_by_key(|span| std::cmp::Reverse(span.0));
     let mut binders: Vec<BinderRef> = Vec::new();
     let mut out = wrapped.clone();
     for (start, end, name, _, has_default) in &spans {
@@ -312,10 +312,11 @@ fn substitute_binder_refs(
 /// `TSTupleElement` wrappers `as_ts_type()` skips) and into function REST
 /// parameters (`...args: infer A` lives in `FormalParameters.rest`, not
 /// `items`) — every `infer` position the corpus's target patterns can carry.
-fn collect_infer_spans(
-    ts: &TSType<'_>,
-    out: &mut Vec<(u32, u32, String, Option<(u32, u32)>, bool)>,
-) {
+/// One collected `TSInferType` span: (start, end, binder name, constraint
+/// span when present, whether a default exists).
+type InferSpanRecord = (u32, u32, String, Option<(u32, u32)>, bool);
+
+fn collect_infer_spans(ts: &TSType<'_>, out: &mut Vec<InferSpanRecord>) {
     use oxc_ast::ast::TSType::*;
     match ts {
         TSInferType(infer) => {
@@ -518,12 +519,12 @@ pub(crate) fn parse_probe_header(
             .to_string()
     };
     let source_text = single_element_tuple(&cond.check_type)
-        .map(|inner| slice(inner))
+        .map(&slice)
         .ok_or_else(|| {
             ProbeHeaderError::ConditionalShape("check side is not a 1-tuple".to_string())
         })?;
     let target_text = single_element_tuple(&cond.extends_type)
-        .map(|inner| slice(inner))
+        .map(slice)
         .ok_or_else(|| {
             ProbeHeaderError::ConditionalShape("extends side is not a 1-tuple".to_string())
         })?;
@@ -1021,11 +1022,11 @@ pub(crate) fn relation_identity_from_spec(
                 position: index,
                 declared: declared
                     .as_ref()
-                    .map(|c| normalize::canonical_json_string(c))
+                    .map(normalize::canonical_json_string)
                     .unwrap_or_else(|| "<none>".to_string()),
                 pattern: pattern_constraint
                     .as_ref()
-                    .map(|c| normalize::canonical_json_string(c))
+                    .map(normalize::canonical_json_string)
                     .unwrap_or_else(|| "<none>".to_string()),
             });
         }

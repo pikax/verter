@@ -832,6 +832,371 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
 }
 
 // ===========================================================================
+// Algebra 4 — `DeclarationFactsAlg`: the node-domain declaration-safety and
+// `typeof`-dependency facts of one node, in ONE facts-only fold (no key
+// interning). Mirrors the terminal splice pipeline's rules exactly:
+//
+// - UNSAFE leaves: `any` / `unknown` primitives, raw `Unknown` carriers,
+//   typed opaque sentinels (they materialize to `Unknown`), and synthetic
+//   slot bindings. A function whose folded return is ABSENT is unsafe.
+// - `typeof <value>` arms record their root path; every other arm combines
+//   child facts (safe = AND, paths = union).
+// ===========================================================================
+
+/// The shape tag a folded declaration-facts value carries (drives the fold's
+/// intersection arm-drop and the function/constructor rewrap inspection).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeclarationTag {
+    Other,
+    EmptyObject,
+    UnrepresentableSurface,
+    Function,
+    Constructor,
+}
+
+/// The folded declaration facts of one node.
+pub(super) struct DeclarationOut {
+    tag: DeclarationTag,
+    pub(super) safe: bool,
+    pub(super) typeof_paths:
+        std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
+}
+
+impl DeclarationOut {
+    fn leaf(tag: DeclarationTag) -> Self {
+        Self {
+            tag,
+            safe: true,
+            typeof_paths: std::collections::BTreeSet::new(),
+        }
+    }
+    fn unsafe_leaf() -> Self {
+        Self {
+            tag: DeclarationTag::Other,
+            safe: false,
+            typeof_paths: std::collections::BTreeSet::new(),
+        }
+    }
+    fn combine(tag: DeclarationTag, children: Vec<DeclarationOut>) -> Self {
+        let mut safe = true;
+        let mut typeof_paths = std::collections::BTreeSet::new();
+        for child in children {
+            safe &= child.safe;
+            typeof_paths.extend(child.typeof_paths);
+        }
+        Self {
+            tag,
+            safe,
+            typeof_paths,
+        }
+    }
+}
+
+/// The declaration-facts function representation: the safety fact plus the
+/// `typeof` dependency paths (the node-domain path never needs the
+/// parameter structure).
+pub(super) struct DeclarationFunction {
+    safe: bool,
+    typeof_paths: std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
+}
+
+/// A declaration-facts object member: only the facts it contributes.
+pub(super) struct DeclarationMember {
+    safe: bool,
+    typeof_paths: std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
+}
+
+/// Stateless declaration-facts algebra — no interner.
+pub(super) struct DeclarationFactsAlg;
+
+impl DeclarationFactsAlg {
+    fn function_safe(function: &FoldedFunction<DeclarationOut>) -> bool {
+        // A function with NO folded return is declaration-unsafe (the
+        // terminal pipeline never splices a return-less function type).
+        let mut safe = function.return_type.is_some();
+        for param in &function.parameters {
+            safe &= param.ty.safe;
+        }
+        if let Some(return_type) = function.return_type.as_ref() {
+            safe &= return_type.safe;
+        }
+        safe
+    }
+    fn function_paths(
+        function: &FoldedFunction<DeclarationOut>,
+    ) -> std::collections::BTreeSet<verter_type_expr::facts::TypeDependencyPathFact> {
+        let mut paths = std::collections::BTreeSet::new();
+        for param in &function.parameters {
+            paths.extend(param.ty.typeof_paths.iter().cloned());
+        }
+        if let Some(return_type) = function.return_type.as_ref() {
+            paths.extend(return_type.typeof_paths.iter().cloned());
+        }
+        paths
+    }
+}
+
+impl RaisedShapeAlgebra for DeclarationFactsAlg {
+    type Out = DeclarationOut;
+    type Fn = DeclarationFunction;
+    type Member = DeclarationMember;
+
+    fn primitive(&mut self, kind: PrimitiveName) -> DeclarationOut {
+        match kind {
+            PrimitiveName::Any | PrimitiveName::Unknown => DeclarationOut::unsafe_leaf(),
+            _ => DeclarationOut::leaf(DeclarationTag::Other),
+        }
+    }
+    fn literal(&mut self, _value: LiteralValue) -> DeclarationOut {
+        DeclarationOut::leaf(DeclarationTag::Other)
+    }
+    fn infer(&mut self, _name: Arc<str>) -> DeclarationOut {
+        DeclarationOut::leaf(DeclarationTag::Other)
+    }
+    fn unknown(&mut self, _value: UnknownValue) -> DeclarationOut {
+        DeclarationOut::unsafe_leaf()
+    }
+    fn opaque_sentinel(&mut self, err: &QueryError) -> DeclarationOut {
+        let tag = if matches!(err, QueryError::UnrepresentableSurface) {
+            DeclarationTag::UnrepresentableSurface
+        } else {
+            DeclarationTag::Other
+        };
+        DeclarationOut {
+            tag,
+            ..DeclarationOut::unsafe_leaf()
+        }
+    }
+    fn recursive_ref(&mut self, _name: Arc<str>) -> DeclarationOut {
+        DeclarationOut::leaf(DeclarationTag::Other)
+    }
+    fn reference(
+        &mut self,
+        _name: Arc<str>,
+        type_arguments: Vec<DeclarationOut>,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, type_arguments)
+    }
+    fn synthetic_slot_binding(
+        &mut self,
+        _carrier: Arc<verter_type_expr::SyntheticCarrierKey>,
+    ) -> DeclarationOut {
+        DeclarationOut::unsafe_leaf()
+    }
+    fn import_type(
+        &mut self,
+        _specifier: Arc<str>,
+        _qualifier: Arc<[Arc<str>]>,
+        _typeof_query: bool,
+        type_arguments: Vec<DeclarationOut>,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, type_arguments)
+    }
+    fn type_of(&mut self, path: Vec<String>, type_args: Vec<DeclarationOut>) -> DeclarationOut {
+        let mut out = DeclarationOut::combine(DeclarationTag::Other, type_args);
+        if let Some(fact) = verter_type_expr::facts::TypeDependencyPathFact::from_segments(path) {
+            out.typeof_paths.insert(fact);
+        }
+        out
+    }
+
+    fn union(&mut self, members: Vec<DeclarationOut>) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, members)
+    }
+    fn intersection(&mut self, arms: Vec<DeclarationOut>) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, arms)
+    }
+    fn empty_object(&mut self) -> DeclarationOut {
+        DeclarationOut::leaf(DeclarationTag::EmptyObject)
+    }
+    fn array(&mut self, element: DeclarationOut, _readonly: bool) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, vec![element])
+    }
+    fn tuple(
+        &mut self,
+        elements: Vec<FoldedTupleElement<DeclarationOut>>,
+        _readonly: bool,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(
+            DeclarationTag::Other,
+            elements.into_iter().map(|element| element.ty).collect(),
+        )
+    }
+    fn key_of(&mut self, base: DeclarationOut) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, vec![base])
+    }
+    fn indexed_access(&mut self, object: DeclarationOut, index: DeclarationOut) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, vec![object, index])
+    }
+    fn conditional(
+        &mut self,
+        check: DeclarationOut,
+        extends: DeclarationOut,
+        true_type: DeclarationOut,
+        false_type: DeclarationOut,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(
+            DeclarationTag::Other,
+            vec![check, extends, true_type, false_type],
+        )
+    }
+    fn mapped(
+        &mut self,
+        _parameter: String,
+        source: DeclarationOut,
+        value: DeclarationOut,
+        _optional: MappedModifier,
+        _readonly: MappedModifier,
+        name_type: Option<DeclarationOut>,
+    ) -> DeclarationOut {
+        let mut children = vec![source, value];
+        children.extend(name_type);
+        DeclarationOut::combine(DeclarationTag::Other, children)
+    }
+    fn template_literal(
+        &mut self,
+        _quasis: Vec<String>,
+        expressions: Vec<DeclarationOut>,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(DeclarationTag::Other, expressions)
+    }
+    fn type_parameter(
+        &mut self,
+        _name: Arc<str>,
+        constraint: Option<DeclarationOut>,
+        default: Option<DeclarationOut>,
+    ) -> DeclarationOut {
+        DeclarationOut::combine(
+            DeclarationTag::Other,
+            constraint.into_iter().chain(default).collect(),
+        )
+    }
+
+    fn build_function(&mut self, function: FoldedFunction<DeclarationOut>) -> DeclarationFunction {
+        DeclarationFunction {
+            safe: Self::function_safe(&function),
+            typeof_paths: Self::function_paths(&function),
+        }
+    }
+    fn function_to_out(&mut self, function: DeclarationFunction) -> DeclarationOut {
+        DeclarationOut {
+            tag: DeclarationTag::Function,
+            safe: function.safe,
+            typeof_paths: function.typeof_paths,
+        }
+    }
+    fn constructor_to_out(&mut self, function: DeclarationFunction) -> DeclarationOut {
+        DeclarationOut {
+            tag: DeclarationTag::Constructor,
+            safe: function.safe,
+            typeof_paths: function.typeof_paths,
+        }
+    }
+    fn out_as_function(&self, out: &DeclarationOut) -> Option<DeclarationFunction> {
+        (out.tag == DeclarationTag::Function).then_some(DeclarationFunction {
+            safe: out.safe,
+            typeof_paths: out.typeof_paths.clone(),
+        })
+    }
+    fn out_as_constructor(&self, out: &DeclarationOut) -> Option<DeclarationFunction> {
+        (out.tag == DeclarationTag::Constructor).then_some(DeclarationFunction {
+            safe: out.safe,
+            typeof_paths: out.typeof_paths.clone(),
+        })
+    }
+
+    fn member_property(
+        &mut self,
+        _key: verter_type_expr::AuthoredPropertyKey<
+            DeclarationOut,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
+        ty: DeclarationOut,
+        _optional: bool,
+        _readonly: bool,
+        _visibility: MemberVisibility,
+        _excess_origin: verter_type_expr::ExcessPropertyOrigin,
+        _spans: verter_type_expr::MemberSpans,
+    ) -> DeclarationMember {
+        DeclarationMember {
+            safe: ty.safe,
+            typeof_paths: ty.typeof_paths,
+        }
+    }
+    fn member_method(
+        &mut self,
+        _key: verter_type_expr::AuthoredPropertyKey<
+            DeclarationOut,
+            verter_type_expr::facts::ValueDeclIdentityPart,
+        >,
+        function: DeclarationFunction,
+        _optional: bool,
+        _method_kind: verter_type_expr::ObjectMethodKind,
+        _has_implementation_body: bool,
+        _visibility: MemberVisibility,
+        _excess_origin: verter_type_expr::ExcessPropertyOrigin,
+        _spans: verter_type_expr::MemberSpans,
+    ) -> DeclarationMember {
+        DeclarationMember {
+            safe: function.safe,
+            typeof_paths: function.typeof_paths,
+        }
+    }
+    fn member_spread(&mut self, ty: DeclarationOut) -> DeclarationMember {
+        DeclarationMember {
+            safe: ty.safe,
+            typeof_paths: ty.typeof_paths,
+        }
+    }
+    fn member_call_signature(&mut self, function: DeclarationFunction) -> DeclarationMember {
+        DeclarationMember {
+            safe: function.safe,
+            typeof_paths: function.typeof_paths,
+        }
+    }
+    fn member_construct_signature(&mut self, function: DeclarationFunction) -> DeclarationMember {
+        DeclarationMember {
+            safe: function.safe,
+            typeof_paths: function.typeof_paths,
+        }
+    }
+    fn member_index_signature(
+        &mut self,
+        _key_name: String,
+        key_type: DeclarationOut,
+        value_type: DeclarationOut,
+        _readonly: bool,
+        _spans: verter_type_expr::IndexSignatureSpans,
+    ) -> DeclarationMember {
+        let combined = DeclarationOut::combine(DeclarationTag::Other, vec![key_type, value_type]);
+        DeclarationMember {
+            safe: combined.safe,
+            typeof_paths: combined.typeof_paths,
+        }
+    }
+    fn object_from_members(&mut self, members: Vec<DeclarationMember>) -> DeclarationOut {
+        let mut safe = true;
+        let mut typeof_paths = std::collections::BTreeSet::new();
+        for member in members {
+            safe &= member.safe;
+            typeof_paths.extend(member.typeof_paths);
+        }
+        DeclarationOut {
+            tag: DeclarationTag::Other,
+            safe,
+            typeof_paths,
+        }
+    }
+
+    fn is_object_surface_sentinel(&self, out: &DeclarationOut) -> bool {
+        out.tag == DeclarationTag::UnrepresentableSurface
+    }
+    fn is_empty_object(&self, out: &DeclarationOut) -> bool {
+        out.tag == DeclarationTag::EmptyObject
+    }
+}
+
+// ===========================================================================
 // Algebra 3 — `TypeExprShapeAlg`: fold an existing `&TypeExpr` into the SAME
 // key space, so a node's raised shape can be compared against a caller's input
 // `TypeExpr` without materializing the node.

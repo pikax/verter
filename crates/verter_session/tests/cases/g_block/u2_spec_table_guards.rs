@@ -167,6 +167,9 @@ fn semantic_query_key_spec_table_equals_enum() {
             SemanticQueryKeyTag::FlowNarrowingAt | SemanticQueryKeyTag::ContextualTypeAt => {
                 SemanticQueryValueTag::ProgramAnalysis
             }
+            // The whole-function return carries its own value domain (the
+            // canonical whole-return carrier + fallthrough bit).
+            SemanticQueryKeyTag::FlowReturn => SemanticQueryValueTag::FlowReturn,
             _ => SemanticQueryValueTag::TypeNode,
         };
         assert_eq!(

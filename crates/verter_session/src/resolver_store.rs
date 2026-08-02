@@ -2467,6 +2467,23 @@ impl HostStoreView {
                 "RouteSurfaceFactRef canonical={} key={:?} lane={:?} expected={:?}",
                 r.canonical_id, r.key, r.lane, r.expected_hash
             )),
+            crate::resolver_core::FactVersionRef::ProgramAnalysis(fact) => match fact {
+                crate::resolver_core::ProgramAnalysisFactRef::FlowBody {
+                    function,
+                    flow_body_stable_hash,
+                } => {
+                    if crate::resolver_core::StoreView::validates_program_analysis_domain(
+                        self, fact,
+                    ) {
+                        None
+                    } else {
+                        Some(format!(
+                            "FlowBody invalid canonical={} hash={flow_body_stable_hash:?}",
+                            function.canonical_id
+                        ))
+                    }
+                }
+            },
             crate::resolver_core::FactVersionRef::FileSourceEnv {
                 canonical_id,
                 parse_env_hash,
@@ -2904,6 +2921,9 @@ impl crate::resolver_core::StoreView for HostStoreView {
             crate::resolver_core::FactVersionRef::RouteSurface(r) => {
                 crate::resolver_core::StoreView::validates_route_surface_domain(self, r)
             }
+            crate::resolver_core::FactVersionRef::ProgramAnalysis(fact) => {
+                crate::resolver_core::StoreView::validates_program_analysis_domain(self, fact)
+            }
             // Contributor source-env identity fact — routes to the
             // strict per-arm validator (differing / missing /
             // tombstoned / untracked identities all reject; no
@@ -3231,6 +3251,44 @@ impl crate::resolver_core::StoreView for HostStoreView {
             // to the route-surface domain; the dispatch layer guards
             // against this so the match is exhaustive defensively.
             _ => false,
+        }
+    }
+
+    /// Program-analysis-domain validation: compare the recorded
+    /// whole-body hash against the view-current `FunctionProgramIndex`
+    /// entry for the exact function identity (canonical + owner + name +
+    /// space + part + overload ordinal). A structural index read through
+    /// the canonical view's captured `IndexedReady` — never a re-lower,
+    /// never a reachability rerun. Tombstoned, withdrawn, untracked, or
+    /// artifact-missing canonicals and hash mismatches all fail closed.
+    fn validates_program_analysis_domain(
+        &self,
+        fact: &crate::resolver_core::ProgramAnalysisFactRef,
+    ) -> bool {
+        match fact {
+            crate::resolver_core::ProgramAnalysisFactRef::FlowBody {
+                function,
+                flow_body_stable_hash,
+            } => {
+                let canonical = function.canonical_id.as_ref();
+                if self.is_tombstoned(canonical) {
+                    return false;
+                }
+                let resolved = self.canonical_view(canonical);
+                let Some(indexed) = resolved.flow_body_indexed.as_ref() else {
+                    return false;
+                };
+                let index = indexed.shallow_state.decl_bodies().function_program_index();
+                index.entries.iter().any(|entry| {
+                    entry.key.declaration.owner == function.owner
+                        && entry.key.declaration.name.as_ref()
+                            == function.merged_symbol_name.as_ref()
+                        && entry.key.declaration.space == function.symbol_space
+                        && entry.key.part == function.function_part
+                        && entry.key.overload_ordinal == function.overload_ordinal
+                        && &entry.flow_body_stable_hash == flow_body_stable_hash
+                })
+            }
         }
     }
 }

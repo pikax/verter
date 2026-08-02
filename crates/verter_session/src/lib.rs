@@ -174,6 +174,9 @@ pub use crate::fact_signature_helpers::ReadSetSignature;
 mod error_propagation_lattice_tests;
 pub mod external_ts;
 pub mod file_artifact_store;
+pub(crate) mod flow_ir;
+#[cfg(test)]
+mod flow_ir_tests;
 mod hash;
 pub(crate) mod instant;
 /// Session-side key identities for locator-backed body lowering
@@ -219,6 +222,8 @@ mod svelte_vertical_tests;
 mod artifact_reads_pinned_tests;
 #[cfg(test)]
 mod overlay_bundle_memo_tests;
+#[cfg(test)]
+mod program_analysis_fact_tests;
 // `SessionView::content_hash_for` is a view-authoritative current-
 // content oracle, consistent with `source()` — base + overlay
 // fallthrough route through the scheduler authority, never a

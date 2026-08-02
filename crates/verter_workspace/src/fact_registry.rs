@@ -22,6 +22,10 @@
 //! - **Route-surface** (`RouteSurface`): post-wildcard, post-augmentation
 //!   effective export surface facts, resolve_env + lib_env keyed.
 //!   Populated by the `RouteDb` producer.
+//! - **Program-analysis** (`ProgramAnalysis`): whole-function body facts
+//!   (the `FlowBody` stable-hash rail), rooted on the per-file
+//!   `FunctionProgramIndex`. Validated by comparing the indexed
+//!   whole-body hash — never by re-lowering.
 //!
 //! Variant taxonomy: parse-time producers populate the parse-domain
 //! variants eagerly. The lazy member-body producers populate
@@ -230,6 +234,10 @@ pub enum FactDomain {
     /// Route-surface facts, resolve_env_hash + lib_env_hash keyed.
     /// Producer: `RouteDb` (post-augmentation-stitched).
     RouteSurface,
+    /// Whole-function program-analysis facts (the `FlowBody` stable-hash
+    /// rail), validated against the live `FunctionProgramIndex` whole-body
+    /// hash — never by re-lowering or rerunning reachability.
+    ProgramAnalysis,
 }
 
 /// Macro target identifier for `MacroSurface` facts (R28).

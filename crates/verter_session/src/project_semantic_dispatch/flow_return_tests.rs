@@ -1,0 +1,1426 @@
+//! @ai-generated - Direct-dispatch `FlowReturn` executor tests: symbolic
+//! call carriers, the `this`-call fallback, loop transparency, degraded
+//! shapes, recursion discharge (base-plus-recursion admits; the empty
+//! cycle is ReturnOnly and never `never`), primitive widening, key
+//! identity (overload ordinals, value-env exclusion), and family warm hits.
+
+use std::sync::Arc;
+
+use super::*;
+use crate::semantic_query::{
+    FlowReturnKey, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
+use crate::types::{HostConfig, UpsertRequest};
+use crate::VerterHost;
+use verter_type_expr::facts::FunctionPartIdentity;
+
+const FLOW_EXEC_FIXTURE: &str = r#"
+export declare function subLog(value: number): void;
+
+export function subCallee(): { ok: string } {
+  return { ok: "yes" };
+}
+
+export function subCallReturn() {
+  return subCallee();
+}
+
+export function subCallAfterLoop() {
+  for (let i = 0; i < 3; i++) subLog(i);
+  return subCallee();
+}
+
+export class SubThisCall {
+  helper(): number {
+    return 1;
+  }
+  run() {
+    return this.helper();
+  }
+}
+
+export function subLoopReturn(n: number) {
+  while (n > 0) {
+    return n;
+  }
+  return 0;
+}
+
+export function subSwitchReturn(value: number) {
+  switch (value) {
+    case 1:
+      return "a";
+    default:
+      return "b";
+  }
+}
+
+export function subTryReturn() {
+  try {
+    return "a";
+  } finally {
+  }
+}
+
+export function subBaseRecursion(n: number) {
+  if (n <= 0) return 0;
+  return subBaseRecursion(n - 1);
+}
+
+export function subEmptyRecursion() {
+  return subEmptyRecursion();
+}
+
+export function subLiteral() {
+  return 1;
+}
+
+export function subParam(a: number) {
+  return a;
+}
+
+export function subLocalConst() {
+  const x = 1;
+  return x;
+}
+
+export function subOverloaded(a: string): void;
+export function subOverloaded(a: number) {
+  return a;
+}
+
+/** Documented.
+ * @returns {string} the documented payload
+ */
+export function subJsdocReturn() {
+  return "doc";
+}
+"#;
+
+const CANONICAL: &str = "/ws/flow-exec.ts";
+
+fn make_host() -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CANONICAL.to_string()),
+        input_id: CANONICAL.to_string(),
+        source: Arc::from(FLOW_EXEC_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    host
+}
+
+fn with_dispatch<R>(
+    host: &Arc<VerterHost>,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+) -> R {
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    f(&dispatch)
+}
+
+fn flow_result_for_file(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) -> (verter_type_expr::TypeExpr, bool) {
+    let key = FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(canonical),
+    };
+    flow_result(dispatch, host, key)
+}
+
+fn flow_key(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    name: &str,
+    part: FunctionPartIdentity,
+    overload_ordinal: u32,
+) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(CANONICAL),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            part,
+            overload_ordinal,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(CANONICAL),
+    }
+}
+
+fn execute_flow(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    key: FlowReturnKey,
+) -> QueryResult<SemanticQueryOutput<SemanticQueryValue>> {
+    dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+}
+
+fn flow_result(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    key: FlowReturnKey,
+) -> (verter_type_expr::TypeExpr, bool) {
+    let QueryResult::Value(SemanticQueryOutput {
+        value: SemanticQueryValue::FlowReturn(result),
+        ..
+    }) = execute_flow(dispatch, key)
+    else {
+        panic!("FlowReturn must produce a complete result");
+    };
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type)
+        .expect("return node must project to TypeExpr");
+    (expr, result.can_fall_through)
+}
+
+fn flow_is_miss(dispatch: &ProjectSemanticDispatch<'_>, key: FlowReturnKey) -> bool {
+    matches!(
+        execute_flow(dispatch, key),
+        QueryResult::Error(QueryError::Miss)
+    )
+}
+
+fn object_prop<'a>(
+    expr: &'a verter_type_expr::TypeExpr,
+    name: &str,
+) -> &'a verter_type_expr::TypeExpr {
+    let verter_type_expr::TypeExpr::Object(object) = expr else {
+        panic!("expected object type, got {expr:?}");
+    };
+    object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.string_name() == Some(name) => {
+                Some(&prop.ty)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected prop {name} in {expr:?}"))
+}
+
+#[test]
+fn flow_return_symbolic_call_resolves_complete() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, fallthrough) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subCallReturn",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            object_prop(&expr, "ok"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+        assert!(!fallthrough);
+    });
+}
+
+#[test]
+fn flow_return_this_call_uses_any_fallback() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "SubThisCall",
+                FunctionPartIdentity::Member {
+                    member_path: Arc::from(vec![1u32].into_boxed_slice()),
+                },
+                0,
+            ),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any)
+        );
+    });
+}
+
+#[test]
+fn flow_return_return_free_loop_stays_transparent() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subCallAfterLoop",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            object_prop(&expr, "ok"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+    });
+}
+
+#[test]
+fn flow_return_return_bearing_loop_switch_try_are_degraded() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        for name in ["subLoopReturn", "subSwitchReturn", "subTryReturn"] {
+            assert!(
+                flow_is_miss(
+                    dispatch,
+                    flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0)
+                ),
+                "{name} must stay degraded"
+            );
+            // Nothing admitted: a repeat demand runs cold again.
+            assert!(
+                flow_is_miss(
+                    dispatch,
+                    flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0)
+                ),
+                "{name} must not admit a warm entry"
+            );
+        }
+    });
+}
+
+#[test]
+fn flow_return_base_plus_recursion_admits_widened_number() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, fallthrough) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subBaseRecursion",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert!(!fallthrough);
+    });
+}
+
+#[test]
+fn flow_return_empty_cycle_is_return_only_and_never_never() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subEmptyRecursion",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert!(
+            flow_is_miss(dispatch, key.clone()),
+            "an empty recursive cycle is ReturnOnly"
+        );
+        // Never admitted: the warm read misses, and nothing in the result is
+        // `never`.
+        assert!(
+            dispatch
+                .graph()
+                .get_flow_return_result(dispatch.ctx, &key)
+                .is_none(),
+            "an empty recursive cycle admits no family value"
+        );
+        assert!(flow_is_miss(dispatch, key), "still cold on the next demand");
+    });
+}
+
+#[test]
+fn flow_return_literal_widens_at_return_position() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subLiteral",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        // The return-argument position widens a fresh top-level literal to
+        // its base primitive (the flow IR's declaration lowering encodes the
+        // positional rule); a `const`-asserted or arrow-body literal keeps
+        // its literal node.
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+#[test]
+fn flow_return_parameter_reference_substitutes_its_annotation() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subParam",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+#[test]
+fn flow_return_local_const_reaching_definition() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subLocalConst",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        // A `const` binding preserves its literal initializer through the
+        // reaching definition (TS's `const x = 1; return x` → `1`).
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        );
+    });
+}
+
+#[test]
+fn flow_return_distinct_overload_ordinals_are_distinct_keys() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let bodiless = flow_key(
+            dispatch,
+            "subOverloaded",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let implementation = flow_key(
+            dispatch,
+            "subOverloaded",
+            FunctionPartIdentity::DeclarationBody,
+            1,
+        );
+        assert_ne!(
+            bodiless, implementation,
+            "distinct overload ordinals produce distinct keys"
+        );
+        // The bodiless overload has no served body — degraded, never confused
+        // with the implementation's admitted result.
+        assert!(flow_is_miss(dispatch, bodiless));
+        let (expr, _) = flow_result(dispatch, &host, implementation);
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+#[test]
+fn flow_return_key_carries_no_value_environment() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        // Two demands of the same function under the same context produce the
+        // identical key (value bindings never enter it) — the second is a warm
+        // family hit.
+        let key = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let first = execute_flow(dispatch, key.clone());
+        assert!(matches!(first, QueryResult::Value(_)));
+        // The warm read runs against a FRESH view (the artifact the cold
+        // build materialized is now visible).
+        let warm_key = key.clone();
+        with_dispatch(&host, |fresh| {
+            let warm = fresh.graph().get_flow_return_result(fresh.ctx, &warm_key);
+            assert!(
+                warm.is_some(),
+                "the second demand of the same function identity is a warm family hit"
+            );
+        });
+        // The substitution axis is TYPE-ONLY: an empty substitution is the
+        // only context the substrate constructs; a type-param binding changes
+        // the key.
+        let mut typed = key.clone();
+        typed.context.type_substitution =
+            crate::semantic_query::CanonicalTypeSubstitution::new(vec![(
+                crate::semantic_query::SemanticNodeId(7),
+                crate::semantic_query::SemanticNodeId(8),
+            )]);
+        assert_ne!(typed, key, "a type substitution fork is a distinct key");
+    });
+}
+
+/// Key axes: `P R T L J`, the TYPE-ONLY substitution, the function slot
+/// (name / part / overload ordinal), and the normalized type args are ALL
+/// family identity. Two keys differing in any single axis are distinct
+/// and never warm-hit each other. Mutation recipe: dropping any axis from
+/// the key fails the distinctness half; failing the fresh-view family
+/// lookup fails the isolation half.
+#[test]
+fn flow_return_keys_do_not_warm_hit_across_env_axes() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let base = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let with_env = |mutate: fn(&mut crate::semantic_query::FlowReturnContext)| {
+            let mut key = base.clone();
+            mutate(&mut key.context);
+            key
+        };
+        for (axis, variant) in [
+            ("P", with_env(|context| context.parse_env_hash = [0xAA; 16])),
+            (
+                "R",
+                with_env(|context| context.resolve_env_hash = [0xBB; 16]),
+            ),
+            ("T", with_env(|context| context.type_env_hash = [0xCC; 16])),
+            ("L", with_env(|context| context.lib_env_hash = [0xDD; 16])),
+            (
+                "J",
+                with_env(|context| context.project_identity = [0xEE; 16]),
+            ),
+        ] {
+            assert_ne!(
+                variant, base,
+                "a key differing only in the {axis} env axis must be distinct"
+            );
+        }
+        let part_fork = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::Initializer,
+            0,
+        );
+        assert_ne!(part_fork, base, "the function part is key identity");
+        let ordinal_fork = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            1,
+        );
+        assert_ne!(ordinal_fork, base, "the overload ordinal is key identity");
+        let mut args_fork = base.clone();
+        args_fork.normalized_type_args =
+            Arc::from(vec![crate::semantic_query::SemanticNodeId(9)].into_boxed_slice());
+        assert_ne!(args_fork, base, "the normalized type args are key identity");
+
+        // Warm isolation: compute the base, then prove a shifted-env key
+        // does NOT warm-hit the base's family entry.
+        let first = execute_flow(dispatch, base.clone());
+        assert!(matches!(first, QueryResult::Value(_)));
+        let shifted = with_env(|context| context.parse_env_hash = [0xAA; 16]);
+        assert!(
+            dispatch
+                .graph()
+                .get_flow_return_result(dispatch.ctx, &shifted)
+                .is_none(),
+            "a shifted-env key must not warm-hit the base entry"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The sealed function-return consumer entry
+// ---------------------------------------------------------------------------
+
+fn return_identity(
+    name: &str,
+    part: FunctionPartIdentity,
+    overload_ordinal: u32,
+) -> verter_type_expr::facts::FlowFunctionReturnIdentity {
+    verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(name),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: part,
+        overload_ordinal,
+    }
+}
+
+fn declared_return_slot(name: &str) -> verter_type_expr::locators::TypeBodySlot {
+    verter_type_expr::locators::TypeBodySlot {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(name),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        path: Arc::from(
+            vec![
+                verter_type_expr::locators::TypeBodyPathStep::ValueSignature { ordinal: 0 },
+                verter_type_expr::locators::TypeBodyPathStep::FunctionReturn,
+            ]
+            .into_boxed_slice(),
+        ),
+    }
+}
+
+/// The sealed helper's Flow arm constructs the IDENTICAL `FlowReturnKey` the
+/// direct dispatch uses — the consumer-identity contract at the helper
+/// boundary. Mutation recipe: deriving the slot or the context anywhere but
+/// the one choke point forks the key and fails the equality half.
+#[test]
+fn function_return_helper_flow_arm_builds_the_identical_key() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let identity = return_identity("subCallReturn", FunctionPartIdentity::DeclarationBody, 0);
+        let direct = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert_eq!(
+            dispatch.flow_return_key_for(&identity),
+            direct,
+            "the sealed helper constructs the identical FlowReturnKey"
+        );
+        let source = verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone());
+        let super::flow_return::FunctionReturnNode::Flow(result) =
+            dispatch.execute_function_return_source(&source, CANONICAL)
+        else {
+            panic!("a Flow source is served by the FlowReturn producer");
+        };
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type)
+            .expect("return node must project to TypeExpr");
+        assert_eq!(
+            object_prop(&expr, "ok"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+        assert!(!result.can_fall_through);
+        // The demand admitted under the helper-constructed key: a fresh view
+        // warm-reads the same family entry.
+        let key = dispatch.flow_return_key_for(&identity);
+        with_dispatch(&host, |fresh| {
+            assert!(
+                fresh
+                    .graph()
+                    .get_flow_return_result(fresh.ctx, &key)
+                    .is_some(),
+                "the helper's demand admits under the identical key"
+            );
+        });
+    });
+}
+
+/// The Declared arm lowers through the memoized locator rail — an authored
+/// TS annotation and a JSDoc `@returns` recovery both deref their slot.
+#[test]
+fn function_return_helper_declared_arm_raises_authored_and_jsdoc() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let authored = verter_type_expr::facts::FunctionReturnSource::Declared(
+            verter_type_expr::locators::FunctionReturnLocator::Authored(declared_return_slot(
+                "subCallee",
+            )),
+        );
+        let super::flow_return::FunctionReturnNode::Declared(hot) =
+            dispatch.execute_function_return_source(&authored, CANONICAL)
+        else {
+            panic!("an authored return lowers through the locator rail");
+        };
+        let expr = host
+            .project_node_to_type_expr_for_test(hot.node())
+            .expect("declared return node must project to TypeExpr");
+        assert_eq!(
+            object_prop(&expr, "ok"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+        let jsdoc = verter_type_expr::facts::FunctionReturnSource::Declared(
+            verter_type_expr::locators::FunctionReturnLocator::Jsdoc(declared_return_slot(
+                "subJsdocReturn",
+            )),
+        );
+        let super::flow_return::FunctionReturnNode::Declared(hot) =
+            dispatch.execute_function_return_source(&jsdoc, CANONICAL)
+        else {
+            panic!("a JSDoc return lowers through the locator rail");
+        };
+        let expr = host
+            .project_node_to_type_expr_for_test(hot.node())
+            .expect("JSDoc return node must project to TypeExpr");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+    });
+}
+
+/// A degraded Flow evaluation surfaces the typed failure (never the
+/// absent arm, never a fabricated node); `Absent` reports the absent
+/// carrier.
+#[test]
+fn function_return_helper_degraded_and_absent_arms() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let loop_source = verter_type_expr::facts::FunctionReturnSource::Flow(return_identity(
+            "subLoopReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ));
+        // The machinery root admits nothing; the TYPED failure rides the
+        // transaction's root-failure channel to the caller (`Unresolved`
+        // only when the cold build never ran).
+        match dispatch.execute_function_return_source(&loop_source, CANONICAL) {
+            super::flow_return::FunctionReturnNode::Degraded(
+                crate::semantic_query::FlowReturnFailure::Unsupported(
+                    crate::semantic_query::FlowReturnUnsupported::Loop,
+                ),
+            ) => {}
+            other => panic!("a return-bearing loop degrades with the typed failure, got {other:?}"),
+        }
+        let absent = verter_type_expr::facts::FunctionReturnSource::Absent;
+        assert!(matches!(
+            dispatch.execute_function_return_source(&absent, CANONICAL),
+            super::flow_return::FunctionReturnNode::Absent
+        ));
+    });
+}
+
+/// A mixed relation <-> flow component's batched member publish rides the
+/// UNION carrier: the published flow member's family entry self-roots on
+/// every component file — its own file AND the files of the relation
+/// members' nodes. Mutation recipe: publishing the member with the root's
+/// relation-only self-root set (the pre-union behavior) drops its own
+/// file from the carrier.
+#[test]
+fn mixed_component_member_entry_self_roots_cover_all_component_files() {
+    let host = make_host();
+    for (canonical, source) in [
+        (
+            "/ws/mixed_b.ts",
+            "import type { RootBox } from \"/ws/mixed_a\";\nexport interface NextBox {\n  next(): RootBox;\n}\n",
+        ),
+        (
+            "/ws/mixed_c.ts",
+            "import type { NextBox } from \"/ws/mixed_b\";\nexport declare function makeBox(): NextBox;\nexport class Worker {\n  run() {\n    return makeBox();\n  }\n}\n",
+        ),
+        (
+            "/ws/mixed_a.ts",
+            "import { Worker } from \"/ws/mixed_c\";\nexport declare const worker: Worker;\nexport class RootBox {\n  next() {\n    return worker.run();\n  }\n}\n",
+        ),
+    ] {
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(canonical)
+                .static_resolution(),
+            aliases: Vec::new(),
+        });
+    }
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/root.ts".to_string()),
+        input_id: "/ws/root.ts".to_string(),
+        source: Arc::from(
+            "import type { RootBox } from \"/ws/mixed_a\";\nimport type { NextBox } from \"/ws/mixed_b\";\nexport type RootAssign = RootBox extends NextBox ? \"yes\" : \"no\";\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/root.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let (expr, _) = host
+        .evaluate_type_expression_with_audit(
+            crate::typeinfo::types::EvaluateTypeExpressionRequest {
+                scope: "/ws/root.ts".to_string(),
+                expression: "RootAssign".to_string(),
+                extra_imports: Vec::new(),
+                mode: crate::semantic_query::ProjectionMode::Expanded,
+                cacheable: false,
+            },
+        )
+        .into_parts();
+    let node = expr.ok().flatten().expect("RootAssign resolves");
+    let projected = host
+        .project_node_to_type_expr_for_test(node)
+        .expect("RootAssign projects");
+    assert_eq!(
+        projected,
+        verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+            "yes".to_string()
+        ))
+    );
+    with_dispatch(&host, |dispatch| {
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from("/ws/mixed_c.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("Worker"),
+                FunctionPartIdentity::Member {
+                    member_path: Arc::from(vec![0u32].into_boxed_slice()),
+                },
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for("/ws/mixed_c.ts"),
+        };
+        let roots = dispatch
+            .graph()
+            .entry_self_root_canonicals_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
+            .expect("the batched flow member's family entry is published");
+        // The member's own file AND every relation member's node file
+        // (the relation root's own demanding file is not a relation input
+        // and is not part of the component's roots).
+        for file in ["/ws/mixed_a.ts", "/ws/mixed_b.ts", "/ws/mixed_c.ts"] {
+            assert!(
+                roots.iter().any(|root| root.as_ref() == file),
+                "the union carrier covers {file}: {roots:?}"
+            );
+        }
+    });
+}
+
+/// Block-scoped bindings never escape their region: the `if` arm's
+/// shadowing `const` does not leak past the arm — the outer `let`
+/// binding's reaching definition answers the trailing `return x`.
+/// Mutation recipe: a flat locals map across regions yields `string`
+/// here.
+#[test]
+fn flow_return_block_scoped_shadowing_does_not_escape() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/shadow.ts".to_string()),
+        input_id: "/ws/shadow.ts".to_string(),
+        source: Arc::from(
+            "export function shadow(c: boolean) {\n  let x = 1;\n  if (c) { const x = \"s\"; }\n  return x;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/shadow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/shadow.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("shadow"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        let super::flow_return::FunctionReturnNode::Flow(result) = dispatch
+            .execute_function_return_source(
+                &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                "/ws/shadow.ts",
+            )
+        else {
+            panic!("the shadowed return evaluates complete");
+        };
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type)
+            .expect("return node projects");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+/// A member-call self-recursion through the symbolic rail
+/// (`return obj.f()` inside `obj.f`) propagates the nested demand's
+/// degradation as a typed failure — the semantic-miss signature return is
+/// NEVER counted as a contributor (a pre-fix evaluation published
+/// `Complete` with the miss inside it). Mutation recipe: contributing the
+/// miss-return node admits a `Complete` family value here.
+#[test]
+fn flow_return_member_call_self_recursion_is_return_only_not_complete_miss() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/member-recur.ts".to_string()),
+        input_id: "/ws/member-recur.ts".to_string(),
+        source: Arc::from("export const obj = {\n  f() {\n    return obj.f();\n  },\n};\n"),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/member-recur.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/member-recur.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("obj"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::Member {
+                member_path: Arc::from(vec![0u32].into_boxed_slice()),
+            },
+            overload_ordinal: 0,
+        };
+        match dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+            "/ws/member-recur.ts",
+        ) {
+            super::flow_return::FunctionReturnNode::Degraded(_) => {}
+            other => panic!("the recursive member call degrades, got {other:?}"),
+        }
+        // Nothing admitted: the family entry never materializes, and a
+        // repeat demand runs cold.
+        assert!(dispatch
+            .graph()
+            .get_flow_return_result(dispatch.ctx, &dispatch.flow_return_key_for(&identity))
+            .is_none());
+    });
+}
+
+/// A direct call to a callee with a DECLARED return serves the declared
+/// carrier (never the narrowed body): `d(): string | number { return 1 }`
+/// — the caller's contribution is `string | number`, not `number`.
+/// Mutation recipe: always executing the callee's flow return narrows this
+/// to `number`.
+#[test]
+fn flow_return_direct_call_prefers_the_callees_declared_return() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/declared-callee.ts".to_string()),
+        input_id: "/ws/declared-callee.ts".to_string(),
+        source: Arc::from(
+            "export function d(): string | number {\n  return 1;\n}\nexport function c() {\n  return d();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/declared-callee.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/declared-callee.ts", "c");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the declared union must survive, got {expr:?}");
+        };
+        assert_eq!(arms.len(), 2);
+    });
+}
+
+/// A parameter that shadows the callee name makes the call an ordinary
+/// parameter call — NEVER a self-recursive flow edge.
+/// `function f(f: () => string) { return f() }` → `string` (not the empty
+/// self-cycle's ReturnOnly). Mutation recipe: firing the DirectCall edge
+/// on the shadowed name degrades this to a miss.
+#[test]
+fn flow_return_direct_call_respects_parameter_shadowing() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/shadowed-callee.ts".to_string()),
+        input_id: "/ws/shadowed-callee.ts".to_string(),
+        source: Arc::from("export function f(f: () => string) {\n  return f();\n}\n"),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/shadowed-callee.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/shadowed-callee.ts", "f");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+    });
+}
+
+/// A namespace-local binding shadows the file-global one for a bare
+/// callee inside the namespace: `N.g(){ return f() }` binds `N.f`
+/// (string), never the global `f` (number). Mutation recipe: the
+/// globally-highest overload ordinal binding flips this to `number`.
+#[test]
+fn flow_return_direct_call_prefers_the_namespace_local_binding() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/ns-callee.ts".to_string()),
+        input_id: "/ws/ns-callee.ts".to_string(),
+        source: Arc::from(
+            "export function f() {\n  return 1;\n}\nnamespace N {\n  export function f() {\n    return \"s\";\n  }\n  export function g() {\n    return f();\n  }\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/ns-callee.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/ns-callee.ts", "N.g");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+    });
+}
+
+/// An unused declaration whose initializer cannot be modeled binds `any`
+/// and never poisons the function (declarations are not return
+/// contributions): `const unused = <unsupported>; return 2` stays
+/// `number`. Mutation recipe: propagating the initializer's failure
+/// degrades the whole function to a miss.
+#[test]
+fn flow_return_unused_binding_failure_binds_any_without_poisoning() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/unused-binding.ts".to_string()),
+        input_id: "/ws/unused-binding.ts".to_string(),
+        source: Arc::from(
+            "export function broken(v: number) {\n  switch (v) {\n    default:\n      return v;\n  }\n}\nexport function survive() {\n  const unused = broken(1);\n  return 2;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/unused-binding.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/unused-binding.ts", "survive");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+/// A nested generic arrow keeps its own binder: `return <T>(x: T) => x`
+/// composes a signature with one type parameter whose identity the
+/// parameter type resolves to. Mutation recipe: dropping nested type
+/// parameters interns the signature with an empty generic clause (and the
+/// parameter as an unbound `T` reference).
+#[test]
+fn flow_return_nested_generic_arrow_keeps_its_type_parameters() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/nested-generic.ts".to_string()),
+        input_id: "/ws/nested-generic.ts".to_string(),
+        source: Arc::from("export function outer() {\n  return <T>(x: T) => x;\n}\n"),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/nested-generic.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/nested-generic.ts", "outer");
+        let verter_type_expr::TypeExpr::Function(function) = &expr else {
+            panic!("the nested value is a function type, got {expr:?}");
+        };
+        assert_eq!(
+            function.type_parameters.len(),
+            1,
+            "the nested generic keeps its binder: {expr:?}"
+        );
+        assert_eq!(function.type_parameters[0].name, "T");
+        let verter_type_expr::TypeExpr::TypeParameter(param_ty) = &function.parameters[0].ty else {
+            panic!(
+                "the parameter resolves to the nested binder, got {:?}",
+                function.parameters[0].ty
+            );
+        };
+        assert_eq!(param_ty.name, "T");
+    });
+}
+
+/// A long acyclic DirectCall chain charges the connected-demand ledger
+/// one unit per inline frame: beyond the limit the chain degrades with a
+/// typed budget failure instead of recursing unbounded. Mutation recipe:
+/// dropping the inline-open charge lets the chain resolve.
+#[test]
+fn flow_return_direct_call_chain_charges_connected_work() {
+    let host = make_host();
+    let mut source = String::new();
+    for index in 0..8 {
+        source.push_str(&format!(
+            "export function chain{index}() {{\n  return chain{}();\n}}\n",
+            index + 1
+        ));
+    }
+    source.push_str("export function chain8() {\n  return 1;\n}\n");
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/chain.ts".to_string()),
+        input_id: "/ws/chain.ts".to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/chain.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        dispatch.set_connected_limits_for_tests(4, u16::MAX);
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/chain.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("chain0"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        match dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            "/ws/chain.ts",
+        ) {
+            super::flow_return::FunctionReturnNode::Degraded(
+                crate::semantic_query::FlowReturnFailure::Budget(_),
+            ) => {}
+            other => panic!("the over-limit chain degrades with Budget, got {other:?}"),
+        }
+    });
+}
+
+/// ONE lexical binding authority: a hoisted nested function declaration
+/// shadows the outer same-name callee, and its own return is beyond the
+/// direct-call inventory — the call FAILS CLOSED (Unresolved), never
+/// binding the outer `g(): number`. Mutation recipe: firing the index
+/// DirectCall edge on the shadowed name admits `number` here.
+#[test]
+fn flow_return_direct_call_fails_closed_on_nested_function_declaration_shadow() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/fn-shadow.ts".to_string()),
+        input_id: "/ws/fn-shadow.ts".to_string(),
+        source: Arc::from(
+            "export function g(): number {\n  return 1;\n}\nexport function f() {\n  function g() {\n    return \"x\";\n  }\n  return g();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/fn-shadow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/fn-shadow.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("f"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        match dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            "/ws/fn-shadow.ts",
+        ) {
+            super::flow_return::FunctionReturnNode::Degraded(
+                crate::semantic_query::FlowReturnFailure::Unresolved,
+            ) => {}
+            other => panic!("the shadowed direct call fails closed, got {other:?}"),
+        }
+    });
+}
+
+/// The same authority covers the self name: a nested `function f(): number`
+/// inside `f` shadows BOTH the self-recursion hold and the declared nested
+/// return — the call fails closed (Unresolved), never EmptyCycle, never
+/// `number`. Mutation recipe: treating the call as a DirectSelfCall
+/// degrades this with EmptyCycle instead.
+#[test]
+fn flow_return_self_call_shadowed_by_nested_function_declaration_fails_closed() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/self-fn-shadow.ts".to_string()),
+        input_id: "/ws/self-fn-shadow.ts".to_string(),
+        source: Arc::from(
+            "export function f() {\n  function f(): number {\n    return 1;\n  }\n  return f();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/self-fn-shadow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/self-fn-shadow.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("f"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        match dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            "/ws/self-fn-shadow.ts",
+        ) {
+            super::flow_return::FunctionReturnNode::Degraded(
+                crate::semantic_query::FlowReturnFailure::Unresolved,
+            ) => {}
+            other => panic!("the shadowed self call fails closed, got {other:?}"),
+        }
+    });
+}
+
+/// A hoisted `var` is in scope from the function's first statement: a call
+/// before its declarator binds the LOCAL (unbound at evaluation — `any`),
+/// never the outer same-name callee's declared `number`. Mutation recipe:
+/// dropping the hoisted-`var` scope seed admits `number` here.
+#[test]
+fn flow_return_forward_var_call_binds_the_unbound_local_not_the_outer_callee() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/forward-var.ts".to_string()),
+        input_id: "/ws/forward-var.ts".to_string(),
+        source: Arc::from(
+            "export function g(): number {\n  return 1;\n}\nexport function f() {\n  return g();\n  var g = () => 1;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/forward-var.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/forward-var.ts", "f");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any)
+        );
+    });
+}
+
+/// A region pre-declares its own lexical names: a call before a `const`
+/// declarator binds the LOCAL (unbound — the TDZ-honest `any`), never the
+/// outer same-name callee. Mutation recipe: dropping the region
+/// pre-declare admits the outer `number` here.
+#[test]
+fn flow_return_forward_const_call_binds_the_unbound_local_not_the_outer_callee() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/forward-const.ts".to_string()),
+        input_id: "/ws/forward-const.ts".to_string(),
+        source: Arc::from(
+            "export function g(): number {\n  return 1;\n}\nexport function f() {\n  return g();\n  const g = () => 1;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/forward-const.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/forward-const.ts", "f");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any)
+        );
+    });
+}
+
+/// The pre-declare is ONE LEVEL deep: a `const` inside a nested block
+/// stays block-local and never shadows the outer callee after the block —
+/// the trailing `g()` still binds the outer `g(): number`. Mutation
+/// recipe: pre-declaring across nested blocks flips this to `any`.
+#[test]
+fn flow_return_block_local_const_does_not_shadow_the_outer_callee() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/block-const.ts".to_string()),
+        input_id: "/ws/block-const.ts".to_string(),
+        source: Arc::from(
+            "export function g(): number {\n  return 1;\n}\nexport function f(c: boolean) {\n  if (c) {\n    const g = () => \"s\";\n  }\n  return g();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/block-const.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/block-const.ts", "f");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+/// A root generic binder is in scope for the body's parameters and leaves:
+/// `function id<T extends string>(x: T) { return x }` returns the BINDER
+/// `T` (constraint `string`), never the file-scope alias `type T =
+/// number`. Mutation recipe: lowering params without the binder env
+/// resolves `T` to the alias and returns `number` here.
+#[test]
+fn flow_return_root_generic_binder_shadows_the_file_alias() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/root-binder.ts".to_string()),
+        input_id: "/ws/root-binder.ts".to_string(),
+        source: Arc::from(
+            "export type T = number;\nexport function id<T extends string>(x: T) {\n  return x;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/root-binder.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/root-binder.ts", "id");
+        let verter_type_expr::TypeExpr::TypeParameter(param) = &expr else {
+            panic!("the return is the root binder T, got {expr:?}");
+        };
+        assert_eq!(param.name, "T");
+        assert_eq!(
+            param.constraint.as_deref(),
+            Some(&verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String
+            )),
+            "the binder keeps its `string` constraint: {expr:?}"
+        );
+    });
+}
+
+/// A return-free loop inside a NESTED function value stays transparent:
+/// the nested body's control skeleton comes from the SAME single
+/// inventory walk, never an empty skeleton. Mutation recipe: serving an
+/// empty control skeleton for nested values degrades this to a miss.
+#[test]
+fn flow_return_nested_function_value_return_free_loop_stays_transparent() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/nested-loop.ts".to_string()),
+        input_id: "/ws/nested-loop.ts".to_string(),
+        source: Arc::from(
+            "export function f() {\n  return (() => {\n    let x = 7;\n    for (let i = 0; i < 1; i++) {}\n    return x;\n  })();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/nested-loop.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/nested-loop.ts", "f");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+/// The lexical binding authority reaches INSIDE nested function values: a
+/// hoisted nested declaration in the nested value's own body shadows the
+/// outer same-name callee, and its return is beyond the direct-call
+/// inventory — the call FAILS CLOSED (Unresolved), never binding the
+/// outer `g(): number`. Mutation recipe: seeding the nested Lowerer with
+/// an empty shadow set admits `number` here.
+#[test]
+fn flow_return_nested_value_hoisted_declaration_shadows_the_outer_callee() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/nested-fn-shadow.ts".to_string()),
+        input_id: "/ws/nested-fn-shadow.ts".to_string(),
+        source: Arc::from(
+            "export function g(): number {\n  return 1;\n}\nexport function outer() {\n  return (() => {\n    function g() {\n      return \"x\";\n    }\n    return g();\n  })();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/nested-fn-shadow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/nested-fn-shadow.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("outer"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        match dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            "/ws/nested-fn-shadow.ts",
+        ) {
+            super::flow_return::FunctionReturnNode::Degraded(
+                crate::semantic_query::FlowReturnFailure::Unresolved,
+            ) => {}
+            other => panic!("the nested-value shadowed call fails closed, got {other:?}"),
+        }
+    });
+}
+
+/// The same authority covers a nested value's OWN name: an inner hoisted
+/// declaration of the nested function's name shadows it — the call is
+/// NEVER a DirectSelfCall (no self edge, no EmptyCycle); it fails closed
+/// (Unresolved). Mutation recipe: an empty nested shadow set fires the
+/// DirectSelfCall arm and degrades with EmptyCycle instead.
+#[test]
+fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_fails_closed() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/nested-self-shadow.ts".to_string()),
+        input_id: "/ws/nested-self-shadow.ts".to_string(),
+        source: Arc::from(
+            "export function outer() {\n  return (function helper() {\n    function helper(): number {\n      return 1;\n    }\n    return helper();\n  })();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/nested-self-shadow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/nested-self-shadow.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("outer"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        match dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            "/ws/nested-self-shadow.ts",
+        ) {
+            super::flow_return::FunctionReturnNode::Degraded(
+                crate::semantic_query::FlowReturnFailure::Unresolved,
+            ) => {}
+            other => panic!(
+                "the nested-value self-name shadow fails closed (never EmptyCycle), got {other:?}"
+            ),
+        }
+    });
+}

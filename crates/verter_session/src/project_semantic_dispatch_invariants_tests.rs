@@ -292,11 +292,11 @@ fn relation_guard_returns_unknown_on_cyclic_reentry() {
     let relation_src = include_str!("project_semantic_dispatch/relation.rs");
     assert!(
         !relation_src.contains("RELATION_IN_FLIGHT"),
-        "the TLS-backed in-flight set is retired — cycle detection rides the CheckerTransaction reentry stack"
+        "cycle detection rides the CheckerDispatchTransaction reentry stack — no TLS in-flight set exists"
     );
     assert!(
         !relation_src.contains("enter_relation_guard"),
-        "the enter_/exit_relation_guard helpers are retired with the TLS set"
+        "no enter_/exit_relation_guard helpers exist beside the reentry stack"
     );
     // Behavioural: a deferred-shell pair returns Unknown and admits NOTHING.
     let host = host_for_relation_tests();
@@ -3913,7 +3913,7 @@ fn binding_session_close_publishes_root_only_with_fixed_bindings() {
     let before = graph.relation_memo_count();
     let step = dispatch.execute_relate_pair(source, target);
     match step {
-        crate::project_semantic_dispatch::relation_txn::RelationStep::Assignable { bindings } => {
+        crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { bindings } => {
             assert_eq!(bindings.len(), 1, "the session fixes exactly one binding");
             assert_eq!(bindings[0].name.as_ref(), "V");
             assert_eq!(
@@ -3946,7 +3946,7 @@ fn binding_session_close_publishes_root_only_with_fixed_bindings() {
     // without growing the memo.
     let replay = dispatch.execute_relate_pair(source, target);
     match replay {
-        crate::project_semantic_dispatch::relation_txn::RelationStep::Assignable { bindings } => {
+        crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { bindings } => {
             assert_eq!(bindings.len(), 1);
             assert_eq!(bindings[0].bound, number);
         }
@@ -3987,7 +3987,7 @@ fn binding_session_abandoned_by_budget_publishes_nothing() {
     assert!(
         matches!(
             step,
-            crate::project_semantic_dispatch::relation_txn::RelationStep::BudgetExceeded(_)
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::BudgetExceeded(_)
         ),
         "the tripped budget surfaces the typed public outcome, got {step:?}"
     );
@@ -4085,7 +4085,7 @@ fn relation_budget_exceeded_is_public_and_admits_nothing() {
     assert!(
         matches!(
             step,
-            crate::project_semantic_dispatch::relation_txn::RelationStep::BudgetExceeded(_)
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::BudgetExceeded(_)
         ),
         "the authority entry recomputes the typed outcome cold, got {step:?}"
     );
@@ -5764,7 +5764,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
         },
     ));
     match dispatch.execute_relate_pair(construct_obj, ctor_infer) {
-        crate::project_semantic_dispatch::relation_txn::RelationStep::Assignable { bindings } => {
+        crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { bindings } => {
             assert_eq!(bindings.len(), 1, "the construct-pattern session binds R");
             assert_eq!(
                 bindings[0].bound,
@@ -5803,7 +5803,7 @@ mod fresh_excess_property_checking {
     use verter_type_expr::ExcessPropertyOrigin;
 
     use super::{empty_surface, host_for_relation_tests, optional_member, required_member};
-    use crate::project_semantic_dispatch::relation_txn::RelationStep;
+    use crate::project_semantic_dispatch::dispatch_txn::RelationStep;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
         FreshnessKey, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember,

@@ -27941,8 +27941,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
                 }]
                 .into_boxed_slice(),
             ),
-            return_ty: None,
-            return_inference: tf::ReturnInferenceCompleteness::NotInferred,
+            return_source: tf::FunctionReturnSource::Absent,
             has_implementation_body: false,
             spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
                 SourceSynthetic,
@@ -28055,8 +28054,7 @@ fn component_meta_output_genuinely_absent_positions_stay_typed_unknown_not_failu
                 }]
                 .into_boxed_slice(),
             ),
-            return_ty: None, // deliberately absent synthetic return slot
-            return_inference: tf::ReturnInferenceCompleteness::NotInferred,
+            return_source: tf::FunctionReturnSource::Absent, // deliberately absent synthetic return
             has_implementation_body: false,
             spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
                 SourceSynthetic,

@@ -33,6 +33,8 @@ mod exports;
 mod fact_projection;
 pub mod file_usage;
 pub mod framework_facts;
+pub mod function_program;
+mod function_program_hash;
 pub mod html_intrinsics;
 mod imports;
 pub mod jsdoc;

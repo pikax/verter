@@ -316,14 +316,16 @@ enum FactKey {
     EffectiveExportSet,
     ModuleAugmentationIndexShape { target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern },
 
-    // Program-analysis domain (populated by the demand-sliced flow engine)
-    FlowSlice { function_slot, projection_path, slice_hash, selected_binding_ids, selected_effect_ids, selected_control_region_ids, closure_summary_ids },
+    // NOTE: no `FlowBody` variant — the ProgramAnalysis rail is NOT a
+    // per-file registry fact and has no `FactKey` (see below).
 }
 
 enum FactDomain { ParseFile, ResolveImports, RouteSurface, ProgramAnalysis }
 
 impl FactKey {
-    fn domain(&self) -> FactDomain;  // routes per-domain validator dispatch
+    // Routes the three REGISTRY domains (ParseFile / ResolveImports /
+    // RouteSurface). There is deliberately NO ProgramAnalysis arm.
+    fn domain(&self) -> FactDomain;
 }
 ```
 
@@ -332,44 +334,68 @@ augmentation statement. It distinguishes same-name contributors from module
 and instance script regions; the resolved augmentation target scope remains
 unpartitioned by lexical owner.
 
-`FactKey::domain()` routes validator lookups through the `StoreView`
-trait surface:
+`StoreView::validates` dispatches on the `FactVersionRef` VARIANT — each
+of the four closed domains routes to its per-domain validator:
 
 ```rust
 trait StoreView {
     fn compat_token(&self) -> StoreViewCompatToken;
     fn validates(&self, fact: &FactVersionRef) -> bool;
     // R26 per-domain validators — default impls return `false`;
-    // Stage 6 producers override.
+    // producers override.
     fn validates_parse_domain(&self, _fact: &ParseFactRef) -> bool { false }
     fn validates_resolve_imports_domain(&self, _fact: &ResolveImportsFactRef) -> bool { false }
     fn validates_route_surface_domain(&self, _fact: &RouteSurfaceFactRef) -> bool { false }
-    // ProgramAnalysis domain — owns the `FlowSlice` fact (the demand-sliced flow
-    // engine). Validates against the current region/function-body identity
-    // (`flow_body_stable_hash`) + the stored `FlowSlice` semantic hash. Fail-closed:
-    // a missing / overflowed / stale / unrooted `FlowSlice` fact returns `false`.
+    // ProgramAnalysis domain — the `FlowBody` whole-function rail (no
+    // FactKey; see below). Default impl fails closed; the production
+    // `HostStoreView` overrides with the live `FunctionProgramIndex`
+    // whole-body hash comparison.
     fn validates_program_analysis_domain(&self, _fact: &ProgramAnalysisFactRef) -> bool { false }
 }
 ```
 
-The dispatch table is bounded by `FactDomain` (4 variants), not by
-`FactKey`. Adding a new `FactKey` extends a per-domain `*FactRef`
-enum but does NOT widen the trait.
+The dispatch table is bounded by the four `FactVersionRef` domain
+variants, not by `FactKey`. Adding a new `FactKey` extends a per-domain
+registry `*FactRef` enum but does NOT widen the trait.
 
-The `ProgramAnalysis` domain is the fourth closed `FactDomain`. It owns
-the `FlowSlice` fact produced by the demand-sliced flow engine — `FlowSlice`
-is NOT a parse / resolve-imports / route-surface fact. Its
-`FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef { .. })` carries the
-flow-region identity (`function_slot`, `projection_path`, `flow_body_stable_hash`)
-plus the stored `FlowSlice` semantic hash. `StoreView::validates_program_analysis_domain`
-re-derives the live region's `flow_body_stable_hash` and the recorded slice's
-semantic hash and validates BOTH gates; it FAILS CLOSED on a missing, overflowed,
-stale (body changed → `flow_body_stable_hash` differs), or unrooted fact — a
-fail-closed miss recomputes rather than serving a torn slice. `flow_body_stable_hash`
-is content-derived flow node/fact identity, NOT a query-identity-key dimension:
-query-identity keys stay content-free (R6); the flow result is version-rooted via
-this `FlowSlice` fact, exactly as the other query-identity caches version-root
-through their recorded facts.
+The `ProgramAnalysis` domain is the fourth closed `FactDomain` — and the
+only one with NO `FactKey`. The `FlowBody` rail is a read-time recorded
+`FactVersionRef` variant, not a per-file registry fact
+(`verter_workspace::fact_cache`):
+
+```rust
+/// The exact function identity of a program-analysis `FlowBody` fact.
+struct ProgramAnalysisFunctionRef {
+    canonical_id, owner, merged_symbol_name, symbol_space,
+    function_part, overload_ordinal,
+}
+
+enum ProgramAnalysisFactRef {
+    /// One served function position's whole-body stable hash, observed
+    /// from the per-file `FunctionProgramIndex`.
+    FlowBody { function: ProgramAnalysisFunctionRef, flow_body_stable_hash: FactHash16 },
+}
+
+enum FactVersionRef { /* …, */ ProgramAnalysis(ProgramAnalysisFactRef), /* … */ }
+```
+
+The whole-function flow producer (`SemanticQueryKey::FlowReturn`) observes
+`FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody { .. })`
+— the exact function identity plus the `flow_body_stable_hash` the
+producing read observed from the per-file `FunctionProgramIndex`.
+`validates` dispatches the variant to `validates_program_analysis_domain`;
+the production override (`HostStoreView` in `resolver_store.rs`) compares
+the recorded hash against the live `FunctionProgramIndex` entry for that
+exact identity (owner / merged name / symbol space / function part /
+overload ordinal) — a structural index read through the view's captured
+`IndexedReady`; it does NOT re-lower or rerun reachability. It FAILS
+CLOSED on a tombstoned, untracked, or artifact-missing canonical and on
+any hash mismatch (body changed → `flow_body_stable_hash` differs) — a
+fail-closed miss recomputes rather than serving a torn result.
+`flow_body_stable_hash` is content-derived body identity, NOT a
+query-identity-key dimension: query-identity keys stay content-free (R6);
+the flow result is version-rooted via this `FlowBody` fact, exactly as the
+other query-identity caches version-root through their recorded facts.
 
 ## Two-phase emission (R28)
 

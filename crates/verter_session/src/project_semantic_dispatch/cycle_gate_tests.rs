@@ -843,7 +843,7 @@ fn cycle_gate_content_only_revision_admits_new_candidate_under_same_key() {
 /// corrupts a recursive relation outcome here.
 #[test]
 fn cycle_gate_classifier_invoked_around_relate_leaves_relation_frames_untouched() {
-    use crate::project_semantic_dispatch::relation_txn::RelationStep;
+    use crate::project_semantic_dispatch::dispatch_txn::RelationStep;
     use crate::semantic_query::{
         InstantiateKey, ProjectionMode, ProjectionReductionContext, QueryResult,
     };

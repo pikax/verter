@@ -454,7 +454,7 @@ fn lowers_constructor_type_wrapping_a_function_signature() {
             }
         ),
         "a bare `new (…) => R` lowers to a root construct Signature, got {:?}",
-        &*node(&graph, root)
+        *node(&graph, root)
     );
     let signature = root;
     match &*node(&graph, signature) {
@@ -865,7 +865,7 @@ fn conditional_binds_bare_infer_in_true_branch() {
                 "the true-branch `P` binds as an `InferRef` REFERENCE to the `infer P` \
                  declaration introduced by `extends` (reference-vs-declaration survives \
                  interning), got {:?}",
-                &*node(&graph, *true_branch_ref)
+                *node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -925,7 +925,7 @@ fn conditional_binds_nested_infer_in_true_branch() {
                 matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "E"),
                 "the true-branch `E` binds as an `InferRef` REFERENCE to the nested \
                  `infer E` declaration, got {:?}",
-                &*node(&graph, *true_branch_ref)
+                *node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -998,7 +998,7 @@ fn conditional_binds_object_member_infer_in_true_branch() {
                 matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "P"),
                 "the true-branch `P` binds as an `InferRef` REFERENCE to the \
                  object-member `infer P` declaration, got {:?}",
-                &*node(&graph, *true_branch_ref)
+                *node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -1073,7 +1073,7 @@ fn conditional_binds_function_param_infer_in_true_branch() {
                 matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "P"),
                 "the true-branch `P` binds as an `InferRef` REFERENCE to the \
                  function-param `infer P` declaration, got {:?}",
-                &*node(&graph, *true_branch_ref)
+                *node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -1137,7 +1137,7 @@ fn conditional_binds_mapped_as_remap_infer_in_true_branch() {
                 matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "R"),
                 "the true-branch `R` binds as an `InferRef` REFERENCE to the mapped \
                  `as infer R` declaration, got {:?}",
-                &*node(&graph, *true_branch_ref)
+                *node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -1911,12 +1911,12 @@ fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
     assert!(
         matches!(&*node(&graph, inner_extends), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "U"),
         "the inner `extends U` is a REFERENCE to the outer binder, got {:?}",
-        &*node(&graph, inner_extends)
+        *node(&graph, inner_extends)
     );
     assert!(
         matches!(&*node(&graph, inner_true), SemanticNodeData::InferRef { name, .. } if name.as_ref() == "U"),
         "the inner true-branch `U` is a REFERENCE to the outer binder, got {:?}",
-        &*node(&graph, inner_true)
+        *node(&graph, inner_true)
     );
 
     // Behavioral contract: the payload evaluates to `"no"`.
@@ -1959,7 +1959,7 @@ fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
         ),
         "`string extends infer U ? (number extends U ? U : \"no\") : never` must \
          resolve \"no\" on the macro producer path, got {:?}",
-        &*node(&graph, result)
+        *node(&graph, result)
     );
 }
 
@@ -1991,6 +1991,6 @@ fn structural_equivalence_for_constructor_signature() {
             }
         ),
         "both producers mint a root Signature(Construct), got {:?}",
-        &*node(&graph, root)
+        *node(&graph, root)
     );
 }
