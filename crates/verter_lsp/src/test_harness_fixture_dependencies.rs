@@ -905,16 +905,26 @@ mod tests {
     #[test]
     fn harness_tsserver_resolution_ignores_ambient_ancestor_typescript() {
         let temporary = tempfile::tempdir().expect("create toolchain scratch root");
+        // `resolve_tsserver` CANONICALIZES every candidate it serves (the pnpm
+        // symlink resolution is load-bearing), so its answers carry the real
+        // path identity. The scratch root must be compared in that same
+        // identity: on macOS `TMPDIR` is itself a symlink (`/var/folders/…` →
+        // `/private/var/folders/…`), and deriving the plants from the raw
+        // spelling would make `starts_with` reject the CORRECT resolution as a
+        // different path — the walk outranking the tsdk is exactly what this
+        // test must observe, not a spelling artifact.
+        let scratch_root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonicalize toolchain scratch root");
         // An ambient TypeScript ABOVE the staged root, exactly as a `TMPDIR`
         // nested under any tree with a `node_modules` would supply.
-        let ambient = temporary.path().join("node_modules/typescript/lib");
+        let ambient = scratch_root.join("node_modules/typescript/lib");
         plant_tsserver_install(&ambient);
         // The tsdk the harness names, somewhere the ancestor walk never reaches.
-        let tsdk_dir = temporary.path().join("configured/typescript/lib");
+        let tsdk_dir = scratch_root.join("configured/typescript/lib");
         plant_tsserver_install(&tsdk_dir);
-        let staged_root = temporary
-            .path()
-            .join("verter-fixture-stage/test-0/single-project");
+        let staged_root = scratch_root.join("verter-fixture-stage/test-0/single-project");
         std::fs::create_dir_all(&staged_root).expect("create staged root");
         let tsdk = tsdk_dir.to_string_lossy().replace('\\', "/");
 
@@ -936,7 +946,7 @@ mod tests {
         )
         .expect("a workspace-rooted resolution must find something");
         assert!(
-            with_root.starts_with(temporary.path().join("node_modules")),
+            with_root.starts_with(scratch_root.join("node_modules")),
             "the ancestor walk must outrank the configured tsdk — otherwise this \
              test cannot discriminate, got: {}",
             with_root.display()
@@ -945,7 +955,7 @@ mod tests {
         let harness = crate::test_harness::harness_tsserver_path(&tsdk)
             .expect("the harness seam must resolve the configured tsdk");
         assert!(
-            harness.starts_with(temporary.path().join("configured")),
+            harness.starts_with(scratch_root.join("configured")),
             "the harness must run the TypeScript it names, not one found above \
              the staged root, got: {}",
             harness.display()
