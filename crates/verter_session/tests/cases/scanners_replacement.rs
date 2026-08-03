@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const LEDGER_KEYS: [&str; 14] = [
     "path",
@@ -28,6 +29,78 @@ const LEDGER_KEYS: [&str; 14] = [
     "test",
     "architecture_guard",
 ];
+
+type CandidateIdentity = (String, String);
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum DiscoveryInput {
+    TrackedProductionSources,
+    CargoPackageGraph,
+    PnpmPackageGraph,
+    ExtensionManifests,
+    CiReleaseSteps,
+    GeneratedBindingManifests,
+    UnpackedShippingArtifacts,
+}
+
+const REQUIRED_DISCOVERY_INPUTS: [DiscoveryInput; 7] = [
+    DiscoveryInput::TrackedProductionSources,
+    DiscoveryInput::CargoPackageGraph,
+    DiscoveryInput::PnpmPackageGraph,
+    DiscoveryInput::ExtensionManifests,
+    DiscoveryInput::CiReleaseSteps,
+    DiscoveryInput::GeneratedBindingManifests,
+    DiscoveryInput::UnpackedShippingArtifacts,
+];
+
+impl DiscoveryInput {
+    fn label(self) -> &'static str {
+        match self {
+            Self::TrackedProductionSources => "git_tracked_production_sources",
+            Self::CargoPackageGraph => "cargo_package_graph",
+            Self::PnpmPackageGraph => "pnpm_package_graph",
+            Self::ExtensionManifests => "extension_manifests",
+            Self::CiReleaseSteps => "ci_release_steps",
+            Self::GeneratedBindingManifests => "generated_binding_manifests",
+            Self::UnpackedShippingArtifacts => "unpacked_shipping_artifacts",
+        }
+    }
+}
+
+struct CandidateDiscovery {
+    candidates: BTreeSet<CandidateIdentity>,
+    by_input: BTreeMap<DiscoveryInput, BTreeSet<CandidateIdentity>>,
+}
+
+impl CandidateDiscovery {
+    fn input_counts(&self) -> BTreeMap<&'static str, usize> {
+        REQUIRED_DISCOVERY_INPUTS
+            .into_iter()
+            .map(|input| {
+                (
+                    input.label(),
+                    self.by_input.get(&input).map_or(0, BTreeSet::len),
+                )
+            })
+            .collect()
+    }
+}
+
+fn validate_discovery_input_coverage(discovery: &CandidateDiscovery) -> Result<(), String> {
+    for input in REQUIRED_DISCOVERY_INPUTS {
+        if discovery
+            .by_input
+            .get(&input)
+            .is_none_or(BTreeSet::is_empty)
+        {
+            return Err(format!(
+                "mandated discovery input {} contributed zero candidates",
+                input.label()
+            ));
+        }
+    }
+    Ok(())
+}
 
 // Closed type universe derived from ruling v2 §§4.1–4.9 plus the V1 images
 // named by the binding plan's canonical projection table.
@@ -428,7 +501,11 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
 ];
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root above verter_session manifest")
+        .to_path_buf()
 }
 
 fn read_json(relative: &str) -> Value {
@@ -796,9 +873,13 @@ fn scanners_replacement_schema_declaration_deletion_is_rejected() {
 }
 
 fn run_workspace_command(program: &str, args: &[&str]) -> String {
+    run_command_at(workspace_root(), program, args)
+}
+
+fn run_command_at(cwd: impl AsRef<Path>, program: &str, args: &[&str]) -> String {
     let output = Command::new(program)
         .args(args)
-        .current_dir(workspace_root())
+        .current_dir(cwd)
         .output()
         .unwrap_or_else(|error| panic!("failed to run {program}: {error}"));
     assert!(
@@ -809,47 +890,149 @@ fn run_workspace_command(program: &str, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("command output must be UTF-8")
 }
 
-fn independently_discovered_candidates() -> BTreeSet<(String, String)> {
+fn pnpm_program() -> &'static str {
+    if cfg!(windows) {
+        "pnpm.cmd"
+    } else {
+        "pnpm"
+    }
+}
+
+fn normalized_relative_path(path: &Path) -> String {
+    path.strip_prefix(workspace_root())
+        .unwrap_or_else(|_| panic!("path is outside workspace: {}", path.display()))
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn add_tracked_under(selected: &mut BTreeSet<String>, tracked: &BTreeSet<String>, root: &str) {
+    let root = root.trim_end_matches('/');
+    let prefix = format!("{root}/");
+    selected.extend(
+        tracked
+            .iter()
+            .filter(|path| *path == root || path.starts_with(&prefix))
+            .cloned(),
+    );
+}
+
+fn workspace_pattern_matches(package_dir: &str, pattern: &str) -> bool {
+    if let Some(parent) = pattern.strip_suffix("/*") {
+        return package_dir
+            .strip_prefix(&format!("{parent}/"))
+            .is_some_and(|tail| !tail.is_empty() && !tail.contains('/'));
+    }
+    package_dir == pattern
+}
+
+fn collect_json_strings(value: &Value, strings: &mut Vec<String>) {
+    match value {
+        Value::String(value) => strings.push(value.clone()),
+        Value::Array(values) => {
+            for value in values {
+                collect_json_strings(value, strings);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_json_strings(value, strings);
+            }
+        }
+        _ => {}
+    }
+}
+
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn freshly_unpacked_shipping_paths(
+    tracked: &BTreeSet<String>,
+    files: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut selected = BTreeSet::new();
+    let package_manifests = tracked
+        .iter()
+        .filter(|path| path.starts_with("extensions/") && path.ends_with("/package.json"));
+    for manifest_path in package_manifests {
+        let manifest: Value = serde_json::from_str(
+            files
+                .get(manifest_path)
+                .unwrap_or_else(|| panic!("missing tracked manifest {manifest_path}")),
+        )
+        .unwrap_or_else(|error| panic!("invalid {manifest_path}: {error}"));
+        let Some(main) = manifest["main"].as_str() else {
+            continue;
+        };
+        let package_root = manifest_path.trim_end_matches("/package.json");
+        let main_path = format!("{package_root}/{}", main.trim_start_matches("./"));
+        if !tracked.contains(&main_path) {
+            continue;
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!(
+            "verter-scanners-b0-pack-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp).expect("create shipping-artifact temp dir");
+        let _guard = TempDirGuard(temp.clone());
+        let temp_arg = temp.to_string_lossy().into_owned();
+        run_command_at(
+            workspace_root().join(package_root),
+            pnpm_program(),
+            &["pack", "--pack-destination", &temp_arg],
+        );
+        let archive = fs::read_dir(&temp)
+            .expect("read shipping-artifact temp dir")
+            .map(|entry| entry.expect("shipping artifact entry").path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "tgz"))
+            .expect("pnpm pack produced no tgz");
+        let archive_name = archive
+            .file_name()
+            .expect("shipping archive filename")
+            .to_string_lossy()
+            .into_owned();
+        run_command_at(&temp, "tar", &["-xzf", &archive_name]);
+        let unpacked_main = temp.join("package").join(main.trim_start_matches("./"));
+        let unpacked_source = fs::read_to_string(&unpacked_main).unwrap_or_else(|error| {
+            panic!(
+                "shipping entry {} missing from freshly unpacked {}: {error}",
+                main,
+                archive.display()
+            )
+        });
+        assert_eq!(
+            files.get(&main_path),
+            Some(&unpacked_source),
+            "freshly unpacked shipping entry drifted from tracked source"
+        );
+        selected.insert(main_path);
+    }
+    selected
+}
+
+fn independently_discovered_candidates() -> CandidateDiscovery {
     let tracked = run_workspace_command("git", &["ls-files"]);
+    let tracked_paths = tracked
+        .lines()
+        .map(|path| path.replace('\\', "/"))
+        .collect::<BTreeSet<_>>();
     let metadata = run_workspace_command(
         "cargo",
-        &[
-            "metadata",
-            "--format-version",
-            "1",
-            "--all-features",
-            "--no-deps",
-        ],
+        &["metadata", "--format-version", "1", "--all-features"],
     );
     let metadata: Value = serde_json::from_str(&metadata).expect("cargo metadata JSON");
-    assert!(metadata["packages"].as_array().is_some_and(|packages| {
-        packages
-            .iter()
-            .any(|package| package["name"] == "verter_session")
-    }));
-
-    // These are the documented B0 rg families. Running the real probe proves
-    // the selector is live; the same alternatives below classify its matches
-    // at the agreed path/function aggregation granularity.
-    let broad_probe = run_workspace_command(
-        "rg",
-        &[
-            "--files-with-matches",
-            "--glob",
-            "*.{rs,ts,js,proto,json}",
-            "scan_sfc_blocks|SfcBlock|customBlocks|applyBlockOverrides|findHtmlTagEnd|find_opening_tag_end|<style\\b|</script>|build_synthetic_source",
-            "crates",
-            "packages",
-            "extensions",
-        ],
-    );
-    assert!(
-        !broad_probe.trim().is_empty(),
-        "discovery rg selected no work"
-    );
 
     let mut files = BTreeMap::new();
-    for path in tracked.lines().map(|path| path.replace('\\', "/")) {
+    for path in &tracked_paths {
         if !(path.starts_with("crates/")
             || path.starts_with("packages/")
             || path.starts_with("extensions/")
@@ -865,10 +1048,282 @@ fn independently_discovered_candidates() -> BTreeSet<(String, String)> {
         {
             continue;
         }
-        if let Ok(source) = fs::read_to_string(workspace_root().join(&path)) {
-            files.insert(path, source);
+        if let Ok(source) = fs::read_to_string(workspace_root().join(path)) {
+            files.insert(path.clone(), source);
         }
     }
+
+    let mut input_paths = BTreeMap::<DiscoveryInput, BTreeSet<String>>::new();
+    input_paths.insert(
+        DiscoveryInput::TrackedProductionSources,
+        files.keys().cloned().collect(),
+    );
+
+    let workspace_members = metadata["workspace_members"]
+        .as_array()
+        .expect("cargo metadata workspace_members")
+        .iter()
+        .map(|id| id.as_str().expect("cargo workspace member id"))
+        .collect::<BTreeSet<_>>();
+    let resolve_nodes = metadata["resolve"]["nodes"]
+        .as_array()
+        .expect("cargo metadata dependency graph nodes");
+    for member in &workspace_members {
+        let node = resolve_nodes
+            .iter()
+            .find(|node| node["id"] == **member)
+            .unwrap_or_else(|| panic!("workspace package {member} missing from dependency graph"));
+        assert!(
+            node["deps"].is_array(),
+            "package {member} has no dependency list"
+        );
+        assert!(
+            node["features"].is_array(),
+            "package {member} has no all-features resolution"
+        );
+    }
+    let mut cargo_paths = BTreeSet::new();
+    let mut cargo_packages_seen = BTreeSet::new();
+    for package in metadata["packages"].as_array().expect("cargo packages") {
+        let id = package["id"].as_str().expect("cargo package id");
+        if !workspace_members.contains(id) {
+            continue;
+        }
+        cargo_packages_seen.insert(id);
+        let manifest = PathBuf::from(
+            package["manifest_path"]
+                .as_str()
+                .expect("cargo package manifest_path"),
+        );
+        let package_root = normalized_relative_path(
+            manifest
+                .parent()
+                .expect("cargo package manifest has no parent"),
+        );
+        add_tracked_under(&mut cargo_paths, &tracked_paths, &package_root);
+        let targets = package["targets"]
+            .as_array()
+            .expect("cargo package targets");
+        assert!(!targets.is_empty(), "workspace package {id} has no targets");
+        for target in targets {
+            let source = PathBuf::from(target["src_path"].as_str().expect("cargo target src_path"));
+            let source = normalized_relative_path(&source);
+            assert!(
+                tracked_paths.contains(&source),
+                "cargo target source is not tracked: {source}"
+            );
+            cargo_paths.insert(source);
+        }
+    }
+    assert_eq!(cargo_packages_seen, workspace_members);
+    input_paths.insert(DiscoveryInput::CargoPackageGraph, cargo_paths);
+
+    let pnpm_output = run_workspace_command(
+        pnpm_program(),
+        &["list", "-r", "--depth", "Infinity", "--json"],
+    );
+    let pnpm_packages: Value = serde_json::from_str(&pnpm_output).expect("pnpm list JSON");
+    let workspace_yaml = fs::read_to_string(workspace_root().join("pnpm-workspace.yaml"))
+        .expect("pnpm-workspace.yaml");
+    let workspace_pattern = Regex::new(r#"(?m)^\s*-\s*[\"']([^\"']+)[\"']\s*$"#).unwrap();
+    let workspace_patterns = workspace_pattern
+        .captures_iter(&workspace_yaml)
+        .map(|capture| capture[1].to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        !workspace_patterns.is_empty(),
+        "pnpm workspace has no package globs"
+    );
+    let expected_pnpm_dirs = tracked_paths
+        .iter()
+        .filter(|path| path.ends_with("/package.json"))
+        .filter_map(|path| path.strip_suffix("/package.json"))
+        .filter(|dir| {
+            workspace_patterns
+                .iter()
+                .any(|pattern| workspace_pattern_matches(dir, pattern))
+        })
+        .map(str::to_owned)
+        .chain(std::iter::once(".".to_owned()))
+        .collect::<BTreeSet<_>>();
+    let actual_pnpm_dirs = pnpm_packages
+        .as_array()
+        .expect("pnpm list root array")
+        .iter()
+        .map(|package| {
+            let absolute = PathBuf::from(package["path"].as_str().expect("pnpm package path"));
+            if absolute == workspace_root() {
+                ".".to_owned()
+            } else {
+                normalized_relative_path(&absolute)
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_pnpm_dirs, expected_pnpm_dirs,
+        "pnpm list omitted or invented a workspace package"
+    );
+    let mut graph_workspace_dirs = BTreeSet::new();
+    for package in pnpm_packages.as_array().expect("pnpm list root array") {
+        for dependency_section in ["dependencies", "optionalDependencies"] {
+            let Some(dependencies) = package[dependency_section].as_object() else {
+                continue;
+            };
+            for dependency in dependencies.values() {
+                let Some(path) = dependency["path"].as_str() else {
+                    continue;
+                };
+                let absolute = PathBuf::from(path);
+                if absolute.starts_with(workspace_root()) && !path.contains("node_modules") {
+                    graph_workspace_dirs.insert(normalized_relative_path(&absolute));
+                }
+            }
+        }
+    }
+    assert!(
+        graph_workspace_dirs.is_subset(&actual_pnpm_dirs),
+        "pnpm dependency graph references a workspace package omitted from the package list"
+    );
+    let mut pnpm_paths =
+        BTreeSet::from(["package.json".to_owned(), "pnpm-workspace.yaml".to_owned()]);
+    let mut declared_entrypoints = 0;
+    for package_dir in &actual_pnpm_dirs {
+        let manifest_path = if package_dir == "." {
+            "package.json".to_owned()
+        } else {
+            format!("{package_dir}/package.json")
+        };
+        assert!(
+            tracked_paths.contains(&manifest_path),
+            "pnpm package has no tracked manifest: {manifest_path}"
+        );
+        let manifest_source = fs::read_to_string(workspace_root().join(&manifest_path))
+            .unwrap_or_else(|error| panic!("failed to read {manifest_path}: {error}"));
+        let manifest: Value = serde_json::from_str(&manifest_source)
+            .unwrap_or_else(|error| panic!("invalid {manifest_path}: {error}"));
+        if package_dir != "." {
+            add_tracked_under(&mut pnpm_paths, &tracked_paths, package_dir);
+        }
+        let mut entrypoints = Vec::new();
+        for field in ["main", "module", "types", "bin", "exports"] {
+            collect_json_strings(&manifest[field], &mut entrypoints);
+        }
+        declared_entrypoints += entrypoints.len();
+        for entrypoint in entrypoints {
+            if entrypoint.starts_with('#') || entrypoint.contains('*') {
+                continue;
+            }
+            let entrypoint = entrypoint.trim_start_matches("./");
+            let path = if package_dir == "." {
+                entrypoint.to_owned()
+            } else {
+                format!("{package_dir}/{entrypoint}")
+            };
+            if tracked_paths.contains(&path) {
+                pnpm_paths.insert(path);
+            }
+        }
+    }
+    assert!(
+        declared_entrypoints > 0,
+        "pnpm package graph exposed no production entrypoints"
+    );
+    input_paths.insert(DiscoveryInput::PnpmPackageGraph, pnpm_paths);
+
+    let mut extension_paths = BTreeSet::new();
+    for (path, source) in &files {
+        if !path.ends_with("/package.json") {
+            continue;
+        }
+        let manifest: Value = serde_json::from_str(source).expect("extension manifest JSON");
+        if manifest["publisher"].is_string() && manifest["engines"]["vscode"].is_string() {
+            let extension_root = path.trim_end_matches("/package.json");
+            add_tracked_under(&mut extension_paths, &tracked_paths, extension_root);
+        }
+    }
+    input_paths.insert(DiscoveryInput::ExtensionManifests, extension_paths);
+
+    let workflow_path = Regex::new(r"(?:crates|packages|extensions)/[A-Za-z0-9_./*${}-]+").unwrap();
+    let workflow_step =
+        Regex::new(r"(?i)\b(cp|copy|mv|package|stage|upload-artifact|download-artifact)\b")
+            .unwrap();
+    let mut ci_release_paths = BTreeSet::new();
+    for workflow in tracked_paths.iter().filter(|path| {
+        path.starts_with(".github/workflows/")
+            && (path.ends_with(".yml") || path.ends_with(".yaml"))
+    }) {
+        let source = fs::read_to_string(workspace_root().join(workflow))
+            .unwrap_or_else(|error| panic!("failed to read {workflow}: {error}"));
+        let mut in_packaging_step = false;
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("- name:") || trimmed.starts_with("- uses:") {
+                in_packaging_step = workflow_step.is_match(line);
+            }
+            if !in_packaging_step {
+                continue;
+            }
+            if line.contains("package.json") {
+                ci_release_paths.insert("package.json".to_owned());
+            }
+            for matched in workflow_path.find_iter(line) {
+                let mut referenced = matched.as_str().trim_end_matches('/').to_owned();
+                if let Some(wildcard) = referenced.find('*') {
+                    referenced.truncate(wildcard);
+                    referenced = referenced.trim_end_matches('/').to_owned();
+                }
+                if !referenced.is_empty() {
+                    add_tracked_under(&mut ci_release_paths, &tracked_paths, &referenced);
+                }
+            }
+        }
+    }
+    input_paths.insert(DiscoveryInput::CiReleaseSteps, ci_release_paths);
+
+    let buf_manifest =
+        fs::read_to_string(workspace_root().join("buf.gen.yaml")).expect("buf.gen.yaml");
+    let generated_out = Regex::new(r"(?m)^\s*out:\s*(\S+)\s*$").unwrap();
+    let mut generated_paths = BTreeSet::new();
+    for capture in generated_out.captures_iter(&buf_manifest) {
+        add_tracked_under(&mut generated_paths, &tracked_paths, &capture[1]);
+    }
+    let root_manifest: Value = serde_json::from_str(
+        files
+            .get("package.json")
+            .expect("root package manifest source"),
+    )
+    .expect("root package manifest JSON");
+    assert!(
+        root_manifest["scripts"]["proto:gen"]
+            .as_str()
+            .is_some_and(|script| script.contains("buf generate")),
+        "root generated-binding command does not consume buf.gen.yaml"
+    );
+    let native_manifest: Value = serde_json::from_str(
+        files
+            .get("packages/native/package.json")
+            .expect("native binding manifest source"),
+    )
+    .expect("native binding manifest JSON");
+    assert!(
+        native_manifest["napi"].is_object(),
+        "native binding manifest has no napi graph"
+    );
+    let native_main = native_manifest["main"]
+        .as_str()
+        .expect("native binding main entry");
+    let native_main = format!("packages/native/{}", native_main.trim_start_matches("./"));
+    assert!(
+        tracked_paths.contains(&native_main),
+        "generated native loader entry is not tracked: {native_main}"
+    );
+    generated_paths.insert(native_main);
+    input_paths.insert(DiscoveryInput::GeneratedBindingManifests, generated_paths);
+
+    input_paths.insert(
+        DiscoveryInput::UnpackedShippingArtifacts,
+        freshly_unpacked_shipping_paths(&tracked_paths, &files),
+    );
 
     let mut discovered = BTreeSet::new();
     // The named-symbol LSP probe is aggregated to one row per matching path;
@@ -1210,18 +1665,44 @@ fn independently_discovered_candidates() -> BTreeSet<(String, String)> {
         "raw_source_compile",
     );
 
-    discovered
+    let by_input = input_paths
+        .into_iter()
+        .map(|(input, paths)| {
+            let candidates = discovered
+                .iter()
+                .filter(|(path, _)| paths.contains(path))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            (input, candidates)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let candidates = by_input
+        .values()
+        .flat_map(|candidates| candidates.iter().cloned())
+        .collect();
+    CandidateDiscovery {
+        candidates,
+        by_input,
+    }
 }
 
 fn validate_ledger_discovery_equality(
     ledger: &Value,
-    discovered: &BTreeSet<(String, String)>,
+    discovery: &CandidateDiscovery,
 ) -> Result<(), String> {
+    validate_discovery_input_coverage(discovery)?;
     let rows = ledger["rows"].as_array().ok_or("ledger rows")?;
     if ledger["set_equality"]["independently_discovered_candidates"] != rows.len()
         || ledger["set_equality"]["classified_ledger_rows"] != rows.len()
     {
         return Err("ledger count attestation drifted from rows".into());
+    }
+    let input_counts = serde_json::to_value(discovery.input_counts())
+        .map_err(|error| format!("serialize discovery input counts: {error}"))?;
+    if ledger["discovery"]["gate_input_candidate_counts"] != input_counts {
+        return Err(format!(
+            "discovery input count attestation drifted: actual {input_counts}"
+        ));
     }
     let identities = rows
         .iter()
@@ -1233,7 +1714,7 @@ fn validate_ledger_discovery_equality(
         })
         .collect::<Result<BTreeSet<_>, &str>>()
         .map_err(str::to_owned)?;
-    if &identities != discovered {
+    if identities != discovery.candidates {
         return Err("independent candidate set drifted".into());
     }
     Ok(())
@@ -1257,6 +1738,39 @@ fn scanners_replacement_capability_ledger_deleted_row_is_rejected() {
         validate_ledger_discovery_equality(&ledger, &independently_discovered_candidates()),
         Err("independent candidate set drifted".into())
     );
+}
+
+#[test]
+fn scanners_replacement_mandated_candidate_inputs_are_nonempty() {
+    let discovery = independently_discovered_candidates();
+    validate_discovery_input_coverage(&discovery).unwrap();
+}
+
+#[test]
+fn scanners_replacement_zero_candidate_input_is_rejected() {
+    let sentinel = BTreeSet::from([("sentinel.rs".to_owned(), "sentinel".to_owned())]);
+    let complete = BTreeMap::from(REQUIRED_DISCOVERY_INPUTS.map(|input| (input, sentinel.clone())));
+    let control = CandidateDiscovery {
+        candidates: sentinel.clone(),
+        by_input: complete.clone(),
+    };
+    assert_eq!(validate_discovery_input_coverage(&control), Ok(()));
+    for missing in REQUIRED_DISCOVERY_INPUTS {
+        let mut by_input = complete.clone();
+        by_input.get_mut(&missing).unwrap().clear();
+        let discovery = CandidateDiscovery {
+            candidates: sentinel.clone(),
+            by_input,
+        };
+        assert_eq!(
+            validate_discovery_input_coverage(&discovery),
+            Err(format!(
+                "mandated discovery input {} contributed zero candidates",
+                missing.label()
+            ))
+        );
+    }
+    assert_eq!(validate_discovery_input_coverage(&control), Ok(()));
 }
 
 #[test]
@@ -1327,7 +1841,9 @@ fn scanners_replacement_capability_ledger_is_total() {
         rows.len()
     );
     assert_eq!(ledger["set_equality"]["classified_ledger_rows"], rows.len());
-    let discovered = independently_discovered_candidates();
+    let discovery = independently_discovered_candidates();
+    validate_discovery_input_coverage(&discovery).unwrap();
+    let discovered = discovery.candidates.clone();
     let ledger_identities = identities
         .into_iter()
         .map(|(path, symbol)| (path.to_owned(), symbol.to_owned()))
@@ -1336,7 +1852,7 @@ fn scanners_replacement_capability_ledger_is_total() {
         discovered, ledger_identities,
         "independent candidate set drifted"
     );
-    validate_ledger_discovery_equality(&ledger, &discovered).unwrap();
+    validate_ledger_discovery_equality(&ledger, &discovery).unwrap();
     assert_eq!(
         ledger["consumer_matrix"].as_array().map(Vec::len),
         Some(
