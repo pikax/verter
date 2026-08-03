@@ -216,7 +216,6 @@ pub(super) fn capture_ordinal_macro_call(
     owner: verter_type_expr::TopLevelOwnerId,
     macro_index: u32,
     source: &str,
-    snippet_imports: &[(String, String)],
     out: &mut SvelteScriptCandidates,
 ) {
     match call {
@@ -277,26 +276,11 @@ pub(super) fn capture_ordinal_macro_call(
                     MacroPayloadPosition::TypeAnnotation,
                 ));
                 candidate.props_leaf_members = leaf_members_from_lowered(&jsdoc_type);
-                collect_snippet_candidate_members_from_lowered(&jsdoc_type, snippet_imports, out);
             }
             // 4. `$bindable()` members + prop DEFAULT values from the destructuring
             //    pattern (both are syntax-only reads over the destructuring +
             //    source slice).
             collect_bindable_and_defaults(&d.id, source, &mut candidate);
-            // 5. snippet-candidate members from the props type — BOTH the
-            //    destructuring annotation (`let {…}: { row: Snippet } = $props()`)
-            //    AND the generic argument (`$props<{ row: Snippet }>()`). A member
-            //    typed as a `Snippet`-candidate import is recorded (validated later).
-            if let Some(annotation) = &d.type_annotation {
-                collect_snippet_candidate_members(
-                    &annotation.type_annotation,
-                    snippet_imports,
-                    out,
-                );
-            }
-            if let Some(generic_ty) = props_generic_argument_ts_type(init) {
-                collect_snippet_candidate_members(generic_ty, snippet_imports, out);
-            }
             out.props = Some(candidate);
         }
         OrdinalMacroCall::Dispatcher {

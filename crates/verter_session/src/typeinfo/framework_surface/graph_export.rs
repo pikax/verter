@@ -865,6 +865,7 @@ mod tests {
                 results::ResolvedPropField::from_source_position(
                     analysis,
                     verter_type_expr::facts::SourcePosition::unannotated(),
+                    verter_type_expr::PropCallableRole::Other,
                 )
             })
             .collect();
@@ -1069,6 +1070,7 @@ mod tests {
                         fields: vec![results::ResolvedPropField::from_source_position(
                             prop_field("named"),
                             verter_type_expr::facts::SourcePosition::unannotated(),
+                            verter_type_expr::PropCallableRole::Other,
                         )],
                         index_signatures: vec![ExpandedIndexSignature {
                             key_type: verter_type_expr::facts::SourcePosition::Present(

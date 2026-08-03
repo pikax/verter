@@ -40,6 +40,7 @@ fn merge_semantic_prop_definitions(
         if enrichment.type_annotation.is_some() {
             native_prop.type_annotation = enrichment.type_annotation;
         }
+        native_prop.callable_role = enrichment.callable_role;
         native_prop.has_default = enrichment.has_default;
         native_prop.is_required = enrichment.is_required;
         native_prop.is_boolean = enrichment.is_boolean;
@@ -202,6 +203,7 @@ impl DocumentRegistry {
                                         publication.terminal_display().text().map(str::to_string);
                                     verter_semantic::analysis::AnalyzedPropDefinition {
                                         name: prop.name,
+                                        callable_role: prop.callable_role,
                                         type_annotation,
                                         has_default: prop.has_default,
                                         is_required: prop.required,
@@ -235,6 +237,8 @@ impl DocumentRegistry {
                                         let materialized = prop.ty.publication.materialized_type();
                                         verter_semantic::analysis::AnalyzedPropDefinition {
                                             name: prop.name.to_string(),
+                                            callable_role:
+                                                verter_type_expr::PropCallableRole::default(),
                                             type_annotation: materialized.and_then(|expression| {
                                                 verter_type_expr::render_type_expr_display(expression)
                                                     .ok()
@@ -394,6 +398,7 @@ mod tests {
     fn prop(name: &str, span: verter_span::Span) -> AnalyzedPropDefinition {
         AnalyzedPropDefinition {
             name: name.to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             type_annotation: Some("string".to_string()),
             has_default: false,
             is_required: false,
@@ -412,8 +417,18 @@ mod tests {
             prop("enabled", authored_span),
             prop("nativeOnly", untouched_span),
         ];
+        let role = verter_type_expr::PropCallableRole::SvelteSnippet {
+            symbol: verter_type_expr::ResolvedSymbolIdentity {
+                canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("Snippet"),
+            },
+            exactness: verter_type_expr::ResolutionExactness::ExactSymbolic,
+            provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        };
         let semantic = vec![AnalyzedPropDefinition {
             name: "enabled".to_string(),
+            callable_role: role.clone(),
             type_annotation: Some("boolean".to_string()),
             has_default: true,
             is_required: true,
@@ -429,6 +444,7 @@ mod tests {
         assert_eq!(native[0].span, authored_span);
         assert!(native[0].used_in_template && native[0].used_in_script);
         assert!(native[0].is_boolean && native[0].has_default && native[0].is_required);
+        assert_eq!(native[0].callable_role, role);
         assert_eq!(native[1].name, "nativeOnly");
         assert_eq!(native[1].span, untouched_span);
     }

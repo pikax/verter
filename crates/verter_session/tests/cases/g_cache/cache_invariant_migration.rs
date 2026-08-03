@@ -547,28 +547,28 @@ use verter_session::cache_schema::{CacheSchemaVersioned, CACHE_CLUSTER_SCHEMA_VE
 const STALE_SCHEMA_VERSION: u32 = CACHE_CLUSTER_SCHEMA_VERSION - 1;
 
 #[test]
-fn pre_creo_schema_v4_artifacts_are_rejected_by_v5() {
+fn pre_callable_role_schema_v5_artifacts_are_rejected_by_v6() {
     use verter_session::file_artifact_store::FileArtifactStore;
 
-    const PRE_CREO_SCHEMA: u32 = 4;
-    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 5);
-    assert_eq!(STALE_SCHEMA_VERSION, PRE_CREO_SCHEMA);
+    const PRE_CALLABLE_ROLE_SCHEMA: u32 = 5;
+    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 6);
+    assert_eq!(STALE_SCHEMA_VERSION, PRE_CALLABLE_ROLE_SCHEMA);
 
-    let stale = FileArtifactStore::new_with_schema_version_for_test(PRE_CREO_SCHEMA);
-    stale.insert_synthetic_for_schema_test("/workspace/pre-creo-v4.ts");
+    let stale = FileArtifactStore::new_with_schema_version_for_test(PRE_CALLABLE_ROLE_SCHEMA);
+    stale.insert_synthetic_for_schema_test("/workspace/pre-callable-role-v5.ts");
     assert_eq!(
         stale.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
         1,
-        "a v4 artifact cannot be read under the occurrence-exact v5 schema"
+        "a v5 artifact cannot be read under the callable-role-aware v6 schema"
     );
     assert_eq!(stale.len(), 0);
 
     let current = FileArtifactStore::new();
-    current.insert_synthetic_for_schema_test("/workspace/creo-v5.ts");
+    current.insert_synthetic_for_schema_test("/workspace/callable-role-v6.ts");
     assert_eq!(
         current.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
         0,
-        "a v5 artifact survives a matching-schema roundtrip"
+        "a v6 artifact survives a matching-schema roundtrip"
     );
     assert_eq!(current.len(), 1);
 }

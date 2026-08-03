@@ -45,6 +45,7 @@ fn make_child_with_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
                     .iter()
                     .map(|name| AnalyzedPropDefinition {
                         name: name.to_string(),
+                        callable_role: verter_type_expr::PropCallableRole::default(),
                         type_annotation: Some("string".into()),
                         has_default: false,
                         is_required: true,

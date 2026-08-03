@@ -250,6 +250,7 @@ pub(crate) fn props_from_typeinfo_surface(
                     declared_in_macro_type_arg,
                 },
                 type_source,
+                verter_type_expr::PropCallableRole::Other,
             )
         })
         .collect()
@@ -649,6 +650,7 @@ pub(crate) fn model_prop_fields(
                     ..field.clone()
                 },
                 type_source,
+                verter_type_expr::PropCallableRole::Other,
             )
         })
         .collect()

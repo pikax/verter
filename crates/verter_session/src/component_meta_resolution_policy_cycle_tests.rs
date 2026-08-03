@@ -95,6 +95,7 @@ fn empty_meta() -> ComponentMetaAnalysis {
 fn prop(name: &str, type_source: SemanticTypeSource) -> PropAnalysis {
     PropAnalysis {
         name: name.to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: crate::test_only::type_publication_fixture(
             verter_type_expr::facts::SourcePosition::Present(type_source),
             verter_type_expr::ResolutionExactness::ExactConcrete,

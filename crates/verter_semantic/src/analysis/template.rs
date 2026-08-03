@@ -1298,6 +1298,8 @@ pub struct AnalyzedSlotDeclaration {
 pub struct AnalyzedPropDefinition {
     /// Prop name.
     pub name: String,
+    /// Typed callable role established by semantic identity.
+    pub callable_role: verter_type_expr::PropCallableRole,
     /// TypeScript type annotation.
     pub type_annotation: Option<String>,
     /// Whether this prop has a default value.
@@ -2215,8 +2217,9 @@ impl<'de> serde::Deserialize<'de> for TemplateAttribute {
 impl serde::Serialize for AnalyzedPropDefinition {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("AnalyzedPropDefinition", 8)?;
+        let mut s = serializer.serialize_struct("AnalyzedPropDefinition", 10)?;
         s.serialize_field("name", &self.name)?;
+        s.serialize_field("callableRole", &self.callable_role)?;
         if self.type_annotation.is_some() {
             s.serialize_field("typeAnnotation", &self.type_annotation)?;
         }
@@ -2238,6 +2241,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedPropDefinition {
         struct Wire {
             name: String,
             #[serde(default)]
+            callable_role: verter_type_expr::PropCallableRole,
+            #[serde(default)]
             type_annotation: Option<String>,
             #[serde(default)]
             has_default: bool,
@@ -2257,6 +2262,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedPropDefinition {
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
             name: w.name,
+            callable_role: w.callable_role,
             type_annotation: w.type_annotation,
             has_default: w.has_default,
             is_required: w.is_required,
@@ -2707,6 +2713,7 @@ mod tests {
             binding_name: Some("props".to_string()),
             props: Some(vec![AnalyzedPropDefinition {
                 name: "msg".to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 type_annotation: Some("string".to_string()),
                 has_default: false,
                 is_required: true,
@@ -3592,6 +3599,7 @@ mod tests {
         fn analyzed_prop_definition_uses_struct() {
             let v = AnalyzedPropDefinition {
                 name: "msg".into(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 type_annotation: Some("string".into()),
                 has_default: false,
                 is_required: true,
@@ -3604,6 +3612,11 @@ mod tests {
             let j = json(&v);
             assert_flat_span(&j, 8, 18);
             assert_eq!(j["name"], "msg");
+            assert_eq!(j["callableRole"]["kind"], "unresolved");
+            assert_eq!(
+                j["callableRole"]["reason"], "analysisUnavailable",
+                "missing analysis must serialize fail-closed"
+            );
         }
 
         #[test]

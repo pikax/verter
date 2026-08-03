@@ -271,6 +271,7 @@ mod tests {
                     prop_definitions: vec![
                         AnalyzedPropDefinition {
                             name: "msg".into(),
+                            callable_role: verter_type_expr::PropCallableRole::default(),
                             type_annotation: Some("string".into()),
                             has_default: false,
                             is_required: true,
@@ -281,6 +282,7 @@ mod tests {
                         },
                         AnalyzedPropDefinition {
                             name: "count".into(),
+                            callable_role: verter_type_expr::PropCallableRole::default(),
                             type_annotation: Some("number".into()),
                             has_default: true,
                             is_required: false,

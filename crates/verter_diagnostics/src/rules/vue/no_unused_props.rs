@@ -70,6 +70,7 @@ mod tests {
     ) -> AnalyzedPropDefinition {
         AnalyzedPropDefinition {
             name: name.to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             type_annotation: None,
             has_default: false,
             is_required: false,

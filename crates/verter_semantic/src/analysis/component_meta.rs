@@ -176,6 +176,8 @@ pub struct ResolvedPropInput {
     /// The member value's published source position.
     pub authority: ResolvedTypeAuthority,
     pub authored_evidence: Option<AuthoredTypeEvidence>,
+    /// Typed callable role established by the session resolver.
+    pub callable_role: verter_type_expr::PropCallableRole,
 }
 
 /// One host-resolved emit row: the emit analysis field plus the payload's
@@ -332,6 +334,8 @@ pub struct MacroExpansionDiagnostics {
 #[derive(Debug, Clone)]
 pub struct PropAnalysis {
     pub name: String,
+    /// Typed callable role; display text never participates in classification.
+    pub callable_role: verter_type_expr::PropCallableRole,
     /// The resolved type SOURCE POSITION: the evaluated source unless the
     /// expansion is incomplete and an authored payload exists (the symbolic
     /// fallback); a PROVEN schema absence when the position carries no
@@ -926,6 +930,8 @@ pub enum AcceptedSurfaceCompleteness {
 #[derive(Debug, Clone)]
 pub struct AcceptedPropAnalysis {
     pub name: String,
+    /// Typed callable role preserved through accepted-surface inheritance.
+    pub callable_role: verter_type_expr::PropCallableRole,
     /// The accepted prop's resolved type SOURCE POSITION (`Absent` =
     /// untyped / cross-branch divergent).
     pub publication: TypePublication,
@@ -972,6 +978,8 @@ pub enum FallthroughSurface {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FallthroughPropEntry {
     pub name: String,
+    /// Typed callable role inherited from the producing prop.
+    pub callable_role: verter_type_expr::PropCallableRole,
     /// The inherited prop's resolved type SOURCE POSITION (`Absent` =
     /// untyped).
     pub publication: TypePublication,
@@ -1760,6 +1768,9 @@ fn extract_props_from_macro(
 
                 out.push(PropAnalysis {
                     name: field.name.clone(),
+                    callable_role: source_row
+                        .map(|row| row.callable_role.clone())
+                        .unwrap_or_default(),
                     publication,
                     type_expansion,
                     required: !field.optional && !has_default,
@@ -1818,6 +1829,7 @@ fn extract_props_from_macro(
 
         out.push(PropAnalysis {
             name: field.name.clone(),
+            callable_role: row.callable_role.clone(),
             publication,
             type_expansion,
             required: !field.is_optional && !has_default,
@@ -1865,6 +1877,7 @@ fn extract_props_from_macro(
             // which has no typed companion.
             out.push(PropAnalysis {
                 name: field.name.clone(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication,
                 type_expansion,
                 required: !field.optional && !has_default,
@@ -2508,6 +2521,7 @@ fn synthesize_model_prop_and_event(
         // typed companion is unset.
         props.push(PropAnalysis {
             name: name.clone(),
+            callable_role: verter_type_expr::PropCallableRole::Other,
             publication: prop_publication.clone(),
             type_expansion: evaluated.and_then(|eval| {
                 eval.props
@@ -2821,6 +2835,7 @@ fn merged_prop_fields(
                     field.payload.as_ref(),
                     field.type_annotation.as_deref(),
                 ),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 field: field.clone(),
             }
         })
@@ -2837,6 +2852,7 @@ fn merged_prop_fields(
                 // position when one denotes the resolved member).
                 existing.authority = prop.authority.clone();
                 existing.authored_evidence = prop.authored_evidence.clone();
+                existing.callable_role = prop.callable_role.clone();
             } else {
                 rows.push(prop.clone());
             }
@@ -3025,6 +3041,7 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
         });
         out.push(PropAnalysis {
             name: prop.name.clone(),
+            callable_role: verter_type_expr::PropCallableRole::Other,
             publication: publication_from_position(
                 &present_or_unannotated(type_source),
                 None,

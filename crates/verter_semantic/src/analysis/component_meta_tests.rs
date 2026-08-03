@@ -154,6 +154,7 @@ fn resolved_prop_input(
         field,
         authority,
         authored_evidence,
+        callable_role: verter_type_expr::PropCallableRole::default(),
     }
 }
 
@@ -3204,6 +3205,33 @@ fn resolved_macros_supply_imported_metadata_without_snapshot_mutation() {
         "component_meta should project all supplied resolved props: {:?}",
         names
     );
+}
+
+#[test]
+fn resolved_prop_callable_role_survives_component_meta_extraction() {
+    let macros = vec![make_define_props(Vec::new())];
+    let mut prop = resolved_prop_input(make_prop("row", Some("DisplayWasPerturbed"), false));
+    let expected = verter_type_expr::PropCallableRole::SvelteSnippet {
+        symbol: verter_type_expr::ResolvedSymbolIdentity {
+            canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from("Snippet"),
+        },
+        exactness: ResolutionExactness::ExactSymbolic,
+        provenance: ResolutionProvenance::FrameworkSurface,
+    };
+    prop.callable_role = expected.clone();
+    let resolved_macros = vec![ResolvedMacroInput {
+        macro_index: 0,
+        props: vec![prop],
+        ..Default::default()
+    }];
+
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
+    let result = extract_component_meta(input);
+
+    assert_eq!(result.props[0].callable_role, expected);
 }
 
 #[test]

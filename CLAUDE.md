@@ -265,7 +265,7 @@ Each crate exposes AT MOST one `tests/main.rs` integration-test binary; extra ca
 
 Dual guard: the fast-fail CI Node check `scripts/check-integration-test-layout.mjs` (runs before the Rust gate) and the in-gate Rust mirror (`crates/verter_session/tests/cases/integration_test_layout_guard.rs`), both reading the same allowlist.
 
-Guards: `integration_test_layout_is_consolidated`, `layout_checker_discriminates_stray_and_stale`, `allowlist_is_the_two_known_process_isolated_targets`.
+Guards: `integration_test_layout_is_consolidated`, `layout_checker_discriminates_stray_and_stale`, `allowlist_is_the_known_standalone_targets`.
 
 ### Framework Adapter Substrate (CRITICAL)
 

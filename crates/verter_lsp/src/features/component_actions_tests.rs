@@ -87,6 +87,7 @@ fn add_prop_to_type_based_define_props() {
             (TemplateAnalysisSnapshot {
                 prop_definitions: vec![AnalyzedPropDefinition {
                     name: "msg".into(),
+                    callable_role: verter_type_expr::PropCallableRole::default(),
                     type_annotation: Some("string".into()),
                     has_default: false,
                     is_required: true,
@@ -472,6 +473,7 @@ fn make_child_with_props(source: &str, prop_names: &[&str]) -> ChildComponentCon
                     .iter()
                     .map(|name| AnalyzedPropDefinition {
                         name: name.to_string(),
+                        callable_role: verter_type_expr::PropCallableRole::default(),
                         type_annotation: Some("unknown".to_string()),
                         has_default: false,
                         is_required: false,

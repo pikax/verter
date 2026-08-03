@@ -56,6 +56,7 @@ mod tests {
     fn make_prop(name: &str, is_required: bool, has_default: bool) -> AnalyzedPropDefinition {
         AnalyzedPropDefinition {
             name: name.to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             type_annotation: None,
             has_default,
             is_required,

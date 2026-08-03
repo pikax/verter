@@ -61,6 +61,7 @@ mod tests {
     fn make_prop(name: &str) -> AnalyzedPropDefinition {
         AnalyzedPropDefinition {
             name: name.to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             type_annotation: Some("String".to_string()),
             has_default: false,
             is_required: false,

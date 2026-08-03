@@ -111,6 +111,22 @@ display never establish public-contract meaning. See
 
 ## Component-Meta Heuristic Prevention (CRITICAL)
 
+### Prop callable roles
+
+`PropCallableRole` is producer-owned semantic authority carried from
+`ResolvedPropField` through `ResolvedPropInput`, `PropAnalysis`,
+accepted/fallthrough surfaces, and `AnalyzedPropDefinition`. `SvelteSnippet`
+requires exact package-backed symbol identity; `Other` is a complete
+non-match; `Unresolved` is typed fail-closed partiality and defaults to
+`AnalysisUnavailable`. Merge divergence must degrade to `Unresolved`, never
+choose a display spelling.
+
+Svelte slot publication and LSP snippet completions pattern-match the typed
+role before callable parameter extraction or item emission. `type_annotation`
+is presentation detail only. Do not restore name/member filtering,
+display-root `Snippet` checks, or parse-candidate `$slots` synthesis. This role
+is analysis-side and does not extend the public component-contract wire shape.
+
 Component-meta may use heuristics only as meaning-preserving performance gates. It must not use heuristics as semantic policy, result repair, or compatibility recovery.
 
 Forbidden patterns:

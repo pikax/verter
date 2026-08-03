@@ -22,7 +22,11 @@ use crate::facts::*;
 use crate::intrinsics::*;
 use crate::locators::*;
 use crate::span_origins::*;
-use crate::{MemberSpans, MemberVisibility, PrimitiveName};
+use crate::{
+    MemberSpans, MemberVisibility, PrimitiveName, PropCallableRole,
+    PropCallableRoleUnresolvedReason, ResolutionExactness, ResolutionProvenance,
+    ResolvedSymbolIdentity,
+};
 
 /// Assert every listed type is a fully-witnessed closed fact carrier.
 macro_rules! assert_fact_carriers {
@@ -200,8 +204,39 @@ assert_fact_carriers!(
     ProjectedSurfaceFact,
     SvelteLegacyPropFact,
     SvelteModuleExportFact,
+    SvelteSnippetImportFact,
     SvelteScriptFactsFact,
+    ResolvedSymbolIdentity,
+    PropCallableRole,
 );
+
+#[test]
+fn prop_callable_role_defaults_fail_closed_and_round_trips() {
+    let defaulted = PropCallableRole::default();
+    assert_eq!(
+        defaulted,
+        PropCallableRole::Unresolved {
+            reason: PropCallableRoleUnresolvedReason::AnalysisUnavailable,
+        },
+        "an absent producer must never silently classify a prop as Other"
+    );
+
+    let role = PropCallableRole::SvelteSnippet {
+        symbol: ResolvedSymbolIdentity {
+            canonical_id: std::sync::Arc::from("/node_modules/svelte/index.d.ts"),
+            owner: TopLevelOwnerId::ordinary_file(),
+            symbol: std::sync::Arc::from("Snippet"),
+        },
+        exactness: ResolutionExactness::ExactSymbolic,
+        provenance: ResolutionProvenance::FrameworkSurface,
+    };
+    let encoded = serde_json::to_string(&role).expect("role serializes");
+    let decoded: PropCallableRole = serde_json::from_str(&encoded).expect("role deserializes");
+    assert_eq!(
+        decoded, role,
+        "typed callable role must round-trip losslessly"
+    );
+}
 
 // --- Four-source SemanticTypeSource + expansion-result wrapper + intrinsics ---
 assert_fact_carriers!(

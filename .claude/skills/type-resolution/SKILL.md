@@ -137,6 +137,23 @@ The `DeclBodyMemo::whole_env()` whole-file env product has exactly four consumer
 
 ## Semantic Query Identity Target Contract
 
+### Exact symbol-identity demand for typed feature roles
+
+`ProjectSemanticDispatch::demand_symbol_identity` is the shared adapter for
+feature facts that require declaration identity. It walks existing graph
+carriers and delegates declaration bodies to the canonical `ResolveDecl` and
+`Instantiate` queries; it must not grow a parallel alias/import resolver or
+parse terminal text. Direct, imported-alias, and multi-hop local-alias subjects
+therefore retain the dispatcher's fixed view, dependency signatures,
+cycle/budget/work limits, and cache-suppression behavior.
+
+The outcome is closed: complete match/non-match returns an optional
+`ResolvedSymbolIdentity`; partial returns only a typed
+`PropCallableRoleUnresolvedReason`, never a graph node. Every partial outcome
+folds into cold-compute completeness and is ineligible for exact warm
+admission. Svelte `Snippet` role classification compares this identity only
+with the package-validated `svelte` import fact.
+
 Architectural target for the project-global cache cutover:
 
 - Type expansion has one authoritative semantic query path.

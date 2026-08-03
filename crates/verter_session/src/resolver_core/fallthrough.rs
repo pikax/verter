@@ -328,6 +328,7 @@ pub fn append_native_candidate_branch<H: FallthroughResolverHost>(
                 let (type_source, _) = member.source.type_channels();
                 inherited_props.push(FallthroughPropEntry {
                     name: member.name.clone(),
+                    callable_role: verter_type_expr::PropCallableRole::Other,
                     publication: type_publication_from_position(
                         &type_source,
                         ResolutionProvenance::Schema,
@@ -645,6 +646,7 @@ pub fn merge_fallthrough_branches(
                     (
                         AcceptedPropAnalysis {
                             name: prop.name.clone(),
+                            callable_role: prop.callable_role.clone(),
                             // Finalized from the absorbing accumulator
                             // AFTER every branch folded — never per-branch.
                             publication: type_publication_from_position(
@@ -666,6 +668,9 @@ pub fn merge_fallthrough_branches(
                         MergedSourceState::Unset,
                     )
                 });
+            if entry.0.callable_role != prop.callable_role {
+                entry.0.callable_role = verter_type_expr::PropCallableRole::default();
+            }
             entry
                 .2
                 .fold(&prop.publication, prop.type_source_scope.as_deref());
@@ -792,6 +797,7 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
         .iter()
         .map(|prop| AcceptedPropAnalysis {
             name: prop.name.clone(),
+            callable_role: prop.callable_role.clone(),
             publication: prop.publication.clone(),
             // Own declared rows: the source is spelled in the owner's own
             // file — the owner scope applies.
@@ -1381,6 +1387,7 @@ fn inherited_component_props(
                 inherited_source_scope(&type_source, &prop.type_source_scope, child_id);
             FallthroughPropEntry {
                 name: prop.name.clone(),
+                callable_role: prop.callable_role.clone(),
                 publication,
                 type_source_scope,
                 sources: vec![InheritedSource::Component {
@@ -1446,6 +1453,7 @@ fn inherited_declared_component_props(
                 inherited_source_scope(&type_source, &prop.type_source_scope, child_id);
             FallthroughPropEntry {
                 name: prop.name.clone(),
+                callable_role: prop.callable_role.clone(),
                 publication,
                 type_source_scope,
                 sources: vec![InheritedSource::Component {
@@ -2224,6 +2232,7 @@ mod tests {
             TestResolution {
                 accepted_props: vec![AcceptedPropAnalysis {
                     name: "title".to_string(),
+                    callable_role: verter_type_expr::PropCallableRole::default(),
                     publication: crate::test_only::type_publication_fixture(
                         verter_type_expr::facts::SourcePosition::Present(
                             SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
@@ -2321,6 +2330,7 @@ mod tests {
             TestResolution {
                 accepted_props: vec![AcceptedPropAnalysis {
                     name: "title".to_string(),
+                    callable_role: verter_type_expr::PropCallableRole::default(),
                     publication: crate::test_only::type_publication_fixture(
                         verter_type_expr::facts::SourcePosition::Present(
                             SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
@@ -2417,6 +2427,7 @@ mod tests {
                 condition_text: None,
                 props: vec![verter_semantic::analysis::component_meta::FallthroughPropEntry {
                     name: "id".to_string(),
+                    callable_role: verter_type_expr::PropCallableRole::default(),
                     publication: crate::test_only::type_publication_fixture(
 
                         verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
@@ -2894,6 +2905,7 @@ mod tests {
             TestResolution {
                 accepted_props: vec![AcceptedPropAnalysis {
                     name: "id".to_string(),
+                    callable_role: verter_type_expr::PropCallableRole::default(),
                     publication: crate::test_only::type_publication_fixture(
 
                         verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
@@ -2982,6 +2994,7 @@ mod tests {
             }));
         let child_props = vec![AcceptedPropAnalysis {
             name: "inherited".to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
                 verter_type_expr::facts::SourcePosition::Present(producer_local),
                 verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -3040,6 +3053,7 @@ mod tests {
         let child_props = |source: SemanticTypeSource| {
             vec![AcceptedPropAnalysis {
                 name: "inherited".to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
                     verter_type_expr::facts::SourcePosition::Present(source),
                     verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -3140,6 +3154,7 @@ mod tests {
     ) -> verter_semantic::analysis::component_meta::FallthroughPropEntry {
         verter_semantic::analysis::component_meta::FallthroughPropEntry {
             name: name.to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
                 source
                     .map(SourcePosition::Present)
@@ -3430,6 +3445,7 @@ mod tests {
         let child_rows = vec![
             AcceptedPropAnalysis {
                 name: "fromGrandchild".to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
                     verter_type_expr::facts::SourcePosition::Present(closed_ref("GrandchildAlias")),
                     verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -3450,6 +3466,7 @@ mod tests {
             },
             AcceptedPropAnalysis {
                 name: "fromChild".to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
                     verter_type_expr::facts::SourcePosition::Present(closed_ref("ChildAlias")),
                     verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -3506,6 +3523,7 @@ mod tests {
          -> AcceptedPropAnalysis {
             AcceptedPropAnalysis {
                 name: name.to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
                     source
                         .map(SourcePosition::Present)
@@ -3675,6 +3693,7 @@ mod tests {
         let child_props = |name: &str| {
             vec![AcceptedPropAnalysis {
                 name: name.to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
                     verter_type_expr::facts::SourcePosition::Present(closed_primitive(
                         PrimitiveName::String,

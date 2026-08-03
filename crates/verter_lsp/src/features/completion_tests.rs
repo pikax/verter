@@ -3,6 +3,18 @@ use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
 
+fn svelte_snippet_role() -> verter_type_expr::PropCallableRole {
+    verter_type_expr::PropCallableRole::SvelteSnippet {
+        symbol: verter_type_expr::ResolvedSymbolIdentity {
+            canonical_id: std::sync::Arc::from("/node_modules/svelte/index.d.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: std::sync::Arc::from("Snippet"),
+        },
+        exactness: verter_type_expr::ResolutionExactness::ExactSymbolic,
+        provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
+    }
+}
+
 fn make_analysis(
     bindings: Vec<AnalyzedBinding>,
     imports: Vec<AnalyzedImport>,
@@ -2784,6 +2796,7 @@ fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
             (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 prop_definitions: vec![verter_semantic::analysis::AnalyzedPropDefinition {
                     name: "camelCaseProp".to_string(),
+                    callable_role: verter_type_expr::PropCallableRole::Other,
                     type_annotation: Some("string".to_string()),
                     has_default: false,
                     is_required: true,
@@ -3132,8 +3145,9 @@ fn test_svelte_snippet_slot_name_completions_from_child_snippet_props() {
     parent.template = Some(template.into());
 
     let mut child_template = TemplateAnalysisSnapshot::default();
-    let d5_prop = |name: &str, ty: &str| AnalyzedPropDefinition {
+    let d5_prop = |name: &str, ty: &str, callable_role| AnalyzedPropDefinition {
         name: name.to_string(),
+        callable_role,
         type_annotation: Some(ty.to_string()),
         has_default: false,
         is_required: false,
@@ -3143,9 +3157,17 @@ fn test_svelte_snippet_slot_name_completions_from_child_snippet_props() {
         span: verter_span::Span::new(0, 0),
     };
     child_template.prop_definitions = vec![
-        d5_prop("header", "import(\"svelte\").Snippet<[{ title: string }]>"),
-        d5_prop("children", "import(\"svelte\").Snippet<[{ body: string }]>"),
-        d5_prop("label", "string"),
+        d5_prop(
+            "header",
+            "import(\"svelte\").Snippet<[{ title: string }]>",
+            svelte_snippet_role(),
+        ),
+        d5_prop(
+            "children",
+            "import(\"svelte\").Snippet<[{ body: string }]>",
+            svelte_snippet_role(),
+        ),
+        d5_prop("label", "string", verter_type_expr::PropCallableRole::Other),
     ];
     let child = FileAnalysisSnapshot {
         template: Some(child_template.into()),
@@ -3205,16 +3227,43 @@ fn test_svelte_render_callee_completions_in_scope_snippets() {
                         params_text: None,
                     },
                 ],
-                prop_definitions: vec![AnalyzedPropDefinition {
-                    name: "actions".to_string(),
-                    type_annotation: Some("import(\"svelte\").Snippet".to_string()),
-                    has_default: false,
-                    is_required: false,
-                    is_boolean: false,
-                    used_in_template: false,
-                    used_in_script: false,
-                    span: verter_span::Span::new(0, 0),
-                }],
+                prop_definitions: vec![
+                    AnalyzedPropDefinition {
+                        name: "actions".to_string(),
+                        callable_role: svelte_snippet_role(),
+                        type_annotation: Some("DisplayWasPerturbed".to_string()),
+                        has_default: false,
+                        is_required: false,
+                        is_boolean: false,
+                        used_in_template: false,
+                        used_in_script: false,
+                        span: verter_span::Span::new(0, 0),
+                    },
+                    AnalyzedPropDefinition {
+                        name: "impostor".to_string(),
+                        callable_role: verter_type_expr::PropCallableRole::Other,
+                        type_annotation: Some("import(\"svelte\").Snippet".to_string()),
+                        has_default: false,
+                        is_required: false,
+                        is_boolean: false,
+                        used_in_template: false,
+                        used_in_script: false,
+                        span: verter_span::Span::new(0, 0),
+                    },
+                    AnalyzedPropDefinition {
+                        name: "pending".to_string(),
+                        callable_role: verter_type_expr::PropCallableRole::Unresolved {
+                            reason: verter_type_expr::PropCallableRoleUnresolvedReason::MissingDependency,
+                        },
+                        type_annotation: Some("Snippet".to_string()),
+                        has_default: false,
+                        is_required: false,
+                        is_boolean: false,
+                        used_in_template: false,
+                        used_in_script: false,
+                        span: verter_span::Span::new(0, 0),
+                    },
+                ],
                 ..Default::default()
             }
             .into(),
@@ -3247,6 +3296,12 @@ fn test_svelte_render_callee_completions_in_scope_snippets() {
             "must offer in-scope snippet {expected}, got: {labels:?}"
         );
     }
+    for rejected in ["impostor", "pending"] {
+        assert!(
+            !labels.contains(&rejected),
+            "display text or partial role must not enable {rejected}, got: {labels:?}"
+        );
+    }
     let row = items.iter().find(|i| i.label == "row").unwrap();
     assert!(
         row.detail.as_deref().unwrap_or("").contains("item: number"),
@@ -3256,37 +3311,7 @@ fn test_svelte_render_callee_completions_in_scope_snippets() {
 }
 
 #[test]
-fn test_is_snippet_type_annotation_classifies_root_reference() {
-    for typed in [
-        "Snippet",
-        "Snippet<[item: number]>",
-        "import(\"svelte\").Snippet",
-        "import(\"svelte\").Snippet<[{ title: string }]>",
-        "svelte.Snippet",
-        "Snippet<[{ title: string }]> | undefined",
-    ] {
-        assert!(
-            is_snippet_type_annotation(typed),
-            "{typed} must classify as snippet-typed"
-        );
-    }
-    for not_snippet in [
-        "NotSnippet",
-        "SnippetExtra",
-        "string",
-        "Array<Snippet>",
-        "() => Snippet",
-        "string | undefined",
-    ] {
-        assert!(
-            !is_snippet_type_annotation(not_snippet),
-            "{not_snippet} must NOT classify as snippet-typed"
-        );
-    }
-}
-
-#[test]
-fn test_svelte_snippet_slot_completions_reject_non_snippet_root_types() {
+fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
     let source = "<script>\n  import IdeSurfaceChild from './IdeSurfaceChild.svelte';\n</script>\n<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>";
     let cursor = source.find("{#snippet ").unwrap() + "{#snippet ".len();
 
@@ -3299,8 +3324,9 @@ fn test_svelte_snippet_slot_completions_reject_non_snippet_root_types() {
     ));
     parent.template = Some(template.into());
 
-    let d5_prop = |name: &str, ty: &str| AnalyzedPropDefinition {
+    let d5_prop = |name: &str, ty: &str, callable_role| AnalyzedPropDefinition {
         name: name.to_string(),
+        callable_role,
         type_annotation: Some(ty.to_string()),
         has_default: false,
         is_required: false,
@@ -3311,9 +3337,24 @@ fn test_svelte_snippet_slot_completions_reject_non_snippet_root_types() {
     };
     let child_template = TemplateAnalysisSnapshot {
         prop_definitions: vec![
-            d5_prop("header", "import(\"svelte\").Snippet<[{ title: string }]>"),
-            d5_prop("notHeader", "import(\"svelte\").NotSnippet"),
-            d5_prop("extras", "SnippetExtra"),
+            d5_prop("header", "DisplayWasPerturbed", svelte_snippet_role()),
+            d5_prop(
+                "notHeader",
+                "import(\"svelte\").Snippet",
+                verter_type_expr::PropCallableRole::Other,
+            ),
+            d5_prop(
+                "extras",
+                "SnippetExtra",
+                verter_type_expr::PropCallableRole::Other,
+            ),
+            d5_prop(
+                "pending",
+                "import(\"svelte\").Snippet",
+                verter_type_expr::PropCallableRole::Unresolved {
+                    reason: verter_type_expr::PropCallableRoleUnresolvedReason::MissingDependency,
+                },
+            ),
         ],
         ..Default::default()
     };
@@ -3344,12 +3385,12 @@ fn test_svelte_snippet_slot_completions_reject_non_snippet_root_types() {
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(
         labels.contains(&"header"),
-        "snippet-typed prop must be offered, got: {labels:?}"
+        "typed-role snippet prop must be offered despite perturbed display, got: {labels:?}"
     );
-    for rejected in ["notHeader", "extras"] {
+    for rejected in ["notHeader", "extras", "pending"] {
         assert!(
             !labels.contains(&rejected),
-            "non-snippet root type must not be offered as a snippet slot, got: {labels:?}"
+            "display text must not mint a snippet role, got: {labels:?}"
         );
     }
 }

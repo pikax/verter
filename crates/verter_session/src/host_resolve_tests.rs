@@ -7097,6 +7097,7 @@ fn an_unnameable_root_component_zeroes_its_whole_arm() {
         condition_text: None,
         props: vec![FallthroughPropEntry {
             name: "label".to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
                 verter_type_expr::facts::SourcePosition::unannotated(),
                 verter_type_expr::ResolutionExactness::ExactConcrete,

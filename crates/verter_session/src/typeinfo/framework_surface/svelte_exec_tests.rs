@@ -8,6 +8,24 @@ use verter_compiler::svelte::parser::parse_svelte;
 /// binding resolution scope.
 const LEGACY_SLOT_OWNER: &str = "/Component.svelte";
 
+fn retain_test_snippet_members(surface: &TypeInfoSurface, names: &[&str]) -> TypeInfoSurface {
+    retain_svelte_snippet_members(surface, |member| {
+        if names.contains(&member.name.as_ref()) {
+            verter_type_expr::PropCallableRole::SvelteSnippet {
+                symbol: verter_type_expr::ResolvedSymbolIdentity {
+                    canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    symbol: Arc::from("Snippet"),
+                },
+                exactness: ResolutionExactness::ExactSymbolic,
+                provenance: ResolutionProvenance::FrameworkSurface,
+            }
+        } else {
+            verter_type_expr::PropCallableRole::Other
+        }
+    })
+}
+
 /// Collect the legacy `<slot>` slot fields from a `.svelte` SOURCE through the
 /// same structural walk the resolver uses (the typed template carrier),
 /// scoped to [`LEGACY_SLOT_OWNER`].
@@ -1671,7 +1689,7 @@ fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
     let props_type = facts.props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
-    let filtered = retain_members(&surface, &["row".to_string()]);
+    let filtered = retain_test_snippet_members(&surface, &["row"]);
     let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
 
     let slots = svelte_snippet_slot_fields_from_typeinfo_surface(&ctx, &resolved);
@@ -1933,7 +1951,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     );
 
     // DTO surface half: the normalizer DROPS `bad` and keeps `good`.
-    let filtered = retain_members(&surface, &["bad".to_string(), "good".to_string()]);
+    let filtered = retain_test_snippet_members(&surface, &["bad", "good"]);
     let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
     let slots = svelte_snippet_slot_fields_from_typeinfo_surface(&ctx, &resolved);
     let slot_names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
@@ -1985,8 +2003,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     let recovered_surface =
         navigate_param_to_object_surface(&recovered_ctx, component, recovered_props)
             .expect("props surface after recovery");
-    let recovered_filtered =
-        retain_members(&recovered_surface, &["bad".to_string(), "good".to_string()]);
+    let recovered_filtered = retain_test_snippet_members(&recovered_surface, &["bad", "good"]);
     let recovered_resolved = macro_surface_shell(
         recovered_filtered,
         AnalyzedMacroKind::DefineSlots,

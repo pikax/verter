@@ -408,6 +408,7 @@ mod tests {
                     crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
                         prop("a"),
                         verter_type_expr::facts::SourcePosition::unannotated(),
+                        verter_type_expr::PropCallableRole::Other,
                     ),
                 ],
                 index_signatures: Vec::new(),

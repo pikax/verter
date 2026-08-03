@@ -238,6 +238,8 @@ pub struct ResolvedPropField {
     pub authority: verter_type_expr::ResolvedTypeAuthority,
     /// Atomic locator/text/provenance evidence, when both authored parts exist.
     pub authored_evidence: Option<verter_type_expr::AuthoredTypeEvidence>,
+    /// Typed callable role established from semantic identity.
+    pub callable_role: verter_type_expr::PropCallableRole,
 }
 
 impl ResolvedPropField {
@@ -246,6 +248,7 @@ impl ResolvedPropField {
     pub(crate) fn from_source_position(
         analysis: AnalyzedPropField,
         source: verter_type_expr::facts::SourcePosition,
+        callable_role: verter_type_expr::PropCallableRole,
     ) -> Self {
         use verter_type_expr::facts::SemanticTypeSource;
         let exactness = match source.present() {
@@ -265,6 +268,7 @@ impl ResolvedPropField {
                 Arc::from([]),
             ),
             authored_evidence,
+            callable_role,
         }
     }
 }

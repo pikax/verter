@@ -58,6 +58,12 @@ pub use facts::{
     TopLevelOwnerKind,
 };
 
+/// Closed feature-role facts derived from resolved symbol identity.
+pub mod feature_roles;
+pub use feature_roles::{
+    PropCallableRole, PropCallableRoleUnresolvedReason, ResolvedSymbolIdentity,
+};
+
 /// Generated static-intrinsic catalog substrate — the interned-id + member-fact
 /// replacement for raw-`TypeExpr` HTML intrinsic member shapes.
 /// Resolved authority, locator-backed authored evidence, and pure publication

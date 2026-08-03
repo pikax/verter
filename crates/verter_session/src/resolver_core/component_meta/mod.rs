@@ -207,6 +207,7 @@ pub(crate) fn component_meta_resolved_macros(
                             field: row.analysis.clone(),
                             authority: row.authority.clone(),
                             authored_evidence: row.authored_evidence.clone(),
+                            callable_role: row.callable_role.clone(),
                         },
                     )
                     .collect(),
@@ -299,6 +300,7 @@ pub(crate) fn component_meta_resolved_macros(
                     field: row.analysis.clone(),
                     authority: row.authority.clone(),
                     authored_evidence: row.authored_evidence.clone(),
+                    callable_role: row.callable_role.clone(),
                 }
             }));
             native.default_keys.extend(

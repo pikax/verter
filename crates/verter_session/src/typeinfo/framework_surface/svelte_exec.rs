@@ -48,6 +48,7 @@ use crate::typeinfo::framework_surface::results::{
     resolved_emit_payload_publication, EmitsSurface, MacroSurfaceDtos, ModelBinding, ModelSurface,
     PropsSurface, ResolvedEmitOccurrence, ResolvedMacroPayload, ResolvedOutcome,
 };
+use crate::typeinfo::framework_surface::svelte_callable_role::classify_svelte_callable_role;
 use crate::typeinfo::framework_surface::vue_exec::{
     emits_from_typeinfo_surface, navigate_param_to_object_surface, props_from_typeinfo_surface,
     VueMacroSurface,
@@ -349,10 +350,36 @@ fn resolve_runes_props(
     let (mut fields, prop_origins) = match surface {
         Some(surface) => {
             let prop_origins = prop_origins_from_surface(owner, &surface);
+            let dispatch = ctx.dispatch();
+            let callable_roles = surface
+                .members
+                .iter()
+                .filter(|member| member.visibility.is_public())
+                .map(|member| {
+                    (
+                        member.name.as_ref().to_string(),
+                        classify_svelte_callable_role(
+                            &dispatch,
+                            member.value,
+                            &facts.snippet_imports,
+                        ),
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>();
             let fields = props_from_typeinfo_surface(
                 ctx,
                 &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
             );
+            let fields = fields
+                .into_iter()
+                .map(|mut field| {
+                    field.callable_role = callable_roles
+                        .get(&field.analysis.name)
+                        .cloned()
+                        .unwrap_or_default();
+                    field
+                })
+                .collect();
             (fields, prop_origins)
         }
         // A props type that does not project to an object surface (a primitive /
@@ -377,6 +404,7 @@ fn resolve_runes_props(
                 crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
                     row.analysis.clone(),
                     source,
+                    row.callable_role.clone(),
                 );
         }
     }
@@ -546,6 +574,7 @@ fn legacy_prop_field(
             declared_in_macro_type_arg: false,
         },
         verter_type_expr::facts::SourcePosition::unannotated(),
+        verter_type_expr::PropCallableRole::Other,
     )
 }
 
@@ -616,9 +645,9 @@ fn resolve_bindable(
 }
 
 /// SLOTS from snippet-typed `$props()` members: project the props surface,
-/// retain ONLY the validated snippet members, and normalize as slots
-/// (function-like Snippet members become slot fields). A userland `Snippet`
-/// look-alike never appears (it is absent from `validated_snippet_members`).
+/// retain only members whose exact symbol identity proves the typed
+/// [`verter_type_expr::PropCallableRole::SvelteSnippet`] role, then normalize
+/// those members as slots.
 fn resolve_snippet_props(
     ctx: &dyn ResolverContext,
     owner: &str,
@@ -627,29 +656,26 @@ fn resolve_snippet_props(
     let Some(facts) = facts else {
         return ResolvedOutcome::Missing;
     };
-    if facts.validated_snippet_members.is_empty() {
-        return ResolvedOutcome::Missing;
-    }
     let Some(props_type) = facts.props_type.as_ref() else {
         return ResolvedOutcome::Missing;
     };
-    let rows = navigate_param_to_object_surface(ctx, owner, props_type)
-        .map(|surface| {
-            // Retain only the snippet-validated members BEFORE the slot
-            // normalizer (the other props are not slots).
-            let filtered = retain_members(&surface, &facts.validated_snippet_members);
-            // The SVELTE-SPECIFIC snippet normalizer (NOT Vue's shared
-            // `slots_from_typeinfo_surface`): a Svelte `Snippet<[a, b]>`
-            // contributes ALL positional parameters as ordered slot bindings,
-            // whereas Vue's slot callable surfaces only its first-parameter
-            // object. The two normalizers stay separate so neither regresses.
-            svelte_snippet_slots_from_typeinfo_surface(
-                ctx,
-                &macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, owner),
-                Some(&props_type.locator),
-            )
-        })
-        .unwrap_or_default();
+    let Some(surface) = navigate_param_to_object_surface(ctx, owner, props_type) else {
+        return ResolvedOutcome::Missing;
+    };
+    let dispatch = ctx.dispatch();
+    let filtered = retain_svelte_snippet_members(&surface, |member| {
+        classify_svelte_callable_role(&dispatch, member.value, &facts.snippet_imports)
+    });
+    if filtered.members.is_empty() {
+        return ResolvedOutcome::Missing;
+    }
+    // Typed role proof has already filtered every member before the callable
+    // reader becomes reachable.
+    let rows = svelte_snippet_slots_from_typeinfo_surface(
+        ctx,
+        &macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, owner),
+        Some(&props_type.locator),
+    );
     let (slots, slot_return_publications) = rows.into_iter().unzip();
     let dtos = MacroSurfaceDtos {
         slots: Some(slots),
@@ -868,12 +894,28 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_s
         .collect()
 }
 
-/// A [`TypeInfoSurface`] keeping only the members whose name is in `keep`.
-fn retain_members(surface: &TypeInfoSurface, keep: &[String]) -> TypeInfoSurface {
+/// A [`TypeInfoSurface`] keeping only members with a typed Svelte snippet role.
+fn retain_svelte_snippet_members(
+    surface: &TypeInfoSurface,
+    mut role_for: impl FnMut(
+        &crate::typeinfo::surface::TypeInfoSurfaceMember,
+    ) -> verter_type_expr::PropCallableRole,
+) -> TypeInfoSurface {
+    let keep = surface
+        .members
+        .iter()
+        .filter(|member| {
+            matches!(
+                role_for(member),
+                verter_type_expr::PropCallableRole::SvelteSnippet { .. }
+            )
+        })
+        .map(|member| Arc::clone(&member.name))
+        .collect::<std::collections::HashSet<_>>();
     let members: Vec<_> = surface
         .members
         .iter()
-        .filter(|m| keep.iter().any(|k| k.as_str() == m.name.as_ref()))
+        .filter(|member| keep.contains(&member.name))
         .cloned()
         .collect();
     TypeInfoSurface {
@@ -881,9 +923,9 @@ fn retain_members(surface: &TypeInfoSurface, keep: &[String]) -> TypeInfoSurface
             .entries
             .iter()
             .filter(|entry| match entry {
-                crate::typeinfo::surface::TypeInfoSurfaceEntry::Member(member) => keep
-                    .iter()
-                    .any(|name| name.as_str() == member.name.as_ref()),
+                crate::typeinfo::surface::TypeInfoSurfaceEntry::Member(member) => {
+                    keep.contains(&member.name)
+                }
                 _ => true,
             })
             .cloned()

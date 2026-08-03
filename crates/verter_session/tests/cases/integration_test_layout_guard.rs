@@ -561,13 +561,13 @@ fn integration_test_layout_is_consolidated() {
     );
 }
 
-/// The committed allowlist must be exactly the two genuine
-/// "needs-a-separate-test-process" exceptions, in agreement with the Node
-/// guard's expectation. If a third entry is added (or one removed) without a
+/// The committed allowlist must be exactly the audited standalone-target
+/// exceptions, in agreement with the Node guard's expectation. If an entry is
+/// added or removed without a
 /// corresponding architecture decision, this fails loudly — the exception set
 /// is small and audited, not free-form.
 #[test]
-fn allowlist_is_the_two_known_process_isolated_targets() {
+fn allowlist_is_the_known_standalone_targets() {
     let allowlist = load_allowlist();
     let actual: BTreeSet<(String, String, String)> = allowlist
         .iter()
@@ -584,14 +584,20 @@ fn allowlist_is_the_two_known_process_isolated_targets() {
             "lsp_audit_trace_out_env_var".to_string(),
             "crates/verter_lsp/tests/lsp_audit_trace_out_env_var.rs".to_string(),
         ),
+        (
+            "verter_lsp".to_string(),
+            "typed_prop_callable_role_guard".to_string(),
+            "crates/verter_lsp/tests/typed_prop_callable_role_guard.rs".to_string(),
+        ),
     ]);
     assert_eq!(
         actual, expected,
-        "the integration-test-layout allowlist drifted from the two known \
-         process-isolated targets (allocator_canaries + lsp_audit_trace_out_env_var). \
+        "the integration-test-layout allowlist drifted from the known standalone \
+         targets (allocator_canaries + lsp_audit_trace_out_env_var + \
+         typed_prop_callable_role_guard). \
          Adding/removing an exception is an architecture decision: update BOTH this \
          guard's expectation and scripts/integration-test-layout-allowlist.json, and \
-         justify the new entry's process-global isolation need."
+         justify the standalone target."
     );
 }
 

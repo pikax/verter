@@ -231,12 +231,12 @@ fn captures_javascript_jsdoc_props_annotation_type() {
 }
 
 #[test]
-fn records_snippet_candidate_from_javascript_jsdoc_props() {
+fn records_snippet_import_without_javascript_jsdoc_member_scanning() {
     let src = "import { Snippet } from 'svelte';\n/** @type {{ row: Snippet<[{ id: number }]> }} */\nlet { row } = $props();";
     let c = capture(src);
-    assert_eq!(c.snippet_candidates.len(), 1);
-    let candidate = &c.snippet_candidates[0];
-    assert_eq!(candidate.member_name, "row");
+    assert_eq!(c.snippet_imports.len(), 1);
+    let candidate = &c.snippet_imports[0];
+    assert_eq!(candidate.imported_name, "Snippet");
     assert_eq!(candidate.local_binding, "Snippet");
     assert_eq!(candidate.import_source, "svelte");
 }
@@ -374,27 +374,31 @@ fn prop_defaults_fold_into_stable_candidate_hash() {
 fn records_snippet_import_candidate_pairs_without_validating() {
     let src = "import type { Snippet } from 'svelte';\nlet { row }: { row: Snippet } = $props();";
     let c = capture(src);
-    assert_eq!(c.snippet_candidates.len(), 1);
-    let cand = &c.snippet_candidates[0];
-    assert_eq!(cand.member_name, "row");
+    assert_eq!(c.snippet_imports.len(), 1);
+    let cand = &c.snippet_imports[0];
+    assert_eq!(cand.imported_name, "Snippet");
+    assert_eq!(cand.local_binding, "Snippet");
     assert_eq!(cand.import_source, "svelte");
     // No validation here — the pair is recorded raw.
 }
 
 #[test]
-fn records_snippet_candidate_from_generic_props_argument() {
-    // `$props<{ row: Snippet }>()` records the snippet candidate from the
-    // GENERIC argument (not just the destructuring annotation).
-    // DISCRIMINATING: without the generic-arg scan this records 0 candidates.
+fn records_aliased_snippet_import_identity_without_scanning_prop_members() {
+    let c = capture("import type { Snippet as Renderable } from 'svelte';");
+    assert_eq!(c.snippet_imports.len(), 1);
+    let cand = &c.snippet_imports[0];
+    assert_eq!(cand.imported_name, "Snippet");
+    assert_eq!(cand.local_binding, "Renderable");
+    assert_eq!(cand.import_source, "svelte");
+}
+
+#[test]
+fn records_snippet_import_without_generic_props_member_scanning() {
     let src = "import type { Snippet } from 'svelte';\nlet p = $props<{ row: Snippet }>();";
     let c = capture(src);
-    assert_eq!(
-        c.snippet_candidates.len(),
-        1,
-        "generic-arg snippet candidate"
-    );
-    assert_eq!(c.snippet_candidates[0].member_name, "row");
-    assert_eq!(c.snippet_candidates[0].import_source, "svelte");
+    assert_eq!(c.snippet_imports.len(), 1);
+    assert_eq!(c.snippet_imports[0].imported_name, "Snippet");
+    assert_eq!(c.snippet_imports[0].import_source, "svelte");
 }
 
 #[test]
@@ -404,8 +408,8 @@ fn records_userland_snippet_import_source_for_resolved_validation_rejection() {
     let src =
         "import type { Snippet } from './fake-svelte';\nlet { row }: { row: Snippet } = $props();";
     let c = capture(src);
-    assert_eq!(c.snippet_candidates.len(), 1);
-    assert_eq!(c.snippet_candidates[0].import_source, "./fake-svelte");
+    assert_eq!(c.snippet_imports.len(), 1);
+    assert_eq!(c.snippet_imports[0].import_source, "./fake-svelte");
 }
 
 #[test]
@@ -921,10 +925,10 @@ fn validate_rejects_userland_snippet_lookalike() {
     // name match would accept it.
     let provider = SvelteScriptProvider;
     let candidates = SvelteScriptCandidates {
-        snippet_candidates: vec![SvelteSnippetImportCandidate {
+        snippet_imports: vec![SvelteSnippetImportCandidate {
+            imported_name: "Snippet".to_string(),
             local_binding: "Snippet".to_string(),
             import_source: "./fake-svelte".to_string(),
-            member_name: "row".to_string(),
         }],
         ..Default::default()
     };
@@ -956,10 +960,10 @@ fn validate_rejects_userland_snippet_lookalike() {
 fn validate_accepts_real_svelte_snippet_import() {
     let provider = SvelteScriptProvider;
     let candidates = SvelteScriptCandidates {
-        snippet_candidates: vec![SvelteSnippetImportCandidate {
+        snippet_imports: vec![SvelteSnippetImportCandidate {
+            imported_name: "Snippet".to_string(),
             local_binding: "Snippet".to_string(),
             import_source: "svelte".to_string(),
-            member_name: "row".to_string(),
         }],
         ..Default::default()
     };
@@ -988,9 +992,13 @@ fn validate_accepts_real_svelte_snippet_import() {
         .as_any()
         .downcast_ref::<SvelteScriptFacts>()
         .expect("svelte facts");
+    let [SvelteSnippetImportFact::Resolved { symbol, .. }] = facts.snippet_imports.as_ref() else {
+        panic!("real svelte import must retain resolved symbol identity");
+    };
+    assert_eq!(symbol.symbol.as_ref(), "Snippet");
     assert_eq!(
-        facts.validated_snippet_members.as_ref(),
-        &["row".to_string()][..]
+        symbol.canonical_id.as_ref(),
+        "/project/node_modules/svelte/src/index.d.ts"
     );
 }
 
@@ -1210,10 +1218,10 @@ fn full_candidates() -> SvelteScriptCandidates {
             }],
             props_leaf_members: None,
         }),
-        snippet_candidates: vec![SvelteSnippetImportCandidate {
+        snippet_imports: vec![SvelteSnippetImportCandidate {
+            imported_name: "Snippet".to_string(),
             local_binding: "Snippet".to_string(),
             import_source: "svelte".to_string(),
-            member_name: "row".to_string(),
         }],
         instance_exports: vec![instance_export("focus", "focus", Span::new(31, 36))],
         module_exports: vec![module_export("meta", "meta", Span::new(37, 41))],
@@ -1289,13 +1297,13 @@ fn stable_candidate_hash_discriminates_every_input() {
         "prop defaults must fold into the hash"
     );
 
-    // (6) snippet members.
+    // (6) snippet import identity.
     let mut c = full_candidates();
-    c.snippet_candidates[0].member_name = "cell".to_string();
+    c.snippet_imports[0].local_binding = "Renderable".to_string();
     assert_ne!(
         stable_candidate_hash(&c),
         base_hash,
-        "snippet members must fold into the hash"
+        "snippet imports must fold into the hash"
     );
 
     // (7) legacy-prop metadata (optionality flip).
@@ -1378,7 +1386,7 @@ fn stable_candidate_hash_discriminates_every_input() {
 
 #[test]
 fn stable_candidate_hash_golden_is_deterministic() {
-    // Deterministic golden for the VERSION 8 candidate hash: two independent
+    // Deterministic golden for the VERSION 10 candidate hash: two independent
     // constructions hash identically, and the bytes are pinned so a silently
     // dropped / reordered hash input fails loudly. An INTENTIONAL hash-shape
     // change must bump `SvelteScriptProvider::VERSION` and re-pin.
@@ -1388,10 +1396,10 @@ fn stable_candidate_hash_golden_is_deterministic() {
     assert_eq!(
         a,
         [
-            0xe2, 0x83, 0x9c, 0x04, 0x13, 0x95, 0x33, 0x91, 0x67, 0x22, 0xc5, 0x07, 0x39, 0x09,
-            0x26, 0x2a
+            0x86, 0xa2, 0x5a, 0x99, 0x45, 0x24, 0xe5, 0x1d, 0xca, 0x3b, 0x0c, 0x45, 0xb5, 0x32,
+            0x8b, 0x48
         ],
-        "the VERSION 8 golden candidate hash"
+        "the VERSION 10 golden candidate hash"
     );
 }
 

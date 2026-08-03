@@ -22684,6 +22684,7 @@ fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
     let analysis = verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
         props: vec![verter_semantic::analysis::component_meta::PropAnalysis {
             name: "label".to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
                 verter_type_expr::facts::SourcePosition::Present(
                     verter_type_expr::facts::SemanticTypeSource::Closed(
@@ -27792,6 +27793,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
     let mut analysis = blank_output_analysis();
     analysis.props.push(cm::PropAnalysis {
         name: "p".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: crate::test_only::type_publication_fixture(
             verter_type_expr::facts::SourcePosition::unannotated(),
             verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -27868,6 +27870,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
     });
     analysis.accepted_props.push(cm::AcceptedPropAnalysis {
         name: "ap".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: crate::test_only::type_publication_fixture(
             verter_type_expr::facts::SourcePosition::unannotated(),
             verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -27895,6 +27898,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
             condition_text: None,
             props: vec![cm::FallthroughPropEntry {
                 name: "fp".to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
                     verter_type_expr::facts::SourcePosition::unannotated(),
                     verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -28041,6 +28045,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
                     props: vec![
                         verter_semantic::analysis::component_meta::FallthroughPropEntry {
                             name: "bad".to_string(),
+                            callable_role: verter_type_expr::PropCallableRole::default(),
                             publication: crate::test_only::type_publication_fixture(
                                 verter_type_expr::facts::SourcePosition::Present(
                                     bad_source.clone(),
@@ -28091,6 +28096,7 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
         .props
         .push(verter_semantic::analysis::component_meta::PropAnalysis {
             name: "p".to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
                 verter_type_expr::facts::SourcePosition::Present(dep_source.clone()),
                 verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -28157,6 +28163,7 @@ fn build_output_with_prop_source(
         .props
         .push(verter_semantic::analysis::component_meta::PropAnalysis {
             name: "p".to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
                 verter_type_expr::facts::SourcePosition::Present(source),
                 verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -29004,6 +29011,7 @@ defineProps<{ own: SharedAlias }>()
             condition_text: None,
             props: vec![cm::FallthroughPropEntry {
                 name: "inherited".to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
                     verter_type_expr::facts::SourcePosition::Present(nested_composite.clone()),
                     verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -29024,6 +29032,7 @@ defineProps<{ own: SharedAlias }>()
     // (threaded by the cross-branch merge finalize in production).
     analysis.accepted_props.push(cm::AcceptedPropAnalysis {
         name: "inherited".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: crate::test_only::type_publication_fixture(
             verter_type_expr::facts::SourcePosition::Present(nested_composite),
             verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -29104,6 +29113,7 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
             .props
             .push(verter_semantic::analysis::component_meta::PropAnalysis {
                 name: name.to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
                     verter_type_expr::facts::SourcePosition::Present(shared.clone()),
                     verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -29140,6 +29150,7 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
     analysis.accepted_props.push(
         verter_semantic::analysis::component_meta::AcceptedPropAnalysis {
             name: "ap".to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
                 verter_type_expr::facts::SourcePosition::Present(distinct.clone()),
                 verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -29228,6 +29239,7 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
             .props
             .push(verter_semantic::analysis::component_meta::PropAnalysis {
                 name: format!("p{i}"),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
                     verter_type_expr::facts::SourcePosition::Present(source.clone()),
                     verter_type_expr::ResolutionExactness::ExactConcrete,

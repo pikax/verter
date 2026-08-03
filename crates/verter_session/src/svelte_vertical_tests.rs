@@ -345,7 +345,7 @@ fn userland_snippet_lookalike_is_not_classified_snippet_typed() {
     upsert_svelte(
         &host,
         "/Userland.svelte",
-        "<script lang=\"ts\">\n  import type { Snippet } from './fake-svelte';\n  let { row }: { row: Snippet } = $props();\n</script>\n",
+        "<script lang=\"ts\">\n  import type { Snippet as UserSnippet } from './fake-svelte';\n  type Snippet = (arg: string) => unknown;\n  let { user, local }: { user: UserSnippet; local: Snippet } = $props();\n</script>\n",
     );
 
     // Drive the resolved-validation half via the host's script-facts seam: the
@@ -353,11 +353,43 @@ fn userland_snippet_lookalike_is_not_classified_snippet_typed() {
     // facts are produced.
     let facts = host.resolve_svelte_script_facts("/Userland.svelte");
     assert!(
-        facts
-            .as_ref()
-            .is_none_or(|f| f.validated_snippet_members.is_empty()),
+        facts.as_ref().is_none_or(|f| f.snippet_imports.is_empty()),
         "a userland `Snippet` look-alike must NOT be classified snippet-typed, got {:?}",
-        facts.map(|f| f.validated_snippet_members.clone())
+        facts.map(|f| f.snippet_imports.clone())
+    );
+
+    let (meta, _, _) = host
+        .get_component_meta_output("/Userland.svelte")
+        .expect("component meta query")
+        .expect("component meta output")
+        .into_parts();
+    for name in ["user", "local"] {
+        let prop = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(
+            matches!(
+                prop.callable_role,
+                verter_type_expr::PropCallableRole::Other
+            ),
+            "{name} look-alike must be a complete non-match, got {:?}",
+            prop.callable_role
+        );
+    }
+    let projection = host
+        .get_public_api_projection("/Userland.svelte")
+        .expect("projection query")
+        .expect("projection");
+    let contract = match projection.contract {
+        crate::framework::ComponentContractAvailability::Supported(contract) => contract,
+        other => panic!("supported Svelte contract, got {other:?}"),
+    };
+    assert!(
+        contract.slots.is_empty(),
+        "look-alike callables must not synthesize slots: {:?}",
+        contract.slots
     );
 }
 
@@ -381,17 +413,19 @@ fn real_svelte_snippet_is_classified_snippet_typed() {
     // Note: snippet validation depends on the host resolving `svelte` to its
     // `node_modules` package AND classifying that canonical as package-backed
     // (the typed `ResolvedPackage` identity). When the hermetic resolver reaches
-    // the package, `row` is validated; when it cannot, `validated_snippet_members`
-    // is empty — the userland-look-alike negative above is the load-bearing
-    // discriminator either way. Assert the validated set is EITHER exactly
-    // `["row"]` (resolved) OR empty (unresolved) — NEVER a different member, and
-    // NEVER a userland member.
+    // the package, the exact import identity is retained; when it cannot, an
+    // unresolved import fact may remain. No prop member name is captured.
     if let Some(facts) = facts {
         assert!(
-            facts.validated_snippet_members.is_empty()
-                || facts.validated_snippet_members.as_ref() == ["row".to_string()].as_slice(),
-            "the only validatable snippet member is `row` (or none when `svelte` did not resolve), got {:?}",
-            facts.validated_snippet_members
+            facts.snippet_imports.is_empty()
+                || facts.snippet_imports.iter().all(|fact| match fact {
+                    verter_type_expr::facts::SvelteSnippetImportFact::Resolved {
+                        symbol, ..
+                    } => symbol.symbol.as_ref() == "Snippet",
+                    verter_type_expr::facts::SvelteSnippetImportFact::Unresolved { .. } => true,
+                }),
+            "only the named `Snippet` import identity may be retained, got {:?}",
+            facts.snippet_imports
         );
     }
 }
@@ -887,6 +921,35 @@ void title; void count; void onselect; void itemRow; void dispatch;
         ],
     );
     upsert_svelte(&host, "/workspace/StructuredContract.svelte", source);
+    let facts = host
+        .resolve_svelte_script_facts("/workspace/StructuredContract.svelte")
+        .expect("Svelte facts");
+    assert!(
+        matches!(
+            facts.snippet_imports.as_ref(),
+            [verter_type_expr::facts::SvelteSnippetImportFact::Resolved { .. }]
+        ),
+        "real package import must retain a resolved Snippet seed: {:?}",
+        facts.snippet_imports
+    );
+    let (meta, _, _) = host
+        .get_component_meta_output("/workspace/StructuredContract.svelte")
+        .expect("component meta query succeeds")
+        .expect("component meta output")
+        .into_parts();
+    let item_row = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "itemRow")
+        .expect("itemRow prop analysis");
+    assert!(
+        matches!(
+            item_row.callable_role,
+            verter_type_expr::PropCallableRole::SvelteSnippet { .. }
+        ),
+        "real package Snippet must resolve to the typed role: {:?}",
+        item_row.callable_role
+    );
     let projection = host
         .get_public_api_projection("/workspace/StructuredContract.svelte")
         .expect("Svelte declaration projection succeeds")
@@ -981,6 +1044,95 @@ void title; void count; void onselect; void itemRow; void dispatch;
             Some(verter_type_expr::TypeExpr::Object(_))
         ),
         "the structured Snippet return must reach the public contract"
+    );
+}
+
+#[test]
+fn svelte_snippet_role_resolves_import_and_multi_hop_local_aliases() {
+    let source = r#"<script lang="ts">
+import type { Snippet as Renderable } from 'svelte';
+type OneHop = Renderable<[item: string]>;
+type TwoHop = OneHop;
+type LocalLookalike = (value: number) => void;
+let { direct, one, two, fake }: {
+  direct: Renderable<[item: string]>;
+  one: OneHop;
+  two: TwoHop;
+  fake: LocalLookalike;
+} = $props();
+void direct; void one; void two; void fake;
+</script>"#;
+    let host = workspace_host_with_svelte(
+        "/workspace/Aliases.svelte",
+        source,
+        &[
+            (
+                "/workspace/node_modules/svelte/package.json",
+                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+            ),
+            (
+                "/workspace/node_modules/svelte/index.d.ts",
+                "export type Snippet<Params extends unknown[] = []> = \
+                 (...args: Params) => { rendered: true };\n",
+            ),
+        ],
+    );
+    upsert_svelte(&host, "/workspace/Aliases.svelte", source);
+    let (meta, _, _) = host
+        .get_component_meta_output("/workspace/Aliases.svelte")
+        .expect("component meta query")
+        .expect("component meta output")
+        .into_parts();
+    for name in ["direct", "one", "two"] {
+        let prop = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(
+            matches!(
+                prop.callable_role,
+                verter_type_expr::PropCallableRole::SvelteSnippet { .. }
+            ),
+            "{name} must resolve through the shared identity demand: role={:?}, publication={:?}",
+            prop.callable_role,
+            prop.publication
+        );
+    }
+    assert!(
+        matches!(
+            meta.props
+                .iter()
+                .find(|prop| prop.name == "fake")
+                .expect("fake prop")
+                .callable_role,
+            verter_type_expr::PropCallableRole::Other
+        ),
+        "a local callable look-alike must remain Other"
+    );
+
+    let projection = host
+        .get_public_api_projection("/workspace/Aliases.svelte")
+        .expect("projection query")
+        .expect("projection");
+    let contract = match projection.contract {
+        crate::framework::ComponentContractAvailability::Supported(contract) => contract,
+        other => panic!("supported Svelte contract, got {other:?}"),
+    };
+    let names = contract
+        .slots
+        .iter()
+        .map(|slot| slot.name.as_ref())
+        .collect::<Vec<_>>();
+    for expected in ["direct", "one", "two"] {
+        assert!(
+            names.contains(&expected),
+            "missing slot {expected}: {names:?}"
+        );
+    }
+    assert!(
+        !names.contains(&"fake"),
+        "look-alike leaked as slot: {names:?}"
     );
 }
 

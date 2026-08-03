@@ -2,75 +2,6 @@
 
 use super::*;
 
-pub(super) fn collect_snippet_candidate_members(
-    ty: &TSType<'_>,
-    snippet_imports: &[(String, String)],
-    out: &mut SvelteScriptCandidates,
-) {
-    let TSType::TSTypeLiteral(literal) = ty else {
-        return;
-    };
-    for member in &literal.members {
-        let TSSignature::TSPropertySignature(sig) = member else {
-            continue;
-        };
-        let Some(member_name) = property_key_name(&sig.key) else {
-            continue;
-        };
-        let Some(annotation) = &sig.type_annotation else {
-            continue;
-        };
-        if let TSType::TSTypeReference(reference) = &annotation.type_annotation {
-            if let TSTypeName::IdentifierReference(local) = &reference.type_name {
-                let type_name = local.name.as_str();
-                if let Some((_, source)) =
-                    snippet_imports.iter().find(|(name, _)| name == type_name)
-                {
-                    out.snippet_candidates.push(SvelteSnippetImportCandidate {
-                        local_binding: type_name.to_string(),
-                        import_source: source.clone(),
-                        member_name: member_name.to_string(),
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// JSDoc-lowered sibling of [`collect_snippet_candidate_members`]. The JSDoc
-/// payload is already ordinary typed IR, so snippet candidate capture remains
-/// syntax-only and uses the same imported-binding provenance pair.
-pub(super) fn collect_snippet_candidate_members_from_lowered(
-    ty: &TypeExpr,
-    snippet_imports: &[(String, String)],
-    out: &mut SvelteScriptCandidates,
-) {
-    use verter_type_expr::ObjectMember;
-
-    let TypeExpr::Object(object) = ty else {
-        return;
-    };
-    for member in object.properties.iter() {
-        let ObjectMember::Property(property) = member else {
-            continue;
-        };
-        let TypeExpr::Ref { name, .. } = &property.ty else {
-            continue;
-        };
-        let Some((_, source)) = snippet_imports
-            .iter()
-            .find(|(binding, _)| binding == name.as_ref())
-        else {
-            continue;
-        };
-        out.snippet_candidates.push(SvelteSnippetImportCandidate {
-            local_binding: name.as_ref().to_string(),
-            import_source: source.clone(),
-            member_name: property.name.clone(),
-        });
-    }
-}
-
 /// The content-free anchor of a svelte macro payload: the component's
 /// `default` value symbol under the analyzer's local-file convention (the
 /// empty producing canonical = the component's own file). Mirrors the Vue
@@ -257,10 +188,10 @@ pub(super) fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8;
             d.value.hash(&mut hasher);
         }
     }
-    for c in &candidates.snippet_candidates {
+    for c in &candidates.snippet_imports {
+        c.imported_name.hash(&mut hasher);
         c.local_binding.hash(&mut hasher);
         c.import_source.hash(&mut hasher);
-        c.member_name.hash(&mut hasher);
     }
     for export in &candidates.instance_exports {
         export.exported_name.hash(&mut hasher);

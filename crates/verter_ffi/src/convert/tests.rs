@@ -165,6 +165,7 @@ fn failed_publication_is_absorbing_in_all_target_ffi_lanes() {
     let mut analysis = empty_analysis();
     analysis.props = vec![cm::PropAnalysis {
         name: "prop".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: failed_publication(),
         type_expansion: None,
         required: true,
@@ -192,6 +193,7 @@ fn failed_publication_is_absorbing_in_all_target_ffi_lanes() {
     }];
     analysis.accepted_props = vec![cm::AcceptedPropAnalysis {
         name: "accepted".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: failed_publication(),
         type_source_scope: None,
         required: true,
@@ -205,6 +207,7 @@ fn failed_publication_is_absorbing_in_all_target_ffi_lanes() {
             condition_text: None,
             props: vec![cm::FallthroughPropEntry {
                 name: "inherited".to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: failed_publication(),
                 type_source_scope: None,
                 sources: Vec::new(),
@@ -2449,6 +2452,7 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     ];
     let prop_entry = |name: &str| cm::FallthroughPropEntry {
         name: name.to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_source_scope: None,
         sources: Vec::new(),
@@ -2594,6 +2598,7 @@ fn component_meta_lane_misalignment_fails_closed_not_silent_truncation() {
     // One analysis prop against the EMPTY default lanes — misaligned.
     analysis.props = vec![cm::PropAnalysis {
         name: "misaligned".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_expansion: None,
         required: true,
@@ -2644,6 +2649,7 @@ fn fallthrough_prop_entry(
 ) -> verter_semantic::analysis::component_meta::FallthroughPropEntry {
     verter_semantic::analysis::component_meta::FallthroughPropEntry {
         name: name.to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_source_scope: None,
         sources: Vec::new(),
@@ -2811,6 +2817,7 @@ fn component_meta_aligned_lanes_convert_unchanged_through_the_hard_guard() {
     let mut analysis = empty_analysis();
     analysis.props = vec![cm::PropAnalysis {
         name: "aligned".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_expansion: None,
         required: true,

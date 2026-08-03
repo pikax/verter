@@ -76,7 +76,10 @@
 /// - `5` — canonical resolved emit occurrences and occurrence-based callable
 ///   replay. Version `4` entries can carry ordinal/parallel-lane associations
 ///   and must fail closed.
-pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 5;
+/// - `6` — exact prop callable roles and package-backed Svelte `Snippet`
+///   symbol identities. Version `5` entries lack the role fact and must fail
+///   closed instead of inferring from display text.
+pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 6;
 
 /// Trait surface every participating Db implements. The implementation is a
 /// trivial getter — the reason it exists at all is so the architecture-guard

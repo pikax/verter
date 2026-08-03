@@ -31,7 +31,7 @@ use verter_type_expr::PrimitiveName;
 
 use crate::decl_body_memo::{lowered_value_decl_for_synthesised_default, LoweredValueDecl};
 
-use super::vue_default_synth::{VUE_INSTANCE_PROPS_MEMBER, VUE_INSTANCE_SLOTS_MEMBER};
+use super::vue_default_synth::VUE_INSTANCE_PROPS_MEMBER;
 
 /// The synthesized instance member carrying the component's event map (the
 /// legacy `createEventDispatcher<E>` payload map). Mirrors Vue's `$emit` member
@@ -75,25 +75,6 @@ pub fn synthesise_svelte_default_value_symbol(
             SVELTE_INSTANCE_EVENTS_MEMBER,
             false,
             payload_ref_fact(events_payload),
-        ));
-    }
-
-    // The snippet-typed slot members, when the component declares snippet props
-    // (parse-domain candidate member names). The fabricated `$slots` map records
-    // the exact slot KEYS so the consumer's `$slots[K]` index is name-exact (an
-    // unknown slot name FAILS the `keyof` index); each value degrades to the
-    // honest `any` leaf — the PRECISE snippet callable lives in the snippet
-    // prop's own `Snippet<…>` type on `$props`, re-resolved by the consumer on
-    // demand (shallow-by-default), and `any` stays callable and indexable. A
-    // component with no snippet props carries no `$slots` member; the
-    // consumer's `$slots[K]` then fails the `keyof {}` index (the correct
-    // slot-less behaviour).
-    let slot_members = snippet_slot_members(candidates);
-    if !slot_members.is_empty() {
-        members.push(synthetic_member(
-            VUE_INSTANCE_SLOTS_MEMBER,
-            false,
-            FactOrLocator::LeafObject(Arc::from(slot_members.into_boxed_slice())),
         ));
     }
 
@@ -152,28 +133,6 @@ fn payload_ref_fact(payload: &AuthoredTypePayloadRef) -> FactOrLocator {
             FactOrLocator::Leaf(LeafTypeFact::Primitive(PrimitiveName::Unknown))
         }
     }
-}
-
-/// The snippet-typed slot members for the internal `$slots` inventory row.
-///
-/// Each parse-domain snippet candidate (`member_name`) becomes one slot key
-/// whose value is the honest `any` leaf. The PRECISE binding type lives in the
-/// snippet prop's own `Snippet<[...]>` type on `$props` (the consumer
-/// re-resolves it on demand — shallow-by-default); the synth records the exact
-/// slot KEYS so the consumer's `$slots[K]` index is name-exact (an unknown
-/// slot name FAILS the `keyof` index). De-duplicated by member name.
-fn snippet_slot_members(candidates: &SvelteScriptCandidates) -> Vec<SynthesizedLeafMember> {
-    let mut seen = std::collections::HashSet::new();
-    candidates
-        .snippet_candidates
-        .iter()
-        .filter(|c| seen.insert(c.member_name.clone()))
-        .map(|c| SynthesizedLeafMember {
-            name: c.member_name.clone(),
-            optional: false,
-            ty: LeafTypeFact::Primitive(PrimitiveName::Any),
-        })
-        .collect()
 }
 
 /// The `$props` member fact for the synthesized instance: the runes `$props()`
@@ -431,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn synth_reads_only_parse_domain_candidates_never_resolved_validation() {
+    fn snippet_import_candidates_never_synthesise_slots() {
         // Synth is a pure function of the PARSE-DOMAIN candidate set: it never
         // reads the resolved-validation facts (the snippet `svelte`-import
         // validation, the dispatcher provenance). The SAME candidates always
@@ -442,10 +401,10 @@ mod tests {
                 props_type: Some(props_payload_ref(0, 3)),
                 ..Default::default()
             }),
-            snippet_candidates: vec![SvelteSnippetImportCandidate {
+            snippet_imports: vec![SvelteSnippetImportCandidate {
+                imported_name: "Snippet".to_string(),
                 local_binding: "Snippet".to_string(),
                 import_source: "svelte".to_string(),
-                member_name: "row".to_string(),
             }],
             ..Default::default()
         };
@@ -453,50 +412,9 @@ mod tests {
         let a = synthesise_svelte_default_value_symbol(&candidates);
         let b = synthesise_svelte_default_value_symbol(&candidates);
         assert_eq!(instance_members(&a), instance_members(&b));
-    }
-
-    #[test]
-    fn snippet_candidates_synthesise_a_slots_instance_member() {
-        // F9: the parse-domain snippet candidates contribute a `$slots` instance
-        // member (an exact key map) — the consumer's `$slots[K]` index is
-        // name-exact. A component with NO snippet props carries NO `$slots`
-        // member.
-        use verter_semantic::analysis::framework_facts::svelte::SvelteSnippetImportCandidate;
-        let with_snippet = SvelteScriptCandidates {
-            props: Some(SveltePropsCandidate {
-                props_type: Some(props_payload_ref(0, 5)),
-                ..Default::default()
-            }),
-            snippet_candidates: vec![SvelteSnippetImportCandidate {
-                local_binding: "Snippet".to_string(),
-                import_source: "svelte".to_string(),
-                member_name: "row".to_string(),
-            }],
-            ..Default::default()
-        };
-        let sym = synthesise_svelte_default_value_symbol(&with_snippet);
-        let FactOrLocator::LeafObject(slots) = member_ty(&sym, "$slots") else {
-            panic!(
-                "a snippet prop synthesises a $slots member, got {:?}",
-                member_names(&sym)
-            );
-        };
-        // The slot KEY inventory is exact.
-        assert_eq!(
-            slots.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
-            vec!["row"]
-        );
-
-        // No snippet candidates ⇒ no `$slots` member.
-        let without_snippet = SvelteScriptCandidates {
-            snippet_candidates: Vec::new(),
-            ..with_snippet.clone()
-        };
-        let sym2 = synthesise_svelte_default_value_symbol(&without_snippet);
         assert!(
-            !member_names(&sym2).contains(&"$slots".to_string()),
-            "no snippet props ⇒ no $slots member, got {:?}",
-            member_names(&sym2)
+            !member_names(&a).contains(&"$slots".to_string()),
+            "parse-domain snippet imports must not mint semantic slot inventory"
         );
     }
 

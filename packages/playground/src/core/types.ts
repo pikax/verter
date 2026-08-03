@@ -675,8 +675,41 @@ export interface AnalysisIfChain {
   conditions: [string, number, number][];
 }
 
+export type AnalysisPropCallableRole =
+  | {
+      kind: "svelteSnippet";
+      symbol: {
+        canonicalId: string;
+        owner: {
+          kind: "Module" | "Instance" | "Frontmatter";
+          ordinal: number;
+        };
+        symbol: string;
+      };
+      exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+      provenance:
+        | "semanticEvaluator"
+        | "sessionProjector"
+        | "frameworkSurface"
+        | "fallthroughInheritance"
+        | "schema";
+    }
+  | { kind: "other" }
+  | {
+      kind: "unresolved";
+      reason:
+        | "analysisUnavailable"
+        | "missingDependency"
+        | "cycle"
+        | "budgetExceeded"
+        | "workLimitExceeded"
+        | "unsupported"
+        | "fault";
+    };
+
 export interface AnalysisPropDefinition {
   name: string;
+  callableRole: AnalysisPropCallableRole;
   typeAnnotation?: string | null;
   hasDefault: boolean;
   isRequired: boolean;

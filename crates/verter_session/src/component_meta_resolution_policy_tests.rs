@@ -157,6 +157,7 @@ fn empty_meta() -> ComponentMetaAnalysis {
 fn prop(name: &str, type_source: SemanticTypeSource) -> PropAnalysis {
     PropAnalysis {
         name: name.to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: crate::test_only::type_publication_fixture(
             verter_type_expr::facts::SourcePosition::Present(type_source),
             verter_type_expr::ResolutionExactness::ExactConcrete,
@@ -183,6 +184,7 @@ fn symbolic_prop_with_evidence(
 ) -> PropAnalysis {
     PropAnalysis {
         name: name.to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: crate::test_only::type_publication_fixture(
             verter_type_expr::facts::SourcePosition::Present(resolved),
             verter_type_expr::ResolutionExactness::ExactSymbolic,
@@ -1291,6 +1293,7 @@ fn w2_4_restore_macro_participating_from_equivalent_typed_annotation() {
     let mut meta = empty_meta();
     meta.props.push(PropAnalysis {
         name: "actions".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: crate::test_only::type_publication_fixture(
             verter_type_expr::facts::SourcePosition::Present(resolved),
             verter_type_expr::ResolutionExactness::ExactSymbolic,
@@ -1395,6 +1398,7 @@ fn same_spelled_distinct_macro_compound_refs_cannot_mint_symbolic_equivalence() 
     let mut meta = empty_meta();
     meta.props.push(PropAnalysis {
         name: "actions".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: crate::test_only::type_publication_fixture(
             verter_type_expr::facts::SourcePosition::Present(resolved.clone()),
             verter_type_expr::ResolutionExactness::ExactSymbolic,
@@ -1449,6 +1453,7 @@ fn mismatched_macro_compound_shape_cannot_mint_symbolic_equivalence() {
     let mut meta = empty_meta();
     meta.props.push(PropAnalysis {
         name: "actions".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
         publication: crate::test_only::type_publication_fixture(
             verter_type_expr::facts::SourcePosition::Present(resolved.clone()),
             verter_type_expr::ResolutionExactness::ExactSymbolic,

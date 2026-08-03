@@ -709,6 +709,7 @@ fn populate_unused_declaration_facts(
                 let used_in_style = ctx.style_vbind_roots.iter().any(|root| root == &field.name);
                 definitions.push(AnalyzedPropDefinition {
                     name: field.name.clone(),
+                    callable_role: verter_type_expr::PropCallableRole::default(),
                     type_annotation: field.type_annotation.clone(),
                     has_default: default_keys.contains(field.name.as_str()),
                     is_required: !field.is_optional,

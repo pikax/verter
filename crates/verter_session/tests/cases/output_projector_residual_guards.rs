@@ -7446,6 +7446,13 @@ const KNOWN_NON_DTO_OUTPUT_IDENTS: &[(&str, NonAuthorityCategory)] = &[
         "TypePublication",
         NonAuthorityCategory::ExternalNonAuthority(&["verter_type_expr"]),
     ),
+    // Typed callable-role classification result: a closed enum over symbolic
+    // identity, exactness, provenance, and unresolved reason. It derives
+    // `NoTypeExpr` and carries no materialized `TypeExpr`.
+    (
+        "PropCallableRole",
+        NonAuthorityCategory::ExternalNonAuthority(&["verter_type_expr"]),
+    ),
     // Framework-surface WIRE response / error / audit-envelope types — proto /
     // audit DTOs carrying GRAPH nodes (a shallow projection), NOT the Rust
     // `verter_type_expr::TypeExpr` payload, so non-bearing for this closure. The

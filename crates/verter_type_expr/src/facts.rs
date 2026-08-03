@@ -2885,6 +2885,40 @@ pub struct SvelteModuleExportFact {
     pub binding_key: crate::DeclBindingKey,
 }
 
+/// One named Svelte `Snippet` import after session-side package validation.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum SvelteSnippetImportFact {
+    /// The import resolved through the package-backed `svelte` route.
+    Resolved {
+        /// Local binding, including an authored import alias.
+        local_binding: String,
+        /// Raw import specifier retained as route evidence.
+        import_source: String,
+        /// Package export identity to canonicalize through shared demand.
+        symbol: crate::ResolvedSymbolIdentity,
+    },
+    /// The import route could not resolve, so identity remains undecidable.
+    Unresolved {
+        /// Local binding, including an authored import alias.
+        local_binding: String,
+        /// Raw import specifier retained as route evidence.
+        import_source: String,
+        /// Typed fail-closed reason.
+        reason: crate::PropCallableRoleUnresolvedReason,
+    },
+}
+
 /// The narrowed persisted `SvelteScriptFacts`. `props_type` /
 /// `dispatcher_events` are authored-type payload refs: a content-free
 /// `MacroPayload` locator (the re-resolution address) plus a parse-stable
@@ -2907,8 +2941,8 @@ pub struct SvelteScriptFactsFact {
     pub props_type: Option<AuthoredTypePayloadRef>,
     /// MODEL binding names.
     pub bindable_members: Arc<[String]>,
-    /// svelte-package-validated snippet prop names.
-    pub validated_snippet_members: Arc<[String]>,
+    /// Named `Snippet` imports with package-validated symbol identity.
+    pub snippet_imports: Arc<[SvelteSnippetImportFact]>,
     /// Legacy props.
     pub legacy_props: Arc<[SvelteLegacyPropFact]>,
     /// The `createEventDispatcher<E>()` type-arg authored-type payload ref,
