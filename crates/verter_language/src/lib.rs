@@ -33,6 +33,9 @@ mod language;
 mod parse_artifact;
 mod registry;
 
+pub mod carrier_grammar;
+pub mod registered_source_authority;
+
 pub use ids::{CapabilityId, FrameworkAdapterId, LanguageId};
 pub use language::{FileLanguage, JsModuleKind, ScriptFlavor, ScriptSourceType};
 pub use parse_artifact::{
