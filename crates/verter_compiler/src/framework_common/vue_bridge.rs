@@ -301,6 +301,13 @@ impl Default for VueCarrierCompiler {
 }
 
 impl VueCarrierCompiler {
+    pub(super) fn carrier_arc(
+        &self,
+        artifact: &FrameworkParseArtifact,
+    ) -> Option<Arc<VueParseCarrier>> {
+        self.ctx.carrier_for_arc::<VueParseCarrier>(artifact)
+    }
+
     /// Reach the parsed SFC back out of a Vue artifact, or `None` when the
     /// artifact is not a Vue carrier (foreign adapter id or non-Vue
     /// erased payload). The blessed downcast home for the Vue bridge.

@@ -11,13 +11,16 @@ use verter_language::{
     CarrierAttribute, CarrierBlock, CarrierBlockInventory, CarrierStructureHash, MarkupNodeKind,
 };
 
-use super::registered_carrier_projection::project_registered_carrier_for_tests as project_registered_carrier;
+use super::registered_carrier_projection::{
+    project_registered_carrier_for_tests as project_registered_carrier, RegisteredCarrierPayload,
+};
 use super::registered_projector_seal::{
     mint_registered_projector_seal_for_tests, RegisteredProjectorSeal,
 };
 use super::registry::CarrierCompilerRegistry;
 
 struct RegisteredCarrierProjection {
+    carrier: RegisteredCarrierPayload,
     inventory: Arc<CarrierBlockInventory>,
     carrier_structure_hash: CarrierStructureHash,
 }
@@ -26,9 +29,18 @@ type RegisteredProjectorForTests = fn(
     &dyn super::carrier_compiler::CarrierCompiler,
     &AcceptedRegisteredCarrierSource,
     &RegisteredProjectorSeal,
-) -> (Arc<CarrierBlockInventory>, CarrierStructureHash);
+) -> (
+    RegisteredCarrierPayload,
+    Arc<CarrierBlockInventory>,
+    CarrierStructureHash,
+    bool,
+);
 
 impl RegisteredCarrierProjection {
+    fn carrier(&self) -> &RegisteredCarrierPayload {
+        &self.carrier
+    }
+
     fn inventory(&self) -> &Arc<CarrierBlockInventory> {
         &self.inventory
     }
@@ -87,11 +99,53 @@ fn project(accepted: &AcceptedRegisteredCarrierSource) -> RegisteredCarrierProje
         )
         .expect("registered compiler");
     let seal = mint_registered_projector_seal_for_tests();
-    let (inventory, carrier_structure_hash) =
+    let (carrier, inventory, carrier_structure_hash, same_carrier_arc) =
         project_registered_carrier(compiler.as_ref(), accepted, &seal);
+    assert!(
+        same_carrier_arc,
+        "projection payload must retain the exact Arc produced by the sole parse"
+    );
     RegisteredCarrierProjection {
+        carrier,
         inventory,
         carrier_structure_hash,
+    }
+}
+
+#[test]
+fn registered_projection_retains_the_sole_parse_carrier_arc_and_metadata() {
+    for (path, language, source) in [
+        (
+            "file:///workspace/Identity.vue",
+            verter_language::FileLanguage::vue(),
+            "<template><div/></template>",
+        ),
+        (
+            "file:///workspace/Identity.svelte",
+            verter_language::FileLanguage::svelte(),
+            "<div />",
+        ),
+    ] {
+        let (_, _, accepted) = accepted(path, language, source);
+        let projection = project(&accepted);
+        let payload = projection.carrier();
+        assert_eq!(
+            payload.adapter_id(),
+            accepted
+                .source()
+                .resolved_file_language()
+                .adapter_id()
+                .expect("carrier adapter")
+        );
+        assert_eq!(
+            payload.language_id(),
+            accepted
+                .source()
+                .resolved_file_language()
+                .carrier_language_id()
+                .expect("carrier language")
+        );
+        assert_ne!(payload.parser_version(), 0);
     }
 }
 

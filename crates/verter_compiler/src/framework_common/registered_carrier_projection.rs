@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use verter_language::carrier_grammar::{AcceptedRegisteredCarrierSource, CarrierGrammarConfig};
 use verter_language::parse_artifact::carrier_inventory::*;
-use verter_language::{compute_carrier_structure_hash, CarrierStructureHash};
+use verter_language::{
+    compute_carrier_structure_hash, CarrierParse, CarrierStructureHash, FrameworkAdapterId,
+    LanguageId,
+};
 use verter_span::Span;
 
 use super::carrier_compiler::{CarrierCompiler, ParseOptions};
@@ -13,12 +16,75 @@ use super::registered_projector_seal::RegisteredProjectorSeal;
 use super::vue_bridge::VueCarrierCompiler;
 use crate::svelte::SvelteCarrierCompiler;
 
+/// Opaque in-process carrier retained by the registered projector.
+///
+/// Only immutable producer metadata is observable. The erased carrier has no
+/// accessor or downcast surface, and this type has no serialization, equality,
+/// or hashing implementation that could turn it into publication identity.
+#[derive(Clone)]
+pub struct RegisteredCarrierPayload {
+    inner: Arc<RegisteredCarrierPayloadInner>,
+}
+
+struct RegisteredCarrierPayloadInner {
+    carrier: Arc<dyn CarrierParse>,
+    adapter_id: FrameworkAdapterId,
+    language_id: LanguageId,
+    parser_version: u32,
+}
+
+impl RegisteredCarrierPayload {
+    fn new(
+        carrier: Arc<dyn CarrierParse>,
+        adapter_id: FrameworkAdapterId,
+        language_id: LanguageId,
+        parser_version: u32,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RegisteredCarrierPayloadInner {
+                carrier,
+                adapter_id,
+                language_id,
+                parser_version,
+            }),
+        }
+    }
+
+    /// Adapter that owns the retained parse.
+    #[must_use]
+    pub fn adapter_id(&self) -> &FrameworkAdapterId {
+        &self.inner.adapter_id
+    }
+
+    /// Carrier language parsed by the owning adapter.
+    #[must_use]
+    pub fn language_id(&self) -> &LanguageId {
+        &self.inner.language_id
+    }
+
+    /// Parser version that produced the retained parse.
+    #[must_use]
+    pub fn parser_version(&self) -> u32 {
+        self.inner.parser_version
+    }
+
+    #[cfg(test)]
+    fn points_to(&self, carrier: &Arc<dyn CarrierParse>) -> bool {
+        Arc::ptr_eq(&self.inner.carrier, carrier)
+    }
+}
+
 struct RegisteredCarrierProjection {
+    carrier: RegisteredCarrierPayload,
     inventory: Arc<CarrierBlockInventory>,
     carrier_structure_hash: CarrierStructureHash,
 }
 
 impl RegisteredCarrierProjection {
+    fn carrier(&self) -> &RegisteredCarrierPayload {
+        &self.carrier
+    }
+
     fn inventory(&self) -> &Arc<CarrierBlockInventory> {
         &self.inventory
     }
@@ -32,6 +98,14 @@ fn project_registered_carrier(
     accepted: &AcceptedRegisteredCarrierSource,
     _seal: &RegisteredProjectorSeal,
 ) -> RegisteredCarrierProjection {
+    project_registered_carrier_with_witness(compiler, accepted, _seal).0
+}
+
+fn project_registered_carrier_with_witness(
+    compiler: &dyn CarrierCompiler,
+    accepted: &AcceptedRegisteredCarrierSource,
+    _seal: &RegisteredProjectorSeal,
+) -> (RegisteredCarrierProjection, Arc<dyn CarrierParse>) {
     let language = accepted.source().resolved_file_language();
     assert_eq!(
         compiler.adapter_id(),
@@ -64,25 +138,44 @@ fn project_registered_carrier(
     let artifact = compiler.parse(accepted.source().bytes(), &options);
     assert_eq!(artifact.adapter_id, compiler.adapter_id());
     assert_eq!(artifact.language_id, compiler.carrier_language_id());
-    let inventory = if let Some(vue) = compiler
-        .__verter_as_any()
-        .downcast_ref::<VueCarrierCompiler>()
-    {
-        project_vue(vue, accepted, &artifact)
-    } else if let Some(svelte) = compiler
-        .__verter_as_any()
-        .downcast_ref::<SvelteCarrierCompiler>()
-    {
-        project_svelte(svelte, accepted, &artifact)
-    } else {
-        panic!("registered compiler lacks a closed carrier inventory projector")
-    };
+    let (inventory, parsed_carrier): (CarrierBlockInventory, Arc<dyn CarrierParse>) =
+        if let Some(vue) = compiler
+            .__verter_as_any()
+            .downcast_ref::<VueCarrierCompiler>()
+        {
+            (
+                project_vue(vue, accepted, &artifact),
+                vue.carrier_arc(&artifact).expect("Vue carrier payload"),
+            )
+        } else if let Some(svelte) = compiler
+            .__verter_as_any()
+            .downcast_ref::<SvelteCarrierCompiler>()
+        {
+            (
+                project_svelte(svelte, accepted, &artifact),
+                svelte
+                    .carrier_arc(&artifact)
+                    .expect("Svelte carrier payload"),
+            )
+        } else {
+            panic!("registered compiler lacks a closed carrier inventory projector")
+        };
     let inventory = Arc::new(inventory);
     let carrier_structure_hash = compute_carrier_structure_hash(&inventory);
-    RegisteredCarrierProjection {
-        inventory,
-        carrier_structure_hash,
-    }
+    let carrier = RegisteredCarrierPayload::new(
+        Arc::clone(&parsed_carrier),
+        artifact.adapter_id.clone(),
+        artifact.language_id.clone(),
+        artifact.parser_version,
+    );
+    (
+        RegisteredCarrierProjection {
+            carrier,
+            inventory,
+            carrier_structure_hash,
+        },
+        parsed_carrier,
+    )
 }
 
 #[cfg(test)]
@@ -90,12 +183,21 @@ pub(super) fn project_registered_carrier_for_tests(
     compiler: &dyn CarrierCompiler,
     accepted: &AcceptedRegisteredCarrierSource,
     seal: &RegisteredProjectorSeal,
-) -> (Arc<CarrierBlockInventory>, CarrierStructureHash) {
-    let projection = project_registered_carrier(compiler, accepted, seal);
-    (
-        Arc::clone(projection.inventory()),
-        projection.carrier_structure_hash(),
-    )
+) -> (
+    RegisteredCarrierPayload,
+    Arc<CarrierBlockInventory>,
+    CarrierStructureHash,
+    bool,
+) {
+    let (projection, parsed_carrier) =
+        project_registered_carrier_with_witness(compiler, accepted, seal);
+    let same_carrier_arc = projection.carrier().points_to(&parsed_carrier);
+    let RegisteredCarrierProjection {
+        carrier,
+        inventory,
+        carrier_structure_hash,
+    } = projection;
+    (carrier, inventory, carrier_structure_hash, same_carrier_arc)
 }
 
 struct Builder<'a> {

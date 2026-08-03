@@ -1,0 +1,5 @@
+error[E0609]: no field `carrier` on type `&RegisteredCarrierPayload`
+ --> tests/cases/compile-fail/registered_carrier_payload_no_raw_carrier.rs:4:21
+  |
+4 |     let _ = payload.carrier;
+  |                     ^^^^^^^ unknown field

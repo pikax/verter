@@ -18,8 +18,13 @@ single internal projector. It accepts only a `CarrierCompiler` and a sealed
 constructor state is owned by a separate sibling module. The projector module
 cannot mint that seal. Tests have a cfg(test)-only mint and exercise the real
 projector; the inaccessible carrier-publication-store-leader module reserves
-the currently unused production mint. The returned bundle is private,
-non-serializable, and has read-only inventory/hash accessors. B1 therefore has
+the currently unused production mint. The returned bundle is private and
+non-serializable, and carries the exact sealed carrier payload, inventory, and
+carrier structure hash together. The payload retains the sole parse's
+`Arc<dyn CarrierParse>` plus immutable adapter/language/parser-version metadata;
+it exposes no carrier downcast, raw carrier/source accessor, serialization,
+hashing, equality, or replacement surface. The projection has read-only
+payload/inventory/hash accessors. B1 therefore has
 no production mint, acceptance, or authorized projector caller; B2 owns the
 first production publication path.
 

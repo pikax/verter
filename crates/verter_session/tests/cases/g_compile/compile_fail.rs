@@ -101,6 +101,22 @@ fn registered_carrier_projector_not_public_or_reexported() {
     );
 }
 
+/// The registered projection's carrier payload is an opaque in-process seal:
+/// it exposes neither a typed downcast nor its erased carrier, and it cannot be
+/// serialized into a reconstructible form.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn registered_carrier_payload_is_opaque_and_non_serializable() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/registered_carrier_payload_no_downcast.rs");
+    t.compile_fail("tests/cases/compile-fail/registered_carrier_payload_no_serialize.rs");
+    t.compile_fail("tests/cases/compile-fail/registered_carrier_payload_no_deserialize.rs");
+    t.compile_fail("tests/cases/compile-fail/registered_carrier_payload_no_raw_carrier.rs");
+}
+
 /// The `TscResponse` rendering-channel seal has NO inside: the two code
 /// fields (`code`, `ts_carrier_code`) and the sole from-parts constructor
 /// live in the private `types::tsc_response` CHILD module, so even sibling

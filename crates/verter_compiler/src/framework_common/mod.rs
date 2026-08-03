@@ -42,4 +42,6 @@ pub use carrier_compiler::{
 };
 pub use ctx::CarrierCompilerCtx;
 pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};
+#[doc(hidden)]
+pub use registered_carrier_projection::RegisteredCarrierPayload;
 pub use registry::CarrierCompilerRegistry;

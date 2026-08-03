@@ -1,0 +1,11 @@
+error[E0599]: no method named `downcast_ref` found for reference `&RegisteredCarrierPayload` in the current scope
+ --> tests/cases/compile-fail/registered_carrier_payload_no_downcast.rs:4:21
+  |
+4 |     let _ = payload.downcast_ref::<()>();
+  |                     ^^^^^^^^^^^^
+  |
+help: there is a method `on_red` with a similar name
+  |
+4 -     let _ = payload.downcast_ref::<()>();
+4 +     let _ = payload.on_red::<()>();
+  |

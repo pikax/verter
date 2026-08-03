@@ -210,6 +210,13 @@ impl Default for SvelteCarrierCompiler {
 }
 
 impl SvelteCarrierCompiler {
+    pub(crate) fn carrier_arc(
+        &self,
+        artifact: &FrameworkParseArtifact,
+    ) -> Option<Arc<SvelteParseCarrier>> {
+        self.ctx.carrier_for_arc::<SvelteParseCarrier>(artifact)
+    }
+
     /// Reach the parsed component back out of a Svelte artifact, or `None` when
     /// the artifact is not a Svelte carrier.
     #[must_use]
