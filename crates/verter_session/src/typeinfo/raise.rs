@@ -97,6 +97,70 @@ impl VerterHost {
         serde_json::to_vec(&type_expr).ok()
     }
 
+    /// Demand-time deepen of one published synthetic slot-binding carrier —
+    /// the in-process hover-boundary consumer of the shallow
+    /// [`verter_type_expr::TypeExpr::SyntheticSlotBinding`] publication.
+    ///
+    /// Publication stays shallow-by-default; a consumer holding a contract
+    /// row whose materialized type is the synthetic carrier (extracted by a
+    /// typed-IR variant match, never text) walks it here as an explicit
+    /// terminal demand. The deepen enters through the one shared engine: the
+    /// source raise (`raise_semantic_type_source_to_hot`, the
+    /// `SemanticTypeSource::SyntheticSlotBinding` arm) runs under an
+    /// `Expanded` reduction context, whose terminal-demand split routes
+    /// through the ONE sanctioned synthetic explicit-deepen route
+    /// (`deepen_synthetic_binding_to_hot` — `ShapeCacheDb`-keyed on the
+    /// content-free `SyntheticBindingId`, same-generation seed-gated,
+    /// no-poison). This method never touches `ShapeCacheDb` or mints
+    /// `ShapeCacheKey`s itself — it is a demand entry above the engine, not a
+    /// second resolver and not a second cache client.
+    ///
+    /// FAIL-CLOSED: a deepen that cannot complete (stale seed, evicted node,
+    /// unresolvable value) falls back to the shallow carrier inside the raise
+    /// arm; this method maps that fallback — and any unraisable source — to
+    /// `None`, so the caller keeps its typed refusal and never renders a
+    /// fabricated shape. `scope_canonical_id` is the OWNING child component's
+    /// canonical id (the scope the contract row was published under).
+    #[must_use]
+    pub fn deepen_synthetic_slot_binding(
+        &self,
+        scope_canonical_id: &str,
+        key: &std::sync::Arc<verter_type_expr::SyntheticCarrierKey>,
+    ) -> Option<verter_type_expr::TypeExpr> {
+        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let source = verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
+            std::sync::Arc::clone(key),
+        );
+        let hot = dispatch.raise_semantic_type_source_to_hot(
+            &source,
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id,
+                scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+                interior_failures: None,
+            },
+        )?;
+        // The raise arm's honest degraded answer is the shallow carrier NODE
+        // itself — a refusal to deepen, not a deepened view. Decided on the
+        // NODE-DOMAIN fact (never on a reverse-materialized `TypeExpr` — the
+        // hot-path fence): the materialization below is the ONE terminal-sink
+        // output raise and feeds no semantic decision.
+        if dispatch.node_is_synthetic_binding_carrier(hot.node()) {
+            return None;
+        }
+        let cap = TypeinfoRaiseOutputCap::new(&dispatch);
+        Some(
+            cap.materialize_output_type_expr(hot.node())?
+                .into_type_expr(&cap),
+        )
+    }
+
     /// Test-only sibling of [`Self::project_node_to_type_expr_json_bytes`]
     /// that returns the raised [`verter_type_expr::TypeExpr`] directly
     /// (rather than wire bytes) so the typeinfo / dispatch-equivalence /

@@ -7648,3 +7648,160 @@ fn a_namespace_member_root_fails_closed_with_a_typed_unresolved_reason() {
          the namespace result above is about the namespace shape only:\n{control}"
     );
 }
+
+// @ai-generated - Single-knob proof that mandatory-contract composition is
+// projection-entry-scoped: the response-only render never reaches an output
+// build; only `get_public_api_projection` composes (and pays) the contract.
+#[test]
+fn response_only_public_api_render_composes_no_contract() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/ResponseOnly.vue",
+        r#"<script setup lang="ts">
+defineProps<{ label: string }>()
+</script>
+<template><button>{{ label }}</button></template>"#,
+    );
+
+    // Arm ONE output-build failure for the target canonical (consumed by the
+    // next `build_component_meta_output` for it).
+    crate::test_only::component_meta_output::force_output_failure_for("/src/ResponseOnly.vue");
+
+    // The response-only render must succeed WITHOUT reaching an output build:
+    // the armed failure survives it. (Pre-move discrimination: a response body
+    // still composing the contract consumes the arm here, and the projection
+    // below then composes a SUPPORTED contract.)
+    let response = host
+        .get_public_api("/src/ResponseOnly.vue")
+        .expect("response-only render succeeds with the failure armed")
+        .expect("Vue carrier renders a response");
+    assert!(
+        !response.ts_labeled_code().is_empty(),
+        "the declaration response renders normally"
+    );
+
+    // The projection entry is the ONE composition point: it consumes the arm
+    // and degrades to the typed Unsupported availability — never a gated or
+    // absent response.
+    let projection = host
+        .get_public_api_projection("/src/ResponseOnly.vue")
+        .expect("projection entry succeeds — composition never gates the response")
+        .expect("Vue carrier projects");
+    assert!(
+        !projection.response.ts_labeled_code().is_empty(),
+        "the projection's declaration response renders despite the contract failure"
+    );
+    match projection.contract {
+        crate::framework::ComponentContractAvailability::Unsupported(unsupported) => {
+            assert!(
+                matches!(
+                    unsupported.reason,
+                    crate::framework::ComponentContractUnsupportedReason::OutputMaterializationFailed { .. }
+                ),
+                "the projection composes the contract and consumes the armed output failure, got: {:?}",
+                unsupported.reason
+            );
+        }
+        crate::framework::ComponentContractAvailability::Supported(_) => panic!(
+            "the armed output failure must be consumed by the PROJECTION's composition — a \
+             supported contract means a response-only render composed (and discarded) it first"
+        ),
+    }
+}
+
+// @ai-generated - The hover-boundary demand entry to the synthetic-binding
+// deepen route: a live published carrier deepens to its authored member type;
+// a stale carrier fails closed to `None` (the caller keeps the refusal).
+#[test]
+fn deepen_synthetic_slot_binding_deepens_live_carrier_and_fails_closed_on_stale() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/SlotCarrier.vue",
+        r#"<script setup lang="ts">
+defineSlots<{ header(props: { title: string; count: number }): any }>()
+</script>
+<template><slot name="header" title="hdr" :count="1" /></template>"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/SlotCarrier.vue")
+        .expect("Vue declaration projection succeeds")
+        .expect("Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Vue carrier must publish a supported contract");
+    };
+    let slot = contract
+        .slots
+        .iter()
+        .find(|slot| slot.name.as_ref() == "header")
+        .expect("header slot row");
+    let title = slot
+        .input
+        .bindings
+        .iter()
+        .find(|binding| binding.name.as_ref() == "title")
+        .expect("title binding row");
+    // Publication stays shallow-by-default: the published binding type IS the
+    // synthetic carrier (typed-IR variant match, never text).
+    let Some(verter_type_expr::TypeExpr::SyntheticSlotBinding(key)) =
+        title.ty.publication.materialized_type()
+    else {
+        panic!(
+            "the concrete-inline slot binding publishes the shallow synthetic carrier, got: {:?}",
+            title.ty.publication.materialized_type()
+        );
+    };
+
+    // Terminal demand at the hover boundary: the carrier deepens through the
+    // one sanctioned route to the authored member type.
+    let deepened = host
+        .deepen_synthetic_slot_binding("/src/SlotCarrier.vue", key)
+        .expect("a live same-generation carrier deepens");
+    assert!(
+        !matches!(
+            deepened,
+            verter_type_expr::TypeExpr::SyntheticSlotBinding(_)
+        ),
+        "the deepened view must not be the shallow carrier again"
+    );
+    assert_eq!(
+        deepened,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the deepened `title` binding is its authored `string`"
+    );
+
+    // The deepen's cache identity is the CONTENT-FREE `SyntheticBindingId`
+    // (the `value_node` ordinal is value-side provenance, never a key): a
+    // same-identity carrier with a bogus ordinal still collapses onto the
+    // warm fact-validated entry (the designed collapse the explicit-deepen
+    // proof suite pins).
+    let same_identity_bogus_ordinal = std::sync::Arc::new(verter_type_expr::SyntheticCarrierKey {
+        value_node: u64::MAX,
+        ..(**key).clone()
+    });
+    assert_eq!(
+        host.deepen_synthetic_slot_binding("/src/SlotCarrier.vue", &same_identity_bogus_ordinal),
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        )),
+        "the content-free identity serves the warm deepened entry regardless of the ordinal"
+    );
+
+    // FAIL-CLOSED negative: a COLD identity (no warm entry) whose seed node
+    // does not exist returns `None` — never a fabricated shape. (`u64::MAX`
+    // is not a live arena ordinal; the same-generation seed gate refuses it,
+    // and the raise arm falls back to the shallow carrier — the refusal.)
+    let stale = std::sync::Arc::new(verter_type_expr::SyntheticCarrierKey {
+        binding_name: std::sync::Arc::from("neverPublishedBinding"),
+        value_node: u64::MAX,
+        ..(**key).clone()
+    });
+    assert_eq!(
+        host.deepen_synthetic_slot_binding("/src/SlotCarrier.vue", &stale),
+        None,
+        "a stale/unresolvable carrier fails closed — the caller keeps the refusal"
+    );
+}

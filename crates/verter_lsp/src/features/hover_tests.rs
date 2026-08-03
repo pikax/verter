@@ -691,7 +691,13 @@ fn child_event_and_slot_hovers_render_structured_overloads_and_slot_contract() {
     assert!(event_text.contains("@select(count?: number, ...tail: Array<string>) => boolean"));
     assert!(!event_text.contains("hostile?: never"));
 
-    let slot = build_child_slot_hover("#item-row", "item-row", &contract).expect("slot contract");
+    let slot = build_child_slot_hover(
+        "#item-row",
+        "item-row",
+        &contract,
+        &crate::features::hover_slot_deepen::SlotBindingDeepenView::default(),
+    )
+    .expect("slot contract");
     let slot_text = hover_text(&slot);
     assert!(slot_text.contains("(slot) itemRow(props: { item: Item }): VNode"));
     assert!(slot_text.contains("`#item-row`"));
@@ -711,8 +717,13 @@ fn child_summary_surfaces_typed_unsupported_contract_without_fabricated_rows() {
     for hover in [
         build_child_component_hover("Child", "./Child.vue", &unsupported, &[]),
         build_child_event_hover("@save", &unsupported).expect("typed unsupported event hover"),
-        build_child_slot_hover("#default", "default", &unsupported)
-            .expect("typed unsupported slot hover"),
+        build_child_slot_hover(
+            "#default",
+            "default",
+            &unsupported,
+            &crate::features::hover_slot_deepen::SlotBindingDeepenView::default(),
+        )
+        .expect("typed unsupported slot hover"),
     ] {
         let text = hover_text(&hover);
         assert!(text.contains("ComponentMetaUnavailable"));
@@ -2151,5 +2162,79 @@ fn module_class_rule_never_renders_in_class_token_hover() {
     assert!(
         hover.is_none(),
         "a module-only class must not hover a rule for a plain class token"
+    );
+}
+
+// @ai-generated - The prop-backed event arm: a child accepting its listener as
+// a function-shaped `onX` handler PROP serves the `@x` hover natively from
+// `contract.props`; the join is typed (attr mapper + structural function
+// check), never name-only.
+fn prop_backed_event_contract(handler_type: TypeExpr) -> ComponentContractAvailability {
+    ComponentContractAvailability::Supported(Arc::new(ComponentPublicContract {
+        adapter_id: FrameworkAdapterId::vue(),
+        exactness: ContractExactness::Exact,
+        degradation: Arc::from([]),
+        provenance: ContractProvenance::ComponentMetaOutput,
+        props: Arc::from([PublicProp {
+            name: Arc::from("onAlert"),
+            optional: true,
+            has_default: false,
+            ty: public_type(handler_type, "HOSTILE_HANDLER_DISPLAY"),
+            exactness: ContractExactness::Exact,
+            degradation: Arc::from([]),
+            provenance: ContractProvenance::ComponentMetaOutput,
+        }]),
+        events: Arc::from([]),
+        slots: Arc::from([]),
+    }))
+}
+
+#[test]
+fn child_event_hover_serves_function_shaped_handler_prop_as_event_attr() {
+    let contract = prop_backed_event_contract(TypeExpr::Function(Arc::new(
+        verter_type_expr::FunctionExpr::synthetic(
+            vec![verter_type_expr::FunctionParam::synthetic(
+                Some("payload".to_string()),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Void))),
+            Vec::new(),
+        ),
+    )));
+    let hover = build_child_event_hover("@alert", &contract).expect("prop-backed event hover");
+    let text = hover_text(&hover);
+    assert!(text.contains("@alert"), "vue attr label: {text}");
+    assert!(text.contains("payload"), "handler parameter label: {text}");
+    assert!(text.contains("string"), "handler parameter type: {text}");
+    assert!(
+        !text.contains("onAlert"),
+        "the TSX on* prop spelling must never surface: {text}"
+    );
+}
+
+#[test]
+fn child_event_hover_rejects_non_function_prop_and_unmatched_attr() {
+    // A NON-function prop whose JSX name maps to the attr is NOT an event —
+    // the join is structural on the typed IR, never name-only.
+    let non_function = prop_backed_event_contract(TypeExpr::Primitive(PrimitiveName::String));
+    assert!(
+        build_child_event_hover("@alert", &non_function).is_none(),
+        "a string-typed onAlert prop must not be served as an event"
+    );
+
+    // An attr matching neither a declared event nor a function-shaped prop
+    // stays a no-match (the caller keeps SurfaceAvailableNoMatch).
+    let function_shaped = prop_backed_event_contract(TypeExpr::Function(Arc::new(
+        verter_type_expr::FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Void))),
+            Vec::new(),
+        ),
+    )));
+    assert!(
+        build_child_event_hover("@missing", &function_shaped).is_none(),
+        "an unmatched attr must stay a no-match"
     );
 }

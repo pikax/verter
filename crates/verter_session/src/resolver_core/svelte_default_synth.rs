@@ -403,7 +403,9 @@ mod tests {
             }),
             snippet_imports: vec![SvelteSnippetImportCandidate {
                 imported_name: "Snippet".to_string(),
-                local_binding: "Snippet".to_string(),
+                binding: verter_semantic::analysis::framework_facts::svelte::SvelteSnippetCandidateBinding::Statement {
+                    local_binding: "Snippet".to_string(),
+                },
                 import_source: "svelte".to_string(),
             }],
             ..Default::default()

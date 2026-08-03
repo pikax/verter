@@ -594,7 +594,6 @@ fn public_contract_to_ffi(
         events: contract
             .events
             .iter()
-            .cloned()
             .map(|event| FfiPublicEvent {
                 name: event.name.to_string(),
                 overloads: event
@@ -608,7 +607,6 @@ fn public_contract_to_ffi(
                         .derived_handler
                         .overloads
                         .iter()
-                        .cloned()
                         .map(|signature| FfiPublicHandlerSignature {
                             parameters: signature
                                 .parameters
@@ -616,7 +614,7 @@ fn public_contract_to_ffi(
                                 .cloned()
                                 .map(public_parameter_to_ffi)
                                 .collect(),
-                            return_type: signature.return_type,
+                            return_type: signature.return_type.clone(),
                         })
                         .collect(),
                 },

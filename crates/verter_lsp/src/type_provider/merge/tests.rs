@@ -14,7 +14,7 @@ use verter_span::TsPosition;
 use super::definition::{
     is_carrier_ide_path, normalize_carrier_path, path_to_uri, resolve_carrier_ide_range_strict,
 };
-use super::hover::{apply_vue_kind_label_override, extract_hover_text, strip_leading_code_block};
+use super::hover::{apply_kind_label_override, extract_hover_text, strip_leading_code_block};
 use super::*;
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
@@ -6378,7 +6378,7 @@ fn merge_hover_verter_and_tsgo_combined_markdown() {
 
 #[test]
 fn vue_kind_label_override_replaces_existing_display_prefix() {
-    let result = apply_vue_kind_label_override("(const) const count: Ref<number>", "ref");
+    let result = apply_kind_label_override("(const) const count: Ref<number>", "ref");
     assert_eq!(result, "(ref) const count: Ref<number>");
     assert!(!result.contains("(const)"), "old prefix must be replaced");
 }
@@ -6387,7 +6387,7 @@ fn vue_kind_label_override_replaces_existing_display_prefix() {
 fn vue_kind_label_override_applies_when_no_prefix_exists() {
     // `(vue_kind_label ?? kind)` composition: a kind-less signature (tsgo)
     // still gains the Vue label.
-    let result = apply_vue_kind_label_override("const count: number", "ref");
+    let result = apply_kind_label_override("const count: number", "ref");
     assert_eq!(result, "(ref) const count: number");
 }
 
@@ -6395,7 +6395,7 @@ fn vue_kind_label_override_applies_when_no_prefix_exists() {
 fn vue_kind_label_override_is_idempotent() {
     let already = "(ref) const count: Ref<number>";
     assert_eq!(
-        apply_vue_kind_label_override(already, "ref"),
+        apply_kind_label_override(already, "ref"),
         already,
         "an already-applied label is never doubled"
     );

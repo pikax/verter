@@ -1185,10 +1185,32 @@ impl VerterLanguageServer {
                 else {
                     return Ok(ChildHoverOutcome::SurfaceUnavailable);
                 };
+                // Hover-boundary terminal demand, path-precise: deepen the
+                // RANK-MATCHED slot's synthetic-carrier bindings only (other
+                // slots never deepen), through the one sanctioned session
+                // route. A binding that fails to deepen keeps its published
+                // form — the typed refusal (fail-closed, never fabricated).
+                let mut deepened =
+                    crate::features::hover_slot_deepen::SlotBindingDeepenView::default();
+                for (binding_name, key) in
+                    crate::features::hover_slot_deepen::matched_slot_carrier_bindings(
+                        &projection.contract,
+                        &target.slot_name,
+                    )
+                {
+                    if let Some(view) = self
+                        .documents
+                        .host()
+                        .deepen_synthetic_slot_binding(&child.canonical_id, key)
+                    {
+                        deepened.insert(std::sync::Arc::clone(binding_name), view);
+                    }
+                }
                 Ok(hover::build_child_slot_hover(
                     &target.vue_attr,
                     &target.slot_name,
                     &projection.contract,
+                    &deepened,
                 )
                 .map(ChildHoverOutcome::Hover)
                 .unwrap_or(ChildHoverOutcome::SurfaceAvailableNoMatch))

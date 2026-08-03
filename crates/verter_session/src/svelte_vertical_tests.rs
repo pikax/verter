@@ -1783,3 +1783,93 @@ fn svelte_public_api_source_map_links_legacy_export_let_prop_name() {
         "the generated legacy prop maps to the authored export-let binding"
     );
 }
+
+// @ai-generated - The binding-less inline `import("svelte").Snippet<[…]>`
+// props shape (no import statement): the capture half mints an import()-type
+// snippet candidate, the resolved-validation half package-validates its
+// specifier exactly like a statement candidate, and the meta output rows
+// carry the typed `SvelteSnippet` role end-to-end.
+#[test]
+fn svelte_inline_import_type_snippet_prop_resolves_typed_role() {
+    let source = r#"<script lang="ts">
+  let { label, header, children }: {
+    label: string;
+    header?: import("svelte").Snippet<[{ title: string }]>;
+    children?: import("svelte").Snippet<[{ body: string }]>;
+  } = $props();
+  void label; void header; void children;
+</script>
+<span>{label}</span>"#;
+    let host = workspace_host_with_svelte(
+        "/workspace/InlineImportType.svelte",
+        source,
+        &[
+            (
+                "/workspace/node_modules/svelte/package.json",
+                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+            ),
+            (
+                "/workspace/node_modules/svelte/index.d.ts",
+                "export type Snippet<Params extends unknown[] = []> = \
+                 (...args: Params) => { rendered: true };\n",
+            ),
+        ],
+    );
+    upsert_svelte(&host, "/workspace/InlineImportType.svelte", source);
+
+    // The producer half: the import()-type reference yields a package-
+    // validated Resolved seed with TYPED binding absence (no lexical
+    // binding exists for the inline form).
+    let facts = host
+        .resolve_svelte_script_facts("/workspace/InlineImportType.svelte")
+        .expect("Svelte facts for the inline import()-type shape");
+    assert!(
+        matches!(
+            facts.snippet_imports.as_ref(),
+            [verter_type_expr::facts::SvelteSnippetImportFact::Resolved {
+                local_binding: None,
+                ..
+            }]
+        ),
+        "the inline import()-type reference must package-validate into ONE \
+         binding-less Resolved seed, got: {:?}",
+        facts.snippet_imports
+    );
+
+    // The consumer half: meta output rows carry the typed role — snippet
+    // props classify `SvelteSnippet`, the plain string prop stays a complete
+    // non-match.
+    let (meta, _, _) = host
+        .get_component_meta_output("/workspace/InlineImportType.svelte")
+        .expect("component meta query succeeds")
+        .expect("component meta output")
+        .into_parts();
+    for name in ["header", "children"] {
+        let prop = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("missing {name} prop"));
+        assert!(
+            matches!(
+                prop.callable_role,
+                verter_type_expr::PropCallableRole::SvelteSnippet { .. }
+            ),
+            "{name} must classify through the shared identity demand: {:?}",
+            prop.callable_role
+        );
+    }
+    let label = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "label")
+        .expect("label prop");
+    assert!(
+        matches!(
+            label.callable_role,
+            verter_type_expr::PropCallableRole::Other
+        ),
+        "a plain string prop is a complete non-match, never a snippet: {:?}",
+        label.callable_role
+    );
+}

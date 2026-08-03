@@ -12474,6 +12474,13 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ("macro_output_expansion.rs", "expand_slot_binding_output"),
     ("typeinfo/raise.rs", "project_node_to_type_expr_json_bytes"),
     ("typeinfo/raise.rs", "render_node_display_with_ctx"),
+    // The hover-boundary synthetic slot-binding deepen entry: raises the
+    // published source arm under the terminal demand, decides the carrier
+    // fallback in NODE DOMAIN (`node_is_synthetic_binding_carrier`, BEFORE
+    // materialising), then unwraps the sealed carrier ONCE for the caller.
+    // No decision touches the materialised `TypeExpr`; it takes no `TypeExpr`
+    // param, so the self-policing rail seeds nothing.
+    ("typeinfo/raise.rs", "deepen_synthetic_slot_binding"),
     ("vue_exec/mod.rs", "raise_member_value"),
     // The former `vue_exec/imported_elements.rs` terminal sinks
     // (`resolved_elements_from_surface`, `imported_emits_resolved_elements`,

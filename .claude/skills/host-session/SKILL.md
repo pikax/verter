@@ -283,6 +283,31 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 
 During `initialized()`, the LSP spawns a priority-aware `WorkspaceScanner`. Filesystem-backed tsserver continues to resolve real `.ts`/`.tsx`/`.js`/`.jsx` and `node_modules` from disk. Framework carriers are compiled on the background lane and published by authored source identity into the durable plugin store; after the carrier pass, one coalesced refresh advances metadata without making every workspace carrier a Program root. No generated file is opened over the tsserver protocol. Before every carrier unit the scanner yields to active LSP handlers, with a bounded background-deferral interval so continuous editor traffic cannot starve project-wide warmup. TSGO retains its explicit eager project-input path for carrier and plain-source materialization. Verter semantic/type-info caches remain a separate host concern; they are not serialized into either TypeScript engine or used as a substitute for its project graph.
 
+### Public-API Entries: Response-Only vs Projection
+
+The public-API surface has TWO consumer classes with distinct costs, split at the
+entry level (`host_resolve/virtual_file_pipeline.rs`):
+
+- **Response-only** — `get_public_api`, `get_public_api_with_mode`,
+  `get_public_api_batch`: adapter declaration render ONLY (the shared
+  `render_public_api_items` body). They never compose the structured component
+  contract and never run the component-meta walk, so a completion-time carrier
+  reconcile (`reconcile_carrier_source` → live `get_public_api`) cannot
+  `ensure_loaded` an evicted child or commit child analysis (pinned by
+  `completion_does_not_cold_load_children_for_native_enrichment`).
+- **Projection** — `get_public_api_projection`: the ONE entry returning
+  `ComponentApiProjection { response, contract }`. The mandatory contract
+  composes HERE, at the demand that consumes it, under the SAME `(fixed, view)`
+  capture as the render (`compose_component_contract`); composition never gates
+  the response (absent/failed component-meta output ⇒ typed `Unsupported`).
+  The contract stays NON-OPTIONAL on the projection type (compile-fail rail
+  `component_api_projection_contract_not_optional`).
+
+Single-knob proof that composition is projection-entry-scoped:
+`response_only_public_api_render_composes_no_contract`
+(`host_resolve_tests.rs`) — an armed `OUTPUT_MATERIALIZE_FORCE_FAIL_FOR`
+survives `get_public_api` and is consumed by `get_public_api_projection`.
+
 ### Ordinary Carrier Import → Public-API Surface
 
 An ordinary module import of a carrier (`import C from "./Comp.vue"` from a plain

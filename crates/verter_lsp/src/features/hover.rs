@@ -412,13 +412,17 @@ pub fn build_child_component_hover(
     if !contract.slots.is_empty() {
         lines.push(String::new());
         lines.push("**Slots:**".to_string());
+        // The component-tag summary lists EVERY slot and deepens NONE
+        // (path-precision: only a slot-name hover's rank-matched slot makes
+        // a deepen demand).
+        let no_deepen = crate::features::hover_slot_deepen::SlotBindingDeepenView::default();
         lines.extend(contract.slots.iter().map(|slot| {
             let optional_marker = if slot.optional { "?" } else { "" };
             format!(
                 "- `{}`{}{}",
                 slot.name,
                 optional_marker,
-                render_slot_signature(slot)
+                render_slot_signature(slot, &no_deepen)
             )
         }));
     }
@@ -458,23 +462,46 @@ pub fn build_child_event_hover(
         };
         return Some(make_hover(render_contract_unsupported(unsupported)));
     };
-    let event = contract
+    // Declared emits outrank the prop join: the CREO-projected events lane is
+    // the primary public-event authority.
+    if let Some(event) = contract
         .events
         .iter()
-        .find(|event| public_event_matches_vue_attr(&event.name, vue_attr))?;
-    let signatures = event
-        .derived_handler
-        .overloads
-        .iter()
-        .map(|signature| {
-            format!(
-                "{vue_attr}{}",
-                render_handler_signature(&signature.parameters, &signature.return_type)
+        .find(|event| public_event_matches_event_attr(&event.name, vue_attr))
+    {
+        let signatures = event
+            .derived_handler
+            .overloads
+            .iter()
+            .map(|signature| {
+                format!(
+                    "{vue_attr}{}",
+                    render_handler_signature(&signature.parameters, &signature.return_type)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Some(make_hover(format!("```typescript\n{signatures}\n```")));
+    }
+    // Prop-backed event arm: a child may accept a listener as an `onX`
+    // handler PROP (`onAlert?: (payload: string) => void`) instead of a
+    // declared emit. The join is typed end-to-end — the JSX name maps to the
+    // hovered attr through the sanctioned attr mapper AND the published type
+    // is structurally function-shaped in typed IR (never name-only, no `on*`
+    // suffix sniffing).
+    let prop = contract.props.iter().find(|prop| {
+        crate::type_provider::merge::jsx_prop_to_vue_attr(&prop.name).as_deref() == Some(vue_attr)
+            && matches!(
+                prop.ty.publication.materialized_type(),
+                Some(TypeExpr::Function(_))
             )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(make_hover(format!("```typescript\n{signatures}\n```")))
+    })?;
+    let handler = prop.ty.publication.materialized_type()?;
+    let optional_marker = if prop.optional { "?" } else { "" };
+    Some(make_hover(format!(
+        "```typescript\n{vue_attr}{optional_marker}: {}\n```",
+        render_structured_type(handler)
+    )))
 }
 
 fn render_public_type(reference: &PublicTypeReference) -> String {
@@ -535,7 +562,7 @@ fn event_summary_name(event_name: &str) -> String {
         .to_string()
 }
 
-fn public_event_matches_vue_attr(event_name: &str, vue_attr: &str) -> bool {
+fn public_event_matches_event_attr(event_name: &str, vue_attr: &str) -> bool {
     if vue_event_attr_label(event_name) == vue_attr {
         return true;
     }
@@ -543,7 +570,14 @@ fn public_event_matches_vue_attr(event_name: &str, vue_attr: &str) -> bool {
     crate::type_provider::merge::jsx_prop_to_vue_attr(&listener_prop).as_deref() == Some(vue_attr)
 }
 
-fn render_slot_signature(slot: &PublicSlot) -> String {
+/// Render one slot's signature. `deepened` supplies demand-resolved views
+/// for THIS slot's carrier bindings (empty for surfaces that made no deepen
+/// demand — e.g. the component-tag summary, which lists every slot and stays
+/// path-precise by never deepening any).
+fn render_slot_signature(
+    slot: &PublicSlot,
+    deepened: &crate::features::hover_slot_deepen::SlotBindingDeepenView,
+) -> String {
     let input = if slot.input.bindings.is_empty() {
         "()".to_string()
     } else {
@@ -551,7 +585,10 @@ fn render_slot_signature(slot: &PublicSlot) -> String {
             .input
             .bindings
             .iter()
-            .map(|binding| format!("{}: {}", binding.name, render_public_type(&binding.ty)))
+            .map(|binding| match deepened.deepened(&binding.name) {
+                Some(view) => format!("{}: {}", binding.name, render_structured_type(view)),
+                None => format!("{}: {}", binding.name, render_public_type(&binding.ty)),
+            })
             .collect::<Vec<_>>()
             .join("; ");
         format!("(props: {{ {bindings} }})")
@@ -1352,10 +1389,17 @@ fn slot_attribute_hover_target(
 /// type — resolved with Vue's kebab↔camel equivalence (`#my-slot` → `mySlot`).
 /// The authored spelling is presentation context only. A slot absent from the
 /// contract yields `None`; no child-analysis fallback fabricates a signature.
+///
+/// `deepened` carries the rank-matched slot's demand-resolved carrier views
+/// (derived from the SAME contract rows through the one sanctioned deepen
+/// route); a binding without a deepened view renders its published form —
+/// the typed refusal stays the fail-closed branch for a carrier that could
+/// not deepen.
 pub fn build_child_slot_hover(
     vue_attr: &str,
     slot_name: &str,
     availability: &ComponentContractAvailability,
+    deepened: &crate::features::hover_slot_deepen::SlotBindingDeepenView,
 ) -> Option<Hover> {
     let ComponentContractAvailability::Supported(contract) = availability else {
         let ComponentContractAvailability::Unsupported(unsupported) = availability else {
@@ -1364,22 +1408,11 @@ pub fn build_child_slot_hover(
         return Some(make_hover(render_contract_unsupported(unsupported)));
     };
     let slot =
-        crate::server::select_best_ranked_candidate(contract.slots.iter().enumerate().filter_map(
-            |(index, slot)| {
-                crate::server::attr_name_match_rank(slot_name, &slot.name).map(|rank| {
-                    (
-                        rank,
-                        verter_span::Span::new(index as u32, index as u32),
-                        slot,
-                    )
-                })
-            },
-        ))
-        .map(|(_, _, slot)| slot)?;
+        crate::features::hover_slot_deepen::select_contract_slot(&contract.slots, slot_name)?;
     Some(make_hover(format!(
         "```typescript\n(slot) {}{}\n```\n\n**Authored as:** `{vue_attr}`",
         slot.name,
-        render_slot_signature(slot)
+        render_slot_signature(slot, deepened)
     )))
 }
 

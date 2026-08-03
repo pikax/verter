@@ -190,7 +190,18 @@ pub(super) fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8;
     }
     for c in &candidates.snippet_imports {
         c.imported_name.hash(&mut hasher);
-        c.local_binding.hash(&mut hasher);
+        // The binding FORM discriminates the slot (a statement binding and a
+        // binding-less import()-type reference are distinct captured shapes),
+        // and a statement's local binding stays part of the shape.
+        match &c.binding {
+            crate::analysis::framework_facts::svelte::SvelteSnippetCandidateBinding::Statement { local_binding } => {
+                1u8.hash(&mut hasher);
+                local_binding.hash(&mut hasher);
+            }
+            crate::analysis::framework_facts::svelte::SvelteSnippetCandidateBinding::ImportTypeReference => {
+                2u8.hash(&mut hasher);
+            }
+        }
         c.import_source.hash(&mut hasher);
     }
     for export in &candidates.instance_exports {

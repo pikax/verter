@@ -3011,8 +3011,10 @@ pub struct SvelteModuleExportFact {
 pub enum SvelteSnippetImportFact {
     /// The import resolved through the package-backed `svelte` route.
     Resolved {
-        /// Local binding, including an authored import alias.
-        local_binding: String,
+        /// Local binding, including an authored import alias. `None` for a
+        /// binding-less inline `import("…").Snippet` type reference (no
+        /// lexical binding exists — typed absence, never a sentinel string).
+        local_binding: Option<String>,
         /// Raw import specifier retained as route evidence.
         import_source: String,
         /// Package export identity to canonicalize through shared demand.
@@ -3020,8 +3022,9 @@ pub enum SvelteSnippetImportFact {
     },
     /// The import route could not resolve, so identity remains undecidable.
     Unresolved {
-        /// Local binding, including an authored import alias.
-        local_binding: String,
+        /// Local binding, including an authored import alias. `None` for a
+        /// binding-less inline `import("…").Snippet` type reference.
+        local_binding: Option<String>,
         /// Raw import specifier retained as route evidence.
         import_source: String,
         /// Typed fail-closed reason.

@@ -14752,7 +14752,7 @@ defineEmits<Emits>()
     };
     assert_eq!(members.len(), 2, "both union arms must materialize");
     assert!(
-        members.contains(&&TypeExpr::Primitive(PrimitiveName::String)),
+        members.contains(&TypeExpr::Primitive(PrimitiveName::String)),
         "the demanded union must include string, got {demanded:?}"
     );
     assert!(

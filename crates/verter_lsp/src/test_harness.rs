@@ -1468,7 +1468,7 @@ export namespace JSX {
 /// imports unresolved) alongside a `svelte-package-unusable` diagnostic.
 /// Modelling the real export map is what makes the Svelte assertions in this
 /// fixture exercise the production path instead of a degraded one.
-const VENDORED_SVELTE_PACKAGE: &[(&str, &str)] = &[
+pub(crate) const VENDORED_SVELTE_PACKAGE: &[(&str, &str)] = &[
     (
         "package.json",
         include_str!(

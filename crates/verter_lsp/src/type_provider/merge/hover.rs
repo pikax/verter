@@ -114,7 +114,7 @@ fn render_type_block(
     // producers render `contents` with.
     let mut line = info.kind_labeled_signature()?;
     if let Some(label) = vue_kind_label {
-        line = apply_vue_kind_label_override(&line, label);
+        line = apply_kind_label_override(&line, label);
     }
     // Rewrite the primary label to Vue source syntax ONLY when the verter
     // hover carries TYPED event-directive provenance — never by reparsing
@@ -158,7 +158,7 @@ fn provider_range_to_carrier_range(
 /// GlobalComponents fallback const renders `GlobalComponentType<"Name">`, not
 /// `___VERTER___GlobalComponentType<"Name">`. Pure display rewrite on the
 /// provider's rendered type block (the same display-only class as
-/// [`apply_vue_kind_label_override`]); it never feeds a semantic decision. The prefix is
+/// [`apply_kind_label_override`]); it never feeds a semantic decision. The prefix is
 /// Verter's reserved namespace (`super::completion::VERTER_INTERNAL_PREFIX`),
 /// so no user identifier can legitimately contain it.
 fn strip_synthetic_prefix(content: &str) -> String {
@@ -211,7 +211,7 @@ pub(crate) fn strip_leading_code_block(text: &str) -> &str {
 /// override REPLACES an existing display prefix rather than stacking onto it,
 /// which also keeps the composition idempotent when the display string already
 /// carries TypeScript's own `(property)`-style prefix.
-pub(crate) fn apply_vue_kind_label_override(line: &str, vue_label: &str) -> String {
+pub(crate) fn apply_kind_label_override(line: &str, vue_label: &str) -> String {
     let target_prefix = format!("({vue_label}) ");
     if line.starts_with(&target_prefix) {
         return line.to_string();

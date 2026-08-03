@@ -902,6 +902,17 @@ impl ProjectSemanticDispatch<'_> {
         HotTypeRef::new(node)
     }
 
+    /// Node-domain fact: whether `node` is the terminal shallow
+    /// [`SemanticNodeData::SyntheticBinding`] carrier — the raise arm's honest
+    /// degraded fallback when a terminal-demand deepen cannot complete
+    /// ([`Self::raise_synthetic_binding_source_to_hot`]). Consumers decide on
+    /// THIS node-domain fact, never on a reverse-materialized `TypeExpr`.
+    pub(crate) fn node_is_synthetic_binding_carrier(&self, node: SemanticNodeId) -> bool {
+        self.graph()
+            .node_data(node)
+            .is_some_and(|data| matches!(data.as_ref(), SemanticNodeData::SyntheticBinding { .. }))
+    }
+
     /// Terminal-demand explicit deepen for a synthetic slot-binding carrier —
     /// the production consumer of the content-free synthetic-binding cache
     /// route: the host-owned `ShapeCacheDb` slot keyed by

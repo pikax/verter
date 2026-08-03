@@ -1908,6 +1908,20 @@ async fn make_definition_test_server_with_kind_and_deadlines(
     std::fs::create_dir_all(&workspace).expect("workspace dir");
     std::fs::write(workspace.join("tsconfig.json"), "{}").expect("write tsconfig");
 
+    // The harness models a real workspace: Svelte fixtures reference the
+    // `svelte` package (statement imports AND binding-less inline
+    // `import("svelte").…` type references), and the typed package-provenance
+    // chain (snippet-role classification, dispatcher validation) requires the
+    // specifier to resolve to the INSTALLED svelte package — a workspace
+    // without it honestly degrades to `Unresolved` roles. Vendor the same
+    // hermetic minimal Svelte 5 surface the real-provider fixtures vendor.
+    let svelte_dir = workspace.join("node_modules").join("svelte");
+    std::fs::create_dir_all(&svelte_dir).expect("vendored svelte dir");
+    for (name, contents) in crate::test_harness::VENDORED_SVELTE_PACKAGE {
+        std::fs::write(svelte_dir.join(name), contents)
+            .unwrap_or_else(|e| panic!("write vendored svelte {name}: {e}"));
+    }
+
     for (relative_path, _language_id, source) in files {
         let file_path = relative_path
             .split('/')

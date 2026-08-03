@@ -277,7 +277,6 @@ impl TypeInfoSurface {
             .entries
             .iter()
             .cloned()
-            .into_iter()
             .map(|entry| match entry {
                 crate::semantic_query::SurfaceEntry::Member(member) => {
                     TypeInfoSurfaceEntry::Member(build_member(graph, &member))

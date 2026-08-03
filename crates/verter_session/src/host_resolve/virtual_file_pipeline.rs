@@ -2183,11 +2183,6 @@ impl VerterHost {
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
         self.render_public_api_items(canonical_ids, PublicApiMode::Public, None, &fixed, &view)
-            .into_iter()
-            .map(|projection| {
-                projection.map(|projection| projection.map(|projection| projection.response))
-            })
-            .collect()
     }
 
     /// The shared per-item public-API render body (scalar `N=1` + batch `N`).
@@ -2198,6 +2193,15 @@ impl VerterHost {
     /// session view threaded via the `render_seed` ctx carrier so the render
     /// takes ZERO per-call store-view reads. Scalar and batch are byte-identical
     /// by construction (both are THIS body).
+    ///
+    /// RESPONSE-ONLY by design: the render is adapter declaration output and
+    /// never composes the structured component contract. The contract is
+    /// projection-entry-scoped — [`Self::get_public_api_projection`] composes
+    /// it at the demand that consumes it, under the same `(fixed, view)`
+    /// capture as its render. Response-only consumers (carrier sync,
+    /// background drains, batch, MCP, NAPI) therefore never pay a
+    /// composed-then-discarded component-meta walk, and a completion-time
+    /// reconcile never cold-loads a child through it.
     fn render_public_api_items(
         &self,
         canonical_ids: &[&str],
@@ -2205,12 +2209,7 @@ impl VerterHost {
         profile: Option<&CompileProfile>,
         fixed: &crate::resolver_store::BatchFixedView,
         view: &dyn crate::session_view::SessionView,
-    ) -> Vec<
-        Result<
-            Option<crate::framework::api_projector::ComponentApiProjection>,
-            crate::PublicApiProjectionError,
-        >,
-    > {
+    ) -> Vec<Result<Option<TscResponse>, crate::PublicApiProjectionError>> {
         canonical_ids
             .iter()
             .map(|canonical_id| {
@@ -2237,52 +2236,51 @@ impl VerterHost {
                 else {
                     return Ok(None);
                 };
-                let response = projector.render_api(
-                    crate::framework::api_projector::ComponentApiProjectorCtx {
-                        host: self,
-                        resolved_canonical: &canonical,
-                        file_language: &file_language,
-                        mode,
-                        profile,
-                        render_seed: Some(crate::framework::api_projector::PublicApiRenderSeed {
-                            cold_seed: fixed.cold_seed(),
-                            view,
-                            fixed,
-                        }),
-                    },
-                )?;
-                let Some(response) = response else {
-                    return Ok(None);
-                };
-                let contract = match self
-                    .get_component_meta_output_via_view_with_fixed_store_view(
-                        &canonical,
+                projector.render_api(crate::framework::api_projector::ComponentApiProjectorCtx {
+                    host: self,
+                    resolved_canonical: &canonical,
+                    file_language: &file_language,
+                    mode,
+                    profile,
+                    render_seed: Some(crate::framework::api_projector::PublicApiRenderSeed {
+                        cold_seed: fixed.cold_seed(),
                         view,
                         fixed,
-                        false,
-                    )
-                {
-                    Ok(Some(output)) => output.contract().clone(),
-                    Ok(None) => crate::framework::ComponentContractAvailability::Unsupported(
-                        crate::framework::ComponentContractUnsupported {
-                            adapter_id: adapter_id.clone(),
-                            reason: crate::framework::ComponentContractUnsupportedReason::
-                                ComponentMetaUnavailable,
-                            diagnostics: std::sync::Arc::from([]),
-                        },
-                    ),
-                    Err(error) => {
-                        crate::framework::public_contract::unsupported_from_output_error(
-                            adapter_id.clone(),
-                            &error,
-                        )
-                    }
-                };
-                Ok(Some(
-                    crate::framework::api_projector::ComponentApiProjection { response, contract },
-                ))
+                    }),
+                })
             })
             .collect()
+    }
+
+    /// Compose one canonical's mandatory structured contract under the SAME
+    /// `(fixed, view)` capture its declaration render used — the
+    /// projection-entry half of the "one coherent projector invocation"
+    /// contract. Composition never gates the response: an absent or failed
+    /// component-meta output degrades to the typed `Unsupported` availability.
+    fn compose_component_contract(
+        &self,
+        canonical: &str,
+        adapter_id: &verter_language::FrameworkAdapterId,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+    ) -> crate::framework::ComponentContractAvailability {
+        match self.get_component_meta_output_via_view_with_fixed_store_view(
+            canonical, view, fixed, false,
+        ) {
+            Ok(Some(output)) => output.contract().clone(),
+            Ok(None) => crate::framework::ComponentContractAvailability::Unsupported(
+                crate::framework::ComponentContractUnsupported {
+                    adapter_id: adapter_id.clone(),
+                    reason:
+                        crate::framework::ComponentContractUnsupportedReason::ComponentMetaUnavailable,
+                    diagnostics: std::sync::Arc::from([]),
+                },
+            ),
+            Err(error) => crate::framework::public_contract::unsupported_from_output_error(
+                adapter_id.clone(),
+                &error,
+            ),
+        }
     }
 
     /// The consumer-facing declaration companion path (`.d.<ext>.ts`) for a
@@ -2353,7 +2351,6 @@ impl VerterHost {
             .into_iter()
             .next()
             .unwrap_or(Ok(None))
-            .map(|projection| projection.map(|projection| projection.response))
         };
 
         if let Some(profile) = profile {
@@ -2394,6 +2391,12 @@ impl VerterHost {
     /// declaration text. When structured metadata is unavailable, the
     /// declaration remains available with typed `Unsupported` contract
     /// availability.
+    ///
+    /// THIS entry is where the mandatory contract composes (demand-scoped):
+    /// the declaration renders and the contract composes under ONE shared
+    /// `(fixed, view)` capture. Response-only entries ([`Self::get_public_api`],
+    /// [`Self::get_public_api_with_mode`], [`Self::get_public_api_batch`])
+    /// render the declaration only and never run the component-meta walk.
     pub fn get_public_api_projection(
         &self,
         canonical_id: &str,
@@ -2403,16 +2406,39 @@ impl VerterHost {
     > {
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
-        self.render_public_api_items(
-            std::slice::from_ref(&canonical_id),
-            PublicApiMode::Public,
-            None,
-            &fixed,
-            &view,
-        )
-        .into_iter()
-        .next()
-        .unwrap_or(Ok(None))
+        let response = self
+            .render_public_api_items(
+                std::slice::from_ref(&canonical_id),
+                PublicApiMode::Public,
+                None,
+                &fixed,
+                &view,
+            )
+            .into_iter()
+            .next()
+            .unwrap_or(Ok(None))?;
+        let Some(response) = response else {
+            return Ok(None);
+        };
+        // A rendered response proves the same classification chain the render
+        // ran resolves; re-derive the adapter identity for the contract's
+        // typed `Unsupported` arms.
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let Some(adapter_id) = self
+            .scheduler
+            .try_get_source(&canonical)
+            .and_then(|snap| {
+                snap.downcast_data::<crate::host_executor::HostSourceData>()
+                    .map(|hd| hd.file_language.clone())
+            })
+            .and_then(|file_language| file_language.adapter_id().cloned())
+        else {
+            return Ok(None);
+        };
+        let contract = self.compose_component_contract(&canonical, &adapter_id, &view, &fixed);
+        Ok(Some(
+            crate::framework::api_projector::ComponentApiProjection { response, contract },
+        ))
     }
 
     /// The Vue public-API extraction body — the EXEMPT legacy producer the

@@ -469,7 +469,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // The scope is opened by NAME so a test can target THIS boundary's overflow
     // rail specifically — see `named_cacheability_scope!`. The name is erased in a
     // production build.
-    let (resolved_import_targets_opt, import_non_cacheable): (
+    let (resolved_import_targets_opt, mut import_non_cacheable): (
         Option<Vec<ResolvedImportTarget>>,
         bool,
     ) = named_cacheability_scope!(host, TracerScope::ScriptFactsImportRoute, || {
@@ -501,7 +501,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                 .collect(),
         )
     });
-    let resolved_import_targets = resolved_import_targets_opt?;
+    let mut resolved_import_targets = resolved_import_targets_opt?;
 
     // Select the active provider through the SHARED gate-matching authority
     // (`ActiveProviderIndex::gate_matches`) over THIS registration's own
@@ -559,6 +559,63 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                     .insert(candidate_key.clone(), c)
             })
         })?;
+
+    // ── Candidate-referenced specifiers OUTSIDE the import statements ──
+    //
+    // A binding-less inline `import("…")` type reference names a module with
+    // no import statement, so the snapshot-imports resolution above cannot
+    // see its specifier. The provider surfaces those candidate specifiers as
+    // DATA (`candidate_import_specifiers` — a pure candidate read); the
+    // session resolves them through the SAME resolver + typed package
+    // classification as statement imports, under the same import-route
+    // cacheability scope, and appends them so the fan-out observation and
+    // `provider.validate` see ONE uniform resolved-target list.
+    let extra_specifiers: Vec<String> = provider
+        .candidate_import_specifiers(&candidates)
+        .into_iter()
+        .filter(|specifier| {
+            !resolved_import_targets
+                .iter()
+                .any(|target| &target.specifier == specifier)
+        })
+        .collect();
+    if !extra_specifiers.is_empty() {
+        let (extra_targets, extra_non_cacheable): (Option<Vec<ResolvedImportTarget>>, bool) =
+            named_cacheability_scope!(host, TracerScope::ScriptFactsImportRoute, || {
+                Some(
+                    extra_specifiers
+                        .iter()
+                        .map(|specifier| {
+                            let resolved = host
+                                .authoritative_import_route(canonical, specifier)
+                                .and_then(|resolution| {
+                                    resolution.resolved_canonical_id.clone().or_else(|| {
+                                        resolution.effective_target().map(str::to_string)
+                                    })
+                                })
+                                .or_else(|| {
+                                    let ctx = verter_workspace::ResolutionContext {
+                                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                                        kind: verter_workspace::ResolveRequestKind::TypeImport,
+                                    };
+                                    host.resolve_via_vfs(canonical, specifier, ctx)
+                                });
+                            let package =
+                                resolved_package_for_import(host, specifier, resolved.as_deref());
+                            ResolvedImportTarget {
+                                specifier: specifier.clone(),
+                                resolved_canonical: resolved,
+                                package,
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            });
+        if let Some(extra) = extra_targets {
+            resolved_import_targets.extend(extra);
+        }
+        import_non_cacheable = import_non_cacheable || extra_non_cacheable;
+    }
 
     // ── Resolved-fact lookup ──
     let project_identity = host.host_view_project_identity_for(canonical).0;
