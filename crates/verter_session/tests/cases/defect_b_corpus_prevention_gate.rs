@@ -668,15 +668,10 @@ fn published_surface_carries_budget_exceeded(
     let models = meta.models.iter().any(|m| carries(&m.type_source));
     let events = meta.events.iter().any(|e| carries(&e.payload));
     let slots = meta.slots.iter().any(|s| {
-        s.return_source.as_ref().is_some_and(|source| {
-            verter_session::test_only::semantic_source_probe::shallow_type_expr(
-                host,
-                owner_canonical,
-                source,
-            )
+        s.return_publication
             .as_ref()
-            .is_some_and(type_expr_mentions_budget_exceeded)
-        }) || s.bindings.iter().any(|b| carries(&b.type_source))
+            .is_some_and(|publication| carries(&publication.source_position()))
+            || s.bindings.iter().any(|b| carries(&b.type_source))
     });
     props || models || events || slots
 }

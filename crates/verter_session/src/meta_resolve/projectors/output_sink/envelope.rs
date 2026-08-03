@@ -284,59 +284,6 @@ impl<'a> OutputSourceMemo<'a> {
             ),
         )
     }
-
-    #[allow(clippy::too_many_arguments)]
-    fn materialize_slot_return_publication(
-        &mut self,
-        dispatch: &ProjectSemanticDispatch<'_>,
-        cap: &MetaResolveProjectorsOutputCap<'_, '_>,
-        effective_scope: &'a str,
-        index: usize,
-        source: &'a verter_type_expr::facts::SemanticTypeSource,
-        publication: &verter_type_expr::TypePublication,
-    ) -> Result<
-        crate::meta_resolve::MaterializedTypePublication,
-        crate::meta_resolve::ComponentMetaOutputError,
-    > {
-        let materialized = match self.memo.entry((effective_scope, source)) {
-            std::collections::hash_map::Entry::Occupied(hit) => hit.get().clone(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                self.materialize_calls += 1;
-                let value = materialize_output_source(
-                    dispatch,
-                    cap,
-                    effective_scope,
-                    verter_type_expr::TopLevelOwnerId::instance(0),
-                    source,
-                )
-                .map_err(|failure| {
-                    crate::meta_resolve::ComponentMetaOutputError {
-                        lane: crate::meta_resolve::ComponentMetaOutputLane::SlotReturn,
-                        index,
-                        inner_index: None,
-                        position: Box::new(verter_type_expr::facts::SourcePosition::Present(
-                            source.clone(),
-                        )),
-                        failure,
-                    }
-                })?;
-                slot.insert(value.clone());
-                value
-            }
-        };
-        let display = verter_type_expr::render_type_expr_display(&materialized)
-            .ok()
-            .map(|rendered| rendered.text);
-        Ok(
-            crate::meta_resolve::MaterializedTypePublication::from_parts(
-                cap,
-                publication.result().clone(),
-                Some(materialized),
-                crate::meta_resolve::TerminalTypeDisplay::from_text(cap, display),
-                publication.authority().diagnostics().to_vec().into(),
-            ),
-        )
-    }
 }
 
 /// Materialize ALL 11 component-meta output type lanes against the caller's
@@ -423,6 +370,30 @@ fn materialize_component_meta_output_types<'a>(
                 None,
                 &event.publication,
             )?);
+        lanes.event_returns.push(
+            event
+                .return_publication
+                .as_ref()
+                .map(|publication| {
+                    let effective = effective_output_scope(
+                        scope,
+                        event
+                            .return_publication_scope
+                            .as_ref()
+                            .map(verter_type_expr::TypeExprScope::as_str),
+                    );
+                    memo.materialize_publication_lane_slot(
+                        dispatch,
+                        cap,
+                        effective,
+                        Lane::EventReturn,
+                        index,
+                        None,
+                        publication,
+                    )
+                })
+                .transpose()?,
+        );
     }
     for (index, slot) in analysis.slots.iter().enumerate() {
         let mut bindings = Vec::with_capacity(slot.bindings.len());
@@ -439,22 +410,22 @@ fn materialize_component_meta_output_types<'a>(
         }
         lanes.slot_bindings.push(bindings);
         lanes.slot_returns.push(
-            slot.return_source
+            slot.return_publication
                 .as_ref()
-                .zip(slot.typed_return_publication().as_ref())
-                .map(|(source, publication)| {
+                .map(|publication| {
                     let effective = effective_output_scope(
                         scope,
-                        slot.return_source_scope
+                        slot.return_publication_scope
                             .as_ref()
                             .map(verter_type_expr::TypeExprScope::as_str),
                     );
-                    memo.materialize_slot_return_publication(
+                    memo.materialize_publication_lane_slot(
                         dispatch,
                         cap,
                         effective,
+                        Lane::SlotReturn,
                         index,
-                        source,
+                        None,
                         publication,
                     )
                 })

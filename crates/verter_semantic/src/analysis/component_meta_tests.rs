@@ -212,6 +212,8 @@ fn resolved_emit_input(
     crate::analysis::component_meta::ResolvedEmitInput {
         field,
         payload_source,
+        return_publication: None,
+        return_publication_scope: None,
     }
 }
 
@@ -523,6 +525,7 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
             props: vec![resolved_prop_input(make_prop("x", Some("string"), false))],
             emits: Vec::new(),
             slots: Vec::new(),
+            slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
         },
@@ -531,6 +534,7 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
             props: vec![resolved_prop_input(make_prop("y", Some("number"), true))],
             emits: Vec::new(),
             slots: Vec::new(),
+            slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
         },
@@ -573,6 +577,7 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
             props: vec![resolved_prop_input(sparse)],
             emits: Vec::new(),
             slots: Vec::new(),
+            slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
         },
@@ -581,6 +586,7 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
             props: vec![resolved_prop_input(rich)],
             emits: Vec::new(),
             slots: Vec::new(),
+            slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
         },
@@ -683,6 +689,7 @@ fn extracts_events_from_define_emits() {
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![
             crate::analysis::types::AnalyzedEmitField {
+                producer_identity: Default::default(),
                 name: "change".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[value: string]".to_string()),
@@ -692,6 +699,7 @@ fn extracts_events_from_define_emits() {
                 payload_expr_scope: lower_for_test(Some("[value: string]")).1,
             },
             crate::analysis::types::AnalyzedEmitField {
+                producer_identity: Default::default(),
                 name: "close".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: None,
@@ -724,6 +732,7 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
+            producer_identity: Default::default(),
             name: "update:searchTerm".to_string(),
             span: verter_span::Span::default(),
             payload_type: Some("[value: string]".to_string()),
@@ -740,6 +749,7 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
         props: Vec::new(),
         emits: vec![
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+                producer_identity: Default::default(),
                 name: "escapeKeyDown".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
@@ -749,6 +759,7 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                 payload_expr_scope: lower_for_test(Some("[event: KeyboardEvent]")).1,
             }),
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+                producer_identity: Default::default(),
                 name: "closeAutoFocus".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[event: Event]".to_string()),
@@ -759,6 +770,7 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
             }),
         ],
         slots: Vec::new(),
+        slot_return_publications: Vec::new(),
         default_keys: Vec::new(),
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
@@ -857,6 +869,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
         props: Vec::new(),
         emits: vec![
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+                producer_identity: Default::default(),
                 name: "escapeKeyDown".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
@@ -866,6 +879,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                 payload_expr_scope: lower_for_test(Some("[event: KeyboardEvent]")).1,
             }),
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+                producer_identity: Default::default(),
                 name: "closeAutoFocus".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[]".to_string()),
@@ -876,6 +890,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
             }),
         ],
         slots: Vec::new(),
+        slot_return_publications: Vec::new(),
         default_keys: Vec::new(),
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
@@ -2028,6 +2043,7 @@ fn partial_identifier_props_keep_resolved_authority_and_authored_evidence() {
         props: vec![resolved_prop_input(imported)],
         emits: Vec::new(),
         slots: Vec::new(),
+        slot_return_publications: Vec::new(),
         exposed: Vec::new(),
         default_keys: Vec::new(),
     }];
@@ -2264,6 +2280,7 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
+            producer_identity: Default::default(),
             name: "update:modelValue".to_string(),
             span: verter_span::Span::default(),
             payload_type: Some(
@@ -2326,6 +2343,7 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineEmits,
             emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
+                producer_identity: Default::default(),
                 name: "update:modelValue".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some(
@@ -2417,6 +2435,7 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
+            producer_identity: Default::default(),
             name: "update:modelValue".to_string(),
             span: verter_span::Span::default(),
             payload_type: Some("[date: CalendarModelValue<R, M>]".to_string()),
@@ -2583,6 +2602,7 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
         props: Vec::new(),
         emits: Vec::new(),
         default_keys: Vec::new(),
+        slot_return_publications: Vec::new(),
         slots: vec![
             crate::analysis::types::AnalyzedSlotField {
                 name: "default".to_string(),
@@ -3141,6 +3161,7 @@ fn resolved_macros_supply_imported_metadata_without_snapshot_mutation() {
             .collect(),
         emits: Vec::new(),
         slots: Vec::new(),
+        slot_return_publications: Vec::new(),
         exposed: Vec::new(),
         default_keys: Vec::new(),
     }];
@@ -3179,6 +3200,7 @@ fn resolved_macros_merge_with_local_prop_fields_for_mixed_type_sources() {
         ))],
         emits: Vec::new(),
         slots: Vec::new(),
+        slot_return_publications: Vec::new(),
         exposed: Vec::new(),
         default_keys: Vec::new(),
     }];
@@ -3214,6 +3236,7 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
         ))],
         emits: vec![
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+                producer_identity: Default::default(),
                 name: "save".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[value: string]".to_string()),
@@ -3223,6 +3246,7 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
                 tags: Vec::new(),
             }),
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+                producer_identity: Default::default(),
                 name: "save".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[index?: number]".to_string()),
@@ -3243,6 +3267,7 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
             payload: slot_payload.0,
             return_expr_scope: slot_payload.1,
         }],
+        slot_return_publications: Vec::new(),
         exposed: Vec::new(),
         default_keys: vec!["count".to_string()],
     }];
@@ -3264,9 +3289,21 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
         result.events[1].publication.result().source_position(),
         "duplicate rows retain their own A1 publication authority"
     );
+    let publication = result.slots[0]
+        .return_publication
+        .as_ref()
+        .expect("meaningful native slot returns carry producer-owned A1 authority");
+    assert_eq!(
+        publication.authority().exactness(),
+        Some(ResolutionExactness::ExactSymbolic)
+    );
+    assert_eq!(
+        publication.authority().provenance(),
+        ResolutionProvenance::FrameworkSurface
+    );
     assert!(
-        result.slots[0].typed_return_publication().is_some(),
-        "meaningful native slot returns publish typed A1 authority"
+        publication.evidence().is_some(),
+        "the producer must retain authored slot-return evidence"
     );
 }
 
@@ -5148,8 +5185,8 @@ fn evaluator_display_perturbation_cannot_change_publication_inputs_or_result() {
             bindings,
             is_required: source.is_required,
             return_type: source.return_type,
-            return_source: None,
-            return_source_scope: None,
+            return_publication: None,
+            return_publication_scope: None,
             description: None,
             tags: Vec::new(),
             declared_in_macro_type_arg: true,

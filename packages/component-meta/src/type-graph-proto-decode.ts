@@ -10,6 +10,7 @@ import type { NativeComponentMetaResult } from "./native-component-meta.js";
 import type {
   NativeConsumedRootBindings,
   NativeComponentContractAvailability,
+  NativeComponentMetaOutputFailure,
   NativeComponentPublicContract,
   NativeContractDegradation,
   NativeContractSurface,
@@ -21,6 +22,7 @@ import type {
   NativeRootTargetRef,
   NativeTerminalTypeDisplay,
   NativeTypePublication,
+  NativeTypePublicationFailure,
   NativeUnresolvedRootTargetReason,
 } from "./native-component-meta.js";
 import {
@@ -674,7 +676,10 @@ function decodeComponentContractAvailability(
           ...(Boolean(unsupported.hasInnerIndex)
             ? { innerIndex: Number(unsupported.innerIndex ?? 0) }
             : {}),
-          failure: decodeOutputFailure(Number(unsupported.outputFailure ?? 0)),
+          failure: decodeOutputFailure(
+            Number(unsupported.outputFailure ?? 0),
+            Number(unsupported.publicationFailure ?? 0),
+          ),
         },
         diagnostics,
       };
@@ -945,9 +950,7 @@ function requireContractProvenance(value: unknown): void {
   }
 }
 
-function decodePublicationFailure(
-  value: number,
-): "unrepresentableRequiredMemberValue" | "unrepresentableRequiredPayload" {
+function decodePublicationFailure(value: number): NativeTypePublicationFailure {
   if (value === 1) return "unrepresentableRequiredMemberValue";
   if (value === 2) return "unrepresentableRequiredPayload";
   throw graphError(`component-meta contract has unknown publication failure ${value}`);
@@ -967,25 +970,34 @@ function decodeOutputLane(value: number): string {
     "acceptedEventPayload",
     "fallthroughProp",
     "fallthroughEventPayload",
+    "eventReturn",
   ];
   const lane = lanes[value - 1];
   if (!lane) throw graphError(`component-meta contract has unknown output lane ${value}`);
   return lane;
 }
 
-function decodeOutputFailure(value: number): string {
-  const failures = [
-    "unraisableSource",
-    "requiredSourceUnavailable",
-    "interiorSourceMiss",
-    "shellMaterializationMiss",
-    "unknownMaterializingSourceInterior",
-  ];
-  const failure = failures[value - 1];
-  if (!failure) {
-    throw graphError(`component-meta contract has unknown output failure ${value}`);
+function decodeOutputFailure(
+  value: number,
+  publicationFailure: number,
+): NativeComponentMetaOutputFailure {
+  switch (value) {
+    case 1:
+      return { kind: "unraisableSource" };
+    case 2:
+      return {
+        kind: "requiredSourceUnavailable",
+        publicationFailure: decodePublicationFailure(publicationFailure),
+      };
+    case 3:
+      return { kind: "interiorSourceMiss" };
+    case 4:
+      return { kind: "shellMaterializationMiss" };
+    case 5:
+      return { kind: "unknownMaterializingSourceInterior" };
+    default:
+      throw graphError(`component-meta contract has unknown output failure ${value}`);
   }
-  return failure;
 }
 
 function decodeOptionalPublicInstance(

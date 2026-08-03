@@ -113,7 +113,9 @@ pub(crate) use normalize::{
     emits_from_typeinfo_surface, exposed_from_typeinfo_surface, index_signatures_from_surface,
     object_members_from_typeinfo_surface, props_from_typeinfo_surface,
 };
-pub(crate) use normalize_slots::slots_from_typeinfo_surface;
+pub(crate) use normalize_slots::{
+    slot_return_publications_from_typeinfo_surface, slots_from_typeinfo_surface,
+};
 
 crate::project_semantic_dispatch::output_materialization::define_output_capability! {
     /// The Vue framework-surface executor's output-sink capability: the Vue
@@ -1089,10 +1091,16 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                         }),
                         ..MacroSurfaceDtos::default()
                     },
-                    AnalyzedMacroKind::DefineSlots => MacroSurfaceDtos {
-                        slots: Some(slots_from_typeinfo_surface(ctx, &resolved)),
-                        ..MacroSurfaceDtos::default()
-                    },
+                    AnalyzedMacroKind::DefineSlots => {
+                        let slots = slots_from_typeinfo_surface(ctx, &resolved);
+                        let slot_return_publications =
+                            slot_return_publications_from_typeinfo_surface(ctx, &resolved, &slots);
+                        MacroSurfaceDtos {
+                            slots: Some(slots),
+                            slot_return_publications,
+                            ..MacroSurfaceDtos::default()
+                        }
+                    }
                     // `defineOptions<T>()` / `defineExpose<T>()` are object-member
                     // surfaces: the type argument projects to the SAME one-level
                     // object surface props/emits/slots resolve through (the SHARED

@@ -64,6 +64,8 @@ const props = withDefaults(defineProps<{
 defineEmits<{
   save: [value: string]
   save: [count?: number, ...string[]]
+  (event: 'confirm', value: string): boolean
+  (event: 'confirm', count: number): number
 }>()
 defineSlots<{
   itemRow?(props: { item: string }): number
@@ -124,6 +126,29 @@ void props
     assert!(save.overloads[1].parameters[1].rest);
     assert_eq!(save.derived_handler.overloads.len(), 2);
 
+    let confirm = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "confirm")
+        .expect("confirm event");
+    assert_eq!(confirm.overloads.len(), 2);
+    assert_eq!(
+        confirm.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+    assert_eq!(
+        confirm.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+    assert_eq!(
+        confirm.derived_handler.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+    assert_eq!(
+        confirm.derived_handler.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+
     let slot = contract
         .slots
         .iter()
@@ -158,6 +183,220 @@ defineProps<{ replacement: boolean }>()
     assert_eq!(refreshed.props.len(), 1);
     assert_eq!(refreshed.props[0].name.as_ref(), "replacement");
     assert!(refreshed.events.is_empty() && refreshed.slots.is_empty());
+}
+
+// @ai-generated - Discriminates mixed duplicate emit producers whose normalized
+// call/property lane order differs from the analyzer's authored member order.
+#[test]
+fn vue_public_projection_matches_mixed_duplicate_emit_returns_by_producer() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/MixedEmit.vue",
+        r#"<script setup lang="ts">
+defineEmits<{
+  save: [value: string]
+  (event: 'save', count: number): boolean
+}>()
+</script>"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/MixedEmit.vue")
+        .expect("Vue declaration projection succeeds")
+        .expect("Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Vue carrier must publish a supported contract");
+    };
+    let save = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "save")
+        .expect("save event");
+    assert_eq!(save.overloads.len(), 2, "duplicate rows form overloads");
+    assert_eq!(
+        save.overloads[0].parameters[0].name.as_deref(),
+        Some("value"),
+        "the property row remains first"
+    );
+    assert_eq!(
+        save.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Void),
+        "the property row keeps its implicit void return"
+    );
+    assert_eq!(
+        save.overloads[1].parameters[0].name.as_deref(),
+        Some("count"),
+        "the callable row remains second"
+    );
+    assert_eq!(
+        save.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the callable return stays attached to its producer"
+    );
+    assert_eq!(
+        save.derived_handler.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the derived handler uses the same callable return"
+    );
+}
+
+// @ai-generated - Discriminates callable producer identities when raw
+// signatures filtered from the analyzer still reserve normalized ordinals.
+#[test]
+fn vue_public_projection_reserves_skipped_callable_emit_ordinals() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/SkippedCallableOrdinal.vue",
+        r#"<script setup lang="ts">
+defineEmits<{
+  (value: number): Date
+  (event: 'save' | 'cancel', unionPayload: string): number
+  (event: 'save', literalPayload: boolean): boolean
+}>()
+</script>"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/SkippedCallableOrdinal.vue")
+        .expect("Vue declaration projection succeeds")
+        .expect("Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Vue carrier must publish a supported contract");
+    };
+
+    let save = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "save")
+        .expect("save event");
+    assert_eq!(
+        save.overloads.len(),
+        2,
+        "the literal signature must merge with its normalized row instead of duplicating"
+    );
+    assert_eq!(
+        save.overloads[0].parameters[0].name.as_deref(),
+        Some("literalPayload"),
+        "the analyzer-authored literal row remains first"
+    );
+    assert_eq!(
+        save.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the literal signature keeps its own return"
+    );
+    assert_eq!(
+        save.overloads[1].parameters[0].name.as_deref(),
+        Some("unionPayload"),
+        "the analyzer-skipped union signature remains a distinct overload"
+    );
+    assert_eq!(
+        save.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "the union signature keeps its own return"
+    );
+
+    let cancel = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "cancel")
+        .expect("cancel event");
+    assert_eq!(cancel.overloads.len(), 1);
+    assert_eq!(
+        cancel.overloads[0].parameters[0].name.as_deref(),
+        Some("unionPayload")
+    );
+    assert_eq!(
+        cancel.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+// @ai-generated - Discriminates heritage call-signature identities against
+// the resolved surface's base-before-own order.
+#[test]
+fn vue_public_projection_orders_inherited_callable_emits_base_before_own() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/InheritedCallableOrdinal.vue",
+        r#"<script setup lang="ts">
+interface BaseEmits {
+  (event: 'baseOnly', baseOnlyPayload: number): string
+  (event: 'save', basePayload: string): number
+}
+interface DerivedEmits extends BaseEmits {
+  (event: 'save', ownPayload: boolean): boolean
+}
+defineEmits<DerivedEmits>()
+</script>"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/InheritedCallableOrdinal.vue")
+        .expect("Vue declaration projection succeeds")
+        .expect("Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Vue carrier must publish a supported contract");
+    };
+
+    let base_only = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "baseOnly")
+        .expect("baseOnly event");
+    assert_eq!(
+        base_only.overloads.len(),
+        1,
+        "the inherited-only signature must not be duplicated"
+    );
+    assert_eq!(
+        base_only.overloads[0].parameters[0].name.as_deref(),
+        Some("baseOnlyPayload")
+    );
+    assert_eq!(
+        base_only.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+
+    let save = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "save")
+        .expect("save event");
+    assert_eq!(save.overloads.len(), 2, "base and own overloads survive");
+    assert_eq!(
+        save.overloads[0].parameters[0].name.as_deref(),
+        Some("basePayload"),
+        "the inherited signature occupies resolved-surface ordinal zero"
+    );
+    assert_eq!(
+        save.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "the inherited return remains attached to the inherited payload"
+    );
+    assert_eq!(
+        save.overloads[1].parameters[0].name.as_deref(),
+        Some("ownPayload"),
+        "the derived own signature follows its heritage"
+    );
+    assert_eq!(
+        save.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the derived return remains attached to the derived payload"
+    );
+    assert_eq!(
+        save.derived_handler.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+    assert_eq!(
+        save.derived_handler.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
 }
 
 #[test]

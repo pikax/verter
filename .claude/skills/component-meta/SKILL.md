@@ -294,7 +294,7 @@ The NAPI/WASM/LSP wire boundary consumes the session-owned, fully-materialized
 - The `*Analysis` carriers hold content-free `SemanticTypeSource` locators; the
   terminal output sink (`meta_resolve/projectors/output_sink.rs` +
   `projectors/output_sink/envelope.rs`, reusing `MetaResolveProjectorsOutputCap`)
-  materializes ALL 11 wire type lanes (props, event payloads, slot bindings,
+  materializes ALL 12 wire type lanes (props, event payloads, event returns, slot bindings,
   models, exposed, public-instance members, merged registry entries, accepted
   props/events, fallthrough props/events per branch) as NESTED POSITIONAL
   vectors under the request-bound validated view — `Navigate` structural
@@ -436,6 +436,26 @@ A budget-tripped partial can surface as a COMPLETE `QueryResult::Value` (a `Proj
 **Navigator-boundary rule:** component-meta path walkers are not allowed to become a private resolver. They may do non-owning normalization and choose the next hop, but any operation that could recurse, cross files, instantiate a new semantic node, or populate reusable caches must enter through the shared semantic query API.
 
 **Component-meta rule:** all metadata-producing macro and Options API surfaces must go through the shared resolver. That includes props, emits, slots, data, computed, and expose-style members. Publication routes dispatch their `Published` projection contexts at `Navigate` (shallow-by-default; deep materialisation happens only when a consumer explicitly walks the path — see "Publication demand is Navigate" above).
+
+**Slot-return publication is producer-owned.** A normalized framework slot carries
+its return as a complete `TypePublication` lane (authority exactness,
+diagnostics, provenance, and authored evidence), aligned with the slot row.
+`SlotAnalysis` preserves that publication and its raise scope; the terminal
+output sink only materializes the publication selected by the producer. It must
+never reconstruct slot-return authority from display text or a bare source.
+Structured callable returns use the content-free
+`ProjectedTypeFact::CallableReturn { base, path, signature_ordinal }` replay
+route.
+
+**Callable-event return publication is producer-owned.** A normalized Vue
+call-signature event or Svelte callback-prop event carries its return as a
+separate `TypePublication` aligned with the payload row. Vue addresses the
+root callable by declaration-order signature ordinal; Svelte addresses the
+callback member by path. The terminal output sink materializes the lane once,
+and only property/event-map rows default the public call return to `void`.
+Analyzer/normalized Vue rows align by `EmitProducerIdentity` (producer kind plus
+kind-local declaration ordinal), never by same-name occurrence; this remains
+stable when normalized call signatures precede authored property rows.
 
 **Traversal rule:** only follow the import graph reachable from the requested type's declaration graph. Unrelated imports in the same file are out of scope.
 

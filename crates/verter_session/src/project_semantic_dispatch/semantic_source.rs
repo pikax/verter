@@ -227,6 +227,11 @@ impl ProjectSemanticDispatch<'_> {
                     *first_param,
                     &ctx,
                 ),
+                ProjectedTypeFact::CallableReturn {
+                    base,
+                    path,
+                    signature_ordinal,
+                } => self.raise_projected_callable_return(base, path, *signature_ordinal, &ctx),
                 ProjectedTypeFact::IndexPosition {
                     base,
                     signature_ordinal,
@@ -598,6 +603,53 @@ impl ProjectSemanticDispatch<'_> {
             }
             QueryResult::Error(_) => None,
         }
+    }
+
+    /// Replay a callable member route and select its combined return node using
+    /// the same callable-arm policy as framework slot normalization.
+    fn raise_projected_callable_return(
+        &self,
+        base: &AuthoredBodyLocator,
+        path: &Arc<[String]>,
+        signature_ordinal: Option<u32>,
+        ctx: &SourceRaiseContext<'_>,
+    ) -> Option<HotTypeRef> {
+        let context =
+            ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate);
+        let callable = if let Some(signature_ordinal) = signature_ordinal {
+            let locator = absolutize_locator(base, ctx.scope_canonical_id);
+            let AuthoredBodyLocator::MacroPayload(payload) = &locator else {
+                return None;
+            };
+            let surface = self.replay_vue_macro_type_argument_surface(payload)?;
+            surface
+                .surface
+                .call_signatures
+                .get(signature_ordinal as usize)?
+                .node
+        } else {
+            self.raise_projected_member_path(base, path, ctx)?.node()
+        };
+        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, callable);
+        let return_node = if signature_ordinal.is_some() {
+            view.signature(context)?.return_type()?
+        } else {
+            let realized_root = view.realized_callable_root(context)?;
+            let combine = match super::node_data_for(self.ctx, realized_root).as_deref() {
+                Some(SemanticNodeData::Union(_)) => {
+                    crate::meta_resolve::callable_view::ArmCombineNode::Union
+                }
+                _ => crate::meta_resolve::callable_view::ArmCombineNode::Intersection,
+            };
+            view.slot_param_and_return_by_arm(combine, context)?
+                .return_type?
+        };
+        if super::raise::node_is_unknown_materializing_failure(self, return_node) {
+            return None;
+        }
+        let hot = HotTypeRef::new(return_node);
+        ctx.check_raised_unknown_materializing(self, Some(&hot));
+        Some(hot)
     }
 
     /// Raise a projected CALLABLE-PARAMS fact

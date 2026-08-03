@@ -3040,6 +3040,22 @@ pub enum ProjectedTypeFact {
         /// address/name parameters, not payload).
         first_param: u32,
     },
+    /// A projected CALLABLE-RETURN route: replay `base`, then either select the
+    /// declaration-order call signature at `signature_ordinal` or project the
+    /// ordered member `path` to a callable published as a slot/snippet. The
+    /// shared callable view returns that signature's return node or combines
+    /// the member callable's arms. This preserves structured returns without
+    /// storing a graph node or reverse-materialized `TypeExpr`.
+    CallableReturn {
+        /// The authored body whose surface carries the callable member.
+        base: AuthoredBodyLocator,
+        /// The ordered member-name path to the callable.
+        path: Arc<[String]>,
+        /// Declaration-order call-signature ordinal for a root callable
+        /// surface. `None` selects the member callable addressed by `path`.
+        #[serde(default)]
+        signature_ordinal: Option<u32>,
+    },
     /// A projected INDEX-POSITION route: the content-free replay address for
     /// an index signature's KEY or VALUE type position on the publication
     /// surface (`{ [key: string]: { nested: number } }`) — positions richer
@@ -3666,6 +3682,17 @@ impl ProjectedTypeFact {
                     signature_ordinal: *signature_ordinal,
                     first_param: *first_param,
                 }),
+            ProjectedTypeFact::CallableReturn {
+                base,
+                path,
+                signature_ordinal,
+            } => base
+                .absolutize(canonical_id)
+                .map(|base| ProjectedTypeFact::CallableReturn {
+                    base,
+                    path: Arc::clone(path),
+                    signature_ordinal: *signature_ordinal,
+                }),
             ProjectedTypeFact::IndexPosition {
                 base,
                 signature_ordinal,
@@ -3807,6 +3834,7 @@ impl SemanticTypeSource {
                 // The ordinal addressing is scope-free; the base locator's
                 // anchor decides, exactly as for the member-path route.
                 ProjectedTypeFact::CallableParams { base, .. }
+                | ProjectedTypeFact::CallableReturn { base, .. }
                 | ProjectedTypeFact::IndexPosition { base, .. } => {
                     authored_locator_scope_relative(base)
                 }

@@ -336,8 +336,15 @@ fn project_supported(
             name: Arc::from(event.name.as_str()),
             overload_index,
         };
-        let member_degradation = publication_degradation(lane, surface)?;
-        let signature = signature_from_publication(lane);
+        let mut member_degradation = publication_degradation(lane, surface.clone())?;
+        let return_lane = lanes
+            .event_returns
+            .get(event_index)
+            .and_then(Option::as_ref);
+        if let Some(return_lane) = return_lane {
+            member_degradation.extend(publication_degradation(return_lane, surface)?);
+        }
+        let signature = signature_from_publication(lane, return_lane);
         let handler = PublicHandlerSignature {
             parameters: Arc::clone(&signature.parameters),
             return_type: signature.return_type.clone(),
@@ -367,7 +374,6 @@ fn project_supported(
                 provenance: ContractProvenance::ComponentMetaOutput,
             });
         }
-        let _ = event_index;
     }
 
     let mut slots = Vec::with_capacity(analysis.slots.len());
@@ -478,8 +484,11 @@ fn exactness(degradation: &[ContractDegradation]) -> ContractExactness {
     }
 }
 
-fn signature_from_publication(publication: &MaterializedTypePublication) -> PublicCallSignature {
-    let (parameters, return_type) = match publication.materialized_type() {
+fn signature_from_publication(
+    publication: &MaterializedTypePublication,
+    return_publication: Option<&MaterializedTypePublication>,
+) -> PublicCallSignature {
+    let (parameters, payload_return_type) = match publication.materialized_type() {
         Some(TypeExpr::Tuple { elements, .. }) => (
             elements
                 .iter()
@@ -520,6 +529,10 @@ fn signature_from_publication(publication: &MaterializedTypePublication) -> Publ
         ),
         None => (Vec::new(), TypeExpr::Primitive(PrimitiveName::Void)),
     };
+    let return_type = return_publication
+        .and_then(MaterializedTypePublication::materialized_type)
+        .cloned()
+        .unwrap_or(payload_return_type);
     PublicCallSignature {
         source: PublicTypeReference {
             publication: publication.clone(),

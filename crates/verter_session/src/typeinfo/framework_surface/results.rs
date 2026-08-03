@@ -161,6 +161,13 @@ pub struct ResolvedEmitField {
     pub analysis: AnalyzedEmitField,
     /// The payload's published source position.
     pub payload_source: verter_type_expr::facts::SourcePosition,
+    /// Producer-owned callable return publication. `Some` is reserved for
+    /// callable event producers; property/event-map rows use the implicit
+    /// `void` contract and carry `None`.
+    pub return_publication: Option<verter_type_expr::TypePublication>,
+    /// Scope used to raise [`Self::return_publication`]'s selected source.
+    /// Kept separate from the synthesized payload's scope.
+    pub return_publication_scope: Option<verter_type_expr::TypeExprScope>,
 }
 
 /// One session-resolved prop row: the prop analysis field plus the member
@@ -386,6 +393,11 @@ pub struct MacroSurfaceDtos {
     pub emits: Option<EmitsSurface>,
     /// The resolved slots surface.
     pub slots: Option<Vec<AnalyzedSlotField>>,
+    /// Producer-owned slot return publications aligned one-for-one with
+    /// [`Self::slots`]. A missing row is an invariant violation at the
+    /// framework boundary; `None` within the vector means that slot has no
+    /// typed return source.
+    pub slot_return_publications: Vec<Option<verter_type_expr::TypePublication>>,
     /// The resolved options object surface.
     pub options: Option<OptionsSurface>,
     /// The resolved expose object surface (the framework-neutral
@@ -451,6 +463,12 @@ impl MacroSurfaceDtos {
     #[must_use]
     pub fn slot_fields(&self) -> &[AnalyzedSlotField] {
         self.slots.as_deref().unwrap_or(&[])
+    }
+
+    /// Producer-owned return publications aligned with [`Self::slot_fields`].
+    #[must_use]
+    pub fn slot_return_publications(&self) -> &[Option<verter_type_expr::TypePublication>] {
+        self.slot_return_publications.as_slice()
     }
 
     /// The resolved expose fields in the component-meta [`AnalyzedExposeField`]
@@ -621,6 +639,7 @@ mod tests {
             props,
             emits,
             slots,
+            slot_return_publications,
             options,
             expose,
             exposed_fields,
@@ -629,6 +648,7 @@ mod tests {
         assert!(props.is_none());
         assert!(emits.is_none());
         assert!(slots.is_none());
+        assert!(slot_return_publications.is_empty());
         assert!(options.is_none());
         assert!(expose.is_none());
         assert!(exposed_fields.is_empty());

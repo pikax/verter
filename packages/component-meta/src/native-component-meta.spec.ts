@@ -33,6 +33,12 @@ function publishedTypeFields(text?: string) {
 function nativeMetaWithProp(prop: Record<string, unknown>) {
   return {
     filePath: "/project/src/App.vue",
+    componentPublicContract: {
+      kind: "unsupported" as const,
+      adapterId: "vue",
+      reason: { kind: "componentMetaUnavailable" as const },
+      diagnostics: [],
+    },
     optionsApi: false,
     props: [prop],
     events: [],
@@ -61,6 +67,20 @@ function nativeMetaWithProp(prop: Record<string, unknown>) {
 }
 
 describe("nativeComponentMetaToComponentMeta", () => {
+  it("exposes mandatory contract availability on ComponentMeta", () => {
+    const native = nativeMetaWithProp({
+      name: "value",
+      type: { kind: "primitive", name: "string" },
+      ...publishedTypeFields("string"),
+      required: true,
+      hasDefault: false,
+    });
+
+    const mapped = nativeComponentMetaToComponentMeta(native);
+
+    expect(mapped.componentPublicContract).toBe(native.componentPublicContract);
+  });
+
   it("projects compat rawType only from terminal display and rejects Failed publication", () => {
     const published = nativeComponentMetaToComponentMeta(
       nativeMetaWithProp({

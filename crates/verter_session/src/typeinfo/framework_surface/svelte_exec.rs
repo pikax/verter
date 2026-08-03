@@ -28,7 +28,9 @@ use verter_semantic::analysis::types::{
     AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     AnalyzedSlotFieldBinding, TypeResolutionSource,
 };
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{
+    PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypeExpr, TypePublication,
+};
 
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 
@@ -631,7 +633,7 @@ fn resolve_snippet_props(
     let Some(props_type) = facts.props_type.as_ref() else {
         return ResolvedOutcome::Missing;
     };
-    let slots = navigate_param_to_object_surface(ctx, owner, props_type)
+    let rows = navigate_param_to_object_surface(ctx, owner, props_type)
         .map(|surface| {
             // Retain only the snippet-validated members BEFORE the slot
             // normalizer (the other props are not slots).
@@ -644,11 +646,14 @@ fn resolve_snippet_props(
             svelte_snippet_slots_from_typeinfo_surface(
                 ctx,
                 &macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, owner),
+                Some(&props_type.locator),
             )
         })
         .unwrap_or_default();
+    let (slots, slot_return_publications) = rows.into_iter().unzip();
     let dtos = MacroSurfaceDtos {
         slots: Some(slots),
+        slot_return_publications,
         ..Default::default()
     };
     ResolvedOutcome::Resolved(Arc::new(dtos))
@@ -680,7 +685,8 @@ fn resolve_snippet_props(
 fn svelte_snippet_slots_from_typeinfo_surface(
     ctx: &dyn ResolverContext,
     resolved: &impl ResolvedSurfaceAccess,
-) -> Vec<AnalyzedSlotField> {
+    return_base: Option<&verter_type_expr::locators::AuthoredBodyLocator>,
+) -> Vec<(AnalyzedSlotField, Option<TypePublication>)> {
     let macro_surface = resolved.macro_surface();
     let host = ctx.host_for_fact_tracer_install();
     let dispatch = ctx.dispatch();
@@ -702,8 +708,25 @@ fn svelte_snippet_slots_from_typeinfo_surface(
             // uninstantiated `Params` — resolving a `DeclRef`-to-tuple `Params`
             // to its ordered elements).
             // A fail-closed `None` (an unresolved `Params` carrier) drops the slot.
-            let params = CallableNodeView::new(&dispatch, member.value)
-                .validated_snippet_positional_params(context)?;
+            let view = CallableNodeView::new(&dispatch, member.value);
+            let params = view.validated_snippet_positional_params(context)?;
+            let return_node = view
+                .realized_callable_root(context)
+                .and_then(|realized_root| {
+                    let combine = match crate::project_semantic_dispatch::node_data_for(
+                        dispatch.ctx,
+                        realized_root,
+                    )
+                    .as_deref()
+                    {
+                        Some(SemanticNodeData::Union(_)) => {
+                            crate::meta_resolve::callable_view::ArmCombineNode::Union
+                        }
+                        _ => crate::meta_resolve::callable_view::ArmCombineNode::Intersection,
+                    };
+                    view.slot_param_and_return_by_arm(combine, context)
+                })
+                .and_then(|parts| parts.return_type);
             // The slot member's scope (the shared member-value-scope rule) —
             // each published binding display value is paired with it.
             let member_scope = crate::typeinfo::framework_surface::scope::member_value_expr_scope(
@@ -714,19 +737,73 @@ fn svelte_snippet_slots_from_typeinfo_surface(
             // Materialize each binding node ONCE at the terminal DTO sink; this
             // normalizer makes NO decision on any materialized value.
             let bindings = materialize_snippet_slot_bindings(ctx, &member_scope, &params);
-            Some(AnalyzedSlotField {
+            let return_type = return_node
+                .map(|return_node| materialize_snippet_slot_return(ctx, return_node))
+                .as_ref()
+                .and_then(
+                    crate::resolver_core::surface_projector::render_type_expr_display,
+                );
+            let return_position = return_node.zip(return_base).map_or_else(
+                || {
+                    verter_type_expr::facts::SourcePosition::Failed(
+                        verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+                    )
+                },
+                |(_, base)| {
+                    verter_type_expr::facts::SourcePosition::Present(
+                        verter_type_expr::facts::SemanticTypeSource::Projected(
+                            verter_type_expr::facts::ProjectedTypeFact::CallableReturn {
+                                base: base.clone(),
+                                path: Arc::from([member.name.as_ref().to_string()]),
+                                signature_ordinal: None,
+                            },
+                        ),
+                    )
+                },
+            );
+            let return_publication = TypePublication::from_source_position(
+                &return_position,
+                ResolutionExactness::ExactConcrete,
+                ResolutionProvenance::FrameworkSurface,
+                Arc::from([]),
+                None,
+                &PublicationPolicy::exact_only(),
+            );
+            Some((AnalyzedSlotField {
                 name: member.name.as_ref().to_string(),
                 is_required: !member.optional,
                 span: verter_span::Span::default(),
                 bindings,
-                return_type: None,
+                return_type,
                 payload: None,
-                return_expr_scope: None,
+                return_expr_scope: return_node.map(|_| member_scope),
                 description: None,
                 tags: Vec::new(),
-            })
+            }, Some(return_publication)))
         })
         .collect()
+}
+
+#[cfg(test)]
+fn svelte_snippet_slot_fields_from_typeinfo_surface(
+    ctx: &dyn ResolverContext,
+    resolved: &impl ResolvedSurfaceAccess,
+) -> Vec<AnalyzedSlotField> {
+    svelte_snippet_slots_from_typeinfo_surface(ctx, resolved, None)
+        .into_iter()
+        .map(|(field, _)| field)
+        .collect()
+}
+
+fn materialize_snippet_slot_return(
+    ctx: &dyn ResolverContext,
+    return_node: SemanticNodeId,
+) -> TypeExpr {
+    let dispatch = ctx.dispatch();
+    let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
+    cap.materialize_output_type_expr(return_node)
+        .map(|raised| raised.into_type_expr(&cap))
+        .unwrap_or(TypeExpr::Unknown { raw: String::new() })
 }
 
 /// Materialize the validated Svelte snippet-slot bindings from NODE-DOMAIN
@@ -849,6 +926,7 @@ fn resolve_legacy_slot_inventory(ctx: &dyn ResolverContext, owner: &str) -> Reso
         return ResolvedOutcome::Missing;
     }
     let dtos = MacroSurfaceDtos {
+        slot_return_publications: vec![None; slots.len()],
         slots: Some(slots),
         ..Default::default()
     };
@@ -1056,7 +1134,9 @@ fn resolve_callback_prop_events(
         return ResolvedOutcome::Missing;
     };
     let fields = navigate_param_to_object_surface(ctx, owner, props_type)
-        .map(|surface| callback_events_from_props_surface(ctx, &surface))
+        .map(|surface| {
+            callback_events_from_props_surface(ctx, &surface, &props_type.locator, owner)
+        })
         .unwrap_or_default();
     let dtos = MacroSurfaceDtos {
         emits: Some(EmitsSurface {
@@ -1089,8 +1169,11 @@ fn resolve_callback_prop_events(
 fn callback_events_from_props_surface(
     ctx: &dyn ResolverContext,
     surface: &TypeInfoSurface,
+    return_base: &verter_type_expr::locators::AuthoredBodyLocator,
+    owner: &str,
 ) -> Vec<ResolvedEmitField> {
     let dispatch = ctx.dispatch();
+    let host = ctx.host_for_fact_tracer_install();
     // Publication sink (DTO event payload tuples): the callable-arm decide and the
     // payload param selection are made ENTIRELY in the node domain through the
     // shared `CallableNodeView`; materialization happens ONCE at the terminal
@@ -1149,8 +1232,28 @@ fn callback_events_from_props_surface(
             .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
                 verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
             ));
+        let return_position = verter_type_expr::facts::SourcePosition::Present(
+            verter_type_expr::facts::SemanticTypeSource::Projected(
+                verter_type_expr::facts::ProjectedTypeFact::CallableReturn {
+                    base: return_base.clone(),
+                    path: Arc::from([member.name.as_ref().to_string()]),
+                    signature_ordinal: None,
+                },
+            ),
+        );
+        let return_publication = TypePublication::from_source_position(
+            &return_position,
+            ResolutionExactness::ExactConcrete,
+            ResolutionProvenance::FrameworkSurface,
+            Arc::from([]),
+            None,
+            &PublicationPolicy::exact_only(),
+        );
+        let member_scope =
+            crate::typeinfo::framework_surface::scope::member_value_expr_scope(host, member, owner);
         events.push(ResolvedEmitField {
             analysis: AnalyzedEmitField {
+                producer_identity: Default::default(),
                 name: event_name.to_string(),
                 span: verter_span::Span::default(),
                 payload_type,
@@ -1160,6 +1263,8 @@ fn callback_events_from_props_surface(
                 tags: Vec::new(),
             },
             payload_source,
+            return_publication: Some(return_publication),
+            return_publication_scope: Some(member_scope),
         });
     }
     events

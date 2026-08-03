@@ -7438,6 +7438,14 @@ const KNOWN_NON_DTO_OUTPUT_IDENTS: &[(&str, NonAuthorityCategory)] = &[
         "DeclarationId",
         NonAuthorityCategory::ExternalNonAuthority(&["verter_semantic::analysis::type_eval"]),
     ),
+    // Producer-owned semantic publication bundle: source/evidence/exactness/
+    // provenance over graph-domain facts. It derives `NoTypeExpr` and carries
+    // no materialized `verter_type_expr::TypeExpr`, so returning it across the
+    // framework-surface boundary is intentionally non-bearing.
+    (
+        "TypePublication",
+        NonAuthorityCategory::ExternalNonAuthority(&["verter_type_expr"]),
+    ),
     // Framework-surface WIRE response / error / audit-envelope types — proto /
     // audit DTOs carrying GRAPH nodes (a shallow projection), NOT the Rust
     // `verter_type_expr::TypeExpr` payload, so non-bearing for this closure. The
@@ -12517,6 +12525,11 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     // are node-domain (`CallableNodeView::validated_snippet_positional_params`)
     // in the non-terminal `svelte_snippet_slots_from_typeinfo_surface`.
     ("svelte_exec.rs", "materialize_snippet_slot_bindings"),
+    // The Svelte snippet-slot return terminal: mints the callable return
+    // `SemanticNodeId` ONCE through the sealed Svelte output cap. ZERO decide;
+    // the structured return and callable-arm selection are decided in the node
+    // domain before this sink, and this function takes no `TypeExpr` input.
+    ("svelte_exec.rs", "materialize_snippet_slot_return"),
     // The Vue slot-return terminal (the single-node twin of the Vue
     // `materialize_payload_tuple`): mints the slot's return `SemanticNodeId` ONCE
     // through the sealed output cap into the display return `TypeExpr`. ZERO

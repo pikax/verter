@@ -394,16 +394,16 @@ fn define_emits_normalizer_property_style_fallback() {
 // ---------------------------------------------------------------------------
 // (3a) Mixed emit interface — a call signature AND property members, including
 //      a property member that DUPLICATES the call-signature event name. The
-//      published emits are the UNION of both forms: a property member inside a
-//      `defineEmits<T>` object surface IS an emit; duplicate names take
-//      CALL-SIGNATURE precedence (call-sig emits are pushed first, first-writer
-//      wins in the de-dup).
+//      normalized emits are the UNION of both forms: a property member inside a
+//      `defineEmits<T>` object surface IS an emit. Duplicate names remain as
+//      positionally ordered rows so each authored payload reaches the
+//      public-contract projector, where overloads are grouped by event name.
 //
 //      Discriminating: the either/or gate (property-style fires ONLY when no
 //      call-sig emit was found) drops `notAnEvent` entirely and fails the union
-//      assertion; property-precedence on the duplicate `change` would publish
-//      the `[dup: string]` tuple and fail the payload assertion. Also asserts
-//      deterministic order (signature order, then member order) + SFC scope.
+//      assertion; name de-dup would drop one of the ordered `change` payload
+//      rows. Also asserts deterministic order (signature order, then member
+//      order), both duplicate payloads, and SFC scope.
 // ---------------------------------------------------------------------------
 
 const VUE_EMITS_MIXED: &str = r#"<script setup lang="ts">
@@ -431,9 +431,9 @@ fn define_emits_normalizer_mixed_callsig_unions_property_members() {
     let names: Vec<&str> = emits.iter().map(|e| e.analysis.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["change", "notAnEvent"],
-        "the published emits are the UNION of call-signature and property emits, \
-         deterministic (signature order, then member order), de-duped by name"
+        vec!["change", "notAnEvent", "change"],
+        "the normalized emits preserve every call-signature and property row in \
+         deterministic signature-then-member order"
     );
     // The property member IS an emit alongside the call signature (the
     // either/or gate is gone).
@@ -447,38 +447,49 @@ fn define_emits_normalizer_mixed_callsig_unions_property_members() {
         "the property emit publishes its named-tuple payload display, got {:?}",
         not_an_event.analysis.payload_type
     );
-    // Exactly ONE `change` survives the de-dup (negative: no duplicate rows).
+    // Both authored `change` rows survive normalization for downstream
+    // public-contract overload grouping.
     assert_eq!(
         emits.iter().filter(|e| e.analysis.name == "change").count(),
-        1,
-        "duplicate event names de-dup to one published emit"
+        2,
+        "duplicate event names remain as separate normalized rows"
     );
 
-    // CALL-SIGNATURE precedence on the duplicate name: the surviving `change`
-    // payload is the stripped call-sig tuple `[value: number]`, NOT the
-    // property member's `[dup: string]` tuple.
-    let change = &emits[0];
+    // The call-signature row comes first with its stripped tuple payload.
+    let call_signature_change = &emits[0];
     assert_eq!(
-        change.analysis.payload_type.as_deref(),
+        call_signature_change.analysis.payload_type.as_deref(),
         Some("[value: number]"),
-        "the duplicate-name emit keeps the CALL-SIGNATURE payload (precedence), got {:?}",
-        change.analysis.payload_type
+        "the first duplicate-name row keeps the call-signature payload, got {:?}",
+        call_signature_change.analysis.payload_type
     );
-    assert_ne!(
-        change.analysis.payload_type.as_deref(),
+    // The property row follows with its distinct tuple payload.
+    let property_change = &emits[2];
+    assert_eq!(
+        property_change.analysis.payload_type.as_deref(),
         Some("[dup: string]"),
-        "the property member must not shadow the call-signature payload (negative)"
+        "the second duplicate-name row keeps the property payload, got {:?}",
+        property_change.analysis.payload_type
     );
     // The payload scope is the SFC (the signature was written in the SFC's own
     // defineEmits type argument).
     assert_eq!(
-        change
+        call_signature_change
             .analysis
             .payload_expr_scope
             .as_ref()
             .map(|s| s.as_str()),
         Some(FILE),
         "the local call-sig payload scope is the SFC"
+    );
+    assert_eq!(
+        property_change
+            .analysis
+            .payload_expr_scope
+            .as_ref()
+            .map(|s| s.as_str()),
+        Some(FILE),
+        "the duplicate property payload remains paired with its SFC scope"
     );
     // The property emit's display value is scoped to the SFC too (its
     // value-node scope — the tuple was authored in the SFC).

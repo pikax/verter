@@ -8,7 +8,10 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::types::*;
 
-use super::component_meta::{component_meta_parts_to_ffi, resolved_component_meta_to_ffi};
+use super::component_meta::{
+    component_meta_parts_to_ffi, component_meta_parts_with_contract_to_ffi,
+    resolved_component_meta_to_ffi,
+};
 use super::error::*;
 use super::offset::*;
 use super::string_helpers::*;
@@ -181,8 +184,8 @@ fn failed_publication_is_absorbing_in_all_target_ffi_lanes() {
         }],
         is_required: false,
         return_type: None,
-        return_source: None,
-        return_source_scope: None,
+        return_publication: None,
+        return_publication_scope: None,
         description: None,
         tags: Vec::new(),
         declared_in_macro_type_arg: true,
@@ -2431,8 +2434,8 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
         bindings,
         is_required: false,
         return_type: None,
-        return_source: None,
-        return_source_scope: None,
+        return_publication: None,
+        return_publication_scope: None,
         description: None,
         tags: Vec::new(),
         declared_in_macro_type_arg: true,
@@ -2830,6 +2833,96 @@ fn component_meta_aligned_lanes_convert_unchanged_through_the_hard_guard() {
         ffi.props[0].r#type,
         Some(TypeExpr::Primitive(PrimitiveName::String))
     );
+}
+
+#[test]
+fn component_public_contract_crosses_the_production_ffi_seam_structurally() {
+    use host::framework::{
+        ComponentContractAvailability, ComponentPublicContract, ContractExactness,
+        ContractProvenance, PublicCallSignature, PublicDerivedHandlerShape, PublicEvent,
+        PublicHandlerSignature, PublicParameter, PublicSlot, PublicSlotBinding, PublicSlotInput,
+        PublicTypeReference,
+    };
+
+    let reference = || PublicTypeReference {
+        publication: materialized_publication(TypeExpr::Primitive(PrimitiveName::String)),
+    };
+    let parameter = PublicParameter {
+        name: Some(Arc::from("value")),
+        optional: true,
+        rest: true,
+        ty: TypeExpr::Primitive(PrimitiveName::String),
+    };
+    let contract = ComponentContractAvailability::Supported(Arc::new(ComponentPublicContract {
+        adapter_id: host::framework::FrameworkAdapterId::new("vue"),
+        exactness: ContractExactness::Exact,
+        degradation: Arc::from([]),
+        provenance: ContractProvenance::ComponentMetaOutput,
+        props: Arc::from([]),
+        events: Arc::from([PublicEvent {
+            name: Arc::from("select"),
+            overloads: Arc::from([PublicCallSignature {
+                source: reference(),
+                parameters: Arc::from([parameter.clone()]),
+                return_type: TypeExpr::Primitive(PrimitiveName::Void),
+            }]),
+            derived_handler: PublicDerivedHandlerShape {
+                overloads: Arc::from([PublicHandlerSignature {
+                    parameters: Arc::from([parameter]),
+                    return_type: TypeExpr::Primitive(PrimitiveName::Void),
+                }]),
+            },
+            exactness: ContractExactness::Exact,
+            degradation: Arc::from([]),
+            provenance: ContractProvenance::ComponentMetaOutput,
+        }]),
+        slots: Arc::from([PublicSlot {
+            name: Arc::from("default"),
+            optional: true,
+            input: PublicSlotInput {
+                bindings: Arc::from([PublicSlotBinding {
+                    name: Arc::from("value"),
+                    ty: reference(),
+                }]),
+            },
+            return_type: Some(PublicTypeReference {
+                publication: materialized_publication(TypeExpr::Object(Arc::new(
+                    verter_type_expr::ObjectExpr {
+                        properties: Vec::new(),
+                    },
+                ))),
+            }),
+            exactness: ContractExactness::Exact,
+            degradation: Arc::from([]),
+            provenance: ContractProvenance::ComponentMetaOutput,
+        }]),
+    }));
+
+    let ffi = component_meta_parts_with_contract_to_ffi(
+        empty_analysis(),
+        None,
+        Default::default(),
+        contract,
+    );
+    let FfiComponentContractAvailability::Supported { contract } = ffi.component_public_contract
+    else {
+        panic!("supported contract must survive FFI conversion")
+    };
+    assert_eq!(contract.adapter_id, "vue");
+    assert_eq!(contract.events.len(), 1);
+    assert_eq!(contract.events[0].overloads.len(), 1);
+    assert!(contract.events[0].overloads[0].parameters[0].optional);
+    assert!(contract.events[0].overloads[0].parameters[0].rest);
+    assert_eq!(contract.slots.len(), 1);
+    assert!(contract.slots[0].optional);
+    assert_eq!(contract.slots[0].input.bindings.len(), 1);
+    assert!(matches!(
+        contract.slots[0]
+            .return_type
+            .as_ref()
+            .and_then(|reference| reference.r#type.as_ref()),
+        Some(TypeExpr::Object(_))
+    ));
 }
 
 /// The wire payload's RESOLUTION STATUS is typed and honest: a

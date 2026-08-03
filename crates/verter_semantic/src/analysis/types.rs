@@ -1144,10 +1144,65 @@ fn is_false(v: &bool) -> bool {
     !v
 }
 
+/// The producer family that authored one emit row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EmitProducerKind {
+    /// A row without an analyzer/normalizer producer identity.
+    #[default]
+    Untracked,
+    /// A property/event-map member.
+    Property,
+    /// A callable signature.
+    CallSignature,
+    /// A runtime array/object entry.
+    Runtime,
+}
+
+/// Stable identity of one emit producer within its producer family.
+///
+/// Call signatures and property members have independent declaration-order
+/// ordinals because the normalized surface stores those families separately.
+/// Callable ordinals count every raw call signature, including signatures
+/// that produce no analyzer event row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct EmitProducerIdentity {
+    pub kind: EmitProducerKind,
+    pub ordinal: u32,
+}
+
+impl EmitProducerIdentity {
+    #[must_use]
+    pub const fn property(ordinal: u32) -> Self {
+        Self {
+            kind: EmitProducerKind::Property,
+            ordinal,
+        }
+    }
+
+    #[must_use]
+    pub const fn call_signature(ordinal: u32) -> Self {
+        Self {
+            kind: EmitProducerKind::CallSignature,
+            ordinal,
+        }
+    }
+
+    #[must_use]
+    pub const fn runtime(ordinal: u32) -> Self {
+        Self {
+            kind: EmitProducerKind::Runtime,
+            ordinal,
+        }
+    }
+}
+
 /// An individual emit field from `defineEmits`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedEmitField {
+    /// Internal stable producer key used to align analyzer and normalized rows.
+    #[serde(skip)]
+    pub producer_identity: EmitProducerIdentity,
     /// Event name as declared (e.g., `"custom"` from `defineEmits<{ custom: [payload: string] }>()`).
     pub name: String,
     /// SFC-absolute byte span of the event name in the declaration.

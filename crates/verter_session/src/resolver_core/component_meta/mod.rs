@@ -217,10 +217,13 @@ pub(crate) fn component_meta_resolved_macros(
                         |row| verter_semantic::analysis::component_meta::ResolvedEmitInput {
                             field: row.analysis.clone(),
                             payload_source: row.payload_source.clone(),
+                            return_publication: row.return_publication.clone(),
+                            return_publication_scope: row.return_publication_scope.clone(),
                         },
                     )
                     .collect(),
                 slots: dtos.slot_fields().to_vec(),
+                slot_return_publications: dtos.slot_return_publications().to_vec(),
                 exposed: dtos
                     .expose_fields()
                     .iter()
@@ -256,6 +259,7 @@ pub(crate) fn component_meta_resolved_macros(
             props: Vec::new(),
             emits: Vec::new(),
             slots: Vec::new(),
+            slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
         };
@@ -298,9 +302,14 @@ pub(crate) fn component_meta_resolved_macros(
                 verter_semantic::analysis::component_meta::ResolvedEmitInput {
                     field: row.analysis.clone(),
                     payload_source: row.payload_source.clone(),
+                    return_publication: row.return_publication.clone(),
+                    return_publication_scope: row.return_publication_scope.clone(),
                 }
             }));
             native.slots.extend_from_slice(dtos.slot_fields());
+            native
+                .slot_return_publications
+                .extend_from_slice(dtos.slot_return_publications());
         }
         inputs.push(native);
     }

@@ -20,6 +20,17 @@ source-ordered overloads with structured names, optional/rest flags, parameter
 types, return types, and derived handler shapes. Slots preserve source-ordered
 scoped bindings and meaningful typed returns.
 
+Callable event producers carry the return as a producer-owned
+`TypePublication` aligned with the payload row. Vue call-signature returns are
+addressed by declaration-order signature ordinal; Svelte callback-prop returns
+are addressed by member path. The output sink materializes that lane once, and
+property/event-map rows alone use the implicit `void` return. Vue analyzer and
+normalized rows align by producer kind plus kind-local ordinal, so normalized
+call-first ordering cannot move a return onto a same-name property overload.
+Return-only output failures identify the distinct `EventReturn`
+(`events[].return`) materialization lane through session, FFI, and protocol
+diagnostics.
+
 ## Single projection authority
 
 `verter_session::framework::public_contract` is the sole projector. It consumes

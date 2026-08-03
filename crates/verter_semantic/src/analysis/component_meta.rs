@@ -187,6 +187,11 @@ pub struct ResolvedEmitInput {
     pub field: AnalyzedEmitField,
     /// The payload's published source position.
     pub payload_source: SourcePosition,
+    /// Producer-owned callable return publication. Property/event-map rows use
+    /// the implicit `void` return and carry `None`.
+    pub return_publication: Option<TypePublication>,
+    /// Scope used to raise [`Self::return_publication`]'s selected source.
+    pub return_publication_scope: Option<TypeExprScope>,
 }
 
 /// One host-resolved expose row: the expose analysis field plus the member
@@ -216,6 +221,10 @@ pub struct ResolvedMacroInput {
     pub emits: Vec<ResolvedEmitInput>,
     /// Host-resolved slots for the macro.
     pub slots: Vec<AnalyzedSlotField>,
+    /// Producer-owned return publications aligned one-for-one with [`Self::slots`].
+    /// `None` is the proven no-return-source case; a typed failure remains a
+    /// `Some(TypePublication)` and must not be collapsed into absence.
+    pub slot_return_publications: Vec<Option<TypePublication>>,
     /// Host-resolved exposed rows for the macro (`defineExpose<T>()`
     /// type-argument surface members with their span-sliced JSDoc), each
     /// with its member-value source.
@@ -343,6 +352,11 @@ pub struct EventAnalysis {
     /// Producer-owned payload publication. This retains typed authority,
     /// exactness, diagnostics, and provenance through terminal materialization.
     pub publication: TypePublication,
+    /// Producer-owned callable return publication. `None` denotes the
+    /// property/event-map implicit `void` return.
+    pub return_publication: Option<TypePublication>,
+    /// Scope used to raise [`Self::return_publication`]'s selected source.
+    pub return_publication_scope: Option<TypeExprScope>,
     pub payload_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     pub raw_signature: Option<String>,
     pub description: Option<String>,
@@ -357,13 +371,12 @@ pub struct SlotAnalysis {
     pub bindings: Vec<SlotBindingAnalysis>,
     pub is_required: bool,
     pub return_type: Option<String>,
-    /// The slot return's authored SOURCE, propagated from
-    /// [`AnalyzedSlotField::payload`] — `return_type` is display-only.
-    pub return_source: Option<SemanticTypeSource>,
-    /// Scope of `return_source`: canonical_id of the file whose parse produced
-    /// the authored return type. Pairing invariant:
-    /// `return_source.is_some() <=> return_source_scope.is_some()`.
-    pub return_source_scope: Option<TypeExprScope>,
+    /// Producer-owned typed return publication. Source outcome, exactness,
+    /// diagnostics, provenance, and authored evidence travel together to the
+    /// terminal output sink.
+    pub return_publication: Option<TypePublication>,
+    /// Scope used to raise [`Self::return_publication`]'s selected source.
+    pub return_publication_scope: Option<TypeExprScope>,
     pub description: Option<String>,
     pub tags: Vec<JsdocTag>,
     /// Producer fact: does this slot come from the component's own AUTHORED
@@ -376,20 +389,6 @@ pub struct SlotAnalysis {
     /// `Compat` / `Refined` slot blocklist (an author-declared slot is
     /// never blocked, whatever its name).
     pub declared_in_macro_type_arg: bool,
-}
-
-impl SlotAnalysis {
-    /// Build the A1 publication for a meaningful typed return from the
-    /// producer-owned semantic source. Legacy display text is not consulted.
-    pub fn typed_return_publication(&self) -> Option<TypePublication> {
-        let position = SourcePosition::Present(self.return_source.clone()?);
-        Some(publication_from_position(
-            &position,
-            None,
-            None,
-            ResolutionProvenance::FrameworkSurface,
-        ))
-    }
 }
 
 /// A single binding property on a scoped slot.
@@ -1483,7 +1482,13 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             }
             AnalyzedMacroKind::DefineSlots => {
                 let slot_fields = merged_slot_fields(mac, resolved_macro.as_ref());
-                extract_slots_from_macro(macro_index, &slot_fields, evaluated_types, &mut slots);
+                extract_slots_from_macro(
+                    macro_index,
+                    &slot_fields.fields,
+                    &slot_fields.return_publications,
+                    evaluated_types,
+                    &mut slots,
+                );
             }
             AnalyzedMacroKind::DefineModel => {
                 let prop_fields = merged_prop_fields(mac, resolved_macro.as_ref());
@@ -1532,7 +1537,13 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             &mut props,
         );
         extract_events_from_macro(macro_index, &resolved.emits, evaluated_types, &mut events);
-        extract_slots_from_macro(macro_index, &resolved.slots, evaluated_types, &mut slots);
+        extract_slots_from_macro(
+            macro_index,
+            &resolved.slots,
+            &resolved.slot_return_publications,
+            evaluated_types,
+            &mut slots,
+        );
     }
 
     // Merge template-discovered slots with defineSlots
@@ -1964,6 +1975,7 @@ fn merged_resolved_macro_input(
             props: Vec::new(),
             emits: Vec::new(),
             slots: Vec::new(),
+            slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
         });
@@ -1982,9 +1994,16 @@ fn merged_resolved_macro_input(
         for emit in &resolved.emits {
             entry.emits.push(emit.clone());
         }
-        for slot in &resolved.slots {
+        for (slot_index, slot) in resolved.slots.iter().enumerate() {
             if seen_slots.insert(slot.name.clone()) {
                 entry.slots.push(slot.clone());
+                entry.slot_return_publications.push(
+                    resolved
+                        .slot_return_publications
+                        .get(slot_index)
+                        .cloned()
+                        .flatten(),
+                );
             }
         }
         for exposed in &resolved.exposed {
@@ -2107,6 +2126,8 @@ fn extract_events_from_macro(
                         None,
                         ResolutionProvenance::FrameworkSurface,
                     ),
+                    return_publication: None,
+                    return_publication_scope: None,
                     payload_expansion: event.payload_expansion,
                     raw_signature: event_raw_signature_from_evaluated_and_source(
                         evaluated_field
@@ -2157,6 +2178,8 @@ fn extract_events_from_macro(
                     authored_type_evidence(field.payload.as_ref(), field.payload_type.as_deref()),
                     ResolutionProvenance::FrameworkSurface,
                 ),
+                return_publication: row.return_publication.clone(),
+                return_publication_scope: row.return_publication_scope.clone(),
                 payload_expansion,
                 raw_signature: event_raw_signature_from_evaluated_and_source(
                     evaluated.and_then(|eval| {
@@ -2195,6 +2218,8 @@ fn extract_events_from_macro(
                 authored_type_evidence(field.payload.as_ref(), field.payload_type.as_deref()),
                 ResolutionProvenance::FrameworkSurface,
             ),
+            return_publication: row.return_publication.clone(),
+            return_publication_scope: row.return_publication_scope.clone(),
             payload_expansion,
             raw_signature: event_raw_signature_from_evaluated_and_source(
                 evaluated.and_then(|eval| {
@@ -2217,6 +2242,7 @@ fn extract_events_from_macro(
 fn extract_slots_from_macro(
     macro_index: usize,
     slot_fields: &[crate::analysis::types::AnalyzedSlotField],
+    slot_return_publications: &[Option<TypePublication>],
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<SlotAnalysis>,
 ) {
@@ -2235,7 +2261,7 @@ fn extract_slots_from_macro(
     let mut expanded_remaining = expanded_define_slot_entries(evaluated, macro_index);
     let mut seen_slots = rustc_hash::FxHashSet::default();
 
-    for field in slot_fields {
+    for (field_index, field) in slot_fields.iter().enumerate() {
         if !seen_slots.insert(field.name.clone()) {
             continue;
         }
@@ -2252,16 +2278,19 @@ fn extract_slots_from_macro(
         };
         let bindings = merge_slot_bindings_with_source(field, expanded_bindings);
 
-        let return_source = authored_payload_source(field.payload.as_ref());
-        let return_source_scope = field.return_expr_scope.clone();
+        let return_publication = slot_return_publications
+            .get(field_index)
+            .cloned()
+            .flatten()
+            .or_else(|| slot_return_publication_from_field(field));
         out.push(SlotAnalysis {
             name: field.name.clone(),
             is_scoped: !bindings.is_empty(),
             bindings,
             is_required,
             return_type: field.return_type.clone(),
-            return_source,
-            return_source_scope,
+            return_publication,
+            return_publication_scope: field.return_expr_scope.clone(),
             description: field.description.clone(),
             tags: field.tags.clone(),
             // Straight off the authored / resolver-projected
@@ -2283,14 +2312,26 @@ fn extract_slots_from_macro(
             bindings: slot.bindings,
             is_required: slot.is_required,
             return_type: None,
-            return_source: None,
-            return_source_scope: None,
+            return_publication: None,
+            return_publication_scope: None,
             description: None,
             tags: Vec::new(),
             // No authored/resolved field declared this evaluated-only name.
             declared_in_macro_type_arg: false,
         });
     }
+}
+
+fn slot_return_publication_from_field(
+    field: &crate::analysis::types::AnalyzedSlotField,
+) -> Option<TypePublication> {
+    let position = SourcePosition::Present(authored_payload_source(field.payload.as_ref())?);
+    Some(publication_from_position(
+        &position,
+        None,
+        authored_type_evidence(field.payload.as_ref(), field.return_type.as_deref()),
+        ResolutionProvenance::FrameworkSurface,
+    ))
 }
 
 #[derive(Clone)]
@@ -2574,8 +2615,8 @@ fn merge_template_slots(
                 bindings: Vec::new(),
                 is_required: false,
                 return_type: None,
-                return_source: None,
-                return_source_scope: None,
+                return_publication: None,
+                return_publication_scope: None,
                 description: None,
                 tags: Vec::new(),
                 // An authored template `<slot>` element declares the name.
@@ -2796,6 +2837,8 @@ fn synthesize_model_prop_and_event(
                 }),
                 ResolutionProvenance::FrameworkSurface,
             ),
+            return_publication: None,
+            return_publication_scope: None,
             payload_expansion: evaluated_event.map(field_expansion_metadata),
             raw_signature,
             description: None,
@@ -3039,8 +3082,8 @@ fn merge_prop_field(target: &mut AnalyzedPropField, candidate: &AnalyzedPropFiel
 /// rows into ONE per-macro row set, each carrying its payload SOURCE. An
 /// analyzer-only field's source is its authored payload position; a
 /// host-resolved row carries the normalized `payload_source` authority.
-/// First-writer-wins by event name (analyzer rows first — a local authored
-/// event keeps its authored position).
+/// Analyzer rows keep authored order. Normalized rows align by the producer's
+/// stable kind-local identity, never by same-name occurrence.
 fn merged_emit_fields(
     mac: &AnalyzedMacro,
     resolved: Option<&ResolvedMacroInput>,
@@ -3050,33 +3093,36 @@ fn merged_emit_fields(
         .iter()
         .map(|field| ResolvedEmitInput {
             payload_source: authored_payload_position(field.payload.as_ref()),
+            return_publication: None,
+            return_publication_scope: None,
             field: field.clone(),
         })
         .collect();
     if let Some(resolved) = resolved {
         let mut matched = vec![false; rows.len()];
         for emit in &resolved.emits {
-            let matching_indices = rows
+            let duplicate_name = rows
                 .iter()
-                .enumerate()
-                .filter_map(|(index, row)| (row.field.name == emit.field.name).then_some(index))
-                .collect::<Vec<_>>();
-            if matching_indices.len() > 1 {
-                for index in matching_indices {
-                    matched[index] = true;
-                }
-                continue;
-            }
-            if let Some((index, existing)) = rows
-                .iter_mut()
-                .enumerate()
-                .find(|(index, row)| !matched[*index] && row.field.name == emit.field.name)
-            {
+                .filter(|row| row.field.name == emit.field.name)
+                .count()
+                > 1;
+            if let Some((index, existing)) = rows.iter_mut().enumerate().find(|(index, row)| {
+                !matched[*index]
+                    && row.field.name == emit.field.name
+                    && row.field.producer_identity == emit.field.producer_identity
+            }) {
                 // The normalized-surface payload source is authoritative for
                 // the merged row (it already prefers the PROVEN authored
                 // position when one denotes the resolved member); the
-                // analyzer row keeps its local analysis metadata.
-                existing.payload_source = emit.payload_source.clone();
+                // analyzer row keeps its local analysis metadata. Duplicate
+                // authored overloads retain their individual payload sources;
+                // the producer identity still attaches the callable return to
+                // the correct row.
+                if !duplicate_name {
+                    existing.payload_source = emit.payload_source.clone();
+                }
+                existing.return_publication = emit.return_publication.clone();
+                existing.return_publication_scope = emit.return_publication_scope.clone();
                 matched[index] = true;
             } else {
                 rows.push(emit.clone());
@@ -3087,20 +3133,44 @@ fn merged_emit_fields(
     rows
 }
 
+struct MergedSlotFields {
+    fields: Vec<crate::analysis::types::AnalyzedSlotField>,
+    return_publications: Vec<Option<TypePublication>>,
+}
+
 fn merged_slot_fields(
     mac: &AnalyzedMacro,
     resolved: Option<&ResolvedMacroInput>,
-) -> Vec<crate::analysis::types::AnalyzedSlotField> {
+) -> MergedSlotFields {
     let mut fields = mac.slot_fields.clone();
+    let mut return_publications = fields
+        .iter()
+        .map(slot_return_publication_from_field)
+        .collect::<Vec<_>>();
     if let Some(resolved) = resolved {
         if fields.is_empty() {
             fields = resolved.slots.clone();
+            return_publications = fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| {
+                    resolved
+                        .slot_return_publications
+                        .get(index)
+                        .cloned()
+                        .flatten()
+                        .or_else(|| slot_return_publication_from_field(field))
+                })
+                .collect();
         } else {
             let mut seen_slots: rustc_hash::FxHashSet<String> =
                 fields.iter().map(|field| field.name.clone()).collect();
-            for field in &mut fields {
-                let Some(resolved_slot) =
-                    resolved.slots.iter().find(|slot| slot.name == field.name)
+            for (field_index, field) in fields.iter_mut().enumerate() {
+                let Some((resolved_index, resolved_slot)) = resolved
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .find(|(_, slot)| slot.name == field.name)
                 else {
                     continue;
                 };
@@ -3126,16 +3196,35 @@ fn merged_slot_fields(
                     field.tags = resolved_slot.tags.clone();
                 }
                 field.is_required |= resolved_slot.is_required;
+                if let Some(publication) = resolved
+                    .slot_return_publications
+                    .get(resolved_index)
+                    .cloned()
+                    .flatten()
+                {
+                    return_publications[field_index] = Some(publication);
+                }
             }
 
-            for resolved_slot in &resolved.slots {
+            for (resolved_index, resolved_slot) in resolved.slots.iter().enumerate() {
                 if seen_slots.insert(resolved_slot.name.clone()) {
                     fields.push(resolved_slot.clone());
+                    return_publications.push(
+                        resolved
+                            .slot_return_publications
+                            .get(resolved_index)
+                            .cloned()
+                            .flatten()
+                            .or_else(|| slot_return_publication_from_field(resolved_slot)),
+                    );
                 }
             }
         }
     }
-    fields
+    MergedSlotFields {
+        fields,
+        return_publications,
+    }
 }
 
 fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnalysis>) {
@@ -3201,6 +3290,8 @@ fn extract_events_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<EventAna
                 authored_type_evidence(field.payload.as_ref(), field.payload_type.as_deref()),
                 ResolutionProvenance::FrameworkSurface,
             ),
+            return_publication: None,
+            return_publication_scope: None,
             payload_expansion: None,
             raw_signature: field.payload_type.clone(),
             description: field.description.clone(),

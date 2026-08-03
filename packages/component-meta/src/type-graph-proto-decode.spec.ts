@@ -33,6 +33,53 @@ describe("decodeTypedComponentMetaPayload", () => {
     expect(result.componentPublicContract.contract.props[0]?.type.type).toBeDefined();
   });
 
+  it.each([
+    [1, "unrepresentableRequiredMemberValue"],
+    [2, "unrepresentableRequiredPayload"],
+  ] as const)(
+    "decodes required-source output failure with publication subreason %s",
+    (publicationFailure, expected) => {
+      const base = createTestComponentMetaPayload();
+      const current = base.body!.componentPublicContract!.availability;
+      if (current.case !== "supported") throw new Error("fixture contract must be supported");
+      const payload = create(ComponentMetaPayloadSchema, {
+        ...base,
+        body: {
+          ...base.body!,
+          componentPublicContract: {
+            availability: {
+              case: "unsupported",
+              value: {
+                adapterId: current.value.adapterId,
+                reason: 3,
+                outputLane: 13,
+                index: 2,
+                outputFailure: 2,
+                publicationFailure,
+                diagnostics: [],
+              },
+            },
+          },
+        },
+      });
+
+      const result = decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload));
+
+      expect(result.componentPublicContract).toMatchObject({
+        kind: "unsupported",
+        reason: {
+          kind: "outputMaterializationFailed",
+          lane: "eventReturn",
+          index: 2,
+          failure: {
+            kind: "requiredSourceUnavailable",
+            publicationFailure: expected,
+          },
+        },
+      });
+    },
+  );
+
   it("decodes origin graph from protobuf binary", () => {
     const base = createTestComponentMetaPayload();
     const originGraph = create(OriginGraphSchema, {

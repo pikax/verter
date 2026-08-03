@@ -81,10 +81,14 @@ export type NativePublicationReason =
       proof: "importedMacroCompound" | "importedIndexedAccess";
     };
 
+export type NativeTypePublicationFailure =
+  | "unrepresentableRequiredMemberValue"
+  | "unrepresentableRequiredPayload";
+
 export type NativeTypePublication =
   | {
       kind: "failed";
-      failure: "unrepresentableRequiredMemberValue" | "unrepresentableRequiredPayload";
+      failure: NativeTypePublicationFailure;
       provenance: NativeResolutionProvenance;
     }
   | {
@@ -184,6 +188,16 @@ export interface NativeComponentPublicContract {
   slots: NativePublicSlot[];
 }
 
+export type NativeComponentMetaOutputFailure =
+  | { kind: "unraisableSource" }
+  | {
+      kind: "requiredSourceUnavailable";
+      publicationFailure: NativeTypePublicationFailure;
+    }
+  | { kind: "interiorSourceMiss" }
+  | { kind: "shellMaterializationMiss" }
+  | { kind: "unknownMaterializingSourceInterior" };
+
 export type NativeComponentContractAvailability =
   | { kind: "supported"; contract: NativeComponentPublicContract }
   | {
@@ -197,12 +211,12 @@ export type NativeComponentContractAvailability =
             lane: string;
             index: number;
             innerIndex?: number;
-            failure: string;
+            failure: NativeComponentMetaOutputFailure;
           }
         | {
             kind: "publicationFailed";
             surface: NativeContractSurface;
-            failure: "unrepresentableRequiredMemberValue" | "unrepresentableRequiredPayload";
+            failure: NativeTypePublicationFailure;
             provenance: NativeResolutionProvenance;
           };
       diagnostics: NativeResolutionDiagnostic[];
@@ -757,6 +771,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     filePath: meta.filePath,
     componentName: deriveComponentName(meta.filePath),
     optionsApi: meta.optionsApi,
+    componentPublicContract: meta.componentPublicContract,
     props: meta.props.map((prop) => ({
       name: prop.name,
       type: typeExprToDescriptor(requirePublishedType(prop, `prop ${prop.name}`), nativeRegistry),

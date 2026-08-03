@@ -1651,7 +1651,7 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
 fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
     // END-TO-END (the CONVERTED node-domain normalizer): a
     // `Snippet<[item: Item, index: number]>` member publishes ordered slot
-    // bindings `item` + `index` through `svelte_snippet_slots_from_typeinfo_surface`
+    // bindings `item` + `index` through `svelte_snippet_slot_fields_from_typeinfo_surface`
     // — the node-domain path (no materialize-then-decide). Uses a WORKSPACE-LOCAL
     // `Snippet` interface + a direct `retain_members` (bypassing package-backed
     // validation) so the CONVERTED normalizer is exercised directly.
@@ -1686,7 +1686,7 @@ fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
     let filtered = retain_members(&surface, &["row".to_string()]);
     let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
 
-    let slots = svelte_snippet_slots_from_typeinfo_surface(&ctx, &resolved);
+    let slots = svelte_snippet_slot_fields_from_typeinfo_surface(&ctx, &resolved);
     let row = slots
         .iter()
         .find(|s| s.name == "row")
@@ -1947,7 +1947,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     // DTO surface half: the normalizer DROPS `bad` and keeps `good`.
     let filtered = retain_members(&surface, &["bad".to_string(), "good".to_string()]);
     let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
-    let slots = svelte_snippet_slots_from_typeinfo_surface(&ctx, &resolved);
+    let slots = svelte_snippet_slot_fields_from_typeinfo_surface(&ctx, &resolved);
     let slot_names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     assert!(
         !slot_names.contains(&"bad"),
@@ -2005,7 +2005,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         component,
     );
     let recovered_slots =
-        svelte_snippet_slots_from_typeinfo_surface(&recovered_ctx, &recovered_resolved);
+        svelte_snippet_slot_fields_from_typeinfo_surface(&recovered_ctx, &recovered_resolved);
     let recovered_bad = recovered_slots
         .iter()
         .find(|s| s.name == "bad")

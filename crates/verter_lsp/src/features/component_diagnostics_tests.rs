@@ -845,6 +845,7 @@ fn make_child_with_prop_emit_pair(props: &[&str], emits: &[&str]) -> FileAnalysi
     define_emits.emit_fields = emits
         .iter()
         .map(|name| verter_semantic::analysis::AnalyzedEmitField {
+            producer_identity: Default::default(),
             name: (*name).to_string(),
             span: verter_span::Span::new(0, 0),
             payload_type: None,

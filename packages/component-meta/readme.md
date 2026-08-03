@@ -165,6 +165,7 @@ Compat `exposed` stays on the analysis `defineExpose` / Options API `expose` sur
 
 The `_verter` payload includes:
 
+- componentPublicContract (mandatory supported/unsupported availability)
 - props
 - events
 - slots

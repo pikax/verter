@@ -3,7 +3,10 @@
  */
 
 import type { TypeDescriptor } from "@verter/type-ir";
-import type { NativeOriginGraph } from "./native-component-meta.js";
+import type {
+  NativeComponentContractAvailability,
+  NativeOriginGraph,
+} from "./native-component-meta.js";
 
 /** Structured metadata extracted from a Vue Single File Component. */
 export interface ComponentMeta {
@@ -13,6 +16,8 @@ export interface ComponentMeta {
   componentName: string;
   /** Whether the component uses the Options API (`export default { ... }`). */
   optionsApi: boolean;
+  /** Mandatory structured Vue/Svelte public-contract availability. */
+  componentPublicContract: NativeComponentContractAvailability;
   /** Props declared via `defineProps` or Options API `props`. */
   props: PropMeta[];
   /** Events declared via `defineEmits` or Options API `emits`. */

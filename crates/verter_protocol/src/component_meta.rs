@@ -726,6 +726,7 @@ fn component_meta_output_lane_to_proto(
     match lane {
         F::Prop => P::Prop,
         F::EventPayload => P::EventPayload,
+        F::EventReturn => P::EventReturn,
         F::SlotBinding => P::SlotBinding,
         F::SlotReturn => P::SlotReturn,
         F::Model => P::Model,
@@ -2032,8 +2033,67 @@ fn build_test_meta() -> FfiComponentMeta {
                     degradation: Vec::new(),
                     provenance: FfiContractProvenance::ComponentMetaOutput,
                 }],
-                events: Vec::new(),
-                slots: Vec::new(),
+                events: vec![FfiPublicEvent {
+                    name: "select".to_string(),
+                    overloads: vec![FfiPublicCallSignature {
+                        source: test_public_type_reference(
+                            TypeExpr::Function(Arc::new(
+                                verter_type_expr::FunctionExpr::synthetic(
+                                    Vec::new(),
+                                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Void))),
+                                    Vec::new(),
+                                ),
+                            )),
+                            "() => void",
+                        ),
+                        parameters: vec![
+                            FfiPublicParameter {
+                                name: Some("root".to_string()),
+                                optional: false,
+                                rest: false,
+                                ty: tree_ref.clone(),
+                            },
+                            FfiPublicParameter {
+                                name: Some("rest".to_string()),
+                                optional: true,
+                                rest: true,
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                            },
+                        ],
+                        return_type: TypeExpr::Primitive(PrimitiveName::Void),
+                    }],
+                    derived_handler: FfiPublicDerivedHandlerShape {
+                        overloads: vec![FfiPublicHandlerSignature {
+                            parameters: vec![FfiPublicParameter {
+                                name: Some("root".to_string()),
+                                optional: false,
+                                rest: false,
+                                ty: tree_ref.clone(),
+                            }],
+                            return_type: TypeExpr::Primitive(PrimitiveName::Void),
+                        }],
+                    },
+                    exactness: FfiContractExactness::Exact,
+                    degradation: Vec::new(),
+                    provenance: FfiContractProvenance::ComponentMetaOutput,
+                }],
+                slots: vec![FfiPublicSlot {
+                    name: "default".to_string(),
+                    optional: true,
+                    input: FfiPublicSlotInput {
+                        bindings: vec![FfiPublicSlotBinding {
+                            name: "root".to_string(),
+                            ty: test_public_type_reference(tree_ref.clone(), "TreeNode"),
+                        }],
+                    },
+                    return_type: Some(test_public_type_reference(
+                        tree_node.clone(),
+                        "{ label: string; next?: TreeNode | undefined }",
+                    )),
+                    exactness: FfiContractExactness::Exact,
+                    degradation: Vec::new(),
+                    provenance: FfiContractProvenance::ComponentMetaOutput,
+                }],
             },
         },
         // The synthetic test payload carries no resolution seed.
@@ -2139,6 +2199,23 @@ fn build_test_meta() -> FfiComponentMeta {
         file_path: "/src/Tree.vue".to_string(),
         resolution: None,
         origin: OriginGraphDto::default(),
+    }
+}
+
+fn test_public_type_reference(ty: TypeExpr, display: &str) -> FfiPublicTypeReference {
+    FfiPublicTypeReference {
+        r#type: Some(ty),
+        publication: FfiTypePublication::Published {
+            semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+            exactness: FfiPublicationExactness::ExactSymbolic,
+            reason: FfiPublicationReason::ResolvedExactSymbolic,
+            provenance: FfiPublicationProvenance::Resolved(
+                FfiResolutionProvenance::SemanticEvaluator,
+            ),
+        },
+        terminal_display: FfiTerminalTypeDisplay {
+            text: Some(display.to_string()),
+        },
     }
 }
 
@@ -2280,7 +2357,11 @@ mod tests {
     fn v6_full_body_uses_tag_26_and_roundtrips_supported_contract() {
         let payload = build_test_payload();
         assert_eq!(payload.schema_version, 6);
-        let body = payload.body.expect("component-meta body");
+        let encoded = payload.encode_to_vec();
+        let decoded =
+            ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
+        assert_eq!(decoded.schema_version, 6);
+        let body = decoded.body.expect("component-meta body");
         let bytes = body.encode_to_vec();
         assert!(
             bytes.windows(2).any(|window| window == [0xd2, 0x01]),
@@ -2297,6 +2378,30 @@ mod tests {
             panic!("test payload must carry Supported");
         };
         assert_eq!(contract.props.len(), 1);
+        assert_eq!(contract.events.len(), 1);
+        assert_eq!(contract.events[0].overloads.len(), 1);
+        assert_eq!(contract.events[0].overloads[0].parameters.len(), 2);
+        assert!(contract.events[0].overloads[0].parameters[1].optional);
+        assert!(contract.events[0].overloads[0].parameters[1].rest);
+        assert_eq!(contract.slots.len(), 1);
+        assert!(contract.slots[0].optional);
+        assert_eq!(
+            contract.slots[0]
+                .input
+                .as_ref()
+                .expect("slot input")
+                .bindings
+                .len(),
+            1
+        );
+        assert!(
+            contract.slots[0]
+                .return_type
+                .as_ref()
+                .expect("structured slot return")
+                .type_node_id
+                > 0
+        );
         assert_ne!(
             contract.props[0]
                 .r#type
@@ -2313,12 +2418,21 @@ mod tests {
         meta.component_public_contract = crate::types::FfiComponentContractAvailability::Unsupported {
             unsupported: crate::types::FfiComponentContractUnsupported {
                 adapter_id: "vue".to_string(),
-                reason: crate::types::FfiComponentContractUnsupportedReason::ComponentMetaUnavailable,
+                reason: crate::types::FfiComponentContractUnsupportedReason::OutputMaterializationFailed {
+                    lane: crate::types::FfiComponentMetaOutputLane::EventReturn,
+                    index: 3,
+                    inner_index: Some(1),
+                    failure: crate::types::FfiComponentMetaOutputFailure::RequiredSourceUnavailable {
+                        failure: crate::types::FfiTypePublicationFailure::UnrepresentableRequiredPayload,
+                    },
+                },
                 diagnostics: Vec::new(),
             },
         };
-        let payload = super::component_meta_payload(&meta);
-        let availability = payload
+        let encoded = super::component_meta_payload(&meta).encode_to_vec();
+        let decoded =
+            ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
+        let availability = decoded
             .body
             .and_then(|body| body.component_public_contract)
             .and_then(|availability| availability.availability)
@@ -2330,7 +2444,22 @@ mod tests {
         };
         assert_eq!(
             unsupported.reason,
-            proto::ComponentContractUnsupportedReason::ComponentMetaUnavailable as i32
+            proto::ComponentContractUnsupportedReason::OutputMaterializationFailed as i32
+        );
+        assert_eq!(
+            unsupported.output_lane,
+            proto::ComponentMetaOutputLane::EventReturn as i32
+        );
+        assert_eq!(unsupported.index, 3);
+        assert!(unsupported.has_inner_index);
+        assert_eq!(unsupported.inner_index, 1);
+        assert_eq!(
+            unsupported.output_failure,
+            proto::ComponentMetaOutputFailure::RequiredSourceUnavailable as i32
+        );
+        assert_eq!(
+            unsupported.publication_failure,
+            proto::TypePublicationFailure::UnrepresentableRequiredPayload as i32
         );
     }
 

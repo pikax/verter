@@ -14,7 +14,10 @@ use std::sync::Arc;
 use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
 use verter_semantic::analysis::types::{AnalyzedEmitField, AnalyzedPropField};
 use verter_semantic::analysis::AnalyzedMacroKind;
-use verter_type_expr::{TypeExpr, TypeExprScope};
+use verter_type_expr::{
+    PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypeExpr, TypeExprScope,
+    TypePublication,
+};
 
 use super::{member_jsdoc_from_spans, raise_member_value, signature_jsdoc_from_spans};
 use crate::meta_resolve::callable_view::CallableNodeView;
@@ -782,6 +785,34 @@ pub(crate) fn emits_from_typeinfo_surface(
             .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
                 verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
             ));
+        let return_position = type_arg_base.as_ref().map_or_else(
+            || {
+                verter_type_expr::facts::SourcePosition::Failed(
+                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+                )
+            },
+            |base| {
+                verter_type_expr::facts::SourcePosition::Present(
+                    verter_type_expr::facts::SemanticTypeSource::Projected(
+                        verter_type_expr::facts::ProjectedTypeFact::CallableReturn {
+                            base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                                base.clone(),
+                            ),
+                            path: Arc::<[String]>::from([]),
+                            signature_ordinal: Some(signature_ordinal as u32),
+                        },
+                    ),
+                )
+            },
+        );
+        let return_publication = TypePublication::from_source_position(
+            &return_position,
+            ResolutionExactness::ExactConcrete,
+            ResolutionProvenance::FrameworkSurface,
+            Arc::from([]),
+            None,
+            &PublicationPolicy::exact_only(),
+        );
         // The published display VALUE is paired with its resolution scope: the
         // call signature's DECLARATION-origin file (a cross-file emit
         // interface's payload `Ref`s resolve in the base file the signature
@@ -790,6 +821,7 @@ pub(crate) fn emits_from_typeinfo_surface(
         let payload_expr_scope = payload_type
             .as_ref()
             .map(|_| macro_surface.signature_expr_scope(sig));
+        let return_publication_scope = Some(macro_surface.signature_expr_scope(sig));
         // The event's JSDoc rides on the call signature itself, sliced from the
         // signature's typeinfo JSDoc spans. A union of event-name literals on ONE
         // signature shares that signature's JSDoc across each event.
@@ -797,6 +829,10 @@ pub(crate) fn emits_from_typeinfo_surface(
         for name in names {
             emits.push(ResolvedEmitField {
                 analysis: AnalyzedEmitField {
+                    producer_identity:
+                        verter_semantic::analysis::types::EmitProducerIdentity::call_signature(
+                            signature_ordinal as u32,
+                        ),
                     name: name.to_string(),
                     span: verter_span::Span::default(),
                     payload_type: payload_type.clone(),
@@ -806,6 +842,8 @@ pub(crate) fn emits_from_typeinfo_surface(
                     tags: tags.clone(),
                 },
                 payload_source: payload_source.clone(),
+                return_publication: Some(return_publication.clone()),
+                return_publication_scope: return_publication_scope.clone(),
             });
         }
     }
@@ -941,7 +979,8 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
         // Public-only publication: a `private` / `protected` class member
         // recorded on the shared surface must NOT leak as a published emit.
         .filter(|member| member.visibility.is_public())
-        .map(|member| {
+        .enumerate()
+        .map(|(property_ordinal, member)| {
             let raised = raise_member_value(ctx, member);
             let payload_type = raised.as_ref().and_then(render_type_expr_display);
             // LOCAL authored position candidates: analyzer emit fields
@@ -1006,6 +1045,10 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
             let (description, tags) = member_jsdoc_from_spans(host, member);
             ResolvedEmitField {
                 analysis: AnalyzedEmitField {
+                    producer_identity:
+                        verter_semantic::analysis::types::EmitProducerIdentity::property(
+                            property_ordinal as u32,
+                        ),
                     name: member.name.as_ref().to_string(),
                     span: verter_span::Span::default(),
                     payload_type,
@@ -1015,6 +1058,8 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
                     tags,
                 },
                 payload_source,
+                return_publication: None,
+                return_publication_scope: None,
             }
         })
         .collect()

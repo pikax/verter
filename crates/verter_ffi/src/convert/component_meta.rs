@@ -802,6 +802,7 @@ fn output_lane_to_ffi(
     match lane {
         ComponentMetaOutputLane::Prop => FfiComponentMetaOutputLane::Prop,
         ComponentMetaOutputLane::EventPayload => FfiComponentMetaOutputLane::EventPayload,
+        ComponentMetaOutputLane::EventReturn => FfiComponentMetaOutputLane::EventReturn,
         ComponentMetaOutputLane::SlotBinding => FfiComponentMetaOutputLane::SlotBinding,
         ComponentMetaOutputLane::SlotReturn => FfiComponentMetaOutputLane::SlotReturn,
         ComponentMetaOutputLane::Model => FfiComponentMetaOutputLane::Model,

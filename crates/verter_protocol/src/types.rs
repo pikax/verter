@@ -694,6 +694,7 @@ pub enum FfiComponentContractUnsupportedReason {
 pub enum FfiComponentMetaOutputLane {
     Prop,
     EventPayload,
+    EventReturn,
     SlotBinding,
     SlotReturn,
     Model,

@@ -251,6 +251,9 @@ pub struct MaterializedComponentMetaTypeLanes {
     pub event_payloads: Vec<TypeExpr>,
     /// A1 publications aligned with `event_payloads`.
     pub event_publications: Vec<MaterializedTypePublication>,
+    /// Callable return publications aligned with `event_payloads`. `None`
+    /// denotes a property/event-map row whose public call return is `void`.
+    pub event_returns: Vec<Option<MaterializedTypePublication>>,
     /// `slots[i].bindings[j].type` — outer aligned with
     /// `ComponentMetaAnalysis::slots`, inner with `slots[i].bindings`.
     pub slot_bindings: Vec<Vec<MaterializedTypePublication>>,
@@ -358,6 +361,8 @@ pub enum ComponentMetaOutputLane {
     Prop,
     /// The `events[].payload` lane.
     EventPayload,
+    /// The optional `events[].return` lane.
+    EventReturn,
     /// The `slots[].bindings[].type` lane.
     SlotBinding,
     /// The optional `slots[].return` lane.
@@ -386,6 +391,7 @@ impl ComponentMetaOutputLane {
         match self {
             ComponentMetaOutputLane::Prop => "props[].type",
             ComponentMetaOutputLane::EventPayload => "events[].payload",
+            ComponentMetaOutputLane::EventReturn => "events[].return",
             ComponentMetaOutputLane::SlotBinding => "slots[].bindings[].type",
             ComponentMetaOutputLane::SlotReturn => "slots[].return",
             ComponentMetaOutputLane::Model => "models[].type",

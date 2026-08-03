@@ -1164,6 +1164,7 @@ fn lower_slot_return_payload_at_span(
 /// vocabulary cannot address a nested (slot, binding) position honestly, so
 /// typed binding demand is host-raised.
 pub(crate) fn stamp_macro_payload_locators(mac: &mut AnalyzedMacro, macro_index: u32) {
+    use crate::analysis::types::EmitProducerKind;
     use verter_type_expr::locators::{
         AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
     };
@@ -1199,7 +1200,30 @@ pub(crate) fn stamp_macro_payload_locators(mac: &mut AnalyzedMacro, macro_index:
             field.payload = field_locator(macro_index, field_index);
         }
     }
+    let mut property_ordinal = 0;
+    let mut runtime_ordinal = 0;
     for (field_index, field) in mac.emit_fields.iter_mut().enumerate() {
+        match field.producer_identity.kind {
+            EmitProducerKind::Property => {
+                field.producer_identity.ordinal = property_ordinal;
+                property_ordinal += 1;
+            }
+            // Callable ordinals are stamped while walking the raw signature
+            // surface, before non-event and union-name signatures are
+            // filtered. Reassigning them here would collapse that reserved
+            // coordinate space.
+            EmitProducerKind::CallSignature => {}
+            EmitProducerKind::Runtime => {
+                field.producer_identity.ordinal = runtime_ordinal;
+                runtime_ordinal += 1;
+            }
+            EmitProducerKind::Untracked => {
+                if field.payload_expr_scope.is_some() {
+                    field.payload = field_locator(macro_index, field_index);
+                }
+                continue;
+            }
+        }
         if field.payload_expr_scope.is_some() {
             field.payload = field_locator(macro_index, field_index);
         }
@@ -2036,6 +2060,7 @@ fn resolve_local_define_emits(
     } else if mac.type_references.len() == 1 {
         let type_ref = &mac.type_references[0];
         if let Some((declaration_registry, decl)) = registry.resolve(type_ref.as_str()) {
+            let mut call_signature_ordinal = 0;
             if let Some(fields) = resolve_interface_decl_generic(
                 type_ref,
                 decl,
@@ -2043,7 +2068,8 @@ fn resolve_local_define_emits(
                 source,
                 comments,
                 &mut visited,
-                &extract_emit_fields_from_members,
+                &mut call_signature_ordinal,
+                &extract_emit_fields_from_members_at,
             ) {
                 mac.emit_fields = fields;
             }
@@ -2071,6 +2097,7 @@ fn resolve_local_define_slots(
     } else if mac.type_references.len() == 1 {
         let type_ref = &mac.type_references[0];
         if let Some((declaration_registry, decl)) = registry.resolve(type_ref.as_str()) {
+            let mut state = ();
             if let Some(fields) = resolve_interface_decl_generic(
                 type_ref,
                 decl,
@@ -2078,7 +2105,10 @@ fn resolve_local_define_slots(
                 source,
                 comments,
                 &mut visited,
-                &extract_slot_fields_from_members,
+                &mut state,
+                &|members, source, comments, _state| {
+                    extract_slot_fields_from_members(members, source, comments)
+                },
             ) {
                 mac.slot_fields = fields;
             }
@@ -2220,23 +2250,69 @@ fn resolve_interface_decl(
 }
 
 // ── Generic local type resolution for emit/slot fields ──
-// Single resolver shared by emits and slots. Differences are only in the
-// member extraction function (what fields to extract from TSSignature members).
+// Single resolver shared by emits and slots. The field policy keeps their
+// distinct interface ordering semantics inside this shared traversal.
 
 /// Trait for extracting a dedup key from a resolved field.
-trait NamedField {
+trait NamedField: Sized {
     fn field_name(&self) -> &str;
+
+    /// Reconcile interface-body precedence with any producer coordinate space.
+    fn order_interface_fields(own_fields: Vec<Self>, heritage_fields: Vec<Self>) -> Vec<Self>;
 }
 
 impl NamedField for AnalyzedEmitField {
     fn field_name(&self) -> &str {
         &self.name
     }
+
+    fn order_interface_fields(mut own_fields: Vec<Self>, heritage_fields: Vec<Self>) -> Vec<Self> {
+        own_fields.extend(heritage_fields);
+        // Heritage is extracted first, so these ordinals match the resolved
+        // `Intersection([heritage..., own])` surface. Refill only callable
+        // positions in that order: property emit and slot shadowing semantics
+        // must not change as a side effect of callable identity alignment.
+        let callable_positions = own_fields
+            .iter()
+            .enumerate()
+            .filter_map(|(index, field)| {
+                (field.producer_identity.kind
+                    == crate::analysis::types::EmitProducerKind::CallSignature)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let mut callables = callable_positions
+            .iter()
+            .map(|index| own_fields[*index].clone())
+            .collect::<Vec<_>>();
+        callables.sort_by_key(|field| field.producer_identity.ordinal);
+        for (index, field) in callable_positions.into_iter().zip(callables) {
+            own_fields[index] = field;
+        }
+        own_fields
+    }
 }
 
 impl NamedField for AnalyzedSlotField {
     fn field_name(&self) -> &str {
         &self.name
+    }
+
+    fn order_interface_fields(mut own_fields: Vec<Self>, heritage_fields: Vec<Self>) -> Vec<Self> {
+        own_fields.extend(heritage_fields);
+        own_fields
+    }
+}
+
+fn append_unique_named_fields<T: NamedField>(
+    target: &mut Vec<T>,
+    seen_names: &mut FxHashSet<String>,
+    fields: impl IntoIterator<Item = T>,
+) {
+    for field in fields {
+        if seen_names.insert(field.field_name().to_string()) {
+            target.push(field);
+        }
     }
 }
 
@@ -2246,18 +2322,22 @@ impl NamedField for AnalyzedSlotField {
 /// Termination behavior: does not emit partial/guessed fields, does not fall back
 /// to host resolution. Leaves the branch empty for unresolvable types.
 #[allow(clippy::type_complexity)]
-fn resolve_type_to_fields<T: NamedField + Clone>(
+fn resolve_type_to_fields<T: NamedField + Clone, S>(
     ts_type: &TSType<'_>,
     registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
-    extract_from_members: &dyn Fn(&[TSSignature<'_>], &str, &[Comment]) -> Vec<T>,
+    state: &mut S,
+    extract_from_members: &dyn Fn(&[TSSignature<'_>], &str, &[Comment], &mut S) -> Vec<T>,
 ) -> Option<Vec<T>> {
     match ts_type {
-        TSType::TSTypeLiteral(literal) => {
-            Some(extract_from_members(&literal.members, source, comments))
-        }
+        TSType::TSTypeLiteral(literal) => Some(extract_from_members(
+            &literal.members,
+            source,
+            comments,
+            state,
+        )),
         TSType::TSTypeReference(ref_type) => {
             let name = type_name_to_string(&ref_type.type_name);
             if visited.contains(&name) {
@@ -2278,12 +2358,7 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                 Some((declaration_registry, LocalTypeDecl::Interface { body, extends })) => {
                     let mut all_fields = Vec::new();
                     let mut seen_names = FxHashSet::default();
-                    let own_fields = extract_from_members(&body.body, source, comments);
-                    for field in own_fields {
-                        if seen_names.insert(field.field_name().to_string()) {
-                            all_fields.push(field);
-                        }
-                    }
+                    let mut heritage_fields = Vec::new();
                     for heritage in *extends {
                         let Some(parent_name) = heritage_name(&heritage.expression) else {
                             continue;
@@ -2300,16 +2375,19 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                             source,
                             comments,
                             visited,
+                            state,
                             extract_from_members,
                         ) else {
                             continue;
                         };
-                        for field in parent_fields {
-                            if seen_names.insert(field.field_name().to_string()) {
-                                all_fields.push(field);
-                            }
-                        }
+                        heritage_fields.extend(parent_fields);
                     }
+                    let own_fields = extract_from_members(&body.body, source, comments, state);
+                    append_unique_named_fields(
+                        &mut all_fields,
+                        &mut seen_names,
+                        T::order_interface_fields(own_fields, heritage_fields),
+                    );
                     Some(all_fields)
                 }
                 Some((declaration_registry, LocalTypeDecl::Alias(aliased_type))) => {
@@ -2319,6 +2397,7 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                         source,
                         comments,
                         visited,
+                        state,
                         extract_from_members,
                     )
                 }
@@ -2337,6 +2416,7 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                     source,
                     comments,
                     visited,
+                    state,
                     extract_from_members,
                 ) {
                     for field in fields {
@@ -2353,15 +2433,16 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
 }
 
 /// Generic interface declaration resolver. Shared by emit/slot resolution.
-#[allow(clippy::type_complexity)]
-fn resolve_interface_decl_generic<T: NamedField + Clone>(
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn resolve_interface_decl_generic<T: NamedField + Clone, S>(
     name: &str,
     decl: &LocalTypeDecl<'_>,
     registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
-    extract_from_members: &dyn Fn(&[TSSignature<'_>], &str, &[Comment]) -> Vec<T>,
+    state: &mut S,
+    extract_from_members: &dyn Fn(&[TSSignature<'_>], &str, &[Comment], &mut S) -> Vec<T>,
 ) -> Option<Vec<T>> {
     if visited.contains(name) {
         return Some(Vec::new());
@@ -2371,12 +2452,7 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
         LocalTypeDecl::Interface { body, extends } => {
             let mut fields = Vec::new();
             let mut seen_names = FxHashSet::default();
-            let own_fields = extract_from_members(&body.body, source, comments);
-            for field in own_fields {
-                if seen_names.insert(field.field_name().to_string()) {
-                    fields.push(field);
-                }
-            }
+            let mut heritage_fields = Vec::new();
             for heritage in *extends {
                 let Some(parent_name) = heritage_name(&heritage.expression) else {
                     continue;
@@ -2391,16 +2467,19 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
                     source,
                     comments,
                     visited,
+                    state,
                     extract_from_members,
                 ) else {
                     continue;
                 };
-                for field in parent_fields {
-                    if seen_names.insert(field.field_name().to_string()) {
-                        fields.push(field);
-                    }
-                }
+                heritage_fields.extend(parent_fields);
             }
+            let own_fields = extract_from_members(&body.body, source, comments, state);
+            append_unique_named_fields(
+                &mut fields,
+                &mut seen_names,
+                T::order_interface_fields(own_fields, heritage_fields),
+            );
             Some(fields)
         }
         LocalTypeDecl::Alias(aliased_type) => resolve_type_to_fields(
@@ -2409,6 +2488,7 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
             source,
             comments,
             visited,
+            state,
             extract_from_members,
         ),
         LocalTypeDecl::Class => None,
@@ -2425,13 +2505,15 @@ fn resolve_type_to_emit_fields(
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
 ) -> Option<Vec<AnalyzedEmitField>> {
+    let mut call_signature_ordinal = 0;
     resolve_type_to_fields(
         ts_type,
         registry,
         source,
         comments,
         visited,
-        &extract_emit_fields_from_members,
+        &mut call_signature_ordinal,
+        &extract_emit_fields_from_members_at,
     )
 }
 
@@ -2443,13 +2525,17 @@ fn resolve_type_to_slot_fields(
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
 ) -> Option<Vec<AnalyzedSlotField>> {
+    let mut state = ();
     resolve_type_to_fields(
         ts_type,
         registry,
         source,
         comments,
         visited,
-        &extract_slot_fields_from_members,
+        &mut state,
+        &|members, source, comments, _state| {
+            extract_slot_fields_from_members(members, source, comments)
+        },
     )
 }
 
@@ -3187,25 +3273,46 @@ fn extract_emit_fields_from_type(
     comments: &[Comment],
     source: &str,
 ) -> Vec<AnalyzedEmitField> {
+    let mut call_signature_ordinal = 0;
+    extract_emit_fields_from_type_at(ts_type, comments, source, &mut call_signature_ordinal)
+}
+
+fn extract_emit_fields_from_type_at(
+    ts_type: &TSType<'_>,
+    comments: &[Comment],
+    source: &str,
+    call_signature_ordinal: &mut u32,
+) -> Vec<AnalyzedEmitField> {
     match ts_type {
-        TSType::TSTypeLiteral(literal) => {
-            extract_emit_fields_from_members(&literal.members, source, comments)
-        }
+        TSType::TSTypeLiteral(literal) => extract_emit_fields_from_members_at(
+            &literal.members,
+            source,
+            comments,
+            call_signature_ordinal,
+        ),
         TSType::TSTypeReference(_) => Vec::new(),
-        TSType::TSIntersectionType(intersection) => intersection
-            .types
-            .iter()
-            .flat_map(|t| extract_emit_fields_from_type(t, comments, source))
-            .collect(),
+        TSType::TSIntersectionType(intersection) => {
+            let mut fields = Vec::new();
+            for ty in &intersection.types {
+                fields.extend(extract_emit_fields_from_type_at(
+                    ty,
+                    comments,
+                    source,
+                    call_signature_ordinal,
+                ));
+            }
+            fields
+        }
         _ => Vec::new(),
     }
 }
 
 /// Extract emit fields from TSSignature members (shared between TSTypeLiteral and interface bodies).
-fn extract_emit_fields_from_members(
+fn extract_emit_fields_from_members_at(
     members: &[TSSignature<'_>],
     source: &str,
     comments: &[Comment],
+    call_signature_ordinal: &mut u32,
 ) -> Vec<AnalyzedEmitField> {
     members
         .iter()
@@ -3235,6 +3342,7 @@ fn extract_emit_fields_from_members(
                     has_authored_payload.then(|| verter_type_expr::TypeExprScope::new(""));
                 let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
                 key_name.map(|name| AnalyzedEmitField {
+                    producer_identity: crate::analysis::types::EmitProducerIdentity::property(0),
                     name,
                     span: prop.key.span().into(),
                     payload_type,
@@ -3246,6 +3354,11 @@ fn extract_emit_fields_from_members(
             }
             // Call signature: `(e: 'change', id: number): void`
             TSSignature::TSCallSignatureDeclaration(call_sig) => {
+                let producer_identity =
+                    crate::analysis::types::EmitProducerIdentity::call_signature(
+                        *call_signature_ordinal,
+                    );
+                *call_signature_ordinal += 1;
                 let first_param = call_sig.params.items.first()?;
                 let type_ann = first_param.type_annotation.as_ref()?;
                 if let TSType::TSLiteralType(lit) = &type_ann.type_annotation {
@@ -3277,6 +3390,7 @@ fn extract_emit_fields_from_members(
                         let (description, tags) =
                             extract_jsdoc_for(comments, call_sig.span().start, source);
                         return Some(AnalyzedEmitField {
+                            producer_identity,
                             name: s.value.to_string(),
                             span: s.span.into(),
                             payload_type,
@@ -3308,6 +3422,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                         _ => None,
                     };
                     key_name.map(|name| AnalyzedEmitField {
+                        producer_identity: crate::analysis::types::EmitProducerIdentity::runtime(0),
                         name,
                         span: p.key.span().into(),
                         payload_type: None,
@@ -3327,6 +3442,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
             .filter_map(|elem| {
                 if let ArrayExpressionElement::StringLiteral(lit) = elem {
                     Some(AnalyzedEmitField {
+                        producer_identity: crate::analysis::types::EmitProducerIdentity::runtime(0),
                         name: lit.value.to_string(),
                         span: lit.span.into(),
                         payload_type: None,

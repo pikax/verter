@@ -858,17 +858,17 @@ let { contractProp, optionalCount = 0 }: Props = $props();
 fn svelte_public_projection_carries_props_event_overloads_and_slots() {
     let source = r#"<script lang="ts">
 import { createEventDispatcher } from 'svelte';
-interface Props {
+import type { Snippet } from 'svelte';
+let { title, count = 0, onselect, itemRow }: {
   title: string;
   count?: number;
-  onselect: (value: string, index?: number) => void;
-}
-let { title, count = 0, onselect }: Props = $props();
-let item: string = 'row';
+  onselect: (value: string, index?: number) => boolean;
+  itemRow?: Snippet<[item: string, index: number]>;
+} = $props();
 const dispatch = createEventDispatcher<{ select: string }>();
-void title; void count; void onselect; void dispatch;
+void title; void count; void onselect; void itemRow; void dispatch;
 </script>
-<slot name="itemRow" item={item} />"#;
+<p>{title}: {count}</p>"#;
     let host = workspace_host_with_svelte(
         "/workspace/StructuredContract.svelte",
         source,
@@ -879,7 +879,9 @@ void title; void count; void onselect; void dispatch;
             ),
             (
                 "/workspace/node_modules/svelte/index.d.ts",
-                "export declare function createEventDispatcher<E>(): \
+                "export type Snippet<Params extends unknown[] = []> = \
+                 (...args: Params) => { rendered: true };\n\
+                 export declare function createEventDispatcher<E>(): \
                  (name: keyof E, detail: E[keyof E]) => void;\n",
             ),
         ],
@@ -941,6 +943,22 @@ void title; void count; void onselect; void dispatch;
         select.overloads[1].parameters[0].name.as_deref(),
         Some("payload")
     );
+    assert_eq!(
+        select.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+    assert_eq!(
+        select.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Void)
+    );
+    assert_eq!(
+        select.derived_handler.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+    assert_eq!(
+        select.derived_handler.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Void)
+    );
 
     let slot = contract
         .slots
@@ -948,8 +966,22 @@ void title; void count; void onselect; void dispatch;
         .find(|slot| slot.name.as_ref() == "itemRow")
         .expect("Snippet prop derives itemRow slot");
     assert!(slot.optional);
-    assert_eq!(slot.input.bindings.len(), 1);
+    assert_eq!(
+        slot.input.bindings.len(),
+        2,
+        "Snippet's rest-tuple arguments become ordered slot bindings"
+    );
     assert_eq!(slot.input.bindings[0].name.as_ref(), "item");
+    assert_eq!(slot.input.bindings[1].name.as_ref(), "index");
+    assert!(
+        matches!(
+            slot.return_type
+                .as_ref()
+                .and_then(|return_type| return_type.publication.materialized_type()),
+            Some(verter_type_expr::TypeExpr::Object(_))
+        ),
+        "the structured Snippet return must reach the public contract"
+    );
 }
 
 #[test]

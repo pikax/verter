@@ -26833,6 +26833,78 @@ defineEmits<{ change: [value: number]; close: [] }>()
     );
 }
 
+// @ai-generated - Discriminates the event-return output lane from a healthy
+// event payload when only the producer-owned callable return cannot materialize.
+#[test]
+fn component_meta_output_return_only_failure_names_event_return_lane() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ (event: 'change', value: number): boolean }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let mut analysis = host
+        .get_component_meta("/App.vue")
+        .expect("component must resolve");
+    assert_eq!(
+        analysis.events.len(),
+        1,
+        "fixture declares one callable event"
+    );
+    assert!(
+        analysis.events[0].return_publication.is_some(),
+        "the callable producer must publish its return lane"
+    );
+
+    let bad_source = verter_type_expr::facts::SemanticTypeSource::Authored(
+        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+            verter_type_expr::locators::MacroPayloadLocator {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: Arc::from("/App.vue"),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
+                    symbol: Arc::from("default"),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                },
+                macro_index: 99,
+                payload: verter_type_expr::locators::MacroPayloadPosition::TypeArgument,
+            },
+        ),
+    );
+    let failed_position = verter_type_expr::facts::SourcePosition::Present(bad_source.clone());
+    analysis.events[0].return_publication =
+        Some(verter_type_expr::TypePublication::from_source_position(
+            &failed_position,
+            verter_type_expr::ResolutionExactness::ExactConcrete,
+            verter_type_expr::ResolutionProvenance::FrameworkSurface,
+            Arc::from([]),
+            None,
+            &verter_type_expr::PublicationPolicy::exact_only(),
+        ));
+
+    let err = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", analysis, None,
+    )
+    .expect_err("a failed callable return must fail output materialization");
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::EventReturn,
+        "the healthy payload lane must not be blamed for a return-only failure"
+    );
+    assert_eq!(err.index, 0);
+    assert_eq!(err.inner_index, None);
+    assert_eq!(*err.position, failed_position);
+    assert_eq!(
+        err.failure,
+        crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource,
+    );
+}
+
 /// (d) The `events[].payload` lane is POSITIONAL: entries align 1:1 with
 /// `analysis.events` in order, and duplicate event names are preserved as
 /// distinct positional rows — a name-keyed output would collapse the two
@@ -27703,6 +27775,8 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
             None,
             None,
         ),
+        return_publication: None,
+        return_publication_scope: None,
         payload_expansion: None,
         raw_signature: Some("(e: 'e') => void".to_string()),
         description: None,
@@ -27723,8 +27797,8 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
         }],
         is_required: false,
         return_type: None,
-        return_source: None,
-        return_source_scope: None,
+        return_publication: None,
+        return_publication_scope: None,
         description: None,
         tags: Vec::new(),
         declared_in_macro_type_arg: true,
@@ -27883,8 +27957,8 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
             ],
             is_required: false,
             return_type: None,
-            return_source: None,
-            return_source_scope: None,
+            return_publication: None,
+            return_publication_scope: None,
             description: None,
             tags: Vec::new(),
             declared_in_macro_type_arg: true,
@@ -29016,6 +29090,8 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
                 None,
                 None,
             ),
+            return_publication: None,
+            return_publication_scope: None,
             payload_expansion: None,
             raw_signature: None,
             description: None,
