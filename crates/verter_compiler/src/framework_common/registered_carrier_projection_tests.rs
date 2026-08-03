@@ -12,12 +12,21 @@ use verter_language::{
 };
 
 use super::registered_carrier_projection::project_registered_carrier_for_tests as project_registered_carrier;
+use super::registered_projector_seal::{
+    mint_registered_projector_seal_for_tests, RegisteredProjectorSeal,
+};
 use super::registry::CarrierCompilerRegistry;
 
 struct RegisteredCarrierProjection {
     inventory: Arc<CarrierBlockInventory>,
     carrier_structure_hash: CarrierStructureHash,
 }
+
+type RegisteredProjectorForTests = fn(
+    &dyn super::carrier_compiler::CarrierCompiler,
+    &AcceptedRegisteredCarrierSource,
+    &RegisteredProjectorSeal,
+) -> (Arc<CarrierBlockInventory>, CarrierStructureHash);
 
 impl RegisteredCarrierProjection {
     fn inventory(&self) -> &Arc<CarrierBlockInventory> {
@@ -77,8 +86,9 @@ fn project(accepted: &AcceptedRegisteredCarrierSource) -> RegisteredCarrierProje
             language.carrier_language_id().expect("carrier language"),
         )
         .expect("registered compiler");
+    let seal = mint_registered_projector_seal_for_tests();
     let (inventory, carrier_structure_hash) =
-        project_registered_carrier(compiler.as_ref(), accepted);
+        project_registered_carrier(compiler.as_ref(), accepted, &seal);
     RegisteredCarrierProjection {
         inventory,
         carrier_structure_hash,
@@ -760,9 +770,6 @@ fn malformed_registered_sources_preserve_parser_owned_termination() {
 }
 
 #[test]
-fn registered_projector_signature_is_capability_only() {
-    let _: fn(
-        &dyn super::carrier_compiler::CarrierCompiler,
-        &AcceptedRegisteredCarrierSource,
-    ) -> (Arc<CarrierBlockInventory>, CarrierStructureHash) = project_registered_carrier;
+fn registered_projector_signature_requires_authority_seal() {
+    let _: RegisteredProjectorForTests = project_registered_carrier;
 }

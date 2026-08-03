@@ -22,6 +22,7 @@ pub mod carrier_compiler;
 pub mod ctx;
 pub mod generated_identifier;
 mod registered_carrier_projection;
+mod registered_projector_seal;
 pub mod registry;
 pub mod vue_bridge;
 

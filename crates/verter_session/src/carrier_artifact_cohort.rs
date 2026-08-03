@@ -1,8 +1,12 @@
 //! Exact persisted-carrier compatibility cohort.
 //!
-//! This table deliberately contains only carrier-owned versions. Downstream
-//! consumer compatibility belongs to `verter_protocol` and cannot participate
-//! in carrier identity or adoption.
+//! This frozen type shape contains exactly eight carrier-owned version words;
+//! exact equality compares the complete row. Downstream consumer compatibility
+//! is a separate protocol row and cannot participate in carrier identity or
+//! adoption: adding it here changes the structurally pinned size, while the
+//! compiler and language identity owners have no Cargo dependency on the
+//! downstream protocol crate. Carrier lanes and artifact IDs must remain built
+//! solely from these carrier-owned versions when those types are introduced.
 
 use verter_compiler::framework_common::vue_bridge::VUE_CARRIER_ARTIFACT_VERSION;
 use verter_compiler::svelte::carrier::SVELTE_CARRIER_ARTIFACT_VERSION;
@@ -121,8 +125,7 @@ pub fn validate_persisted_carrier_artifact_cohort(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use verter_workspace::native_fs::NativeFs;
+    use std::process::Command;
 
     #[test]
     fn current_cohort_reads_live_carrier_owned_versions() {
@@ -184,6 +187,52 @@ mod tests {
     }
 
     #[test]
+    fn persisted_carrier_cohort_has_frozen_eight_word_shape() {
+        assert_eq!(
+            std::mem::size_of::<PersistedCarrierArtifactCohort>(),
+            8 * std::mem::size_of::<u32>()
+        );
+        assert_eq!(
+            std::mem::align_of::<PersistedCarrierArtifactCohort>(),
+            std::mem::align_of::<u32>()
+        );
+    }
+
+    #[test]
+    fn carrier_identity_owner_crates_cannot_depend_on_consumer_protocol() {
+        let output = Command::new(env!("CARGO"))
+            .args(["metadata", "--format-version", "1", "--no-deps"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("run cargo metadata");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse cargo metadata");
+        let packages = metadata["packages"]
+            .as_array()
+            .expect("cargo metadata packages");
+        for owner in ["verter_language", "verter_compiler"] {
+            let package = packages
+                .iter()
+                .find(|package| package["name"] == owner)
+                .unwrap_or_else(|| panic!("cargo metadata omitted {owner}"));
+            let dependencies = package["dependencies"]
+                .as_array()
+                .expect("package dependencies");
+            assert!(
+                dependencies
+                    .iter()
+                    .all(|dependency| dependency["name"] != "verter_protocol"),
+                "{owner} must not depend on downstream verter_protocol"
+            );
+        }
+    }
+
+    #[test]
     fn consumer_manifest_cache_pin_is_fresh_but_excluded_from_carrier_cohort() {
         let manifest =
             verter_protocol::consumer_compatibility_manifest::current_consumer_compatibility_manifest();
@@ -191,39 +240,5 @@ mod tests {
             manifest.cache_cluster_schema_version.get(),
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION
         );
-    }
-
-    #[test]
-    fn consumer_manifest_is_compile_time_excluded_from_carrier_identity_and_adoption() {
-        use quote::ToTokens;
-
-        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let guarded = [
-            "carrier_artifact_cohort.rs",
-            "carrier_publication_store.rs",
-            "carrier_publication_store/mod.rs",
-            "framework_artifact_id.rs",
-            "carrier_lane.rs",
-        ];
-        let native_fs = NativeFs::new();
-        for relative in guarded {
-            let path = source_root.join(relative);
-            let Some(source) = native_fs.read_file(path.to_string_lossy().as_ref()) else {
-                continue;
-            };
-            let syntax = syn::parse_file(&source).expect("guarded carrier source parses");
-            for item in syntax.items {
-                if matches!(&item, syn::Item::Mod(module) if module.ident == "tests") {
-                    continue;
-                }
-                let tokens = item.to_token_stream().to_string();
-                assert!(
-                    !tokens.contains("ConsumerCompatibilityManifest")
-                        && !tokens.contains("consumer_compatibility_manifest"),
-                    "{} imports downstream compatibility into carrier identity/adoption",
-                    path.display()
-                );
-            }
-        }
     }
 }

@@ -9,6 +9,7 @@ use verter_language::{compute_carrier_structure_hash, CarrierStructureHash};
 use verter_span::Span;
 
 use super::carrier_compiler::{CarrierCompiler, ParseOptions};
+use super::registered_projector_seal::RegisteredProjectorSeal;
 use super::vue_bridge::VueCarrierCompiler;
 use crate::svelte::SvelteCarrierCompiler;
 
@@ -29,6 +30,7 @@ impl RegisteredCarrierProjection {
 fn project_registered_carrier(
     compiler: &dyn CarrierCompiler,
     accepted: &AcceptedRegisteredCarrierSource,
+    _seal: &RegisteredProjectorSeal,
 ) -> RegisteredCarrierProjection {
     let language = accepted.source().resolved_file_language();
     assert_eq!(
@@ -87,8 +89,9 @@ fn project_registered_carrier(
 pub(super) fn project_registered_carrier_for_tests(
     compiler: &dyn CarrierCompiler,
     accepted: &AcceptedRegisteredCarrierSource,
+    seal: &RegisteredProjectorSeal,
 ) -> (Arc<CarrierBlockInventory>, CarrierStructureHash) {
-    let projection = project_registered_carrier(compiler, accepted);
+    let projection = project_registered_carrier(compiler, accepted, seal);
     (
         Arc::clone(projection.inventory()),
         projection.carrier_structure_hash(),
