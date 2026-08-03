@@ -17,7 +17,7 @@
 //!   tag/needle helpers).
 //! - The `<script setup generic="…">` type-parameter reader
 //!   (`sfc_script_setup_type_params`) and the component-meta
-//!   `populate_sfc_blocks_sidecar` — Vue-semantic leaves that open the
+//!   `populate_ordered_sfc_structure` — Vue-semantic leaves that open the
 //!   neutral parse artifact through the blessed `vue_parse()` accessor,
 //!   keeping `host_manage/**` free of Vue parse types. Generic parameters
 //!   BIND through the prepared-decl bundle's script-setup type bindings
@@ -426,128 +426,106 @@ fn is_self_closing_tag(bytes: &[u8], tag_end: usize) -> bool {
     false
 }
 
-fn string_from_span(source: &str, span: Option<verter_compiler::common::Span>) -> Option<String> {
-    span.map(|span| source[span.start as usize..span.end as usize].to_string())
-}
-
-fn sfc_attributes_from_props(
-    props: &[verter_compiler::types::NodeProp],
-    source: &str,
-) -> Vec<verter_semantic::analysis::component_meta::SfcAttributeAnalysis> {
-    crate::parse::extract_attrs(props, source)
-        .into_iter()
-        .map(
-            |(name, value)| verter_semantic::analysis::component_meta::SfcAttributeAnalysis {
-                name: name.to_string(),
-                value: if value.is_empty() {
-                    None
-                } else {
-                    Some(value.to_string())
-                },
-            },
-        )
-        .collect()
-}
-
-fn sfc_custom_block_type(source: &str, tag_open: &verter_compiler::types::NodeTag) -> String {
-    source[tag_open.start as usize + 1..tag_open.name_end as usize].to_string()
-}
-
-/// Populate the component-meta SFC-blocks sidecar from the carrier
-/// parse (template/script/style/custom block attrs). Vue-semantic leaf:
-/// opens the neutral artifact through the blessed `vue_parse()`
-/// accessor. No-op for non-Vue canonicals and artifact-less state.
-pub(crate) fn populate_sfc_blocks_sidecar(
+/// Bind schema-8 metadata to the registered content-free structure.
+pub(crate) fn populate_ordered_sfc_structure(
     host: &crate::VerterHost,
     canonical_id: &str,
     meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
 ) {
-    let Some((source, framework_parse, _)) = host.current_eval_state(canonical_id) else {
+    let Some((structure, _)) = host.registered_file_structure_snapshot(canonical_id) else {
         return;
     };
-    let Some(parsed) = framework_parse
-        .as_deref()
-        .and_then(crate::typeinfo::adapters::vue::vue_parse)
-    else {
-        return;
-    };
-    let source = source.as_ref();
+    meta.ordered_sfc_structure = Some(ordered_sfc_structure_analysis(&structure));
+}
 
-    let template = parsed.template_ast().map(|template| {
-        let attrs = crate::parse::extract_attrs(&template.root.attributes, source);
-        verter_semantic::analysis::component_meta::TemplateBlockAnalysis {
-            lang: string_from_span(source, template.root.lang),
-            src: crate::parse::find_attr(&attrs, "src"),
-            attributes: sfc_attributes_from_props(&template.root.attributes, source),
-        }
-    });
+/// Project the registered carrier inventory into the shared schema-8 envelope.
+/// This is deliberately content-free and never reparses source bytes.
+pub(crate) fn ordered_sfc_structure_analysis(
+    structure: &crate::carrier_publication_store::RegisteredFileStructure,
+) -> verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis {
+    let inventory = structure.inventory();
 
-    let script = parsed.script().map(|script| {
-        let attrs = crate::parse::extract_attrs(&script.attributes, source);
-        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
-            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-            src: crate::parse::find_attr(&attrs, "src"),
-            generic: string_from_span(source, script.generic),
-            attrs_type: string_from_span(source, script.attrs),
-            attributes: sfc_attributes_from_props(&script.attributes, source),
-        }
-    });
-
-    let script_setup = parsed.script_setup().map(|script| {
-        let attrs = crate::parse::extract_attrs(&script.attributes, source);
-        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
-            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-            src: crate::parse::find_attr(&attrs, "src"),
-            generic: string_from_span(source, script.generic),
-            attrs_type: string_from_span(source, script.attrs),
-            attributes: sfc_attributes_from_props(&script.attributes, source),
-        }
-    });
-
-    let styles = parsed
-        .style_nodes()
+    let source_space_tokens = inventory
+        .source_spaces()
         .iter()
-        .enumerate()
-        .map(|(index, style)| {
-            let attrs = crate::parse::extract_attrs(&style.attributes, source);
-            verter_semantic::analysis::component_meta::StyleBlockInfoAnalysis {
-                index,
-                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-                src: crate::parse::find_attr(&attrs, "src"),
-                scoped: style.scoped,
-                is_module: style.module,
-                module_name: crate::parse::find_attr(&attrs, "module")
-                    .filter(|value| value != "true"),
-                attributes: sfc_attributes_from_props(&style.attributes, source),
-            }
+        .map(|space| {
+            structure
+                .public_source_space_token(space.id)
+                .expect("validated source space")
+                .as_str()
+                .to_owned()
         })
-        .collect();
-
-    let custom = parsed
-        .unknown_nodes()
+        .collect::<Vec<_>>();
+    let block_tokens = inventory
+        .blocks()
         .iter()
-        .enumerate()
-        .map(|(index, block)| {
-            let attrs = crate::parse::extract_attrs(&block.attributes, source);
-            verter_semantic::analysis::component_meta::CustomBlockAnalysis {
-                index,
-                block_type: sfc_custom_block_type(source, &block.tag_open),
-                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-                src: crate::parse::find_attr(&attrs, "src"),
-                attributes: sfc_attributes_from_props(&block.attributes, source),
-            }
+        .map(|block| {
+            let block_ref = structure.block_ref(block.id()).expect("validated block");
+            structure
+                .public_block_token(&block_ref)
+                .expect("same artifact")
+                .as_str()
+                .to_owned()
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let markup_node_tokens = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .map(|node| {
+            let node_ref = structure.node_ref(node.id).expect("validated markup node");
+            structure
+                .public_node_token(&node_ref)
+                .expect("same artifact")
+                .as_str()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let mut attributes = inventory
+        .blocks()
+        .iter()
+        .filter_map(|block| match block {
+            verter_language::parse_artifact::carrier_inventory::CarrierBlock::Section {
+                syntax,
+                ..
+            } => Some(syntax.attributes.as_ref()),
+            verter_language::parse_artifact::carrier_inventory::CarrierBlock::MarkupRoot {
+                ..
+            } => None,
+        })
+        .flatten()
+        .chain(
+            inventory
+                .markup()
+                .nodes()
+                .iter()
+                .flat_map(|node| node.kind().attributes()),
+        )
+        .map(|attribute| attribute.id())
+        .collect::<Vec<_>>();
+    attributes.sort_unstable();
+    attributes.dedup();
+    let attribute_tokens = attributes
+        .into_iter()
+        .map(|id| {
+            let attribute_ref = structure.attribute_ref(id).expect("validated attribute");
+            structure
+                .public_attribute_token(&attribute_ref)
+                .expect("same artifact")
+                .as_str()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
 
-    meta.sfc_blocks = Some(
-        verter_semantic::analysis::component_meta::SfcBlocksAnalysis {
-            template,
-            script,
-            script_setup,
-            styles,
-            custom,
-        },
-    );
+    verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis {
+        schema_version: 1,
+        artifact_token: structure.public_artifact_token().as_str().to_owned(),
+        inventory: std::sync::Arc::clone(inventory),
+        source_space_tokens: source_space_tokens.into(),
+        block_tokens: block_tokens.into(),
+        markup_node_tokens: markup_node_tokens.into(),
+        attribute_tokens: attribute_tokens.into(),
+    }
 }
 
 #[cfg(test)]

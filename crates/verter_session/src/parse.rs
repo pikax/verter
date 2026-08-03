@@ -368,6 +368,7 @@ pub(crate) fn carrier_snapshot_from_artifact(
             source,
             analysis_scope,
             parsed,
+            artifact,
             provenance,
             VueScriptProgram::ParseHere,
             None,
@@ -877,7 +878,12 @@ fn build_svelte_snapshot_from_eval_source(
     // style-analysis / template-element class inventory. Svelte styles are
     // scoped by default; per-selector `:global(...)` opt-outs are recorded by
     // the scanner as special pseudos.
-    snapshot.style_analyses = build_svelte_style_analyses(source, &parsed.styles, &style_langs);
+    snapshot.style_analyses = build_style_analyses_from_inventory(
+        &artifact.common.inventory,
+        source,
+        canonical_id,
+        false,
+    );
     snapshot.markup_class_tokens = collect_svelte_markup_class_tokens(source, &parsed.template);
     snapshot.meta = FileMeta {
         has_script: false,
@@ -892,48 +898,6 @@ fn build_svelte_snapshot_from_eval_source(
     };
     snapshot.preprocessor_requests = preprocessor_requests;
     snapshot
-}
-
-/// Build [`verter_semantic::analysis::StyleBlockAnalysis`] facts for a Svelte
-/// component's `<style>` blocks: scoped-by-default, scanned through the shared
-/// dialect-aware CSS scanner (css/scss/less), carrier-absolute spans.
-pub(crate) fn build_svelte_style_analyses(
-    source: &str,
-    styles: &[verter_compiler::svelte::parser::SvelteStyle],
-    style_langs: &[Option<String>],
-) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
-    styles
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, style)| {
-            let span = style.content?;
-            let content = source.get(span.start as usize..span.end as usize)?;
-            let lang = match style_langs.get(idx).and_then(|l| l.as_deref()) {
-                None | Some("css") | Some("postcss") => {
-                    verter_semantic::analysis::StyleAnalysisLang::Css
-                }
-                Some("scss") => verter_semantic::analysis::StyleAnalysisLang::Scss,
-                Some("sass") => verter_semantic::analysis::StyleAnalysisLang::Sass,
-                Some("less") => verter_semantic::analysis::StyleAnalysisLang::Less,
-                Some("stylus") => verter_semantic::analysis::StyleAnalysisLang::Stylus,
-                Some(_) => verter_semantic::analysis::StyleAnalysisLang::Unknown,
-            };
-            let analysis = verter_semantic::analysis::build_scanned_style_analysis(
-                lang,
-                content,
-                verter_semantic::analysis::VueStyleInput::default(),
-                // Svelte styles are component-scoped by default.
-                true,
-                false,
-                None,
-                span.start,
-            );
-            if let Some(css) = &analysis.css {
-                css.debug_assert_valid_spans(source.len() as u32);
-            }
-            Some(analysis)
-        })
-        .collect()
 }
 
 /// Collect resolvable markup class tokens from a Svelte template AST:
@@ -1329,6 +1293,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     parsed: &ParsedSfc,
+    framework_parse: &verter_language::FrameworkParseArtifact,
     provenance: &crate::types::MetaProvenance,
     script_program: VueScriptProgram<'_>,
     script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
@@ -1523,7 +1488,12 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     // Build style analyses for each style block (when style analysis flags are set)
     let style_analyses: Vec<verter_semantic::analysis::StyleBlockAnalysis> =
         if analysis_scope.needs_style_analysis() {
-            build_style_analyses_from_parsed(parsed, source, canonical_id)
+            build_style_analyses_from_inventory(
+                &framework_parse.common.inventory,
+                source,
+                canonical_id,
+                true,
+            )
         } else {
             Vec::new()
         };
@@ -1738,91 +1708,145 @@ fn build_preprocessor_requests(
     requests
 }
 
-/// Build a single style analysis from a parsed style node and the SFC source.
-/// Shared by `parse_vue_snapshot()` (eager) and `build_style_analyses_from_source()` (on-demand).
-fn build_single_style_analysis(
-    style: &verter_compiler::parser::types::RootNodeStyle,
+/// Build style analyses directly from the accepted inventory. This is the sole
+/// association point between semantic style facts and artifact-local block ids.
+fn build_style_analyses_from_inventory(
+    inventory: &verter_language::CarrierBlockInventory,
     source: &str,
     canonical_id: &str,
-) -> verter_semantic::analysis::StyleBlockAnalysis {
-    let module_name =
-        find_attr(&extract_attrs(&style.attributes, source), "module").filter(|v| v != "true");
-    let content_offset = style.content.map(|span| span.start).unwrap_or(0);
+    vue_style_semantics: bool,
+) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
+    use verter_language::parse_artifact::carrier_inventory::{
+        AttributeValue, CarrierAttribute, CarrierBlock, SectionRole, SourceSlice, StyleDialect,
+        StyleModule, TaggedSyntax,
+    };
 
-    // Extract CSS content from the SFC source
-    let css_content = style
-        .content
-        .map(|span| &source[span.start as usize..span.end as usize])
-        .unwrap_or("");
-
-    // Run CSS prepass to extract v-bind() expressions and their generated variable names
-    let component_name = verter_compiler::compile::extract_component_name(canonical_id);
-    let scope_id = verter_compiler::compile::get_hash(&component_name);
-    let prepass_result = verter_compiler::css::prepass::prepass(css_content, &scope_id);
-
-    // Build VueStyleInput from prepass results. Each v-bind carries its
-    // authored expression span (SFC-absolute) and the SOUND OXC-derived free
-    // identifier roots — the single owning usage fact consumed by liveness
-    // marking and compile-input assembly.
-    let vue_input = verter_semantic::analysis::VueStyleInput {
-        v_binds: prepass_result
-            .v_bind_vars
-            .iter()
-            .map(|vb| {
-                let roots =
-                    verter_compiler::compile::style_usage::expression_free_roots(&vb.expression);
-                verter_semantic::analysis::VBindInput {
-                    expression: vb.expression.clone(),
-                    quoted: false,
-                    start: content_offset + vb.expr_start,
-                    end: content_offset + vb.expr_end,
-                    generated_var_name: Some(vb.var_name.clone()),
-                    roots_complete: roots.is_some(),
-                    expr_roots: roots.unwrap_or_default(),
-                }
+    fn named_attr<'a>(
+        inventory: &'a verter_language::CarrierBlockInventory,
+        syntax: &TaggedSyntax,
+        wanted: &str,
+    ) -> Option<Option<&'a str>> {
+        syntax.attributes.iter().find_map(|attribute| {
+            let CarrierAttribute::Named { name, value, .. } = attribute else {
+                return None;
+            };
+            let authored = inventory.slice(name.authored).ok()?;
+            if !authored.eq_ignore_ascii_case(wanted) {
+                return None;
+            }
+            Some(match value {
+                AttributeValue::Static { raw, .. } => inventory.slice(*raw).ok(),
+                AttributeValue::Missing
+                | AttributeValue::Expression { .. }
+                | AttributeValue::Mixed { .. } => None,
             })
-            .collect(),
-        special_pseudos: vec![],
-    };
-
-    let sfc_source_len = source.len() as u32;
-
-    let analysis_lang = match style.lang {
-        Some(verter_compiler::parser::types::StyleLang::Css) | None => {
-            verter_semantic::analysis::StyleAnalysisLang::Css
-        }
-        Some(verter_compiler::parser::types::StyleLang::Scss) => {
-            verter_semantic::analysis::StyleAnalysisLang::Scss
-        }
-        Some(verter_compiler::parser::types::StyleLang::Sass) => {
-            verter_semantic::analysis::StyleAnalysisLang::Sass
-        }
-        Some(verter_compiler::parser::types::StyleLang::Less) => {
-            verter_semantic::analysis::StyleAnalysisLang::Less
-        }
-        Some(verter_compiler::parser::types::StyleLang::Stylus) => {
-            verter_semantic::analysis::StyleAnalysisLang::Stylus
-        }
-        Some(verter_compiler::parser::types::StyleLang::Unknown) => {
-            verter_semantic::analysis::StyleAnalysisLang::Unknown
-        }
-    };
-    // CSS, SCSS and Less run the brace-based scanner (dialect-aware) so class
-    // and selector facts exist for every brace-based style block; indented
-    // languages (Sass, Stylus) keep the Vue-features-only analysis.
-    let analysis = verter_semantic::analysis::build_scanned_style_analysis(
-        analysis_lang,
-        css_content,
-        vue_input,
-        style.scoped,
-        style.module,
-        module_name.as_deref(),
-        content_offset,
-    );
-    if let Some(css) = &analysis.css {
-        css.debug_assert_valid_spans(sfc_source_len);
+        })
     }
-    analysis
+
+    fn analysis_lang(
+        dialect: &StyleDialect,
+        authored: Option<&str>,
+    ) -> verter_semantic::analysis::StyleAnalysisLang {
+        use verter_semantic::analysis::StyleAnalysisLang;
+        match authored.map(str::to_ascii_lowercase).as_deref() {
+            None => match dialect {
+                StyleDialect::Css | StyleDialect::PostCss => StyleAnalysisLang::Css,
+                StyleDialect::Scss => StyleAnalysisLang::Scss,
+                StyleDialect::Sass => StyleAnalysisLang::Sass,
+                StyleDialect::Less => StyleAnalysisLang::Less,
+                StyleDialect::Stylus => StyleAnalysisLang::Stylus,
+                StyleDialect::Custom { .. } | StyleDialect::Missing => StyleAnalysisLang::Unknown,
+            },
+            Some("css" | "postcss") => StyleAnalysisLang::Css,
+            Some("scss") => StyleAnalysisLang::Scss,
+            Some("sass") => StyleAnalysisLang::Sass,
+            Some("less") => StyleAnalysisLang::Less,
+            Some("stylus") => StyleAnalysisLang::Stylus,
+            Some(_) => StyleAnalysisLang::Unknown,
+        }
+    }
+
+    inventory
+        .blocks()
+        .iter()
+        .filter_map(|block| {
+            let CarrierBlock::Section {
+                id,
+                role:
+                    SectionRole::Style {
+                        dialect,
+                        scoped,
+                        module,
+                    },
+                syntax,
+            } = block
+            else {
+                return None;
+            };
+            let css_content = inventory
+                .slice(SourceSlice::new(syntax.content_span))
+                .ok()?;
+            let content_offset = syntax.content_span.start;
+            let lang_attr = named_attr(inventory, syntax, "lang").flatten();
+            let module_attr = named_attr(inventory, syntax, "module");
+            let module_name = module_attr
+                .flatten()
+                .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("true"));
+            let is_module = !matches!(module, StyleModule::None) || module_attr.is_some();
+
+            let prepass_result = vue_style_semantics.then(|| {
+                let component_name = verter_compiler::compile::extract_component_name(canonical_id);
+                let scope_id = verter_compiler::compile::get_hash(&component_name);
+                verter_compiler::css::prepass::prepass(css_content, &scope_id)
+            });
+
+            // Build VueStyleInput from prepass results. Each v-bind carries its
+            // authored expression span (SFC-absolute) and the SOUND OXC-derived free
+            // identifier roots — the single owning usage fact consumed by liveness
+            // marking and compile-input assembly.
+            let vue_input = verter_semantic::analysis::VueStyleInput {
+                v_binds: prepass_result
+                    .iter()
+                    .flat_map(|prepass| &prepass.v_bind_vars)
+                    .map(|vb| {
+                        let roots = verter_compiler::compile::style_usage::expression_free_roots(
+                            &vb.expression,
+                        );
+                        verter_semantic::analysis::VBindInput {
+                            expression: vb.expression.clone(),
+                            quoted: false,
+                            start: content_offset + vb.expr_start,
+                            end: content_offset + vb.expr_end,
+                            generated_var_name: Some(vb.var_name.clone()),
+                            roots_complete: roots.is_some(),
+                            expr_roots: roots.unwrap_or_default(),
+                        }
+                    })
+                    .collect(),
+                special_pseudos: vec![],
+            };
+
+            let sfc_source_len = source.len() as u32;
+            let analysis_lang = analysis_lang(dialect, lang_attr);
+            // CSS, SCSS and Less run the brace-based scanner (dialect-aware) so class
+            // and selector facts exist for every brace-based style block; indented
+            // languages (Sass, Stylus) keep the Vue-features-only analysis.
+            let mut analysis = verter_semantic::analysis::build_scanned_style_analysis(
+                analysis_lang,
+                css_content,
+                vue_input,
+                !vue_style_semantics || *scoped,
+                is_module,
+                module_name,
+                content_offset,
+            );
+            analysis.block_id = Some(id.get());
+            if let Some(css) = &analysis.css {
+                css.debug_assert_valid_spans(sfc_source_len);
+            }
+            Some(analysis)
+        })
+        .collect()
 }
 
 /// Run a closure with panic safety, returning a warning diagnostic if it panics.
@@ -2126,18 +2150,6 @@ pub(crate) fn build_style_analyses_from_source(
     build_style_analyses_for_artifact(Some(&artifact), source, canonical_id, provenance)
 }
 
-pub(crate) fn build_style_analyses_from_parsed(
-    parsed: &ParsedSfc,
-    source: &str,
-    canonical_id: &str,
-) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
-    parsed
-        .style_nodes()
-        .iter()
-        .map(|style| build_single_style_analysis(style, source, canonical_id))
-        .collect()
-}
-
 /// Artifact-facing script-analysis builder: reuse the carrier parse
 /// when the neutral artifact opens through the blessed Vue accessor,
 /// else re-parse from source.
@@ -2160,10 +2172,14 @@ pub(crate) fn build_style_analyses_for_artifact(
     canonical_id: &str,
     _provenance: &crate::types::MetaProvenance,
 ) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
-    match framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse) {
-        Some(parsed) => build_style_analyses_from_parsed(parsed, source, canonical_id),
-        None => Vec::new(),
-    }
+    framework_parse.map_or_else(Vec::new, |artifact| {
+        build_style_analyses_from_inventory(
+            &artifact.common.inventory,
+            source,
+            canonical_id,
+            artifact.adapter_id.is_vue(),
+        )
+    })
 }
 
 /// The cold-flight variant of [`build_carrier_snapshot_from_artifact`]: builds a
@@ -2970,6 +2986,44 @@ const view = <div className="card">hello</div>
         assert_eq!(snap.meta.style_langs.len(), 2);
     }
 
+    /// @ai-generated - Style analyses carry the exact artifact-local ids from
+    /// the accepted inventory even when non-style roots are interleaved.
+    #[test]
+    fn style_analysis_identity_is_inventory_derived() {
+        let source = "<style>.first{}</style><template><div/></template><docs>x</docs><style>.second{}</style>";
+        let (snapshot, artifact) = super::parse_vue_snapshot(
+            "Comp.vue",
+            source,
+            AnalysisScope::LSP,
+            &crate::types::MetaProvenance::default(),
+        );
+        let inventory_ids = artifact
+            .common
+            .inventory
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                verter_language::CarrierBlock::Section {
+                    id,
+                    role: verter_language::SectionRole::Style { .. },
+                    ..
+                } => Some(id.get()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let analysis_ids = snapshot
+            .style_analyses
+            .iter()
+            .map(|style| style.block_id.expect("sealed style identity"))
+            .collect::<Vec<_>>();
+        assert_eq!(analysis_ids, inventory_ids);
+        assert_eq!(
+            analysis_ids,
+            [0, 3],
+            "ids are artifact-local, not style ordinals"
+        );
+    }
+
     /// @ai-generated - Custom block detection
     #[test]
     fn parse_vue_snapshot_custom_block() {
@@ -3566,10 +3620,32 @@ watch(count, (value, oldValue) => {
     #[test]
     fn svelte_style_analyses_scoped_by_default_with_global_pseudo() {
         let source = "<script>let x = 1;</script>\n<div class=\"card\"></div>\n<style>\n.card { color: red; }\n:global(.reset) { margin: 0; }\n</style>\n";
-        let parsed = verter_compiler::svelte::parser::parse_svelte(source);
-        let styles = build_svelte_style_analyses(source, &parsed.styles, &[None]);
+        let (snapshot, artifact) = carrier_parse_snapshot(
+            "test.svelte",
+            source,
+            AnalysisScope::LSP,
+            &verter_language::FileLanguage::svelte(),
+            &crate::types::MetaProvenance::default(),
+        )
+        .expect("registered Svelte carrier");
+        let styles = snapshot.style_analyses;
         assert_eq!(styles.len(), 1);
         let style = &styles[0];
+        let inventory_style_id = artifact
+            .common
+            .inventory
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                verter_language::CarrierBlock::Section {
+                    id,
+                    role: verter_language::SectionRole::Style { .. },
+                    ..
+                } => Some(id.get()),
+                _ => None,
+            })
+            .expect("inventory style block");
+        assert_eq!(style.block_id, Some(inventory_style_id));
         assert!(style.scoped, "svelte styles are scoped by default");
         let css = style.css.as_ref().expect("scanned css facts");
         let card = css.classes.iter().find(|c| c.name == "card").unwrap();

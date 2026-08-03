@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use verter_session::external_ts::{
-    OpenState, PublishSnapshot, ScriptKind, SnapshotFile, SnapshotRole,
+    OpenState, PublishSnapshot, ScriptKind, SnapshotFile, SnapshotRole, SnapshotStructureStamp,
 };
 
 use super::*;
@@ -41,6 +41,7 @@ fn file(
         content_hash: h16(content),
         map_hash: map.map(h16).unwrap_or([0u8; 16]),
         map_json: map.map(Arc::from),
+        structure: None,
         version,
         open_state: OpenState::Closed,
     }
@@ -141,6 +142,52 @@ fn every_ready_file_has_its_blob_on_disk_after_publish() {
         b.map_rel.is_none(),
         "the unmapped carrier advertises no map_rel"
     );
+}
+
+#[test]
+fn structure_stamp_is_published_beside_an_unchanged_standard_map() {
+    let (store, user_tree) = fresh_store();
+    let map = r#"{"version":3,"sources":["A.vue"],"names":[],"mappings":"AAAA"}"#;
+    let mut carrier = file(
+        "d:/ws/src/A.vue.tsx",
+        "d:/ws/src/A.vue",
+        SnapshotRole::CarrierIde,
+        ScriptKind::Tsx,
+        "export const A = 1;",
+        Some(map),
+        7,
+    );
+    carrier.structure = Some(SnapshotStructureStamp {
+        schema_version: 1,
+        artifact_token: Arc::from("a".repeat(43)),
+        script_content_ranges: vec![[8, 23]],
+    });
+    let batch = PublishBatch::from_snapshot(
+        user_tree.path().to_string_lossy().to_string(),
+        snapshot("d:/ws/tsconfig.json", vec![carrier]),
+        None,
+        OwnedSetScope::ProjectAuthoritative,
+    );
+
+    store.publish_batch(&batch).expect("publish");
+
+    let manifest = store.current_manifest();
+    let ready = manifest.projects["d:/ws/tsconfig.json"]
+        .ready_files
+        .get("d:/ws/src/A.vue.tsx")
+        .expect("ready carrier");
+    let structure = ready.structure.as_ref().expect("structure stamp");
+    assert_eq!(structure.schema_version, 1);
+    assert_eq!(structure.artifact_token, "a".repeat(43));
+    assert_eq!(structure.script_content_ranges, vec![[8, 23]]);
+    let published_map = std::fs::read_to_string(
+        store
+            .workspace_dir()
+            .join(ready.map_rel.as_ref().expect("map path")),
+    )
+    .expect("published map");
+    assert_eq!(published_map, map);
+    assert!(!published_map.contains("x_verter_structure"));
 }
 
 #[test]

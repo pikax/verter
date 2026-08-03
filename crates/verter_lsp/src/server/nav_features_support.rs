@@ -9,7 +9,6 @@ pub(super) fn transport_child_hover_result(
 ) -> Result<crate::server::component_resolve::ChildHoverOutcome> {
     result.map_err(|error| crate::public_api_projection_jsonrpc_error("hover", canonical_id, error))
 }
-
 /// Whether the completion position sits inside a style `v-bind(|)` context.
 pub(super) fn is_style_v_bind_context(
     server: &VerterLanguageServer,
@@ -19,7 +18,7 @@ pub(super) fn is_style_v_bind_context(
     (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         let offset = doc.line_index.position_to_offset(position)?;
         Some(matches!(
             classify_cursor_context_for_language(

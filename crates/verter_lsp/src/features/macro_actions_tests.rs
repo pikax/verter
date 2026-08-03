@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use verter_semantic::analysis::template::{
     AnalyzedEmitDefinition, DefinedSlot, TemplateAnalysisSnapshot,
 };
@@ -12,7 +12,7 @@ use verter_semantic::analysis::types::{
 fn b1_generate_define_slots_from_template() {
     let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst x = ref(0)\n</script>\n<template><slot name=\"header\" /><slot /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -83,7 +83,7 @@ fn b1_no_action_when_define_slots_exists() {
     let source =
         "<script setup lang=\"ts\">\ndefineSlots<{}>()\n</script>\n<template><slot /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -122,7 +122,7 @@ fn b1_no_action_when_define_slots_exists() {
 fn b1_no_action_without_script_setup() {
     let source = "<script>\nexport default {}\n</script>\n<template><slot /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -158,7 +158,7 @@ fn b1_no_action_without_script_setup() {
 fn b2_generate_define_emits_from_undeclared() {
     let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\n</script>\n<template><button @click=\"$emit('save')\">Save</button></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -210,7 +210,7 @@ fn b2_generate_define_emits_from_undeclared() {
 fn b2_no_action_when_all_emits_declared() {
     let source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ (e: 'save'): void }>()\n</script>\n<template><button @click=\"emit('save')\">Save</button></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -249,7 +249,7 @@ fn b2_no_action_when_all_emits_declared() {
 fn b4_add_missing_emit_to_existing_type_based() {
     let source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ (e: 'save'): void }>()\n</script>\n<template><button @click=\"emit('delete')\">Del</button></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -313,7 +313,7 @@ fn b4_add_missing_emit_to_existing_type_based() {
 fn b4_add_missing_emit_to_runtime_array() {
     let source = "<script setup lang=\"ts\">\nconst emit = defineEmits(['save'])\n</script>\n<template><button @click=\"emit('delete')\">Del</button></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -376,7 +376,7 @@ fn b4_add_missing_emit_to_runtime_array() {
 fn b4_first_emit_into_an_empty_runtime_array_has_no_leading_separator() {
     let source = "<script setup lang=\"ts\">\nconst emit = defineEmits([])\n</script>\n<template><button @click=\"emit('save')\">S</button></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -428,7 +428,7 @@ fn b4_first_emit_into_an_empty_runtime_array_has_no_leading_separator() {
 fn b5_first_prop_into_an_empty_slot_object_has_no_leading_separator() {
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    header(props: {}): any\n}>()\n</script>\n<template><slot name=\"header\" :item=\"x\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(
         source,
         vec![slot("header", &["item"], verter_span::Span::new(0, 0))],
@@ -473,7 +473,7 @@ fn b5_first_prop_into_an_empty_slot_object_has_no_leading_separator() {
 fn no_actions_without_analysis() {
     let source = "<script setup>\n</script>\n<template></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let actions = macro_code_actions(
         source,
@@ -490,7 +490,7 @@ fn no_actions_without_analysis() {
 fn b1_slots_with_scoped_bindings() {
     let source = "<script setup lang=\"ts\">\n</script>\n<template><slot name=\"row\" :item=\"item\" :index=\"i\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -546,7 +546,7 @@ fn b1_slot_names_with_hyphens_are_quoted() {
     let source =
         "<script setup lang=\"ts\">\n</script>\n<template><slot name=\"nav-bar\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -596,7 +596,7 @@ fn b1_slot_names_with_hyphens_are_quoted() {
 fn b1_insert_after_last_import() {
     let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nimport { computed } from 'vue'\nconst x = ref(0)\n</script>\n<template><slot /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -643,7 +643,7 @@ fn b1_insert_after_last_import() {
 fn b2_multiple_undeclared_emits() {
     let source = "<script setup lang=\"ts\">\n</script>\n<template><button @click=\"$emit('save')\">Save</button><button @click=\"$emit('cancel')\">Cancel</button></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -696,7 +696,7 @@ fn no_actions_with_empty_template() {
     let source =
         "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template><div>Hello</div></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = FileAnalysisSnapshot {
         script_flags: AnalysisFlags::empty().bits(),
@@ -738,7 +738,7 @@ fn make_binding(name: &str, type_annotation: Option<&str>) -> AnalyzedBinding {
 fn b1_resolves_type_from_analysis_bindings() {
     let source = "<script setup lang=\"ts\">\nconst title: string = 'hello'\n</script>\n<template><slot :title=\"title\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let mut analysis = producer_backed_snapshot(
         source,
@@ -789,7 +789,7 @@ fn b1_resolves_type_from_analysis_bindings() {
 fn b1_falls_back_to_unknown_without_type_annotation() {
     let source = "<script setup lang=\"ts\">\nconst items = ref([])\n</script>\n<template><slot :items=\"items\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let mut analysis = producer_backed_snapshot(
         source,
@@ -836,7 +836,7 @@ fn b1_falls_back_to_unknown_without_type_annotation() {
 fn b1_resolves_multiple_binding_types() {
     let source = "<script setup lang=\"ts\">\nconst title: string = ''\nconst count: number = 0\n</script>\n<template><slot name=\"header\" :title=\"title\" :count=\"count\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let mut analysis = producer_backed_snapshot(
         source,
@@ -893,7 +893,7 @@ fn b3_detects_missing_slot() {
     // defineSlots has only "header", but template also has "footer"
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    header(props: {}): any\n}>()\n</script>\n<template><slot name=\"header\" /><slot name=\"footer\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -965,7 +965,7 @@ fn b3_no_action_when_all_present() {
     // defineSlots already has both "header" and "default"
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    header(props: {}): any\n    default(props: {}): any\n}>()\n</script>\n<template><slot name=\"header\" /><slot /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -1019,7 +1019,7 @@ fn b5_missing_prop_detected() {
     // defineSlots has header with "title" prop, but template also passes "subtitle"
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    header(props: { title: string }): any\n}>()\n</script>\n<template><slot name=\"header\" :title=\"t\" :subtitle=\"s\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -1065,7 +1065,7 @@ fn b5_no_action_when_props_match() {
     // defineSlots and template have the same props
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    header(props: { title: string }): any\n}>()\n</script>\n<template><slot name=\"header\" :title=\"t\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let analysis = producer_backed_snapshot(
         source,
@@ -1107,7 +1107,7 @@ fn b5_no_action_when_props_match() {
 fn cursor_on_slot_element_shows_slot_actions() {
     let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\n</script>\n<template><div>hello</div><slot name=\"header\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     // <slot name="header" /> starts at offset 80 (approx)
     let slot_start = source.find("<slot").unwrap() as u32;
@@ -1164,7 +1164,7 @@ fn cursor_on_define_slots_macro_shows_augmentation_actions() {
     // defineSlots has only "header", but template also has "footer"
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    header(props: {}): any\n}>()\n</script>\n<template><slot name=\"header\" /><slot name=\"footer\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let macro_start = source.find("defineSlots").unwrap() as u32;
 
@@ -1223,7 +1223,7 @@ fn cursor_none_shows_all_actions() {
     // When cursor_offset is None, all actions should be returned (backward compat)
     let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\n</script>\n<template><slot name=\"header\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
 
     let slot_start = source.find("<slot").unwrap() as u32;
     let slot_end = source[slot_start as usize..].find("/>").unwrap() as u32 + slot_start + 2;
@@ -1355,7 +1355,7 @@ fn apply_insert(source: &str, line_index: &LineIndex, action: &CodeActionOrComma
 fn b5_slot_prop_membership_reads_analysis_rows_not_macro_text() {
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    header(props: { /* subtitle: string */ title: string }): any\n}>()\n</script>\n<template><slot name=\"header\" :title=\"t\" :subtitle=\"s\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(
         source,
         vec![slot(
@@ -1394,7 +1394,7 @@ fn b5_slot_prop_membership_reads_analysis_rows_not_macro_text() {
 fn b3_offers_no_duplicate_for_arrow_form_declared_slot() {
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    default: (props: { item: string }) => any\n}>()\n</script>\n<template><slot :item=\"i\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(
         source,
         vec![slot("default", &["item"], verter_span::Span::new(0, 0))],
@@ -1422,7 +1422,7 @@ fn b3_offers_no_duplicate_for_arrow_form_declared_slot() {
 fn b5_arrow_form_slot_props_participate() {
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    default: (props: { item: string }) => any\n}>()\n</script>\n<template><slot :item=\"i\" :index=\"n\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(
         source,
         vec![slot(
@@ -1467,7 +1467,7 @@ fn b5_arrow_form_slot_props_participate() {
 fn b3_pick_binding_surface_slots_are_members() {
     let source = "<script setup lang=\"ts\">\ntype Row = { id: string, note: string }\ndefineSlots<{\n    row(props: Pick<Row, 'id'>): any\n    footer(props: { note: string }): any\n}>()\n</script>\n<template><slot name=\"row\" :id=\"r\" /><slot name=\"footer\" :note=\"n\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(
         source,
         vec![
@@ -1508,7 +1508,7 @@ fn b3_pick_binding_surface_slots_are_members() {
 fn b3_insert_offset_comes_from_type_literal_anchor() {
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    header(props: { m: Map<string, { x: number }> }): any\n} /* keep */>()\n</script>\n<template><slot name=\"header\" /><slot name=\"footer\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(
         source,
         vec![
@@ -1549,7 +1549,7 @@ fn b3_insert_offset_comes_from_type_literal_anchor() {
 fn b5_insert_offset_comes_from_slot_props_anchor() {
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    // header(props: { legacy: string }): any\n    header(props: { title: string }): any\n}>()\n</script>\n<template><slot name=\"header\" :title=\"t\" :subtitle=\"s\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(
         source,
         vec![slot(
@@ -1591,7 +1591,7 @@ fn b5_insert_offset_comes_from_slot_props_anchor() {
 fn b4_emit_insert_offset_comes_from_anchor() {
     let source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{\n    (e: 'a'): void\n} /* keep */>()\n</script>\n<template><button @click=\"emit('save')\">x</button></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(source, vec![], vec![undeclared_emit("save")]);
 
     let actions = macro_code_actions(
@@ -1625,7 +1625,7 @@ fn b4_emit_insert_offset_comes_from_anchor() {
 fn b4_emit_runtime_array_insert_offset_comes_from_anchor() {
     let source = "<script setup lang=\"ts\">\nconst emit = defineEmits([ 'a' ] )\n</script>\n<template><button @click=\"emit('save')\">x</button></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(source, vec![], vec![undeclared_emit("save")]);
 
     let actions = macro_code_actions(
@@ -1660,7 +1660,7 @@ fn b4_emit_runtime_array_insert_offset_comes_from_anchor() {
 fn b4_emit_runtime_object_form_yields_no_action() {
     let source = "<script setup lang=\"ts\">\nconst emit = defineEmits({ custom: null })\n</script>\n<template><button @click=\"emit('save')\">x</button></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(source, vec![], vec![undeclared_emit("save")]);
 
     let actions = macro_code_actions(
@@ -1697,7 +1697,7 @@ fn b4_emit_runtime_object_form_yields_no_action() {
 fn named_type_argument_macro_yields_unsupported_anchor_and_no_action() {
     let source = "<script setup lang=\"ts\">\ntype S = { header(props: {}): any }\ndefineSlots<S>()\n</script>\n<template><slot name=\"header\" /><slot name=\"footer\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(
         source,
         vec![
@@ -1736,7 +1736,7 @@ fn named_type_argument_macro_yields_unsupported_anchor_and_no_action() {
 fn intersection_type_argument_yields_unsupported_anchor_and_no_action() {
     let source = "<script setup lang=\"ts\">\ntype A = { header(props: {}): any }\ndefineSlots<A & { nav(props: {}): any }>()\n</script>\n<template><slot name=\"header\" /><slot name=\"footer\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(
         source,
         vec![
@@ -1775,7 +1775,7 @@ fn intersection_type_argument_yields_unsupported_anchor_and_no_action() {
 fn pick_props_surface_yields_unsupported_slot_props_anchor() {
     let source = "<script setup lang=\"ts\">\ntype Row = { id: string, note: string }\ndefineSlots<{\n    row(props: Pick<Row, 'id'>): any\n    footer(props: { note: string }): any\n}>()\n</script>\n<template><slot name=\"row\" :id=\"r\" :extra=\"e\" /><slot name=\"footer\" :note=\"n\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let analysis = producer_backed_snapshot(
         source,
         vec![
@@ -1830,7 +1830,7 @@ fn anchor_out_of_bounds_for_live_source_is_unsupported() {
     let analyzed = "<script setup lang=\"ts\">\ndefineSlots<{\n    header(props: {}): any\n}>()\nconst padding_that_makes_this_much_longer = 1\n</script>\n<template><slot name=\"header\" /><slot name=\"footer\" /></template>";
     let live = "<script setup lang=\"ts\">\n</script>";
     let line_index = LineIndex::new_utf16(live);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(live);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(live);
     let mut analysis = producer_backed_snapshot(
         analyzed,
         vec![
@@ -1885,7 +1885,7 @@ fn macro_actions_reject_analysis_from_a_different_source_revision() {
 
     // Control: same bytes ⇒ the action IS offered, so the fixture is live.
     let line_index = LineIndex::new_utf16(analyzed);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(analyzed);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(analyzed);
     let control = macro_code_actions(
         analyzed,
         AnalysisSourceRevision::of_source(analyzed),
@@ -1903,7 +1903,7 @@ fn macro_actions_reject_analysis_from_a_different_source_revision() {
     // (i) Shorter live source — the pre-change panic case.
     let shorter = "<script setup lang=\"ts\">\ndefineSlots<{}>()\n</script>\n<template><slot name=\"footer\" /></template>";
     let shorter_index = LineIndex::new_utf16(shorter);
-    let shorter_blocks = crate::documents::sfc_scanner::scan_sfc_blocks(shorter);
+    let shorter_blocks = crate::documents::carrier_structure::test_carrier_blocks(shorter);
     let actions = macro_code_actions(
         shorter,
         AnalysisSourceRevision::of_source(shorter),
@@ -1928,7 +1928,7 @@ fn macro_actions_reject_analysis_from_a_different_source_revision() {
     );
     assert_ne!(same_length, analyzed, "fixture must differ in content");
     let same_index = LineIndex::new_utf16(&same_length);
-    let same_blocks = crate::documents::sfc_scanner::scan_sfc_blocks(&same_length);
+    let same_blocks = crate::documents::carrier_structure::test_carrier_blocks(&same_length);
     let actions = macro_code_actions(
         &same_length,
         AnalysisSourceRevision::of_source(&same_length),
@@ -1951,7 +1951,7 @@ fn macro_actions_reject_analysis_from_a_different_source_revision() {
 fn macro_actions_reject_analysis_with_unstamped_revision() {
     let source = "<script setup lang=\"ts\">\ndefineSlots<{\n    header(props: {}): any\n}>()\n</script>\n<template><slot name=\"header\" /><slot name=\"footer\" /></template>";
     let line_index = LineIndex::new_utf16(source);
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
     let mut analysis = producer_backed_snapshot(
         source,
         vec![

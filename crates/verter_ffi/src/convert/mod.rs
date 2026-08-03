@@ -8,7 +8,7 @@
 //!
 //! - [`error`] — `FfiConversionError` and its `Display` / `Error` / `From` impls.
 //! - [`string_helpers`] — small enum-to-string and per-field shared helpers.
-//! - [`sfc_blocks`] — template / script / style / custom block conversions.
+//! - registered structure projection is owned by [`component_meta`].
 //! - [`fallthrough`] — root-reachability and fallthrough surface conversions.
 //! - [`component_meta`] — component-meta analysis → FFI projection (public entry points).
 //! - [`input`] — FFI → host input conversions (config, profile, upserts, queries).
@@ -26,7 +26,6 @@ mod input;
 mod lint;
 mod offset;
 mod output;
-mod sfc_blocks;
 mod string_helpers;
 mod typeinfo;
 

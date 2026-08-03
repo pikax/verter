@@ -19,8 +19,8 @@
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 use crate::features::references::{
     collect_template_css_ref_spans, find_css_target_in_style_refs,
     find_css_target_in_template_refs, markup_class_token_at, CssRefTarget,
@@ -31,7 +31,7 @@ use crate::features::references::{
 pub(crate) fn css_class_name_at(
     offset: usize,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: &FileAnalysisSnapshot,
 ) -> Option<String> {
     let in_style = blocks.iter().any(|b| {
@@ -115,7 +115,7 @@ pub(crate) fn class_declared_global(name: &str, analysis: &FileAnalysisSnapshot)
 pub(crate) fn global_class_target_at(
     offset: usize,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: &FileAnalysisSnapshot,
 ) -> Option<String> {
     let name = css_class_name_at(offset, source, blocks, analysis)?;
@@ -323,7 +323,7 @@ mod tests {
         // Scoped declaration + a template usage: declarations-only yields
         // NOTHING (scoped decl excluded); usage collection still finds the
         // template token.
-        let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(src);
+        let blocks = crate::documents::carrier_structure::test_carrier_blocks(src);
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
         let (scs, sce) = style_block.content_range();
         let analysis = FileAnalysisSnapshot {

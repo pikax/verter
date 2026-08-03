@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
+use crate::documents::carrier_structure::project_carrier_blocks_for_document;
 use crate::documents::uri_to_canonical_id;
 use crate::type_provider::merge;
 
@@ -26,6 +26,98 @@ use super::server_utils::*;
 use super::VerterLanguageServer;
 
 impl VerterLanguageServer {
+    /// Return a content-free structure only while the client's open/version
+    /// stamps and the registry's post-await revision still match exactly.
+    pub async fn document_structure(
+        &self,
+        params: DocumentStructureRequestV1,
+    ) -> Result<DocumentStructureResponseV1> {
+        let echo = || {
+            (
+                params.request_token.clone(),
+                params.client_open_epoch.clone(),
+                params.expected_client_version,
+            )
+        };
+        let Some(before) = self.documents.get(&params.text_document.uri) else {
+            let (request_token, client_open_epoch, expected_client_version) = echo();
+            return Ok(DocumentStructureResponseV1::Closed {
+                request_token,
+                client_open_epoch,
+                expected_client_version,
+            });
+        };
+        if before.version != params.expected_client_version {
+            let (request_token, client_open_epoch, expected_client_version) = echo();
+            return Ok(DocumentStructureResponseV1::StaleClientDocument {
+                request_token,
+                client_open_epoch,
+                expected_client_version,
+            });
+        }
+        let Some(snapshot) = before.feature_snapshot.clone() else {
+            let (request_token, client_open_epoch, expected_client_version) = echo();
+            return Ok(DocumentStructureResponseV1::Unavailable {
+                request_token,
+                client_open_epoch,
+                expected_client_version,
+                reason: DocumentUnavailableReasonV1::StructureNotReady,
+            });
+        };
+
+        tokio::task::yield_now().await;
+        let Some(after) = self.documents.get(&params.text_document.uri) else {
+            let (request_token, client_open_epoch, expected_client_version) = echo();
+            return Ok(DocumentStructureResponseV1::Closed {
+                request_token,
+                client_open_epoch,
+                expected_client_version,
+            });
+        };
+        if after.version != params.expected_client_version {
+            let (request_token, client_open_epoch, expected_client_version) = echo();
+            return Ok(DocumentStructureResponseV1::Superseded {
+                request_token,
+                client_open_epoch,
+                expected_client_version,
+            });
+        }
+        if after.document_revision != snapshot.document_revision() {
+            let (request_token, client_open_epoch, expected_client_version) = echo();
+            return Ok(DocumentStructureResponseV1::ReplacementDocument {
+                request_token,
+                client_open_epoch,
+                expected_client_version,
+            });
+        }
+        if after.feature_snapshot.as_ref().is_none_or(|current| {
+            current.structure().artifact_id() != snapshot.structure().artifact_id()
+        }) {
+            let (request_token, client_open_epoch, expected_client_version) = echo();
+            return Ok(DocumentStructureResponseV1::Superseded {
+                request_token,
+                client_open_epoch,
+                expected_client_version,
+            });
+        }
+
+        let projected = verter_ffi::convert::registered_structure_to_ffi(snapshot.structure());
+        let structure = DocumentStructureV1 {
+            schema_version: projected.schema_version,
+            document_revision_token: snapshot.document_revision().public_token(),
+            artifact_token: projected.artifact_token,
+            blocks: projected.blocks,
+            markup_nodes: projected.markup_nodes,
+        };
+        let (request_token, client_open_epoch, expected_client_version) = echo();
+        Ok(DocumentStructureResponseV1::Available {
+            request_token,
+            client_open_epoch,
+            expected_client_version,
+            structure,
+        })
+    }
+
     /// Handle `$/onDidChangeTsOrJsFile` notification.
     ///
     /// Called when the client edits a `.ts`, `.js`, or `.vue` file.
@@ -246,7 +338,7 @@ impl VerterLanguageServer {
             None => return Ok(None),
         };
 
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         // Compute preferred import path (alias-based if available)
         let canonical_target = crate::documents::uri_to_canonical_id(uri);
         let canonical_dropped = crate::documents::uri_to_canonical_id_from_str(&params.dropped_uri);

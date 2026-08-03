@@ -128,6 +128,16 @@ defineEmits<{
         .expect("overlay SFC produces component-meta output");
     let (analysis, _resolution, _types) = output.into_parts();
 
+    let structure = analysis
+        .ordered_sfc_structure
+        .as_ref()
+        .expect("schema-8 overlay output carries its registered structure");
+    assert_eq!(structure.schema_version, 1);
+    assert!(
+        structure.inventory.blocks().len() >= 2,
+        "script and template blocks must come from the overlay registration"
+    );
+
     let click = analysis
         .events
         .iter()

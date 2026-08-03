@@ -143,6 +143,32 @@ fn registered_file_structure_is_the_envelope_owner() {
 }
 
 #[test]
+fn registered_structure_views_resolve_noncanonical_alias_spelling() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    let workspace: Arc<dyn WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some("C:/src/App.vue".to_string()),
+            input_id: "C:/src/App.vue".to_string(),
+            source: Arc::from("<script setup>const x = 1</script>"),
+            file_language: verter_language::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("carrier upsert");
+
+    assert!(host.registered_file_structure("C:\\src\\App.vue").is_some());
+    assert!(host
+        .registered_file_structure_snapshot("C:\\src\\App.vue")
+        .is_some());
+    assert!(host
+        .registered_source_revision_token("C:\\src\\App.vue")
+        .is_some());
+}
+
+#[test]
 fn exact_cohort_adopts_across_authority_lifetimes_without_parser_start() {
     let persistence = Arc::new(
         crate::carrier_publication_store::persistence::InMemoryCarrierPersistence::default(),
@@ -606,4 +632,80 @@ fn cancelled_request_never_enters_a_publication_lane() {
     );
     assert!(matches!(outcome, PublicationOutcome::Cancelled));
     assert_eq!(store.audit_snapshot(), Default::default());
+}
+
+#[test]
+fn registered_structure_seals_local_refs_and_public_token_domains() {
+    use verter_language::parse_artifact::carrier_inventory::{
+        AttributeId, BlockId, MarkupNodeId, SourceSpaceId,
+    };
+
+    let workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default()),
+    );
+    let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+    let canonical = "/sealed-structure.vue";
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: std::sync::Arc::from(
+                "<template><button disabled>ok</button></template><style>.x{}</style>",
+            ),
+            file_language: crate::FileLanguage::vue(),
+            aliases: vec![],
+        })
+        .expect("upsert");
+
+    let (structure, _) = host
+        .registered_file_structure_snapshot(canonical)
+        .expect("registered structure");
+    let block_ref = structure.block_ref(BlockId(0)).expect("block ref");
+    let node_ref = structure.node_ref(MarkupNodeId(0)).expect("node ref");
+    let attribute_ref = structure
+        .attribute_ref(AttributeId(0))
+        .expect("attribute ref");
+
+    assert_eq!(block_ref.artifact_id(), structure.artifact_id());
+    assert_eq!(block_ref.block_id(), BlockId(0));
+    assert_eq!(node_ref.artifact_id(), structure.artifact_id());
+    assert_eq!(node_ref.node_id(), MarkupNodeId(0));
+    assert_eq!(attribute_ref.artifact_id(), structure.artifact_id());
+    assert_eq!(attribute_ref.attribute_id(), AttributeId(0));
+
+    let artifact = structure.public_artifact_token();
+    let block = structure
+        .public_block_token(&block_ref)
+        .expect("block token");
+    let node = structure.public_node_token(&node_ref).expect("node token");
+    let attribute = structure
+        .public_attribute_token(&attribute_ref)
+        .expect("attribute token");
+    let source_space = structure
+        .public_source_space_token(SourceSpaceId(0))
+        .expect("source-space token");
+    for token in [
+        artifact.as_str(),
+        block.as_str(),
+        node.as_str(),
+        attribute.as_str(),
+        source_space.as_str(),
+    ] {
+        assert_eq!(token.len(), 43, "canonical unpadded base64url token");
+        assert!(token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
+    }
+    assert_eq!(
+        std::collections::HashSet::from([
+            artifact.as_str(),
+            block.as_str(),
+            node.as_str(),
+            attribute.as_str(),
+            source_space.as_str(),
+        ])
+        .len(),
+        5,
+        "token domains must not alias even when local ids are all zero"
+    );
 }

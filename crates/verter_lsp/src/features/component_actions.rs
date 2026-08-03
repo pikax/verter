@@ -191,36 +191,25 @@ fn kebab_to_camel(s: &str) -> String {
     result
 }
 
-/// Find the byte offset just before `>` or `/>` in the opening tag of a
-/// component, scanning from `span_start` in the source.
-///
-/// Returns `None` if no valid insertion point is found.
-fn find_opening_tag_end(source: &str, span_start: u32) -> Option<u32> {
-    let bytes = source.as_bytes();
-    let start = span_start as usize;
-    let mut i = start;
-    let mut in_quote = false;
-    let mut quote_char: u8 = 0;
-
-    while i < bytes.len() {
-        let b = bytes[i];
-        if in_quote {
-            if b == quote_char {
-                in_quote = false;
-            }
-        } else if b == b'"' || b == b'\'' {
-            in_quote = true;
-            quote_char = b;
-        } else if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-            // Self-closing `/>` — insert before the `/`
-            return Some(i as u32);
-        } else if b == b'>' {
-            // Normal close `>` — insert before the `>`
-            return Some(i as u32);
-        }
-        i += 1;
-    }
-    None
+fn component_attribute_anchor(
+    structure: &verter_session::carrier_publication_store::RegisteredFileStructure,
+    span_start: u32,
+) -> Option<u32> {
+    structure
+        .inventory()
+        .markup()
+        .nodes()
+        .iter()
+        .find_map(|node| {
+            let verter_language::parse_artifact::carrier_inventory::MarkupNodeKind::Element(
+                element,
+            ) = node.kind()
+            else {
+                return None;
+            };
+            (element.full_span.start == span_start)
+                .then_some(element.attribute_insertion_anchor.start)
+        })
 }
 
 /// Generate code actions to add matching props from parent bindings to child
@@ -234,7 +223,7 @@ fn find_opening_tag_end(source: &str, span_start: u32) -> Option<u32> {
 /// Produces insertion edits before the component's `>` or `/>`.
 pub fn suggest_matching_props(
     analysis: &verter_session::FileAnalysisSnapshot,
-    source: &str,
+    structure: &verter_session::carrier_publication_store::RegisteredFileStructure,
     line_index: &LineIndex,
     uri: &Uri,
     resolve_child_context: &dyn Fn(&str) -> Option<ChildComponentContext>,
@@ -320,8 +309,9 @@ pub fn suggest_matching_props(
             continue;
         }
 
-        // Find insertion point: before `>` or `/>` of the opening tag
-        let insert_offset = match find_opening_tag_end(source, usage.span.start) {
+        // The parser owns the exact insertion anchor, including quoted `>` and
+        // self-closing syntax; feature code never searches the opening tag.
+        let insert_offset = match component_attribute_anchor(structure, usage.span.start) {
             Some(off) => off,
             None => continue,
         };

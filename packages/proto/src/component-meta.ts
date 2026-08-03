@@ -27,7 +27,7 @@ export type ProtoOriginGraph = ProtoRecord<"verter.v1.OriginGraph"> & RawOriginG
 export type ProtoOriginNode = ProtoRecord<"verter.v1.OriginNode"> & RawOriginNode;
 export type ProtoOriginEdge = ProtoRecord<"verter.v1.OriginEdge"> & RawOriginEdge;
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const PRIMITIVE_STRING = 1;
 const PRIMITIVE_UNDEFINED = 11;
 const OBJECT_MEMBER_PROPERTY = 1;
@@ -183,6 +183,12 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
         kind: FALLTHROUGH_SURFACE_NONE,
         reason: NO_FALLTHROUGH_REASON_NO_TEMPLATE,
         branches: [],
+      },
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "a".repeat(43),
+        blocks: [],
+        markupNodes: [],
       },
       componentPublicContract: {
         availability: {

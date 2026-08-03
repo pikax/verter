@@ -431,9 +431,9 @@ fn has_add_missing_vue_import(
         !uri.as_str().ends_with(".tsx"),
         "the carrier uri under test must be the .vue source, not a .tsx: {uri:?}"
     );
-    // The `<script setup>` content range (typed `scan_sfc_blocks` classification, no string
+    // The `<script setup>` content range (typed `test_carrier_blocks` classification, no string
     // sniffing) — the in-source region the re-anchored import MUST land inside.
-    let setup_content = crate::documents::sfc_scanner::scan_sfc_blocks(carrier_source)
+    let setup_content = crate::documents::carrier_structure::test_carrier_blocks(carrier_source)
         .into_iter()
         .find(|b| b.is_setup())
         .map(|b| b.content_range())

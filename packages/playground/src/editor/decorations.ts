@@ -2,7 +2,7 @@
  * Pure functions computing Monaco decoration arrays from Verter analysis data.
  * No Monaco dependency — returns plain objects that Editor.vue maps to Monaco types.
  */
-import type { FileAnalysis, AnalysisBinding } from "../core/types";
+import type { FileAnalysis, AnalysisBinding, OrderedSfcStructure } from "../core/types";
 
 /** Decoration descriptor for a binding in the script block. */
 export interface BindingDecoration {
@@ -148,13 +148,19 @@ export function computeCssClassDecorations(analysis: FileAnalysis): CssClassDeco
  * Compute CodeLens summaries for SFC blocks.
  * Returns one code lens per block with a summary of its contents.
  */
-export function computeCodeLenses(source: string, analysis: FileAnalysis): BlockCodeLens[] {
+export function computeCodeLenses(
+  source: string,
+  analysis: FileAnalysis,
+  structure: OrderedSfcStructure | null,
+): BlockCodeLens[] {
   const lenses: BlockCodeLens[] = [];
 
   // Script setup block summary
-  const scriptMatch = /<script[^>]*\bsetup\b[^>]*>/i.exec(source);
-  if (scriptMatch) {
-    const line = countLines(source, scriptMatch.index);
+  const scriptBlock = structure?.blocks.find(
+    (block) => block.kind === "section" && block.section.role.kind === "script",
+  );
+  if (scriptBlock?.kind === "section") {
+    const line = countLines(source, scriptBlock.section.openingRange.start);
     const parts: string[] = [];
 
     const bindingCount = analysis.bindings.filter((b) => !b.name.startsWith("___VERTER___")).length;
@@ -179,19 +185,22 @@ export function computeCodeLenses(source: string, analysis: FileAnalysis): Block
   }
 
   // Template block summary
-  const templateMatch = /<template\b[^>]*>/i.exec(source);
-  if (templateMatch) {
-    const line = countLines(source, templateMatch.index);
+  const templateBlock = structure?.blocks.find(
+    (block) => block.kind === "section" && block.section.role.kind === "templateHost",
+  );
+  if (templateBlock?.kind === "section") {
+    const line = countLines(source, templateBlock.section.openingRange.start);
     // We don't have template element count from analysis yet
     lenses.push({ line, title: "template" });
   }
 
   // Style block summaries
-  const styleRegex = /<style\b([^>]*)>/gi;
-  let styleMatch;
   let styleIdx = 0;
-  while ((styleMatch = styleRegex.exec(source)) !== null) {
-    const line = countLines(source, styleMatch.index);
+  for (const styleBlock of structure?.blocks.filter(
+    (block) => block.kind === "section" && block.section.role.kind === "style",
+  ) ?? []) {
+    if (styleBlock.kind !== "section") continue;
+    const line = countLines(source, styleBlock.section.openingRange.start);
     const styleAnalysis = analysis.styles[styleIdx];
     const parts: string[] = [];
 

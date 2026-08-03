@@ -8,8 +8,8 @@ use tower_lsp_server::ls_types::*;
 use verter_semantic::analysis::types::MemberListAnchor;
 use verter_session::{AnalysisSourceRevision, FileAnalysisSnapshot};
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 /// The live document buffer a macro edit will be applied to.
 ///
@@ -61,7 +61,7 @@ impl<'a> LiveEditTarget<'a> {
 pub fn find_script_insert_offset(
     source: &str,
     analysis: &FileAnalysisSnapshot,
-    setup_block: &SfcBlock,
+    setup_block: &CarrierBlockView,
 ) -> u32 {
     if let Some(last_import) = analysis.imports.last() {
         let end = last_import.span.end as usize;
@@ -267,7 +267,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+        let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
         let setup_block = blocks.iter().find(|b| b.is_setup()).unwrap();
 
         let offset = find_script_insert_offset(source, &analysis, setup_block) as usize;
@@ -288,7 +288,7 @@ mod tests {
     fn insert_offset_falls_back_to_script_tag() {
         let source = "<script setup>\nconst x = 1\n</script>";
         let analysis = FileAnalysisSnapshot::default();
-        let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(source);
+        let blocks = crate::documents::carrier_structure::test_carrier_blocks(source);
         let setup_block = blocks.iter().find(|b| b.is_setup()).unwrap();
 
         let offset = find_script_insert_offset(source, &analysis, setup_block);

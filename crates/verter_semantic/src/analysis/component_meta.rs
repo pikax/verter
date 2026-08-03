@@ -302,8 +302,8 @@ pub struct ComponentMetaAnalysis {
     pub exposed: Vec<ExposedAnalysis>,
     /// Host-populated public-instance sidecar derived from runtime-observable members.
     pub public_instance: Option<PublicInstanceAnalysis>,
-    /// Host-populated SFC block metadata sidecar derived from parsed root blocks.
-    pub sfc_blocks: Option<SfcBlocksAnalysis>,
+    /// Host-populated, content-free structure projected from the registered artifact.
+    pub ordered_sfc_structure: Option<OrderedSfcStructureAnalysis>,
     pub type_registry: Vec<ResolvedTypeAnalysis>,
     pub components: Vec<ComponentUsageAnalysis>,
     pub template_refs: Vec<TemplateRefAnalysis>,
@@ -485,61 +485,18 @@ pub struct PublicInstanceMemberAnalysis {
     pub tags: Vec<JsdocTag>,
 }
 
-/// Host-populated SFC root block metadata exposed by the official API.
+/// Content-free schema-8 structure authority. Token arrays are indexed only
+/// by the corresponding canonical local IDs; public identity is the token.
 #[derive(Debug, Clone)]
-pub struct SfcBlocksAnalysis {
-    pub template: Option<TemplateBlockAnalysis>,
-    pub script: Option<ScriptBlockAnalysis>,
-    pub script_setup: Option<ScriptBlockAnalysis>,
-    pub styles: Vec<StyleBlockInfoAnalysis>,
-    pub custom: Vec<CustomBlockAnalysis>,
-}
-
-/// A single raw SFC root-block attribute.
-#[derive(Debug, Clone)]
-pub struct SfcAttributeAnalysis {
-    pub name: String,
-    pub value: Option<String>,
-}
-
-/// Metadata for the `<template>` block.
-#[derive(Debug, Clone)]
-pub struct TemplateBlockAnalysis {
-    pub lang: Option<String>,
-    pub src: Option<String>,
-    pub attributes: Vec<SfcAttributeAnalysis>,
-}
-
-/// Metadata for a `<script>` or `<script setup>` block.
-#[derive(Debug, Clone)]
-pub struct ScriptBlockAnalysis {
-    pub lang: Option<String>,
-    pub src: Option<String>,
-    pub generic: Option<String>,
-    pub attrs_type: Option<String>,
-    pub attributes: Vec<SfcAttributeAnalysis>,
-}
-
-/// Metadata for a `<style>` block.
-#[derive(Debug, Clone)]
-pub struct StyleBlockInfoAnalysis {
-    pub index: usize,
-    pub lang: Option<String>,
-    pub src: Option<String>,
-    pub scoped: bool,
-    pub is_module: bool,
-    pub module_name: Option<String>,
-    pub attributes: Vec<SfcAttributeAnalysis>,
-}
-
-/// Metadata for a custom root block such as `<i18n>`.
-#[derive(Debug, Clone)]
-pub struct CustomBlockAnalysis {
-    pub index: usize,
-    pub block_type: String,
-    pub lang: Option<String>,
-    pub src: Option<String>,
-    pub attributes: Vec<SfcAttributeAnalysis>,
+pub struct OrderedSfcStructureAnalysis {
+    pub schema_version: u32,
+    pub artifact_token: String,
+    pub inventory:
+        std::sync::Arc<verter_language::parse_artifact::carrier_inventory::CarrierBlockInventory>,
+    pub source_space_tokens: std::sync::Arc<[String]>,
+    pub block_tokens: std::sync::Arc<[String]>,
+    pub markup_node_tokens: std::sync::Arc<[String]>,
+    pub attribute_tokens: std::sync::Arc<[String]>,
 }
 
 /// What kind of member this public-instance entry represents.
@@ -1684,7 +1641,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
         models,
         exposed,
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry,
         components,
         template_refs,

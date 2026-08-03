@@ -1,10 +1,10 @@
 mod analysis;
 pub(crate) use analysis::SemanticReady;
+pub mod carrier_structure;
 pub mod line_index;
 pub mod position_map;
 pub mod provider_projection;
 pub mod registration_signal;
-pub mod sfc_scanner;
 
 use std::sync::Arc;
 
@@ -167,6 +167,28 @@ impl DocumentRevisionId {
             open_incarnation: self.open_incarnation,
             edit_generation: DocumentEditGeneration(self.edit_generation.0.wrapping_add(1)),
         }
+    }
+
+    /// Stable opaque token for this exact open-incarnation/edit generation.
+    pub fn public_token(self) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut input = [0u8; 16];
+        input[..8].copy_from_slice(&self.open_incarnation.0.to_be_bytes());
+        input[8..].copy_from_slice(&self.edit_generation.0.to_be_bytes());
+        let digest = blake3::derive_key("verter.document-revision-token.v1", &input);
+        let mut out = String::with_capacity(43);
+        for chunk in digest.chunks_exact(3) {
+            out.push(ALPHABET[(chunk[0] >> 2) as usize] as char);
+            out.push(ALPHABET[(((chunk[0] & 0x03) << 4) | (chunk[1] >> 4)) as usize] as char);
+            out.push(ALPHABET[(((chunk[1] & 0x0f) << 2) | (chunk[2] >> 6)) as usize] as char);
+            out.push(ALPHABET[(chunk[2] & 0x3f) as usize] as char);
+        }
+        let tail = &digest[30..];
+        out.push(ALPHABET[(tail[0] >> 2) as usize] as char);
+        out.push(ALPHABET[(((tail[0] & 0x03) << 4) | (tail[1] >> 4)) as usize] as char);
+        out.push(ALPHABET[((tail[1] & 0x0f) << 2) as usize] as char);
+        out
     }
 }
 

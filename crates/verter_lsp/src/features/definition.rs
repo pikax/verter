@@ -13,8 +13,8 @@ use verter_semantic::analysis::types::{DomQueryCallSite, DomQueryKind};
 use verter_semantic::analysis::{match_selector, MatchResult};
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 pub use super::sentinel_uris::SAME_FILE_URI;
 pub use super::sentinel_uris::SAME_FILE_URI_STR;
@@ -41,7 +41,7 @@ pub use super::sentinel_uris::SAME_FILE_URI_STR;
 pub fn definition_at_position(
     position: &Position,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
     resolve_path: Option<&dyn Fn(&str) -> Option<String>>,
@@ -826,7 +826,7 @@ fn import_source_definition(
 /// Falls back to the CSS rule definition if no template element matches.
 fn dom_query_definition(
     offset: usize,
-    _blocks: &[SfcBlock],
+    _blocks: &[CarrierBlockView],
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<GotoDefinitionResponse> {

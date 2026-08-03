@@ -40,6 +40,49 @@ export interface RemappedSpan {
 
 const parsedMapCache = new Map<string, TraceMap | null>();
 
+export interface CarrierSourceStructureStamp {
+  schemaVersion: 1;
+  artifactToken: string;
+  scriptContentRanges: readonly (readonly [number, number])[];
+}
+
+/** Content-free inventory facts stamped into the exact published source map. */
+export function carrierSourceStructure(
+  reader: CarrierStoreReader,
+  providerPath: string,
+): CarrierSourceStructureStamp | null {
+  const ready = reader.readyFile(providerPath);
+  const value = ready?.structure as Record<string, unknown> | undefined;
+  if (value === undefined) return null;
+  if (value.schema_version !== 1) return null;
+  if (
+    typeof value.artifact_token !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(value.artifact_token)
+  ) {
+    return null;
+  }
+  if (!Array.isArray(value.script_content_ranges)) return null;
+  const ranges: [number, number][] = [];
+  for (const range of value.script_content_ranges) {
+    if (
+      !Array.isArray(range) ||
+      range.length !== 2 ||
+      !Number.isSafeInteger(range[0]) ||
+      !Number.isSafeInteger(range[1]) ||
+      range[0] < 0 ||
+      range[0] > range[1]
+    ) {
+      return null;
+    }
+    ranges.push([range[0], range[1]]);
+  }
+  return {
+    schemaVersion: 1,
+    artifactToken: value.artifact_token,
+    scriptContentRanges: ranges,
+  };
+}
+
 function storePathKey(reader: CarrierStoreReader, fileName: string): string {
   return reader.canonicalPath?.(fileName) ?? normalizePath(fileName);
 }
@@ -195,6 +238,25 @@ export function mapCarrierSourceOffsetToGeneratedAll(
   return mapper
     .mapSourceOffsetToGeneratedAll(sourceOffset, normalizePath(publishedSource))
     .map((position) => position.offset);
+}
+
+/** Earliest authored source offset carried by the ready companion's sealed map. */
+export function carrierMappedSourceAnchor(
+  reader: CarrierStoreReader,
+  providerPath: string,
+  sourcePath: string,
+  readCompanionText: (providerPath: string) => string | undefined,
+  readSourceText: (sourcePath: string) => string | undefined,
+): number | null {
+  const mapper = carrierMapperForSourceRequest(
+    reader,
+    providerPath,
+    readCompanionText,
+    readSourceText,
+  );
+  if (mapper === null) return null;
+  const publishedSource = reader.ownedSourceFor(sourcePath)?.source_uri ?? sourcePath;
+  return mapper.firstMappedSourceOffset(normalizePath(publishedSource));
 }
 
 function carrierMapperForSourceRequest(

@@ -410,6 +410,19 @@ impl WasmVerterHost {
         to_wasm_value(&output)
     }
 
+    /// Returns the exact registered, content-free schema-8 structure projection.
+    /// Ranges are UTF-8 offsets and identity fields are sealed public tokens.
+    #[wasm_bindgen(js_name = getDocumentStructure)]
+    pub fn get_document_structure(&self, canonical_id: &str) -> Result<JsValue, JsValue> {
+        let output = catch_panic(|| {
+            self.inner
+                .ordered_sfc_structure(canonical_id)
+                .as_ref()
+                .map(verter_ffi::convert::ordered_structure_to_ffi)
+        })?;
+        to_wasm_value(&output)
+    }
+
     /// Removes a file from the host by its canonical ID or any registered alias.
     ///
     /// All associated virtual nodes and cached compilations are discarded.

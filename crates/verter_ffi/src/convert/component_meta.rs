@@ -14,9 +14,6 @@
 use crate::types::*;
 
 use super::fallthrough::{fallthrough_surface_to_ffi, root_info_to_ffi, root_reachability_to_ffi};
-use super::sfc_blocks::{
-    custom_block_to_ffi, script_block_to_ffi, style_block_to_ffi, template_block_to_ffi,
-};
 use super::string_helpers::{
     accepted_event_to_ffi, accepted_prop_to_ffi, accepted_surface_completeness_to_ffi,
     binding_kind_to_string, component_prop_constness_to_string, expansion_exactness_to_string,
@@ -61,6 +58,338 @@ pub(super) fn require_lane_aligned(lane: &str, analysis_len: usize, lane_len: us
     );
 }
 
+pub fn ordered_structure_to_ffi(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+) -> FfiOrderedSfcStructure {
+    use verter_language::parse_artifact::carrier_inventory::{CarrierBlock, MarkupNodeKind};
+
+    let inventory = structure.inventory.as_ref();
+    let range = |span| structure_range(structure, span);
+    let blocks = inventory
+        .blocks()
+        .iter()
+        .map(|block| match block {
+            CarrierBlock::Section { id, role, syntax } => {
+                let markup_root_tokens = inventory
+                    .markup()
+                    .roots()
+                    .iter()
+                    .filter(|root| {
+                        inventory.markup().nodes()[root.get() as usize].root_block == *id
+                    })
+                    .map(|root| structure.markup_node_tokens[root.get() as usize].clone())
+                    .collect();
+                FfiStructureBlock::Section {
+                    section: Box::new(FfiStructureSection {
+                        block_token: structure.block_tokens[id.get() as usize].clone(),
+                        role: block_role_to_ffi(role),
+                        authored_name: authored_name_to_ffi(
+                            structure,
+                            syntax.authored_name,
+                            syntax.normalized_name,
+                        ),
+                        opening_range: range(syntax.opening_span),
+                        opening_name_range: range(syntax.opening_name_span),
+                        content_range: range(syntax.content_span),
+                        closing_range: syntax.closing_span.map(range),
+                        closing_name_range: syntax.closing_name_span.map(range),
+                        full_range: range(syntax.full_span),
+                        termination: termination_to_ffi(structure, &syntax.termination),
+                        attributes: syntax
+                            .attributes
+                            .iter()
+                            .map(|attribute| attribute_to_ffi(structure, attribute))
+                            .collect(),
+                        block_content_basis_token: None,
+                        attribute_insertion_anchor: range(syntax.attribute_insertion_anchor),
+                    }),
+                    markup_root_tokens,
+                }
+            }
+            CarrierBlock::MarkupRoot { id, node } => FfiStructureBlock::MarkupRoot {
+                block_token: structure.block_tokens[id.get() as usize].clone(),
+                markup_root_token: structure.markup_node_tokens[node.get() as usize].clone(),
+            },
+        })
+        .collect();
+    let markup_nodes = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .map(|node| {
+            let syntax = match node.kind() {
+                MarkupNodeKind::Element(element) => FfiMarkupSyntax::Element {
+                    authored_name: authored_name_to_ffi(
+                        structure,
+                        element.authored_name,
+                        element.normalized_name,
+                    ),
+                    namespace: format!("{:?}", element.namespace),
+                    element_kind: format!("{:?}", element.kind),
+                    opening_range: range(element.opening_span),
+                    opening_name_range: range(element.opening_name_span),
+                    attribute_insertion_anchor: range(element.attribute_insertion_anchor),
+                    content_range: range(element.content_span),
+                    closing_range: element.closing_span.map(range),
+                    closing_name_range: element.closing_name_span.map(range),
+                    full_range: range(element.full_span),
+                    self_closing: element.self_closing,
+                    void_element: element.void_element,
+                    raw_text: element.raw_text,
+                    termination: termination_to_ffi(structure, &element.termination),
+                    attributes: element
+                        .attributes
+                        .iter()
+                        .map(|attribute| attribute_to_ffi(structure, attribute))
+                        .collect(),
+                },
+                MarkupNodeKind::Text { content_span } => FfiMarkupSyntax::Text {
+                    content_range: range(*content_span),
+                },
+                MarkupNodeKind::Comment {
+                    opening_span,
+                    content_span,
+                    closing_span,
+                    full_span,
+                    termination,
+                } => FfiMarkupSyntax::Comment {
+                    opening_range: range(*opening_span),
+                    content_range: range(*content_span),
+                    closing_range: closing_span.map(range),
+                    full_range: range(*full_span),
+                    termination: termination_to_ffi(structure, termination),
+                },
+                MarkupNodeKind::Interpolation {
+                    family,
+                    opening_span,
+                    expression_span,
+                    closing_span,
+                    full_span,
+                    termination,
+                } => FfiMarkupSyntax::Interpolation {
+                    family: format!("{family:?}"),
+                    opening_range: range(*opening_span),
+                    expression_range: range(*expression_span),
+                    closing_range: closing_span.map(range),
+                    full_range: range(*full_span),
+                    termination: termination_to_ffi(structure, termination),
+                },
+                MarkupNodeKind::SvelteControlBlock(value) => FfiMarkupSyntax::SvelteControlBlock {
+                    full_range: range(value.full_span),
+                    termination: termination_to_ffi(structure, &value.termination),
+                },
+                MarkupNodeKind::SvelteClause(value) => FfiMarkupSyntax::SvelteClause {
+                    full_range: range(value.full_span),
+                    termination: termination_to_ffi(structure, &value.termination),
+                },
+                MarkupNodeKind::SvelteStandaloneTag(value) => {
+                    FfiMarkupSyntax::SvelteStandaloneTag {
+                        full_range: range(value.full_span),
+                        termination: termination_to_ffi(structure, &value.termination),
+                    }
+                }
+                MarkupNodeKind::Recovered {
+                    opening_span,
+                    opening_name_span,
+                    content_span,
+                    closing_span,
+                    closing_name_span,
+                    full_span,
+                    termination,
+                    expected,
+                    reason,
+                } => FfiMarkupSyntax::Recovered {
+                    opening_range: opening_span.map(range),
+                    opening_name_range: opening_name_span.map(range),
+                    content_range: content_span.map(range),
+                    closing_range: closing_span.map(range),
+                    closing_name_range: closing_name_span.map(range),
+                    full_range: range(*full_span),
+                    termination: termination_to_ffi(structure, termination),
+                    expected: format!("{expected:?}"),
+                    reason: format!("{reason:?}"),
+                },
+                MarkupNodeKind::Unknown {
+                    opening_span,
+                    opening_name_span,
+                    content_span,
+                    closing_span,
+                    closing_name_span,
+                    full_span,
+                    termination,
+                    authored_head,
+                    reason,
+                } => FfiMarkupSyntax::Unknown {
+                    opening_range: opening_span.map(range),
+                    opening_name_range: opening_name_span.map(range),
+                    content_range: content_span.map(range),
+                    closing_range: closing_span.map(range),
+                    closing_name_range: closing_name_span.map(range),
+                    full_range: range(*full_span),
+                    termination: termination_to_ffi(structure, termination),
+                    authored_head: authored_head
+                        .and_then(|slice| inventory.slice(slice).ok())
+                        .map(str::to_owned),
+                    reason: format!("{reason:?}"),
+                },
+            };
+            let children = inventory.markup().child_ids()
+                [node.children.start as usize..node.children.end as usize]
+                .iter()
+                .map(|child| structure.markup_node_tokens[child.get() as usize].clone())
+                .collect();
+            FfiMarkupNode {
+                node_token: structure.markup_node_tokens[node.id.get() as usize].clone(),
+                parent_node_token: node
+                    .parent
+                    .map(|parent| structure.markup_node_tokens[parent.get() as usize].clone()),
+                child_node_tokens: children,
+                syntax,
+            }
+        })
+        .collect();
+    FfiOrderedSfcStructure {
+        schema_version: structure.schema_version,
+        artifact_token: structure.artifact_token.clone(),
+        blocks,
+        markup_nodes,
+    }
+}
+
+/// Project directly from the sole registered envelope owner.
+pub fn registered_structure_to_ffi(
+    structure: &verter_session::carrier_publication_store::RegisteredFileStructure,
+) -> FfiOrderedSfcStructure {
+    ordered_structure_to_ffi(
+        &verter_session::component_meta_host::ordered_sfc_structure_projection(structure),
+    )
+}
+
+fn structure_range(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    span: verter_language::parse_artifact::carrier_inventory::SourceSpan,
+) -> FfiStructureRange {
+    FfiStructureRange {
+        source_space_token: structure.source_space_tokens[span.source_space.get() as usize].clone(),
+        start: span.start,
+        end: span.end,
+    }
+}
+
+fn authored_name_to_ffi(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    authored: verter_language::parse_artifact::carrier_inventory::SourceSlice,
+    normalized: verter_language::parse_artifact::carrier_inventory::InternedNameId,
+) -> FfiAuthoredName {
+    FfiAuthoredName {
+        spelling: structure
+            .inventory
+            .slice(authored)
+            .expect("validated authored name")
+            .to_owned(),
+        normalized: structure
+            .inventory
+            .normalized_name(normalized)
+            .expect("validated normalized name")
+            .to_owned(),
+        range: structure_range(structure, authored.span),
+    }
+}
+
+fn block_role_to_ffi(
+    role: &verter_language::parse_artifact::carrier_inventory::SectionRole,
+) -> FfiCarrierBlockRole {
+    use verter_language::parse_artifact::carrier_inventory::SectionRole;
+    match role {
+        SectionRole::TemplateHost => FfiCarrierBlockRole::TemplateHost,
+        SectionRole::Script { role, dialect } => FfiCarrierBlockRole::Script {
+            role: format!("{role:?}"),
+            dialect: format!("{dialect:?}"),
+        },
+        SectionRole::Style {
+            dialect,
+            scoped,
+            module,
+        } => FfiCarrierBlockRole::Style {
+            dialect: format!("{dialect:?}"),
+            scoped: *scoped,
+            module: format!("{module:?}"),
+        },
+        SectionRole::Custom { normalized_name } => FfiCarrierBlockRole::Custom {
+            normalized_name: normalized_name.to_string(),
+        },
+    }
+}
+
+fn termination_to_ffi(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    value: &verter_language::parse_artifact::carrier_inventory::SyntaxTermination,
+) -> FfiSyntaxTermination {
+    use verter_language::parse_artifact::carrier_inventory::SyntaxTermination;
+    match value {
+        SyntaxTermination::Closed => FfiSyntaxTermination::Closed,
+        SyntaxTermination::SelfClosing => FfiSyntaxTermination::SelfClosing,
+        SyntaxTermination::Void => FfiSyntaxTermination::Void,
+        SyntaxTermination::UnclosedEof => FfiSyntaxTermination::UnclosedEof,
+        SyntaxTermination::Recovered {
+            reason,
+            recovery_span,
+        } => FfiSyntaxTermination::Recovered {
+            reason: format!("{reason:?}"),
+            recovery_range: recovery_span.map(|span| structure_range(structure, span)),
+        },
+    }
+}
+
+fn attribute_to_ffi(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    attribute: &verter_language::parse_artifact::carrier_inventory::CarrierAttribute,
+) -> FfiCarrierAttribute {
+    use verter_language::parse_artifact::carrier_inventory::{AttributeValue, CarrierAttribute};
+    let (kind, name, value) = match attribute {
+        CarrierAttribute::Named { name, value, .. } => (
+            "named",
+            Some(authored_name_to_ffi(
+                structure,
+                name.authored,
+                name.normalized,
+            )),
+            match value {
+                AttributeValue::Static { raw, .. } => {
+                    structure.inventory.slice(*raw).ok().map(str::to_owned)
+                }
+                _ => None,
+            },
+        ),
+        CarrierAttribute::Spread { .. } => ("spread", None, None),
+        CarrierAttribute::Directive {
+            local_name, value, ..
+        } => (
+            "directive",
+            local_name
+                .as_ref()
+                .map(|name| authored_name_to_ffi(structure, name.authored, name.normalized)),
+            match value {
+                AttributeValue::Static { raw, .. } => {
+                    structure.inventory.slice(*raw).ok().map(str::to_owned)
+                }
+                _ => None,
+            },
+        ),
+        CarrierAttribute::Attach { .. } => ("attach", None, None),
+    };
+    FfiCarrierAttribute {
+        attribute_token: structure.attribute_tokens[attribute.id().get() as usize].clone(),
+        kind: kind.to_owned(),
+        name,
+        value,
+        full_range: structure_range(structure, attribute.full_span()),
+        duplicate_of: attribute
+            .duplicate_of()
+            .map(|id| structure.attribute_tokens[id.get() as usize].clone()),
+    }
+}
+
 /// Parts-level mechanical mapping — the body of
 /// [`component_meta_output_to_ffi`] after the envelope's destructive
 /// transfer. Module-private: production code converts ONLY the sealed
@@ -94,6 +423,18 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
     contract: verter_session::framework::ComponentContractAvailability,
 ) -> FfiComponentMeta {
     let root_info = root_info_to_ffi(&analysis.root_reachability);
+    let ordered_sfc_structure = match analysis.ordered_sfc_structure.as_ref() {
+        Some(structure) => ordered_structure_to_ffi(structure),
+        #[cfg(test)]
+        None => FfiOrderedSfcStructure {
+            schema_version: 1,
+            artifact_token: "test-only-unregistered".to_string(),
+            blocks: Vec::new(),
+            markup_nodes: Vec::new(),
+        },
+        #[cfg(not(test))]
+        None => panic!("schema-8 component metadata requires registered structure"),
+    };
 
     require_lane_aligned("props", analysis.props.len(), lanes.props.len());
     require_lane_aligned(
@@ -284,13 +625,7 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
                     })
                     .collect(),
             }),
-        sfc_blocks: analysis.sfc_blocks.map(|blocks| FfiSfcBlocksMeta {
-            template: blocks.template.map(template_block_to_ffi),
-            script: blocks.script.map(script_block_to_ffi),
-            script_setup: blocks.script_setup.map(script_block_to_ffi),
-            styles: blocks.styles.into_iter().map(style_block_to_ffi).collect(),
-            custom: blocks.custom.into_iter().map(custom_block_to_ffi).collect(),
-        }),
+        ordered_sfc_structure,
         // `analysis.type_registry` already carries the SESSION-owned
         // resolved-registry name-overlay finalize (applied before
         // materialization when the envelope carries a resolution); the lane

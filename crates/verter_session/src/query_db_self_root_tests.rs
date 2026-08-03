@@ -5126,7 +5126,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
             models: Vec::new(),
             exposed: Vec::new(),
             public_instance: None,
-            sfc_blocks: None,
+            ordered_sfc_structure: None,
             type_registry: Vec::new(),
             components: Vec::new(),
             template_refs: Vec::new(),

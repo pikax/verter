@@ -6,12 +6,7 @@ import type {
   AcceptedPropMeta,
   AcceptedEventMeta,
   AcceptedSurfaceCompleteness,
-  SfcBlocksMeta,
-  SfcAttributeMeta,
-  TemplateBlockMeta,
-  ScriptBlockMeta,
-  StyleBlockMeta,
-  CustomBlockMeta,
+  OrderedSfcStructureMeta,
   RootInfo,
   RootReachability,
   FallthroughSurface,
@@ -318,49 +313,11 @@ export interface NativePublicInstanceMemberMeta {
   tags?: NativeJsdocTag[];
 }
 
-export interface NativeSfcBlocksMeta {
-  template?: NativeTemplateBlockMeta;
-  script?: NativeScriptBlockMeta;
-  scriptSetup?: NativeScriptBlockMeta;
-  styles: NativeStyleBlockMeta[];
-  custom: NativeCustomBlockMeta[];
-}
-
-export interface NativeSfcAttributeMeta {
-  name: string;
-  value?: string;
-}
-
-export interface NativeTemplateBlockMeta {
-  lang?: string;
-  src?: string;
-  attributes: NativeSfcAttributeMeta[];
-}
-
-export interface NativeScriptBlockMeta {
-  lang?: string;
-  src?: string;
-  generic?: string;
-  attrsType?: string;
-  attributes: NativeSfcAttributeMeta[];
-}
-
-export interface NativeStyleBlockMeta {
-  index: number;
-  lang?: string;
-  src?: string;
-  scoped: boolean;
-  isModule: boolean;
-  moduleName?: string;
-  attributes: NativeSfcAttributeMeta[];
-}
-
-export interface NativeCustomBlockMeta {
-  index: number;
-  blockType: string;
-  lang?: string;
-  src?: string;
-  attributes: NativeSfcAttributeMeta[];
+export interface NativeOrderedSfcStructure {
+  schemaVersion: 1;
+  artifactToken: string;
+  blocks: Array<Record<string, unknown>>;
+  markupNodes: Array<Record<string, unknown>>;
 }
 
 export interface NativeResolvedTypeMeta {
@@ -715,7 +672,7 @@ export interface NativeComponentMetaResult {
   models: NativeModelMeta[];
   exposed: NativeExposedMeta[];
   publicInstance?: NativePublicInstanceMeta;
-  sfcBlocks?: NativeSfcBlocksMeta;
+  orderedSfcStructure: NativeOrderedSfcStructure;
   typeRegistry?: NativeResolvedTypeMeta[];
   components: NativeComponentUsage[];
   templateRefs: NativeTemplateRefMeta[];
@@ -859,11 +816,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
           },
         }
       : {}),
-    ...(meta.sfcBlocks !== undefined
-      ? {
-          sfcBlocks: mapNativeSfcBlocks(meta.sfcBlocks),
-        }
-      : {}),
+    orderedSfcStructure: mapNativeOrderedStructure(meta.orderedSfcStructure),
     components: meta.components.map((component) => ({
       name: component.name,
       ...(component.importSource !== undefined ? { importSource: component.importSource } : {}),
@@ -966,63 +919,11 @@ function mapNativeRootInfo(info: NativeRootInfo): RootInfo {
   };
 }
 
-function mapNativeSfcBlocks(blocks: NativeSfcBlocksMeta): SfcBlocksMeta {
-  return {
-    ...(blocks.template !== undefined ? { template: mapNativeTemplateBlock(blocks.template) } : {}),
-    ...(blocks.script !== undefined ? { script: mapNativeScriptBlock(blocks.script) } : {}),
-    ...(blocks.scriptSetup !== undefined
-      ? { scriptSetup: mapNativeScriptBlock(blocks.scriptSetup) }
-      : {}),
-    styles: blocks.styles.map((style) => mapNativeStyleBlock(style)),
-    custom: blocks.custom.map((block) => mapNativeCustomBlock(block)),
-  };
-}
-
-function mapNativeSfcAttributes(attributes: NativeSfcAttributeMeta[]): SfcAttributeMeta[] {
-  return attributes.map((attribute) => ({
-    name: attribute.name,
-    ...(attribute.value !== undefined ? { value: attribute.value } : {}),
-  }));
-}
-
-function mapNativeTemplateBlock(block: NativeTemplateBlockMeta): TemplateBlockMeta {
-  return {
-    ...(block.lang !== undefined ? { lang: block.lang } : {}),
-    ...(block.src !== undefined ? { src: block.src } : {}),
-    attributes: mapNativeSfcAttributes(block.attributes),
-  };
-}
-
-function mapNativeScriptBlock(block: NativeScriptBlockMeta): ScriptBlockMeta {
-  return {
-    ...(block.lang !== undefined ? { lang: block.lang } : {}),
-    ...(block.src !== undefined ? { src: block.src } : {}),
-    ...(block.generic !== undefined ? { generic: block.generic } : {}),
-    ...(block.attrsType !== undefined ? { attrsType: block.attrsType } : {}),
-    attributes: mapNativeSfcAttributes(block.attributes),
-  };
-}
-
-function mapNativeStyleBlock(block: NativeStyleBlockMeta): StyleBlockMeta {
-  return {
-    index: block.index,
-    ...(block.lang !== undefined ? { lang: block.lang } : {}),
-    ...(block.src !== undefined ? { src: block.src } : {}),
-    scoped: block.scoped,
-    isModule: block.isModule,
-    ...(block.moduleName !== undefined ? { moduleName: block.moduleName } : {}),
-    attributes: mapNativeSfcAttributes(block.attributes),
-  };
-}
-
-function mapNativeCustomBlock(block: NativeCustomBlockMeta): CustomBlockMeta {
-  return {
-    index: block.index,
-    blockType: block.blockType,
-    ...(block.lang !== undefined ? { lang: block.lang } : {}),
-    ...(block.src !== undefined ? { src: block.src } : {}),
-    attributes: mapNativeSfcAttributes(block.attributes),
-  };
+function mapNativeOrderedStructure(structure: NativeOrderedSfcStructure): OrderedSfcStructureMeta {
+  if (structure.schemaVersion !== 1) {
+    throw new Error(`unsupported ordered structure schema ${structure.schemaVersion}`);
+  }
+  return structure;
 }
 
 function deriveRootInfo(reachability: NativeRootReachability): NativeRootInfo {

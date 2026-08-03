@@ -13781,7 +13781,7 @@ const count = ref(0)
 }
 
 #[test]
-fn get_component_meta_surfaces_sfc_block_metadata() {
+fn get_component_meta_surfaces_registered_ordered_structure() {
     let project = make_project();
     project
         .upsert_base(
@@ -13818,55 +13818,37 @@ defineExpose({
         .expect("component meta should be available");
 
     let blocks = meta
-        .sfc_blocks
+        .ordered_sfc_structure
         .as_ref()
-        .expect("host should surface SFC block metadata");
+        .expect("host should surface registered structure");
+    assert_eq!(blocks.schema_version, 1);
+    assert_eq!(blocks.artifact_token.len(), 43);
+    assert_eq!(blocks.block_tokens.len(), blocks.inventory.blocks().len());
     assert_eq!(
-        blocks
-            .script
-            .as_ref()
-            .and_then(|block| block.lang.as_deref()),
-        Some("ts")
+        blocks.markup_node_tokens.len(),
+        blocks.inventory.markup().nodes().len()
     );
-    assert_eq!(
-        blocks
-            .script_setup
-            .as_ref()
-            .and_then(|block| block.generic.as_deref()),
-        Some("T extends string = string")
-    );
-    assert_eq!(
-        blocks
-            .script_setup
-            .as_ref()
-            .and_then(|block| block.attrs_type.as_deref()),
-        Some("ButtonAttrs")
-    );
-    assert_eq!(
-        blocks
-            .template
-            .as_ref()
-            .and_then(|block| block.lang.as_deref()),
-        Some("html")
-    );
-    assert!(
-        blocks.template.as_ref().is_some_and(|block| block
-            .attributes
-            .iter()
-            .any(|attribute| attribute.name == "data-layout"
-                && attribute.value.as_deref() == Some("stack"))),
-        "template block should preserve arbitrary root attributes"
-    );
-    assert_eq!(blocks.styles.len(), 1);
-    assert_eq!(blocks.styles[0].index, 0);
-    assert_eq!(blocks.styles[0].lang.as_deref(), Some("scss"));
-    assert!(blocks.styles[0].scoped);
-    assert!(blocks.styles[0].is_module);
-    assert_eq!(blocks.styles[0].module_name.as_deref(), Some("theme"));
-    assert_eq!(blocks.custom.len(), 1);
-    assert_eq!(blocks.custom[0].index, 0);
-    assert_eq!(blocks.custom[0].block_type, "i18n");
-    assert_eq!(blocks.custom[0].lang.as_deref(), Some("json"));
+    assert!(blocks
+        .block_tokens
+        .iter()
+        .all(|token| token.len() == 43 && token != &blocks.artifact_token));
+    let has_data_layout = blocks.inventory.blocks().iter().any(|block| {
+        let verter_language::parse_artifact::carrier_inventory::CarrierBlock::Section {
+            syntax,
+            ..
+        } = block
+        else {
+            return false;
+        };
+        syntax.attributes.iter().any(|attribute| match attribute {
+            verter_language::parse_artifact::carrier_inventory::CarrierAttribute::Named {
+                name,
+                ..
+            } => blocks.inventory.slice(name.authored).ok() == Some("data-layout"),
+            _ => false,
+        })
+    });
+    assert!(has_data_layout, "inventory preserves arbitrary attributes");
 }
 
 #[test]
@@ -22691,7 +22673,7 @@ fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: Vec::new(),
         components: Vec::new(),
         template_refs: Vec::new(),
@@ -27068,7 +27050,7 @@ fn blank_output_analysis() -> verter_semantic::analysis::component_meta::Compone
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: Vec::new(),
         components: Vec::new(),
         template_refs: Vec::new(),

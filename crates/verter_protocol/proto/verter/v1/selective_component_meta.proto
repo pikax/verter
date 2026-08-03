@@ -10,7 +10,7 @@ import "verter/v1/component_meta.proto";
 // sibling .proto file; types share the verter.v1 package with the existing
 // component_meta.proto and reach into ComponentFlags / RootReachability /
 // AcceptedSurfaceCompleteness / MacroExpansionDiagnosticEntry /
-// VueApiCallMeta / SfcBlocksMeta / ImportMeta / BindingMeta / StyleMeta /
+// VueApiCallMeta / OrderedSfcStructure / ImportMeta / BindingMeta / StyleMeta /
 // ComponentUsage / TemplateRefMeta / PublicInstanceMeta / FallthroughSurface
 // already defined there.
 //
@@ -94,13 +94,18 @@ message ComponentMetaSurface {
   AcceptedSurfaceCompleteness accepted_surface_completeness = 5;
   repeated MacroExpansionDiagnosticEntry macro_expansion_diagnostics = 6;
   repeated VueApiCallMeta vue_api_calls = 7;
-  SfcBlocksMeta sfc_blocks = 8;
+  reserved 8;
+  reserved "sfc_blocks";
   repeated ImportMeta imports = 9;
   repeated BindingMeta bindings = 10;
   repeated StyleMeta styles = 11;
   repeated ComponentUsage components = 12;
   repeated TemplateRefMeta template_refs = 13;
   PublicInstanceMeta public_instance = 14;
+  OrderedSfcStructure ordered_sfc_structure = 15;
+  uint32 surface_schema_version = 16;
+  ComponentContractAvailability component_public_contract = 17;
+  reserved 18 to 19;
 
   // Lazy type-bearing fields (9)
   repeated NamedTypeHandle props = 20;

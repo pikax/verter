@@ -7,6 +7,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use verter_language::carrier_grammar::{
     AcceptedRegisteredCarrierSource, CarrierAcceptanceError, CarrierGrammarAuthority,
     CarrierGrammarFingerprint, GrammarAuthorityNamespaceId,
@@ -171,6 +172,110 @@ impl FrameworkArtifactId {
     }
 }
 
+macro_rules! public_structure_token {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        pub struct $name(Arc<str>);
+
+        impl $name {
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    };
+}
+
+public_structure_token!(FrameworkArtifactToken);
+public_structure_token!(ArtifactBlockToken);
+public_structure_token!(ArtifactNodeToken);
+public_structure_token!(ArtifactAttributeToken);
+public_structure_token!(ArtifactSourceSpaceToken);
+
+/// An artifact-bound block reference. Construction is owned by
+/// [`RegisteredFileStructure`], so a local block id cannot be spliced onto a
+/// different carrier artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FrameworkBlockRef {
+    artifact: FrameworkArtifactId,
+    local: verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef,
+}
+
+impl FrameworkBlockRef {
+    pub fn artifact_id(&self) -> &FrameworkArtifactId {
+        &self.artifact
+    }
+
+    pub fn block_id(&self) -> verter_language::parse_artifact::carrier_inventory::BlockId {
+        self.local.block
+    }
+}
+
+/// An artifact-bound markup-node reference.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArtifactNodeRef {
+    artifact: FrameworkArtifactId,
+    node: verter_language::parse_artifact::carrier_inventory::MarkupNodeId,
+}
+
+impl ArtifactNodeRef {
+    pub fn artifact_id(&self) -> &FrameworkArtifactId {
+        &self.artifact
+    }
+
+    pub fn node_id(&self) -> verter_language::parse_artifact::carrier_inventory::MarkupNodeId {
+        self.node
+    }
+}
+
+/// An artifact-bound carrier-attribute reference.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArtifactAttributeRef {
+    artifact: FrameworkArtifactId,
+    attribute: verter_language::parse_artifact::carrier_inventory::AttributeId,
+}
+
+impl ArtifactAttributeRef {
+    pub fn artifact_id(&self) -> &FrameworkArtifactId {
+        &self.artifact
+    }
+
+    pub fn attribute_id(&self) -> verter_language::parse_artifact::carrier_inventory::AttributeId {
+        self.attribute
+    }
+}
+
+fn public_token(domain: &[u8], artifact: &FrameworkArtifactId, local: Option<u32>) -> Arc<str> {
+    let mut digest = Sha256::new();
+    digest.update(b"verter.structure-token.v1\0");
+    digest.update(domain);
+    digest.update(format!("{artifact:?}").as_bytes());
+    if let Some(local) = local {
+        digest.update(local.to_le_bytes());
+    }
+    Arc::from(base64url_32(digest.finalize().into()))
+}
+
+fn base64url_32(bytes: [u8; 32]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(43);
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let value = u32::from(bytes[index]) << 16
+            | u32::from(bytes[index + 1]) << 8
+            | u32::from(bytes[index + 2]);
+        out.push(ALPHABET[((value >> 18) & 63) as usize] as char);
+        out.push(ALPHABET[((value >> 12) & 63) as usize] as char);
+        out.push(ALPHABET[((value >> 6) & 63) as usize] as char);
+        out.push(ALPHABET[(value & 63) as usize] as char);
+        index += 3;
+    }
+    let value = u32::from(bytes[index]) << 16 | u32::from(bytes[index + 1]) << 8;
+    out.push(ALPHABET[((value >> 18) & 63) as usize] as char);
+    out.push(ALPHABET[((value >> 12) & 63) as usize] as char);
+    out.push(ALPHABET[((value >> 6) & 63) as usize] as char);
+    out
+}
+
 pub struct FrameworkArtifactEnvelope {
     id: FrameworkArtifactId,
     source: RegisteredSourceSnapshot,
@@ -233,6 +338,114 @@ impl RegisteredFileStructure {
         &self,
     ) -> &Arc<verter_language::parse_artifact::carrier_inventory::CarrierBlockInventory> {
         self.envelope.inventory()
+    }
+
+    pub fn block_ref(
+        &self,
+        block: verter_language::parse_artifact::carrier_inventory::BlockId,
+    ) -> Option<FrameworkBlockRef> {
+        self.inventory().blocks().get(block.get() as usize)?;
+        Some(FrameworkBlockRef {
+            artifact: self.artifact_id().clone(),
+            local: verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef {
+                artifact_identity: self.public_artifact_token().0,
+                block,
+            },
+        })
+    }
+
+    pub fn node_ref(
+        &self,
+        node: verter_language::parse_artifact::carrier_inventory::MarkupNodeId,
+    ) -> Option<ArtifactNodeRef> {
+        self.inventory().markup().nodes().get(node.get() as usize)?;
+        Some(ArtifactNodeRef {
+            artifact: self.artifact_id().clone(),
+            node,
+        })
+    }
+
+    pub fn attribute_ref(
+        &self,
+        attribute: verter_language::parse_artifact::carrier_inventory::AttributeId,
+    ) -> Option<ArtifactAttributeRef> {
+        let exists = self
+            .inventory()
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                verter_language::parse_artifact::carrier_inventory::CarrierBlock::Section {
+                    syntax,
+                    ..
+                } => Some(syntax.attributes.as_ref()),
+                verter_language::parse_artifact::carrier_inventory::CarrierBlock::MarkupRoot {
+                    ..
+                } => None,
+            })
+            .flatten()
+            .chain(
+                self.inventory()
+                    .markup()
+                    .nodes()
+                    .iter()
+                    .flat_map(|node| node.kind().attributes()),
+            )
+            .any(|candidate| candidate.id() == attribute);
+        exists.then(|| ArtifactAttributeRef {
+            artifact: self.artifact_id().clone(),
+            attribute,
+        })
+    }
+
+    pub fn public_artifact_token(&self) -> FrameworkArtifactToken {
+        FrameworkArtifactToken(public_token(b"artifact\0", self.artifact_id(), None))
+    }
+
+    pub fn public_block_token(&self, block: &FrameworkBlockRef) -> Option<ArtifactBlockToken> {
+        (block.artifact == *self.artifact_id()).then(|| {
+            ArtifactBlockToken(public_token(
+                b"block\0",
+                self.artifact_id(),
+                Some(block.block_id().get()),
+            ))
+        })
+    }
+
+    pub fn public_node_token(&self, node: &ArtifactNodeRef) -> Option<ArtifactNodeToken> {
+        (node.artifact == *self.artifact_id()).then(|| {
+            ArtifactNodeToken(public_token(
+                b"node\0",
+                self.artifact_id(),
+                Some(node.node_id().get()),
+            ))
+        })
+    }
+
+    pub fn public_attribute_token(
+        &self,
+        attribute: &ArtifactAttributeRef,
+    ) -> Option<ArtifactAttributeToken> {
+        (attribute.artifact == *self.artifact_id()).then(|| {
+            ArtifactAttributeToken(public_token(
+                b"attribute\0",
+                self.artifact_id(),
+                Some(attribute.attribute_id().get()),
+            ))
+        })
+    }
+
+    pub fn public_source_space_token(
+        &self,
+        source_space: verter_language::parse_artifact::carrier_inventory::SourceSpaceId,
+    ) -> Option<ArtifactSourceSpaceToken> {
+        self.inventory()
+            .source_spaces()
+            .get(source_space.get() as usize)?;
+        Some(ArtifactSourceSpaceToken(public_token(
+            b"source-space\0",
+            self.artifact_id(),
+            Some(source_space.get()),
+        )))
     }
 }
 

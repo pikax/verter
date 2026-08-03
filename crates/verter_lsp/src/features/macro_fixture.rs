@@ -12,7 +12,7 @@ use verter_semantic::analysis::{
     build_script_analysis_with_scope, AnalysisScope, ScriptAnalysisSnapshot,
 };
 
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::carrier_structure::test_carrier_blocks;
 
 /// Blank every byte outside the SFC's `<script>` content ranges, preserving
 /// line terminators and total length.
@@ -26,7 +26,7 @@ fn position_preserving_script_source(source: &str) -> String {
         .iter()
         .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
         .collect();
-    for block in scan_sfc_blocks(source) {
+    for block in test_carrier_blocks(source) {
         if block.tag_name != "script" {
             continue;
         }

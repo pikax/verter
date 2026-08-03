@@ -12,8 +12,8 @@ use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::{GotoDefinitionResponse, Hover, Location, Position, Range, Uri};
 
+use crate::documents::carrier_structure::project_carrier_blocks;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::{custom_block_content_kind, scan_sfc_blocks_with};
 use crate::documents::uri_to_canonical_id;
 use crate::features::hover;
 use crate::type_provider::merge;
@@ -1086,17 +1086,13 @@ impl VerterLanguageServer {
             .get_analysis(&child_canonical_id)
             .or_else(|| self.ensure_component_ready(&child_canonical_id))?;
 
-        // Get the child's source
-        let child_source_arc = self.documents.host().get_source(&child_canonical_id)?;
-        let child_source = child_source_arc.to_string();
+        let (child_structure, _) = self
+            .documents
+            .host()
+            .registered_file_structure_snapshot(&child_canonical_id)?;
+        let child_source = std::sync::Arc::clone(child_structure.source().source_arc());
         let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
-        // Host-loaded child: no editor language_id, so the canonical path
-        // classifies the carrier (a `.svelte` child balances its root
-        // components; a `.vue` child keeps raw-text custom blocks).
-        let blocks = scan_sfc_blocks_with(
-            &child_source,
-            custom_block_content_kind(None, &child_canonical_id),
-        );
+        let blocks = project_carrier_blocks(&child_structure);
         let line_index = LineIndex::new(&child_source, self.documents.encoding());
 
         let inherited_attrs = super::server_utils::resolved_fallthrough_attr_names(

@@ -4,8 +4,8 @@ use tower_lsp_server::ls_types::*;
 use verter_semantic::analysis::types::{AnalysisFlags, AnalyzedBinding, AnalyzedMacroKind};
 use verter_session::{AnalysisSourceRevision, FileAnalysisSnapshot};
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 use crate::features::action_utils::{
     find_script_insert_offset, make_insert_action, needs_quoting, LiveEditTarget,
 };
@@ -98,7 +98,7 @@ pub fn macro_code_actions(
     source: &str,
     live_revision: AnalysisSourceRevision,
     analysis: Option<&FileAnalysisSnapshot>,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     line_index: &LineIndex,
     cursor_offset: Option<u32>,
 ) -> Vec<CodeActionOrCommand> {
@@ -234,7 +234,7 @@ pub fn macro_code_actions(
 fn generate_define_slots_action(
     source: &str,
     analysis: &FileAnalysisSnapshot,
-    setup_block: &SfcBlock,
+    setup_block: &CarrierBlockView,
     template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
     line_index: &LineIndex,
     type_ctx: &SlotTypeContext<'_>,
@@ -267,7 +267,7 @@ fn generate_define_slots_action(
 fn generate_define_emits_action(
     source: &str,
     analysis: &FileAnalysisSnapshot,
-    setup_block: &SfcBlock,
+    setup_block: &CarrierBlockView,
     undeclared: &[&str],
     line_index: &LineIndex,
 ) -> Option<CodeActionOrCommand> {

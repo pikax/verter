@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import ts from "typescript";
 import init from "./index";
+import { isFrameworkAttributeNamePosition } from "./cursorGeometry";
 import {
   EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY,
   EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY,
@@ -20,6 +21,15 @@ import {
   EDITOR_TSSERVER_ATTESTATION_CONFIG_KEY,
   type Manifest,
 } from "@verter/language-shared";
+
+describe("bounded framework attribute context", () => {
+  it("does not inspect a tag opener beyond 256 UTF-8 bytes", () => {
+    const within = `<div ${"a".repeat(249)} x`;
+    const beyond = `<div ${"é".repeat(126)} x`;
+    expect(isFrameworkAttributeNamePosition(within, within.length)).toBe(true);
+    expect(isFrameworkAttributeNamePosition(beyond, beyond.length)).toBe(false);
+  });
+});
 
 // ── fixture store ───────────────────────────────────────────────────────────
 
@@ -3940,6 +3950,11 @@ describe("editor-owned source diagnostic routing", () => {
     const ready = manifest.projects["/ws/tsconfig.json"].ready_files[companionPath];
     ready.blob_rel = "blobs/A.vue.tsx";
     ready.map_hash = "script-completion-map";
+    ready.structure = {
+      schema_version: 1,
+      artifact_token: "a".repeat(43),
+      script_content_ranges: [[sourceText.indexOf("computed"), sourceText.indexOf("</script>")]],
+    };
     const dir = track(
       writeStore(manifest, {
         ...mappableBlobs(),
@@ -4094,6 +4109,11 @@ describe("editor-owned source diagnostic routing", () => {
     const ready = manifest.projects["/ws/tsconfig.json"].ready_files[companionPath];
     ready.blob_rel = "blobs/A.vue.tsx";
     ready.map_hash = "auto-import-preamble-map";
+    ready.structure = {
+      schema_version: 1,
+      artifact_token: "b".repeat(43),
+      script_content_ranges: [[sourceText.indexOf("\n") + 1, sourceText.indexOf("</script>")]],
+    };
     const dir = track(
       writeStore(manifest, {
         ...mappableBlobs(),

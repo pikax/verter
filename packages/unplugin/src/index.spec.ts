@@ -775,20 +775,18 @@ describe("disk fallback without workspace", () => {
     } as any) as any;
   }
 
-  it("transform loads external src blocks from disk when no workspace is initialized", async () => {
+  it("fails closed for external src blocks before B-23", async () => {
     const plugin = createPlugin();
     const filename = join(tempDir, "ExternalStyle.vue").replace(/\\/g, "/");
     writeFileSync(join(tempDir, "external.css"), ".from-disk { color: red; }\n");
 
-    const result = await plugin.transform(
-      `<template><div class="from-disk">ok</div></template>
+    await expect(
+      plugin.transform(
+        `<template><div class="from-disk">ok</div></template>
 <style src="./external.css"></style>`,
-      filename,
-    );
-
-    expect(result).toBeDefined();
-    expect(result.code).toContain("type=style&index=0");
-    expect(result.code).not.toContain("<style src=");
+        filename,
+      ),
+    ).rejects.toThrow(/ExternalBlockContentDeferred.*B-23/);
   });
 });
 
@@ -1194,7 +1192,7 @@ describe("preCompile", () => {
   });
 
   // @ai-generated - External src resolution during preCompile
-  it("resolves external style src during preCompile", async () => {
+  it("fails closed for external style src during preCompile before B-23", async () => {
     const vueSfc = `<script setup>\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>\n<style src="./style.css" scoped></style>\n`;
     const css = `.box { color: red; }\n`;
 
@@ -1202,13 +1200,7 @@ describe("preCompile", () => {
     writeFileSync(join(tempDir, "style.css"), css);
 
     const plugin = createPreCompilePlugin();
-    // Should not throw — external src is resolved during buildStart
-    await plugin.buildStart();
-
-    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
-    const result = await plugin.transform(vueSfc, filename);
-    expect(result).toBeDefined();
-    expect(result.code).toBeDefined();
+    await expect(plugin.buildStart()).rejects.toThrow(/ExternalBlockContentDeferred.*B-23/);
   });
 
   // @ai-generated - node_modules exclusion: files in node_modules are not pre-compiled

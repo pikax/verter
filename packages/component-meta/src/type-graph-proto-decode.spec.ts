@@ -10,15 +10,15 @@ import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 describe("decodeTypedComponentMetaPayload", () => {
   it("accepts the current schema version and rejects an older response", () => {
     const current = createTestComponentMetaPayload();
-    expect(current.schemaVersion).toBe(7);
+    expect(current.schemaVersion).toBe(8);
     expect(() =>
       decodeTypedComponentMetaPayload(
         toBinary(
           ComponentMetaPayloadSchema,
-          create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 6 }),
+          create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 7 }),
         ),
       ),
-    ).toThrow(/expected 7, found 6/);
+    ).toThrow(/expected 8, found 7/);
   });
 
   it("decodes supported contract type references from the shared graph", () => {

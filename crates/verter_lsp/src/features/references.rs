@@ -4,8 +4,8 @@
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 // The positional instance-member rule is DEFINED once, next to the rename
 // classifier that owns rename semantics (`features::rename`). References
 // consumes that same single definition for the references half of the identical
@@ -32,7 +32,7 @@ pub use super::sentinel_uris::SAME_FILE_URI_STR;
 pub fn references_at_position(
     position: &Position,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
     include_declaration: bool,
@@ -189,7 +189,7 @@ pub fn references_at_position(
 fn css_references_at_position(
     offset: usize,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<Vec<Location>> {
@@ -611,7 +611,7 @@ use crate::utils::{find_all_word_occurrences, word_at_offset};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::carrier_structure::test_carrier_blocks;
     use verter_semantic::analysis::*;
 
     fn make_analysis(
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn test_references_for_binding_across_blocks() {
         let source = "<template>\n  {{ count }}\n</template>\n\n<script setup>\nconst count = ref(0)\nconsole.log(count)\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let count_decl = source.rfind("count = ref").unwrap() as u32;
@@ -675,7 +675,7 @@ mod tests {
     fn test_references_exclude_declaration() {
         let source =
             "<template>\n  {{ x }}\n</template>\n\n<script setup>\nconst x = 1\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let x_offset = source.rfind("x = 1").unwrap() as u32;
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn test_no_references_for_unknown_word() {
         let source = "<script setup>\nconst x = 1\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = make_analysis(vec![], vec![], vec![]);
@@ -821,12 +821,12 @@ mod tests {
 
     fn build_style(
         source: &str,
-        blocks: &[SfcBlock],
+        blocks: &[CarrierBlockView],
     ) -> verter_semantic::analysis::StyleBlockAnalysis {
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
         let (content_start, content_end) = style_block.content_range();
         let css_content = &source[content_start as usize..content_end as usize];
-        let scoped = style_block.attrs_raw.contains("scoped");
+        let scoped = style_block.is_scoped();
         verter_semantic::analysis::style::build_css_style_analysis(
             css_content,
             verter_semantic::analysis::style::VueStyleInput {
@@ -844,7 +844,7 @@ mod tests {
     #[test]
     fn test_css_class_references_from_template() {
         let source = "<template><div class=\"btn\"></div></template>\n<style scoped>\n.btn { color: red; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 
@@ -878,7 +878,7 @@ mod tests {
     #[test]
     fn test_css_class_references_from_style() {
         let source = "<template><div class=\"btn\"></div></template>\n<style scoped>\n.btn { color: red; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 
@@ -917,7 +917,7 @@ mod tests {
     #[test]
     fn test_css_id_references_from_template() {
         let source = "<template><div id=\"app\"></div></template>\n<style scoped>\n#app { margin: 0; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 
@@ -951,7 +951,7 @@ mod tests {
     #[test]
     fn test_no_css_references_without_style() {
         let source = "<template><div class=\"foo\"></div></template>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let el = make_element_with_attrs(source, "div", &["foo"], None);

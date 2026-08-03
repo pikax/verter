@@ -3,8 +3,8 @@
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 /// Build folding ranges from SFC blocks and template elements.
 ///
@@ -12,7 +12,7 @@ use crate::documents::sfc_scanner::SfcBlock;
 /// - SFC block boundaries (template, script, style) — folds at the block level
 /// - Template elements that span multiple lines — folds within the template
 pub fn build_folding_ranges(
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> Vec<FoldingRange> {
@@ -71,8 +71,8 @@ pub fn build_folding_ranges(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::{
-        scan_sfc_blocks, scan_sfc_blocks_with, CustomBlockContentKind,
+    use crate::documents::carrier_structure::{
+        test_carrier_blocks, test_carrier_blocks_with, TestCarrierKind,
     };
     use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
 
@@ -80,7 +80,7 @@ mod tests {
     fn test_basic_folding() {
         let source =
             "<template>\n  <div/>\n</template>\n\n<script setup>\nconst x = 1;\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let ranges = build_folding_ranges(&blocks, None, &line_index);
 
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn test_single_line_block_not_foldable() {
         let source = "<style>.foo {}</style>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let ranges = build_folding_ranges(&blocks, None, &line_index);
 
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn test_collapsed_text() {
         let source = "<script setup>\nconst x = 1;\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let ranges = build_folding_ranges(&blocks, None, &line_index);
 
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn test_template_element_folding() {
         let source = "<template>\n  <div>\n    <p>hello</p>\n  </div>\n</template>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn test_self_closing_not_foldable() {
         let source = "<template>\n  <br />\n</template>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn test_single_line_element_not_foldable() {
         let source = "<template>\n  <div>inline</div>\n</template>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
@@ -213,7 +213,7 @@ mod tests {
         // template's fold: the fold must reach the OUTER `</template>` line
         // (5), not stop at the nested close (line 3).
         let source = "<template>\n  <template #header>\n    <h1>t</h1>\n  </template>\n  <button>after</button>\n</template>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let ranges = build_folding_ranges(&blocks, None, &line_index);
 
@@ -228,11 +228,11 @@ mod tests {
     #[test]
     fn svelte_nested_same_name_component_folds_to_the_outer_close_line() {
         // The folding handler scans with the document's carrier-resolved kind
-        // (`scan_sfc_blocks_for_document`); a Svelte document resolves to
+        // (`project_carrier_blocks_for_document`); a Svelte document resolves to
         // `Markup`, under which a nested same-name component must not truncate
         // the outer component's fold.
         let source = "<script>\n  let n = 1;\n</script>\n<Card>\n  <Card>inner</Card>\n  <p>after</p>\n</Card>\n";
-        let blocks = scan_sfc_blocks_with(source, CustomBlockContentKind::Markup);
+        let blocks = test_carrier_blocks_with(source, TestCarrierKind::Markup);
         let line_index = LineIndex::new_utf16(source);
         let ranges = build_folding_ranges(&blocks, None, &line_index);
 

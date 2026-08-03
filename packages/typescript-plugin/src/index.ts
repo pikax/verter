@@ -5,6 +5,7 @@ import {
   activeCarrierSources,
   CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY,
   cleanupCarrierVirtualImportPath,
+  carrierSourceStructure,
   containingFileAwareExists,
   editorOwnsCarrierMembership,
   editorOwnsCarrierSourceFeatures,
@@ -47,6 +48,9 @@ import {
 import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
 import { writeEditorTsserverAttestation } from "./helpers/editorAttestation";
 import { prepareVueJsxCarrier } from "./helpers/vueJsxAuthority";
+import { isFrameworkAttributeNamePosition as boundedFrameworkAttributeNamePosition } from "./cursorGeometry";
+
+const isFrameworkAttributeNamePosition = boundedFrameworkAttributeNamePosition;
 
 // tsserver may invoke the plugin module factory separately for different projects.
 // Attestation is process-scoped, so every factory must publish the same union rather
@@ -350,104 +354,6 @@ function manifestScriptKind(ts: typeof tsModule, kind: ManifestScriptKind): tsMo
   }
 }
 
-function asciiEqualsAt(source: string, offset: number, expectedLowercase: string): boolean {
-  if (offset < 0 || offset + expectedLowercase.length > source.length) return false;
-  for (let index = 0; index < expectedLowercase.length; index += 1) {
-    let code = source.charCodeAt(offset + index);
-    if (code >= 65 && code <= 90) code += 32;
-    if (code !== expectedLowercase.charCodeAt(index)) return false;
-  }
-  return true;
-}
-
-function isHtmlTagBoundary(source: string, offset: number): boolean {
-  if (offset >= source.length) return true;
-  const code = source.charCodeAt(offset);
-  return (
-    code === 47 ||
-    code === 62 ||
-    code === 9 ||
-    code === 10 ||
-    code === 12 ||
-    code === 13 ||
-    code === 32
-  );
-}
-
-function findHtmlTagEnd(source: string, start: number): number {
-  let quote = 0;
-  for (let offset = start; offset < source.length; offset += 1) {
-    const code = source.charCodeAt(offset);
-    if (quote !== 0) {
-      if (code === quote) quote = 0;
-      continue;
-    }
-    if (code === 34 || code === 39) {
-      quote = code;
-    } else if (code === 62) {
-      return offset;
-    }
-  }
-  return -1;
-}
-
-/**
- * Classify a raw SFC offset without interpreting the generated companion.
- *
- * HTML raw-text rules make the first matching `</script>` terminate a script
- * block even when those bytes appear in JavaScript text. The scan therefore
- * needs only quote-aware opening-tag handling plus comment skipping; it does
- * not guess from generated TSX or project configuration. This serves Vue and
- * Svelte carriers alike and does no source allocation on the completion path.
- */
-function sfcScriptImportAnchor(source: string | undefined, position: number): number | null {
-  if (source === undefined || position < 0 || position > source.length) return null;
-  let offset = 0;
-  while (offset < source.length) {
-    const tagStart = source.indexOf("<", offset);
-    if (tagStart < 0 || tagStart > position) return null;
-    if (source.startsWith("<!--", tagStart)) {
-      const commentEnd = source.indexOf("-->", tagStart + 4);
-      if (commentEnd < 0) return null;
-      offset = commentEnd + 3;
-      continue;
-    }
-    if (
-      !asciiEqualsAt(source, tagStart + 1, "script") ||
-      !isHtmlTagBoundary(source, tagStart + 7)
-    ) {
-      offset = tagStart + 1;
-      continue;
-    }
-    const openEnd = findHtmlTagEnd(source, tagStart + 7);
-    if (openEnd < 0) return null;
-    let closeStart = source.indexOf("<", openEnd + 1);
-    while (
-      closeStart >= 0 &&
-      (!asciiEqualsAt(source, closeStart + 1, "/script") ||
-        !isHtmlTagBoundary(source, closeStart + 8))
-    ) {
-      closeStart = source.indexOf("<", closeStart + 1);
-    }
-    let contentStart = openEnd + 1;
-    if (source.charCodeAt(contentStart) === 13 && source.charCodeAt(contentStart + 1) === 10) {
-      contentStart += 2;
-    } else if (source.charCodeAt(contentStart) === 10 || source.charCodeAt(contentStart) === 13) {
-      contentStart += 1;
-    }
-    if (closeStart < 0) return position > openEnd ? contentStart : null;
-    if (position > openEnd && position <= closeStart) return contentStart;
-    const closeEnd = findHtmlTagEnd(source, closeStart + 8);
-    if (closeEnd < 0) return null;
-    offset = closeEnd + 1;
-  }
-  return null;
-}
-
-function isInsideSfcScript(source: string | undefined, position: number): boolean {
-  return sfcScriptImportAnchor(source, position) !== null;
-}
-
 function identifierPrefixAt(source: string | undefined, position: number): string | null {
   if (source === undefined || position <= 0 || position > source.length) return null;
   const lineStart = source.lastIndexOf("\n", position - 1) + 1;
@@ -466,29 +372,6 @@ function identifierSpanAt(source: string | undefined, position: number): tsModul
   const identifier = left + right;
   if (identifier.length === 0 || !/^[$_\p{ID_Start}]/u.test(identifier)) return null;
   return { start: position - left.length, length: identifier.length };
-}
-
-function isFrameworkAttributeNamePosition(source: string | undefined, position: number): boolean {
-  if (source === undefined || position <= 0 || position > source.length) return false;
-  const tagStart = source.lastIndexOf("<", position - 1);
-  if (tagStart < 0 || source.lastIndexOf(">", position - 1) > tagStart) return false;
-  const first = source.charCodeAt(tagStart + 1);
-  if (first === 47 || first === 33 || first === 63) return false;
-
-  let quote = 0;
-  let braceDepth = 0;
-  for (let offset = tagStart + 1; offset < position; offset++) {
-    const code = source.charCodeAt(offset);
-    if (quote !== 0) {
-      if (code === 92) offset += 1;
-      else if (code === quote) quote = 0;
-      continue;
-    }
-    if (code === 34 || code === 39) quote = code;
-    else if (code === 123) braceDepth += 1;
-    else if (code === 125 && braceDepth > 0) braceDepth -= 1;
-  }
-  return quote === 0 && braceDepth === 0;
 }
 
 function camelToKebab(value: string): string {
@@ -1948,8 +1831,6 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         readSource: runtime.readSource,
         fileExists: _fileExists,
       };
-      const sourceText = runtime.readSource(sourceFileName);
-      const importAnchor = sfcScriptImportAnchor(sourceText, sourcePosition);
       const out: tsModule.FileTextChanges[] = [];
       for (const change of changes) {
         const mapped = remapAllFileTextChanges(runtimeContext, [change]);
@@ -1964,6 +1845,14 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // and only into the exact source script block that requested the
         // completion. Every other unmappable edit remains dropped atomically.
         const owned = runtime.getStore().ownedSourceFor(change.fileName);
+        const sourceStructure =
+          owned === undefined
+            ? null
+            : carrierSourceStructure(runtime.getStore(), owned.provider_uri);
+        const importAnchor =
+          sourceStructure?.scriptContentRanges.find(
+            ([start, end]) => sourcePosition >= start && sourcePosition <= end,
+          )?.[0] ?? null;
         if (
           importAnchor === null ||
           owned === undefined ||
@@ -2904,7 +2793,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (usesEditorCarrierRouting(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
-        const scriptOwned = isInsideSfcScript(routed.runtime.readSource(fileName), position);
+        const sourceStructure = carrierSourceStructure(routed.runtime.getStore(), routed.companion);
+        const scriptOwned =
+          sourceStructure?.scriptContentRanges.some(
+            ([start, end]) => position >= start && position <= end,
+          ) ?? false;
         let companionResult = routed.runtime.languageService.getCompletionsAtPosition(
           routed.companion,
           routed.position,

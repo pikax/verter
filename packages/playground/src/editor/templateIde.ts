@@ -1,4 +1,4 @@
-import type { FileAnalysis } from "../core/types";
+import type { FileAnalysis, OrderedSfcStructure, StructureBlock } from "../core/types";
 import { collectCompletions } from "./analysisHelpers";
 
 const HTML_TAGS = [
@@ -129,6 +129,7 @@ export interface TemplateCompletion {
 
 export interface TemplateCompletionParams {
   source: string;
+  structure: OrderedSfcStructure | null;
   offset: number;
   activeFilename: string;
   openFilenames: string[];
@@ -139,16 +140,26 @@ function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function isOffsetInTemplateBlock(source: string, offset: number): boolean {
-  const templateOpen = source.lastIndexOf("<template", offset);
-  if (templateOpen === -1) return false;
+function sections(
+  structure: OrderedSfcStructure | null,
+): Extract<StructureBlock, { kind: "section" }>[] {
+  return (
+    structure?.blocks.filter(
+      (block): block is Extract<StructureBlock, { kind: "section" }> => block.kind === "section",
+    ) ?? []
+  );
+}
 
-  const openEnd = source.indexOf(">", templateOpen);
-  if (openEnd === -1 || offset < openEnd + 1) return false;
-
-  const templateClose = source.indexOf("</template>", openEnd + 1);
-  if (templateClose === -1) return true;
-  return offset <= templateClose;
+export function isOffsetInTemplateBlock(
+  structure: OrderedSfcStructure | null,
+  offset: number,
+): boolean {
+  return sections(structure).some(
+    (block) =>
+      block.section.role.kind === "templateHost" &&
+      offset >= block.section.contentRange.start &&
+      offset <= block.section.contentRange.end,
+  );
 }
 
 export function isInsideInterpolation(source: string, offset: number): boolean {
@@ -159,8 +170,12 @@ export function isInsideInterpolation(source: string, offset: number): boolean {
 
 function getOpenTagStart(source: string, offset: number): number | null {
   const searchOffset = Math.max(0, offset - 1);
-  const lt = source.lastIndexOf("<", searchOffset);
-  const gt = source.lastIndexOf(">", searchOffset);
+  const floor = Math.max(0, offset - 256);
+  const window = source.slice(floor, searchOffset + 1);
+  const ltLocal = window.lastIndexOf("<");
+  const gtLocal = window.lastIndexOf(">");
+  const lt = ltLocal < 0 ? -1 : floor + ltLocal;
+  const gt = gtLocal < 0 ? -1 : floor + gtLocal;
   if (lt === -1 || lt < gt) return null;
 
   const marker = source[lt + 1];
@@ -243,27 +258,26 @@ interface ScriptBlock {
   content: string;
 }
 
-function findScriptBlock(source: string): ScriptBlock | null {
-  const setupMatch = /<script\b[^>]*\bsetup\b[^>]*>/i.exec(source);
-  const anyMatch = /<script\b[^>]*>/i.exec(source);
-  const match = setupMatch ?? anyMatch;
-  if (!match || match.index == null) return null;
-
-  const openStart = match.index;
-  const openEnd = openStart + match[0].length;
-  const closeStart = source.indexOf("</script>", openEnd);
-  if (closeStart === -1) return null;
-
+function findScriptBlock(
+  source: string,
+  structure: OrderedSfcStructure | null,
+): ScriptBlock | null {
+  const block = sections(structure).find((candidate) => candidate.section.role.kind === "script");
+  if (!block) return null;
   return {
-    openStart,
-    openEnd,
-    closeStart,
-    content: source.slice(openEnd, closeStart),
+    openStart: block.section.openingRange.start,
+    openEnd: block.section.contentRange.start,
+    closeStart: block.section.contentRange.end,
+    content: source.slice(block.section.contentRange.start, block.section.contentRange.end),
   };
 }
 
-function hasComponentImport(source: string, componentName: string): boolean {
-  const block = findScriptBlock(source);
+function hasComponentImport(
+  source: string,
+  structure: OrderedSfcStructure | null,
+  componentName: string,
+): boolean {
+  const block = findScriptBlock(source, structure);
   if (!block) return false;
 
   const importRe = /import[\s\S]*?from\s+['"][^'"]+['"]\s*;?/g;
@@ -278,13 +292,14 @@ function hasComponentImport(source: string, componentName: string): boolean {
 
 export function buildComponentImportEdit(
   source: string,
+  structure: OrderedSfcStructure | null,
   componentName: string,
   importPath: string,
 ): ImportEdit | null {
-  if (hasComponentImport(source, componentName)) return null;
+  if (hasComponentImport(source, structure, componentName)) return null;
 
   const importStmt = `import ${componentName} from '${importPath}'`;
-  const block = findScriptBlock(source);
+  const block = findScriptBlock(source, structure);
 
   if (!block) {
     return {
@@ -382,38 +397,32 @@ function buildTagInsertText(tag: string): string {
   return `<${tag}>$0</${tag}>`;
 }
 
-function findLastUnclosedTag(source: string, offset: number): string | null {
-  const before = source.slice(0, offset);
-  const tagRe = /<\/?([A-Za-z][\w.-]*)\b[^>]*>/g;
-  const stack: string[] = [];
-
-  let match: RegExpExecArray | null;
-  while ((match = tagRe.exec(before)) !== null) {
-    const full = match[0];
-    const name = match[1];
-    const lower = name.toLowerCase();
-
-    if (full.startsWith("</")) {
-      const last = stack[stack.length - 1];
-      if (last && last.toLowerCase() === lower) {
-        stack.pop();
-      }
-      continue;
+function currentMarkupElement(
+  structure: OrderedSfcStructure | null,
+  source: string,
+  offset: number,
+): string | null {
+  if (structure === null) return null;
+  const utf8Offset = new TextEncoder().encode(source.slice(0, offset)).length;
+  let best: { start: number; name: string } | null = null;
+  for (const node of structure.markupNodes) {
+    const syntax = node.syntax;
+    if (syntax.kind !== "element" || !("authoredName" in syntax)) continue;
+    if (syntax.openingRange.end > utf8Offset || syntax.fullRange.end < utf8Offset) continue;
+    if (best === null || syntax.openingRange.start > best.start) {
+      best = { start: syntax.openingRange.start, name: syntax.authoredName.spelling };
     }
-
-    if (full.endsWith("/>") || VOID_HTML_TAGS.has(lower)) {
-      continue;
-    }
-
-    stack.push(name);
   }
-
-  return stack[stack.length - 1] ?? null;
+  return best?.name ?? null;
 }
 
-export function computeAutoCloseTagText(source: string, offset: number): string | null {
+export function computeAutoCloseTagText(
+  source: string,
+  structure: OrderedSfcStructure | null,
+  offset: number,
+): string | null {
   if (offset <= 0 || source[offset - 1] !== ">") return null;
-  if (!isOffsetInTemplateBlock(source, offset) || isInsideInterpolation(source, offset)) {
+  if (!isOffsetInTemplateBlock(structure, offset) || isInsideInterpolation(source, offset)) {
     return null;
   }
 
@@ -435,10 +444,14 @@ export function computeAutoCloseTagText(source: string, offset: number): string 
   return `</${tagName}>`;
 }
 
-function collectClosingTagCompletions(source: string, offset: number): TemplateCompletion[] {
+function collectClosingTagCompletions(
+  source: string,
+  structure: OrderedSfcStructure | null,
+  offset: number,
+): TemplateCompletion[] {
   if (!isClosingTagNameContext(source, offset)) return [];
 
-  const expectedTag = findLastUnclosedTag(source, offset);
+  const expectedTag = currentMarkupElement(structure, source, offset);
   if (!expectedTag) return [];
 
   const prefix = currentClosingTagPrefix(source, offset).toLowerCase();
@@ -459,7 +472,10 @@ export function collectTemplateInterpolationCompletions(
   params: TemplateCompletionParams,
 ): TemplateCompletion[] {
   const { source, offset, analysis } = params;
-  if (!isOffsetInTemplateBlock(source, offset) || !isInsideInterpolation(source, offset)) {
+  if (
+    !isOffsetInTemplateBlock(params.structure, offset) ||
+    !isInsideInterpolation(source, offset)
+  ) {
     return [];
   }
 
@@ -498,11 +514,11 @@ export function collectTemplateInterpolationCompletions(
 export function collectTemplateCompletions(params: TemplateCompletionParams): TemplateCompletion[] {
   const { source, offset, activeFilename, openFilenames, analysis } = params;
 
-  if (!isOffsetInTemplateBlock(source, offset) || isInsideInterpolation(source, offset)) {
+  if (!isOffsetInTemplateBlock(params.structure, offset) || isInsideInterpolation(source, offset)) {
     return [];
   }
 
-  const closing = collectClosingTagCompletions(source, offset);
+  const closing = collectClosingTagCompletions(source, params.structure, offset);
   if (closing.length > 0) return closing;
 
   if (isTagNameContext(source, offset)) {
@@ -524,7 +540,7 @@ export function collectTemplateCompletions(params: TemplateCompletionParams): Te
     for (const component of collectComponentCandidates(activeFilename, openFilenames, analysis)) {
       if (prefix && !component.name.toLowerCase().startsWith(prefix)) continue;
       const importEdit = component.importPath
-        ? buildComponentImportEdit(source, component.name, component.importPath)
+        ? buildComponentImportEdit(source, params.structure, component.name, component.importPath)
         : null;
       out.push({
         label: component.name,

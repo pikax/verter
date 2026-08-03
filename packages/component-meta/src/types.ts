@@ -30,8 +30,8 @@ export interface ComponentMeta {
   exposed: ExposedMeta[];
   /** Host-derived runtime public-instance surface for ref-accessible members. */
   publicInstance?: PublicInstanceMeta;
-  /** Parsed SFC root block metadata for template/script/style/custom blocks. */
-  sfcBlocks?: SfcBlocksMeta;
+  /** Mandatory schema-8 ordered structure from the registered artifact. */
+  orderedSfcStructure: OrderedSfcStructureMeta;
 
   // ── Template usage ─────────────────────────────────────────────
 
@@ -263,82 +263,13 @@ export interface PublicInstanceMemberMeta {
   tags?: JsdocTag[];
 }
 
-/** Parsed SFC root block metadata. */
-export interface SfcBlocksMeta {
-  /** The `<template>` block when present. */
-  template?: TemplateBlockMeta;
-  /** The classic `<script>` block when present. */
-  script?: ScriptBlockMeta;
-  /** The `<script setup>` block when present. */
-  scriptSetup?: ScriptBlockMeta;
-  /** All `<style>` blocks in source order. */
-  styles: StyleBlockMeta[];
-  /** All custom root blocks such as `<i18n>` in source order. */
-  custom: CustomBlockMeta[];
-}
-
-/** A single raw root-block attribute. */
-export interface SfcAttributeMeta {
-  /** Attribute name as written in source. */
-  name: string;
-  /** Attribute value when present; omitted for boolean attributes. */
-  value?: string;
-}
-
-/** Metadata for a `<template>` block. */
-export interface TemplateBlockMeta {
-  /** `lang="..."` when present. */
-  lang?: string;
-  /** `src="..."` when present. */
-  src?: string;
-  /** All raw root-block attributes in source order. */
-  attributes: SfcAttributeMeta[];
-}
-
-/** Metadata for a `<script>` or `<script setup>` block. */
-export interface ScriptBlockMeta {
-  /** `lang="..."` when present. */
-  lang?: string;
-  /** `src="..."` when present. */
-  src?: string;
-  /** `<script setup generic="...">` when present. */
-  generic?: string;
-  /** `<script setup attrs="...">` or `attributes="..."` when present. */
-  attrsType?: string;
-  /** All raw root-block attributes in source order. */
-  attributes: SfcAttributeMeta[];
-}
-
-/** Metadata for a `<style>` block. */
-export interface StyleBlockMeta {
-  /** Source-order block index among `<style>` blocks. */
-  index: number;
-  /** `lang="..."` when present. */
-  lang?: string;
-  /** `src="..."` when present. */
-  src?: string;
-  /** Whether the block has the `scoped` attribute. */
-  scoped: boolean;
-  /** Whether the block has the `module` attribute. */
-  isModule: boolean;
-  /** Custom module name from `module="..."` when present. */
-  moduleName?: string;
-  /** All raw root-block attributes in source order. */
-  attributes: SfcAttributeMeta[];
-}
-
-/** Metadata for a custom root block such as `<i18n>`. */
-export interface CustomBlockMeta {
-  /** Source-order block index among custom blocks. */
-  index: number;
-  /** Raw custom tag name, for example `"i18n"`. */
-  blockType: string;
-  /** `lang="..."` when present. */
-  lang?: string;
-  /** `src="..."` when present. */
-  src?: string;
-  /** All raw root-block attributes in source order. */
-  attributes: SfcAttributeMeta[];
+/** Content-free ordered structure. Nested records preserve generated oneof
+ * shapes and sealed token identities without an ordinal compatibility view. */
+export interface OrderedSfcStructureMeta {
+  schemaVersion: 1;
+  artifactToken: string;
+  blocks: Array<Record<string, unknown>>;
+  markupNodes: Array<Record<string, unknown>>;
 }
 
 // ── Template usage types ───────────────────────────────────────────

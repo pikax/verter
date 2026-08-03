@@ -26,6 +26,7 @@ export type PatchRequest<T> = OmitRequest<T> & RequestTyped;
 
 export enum RequestType {
   GetCompiledCode = "$/getCompiledCode",
+  GetDocumentStructure = "$/verter/documentStructure",
   GetStatistics = "$/verter/getStatistics",
   GetVirtualFiles = "$/verter/getVirtualFiles",
   GetAnalysis = "$/verter/getAnalysis",
@@ -41,6 +42,83 @@ export enum RequestType {
   /** D104 — one-layer TypeHandle expansion as protobuf-encoded bytes. */
   GetComponentMetaTypeExpansion = "$/verter/getComponentMetaTypeExpansion",
 }
+
+export interface StructureRangeV1 {
+  sourceSpaceToken: string;
+  start: number;
+  end: number;
+}
+
+export interface StructureSectionV1 {
+  blockToken: string;
+  role:
+    | { kind: "templateHost" }
+    | { kind: "script"; role: string; dialect: string }
+    | { kind: "style"; dialect: string; scoped: boolean; module: string }
+    | { kind: "custom"; normalizedName: string };
+  openingRange: StructureRangeV1;
+  openingNameRange: StructureRangeV1;
+  contentRange: StructureRangeV1;
+  closingRange?: StructureRangeV1;
+  closingNameRange?: StructureRangeV1;
+  fullRange: StructureRangeV1;
+  attributeInsertionAnchor: StructureRangeV1;
+  attributes: Array<{
+    attributeToken: string;
+    kind: "named" | "spread" | "directive" | "attach";
+    name?: { spelling: string; normalized: string; range: StructureRangeV1 };
+    value?: string;
+    fullRange: StructureRangeV1;
+    duplicateOf?: string;
+  }>;
+  blockContentBasisToken?: never;
+}
+
+export type StructureBlockV1 =
+  | { kind: "section"; section: StructureSectionV1; markupRootTokens: string[] }
+  | { kind: "markupRoot"; blockToken: string; markupRootToken: string };
+
+export interface DocumentStructureV1 {
+  schemaVersion: 1;
+  documentRevisionToken: string;
+  artifactToken: string;
+  blocks: StructureBlockV1[];
+  markupNodes: unknown[];
+}
+
+export interface DocumentStructureRequestV1 {
+  requestToken: string;
+  textDocument: { uri: string };
+  clientOpenEpoch: string;
+  expectedClientVersion: number;
+}
+
+export type DocumentStructureResponseV1 =
+  | {
+      kind: "available";
+      requestToken: string;
+      clientOpenEpoch: string;
+      expectedClientVersion: number;
+      structure: DocumentStructureV1;
+    }
+  | {
+      kind: "staleClientDocument" | "replacementDocument" | "superseded" | "closed";
+      requestToken: string;
+      clientOpenEpoch: string;
+      expectedClientVersion: number;
+    }
+  | {
+      kind: "unavailable";
+      requestToken: string;
+      clientOpenEpoch: string;
+      expectedClientVersion: number;
+      reason:
+        | "unsupportedLanguage"
+        | "carrierProducerUnavailable"
+        | "registryMismatch"
+        | "parseFailed"
+        | "structureNotReady";
+    };
 
 /** Server → client request method for forwarding TypeScript queries to the
  * extension's in-process `ts.createLanguageService()` (Experiment E). */
@@ -74,6 +152,7 @@ export interface GetComponentMetaTypeExpansionResponse {
 
 export type RequestParams = {
   [RequestType.GetCompiledCode]: { uri: string };
+  [RequestType.GetDocumentStructure]: DocumentStructureRequestV1;
   [RequestType.GetStatistics]: StatisticsRequestParams | undefined;
   [RequestType.GetVirtualFiles]: { uri: string };
   [RequestType.GetAnalysis]: { uri: string };
@@ -99,6 +178,7 @@ export type RequestResponse = {
     css: { code: string; map: any | undefined };
     wasm: { code: string; map: any | undefined };
   };
+  [RequestType.GetDocumentStructure]: DocumentStructureResponseV1;
   [RequestType.GetStatistics]: StatisticsSnapshot;
   [RequestType.GetVirtualFiles]: VirtualFilesResponse;
   [RequestType.GetAnalysis]: FileAnalysisSnapshot;

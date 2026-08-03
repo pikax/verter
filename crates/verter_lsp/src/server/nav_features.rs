@@ -14,7 +14,7 @@
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
+use crate::documents::carrier_structure::project_carrier_blocks_for_document;
 use crate::features::completion::completions_at_position;
 use crate::features::cursor_context::{
     classify_cursor_context_for_language, classify_expression_context_with_trigger,
@@ -169,7 +169,7 @@ pub(super) async fn handle_hover(
         .then(|| {
             let doc = server.documents.get(uri)?;
             let analysis = server.documents.get_analysis(uri);
-            let blocks = scan_sfc_blocks_for_document(&doc);
+            let blocks = project_carrier_blocks_for_document(&doc);
             let native = hover_at_position(
                 position,
                 &doc.source,
@@ -697,16 +697,29 @@ async fn handle_completion_attempt(
         source: std::sync::Arc<str>,
         line_index: crate::documents::line_index::LineIndex,
         analysis: Option<verter_session::FileAnalysisSnapshot>,
-        blocks: Vec<crate::documents::sfc_scanner::SfcBlock>,
+        blocks: Vec<crate::documents::carrier_structure::CarrierBlockView>,
         canonical_id: String,
     }
     let native_snapshot = (|| {
         let doc = server.documents.get(uri)?;
+        let blocks = if doc.feature_snapshot.is_some() {
+            project_carrier_blocks_for_document(&doc)
+        } else {
+            server
+                .documents
+                .host()
+                .registered_file_structure_snapshot(&doc.canonical_id)
+                .filter(|(structure, _)| structure.source().bytes() == doc.source.as_ref())
+                .map(|(structure, _)| {
+                    crate::documents::carrier_structure::project_carrier_blocks(&structure)
+                })
+                .unwrap_or_default()
+        };
         Some(NativeCompletionSnapshot {
             source: doc.source.clone(),
             line_index: doc.line_index.as_ref().clone(),
             analysis: server.documents.get_analysis(uri),
-            blocks: scan_sfc_blocks_for_document(&doc),
+            blocks,
             canonical_id: crate::documents::uri_to_canonical_id(uri),
         })
     })();

@@ -2,8 +2,8 @@
 
 use tower_lsp_server::ls_types::*;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 /// Extract color information from CSS style blocks.
 ///
@@ -18,7 +18,7 @@ use crate::documents::sfc_scanner::SfcBlock;
 /// ID selector that happens to be all hex digits), are never emitted.
 pub fn document_colors(
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     line_index: &LineIndex,
 ) -> Vec<ColorInformation> {
     let mut colors = Vec::new();
@@ -467,12 +467,12 @@ fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::carrier_structure::test_carrier_blocks;
 
     #[test]
     fn test_hex_color_detection() {
         let source = "<style>\n.foo { color: #ff0000; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn test_short_hex_color() {
         let source = "<style>\n.foo { color: #f00; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn test_rgb_function() {
         let source = "<style>\n.foo { color: rgb(255, 128, 0); }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn test_hsl_function() {
         let source = "<style>\n.foo { color: hsl(0, 100%, 50%); }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);
@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn test_no_colors_in_script() {
         let source = "<script>\nconst color = '#ff0000'\n</script>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn test_hex_with_alpha() {
         let source = "<style>\n.foo { color: #ff000080; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);
@@ -557,7 +557,7 @@ mod tests {
     fn test_css_id_not_matched() {
         // #app is a CSS ID selector, not a color
         let source = "<style>\n#app { color: red; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn hex_shaped_id_selector_never_chips() {
         let source = "<style>\n#bad { color: #f00; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn pseudo_class_colon_never_makes_a_selector_a_value_position() {
         let source = "<style>\na:hover #bad { color: #f00; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn first_rule_chip_maps_exactly_to_the_color_value() {
         let source = "<style>\n.first {\n  color: #abc;\n}\n.second {\n  background: rgb(1, 2, 3);\n}\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);
@@ -641,7 +641,7 @@ mod tests {
     fn colors_in_comments_and_strings_never_chip() {
         let source =
             "<style>\n/* #fff */\n.x { content: '#0f0'; }\n.y { /* rgb(1,2,3) */ color: red; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let colors = document_colors(source, &blocks, &line_index);

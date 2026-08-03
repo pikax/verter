@@ -531,8 +531,6 @@ pub struct NapiResolvedId {
 pub struct NapiVirtualMeta {
     pub scopeId: Option<String>,
     pub blockType: Option<String>,
-    pub styleIndex: Option<u32>,
-    pub customIndex: Option<u32>,
 }
 
 #[napi(object)]
@@ -1174,8 +1172,6 @@ fn host_virtual_file_to_napi(
         meta: NapiVirtualMeta {
             scopeId: input.meta.scope_id,
             blockType: input.meta.block_type,
-            styleIndex: input.meta.style_index.map(|i| i as u32),
-            customIndex: input.meta.custom_index.map(|i| i as u32),
         },
         cacheHit: input.cache_hit,
         requestedMode: input.requested_mode.to_string(),
@@ -1717,6 +1713,25 @@ impl NapiVerterHost {
             })
             .transpose()
         })?
+    }
+
+    /// Returns the registered content-free carrier structure as JSON.
+    #[napi(js_name = "getDocumentStructure")]
+    pub fn get_document_structure(&self, canonical_or_alias: String) -> Result<Option<String>> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner
+                .registered_file_structure(&canonical_or_alias)
+                .map(|structure| {
+                    let projected = registered_structure_to_ffi(&structure);
+                    serde_json::to_string(&projected).map_err(|error| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("structure serialization error: {error}"),
+                        )
+                    })
+                })
+                .transpose()
+        }))?
     }
 
     /// Evaluate type annotations for a file's component metadata using the

@@ -1,5 +1,5 @@
 use super::*;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::carrier_structure::test_carrier_blocks;
 use std::sync::Arc;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::types::VueApiCallSite;
@@ -205,7 +205,7 @@ fn test_word_at_offset() {
 #[test]
 fn test_hover_on_binding() {
     let source = "<script setup>\nconst count = ref(0)\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -255,7 +255,7 @@ fn test_hover_on_binding() {
 #[test]
 fn test_hover_on_import() {
     let source = "<script setup>\nimport { ref } from 'vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -301,7 +301,7 @@ fn test_hover_on_import() {
 #[test]
 fn test_hover_outside_blocks() {
     let source = "<!-- comment -->\n<script setup>\nconst x = 1;\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(vec![], vec![], vec![]);
@@ -325,7 +325,7 @@ fn test_hover_outside_blocks() {
 #[test]
 fn test_hover_on_template_binding() {
     let source = "<template>\n  {{ count }}\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -363,7 +363,7 @@ fn test_hover_on_template_binding() {
 fn test_hover_on_vue_api_call_site() {
     let source =
         "<script setup>\nimport { onMounted } from 'vue'\nonMounted(() => {})\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Offset of "onMounted(() => {})" call
@@ -408,7 +408,7 @@ fn test_hover_on_vue_api_call_site() {
 #[test]
 fn test_no_hover_on_unknown_word() {
     let source = "<script setup>\nconst unknownVar = 1;\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Empty analysis — no bindings registered
@@ -431,7 +431,7 @@ fn test_no_hover_on_unknown_word() {
 #[test]
 fn test_no_hover_inside_html_comment() {
     let source = "<template>\n  <!-- count -->\n  {{ count }}\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -487,7 +487,7 @@ fn test_no_hover_inside_html_comment() {
 fn test_hover_on_component_shows_prop_constness() {
     let source =
         "<template>\n  <MyButton :title=\"msg\" disabled>\n  </MyButton>\n</template>\n\n<script setup>\nimport MyButton from './MyButton.vue'\nconst msg = ref('hello')\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let comp_offset = source.find("<MyButton").unwrap();
@@ -736,7 +736,7 @@ fn child_summary_surfaces_typed_unsupported_contract_without_fabricated_rows() {
 fn test_hover_on_component_with_no_props() {
     let source =
         "<template>\n  <Popup />\n</template>\n\n<script setup>\nimport Popup from './Popup.vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let comp_offset = source.find("<Popup").unwrap();
@@ -797,7 +797,7 @@ fn test_hover_on_component_with_no_props() {
 #[test]
 fn test_hover_on_element_shows_css_rules() {
     let source = "<template>\n  <div class=\"foo\">hello</div>\n</template>\n\n<style scoped>\n.foo { color: red; }\ndiv { font-size: 14px; }\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Build style analysis from the actual CSS content
@@ -891,7 +891,7 @@ fn test_hover_on_element_shows_css_rules() {
 #[test]
 fn test_hover_on_script_tag_name() {
     let source = "<script setup lang=\"ts\">\nconst x = 1;\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Hover on "script" in opening tag (offset 1 = 's')
@@ -912,7 +912,7 @@ fn test_hover_on_script_tag_name() {
 #[test]
 fn test_hover_on_template_tag_name() {
     let source = "<template>\n  <div/>\n</template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let pos = line_index.offset_to_position(1).unwrap();
@@ -931,7 +931,7 @@ fn test_hover_on_template_tag_name() {
 #[test]
 fn test_hover_on_setup_attr() {
     let source = "<script setup lang=\"ts\">\nconst x = 1;\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // "setup" starts at offset 8 in "<script setup lang=\"ts\">"
@@ -956,7 +956,7 @@ fn test_hover_on_setup_attr() {
 #[test]
 fn test_hover_on_lang_attr() {
     let source = "<script setup lang=\"ts\">\nconst x = 1;\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let lang_offset = source.find("lang").unwrap();
@@ -973,7 +973,7 @@ fn test_hover_on_lang_attr() {
 #[test]
 fn test_hover_on_scoped_attr() {
     let source = "<style scoped>\n.foo {}\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let scoped_offset = source.find("scoped").unwrap();
@@ -993,7 +993,7 @@ fn test_hover_on_scoped_attr() {
 #[test]
 fn test_hover_on_closing_tag() {
     let source = "<script setup>\nconst x = 1;\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Closing tag: "</script>" — hover on it
@@ -1011,7 +1011,7 @@ fn test_hover_on_closing_tag() {
 #[test]
 fn test_no_hover_at_root_level() {
     let source = "<template>\n  <div/>\n</template>\n\n<script setup>\nconst x = 1;\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Between blocks — root level
@@ -1024,7 +1024,7 @@ fn test_no_hover_at_root_level() {
 #[test]
 fn test_hover_on_attrs_attribute() {
     let source = "<script setup attrs=\"{ class?: string }\" lang=\"ts\">\nconst x = 1;\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let attrs_offset = source.find("attrs").unwrap();
@@ -1042,7 +1042,7 @@ fn test_hover_on_attrs_attribute() {
 #[test]
 fn test_hover_on_custom_block_tag() {
     let source = "<i18n lang=\"json\">\n{\"en\": {}}\n</i18n>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let pos = line_index.offset_to_position(1).unwrap();
@@ -1069,7 +1069,7 @@ fn test_hover_on_component_attr_does_not_show_constness() {
     // the component prop constness hover — only the tag name should trigger it.
     let source =
         "<template>\n  <Popup :icon=\"x\">\n  </Popup>\n</template>\n\n<script setup>\nimport Popup from './Popup.vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let comp_offset = source.find("<Popup").unwrap();
@@ -1140,7 +1140,7 @@ fn test_hover_on_div_class_attr_does_not_show_css() {
     // Hovering on `class` attribute name in <div class="foo"> should NOT show
     // the CSS rules hover — only the tag name should trigger it.
     let source = "<template>\n  <div class=\"foo\">hello</div>\n</template>\n\n<style scoped>\n.foo { color: red; }\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -1233,7 +1233,7 @@ fn test_hover_on_ref_attr_does_not_show_import() {
     // SOURCE-OWNED template-ref hover: it names the `ref` attribute and its `el`
     // target, and must NOT surface the imported Vue `ref()` symbol.
     let source = "<template>\n  <span ref=\"el\">text</span>\n</template>\n\n<script setup>\nimport { ref } from 'vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let template_ref_offset = source.find("ref=\"el\"").unwrap();
@@ -1365,7 +1365,7 @@ fn native_event_directive_hover_shows_vue_source_token() {
     // (`onClick`). The hover range stays on the source `@click` token so the merge
     // layer can rewrite a paired `onClick` TypeProvider hover back to `@click`.
     let source = r#"<template><button @click="increment">x</button></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let at_pos = source.find("@click").unwrap() as u32;
@@ -1422,7 +1422,7 @@ fn v_on_long_form_hover_canonicalizes_provenance_to_at_form() {
     // user wrote, but the TYPED provenance canonicalizes to `@click` so the merge
     // layer rewrites a paired `onClick` TypeProvider label to `@click`.
     let source = r#"<template><button v-on:click="increment">x</button></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let dir_start = source.find("v-on:click").unwrap() as u32;
@@ -1490,7 +1490,7 @@ fn v_model_directive_name_hover_shows_vue_source_token() {
     // `is_on_attribute_name` suppression would otherwise return None. The
     // source-owned hover runs BEFORE that suppression.
     let source = r#"<template><ModelNamed v-model:show="x" /></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let dir = v_model_directive(source, "show");
@@ -1520,7 +1520,7 @@ fn v_model_arg_hover_shows_vue_source_token() {
     // real prop type via the mapped prop-name codegen; this hover supplies the Vue
     // source context.)
     let source = r#"<template><ModelNamed v-model:show="x" /></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let dir = v_model_directive(source, "show");
@@ -1555,7 +1555,7 @@ fn event_modifier_stop_hover() {
     // Hovering on a `.stop` modifier token must return a source-owned modifier
     // hover describing `stopPropagation`, sourced from the shared modifier table.
     let source = r#"<template><button @click.stop="increment">x</button></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let at_pos = source.find("@click").unwrap() as u32;
@@ -1625,7 +1625,7 @@ fn mouse_event_modifier_left_is_mouse_button_not_arrow_key() {
     // modifier table would return "Arrow Left" (key family) — passing the event name
     // (`click`) disambiguates to the mouse-button family.
     let source = r#"<template><button @click.left="pick">x</button></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let at_pos = source.find("@click").unwrap() as u32;
@@ -1667,7 +1667,7 @@ fn no_value_event_modifier_hover() {
     // source-owned hover for BOTH the event token and the modifier, with no
     // dependency on any generated TSX anchor.
     let source = r#"<template><div @touchmove.stop></div></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let at_pos = source.find("@touchmove").unwrap() as u32;
@@ -1731,7 +1731,7 @@ fn no_value_event_modifier_hover() {
 fn test_hover_on_ref_in_interpolation_still_shows_import() {
     // Hovering on `ref` in {{ ref(0) }} should still show the import hover.
     let source = "<template>\n  {{ ref(0) }}\n</template>\n\n<script setup>\nimport { ref } from 'vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = FileAnalysisSnapshot {
@@ -1787,7 +1787,7 @@ fn test_hover_on_generic_attr_name_shows_docs() {
     let source = r#"<script setup lang="ts" generic="T extends string">
 const x = 1;
 </script>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Hover on the "generic" attribute NAME → should show SFC docs
@@ -1805,7 +1805,7 @@ fn test_hover_on_generic_attr_value_returns_none() {
     let source = r#"<script setup lang="ts" generic="T extends string">
 const x = 1;
 </script>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Hover INSIDE the generic value "T extends string" → should return None
@@ -1824,7 +1824,7 @@ fn test_hover_on_attrs_attr_value_returns_none() {
     let source = r#"<script setup lang="ts" attrs="{ class: string }">
 const x = 1;
 </script>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Hover INSIDE the attrs value "{ class: string }" → should return None
@@ -1842,7 +1842,7 @@ fn test_hover_on_lang_attr_value_still_works() {
     let source = r#"<script setup lang="ts" generic="T">
 const x = 1;
 </script>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Hover inside `lang="ts"` value → should still show SFC attr docs (not generic/attrs)
@@ -1882,7 +1882,7 @@ fn b4_class_element(
 }
 
 fn b4_hover_analysis(source: &str, scoped: bool, class_value: &str) -> FileAnalysisSnapshot {
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (scs, sce) = style_block.content_range();
     let style_css = &source[scs as usize..sce as usize];
@@ -1918,7 +1918,7 @@ fn b4_hover_analysis(source: &str, scoped: bool, class_value: &str) -> FileAnaly
 #[test]
 fn class_token_hover_shows_rule_description() {
     let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style scoped>\n.btn { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = b4_hover_analysis(source, true, "btn");
 
@@ -1956,7 +1956,7 @@ fn class_token_hover_shows_rule_description() {
 #[test]
 fn class_token_hover_fails_closed_without_rule_despite_binding() {
     let source = "<template>\n  <div class=\"primary\"></div>\n</template>\n<script setup>\nconst primary = 1\n</script>\n<style scoped>\n.unrelated { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let mut analysis = b4_hover_analysis(source, true, "primary");
     let binding_start = source.find("const primary").unwrap() as u32 + 6;
@@ -1992,7 +1992,7 @@ fn class_token_hover_fails_closed_without_rule_despite_binding() {
 #[test]
 fn class_token_hover_lists_multiple_rules() {
     let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style>\n.btn { color: red; }\n.card .btn { color: blue; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = b4_hover_analysis(source, false, "btn");
 
@@ -2028,7 +2028,7 @@ fn class_token_hover_lists_multiple_rules() {
 
 /// Svelte-shaped snapshot: markup class token + scoped scanned style.
 fn b4_svelte_analysis(source: &str, token_name: &str) -> FileAnalysisSnapshot {
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (scs, sce) = style_block.content_range();
     let style_css = &source[scs as usize..sce as usize];
@@ -2064,7 +2064,7 @@ fn b4_svelte_analysis(source: &str, token_name: &str) -> FileAnalysisSnapshot {
 #[test]
 fn svelte_class_token_hover_shows_rule() {
     let source = "<div class=\"card\"></div>\n<style>\n.card { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = b4_svelte_analysis(source, "card");
 
@@ -2095,7 +2095,7 @@ fn svelte_class_token_hover_shows_rule() {
 #[test]
 fn svelte_class_token_hover_fails_closed_without_rule() {
     let source = "<div class=\"ghost\"></div>\n<style>\n.real { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = b4_svelte_analysis(source, "ghost");
 
@@ -2118,7 +2118,7 @@ fn svelte_class_token_hover_fails_closed_without_rule() {
 #[test]
 fn module_class_rule_never_renders_in_class_token_hover() {
     let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style module>\n.btn { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();

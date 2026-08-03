@@ -11,7 +11,31 @@ import {
   collectCompletions,
   isOffsetInScriptBlock,
 } from "./analysisHelpers";
-import type { FileAnalysis } from "../core/types";
+import type { FileAnalysis, OrderedSfcStructure, StructureBlock } from "../core/types";
+
+function scriptStructureFor(source: string): OrderedSfcStructure {
+  const blocks: StructureBlock[] = [];
+  const re = /<script\b[^>]*>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(source))) {
+    const start = match.index + match[0].length;
+    const end = source.indexOf("</script>", start);
+    const range = (a: number, b: number) => ({ sourceSpaceToken: "test", start: a, end: b });
+    blocks.push({
+      kind: "section",
+      markupRootTokens: [],
+      section: {
+        blockToken: `script-${blocks.length}`,
+        role: { kind: "script", role: "instance", dialect: "typescript" },
+        openingRange: range(match.index, start),
+        contentRange: range(start, end < 0 ? source.length : end),
+        fullRange: range(match.index, end < 0 ? source.length : end + 9),
+        attributeInsertionAnchor: range(start - 1, start - 1),
+      },
+    });
+  }
+  return { schemaVersion: 1, artifactToken: "test", blocks, markupNodes: [] };
+}
 
 function makeAnalysis(overrides: Partial<FileAnalysis> = {}): FileAnalysis {
   return {
@@ -406,24 +430,24 @@ describe("isOffsetInScriptBlock", () => {
   it("returns true for offset inside script", () => {
     const source = '<script setup lang="ts">\nconst x = 1\n</script>';
     // "const x" starts at offset 25
-    expect(isOffsetInScriptBlock(source, 25)).toBe(true);
+    expect(isOffsetInScriptBlock(scriptStructureFor(source), 25)).toBe(true);
   });
 
   it("returns false for offset in template", () => {
     const source = "<template>\n  <div/>\n</template>\n<script setup>\n</script>";
-    expect(isOffsetInScriptBlock(source, 15)).toBe(false);
+    expect(isOffsetInScriptBlock(scriptStructureFor(source), 15)).toBe(false);
   });
 
   it("returns false for offset before any block", () => {
     const source = "<!-- comment -->\n<script setup>\n</script>";
-    expect(isOffsetInScriptBlock(source, 5)).toBe(false);
+    expect(isOffsetInScriptBlock(scriptStructureFor(source), 5)).toBe(false);
   });
 
   it("handles multiple script blocks", () => {
     const source = "<script>\nexport default {}\n</script>\n<script setup>\nconst x = 1\n</script>";
     // Inside first script (offset 10 is inside "export default")
-    expect(isOffsetInScriptBlock(source, 10)).toBe(true);
+    expect(isOffsetInScriptBlock(scriptStructureFor(source), 10)).toBe(true);
     // Inside second script (offset 52 is start of "const x = 1")
-    expect(isOffsetInScriptBlock(source, 52)).toBe(true);
+    expect(isOffsetInScriptBlock(scriptStructureFor(source), 52)).toBe(true);
   });
 });

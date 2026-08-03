@@ -581,9 +581,11 @@ function decodeComponentMetaBody(
       "publicInstance",
       decodeOptionalPublicInstance(body.publicInstance as ProtoRecord | undefined, graph),
     ),
-    ...maybe(
-      "sfcBlocks",
-      decodeOptionalSfcBlocks(body.sfcBlocks as ProtoRecord | undefined, graph),
+    orderedSfcStructure: decodeOrderedStructure(
+      requireProtoMessage(
+        body.orderedSfcStructure as ProtoRecord | undefined,
+        "ordered SFC structure",
+      ),
     ),
     components: ((body.components as ProtoRecord[] | undefined) ?? []).map((component) =>
       decodeComponentUsage(component, graph),
@@ -1036,93 +1038,22 @@ function decodeOptionalPublicInstance(
   };
 }
 
-function decodeOptionalSfcBlocks(
-  blocks: ProtoRecord | undefined,
-  graph: DecodedTypeGraph,
-): Record<string, unknown> | undefined {
-  if (!blocks) {
-    return undefined;
+function decodeOrderedStructure(structure: ProtoRecord): Record<string, unknown> {
+  const schemaVersion = Number(structure.schemaVersion ?? 0);
+  if (schemaVersion !== 1) {
+    throw graphError(
+      `component-meta payload has unknown ordered structure schema ${schemaVersion}`,
+    );
   }
-
-  return {
-    ...maybe(
-      "template",
-      decodeOptionalTemplateBlock(blocks.template as ProtoRecord | undefined, graph),
-    ),
-    ...maybe("script", decodeOptionalScriptBlock(blocks.script as ProtoRecord | undefined, graph)),
-    ...maybe(
-      "scriptSetup",
-      decodeOptionalScriptBlock(blocks.scriptSetup as ProtoRecord | undefined, graph),
-    ),
-    styles: ((blocks.styles as ProtoRecord[] | undefined) ?? []).map((style) =>
-      decodeStyleBlock(style, graph),
-    ),
-    custom: ((blocks.custom as ProtoRecord[] | undefined) ?? []).map((block) =>
-      decodeCustomBlock(block, graph),
-    ),
-  };
-}
-
-function decodeOptionalTemplateBlock(
-  block: ProtoRecord | undefined,
-  graph: DecodedTypeGraph,
-): Record<string, unknown> | undefined {
-  if (!block) {
-    return undefined;
+  const blocks = (structure.blocks as ProtoRecord[] | undefined) ?? [];
+  for (const block of blocks) {
+    const kind = block.kind as { case?: string; value?: ProtoRecord } | undefined;
+    const section = kind?.case === "section" ? kind.value?.common : undefined;
+    if ((section as ProtoRecord | undefined)?.blockContentBasisToken !== undefined) {
+      throw graphError("schema-8 structure payload must not carry a block content basis");
+    }
   }
-  return {
-    ...maybe("lang", graph.getStringMaybe(Number(block.langId ?? 0))),
-    ...maybe("src", graph.getStringMaybe(Number(block.srcId ?? 0))),
-    attributes: decodeSfcAttributes((block.attributes as ProtoRecord[] | undefined) ?? [], graph),
-  };
-}
-
-function decodeOptionalScriptBlock(
-  block: ProtoRecord | undefined,
-  graph: DecodedTypeGraph,
-): Record<string, unknown> | undefined {
-  if (!block) {
-    return undefined;
-  }
-  return {
-    ...maybe("lang", graph.getStringMaybe(Number(block.langId ?? 0))),
-    ...maybe("src", graph.getStringMaybe(Number(block.srcId ?? 0))),
-    ...maybe("generic", graph.getStringMaybe(Number(block.genericId ?? 0))),
-    ...maybe("attrsType", graph.getStringMaybe(Number(block.attrsTypeId ?? 0))),
-    attributes: decodeSfcAttributes((block.attributes as ProtoRecord[] | undefined) ?? [], graph),
-  };
-}
-
-function decodeStyleBlock(block: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
-  return {
-    index: Number(block.index ?? 0),
-    ...maybe("lang", graph.getStringMaybe(Number(block.langId ?? 0))),
-    ...maybe("src", graph.getStringMaybe(Number(block.srcId ?? 0))),
-    scoped: Boolean(block.scoped),
-    isModule: Boolean(block.isModule),
-    ...maybe("moduleName", graph.getStringMaybe(Number(block.moduleNameId ?? 0))),
-    attributes: decodeSfcAttributes((block.attributes as ProtoRecord[] | undefined) ?? [], graph),
-  };
-}
-
-function decodeCustomBlock(block: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
-  return {
-    index: Number(block.index ?? 0),
-    blockType: graph.getString(readRequiredId(block.blockTypeId, "custom block type")),
-    ...maybe("lang", graph.getStringMaybe(Number(block.langId ?? 0))),
-    ...maybe("src", graph.getStringMaybe(Number(block.srcId ?? 0))),
-    attributes: decodeSfcAttributes((block.attributes as ProtoRecord[] | undefined) ?? [], graph),
-  };
-}
-
-function decodeSfcAttributes(
-  attributes: ProtoRecord[],
-  graph: DecodedTypeGraph,
-): Record<string, unknown>[] {
-  return attributes.map((attribute) => ({
-    name: graph.getString(readRequiredId(attribute.nameId, "SFC attribute name")),
-    ...maybe("value", graph.getStringMaybe(Number(attribute.valueId ?? 0))),
-  }));
+  return structure;
 }
 
 function decodeOptionalRootInfo(

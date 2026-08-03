@@ -1,4 +1,4 @@
-﻿// Cross-file edit support for code actions.
+// Cross-file edit support for code actions.
 //
 // Provides `ChildComponentContext` — a bundle of resolved child component data
 // (URI, source, analysis, blocks, line_index) with helper methods for generating
@@ -12,8 +12,8 @@ use verter_semantic::analysis::types::{
 };
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 use crate::features::action_utils;
 
 /// Context for generating edits in a resolved child component.
@@ -28,7 +28,7 @@ pub struct ChildComponentContext {
     /// The URI of the child component file.
     pub uri: Uri,
     /// The full source text of the child component.
-    pub source: String,
+    pub source: std::sync::Arc<str>,
     /// The analysis snapshot of the child component.
     pub analysis: FileAnalysisSnapshot,
     /// The child's resolved attribute-fallthrough surface: the attribute names
@@ -39,14 +39,14 @@ pub struct ChildComponentContext {
     /// offered an "add prop" quick fix. EMPTY = nothing is inherited.
     pub inherited_attrs: std::collections::HashSet<String>,
     /// SFC blocks parsed from the child source.
-    pub blocks: Vec<SfcBlock>,
+    pub blocks: Vec<CarrierBlockView>,
     /// Line index for position conversions.
     pub line_index: LineIndex,
 }
 
 impl ChildComponentContext {
     /// Find the `<script setup>` block (returns `None` if not present).
-    pub fn script_setup(&self) -> Option<&SfcBlock> {
+    pub fn script_setup(&self) -> Option<&CarrierBlockView> {
         self.blocks.iter().find(|b| b.is_setup())
     }
 
@@ -158,16 +158,16 @@ impl ChildComponentContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::carrier_structure::test_carrier_blocks;
     use verter_semantic::analysis::template::{AnalyzedEmitDefinition, AnalyzedPropDefinition};
 
     fn make_child_context(source: &str, analysis: FileAnalysisSnapshot) -> ChildComponentContext {
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         ChildComponentContext {
             canonical_id: "/project/src/Child.vue".to_string(),
             uri: "file:///project/src/Child.vue".parse().unwrap(),
-            source: source.to_string(),
+            source: source.into(),
             analysis,
             inherited_attrs: std::collections::HashSet::new(),
             blocks,

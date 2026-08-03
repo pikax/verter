@@ -5,8 +5,8 @@
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::{parse_opening_tag, CarrierBlockView};
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::{parse_opening_tag, SfcBlock};
 use crate::features::cursor_context::{
     classify_cursor_context_for_language, CarrierTemplateLanguage, CursorContext, ExpressionKind,
     StyleCursorContext, TemplateCursorContext,
@@ -40,7 +40,7 @@ pub struct WorkspaceComponent {
 pub fn completions_at_position(
     position: &Position,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
     resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
@@ -70,6 +70,23 @@ pub fn completions_at_position(
             }
         }
         CursorContext::BlockOpeningTag { ref tag_name } => {
+            let block = blocks
+                .iter()
+                .find(|block| block.tag_name.as_str() == tag_name.as_str())?;
+            let cursor_token = source.get(block.open_tag_start as usize..offset as usize);
+            if offset == source.len() as u32
+                && cursor_token.is_some_and(|token| !token.contains('>'))
+            {
+                let completed_blocks = blocks
+                    .iter()
+                    .filter(|candidate| candidate.block_ref != block.block_ref)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                return Some(CompletionResult {
+                    items: sfc_root_completions(source, &completed_blocks, offset, line_index),
+                    is_incomplete: false,
+                });
+            }
             // When cursor is inside a `generic`, `attrs`, or `attributes` attribute
             // value on a <script> tag, return None to let the TypeProvider handle
             // completions via sourcemapped TSX positions.
@@ -86,9 +103,6 @@ pub fn completions_at_position(
                     }
                 }
             }
-            let block = blocks
-                .iter()
-                .find(|b| b.tag_name.as_str() == tag_name.as_str())?;
             Some(CompletionResult {
                 items: sfc_attribute_completions(source, block),
                 is_incomplete: false,
@@ -265,14 +279,26 @@ pub fn completions_at_position(
 /// [`snippet_item`] for the replace-range walk-back rule.
 fn sfc_root_completions(
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     offset: u32,
     line_index: &LineIndex,
 ) -> Vec<CompletionItem> {
     let mut items = Vec::new();
-    let has_template = blocks.iter().any(|b| b.tag_name == "template");
-    let has_script = blocks.iter().any(|b| b.tag_name == "script");
-    let has_style = blocks.iter().any(|b| b.tag_name == "style");
+    let is_current_unclosed = |block: &CarrierBlockView| {
+        offset == source.len() as u32
+            && source
+                .get(block.open_tag_start as usize..offset as usize)
+                .is_some_and(|token| !token.contains('>'))
+    };
+    let has_template = blocks
+        .iter()
+        .any(|block| block.tag_name == "template" && !is_current_unclosed(block));
+    let has_script = blocks
+        .iter()
+        .any(|block| block.tag_name == "script" && !is_current_unclosed(block));
+    let has_style = blocks
+        .iter()
+        .any(|block| block.tag_name == "style" && !is_current_unclosed(block));
     let is_empty = source.trim().is_empty();
 
     // Tag snippets (filtered by existing blocks)
@@ -374,7 +400,7 @@ fn sfc_root_completions(
 }
 
 /// Completions inside an SFC opening tag: context-sensitive attributes.
-fn sfc_attribute_completions(source: &str, block: &SfcBlock) -> Vec<CompletionItem> {
+fn sfc_attribute_completions(source: &str, block: &CarrierBlockView) -> Vec<CompletionItem> {
     let ctx = parse_opening_tag(source, block);
     let existing: Vec<&str> = ctx.attrs.iter().map(|a| a.name.as_str()).collect();
     let mut items = Vec::new();

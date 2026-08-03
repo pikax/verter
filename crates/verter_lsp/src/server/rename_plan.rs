@@ -23,9 +23,9 @@
 use tower_lsp_server::ls_types::{Position, Range, Uri, WorkspaceEdit};
 use verter_span::LspPosition;
 
+use crate::documents::carrier_structure::project_carrier_blocks_for_document;
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
-use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::features::rename::{
     classify_rename_target, MarkupOccurrenceInventory, RenameTarget, RenameTargetClass,
     SameFileEnumeration, UnenumeratedRegion,
@@ -52,7 +52,6 @@ pub(super) enum RenameAdmission {
     /// Fail closed with a user-visible reason and NO edit.
     Refuse(tower_lsp_server::jsonrpc::Error),
 }
-
 pub(crate) enum SvelteRenameScriptFactState<'a> {
     ExactSyntax(&'a verter_semantic::analysis::framework_facts::svelte::ExactSveltePropsCalls),
     SyntaxIncomplete,
@@ -252,7 +251,7 @@ impl RenameTargetResolution {
                 );
                 return None;
             }
-            let blocks = scan_sfc_blocks_for_document(&doc);
+            let blocks = project_carrier_blocks_for_document(&doc);
             let mut target = classify_rename_target(
                 position,
                 &doc.source,

@@ -294,8 +294,6 @@ pub struct FfiResolvedId {
 pub struct FfiVirtualMeta {
     pub scope_id: Option<String>,
     pub block_type: Option<String>,
-    pub style_index: Option<u32>,
-    pub custom_index: Option<u32>,
 }
 
 /// Response containing a compiled virtual file.
@@ -618,8 +616,7 @@ pub struct FfiComponentMeta {
     pub exposed: Vec<FfiExposedMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_instance: Option<FfiPublicInstanceMeta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sfc_blocks: Option<FfiSfcBlocksMeta>,
+    pub ordered_sfc_structure: FfiOrderedSfcStructure,
     pub type_registry: Vec<FfiResolvedTypeMeta>,
     pub components: Vec<FfiComponentUsage>,
     pub template_refs: Vec<FfiTemplateRefMeta>,
@@ -1169,80 +1166,184 @@ pub struct FfiPublicInstanceMemberMeta {
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct FfiSfcBlocksMeta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub template: Option<FfiTemplateBlockMeta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub script: Option<FfiScriptBlockMeta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub script_setup: Option<FfiScriptBlockMeta>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub styles: Vec<FfiStyleBlockMeta>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub custom: Vec<FfiCustomBlockMeta>,
+pub struct FfiOrderedSfcStructure {
+    pub schema_version: u32,
+    pub artifact_token: String,
+    pub blocks: Vec<FfiStructureBlock>,
+    pub markup_nodes: Vec<FfiMarkupNode>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiStructureBlock {
+    Section {
+        section: Box<FfiStructureSection>,
+        markup_root_tokens: Vec<String>,
+    },
+    MarkupRoot {
+        block_token: String,
+        markup_root_token: String,
+    },
 }
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct FfiSfcAttributeMeta {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+pub struct FfiStructureSection {
+    pub block_token: String,
+    pub role: FfiCarrierBlockRole,
+    pub authored_name: FfiAuthoredName,
+    pub opening_range: FfiStructureRange,
+    pub opening_name_range: FfiStructureRange,
+    pub content_range: FfiStructureRange,
+    pub closing_range: Option<FfiStructureRange>,
+    pub closing_name_range: Option<FfiStructureRange>,
+    pub full_range: FfiStructureRange,
+    pub termination: FfiSyntaxTermination,
+    pub attributes: Vec<FfiCarrierAttribute>,
+    /// Reserved content basis slot; structure-only producers leave it absent.
+    pub block_content_basis_token: Option<String>,
+    pub attribute_insertion_anchor: FfiStructureRange,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiCarrierBlockRole {
+    TemplateHost,
+    Script {
+        role: String,
+        dialect: String,
+    },
+    Style {
+        dialect: String,
+        scoped: bool,
+        module: String,
+    },
+    Custom {
+        normalized_name: String,
+    },
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiAuthoredName {
+    pub spelling: String,
+    pub normalized: String,
+    pub range: FfiStructureRange,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiStructureRange {
+    pub source_space_token: String,
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiSyntaxTermination {
+    Closed,
+    SelfClosing,
+    Void,
+    UnclosedEof,
+    Recovered {
+        reason: String,
+        recovery_range: Option<FfiStructureRange>,
+    },
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiCarrierAttribute {
+    pub attribute_token: String,
+    pub kind: String,
+    pub name: Option<FfiAuthoredName>,
     pub value: Option<String>,
+    pub full_range: FfiStructureRange,
+    pub duplicate_of: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct FfiTemplateBlockMeta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lang: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub src: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub attributes: Vec<FfiSfcAttributeMeta>,
+pub struct FfiMarkupNode {
+    pub node_token: String,
+    pub parent_node_token: Option<String>,
+    pub child_node_tokens: Vec<String>,
+    pub syntax: FfiMarkupSyntax,
 }
 
 #[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiScriptBlockMeta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lang: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub src: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generic: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attrs_type: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub attributes: Vec<FfiSfcAttributeMeta>,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiStyleBlockMeta {
-    pub index: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lang: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub src: Option<String>,
-    pub scoped: bool,
-    pub is_module: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub module_name: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub attributes: Vec<FfiSfcAttributeMeta>,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiCustomBlockMeta {
-    pub index: u32,
-    pub block_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lang: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub src: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub attributes: Vec<FfiSfcAttributeMeta>,
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiMarkupSyntax {
+    Element {
+        authored_name: FfiAuthoredName,
+        namespace: String,
+        element_kind: String,
+        opening_range: FfiStructureRange,
+        opening_name_range: FfiStructureRange,
+        attribute_insertion_anchor: FfiStructureRange,
+        content_range: FfiStructureRange,
+        closing_range: Option<FfiStructureRange>,
+        closing_name_range: Option<FfiStructureRange>,
+        full_range: FfiStructureRange,
+        self_closing: bool,
+        void_element: bool,
+        raw_text: bool,
+        termination: FfiSyntaxTermination,
+        attributes: Vec<FfiCarrierAttribute>,
+    },
+    Text {
+        content_range: FfiStructureRange,
+    },
+    Comment {
+        opening_range: FfiStructureRange,
+        content_range: FfiStructureRange,
+        closing_range: Option<FfiStructureRange>,
+        full_range: FfiStructureRange,
+        termination: FfiSyntaxTermination,
+    },
+    Interpolation {
+        family: String,
+        opening_range: FfiStructureRange,
+        expression_range: FfiStructureRange,
+        closing_range: Option<FfiStructureRange>,
+        full_range: FfiStructureRange,
+        termination: FfiSyntaxTermination,
+    },
+    SvelteControlBlock {
+        full_range: FfiStructureRange,
+        termination: FfiSyntaxTermination,
+    },
+    SvelteClause {
+        full_range: FfiStructureRange,
+        termination: FfiSyntaxTermination,
+    },
+    SvelteStandaloneTag {
+        full_range: FfiStructureRange,
+        termination: FfiSyntaxTermination,
+    },
+    Recovered {
+        opening_range: Option<FfiStructureRange>,
+        opening_name_range: Option<FfiStructureRange>,
+        content_range: Option<FfiStructureRange>,
+        closing_range: Option<FfiStructureRange>,
+        closing_name_range: Option<FfiStructureRange>,
+        full_range: FfiStructureRange,
+        termination: FfiSyntaxTermination,
+        expected: String,
+        reason: String,
+    },
+    Unknown {
+        opening_range: Option<FfiStructureRange>,
+        opening_name_range: Option<FfiStructureRange>,
+        content_range: Option<FfiStructureRange>,
+        closing_range: Option<FfiStructureRange>,
+        closing_name_range: Option<FfiStructureRange>,
+        full_range: FfiStructureRange,
+        termination: FfiSyntaxTermination,
+        authored_head: Option<String>,
+        reason: String,
+    },
 }
 
 #[derive(Serialize, Clone)]

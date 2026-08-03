@@ -332,18 +332,34 @@ fn registered_vue_projection_uses_the_real_capability_and_preserves_order_and_du
         inventory.block_start(&pair[0]).expect("first block")
             <= inventory.block_start(&pair[1]).expect("second block")
     }));
-    let template_host = inventory
+    let (template_host, template_syntax) = inventory
         .blocks()
         .iter()
         .find_map(|block| match block {
             CarrierBlock::Section {
                 id,
                 role: verter_language::SectionRole::TemplateHost,
-                ..
-            } => Some(*id),
+                syntax,
+            } => Some((*id, syntax)),
             _ => None,
         })
         .expect("template host");
+    assert_eq!(
+        inventory
+            .slice(verter_language::SourceSlice::new(
+                template_syntax.content_span,
+            ))
+            .expect("template content"),
+        "<DIV a=\"&amp;\" a='two' :id=\"x\">{{x}}</DIV>"
+    );
+    assert_eq!(
+        inventory
+            .slice(verter_language::SourceSlice::new(
+                template_syntax.closing_span.expect("template closing span"),
+            ))
+            .expect("template close"),
+        "</template>"
+    );
     let div = inventory
         .markup()
         .nodes()

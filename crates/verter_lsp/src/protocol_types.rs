@@ -450,6 +450,117 @@ pub struct ProjectOverviewStats {
 /// disarmed the fence for any file with no compile row.
 pub(crate) type CachedVerterDiagEntry = (i32, Option<u64>, Vec<Diagnostic>);
 
+/// Client-stamped request for the registered structure of one open document.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentStructureRequestV1 {
+    pub request_token: String,
+    pub text_document: TextDocumentIdentifier,
+    pub client_open_epoch: String,
+    pub expected_client_version: i32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentStructureV1 {
+    pub schema_version: u32,
+    pub document_revision_token: String,
+    pub artifact_token: String,
+    pub blocks: Vec<verter_ffi::types::FfiStructureBlock>,
+    pub markup_nodes: Vec<verter_ffi::types::FfiMarkupNode>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DocumentStructureResponseV1 {
+    Available {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+        structure: DocumentStructureV1,
+    },
+    StaleClientDocument {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+    },
+    ReplacementDocument {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+    },
+    Superseded {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+    },
+    Unavailable {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+        reason: DocumentUnavailableReasonV1,
+    },
+    Closed {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DocumentUnavailableReasonV1 {
+    UnsupportedLanguage,
+    CarrierProducerUnavailable,
+    RegistryMismatch,
+    ParseFailed,
+    StructureNotReady,
+}
+
+#[cfg(test)]
+mod document_structure_response_tests {
+    use super::DocumentStructureResponseV1;
+
+    fn stamps() -> (String, String, i32) {
+        ("request-1".into(), "open-7".into(), 19)
+    }
+
+    #[test]
+    fn freshness_failures_have_disjoint_content_free_wire_tags() {
+        let (request_token, client_open_epoch, expected_client_version) = stamps();
+        let responses = [
+            DocumentStructureResponseV1::StaleClientDocument {
+                request_token: request_token.clone(),
+                client_open_epoch: client_open_epoch.clone(),
+                expected_client_version,
+            },
+            DocumentStructureResponseV1::ReplacementDocument {
+                request_token: request_token.clone(),
+                client_open_epoch: client_open_epoch.clone(),
+                expected_client_version,
+            },
+            DocumentStructureResponseV1::Superseded {
+                request_token: request_token.clone(),
+                client_open_epoch: client_open_epoch.clone(),
+                expected_client_version,
+            },
+        ];
+        let tags = responses
+            .iter()
+            .map(|response| {
+                let value = serde_json::to_value(response).expect("serialize response");
+                let object = value.as_object().expect("response object");
+                assert_eq!(object.len(), 4, "failure response must remain content-free");
+                object["kind"].as_str().expect("kind tag").to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tags,
+            ["staleClientDocument", "replacementDocument", "superseded"]
+        );
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Component-meta selective API (D32 / D102 / D104 / D113)
 // ─────────────────────────────────────────────────────────────────

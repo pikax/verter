@@ -7,8 +7,8 @@ use tower_lsp_server::ls_types::*;
 use verter_semantic::analysis::{match_selector, MatchResult};
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 /// Provide CSS completions at a given position in a style block.
 ///
@@ -20,7 +20,7 @@ use crate::documents::sfc_scanner::SfcBlock;
 pub fn css_completions(
     position: &Position,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> Option<Vec<CompletionItem>> {
@@ -230,7 +230,7 @@ pub(crate) fn v_bind_decl_target_at(
 pub fn css_hover(
     position: &Position,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> Option<Hover> {
@@ -308,17 +308,17 @@ pub fn css_hover(
 /// Check if the cursor is on a CSS selector and show matching template elements.
 fn selector_hover(
     offset: usize,
-    style_block: &SfcBlock,
+    style_block: &CarrierBlockView,
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<Hover> {
-    let (content_start, _) = style_block.content_range();
-
-    // Find the matching style analysis for this block
+    // The sealed block ref is the association authority. Missing producer
+    // identity fails closed; offsets remain span metadata only.
+    let block_id = style_block.block_ref.block_id().get();
     let style = analysis
         .styles
         .iter()
-        .find(|s| s.content_offset == content_start)?;
+        .find(|style| style.block_id == Some(block_id))?;
     let css = style.css.as_ref()?;
     let template = analysis.template.as_deref()?;
 
@@ -465,13 +465,13 @@ static COMMON_CSS_PROPERTIES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::carrier_structure::test_carrier_blocks;
     use verter_semantic::analysis::*;
 
     #[test]
     fn test_css_completions_in_style() {
         let source = "<style>\n.foo { \n}\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         // Position inside the style block, on the empty property line
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn test_no_completions_outside_style() {
         let source = "<template>\n<div />\n</template>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let pos = line_index.offset_to_position(15).unwrap();
@@ -536,14 +536,21 @@ mod tests {
 
     fn build_style(
         source: &str,
-        blocks: &[SfcBlock],
+        blocks: &[CarrierBlockView],
     ) -> verter_semantic::analysis::StyleBlockAnalysis {
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+        build_style_for_block(source, style_block)
+    }
+
+    fn build_style_for_block(
+        source: &str,
+        style_block: &CarrierBlockView,
+    ) -> verter_semantic::analysis::StyleBlockAnalysis {
         let (content_start, content_end) = style_block.content_range();
         let css_content = &source[content_start as usize..content_end as usize];
-        let scoped = style_block.attrs_raw.contains("scoped");
+        let scoped = style_block.is_scoped();
 
-        verter_semantic::analysis::style::build_css_style_analysis(
+        let mut analysis = verter_semantic::analysis::style::build_css_style_analysis(
             css_content,
             verter_semantic::analysis::style::VueStyleInput {
                 v_binds: vec![],
@@ -553,14 +560,16 @@ mod tests {
             false,
             None,
             content_start,
-        )
+        );
+        analysis.block_id = Some(style_block.block_ref.block_id().get());
+        analysis
     }
 
     /// @ai-generated - Hover on CSS selector shows matched template elements
     #[test]
     fn test_hover_on_selector_shows_matches() {
         let source = "<template><div class=\"foo\"></div></template>\n<style scoped>\n.foo { color: red; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 
@@ -593,12 +602,52 @@ mod tests {
         assert!(contents.contains("<div"), "should reference the element");
     }
 
+    /// @ai-generated - Sealed block identity wins when offset metadata points
+    /// at the wrong analysis in a same-scoped multi-style file.
+    #[test]
+    fn selector_hover_joins_multi_style_analysis_by_sealed_block_identity() {
+        let source = "<template><div class=\"target\"></div></template>\n<style>.wrong {}</style>\n<style>.target {}</style>";
+        let blocks = test_carrier_blocks(source);
+        let style_blocks = blocks
+            .iter()
+            .filter(|block| block.tag_name == "style")
+            .collect::<Vec<_>>();
+        assert_eq!(style_blocks.len(), 2);
+
+        let mut wrong = build_style_for_block(source, style_blocks[0]);
+        let mut target = build_style_for_block(source, style_blocks[1]);
+        wrong.content_offset = style_blocks[1].content_range().0;
+        target.content_offset = u32::MAX;
+
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![wrong, target]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![make_element("div", &["target"])],
+                    ..Default::default()
+                })
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let line_index = LineIndex::new_utf16(source);
+        let selector_offset = source.rfind(".target").unwrap() as u32;
+        let position = line_index.offset_to_position(selector_offset).unwrap();
+
+        let hover = css_hover(&position, source, &blocks, Some(&analysis), &line_index)
+            .expect("the target block's analysis must be selected by sealed identity");
+        let HoverContents::Markup(contents) = hover.contents else {
+            panic!("expected markup hover")
+        };
+        assert!(contents.value.contains("`.target`"));
+    }
+
     /// @ai-generated - After '.' in style offers template class names
     #[test]
     fn test_selector_completion_class() {
         let source =
             "<template><div class=\"foo bar\"></div></template>\n<style scoped>\n.\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 
@@ -628,7 +677,7 @@ mod tests {
     #[test]
     fn test_selector_completion_id() {
         let source = "<template><div id=\"app\"></div></template>\n<style scoped>\n#\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 
@@ -669,7 +718,7 @@ mod tests {
     #[test]
     fn test_no_selector_completion_in_value() {
         let source = "<template><div class=\"foo\"></div></template>\n<style scoped>\n.foo { border: .5px; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 
@@ -704,7 +753,7 @@ mod tests {
     #[test]
     fn test_hover_on_selector_no_matches() {
         let source = "<template><div></div></template>\n<style scoped>\n.nonexistent { color: red; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 

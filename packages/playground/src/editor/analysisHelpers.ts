@@ -8,6 +8,7 @@ import type {
   AnalysisImportBinding,
   AnalysisMacro,
   AnalysisBindingInitializer,
+  OrderedSfcStructure,
 } from "../core/types";
 
 // ── Hover formatting ──
@@ -187,15 +188,18 @@ export function collectCompletions(
   return items;
 }
 
-/** Simple check: is the offset within a <script> block? */
-export function isOffsetInScriptBlock(source: string, offset: number): boolean {
-  const scriptOpenRe = /<script[^>]*>/gi;
-  let match;
-  while ((match = scriptOpenRe.exec(source)) !== null) {
-    const openEnd = match.index + match[0].length;
-    const closeIdx = source.indexOf("</script>", openEnd);
-    if (closeIdx === -1) continue;
-    if (offset >= openEnd && offset <= closeIdx) return true;
-  }
-  return false;
+/** Check script membership from the host's registered structure projection. */
+export function isOffsetInScriptBlock(
+  structure: OrderedSfcStructure | null,
+  offset: number,
+): boolean {
+  return (
+    structure?.blocks.some(
+      (block) =>
+        block.kind === "section" &&
+        block.section.role.kind === "script" &&
+        offset >= block.section.contentRange.start &&
+        offset <= block.section.contentRange.end,
+    ) ?? false
+  );
 }

@@ -112,7 +112,7 @@ fn getcomponentmeta_native_payload_unchanged_after_decomposition() {
 
 /// Companion: the audit corpus diff is bounded — the native payload's
 /// high-level field set unchanged across the projector
-/// decomposition. Tests the SFC blocks pass-through (parser data).
+/// decomposition. Tests registered structure pass-through.
 #[test]
 fn getcomponentmeta_native_payload_preserves_parser_data() {
     let host = build_host(&[("/workspace/src/Comp.vue", SIMPLE_VUE)]);
@@ -121,10 +121,10 @@ fn getcomponentmeta_native_payload_preserves_parser_data() {
         .get_component_meta("/workspace/src/Comp.vue")
         .expect("getComponentMeta must succeed");
 
-    // `sfc_blocks` is parser data — unchanged row.
+    // Schema-8 structure is the accepted parser authority.
     assert!(
-        meta.sfc_blocks.is_some(),
-        "sfc_blocks must remain populated (parser data preserved \
+        meta.ordered_sfc_structure.is_some(),
+        "ordered structure must remain populated (parser data preserved \
          across projector decomposition)"
     );
 

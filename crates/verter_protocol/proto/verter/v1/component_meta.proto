@@ -249,9 +249,10 @@ message ComponentMetaBody {
   ComponentMetaResolution resolution = 20;
   RootInfo root_info = 21;
   PublicInstanceMeta public_instance = 22;
-  SfcBlocksMeta sfc_blocks = 23;
+  reserved 23;
+  reserved "sfc_blocks";
   repeated MacroExpansionDiagnosticEntry macro_expansion_diagnostics = 24;
-  // Tag 25 is intentionally left free for the selective-response train.
+  OrderedSfcStructure ordered_sfc_structure = 25;
   ComponentContractAvailability component_public_contract = 26;
 }
 
@@ -502,49 +503,254 @@ message PublicInstanceMemberMeta {
   repeated JsdocTag tags = 7;
 }
 
-message SfcBlocksMeta {
-  TemplateBlockMeta template = 1;
-  ScriptBlockMeta script = 2;
-  ScriptBlockMeta script_setup = 3;
-  repeated StyleBlockMeta styles = 4;
-  repeated CustomBlockMeta custom = 5;
+message OrderedSfcStructure {
+  uint32 schema_version = 1;
+  string artifact_token = 2;
+  repeated StructureBlock blocks = 3;
+  repeated MarkupNode markup_nodes = 4;
+  reserved 5;
+  reserved "markup_root_tokens";
 }
 
-message SfcAttributeMeta {
-  uint32 name_id = 1;
-  uint32 value_id = 2;
+message StructureBlock {
+  oneof kind {
+    SectionBlock section = 1;
+    MarkupRootBlock markup_root = 2;
+  }
 }
 
-message TemplateBlockMeta {
-  uint32 lang_id = 1;
-  uint32 src_id = 2;
-  repeated SfcAttributeMeta attributes = 3;
+message SectionBlock {
+  StructureSection common = 1;
+  repeated string markup_root_tokens = 2;
 }
 
-message ScriptBlockMeta {
-  uint32 lang_id = 1;
-  uint32 src_id = 2;
-  uint32 generic_id = 3;
-  uint32 attrs_type_id = 4;
-  repeated SfcAttributeMeta attributes = 5;
+message MarkupRootBlock {
+  string block_token = 1;
+  string markup_root_token = 2;
 }
 
-message StyleBlockMeta {
-  uint32 index = 1;
-  uint32 lang_id = 2;
-  uint32 src_id = 3;
-  bool scoped = 4;
-  bool is_module = 5;
-  uint32 module_name_id = 6;
-  repeated SfcAttributeMeta attributes = 7;
+message BlockContentBasisTokenV1 {
+  string value = 1;
 }
 
-message CustomBlockMeta {
-  uint32 index = 1;
-  uint32 block_type_id = 2;
-  uint32 lang_id = 3;
-  uint32 src_id = 4;
-  repeated SfcAttributeMeta attributes = 5;
+message StructureSection {
+  string block_token = 1;
+  CarrierBlockRole role = 2;
+  AuthoredName authored_name = 3;
+  CanonicalRange opening_range = 4;
+  CanonicalRange opening_name_range = 5;
+  CanonicalRange content_range = 6;
+  CanonicalRange closing_range = 7;
+  CanonicalRange closing_name_range = 8;
+  CanonicalRange full_range = 9;
+  SyntaxTermination termination = 10;
+  reserved 11;
+  reserved "recovery";
+  repeated CarrierAttribute attributes = 12;
+  BlockContentBasisTokenV1 block_content_basis_token = 13;
+  CanonicalRange attribute_insertion_anchor = 14;
+}
+
+message CarrierBlockRole {
+  oneof kind {
+    Empty template_host = 1;
+    ScriptBlockRole script = 2;
+    StyleBlockRole style = 3;
+    CustomBlockRole custom = 4;
+  }
+}
+
+message Empty {}
+message ScriptBlockRole { string role = 1; string dialect = 2; }
+message StyleBlockRole { string dialect = 1; bool scoped = 2; string module = 3; }
+message CustomBlockRole { string normalized_name = 1; }
+
+message AuthoredName {
+  string spelling = 1;
+  string normalized = 2;
+  CanonicalRange range = 3;
+}
+
+message AuthoredSlice {
+  string text = 1;
+  CanonicalRange range = 2;
+}
+
+message CanonicalRange {
+  string source_space_token = 1;
+  PositionEncoding encoding = 2;
+  oneof representation {
+    OffsetRange offset_range = 3;
+    LineCharacterRange line_character_range = 4;
+  }
+  string encoding_session_token = 5;
+}
+
+message OffsetRange { uint32 start = 1; uint32 end = 2; }
+message LineCharacter { uint32 line = 1; uint32 character = 2; }
+message LineCharacterRange { LineCharacter start = 1; LineCharacter end = 2; }
+enum PositionEncoding {
+  POSITION_ENCODING_UNSPECIFIED = 0;
+  POSITION_ENCODING_UTF8_BYTES = 1;
+  POSITION_ENCODING_UTF16_CODE_UNITS = 2;
+  POSITION_ENCODING_UTF32_CODE_POINTS = 3;
+}
+
+message SyntaxTermination {
+  oneof kind {
+    Empty closed = 1;
+    Empty self_closing = 2;
+    Empty void = 3;
+    Empty unclosed_eof = 4;
+    RecoveredTermination recovered = 5;
+  }
+}
+message RecoveredTermination { string reason = 1; CanonicalRange recovery_range = 2; }
+
+message CarrierAttribute {
+  oneof kind {
+    NamedAttribute named = 1;
+    SpreadAttribute spread = 2;
+    DirectiveAttribute directive = 3;
+    AttachAttribute attach = 4;
+  }
+}
+message NamedAttribute {
+  string attribute_token = 1;
+  AuthoredName name = 2;
+  string syntax = 3;
+  AttributeValue value = 4;
+  CanonicalRange full_range = 5;
+  string duplicate_of = 6;
+}
+message SpreadAttribute {
+  string attribute_token = 1;
+  CanonicalRange full_range = 2;
+  CanonicalRange open_range = 3;
+  CanonicalRange expression_range = 4;
+  CanonicalRange close_range = 5;
+  SyntaxTermination termination = 6;
+}
+message AttachAttribute {
+  string attribute_token = 1;
+  CanonicalRange full_range = 2;
+  CanonicalRange keyword_range = 3;
+  CanonicalRange expression_range = 4;
+  CanonicalRange close_range = 5;
+  SyntaxTermination termination = 6;
+}
+message DirectiveAttribute {
+  string attribute_token = 1;
+  string family = 2;
+  CanonicalRange prefix_range = 3;
+  AuthoredName local_name = 4;
+  DirectiveArgument argument = 5;
+  repeated DirectiveModifier modifiers = 6;
+  AttributeValue value = 7;
+  CanonicalRange full_range = 8;
+  string duplicate_of = 9;
+}
+message DirectiveArgument {
+  oneof kind {
+    Empty none = 1;
+    AuthoredName static_name = 2;
+    DynamicAttributeSyntax dynamic = 3;
+  }
+}
+message DirectiveModifier {
+  AuthoredSlice authored = 1;
+  string normalized = 2;
+  CanonicalRange separator_range = 3;
+  CanonicalRange name_range = 4;
+  CanonicalRange full_range = 5;
+}
+message DynamicAttributeSyntax {
+  CanonicalRange full_range = 1;
+  CanonicalRange open_range = 2;
+  CanonicalRange expression_range = 3;
+  CanonicalRange close_range = 4;
+  SyntaxTermination termination = 5;
+}
+message AttributeValue {
+  oneof kind {
+    Empty missing = 1;
+    StaticAttributeValue static_value = 2;
+    DynamicAttributeSyntax expression = 3;
+    MixedAttributeValue mixed = 4;
+  }
+}
+message StaticAttributeValue {
+  AuthoredSlice raw = 1;
+  string decoded = 2;
+  string quote = 3;
+  CanonicalRange value_range = 4;
+  CanonicalRange inner_range = 5;
+}
+message MixedAttributeValue { CanonicalRange full_range = 1; repeated AttributeValuePart parts = 2; }
+message AttributeValuePart {
+  oneof kind {
+    AuthoredSlice static_value = 1;
+    DynamicAttributeSyntax expression = 2;
+  }
+}
+
+message MarkupNode {
+  string node_token = 1;
+  string parent_node_token = 2;
+  repeated string child_node_tokens = 3;
+  reserved 4 to 9;
+  oneof syntax {
+    MarkupElementSyntax element = 10;
+    TextSyntax text = 11;
+    CommentSyntax comment = 12;
+    InterpolationSyntax interpolation = 13;
+    GenericMarkupSyntax svelte_control_block = 14;
+    GenericMarkupSyntax svelte_clause = 15;
+    GenericMarkupSyntax svelte_standalone_tag = 16;
+    RecoveredSyntax recovered = 17;
+    UnknownSyntax unknown = 18;
+  }
+}
+message MarkupElementSyntax {
+  AuthoredName authored_name = 1;
+  string namespace = 2;
+  string kind = 3;
+  CanonicalRange opening_range = 4;
+  CanonicalRange opening_name_range = 5;
+  CanonicalRange attribute_insertion_anchor = 6;
+  CanonicalRange content_range = 7;
+  CanonicalRange closing_range = 8;
+  CanonicalRange closing_name_range = 9;
+  CanonicalRange full_range = 10;
+  bool self_closing = 11;
+  bool void_element = 12;
+  bool raw_text = 13;
+  SyntaxTermination termination = 14;
+  repeated CarrierAttribute attributes = 15;
+}
+message TextSyntax { CanonicalRange content_range = 1; }
+message CommentSyntax {
+  CanonicalRange opening_range = 1; CanonicalRange content_range = 2;
+  CanonicalRange closing_range = 3; CanonicalRange full_range = 4;
+  SyntaxTermination termination = 5;
+}
+message InterpolationSyntax {
+  string family = 1; CanonicalRange opening_range = 2;
+  CanonicalRange expression_range = 3; CanonicalRange closing_range = 4;
+  CanonicalRange full_range = 5; SyntaxTermination termination = 6;
+}
+message GenericMarkupSyntax { CanonicalRange full_range = 1; SyntaxTermination termination = 2; }
+message RecoveredSyntax {
+  CanonicalRange opening_range = 1; CanonicalRange opening_name_range = 2;
+  CanonicalRange content_range = 3; CanonicalRange closing_range = 4;
+  CanonicalRange closing_name_range = 5; CanonicalRange full_range = 6;
+  SyntaxTermination termination = 7; string expected = 8; string reason = 9;
+}
+message UnknownSyntax {
+  CanonicalRange opening_range = 1; CanonicalRange opening_name_range = 2;
+  CanonicalRange content_range = 3; CanonicalRange closing_range = 4;
+  CanonicalRange closing_name_range = 5; CanonicalRange full_range = 6;
+  SyntaxTermination termination = 7; AuthoredSlice authored_head = 8; string reason = 9;
 }
 
 message ResolvedTypeDeclaration {

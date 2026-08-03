@@ -283,7 +283,7 @@ fn empty_analysis() -> verter_semantic::analysis::component_meta::ComponentMetaA
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: Vec::new(),
         components: Vec::new(),
         template_refs: Vec::new(),
@@ -443,7 +443,7 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: vec![
             verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Props".to_string(),
@@ -540,7 +540,7 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         // DUPLICATE registry names around a DISTINCT middle element: a
         // name-collapsing (map-keyed) conversion loses a row and an internal
         // positional swap moves the sentinel types — both fail the
@@ -686,7 +686,7 @@ fn component_meta_ffi_exposes_root_info_summary() {
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: Vec::new(),
         components: Vec::new(),
         template_refs: Vec::new(),
@@ -1728,8 +1728,6 @@ fn virtual_file_arc_to_string() {
     assert!(ffi.stale);
     assert_eq!(ffi.meta.scope_id, Some("data-v-abc123".to_string()));
     assert!(ffi.meta.block_type.is_none());
-    assert_eq!(ffi.meta.style_index, Some(2));
-    assert!(ffi.meta.custom_index.is_none());
     assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
     assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
     assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));

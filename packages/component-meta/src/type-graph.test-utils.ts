@@ -109,7 +109,7 @@ export interface TestComponentMetaPayload {
   typeRegistry?: TestTypeRegistryEntry[];
 }
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 const NODE_PRIMITIVE = 1;
 const NODE_UNION = 3;
@@ -370,6 +370,12 @@ export function buildTestComponentMetaProtoPayload(
       kind: FALLTHROUGH_NONE,
       reason: NO_FALLTHROUGH_REASON_NO_TEMPLATE,
       branches: [],
+    },
+    orderedSfcStructure: {
+      schemaVersion: 1,
+      artifactToken: "test-artifact-token",
+      blocks: [],
+      markupNodes: [],
     },
     componentPublicContract: {
       availability: {

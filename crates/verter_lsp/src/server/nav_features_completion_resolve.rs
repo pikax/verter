@@ -17,7 +17,7 @@ use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
 use crate::type_provider::auto_import::{
-    resolve_script_import_anchor, translate_completion_import_edits_with_context,
+    resolve_script_import_anchor_from_structure, translate_completion_import_edits_with_context,
     CompletionImportTranslationContext, ExistingImportEditContext, ProviderImportEdit,
 };
 
@@ -129,7 +129,14 @@ pub(super) fn resolve_provider_auto_import_edits(
                 .collect()
         })
         .unwrap_or_default();
-    let anchor = resolve_script_import_anchor(&doc.source, &user_import_spans);
+    let Some(feature_snapshot) = doc.feature_snapshot.as_ref() else {
+        return Ok(None);
+    };
+    let anchor = resolve_script_import_anchor_from_structure(
+        &doc.source,
+        &user_import_spans,
+        feature_snapshot.structure(),
+    );
 
     // The edit targets the carrier SOURCE (the `.vue`/`.svelte` the carrier-IDE path
     // strips to); a bare `./Comp` inserted-import resolves against its directory via

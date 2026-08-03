@@ -251,8 +251,6 @@ export interface HostResolvedId {
 export interface HostVirtualMeta {
   scopeId?: string;
   blockType?: string;
-  styleIndex?: number;
-  customIndex?: number;
 }
 
 export interface HostVirtualFileResponse {

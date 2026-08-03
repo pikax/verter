@@ -65,7 +65,6 @@ import { PropConstnessDecorationProvider } from "./PropConstnessDecorationProvid
 import { SourceMapWebviewPanel } from "./SourceMapWebviewPanel";
 import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
 import { CssService } from "./css/cssService";
-import { findStyleBlockAt, scanStyleBlocks } from "./css/styleBlockScanner";
 import { createRestartSupervisor, restartLanguageServer } from "./restart";
 import {
   checkClaudeCodeAndNotify,
@@ -819,20 +818,29 @@ async function startVueLanguageServer(
   );
 
   // CSS intellisense service — created after client, referenced by middleware closures
+  const documentEpochs = new WeakMap<TextDocument, string>();
+  let documentEpochCounter = 0;
+  const getDocumentOpenEpoch = (uri: string): string => {
+    const document = workspace.textDocuments.find((candidate) => candidate.uri.toString() === uri);
+    if (!document) return `closed:${uri}`;
+    let epoch = documentEpochs.get(document);
+    if (!epoch) {
+      epoch = `${++documentEpochCounter}:${Date.now().toString(36)}`;
+      documentEpochs.set(document, epoch);
+    }
+    return epoch;
+  };
   let cssService: CssService | undefined;
   const getCssService = () => {
     if (!cssService) {
       writeTimingMarker("css_service_construct_start", Date.now());
-      cssService = new CssService(getClient, rootPath);
+      cssService = new CssService(getClient, rootPath, getDocumentOpenEpoch);
       writeTimingMarker("css_service_construct_end", Date.now());
     }
     return cssService;
   };
   const cssDiagnostics = languages.createDiagnosticCollection("verter-css");
   attempt.add(cssDiagnostics);
-  const hasStyleBlockAtPosition = (source: string, line: number, character: number) =>
-    findStyleBlockAt(scanStyleBlocks(source), source, line, character) !== undefined;
-  const hasStyleBlocks = (source: string) => scanStyleBlocks(source).length > 0;
 
   // The active framework carriers are EVERY registered adapter — derived from
   // the descriptor-generated client framework manifest, NOT an opt-in client
@@ -923,10 +931,6 @@ async function startVueLanguageServer(
         }
 
         const source = document.getText();
-        if (!hasStyleBlockAtPosition(source, position.line, position.character)) {
-          return next(document, position, context, token);
-        }
-
         const cssService = getCssService();
         const uri = document.uri.toString();
         const [cssResult, lspResult] = await Promise.all([
@@ -959,10 +963,6 @@ async function startVueLanguageServer(
         }
 
         const source = document.getText();
-        if (!hasStyleBlockAtPosition(source, position.line, position.character)) {
-          return next(document, position, token);
-        }
-
         const cssService = getCssService();
         const uri = document.uri.toString();
         const [cssResult, lspResult] = await Promise.all([
@@ -994,10 +994,6 @@ async function startVueLanguageServer(
         }
 
         const source = document.getText();
-        if (!hasStyleBlocks(source)) {
-          return next(document, token);
-        }
-
         const uri = document.uri.toString();
         const cssService = getCssService();
         const [cssResult, lspResult] = await Promise.all([
@@ -1022,12 +1018,6 @@ async function startVueLanguageServer(
         }
 
         const source = context.document.getText();
-        if (
-          !hasStyleBlockAtPosition(source, context.range.start.line, context.range.start.character)
-        ) {
-          return next(color, context, token);
-        }
-
         const cssService = getCssService();
         const uri = context.document.uri.toString();
         const cssResult = await cssService.getColorPresentations(
@@ -1051,10 +1041,6 @@ async function startVueLanguageServer(
         }
 
         const source = document.getText();
-        if (!hasStyleBlockAtPosition(source, position.line, position.character)) {
-          return next(document, position, token);
-        }
-
         const cssService = getCssService();
         const uri = document.uri.toString();
         const [cssResult, lspResult] = await Promise.all([
@@ -1531,10 +1517,6 @@ async function startVueLanguageServer(
     try {
       const uri = document.uri.toString();
       const source = document.getText();
-      if (!hasStyleBlocks(source)) {
-        cssDiagnostics.delete(document.uri);
-        return;
-      }
       const results = await getCssService().doValidation(uri, source, document.version);
       const allDiags: VDiagnostic[] = [];
       for (const { diagnostics } of results) {

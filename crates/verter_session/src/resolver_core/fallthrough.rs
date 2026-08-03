@@ -1895,7 +1895,7 @@ mod tests {
             models: Vec::new(),
             exposed: Vec::new(),
             public_instance: None,
-            sfc_blocks: None,
+            ordered_sfc_structure: None,
             type_registry: Vec::new(),
             components: Vec::new(),
             template_refs: Vec::new(),

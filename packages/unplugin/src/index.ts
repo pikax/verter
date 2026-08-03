@@ -438,10 +438,74 @@ function isClientComponent(filename: string): boolean {
 }
 
 interface StyleBlockEntry {
+  blockToken: string;
   content: string;
   lang: string;
   scoped: boolean;
   module: boolean | string;
+}
+
+interface HostStructureRange {
+  start: number;
+  end: number;
+}
+
+interface HostStructureAttribute {
+  name?: { normalized: string };
+  value?: string;
+}
+
+interface HostStructureSection {
+  blockToken: string;
+  role: { kind: string; scoped?: boolean };
+  contentRange: HostStructureRange;
+  attributes: HostStructureAttribute[];
+}
+
+interface HostDocumentStructure {
+  blocks: Array<{ kind: string; section?: HostStructureSection }>;
+}
+
+function utf8OffsetToUtf16(source: string, target: number): number | null {
+  let bytes = 0;
+  let units = 0;
+  for (const scalar of source) {
+    if (bytes === target) return units;
+    const code = scalar.codePointAt(0)!;
+    bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+    units += scalar.length;
+    if (bytes > target) return null;
+  }
+  return bytes === target ? units : null;
+}
+
+function styleEntriesFromStructure(
+  host: VerterHost,
+  filename: string,
+  source: string,
+): StyleBlockEntry[] {
+  const encoded = host.getDocumentStructure(filename);
+  if (encoded === null) return [];
+  const structure = JSON.parse(encoded) as HostDocumentStructure;
+  const entries: StyleBlockEntry[] = [];
+  for (const block of structure.blocks) {
+    const section = block.kind === "section" ? block.section : undefined;
+    if (section?.role.kind !== "style") continue;
+    const start = utf8OffsetToUtf16(source, section.contentRange.start);
+    const end = utf8OffsetToUtf16(source, section.contentRange.end);
+    if (start === null || end === null) continue;
+    const attribute = (name: string) =>
+      section.attributes.find((entry) => entry.name?.normalized === name);
+    const module = attribute("module");
+    entries.push({
+      blockToken: section.blockToken,
+      content: source.slice(start, end),
+      lang: attribute("lang")?.value ?? "css",
+      scoped: section.role.scoped ?? false,
+      module: module === undefined ? false : (module.value ?? true),
+    });
+  }
+  return entries;
 }
 
 function createFrameworkFactory(
@@ -480,7 +544,7 @@ function createFrameworkFactory(
     const styleBlockCache = new Map<string, StyleBlockEntry[]>();
     const compiledStyleCache = new Map<string, CompiledStyleArtifact[]>();
 
-    // Build timing instrumentation accumulates per-phase timings across carrier transforms.
+    // Build timing instrumentation accumulates timings across carrier transforms.
     // Enabled when VERTER_TIMING=1 env var is set.
     const timing = process.env.VERTER_TIMING === "1";
     let tFileCount = 0;
@@ -893,16 +957,6 @@ function createFrameworkFactory(
         // Cache the profile so load() can reuse it for virtual file requests
         profileCache.set(filename, profile);
 
-        // Extract per-style-block scoped flags from the SFC source.
-        // Match <style ... scoped ...> tags in order.
-        const scopedFlags: boolean[] = [];
-        const styleRe = /<style\b([^>]*)>/gi;
-        let styleMatch;
-        while ((styleMatch = styleRe.exec(code)) !== null) {
-          scopedFlags.push(/\bscoped\b/.test(styleMatch[1]));
-        }
-        styleScopedCache.set(filename, scopedFlags);
-
         // Register file in host (handles parsing, caching, change detection)
         const t0 = timing ? performance.now() : 0;
         const upsertResult = host.upsert({
@@ -911,17 +965,15 @@ function createFrameworkFactory(
         });
         const t1 = timing ? performance.now() : 0;
 
-        // In Vite mode, populate the style block cache with raw style content.
-        // Vite's CSS pipeline will preprocess SCSS/SASS/Less between load() and transform().
-        if (viteConfig && compiler) {
-          const { descriptor } = compiler.parse(code, { filename });
-          const entries: StyleBlockEntry[] = descriptor.styles.map((s: any) => ({
-            content: s.content,
-            lang: s.lang || "css",
-            scoped: s.scoped ?? false,
-            module: s.module ?? false,
-          }));
+        // Project authored inline styles from the registered inventory. External
+        // content is unavailable on this structure-only surface.
+        if (viteConfig) {
+          const entries = styleEntriesFromStructure(host, upsertResult.canonicalId, code);
           styleBlockCache.set(filename, entries);
+          styleScopedCache.set(
+            filename,
+            entries.map((entry) => entry.scoped),
+          );
         }
 
         await resolveUpsertDependencies(
@@ -1007,9 +1059,7 @@ function createFrameworkFactory(
           });
 
           const scriptRequest = `${filename}?vue&type=script&lang.${mainLang}`;
-          // Build style imports. Prefer the compiler-parsed cache (accurate lang,
-          // scoped, module flags); fall back to a simple regex scan of the raw
-          // SFC source when compiler-sfc is absent.
+          // Build style imports from the registered inventory projection.
           //
           // CSS modules match @vitejs/plugin-vue:
           //   import styleN from "…?vue&type=style&index=N&lang.module.css"
@@ -1020,25 +1070,7 @@ function createFrameworkFactory(
           // `$style` from `type.__cssModules`.
           const cachedStyles = styleBlockCache.get(filename);
           const styleEntries: Array<{ lang: string; module: boolean | string }> =
-            cachedStyles?.map((s) => ({ lang: s.lang, module: s.module })) ??
-            (() => {
-              const entries: Array<{ lang: string; module: boolean | string }> = [];
-              const re = /<style\b([^>]*)>/gi;
-              let m;
-              while ((m = re.exec(code)) !== null) {
-                const attrs = m[1];
-                const langMatch = /\blang\s*=\s*["']([^"']+)["']/.exec(attrs);
-                let module: boolean | string = false;
-                const moduleNamed = /\bmodule\s*=\s*["']([^"']+)["']/.exec(attrs);
-                if (moduleNamed) {
-                  module = moduleNamed[1];
-                } else if (/\bmodule\b/.test(attrs)) {
-                  module = true;
-                }
-                entries.push({ lang: langMatch?.[1] ?? "css", module });
-              }
-              return entries;
-            })();
+            cachedStyles?.map((s) => ({ lang: s.lang, module: s.module })) ?? [];
 
           const styleLines: string[] = [];
           const cssModulesMap: Record<string, string> = {};

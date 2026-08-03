@@ -1,8 +1,8 @@
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 /// Generate CodeLens items for a Vue SFC file.
 ///
@@ -11,7 +11,7 @@ use crate::documents::sfc_scanner::SfcBlock;
 /// - `<template>` — component count, binding occurrences
 /// - `<style>` — selector count, class count
 pub fn code_lenses(
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> Vec<CodeLens> {
@@ -130,11 +130,16 @@ fn template_summary(analysis: &FileAnalysisSnapshot) -> String {
     parts.join(" · ")
 }
 
-fn style_summary(analysis: &FileAnalysisSnapshot, block: &SfcBlock) -> String {
+fn style_summary(analysis: &FileAnalysisSnapshot, block: &CarrierBlockView) -> String {
     let is_scoped = block.is_scoped();
 
-    // Find corresponding style analysis
-    let style = analysis.styles.iter().find(|s| s.scoped == is_scoped);
+    // Associate only through the inventory-derived identity carried by the
+    // sealed block ref. Missing identity fails closed.
+    let block_id = block.block_ref.block_id().get();
+    let style = analysis
+        .styles
+        .iter()
+        .find(|style| style.block_id == Some(block_id));
     let style = match style {
         Some(s) => s,
         None => return String::new(),
@@ -178,14 +183,14 @@ fn style_summary(analysis: &FileAnalysisSnapshot, block: &SfcBlock) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::carrier_structure::test_carrier_blocks;
     use verter_semantic::analysis::types::VueApiCallSite;
     use verter_semantic::analysis::*;
 
     #[test]
     fn test_script_code_lens() {
         let source = "<script setup>\nconst x = ref(0)\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
@@ -231,7 +236,7 @@ mod tests {
     #[test]
     fn test_empty_analysis_no_lenses() {
         let source = "<script setup>\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot::default();
@@ -242,10 +247,56 @@ mod tests {
     #[test]
     fn test_no_analysis_no_lenses() {
         let source = "<script setup>\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let lenses = code_lenses(&blocks, None, &line_index);
         assert!(lenses.is_empty());
+    }
+
+    /// @ai-generated - Same-scoped style blocks must retain distinct summaries
+    /// through their sealed artifact-local block identities.
+    #[test]
+    fn multi_style_code_lenses_join_analysis_by_sealed_block_identity() {
+        let source = "<style>.first {}</style>\n<style>.second {}, .third {}</style>";
+        let blocks = test_carrier_blocks(source);
+        let style_blocks = blocks
+            .iter()
+            .filter(|block| block.tag_name == "style")
+            .collect::<Vec<_>>();
+        assert_eq!(style_blocks.len(), 2);
+
+        let build = |block: &CarrierBlockView| {
+            let (start, end) = block.content_range();
+            let mut style = style::build_css_style_analysis(
+                &source[start as usize..end as usize],
+                style::VueStyleInput::default(),
+                false,
+                false,
+                None,
+                start,
+            );
+            style.block_id = Some(block.block_ref.block_id().get());
+            style
+        };
+        let first = build(style_blocks[0]);
+        let second = build(style_blocks[1]);
+        let analysis = FileAnalysisSnapshot {
+            // Reverse the analyses so a scoped-flag join selects the wrong one.
+            styles: (vec![second, first]).into(),
+            ..Default::default()
+        };
+        let line_index = LineIndex::new_utf16(source);
+
+        let lenses = code_lenses(&blocks, Some(&analysis), &line_index);
+        let titles = lenses
+            .iter()
+            .map(|lens| lens.command.as_ref().unwrap().title.as_str())
+            .collect::<Vec<_>>();
+        assert!(titles[0].contains("1 selector"), "first block: {titles:?}");
+        assert!(
+            titles[1].contains("2 selectors"),
+            "second block: {titles:?}"
+        );
     }
 }

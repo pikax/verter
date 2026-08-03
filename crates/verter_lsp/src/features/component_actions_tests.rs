@@ -1,6 +1,6 @@
-﻿use super::*;
+use super::*;
+use crate::documents::carrier_structure::{test_carrier_blocks, test_structure};
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_semantic::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
@@ -39,7 +39,7 @@ fn make_component(
         v_models: vec![],
         bindings: vec![],
         events: vec![],
-        span: verter_span::Span::new(0, 50),
+        span: verter_span::Span::new(13, 50),
     }
 }
 
@@ -67,12 +67,12 @@ fn producer_backed_macros(
 }
 
 fn make_child_context(source: &str, analysis: FileAnalysisSnapshot) -> ChildComponentContext {
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     ChildComponentContext {
         canonical_id: "/project/src/Child.vue".to_string(),
         uri: "file:///project/src/Child.vue".parse().unwrap(),
-        source: source.to_string(),
+        source: source.into(),
         analysis,
         inherited_attrs: std::collections::HashSet::new(),
         blocks,
@@ -484,7 +484,10 @@ fn suggest_matching_props_single_match() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     // Positive: produces action(s) with `:title`
     assert!(!actions.is_empty(), "should produce at least one action");
@@ -528,7 +531,10 @@ fn suggest_matching_props_multiple_matches() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     // Positive: should have a bulk action (3 matches) + 3 individual actions = 4 total
     assert!(
@@ -565,7 +571,10 @@ fn suggest_matching_props_no_match() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(actions.is_empty(), "no matching bindings → no actions");
 }
@@ -590,7 +599,10 @@ fn suggest_matching_props_already_passed() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(
         actions.is_empty(),
@@ -613,7 +625,7 @@ fn suggest_matching_props_no_child_analysis() {
 
     let actions = suggest_matching_props(
         &parent,
-        source,
+        &test_structure(source, false),
         &li,
         &uri,
         &|_| None, // unresolvable child
@@ -638,7 +650,10 @@ fn suggest_matching_props_no_script_setup_child() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(
         actions.is_empty(),
@@ -676,7 +691,10 @@ fn suggest_matching_props_from_imports() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(!actions.is_empty(), "import-provided binding should match");
 }
@@ -711,7 +729,10 @@ fn suggest_matching_props_type_only_import_excluded() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(actions.is_empty(), "type-only import must not be offered");
 }
@@ -731,7 +752,10 @@ fn suggest_matching_props_spread_present_skips() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(actions.is_empty(), "spread present → skip suggestions");
 }
@@ -753,7 +777,10 @@ fn suggest_matching_props_self_closing() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     // Positive: should still produce actions for self-closing tags
     assert!(
@@ -793,7 +820,10 @@ fn suggest_matching_props_partial_match() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     // Should produce 1 individual action (no bulk since only 1 match)
     assert_eq!(
@@ -808,25 +838,33 @@ fn suggest_matching_props_partial_match() {
     }
 }
 
-// ── find_opening_tag_end helper tests ──────────────────────────────
+// ── inventory attribute-anchor tests ──────────────────────────────
 
 #[test]
 fn find_tag_end_normal() {
-    let source = "<Child class=\"x\">";
-    assert_eq!(find_opening_tag_end(source, 0), Some(16));
+    let source = "<template><Child class=\"x\"></Child></template>";
+    let child_start = source.find("<Child").unwrap() as u32;
+    assert_eq!(
+        component_attribute_anchor(&test_structure(source, false), child_start),
+        Some(source.find('>').unwrap() as u32 + 1 + 16)
+    );
 }
 
 #[test]
 fn find_tag_end_self_closing() {
-    let source = "<Child class=\"x\" />";
-    // Should find `/` at position 17
-    assert_eq!(find_opening_tag_end(source, 0), Some(17));
+    let source = "<template><Child class=\"x\" /></template>";
+    let child_start = source.find("<Child").unwrap() as u32;
+    assert_eq!(
+        component_attribute_anchor(&test_structure(source, false), child_start),
+        Some(source.find("/>").unwrap() as u32)
+    );
 }
 
 #[test]
 fn find_tag_end_with_quotes() {
-    let source = "<Child title=\"a > b\" />";
+    let source = "<template><Child title=\"a > b\" /></template>";
+    let child_start = source.find("<Child").unwrap() as u32;
     // The `>` inside quotes should be ignored
-    let offset = find_opening_tag_end(source, 0).unwrap();
-    assert!(offset > 15, "should skip > inside quotes, got {}", offset);
+    let offset = component_attribute_anchor(&test_structure(source, false), child_start).unwrap();
+    assert_eq!(offset, source.find("/>").unwrap() as u32);
 }

@@ -10,7 +10,48 @@ import {
   computeCodeLenses,
   getDecorationStyles,
 } from "./decorations";
-import type { FileAnalysis, AnalysisBinding } from "../core/types";
+import type {
+  FileAnalysis,
+  AnalysisBinding,
+  OrderedSfcStructure,
+  StructureBlock,
+} from "../core/types";
+
+function structureFor(source: string): OrderedSfcStructure {
+  const blocks: StructureBlock[] = [];
+  const re = /<(template|script|style)\b[^>]*>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(source))) {
+    const name = match[1].toLowerCase();
+    const start = match.index + match[0].length;
+    const close = source.indexOf(`</${name}>`, start);
+    const end = close < 0 ? source.length : close;
+    const range = (a: number, b: number) => ({ sourceSpaceToken: "test", start: a, end: b });
+    blocks.push({
+      kind: "section",
+      markupRootTokens: [],
+      section: {
+        blockToken: `${name}-${blocks.length}`,
+        role:
+          name === "template"
+            ? { kind: "templateHost" }
+            : name === "script"
+              ? { kind: "script", role: "instance", dialect: "typescript" }
+              : {
+                  kind: "style",
+                  dialect: "css",
+                  scoped: match[0].includes("scoped"),
+                  module: "none",
+                },
+        openingRange: range(match.index, start),
+        contentRange: range(start, end),
+        fullRange: range(match.index, close < 0 ? source.length : close + name.length + 3),
+        attributeInsertionAnchor: range(start - 1, start - 1),
+      },
+    });
+  }
+  return { schemaVersion: 1, artifactToken: "test", blocks, markupNodes: [] };
+}
 
 function makeAnalysis(overrides: Partial<FileAnalysis> = {}): FileAnalysis {
   return {
@@ -295,7 +336,7 @@ describe("computeCodeLenses", () => {
         },
       ],
     });
-    const lenses = computeCodeLenses(source, analysis);
+    const lenses = computeCodeLenses(source, analysis, structureFor(source));
     // Should have at least a script lens and a template lens
     expect(lenses.length).toBeGreaterThanOrEqual(2);
     const scriptLens = lenses.find((l) => l.title.includes("binding"));
@@ -328,7 +369,7 @@ describe("computeCodeLenses", () => {
         },
       ],
     });
-    const lenses = computeCodeLenses(source, analysis);
+    const lenses = computeCodeLenses(source, analysis, structureFor(source));
     const styleLens = lenses.find((l) => l.title.includes("scoped"));
     expect(styleLens).toBeTruthy();
   });
@@ -336,7 +377,7 @@ describe("computeCodeLenses", () => {
   it("returns empty array for source with no blocks", () => {
     const source = "// just a comment";
     const analysis = makeAnalysis();
-    const lenses = computeCodeLenses(source, analysis);
+    const lenses = computeCodeLenses(source, analysis, structureFor(source));
     expect(lenses).toEqual([]);
   });
 });

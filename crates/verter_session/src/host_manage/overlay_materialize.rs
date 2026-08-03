@@ -201,6 +201,23 @@ impl OverlayArtifactIdentity {
 }
 
 impl VerterHost {
+    /// Return the registered carrier structure owned by the active view.
+    /// Overlay source is registered through the same authority used by
+    /// materialization; an unmasked file reuses the committed base envelope.
+    pub(super) fn registered_structure_for_view(
+        &self,
+        canonical_id: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<crate::carrier_publication_store::RegisteredFileStructure> {
+        if view.overlay_content_hash_for(canonical_id).is_none() {
+            return self.registered_file_structure(canonical_id);
+        }
+
+        let source = view.source(canonical_id)?;
+        let file_language = self.language_classifier.classify(canonical_id);
+        self.registered_overlay_structure(canonical_id, source, &file_language, view)
+    }
+
     pub(super) fn registered_overlay_structure(
         &self,
         canonical_id: &str,
@@ -696,6 +713,9 @@ impl VerterHost {
                         job_raw_source.as_ref(),
                         job_scope,
                         parsed_sfc,
+                        job_framework_parse
+                            .as_deref()
+                            .expect("Vue parse came from this framework artifact"),
                         &job_provenance,
                         VerterHost::vue_flight_script_program(eval_is_extracted_script, program),
                         Some(&owner_table),

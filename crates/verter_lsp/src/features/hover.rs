@@ -9,10 +9,10 @@ use verter_session::framework::{
 use verter_session::FileAnalysisSnapshot;
 use verter_type_expr::{render_type_expr_display, PublicationResult, TypeExpr};
 
-use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::{
-    classify_cursor, parse_opening_tag, SfcBlock, SfcCursorContext,
+use crate::documents::carrier_structure::{
+    classify_cursor, parse_opening_tag, CarrierBlockView, CarrierCursorContext,
 };
+use crate::documents::line_index::LineIndex;
 use crate::features::hover_event_tokens::{
     camelize_event_name, capitalize_first, event_directive_hover, v_model_hover,
     vue_event_attr_label,
@@ -117,7 +117,7 @@ impl From<Hover> for VerterHoverResult {
 pub fn hover_at_position(
     position: &Position,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
     ssr_context: bool,
@@ -127,8 +127,8 @@ pub fn hover_at_position(
     // Check SFC structural context BEFORE requiring analysis data.
     // This allows hover on tags even when analysis hasn't completed.
     match classify_cursor(offset, blocks) {
-        SfcCursorContext::OpeningTag { block_index } => {
-            if let Some(hover) = sfc_tag_hover(source, &blocks[block_index], offset) {
+        CarrierCursorContext::OpeningTag { block } => {
+            if let Some(hover) = sfc_tag_hover(source, &block, offset) {
                 return Some(hover.into());
             }
             // A phantom custom block from the depth-ignorant scanner (an
@@ -162,10 +162,10 @@ pub fn hover_at_position(
             }
             return None;
         }
-        SfcCursorContext::ClosingTag { block_index } => {
-            return sfc_tag_name_hover(&blocks[block_index].tag_name).map(|h| h.into());
+        CarrierCursorContext::ClosingTag { block } => {
+            return sfc_tag_name_hover(&block.tag_name).map(|h| h.into());
         }
-        SfcCursorContext::RootLevel => {
+        CarrierCursorContext::RootLevel => {
             // Vue template markup the SFC scanner can leave in a dead zone on
             // MALFORMED input: with the outer close missing, the scanner's
             // depth-balanced walk fails closed to the first-close boundary, so
@@ -198,7 +198,7 @@ pub fn hover_at_position(
             }
             return None;
         }
-        SfcCursorContext::BlockContent { .. } => {} // fall through to analysis-based hover
+        CarrierCursorContext::BlockContent { .. } => {} // fall through to analysis-based hover
     }
 
     let analysis = analysis?;
@@ -254,7 +254,7 @@ pub fn hover_at_position(
 /// Hover on an SFC opening tag — dispatches to tag name or attribute hover.
 /// Returns `None` for cursor inside `generic`/`attrs`/`attributes` attribute values
 /// on script tags, letting the TypeProvider handle those via sourcemapped TSX positions.
-fn sfc_tag_hover(source: &str, block: &SfcBlock, offset: u32) -> Option<Hover> {
+fn sfc_tag_hover(source: &str, block: &CarrierBlockView, offset: u32) -> Option<Hover> {
     let ctx = parse_opening_tag(source, block);
 
     // Check if cursor is on the tag name

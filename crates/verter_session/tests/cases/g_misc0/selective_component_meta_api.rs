@@ -53,7 +53,7 @@ fn selective_api_get_component_meta_surface_returns_envelope_with_all_23_analysi
         accepted_surface_completeness_bytes: Vec::new(),
         macro_expansion_diagnostics_bytes: Vec::new(),
         vue_api_calls_bytes: Vec::new(),
-        sfc_blocks_bytes: None,
+        ordered_sfc_structure_bytes: None,
         imports_bytes: Vec::new(),
         bindings_bytes: Vec::new(),
         styles_bytes: Vec::new(),

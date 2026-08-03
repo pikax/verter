@@ -1,7 +1,9 @@
 use oxc_span::GetSpan;
 use verter_session::FileAnalysisSnapshot;
 
-use crate::documents::sfc_scanner::{classify_cursor, SfcBlock, SfcCursorContext};
+use crate::documents::carrier_structure::{
+    classify_cursor, CarrierBlockView, CarrierCursorContext,
+};
 
 // =============================================================================
 // Types
@@ -173,7 +175,7 @@ impl CarrierTemplateLanguage {
 pub fn classify_cursor_context(
     offset: u32,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
 ) -> CursorContext {
     classify_cursor_context_for_language(offset, source, blocks, analysis, None)
@@ -182,7 +184,7 @@ pub fn classify_cursor_context(
 pub fn classify_cursor_context_for_language(
     offset: u32,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     language: Option<CarrierTemplateLanguage>,
 ) -> CursorContext {
@@ -198,13 +200,12 @@ pub fn classify_cursor_context_for_language(
     });
     let blocks = svelte_blocks.as_deref().unwrap_or(blocks);
 
-    // Step 1: SFC block detection using existing scanner
+    // Step 1: registered carrier block context.
     match classify_cursor(offset, blocks) {
-        SfcCursorContext::RootLevel => {
+        CarrierCursorContext::RootLevel => {
             return classify_root_or_template_context(offset, source, blocks, analysis, language);
         }
-        SfcCursorContext::OpeningTag { block_index } => {
-            let block = &blocks[block_index];
+        CarrierCursorContext::OpeningTag { block } => {
             // D5: an unterminated nested `<template #…` (slot outlet being
             // typed) can surface here as a phantom SFC block opening tag when
             // the scanner's depth-balanced walk fails closed to the
@@ -233,11 +234,11 @@ pub fn classify_cursor_context_for_language(
                 return CursorContext::RootLevel;
             }
             return CursorContext::BlockOpeningTag {
-                tag_name: block.tag_name.clone(),
+                tag_name: block.tag_name,
             };
         }
-        SfcCursorContext::ClosingTag { .. } => return CursorContext::BlockClosingTag,
-        SfcCursorContext::BlockContent { .. } => {} // fall through to block-specific
+        CarrierCursorContext::ClosingTag { .. } => return CursorContext::BlockClosingTag,
+        CarrierCursorContext::BlockContent { .. } => {} // fall through to block-specific
     }
 
     // Find which block the cursor is in
@@ -281,7 +282,7 @@ pub fn classify_cursor_context_for_language(
 fn classify_root_or_template_context(
     offset: u32,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     language: Option<CarrierTemplateLanguage>,
 ) -> CursorContext {
@@ -1064,7 +1065,7 @@ fn extract_partial_after(offset: u32, source: &str, _marker: u8) -> String {
 /// Classify style cursor context.
 fn classify_style_context(
     offset: u32,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
 ) -> CursorContext {
     if let Some(analysis) = analysis {

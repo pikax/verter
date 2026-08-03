@@ -4209,7 +4209,7 @@ fn merge_code_actions_vue_without_script_setup_prelude_insertion_is_dropped() {
 /// `resolve_script_import_anchor` resolves `ExistingScriptSetup` and the merge would emit ONE
 /// re-anchored import into the setup block — a non-empty result. The carrier-keyed
 /// `resolve_carrier_preamble_import_anchor` detects the conflicting non-empty normal `<script>` (via
-/// the typed `scan_sfc_blocks` classification, no new string scanner) and returns `None` ⇒ the action
+/// the typed `test_carrier_blocks` classification, no new string scanner) and returns `None` ⇒ the action
 /// is dropped ⇒ empty result.
 #[test]
 fn merge_code_actions_mixed_script_vue_prelude_insertion_is_dropped() {
@@ -4219,7 +4219,7 @@ fn merge_code_actions_mixed_script_vue_prelude_insertion_is_dropped() {
 
     // Precondition: the carrier really is mixed-script (both blocks present and the normal
     // `<script>` is non-empty), so the test exercises the ambiguity gate, not an unrelated drop.
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(carrier_source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(carrier_source);
     assert!(
         blocks.iter().any(|b| b.is_setup()),
         "fixture precondition: a `<script setup>` block must be present"

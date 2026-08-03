@@ -68,8 +68,13 @@ pub struct StyleBlockAnalysis {
     pub is_module: bool,
     pub module_name: Option<String>,
 
+    /// Artifact-local inventory block id. Consumers may associate this analysis
+    /// only through a sealed block reference carrying the same local id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<u32>,
+
     /// Byte offset of the style block content start within the SFC source.
-    /// Stored as block metadata for remapping and block identity.
+    /// Stored only for span remapping; it is not block identity.
     #[serde(default)]
     pub content_offset: u32,
 
@@ -636,6 +641,7 @@ pub fn build_scanned_style_analysis(
         scoped,
         is_module,
         module_name: module_name.map(|s| s.to_string()),
+        block_id: None,
         content_offset,
         v_binds,
         special_pseudos,
@@ -664,6 +670,7 @@ pub fn build_preprocessor_style_analysis(
         scoped,
         is_module,
         module_name: module_name.map(|s| s.to_string()),
+        block_id: None,
         content_offset,
         v_binds,
         special_pseudos,

@@ -68,7 +68,7 @@ fn empty_meta() -> ComponentMetaAnalysis {
         models: vec![],
         exposed: vec![],
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: vec![],
         components: vec![],
         template_refs: vec![],

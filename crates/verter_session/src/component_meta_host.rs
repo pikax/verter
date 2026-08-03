@@ -29,6 +29,13 @@ use verter_type_expr::{ObjectMember, TypeExpr};
 use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
 
+/// Project one registered carrier into its content-free ordered structure.
+pub fn ordered_sfc_structure_projection(
+    structure: &crate::carrier_publication_store::RegisteredFileStructure,
+) -> verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis {
+    crate::host_resolve::ordered_sfc_structure_analysis(structure)
+}
+
 // Test hosts construct via `new_standalone_with_scheduler_config` with
 // `SchedulerConfig { cpu_threads: 1, .. }`. The previous global
 // `HEAVY_COMPONENT_META_TEST_MUTEX` (and its `acquires` / `wait_ns`
@@ -747,7 +754,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
     }
 
     crate::host_manage::populate_public_instance_sidecar(&mut meta);
-    crate::host_resolve::populate_sfc_blocks_sidecar(host, canonical_id, &mut meta);
+    crate::host_resolve::populate_ordered_sfc_structure(host, canonical_id, &mut meta);
     meta
 }
 

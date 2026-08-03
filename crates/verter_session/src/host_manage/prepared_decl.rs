@@ -1942,6 +1942,9 @@ impl VerterHost {
                             job_raw_source.as_ref(),
                             job_scope,
                             parsed_sfc,
+                            job_framework_parse
+                                .as_deref()
+                                .expect("Vue parse came from this framework artifact"),
                             &job_provenance,
                             VerterHost::vue_flight_script_program(
                                 eval_is_extracted_script,

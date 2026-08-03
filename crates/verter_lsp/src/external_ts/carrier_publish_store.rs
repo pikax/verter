@@ -298,6 +298,13 @@ pub struct OwnedSource {
 /// manifest has its `blob_rel` present on disk — the manifest swap is the commit
 /// step, after every blob write in the write step succeeded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadyStructureStamp {
+    pub schema_version: u32,
+    pub artifact_token: String,
+    pub script_content_ranges: Vec<[u32; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadyFile {
     pub content_hash: String,
     pub version: u64,
@@ -310,6 +317,8 @@ pub struct ReadyFile {
     /// `None` when the carrier carries no source map (a zero `map_hash`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub map_rel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub structure: Option<ReadyStructureStamp>,
 }
 
 /// One project's manifest entry: its full owned carrier set plus the subset that is
@@ -631,6 +640,14 @@ impl CarrierPublishStore {
                     map_hash: hex16(&file.map_hash),
                     blob_rel,
                     map_rel,
+                    structure: file
+                        .structure
+                        .as_ref()
+                        .map(|structure| ReadyStructureStamp {
+                            schema_version: structure.schema_version,
+                            artifact_token: structure.artifact_token.to_string(),
+                            script_content_ranges: structure.script_content_ranges.clone(),
+                        }),
                 },
             ));
         }

@@ -706,6 +706,8 @@ export declare class VerterHost {
    * doesn't exist. When `analysisLevel` is not "full", computes analysis on demand.
    */
   getAnalysis(canonicalOrAlias: string): string | null;
+  /** Returns the registered content-free carrier structure as a JSON string. */
+  getDocumentStructure(canonicalOrAlias: string): string | null;
   /**
    * Returns all exports of a file, following re-export chains to their ultimate source.
    * For barrel files, resolves through chains to return the ultimate source file and name.

@@ -4,9 +4,21 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  nativeComponentMetaToComponentMeta,
+  nativeComponentMetaToComponentMeta as mapNativeComponentMeta,
   nativeTypeRegistryToMap,
 } from "./native-component-meta.js";
+
+function nativeComponentMetaToComponentMeta(meta: any) {
+  return mapNativeComponentMeta({
+    orderedSfcStructure: {
+      schemaVersion: 1,
+      artifactToken: "a".repeat(43),
+      blocks: [],
+      markupNodes: [],
+    },
+    ...meta,
+  });
+}
 
 /** Default fallthrough surface fields for test payloads. */
 const defaultFallthroughFields = {
@@ -51,6 +63,12 @@ function nativeMetaWithProp(prop: Record<string, unknown>) {
     bindings: [],
     vueApiCalls: [],
     styles: [],
+    orderedSfcStructure: {
+      schemaVersion: 1,
+      artifactToken: "a".repeat(43),
+      blocks: [],
+      markupNodes: [],
+    },
     flags: {
       asyncSetup: false,
       hasReactiveState: false,
@@ -646,7 +664,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
     });
   });
 
-  it("maps additive SFC block metadata from the native payload", () => {
+  it("maps the mandatory ordered structure from the native payload", () => {
     const meta = nativeComponentMetaToComponentMeta({
       filePath: "/project/src/App.vue",
       optionsApi: false,
@@ -659,7 +677,11 @@ describe("nativeComponentMetaToComponentMeta", () => {
         completeness: "partial",
         members: [],
       },
-      sfcBlocks: {
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "artifact-token",
+        blocks: [],
+        markupNodes: [],
         script: {
           lang: "ts",
           attributes: [{ name: "lang", value: "ts" }],
@@ -725,7 +747,11 @@ describe("nativeComponentMetaToComponentMeta", () => {
       ...defaultFallthroughFields,
     } as any);
 
-    expect(meta.sfcBlocks).toEqual({
+    expect(meta.orderedSfcStructure).toMatchObject({
+      schemaVersion: 1,
+      artifactToken: "artifact-token",
+      blocks: [],
+      markupNodes: [],
       script: {
         lang: "ts",
         attributes: [{ name: "lang", value: "ts" }],

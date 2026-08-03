@@ -29459,7 +29459,7 @@ async fn contract_svelte_transition_family_keyword_definition_fails_closed() {
 /// must still fire from the typed element tree (D6 — built-in docs AND
 /// custom directives in the scanner dead zones).
 #[tokio::test]
-async fn contract_directive_hovers_survive_sfc_scanner_dead_zones() {
+async fn contract_directive_hovers_survive_carrier_structure_dead_zones() {
     let source = "<script setup lang=\"ts\">\nfunction vMyThing(el: HTMLElement, binding: { value: string }) {\n  void el;\n  void binding;\n}\nconst label = \"x\";\n</script>\n<template>\n  <div>\n    <template #unused=\"{ row }\">\n      <span>{{ row }}</span>\n    </template>\n    <div v-if=\"label\">\n      <span>{{ label }}</span>\n    </div>\n    <b v-my-thing=\"label\">directive</b>\n  </div>\n</template>\n";
     let (_temp, service, drain_handle, _provider, workspace_id) =
         make_definition_test_server(&[("src/App.vue", "vue", source)]).await;

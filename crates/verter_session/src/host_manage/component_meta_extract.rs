@@ -5,7 +5,7 @@
 //! Domain K. Owns the public-facing
 //! `extract_component_meta_from_resolved` /
 //! `extract_component_meta_from_resolved_with_facts` entry points
-//! plus their internal helpers (`populate_sfc_blocks_sidecar`,
+//! plus their internal helpers (`populate_ordered_sfc_structure`,
 //! `populate_public_instance_sidecar`,
 //! etc.). The `crate::host_manage::*` import paths used by `meta.rs`,
 //! `component_meta_host.rs`, and
@@ -193,7 +193,15 @@ fn extract_component_meta_from_inputs(
     }
 
     populate_public_instance_sidecar(&mut meta);
-    crate::host_resolve::populate_sfc_blocks_sidecar(host, &canonical, &mut meta);
+    if let Some(view) = ctx.active_session_view() {
+        if let Some(structure) = host.registered_structure_for_view(&canonical, view) {
+            meta.ordered_sfc_structure = Some(crate::host_resolve::ordered_sfc_structure_analysis(
+                &structure,
+            ));
+        }
+    } else {
+        crate::host_resolve::populate_ordered_sfc_structure(host, &canonical, &mut meta);
+    }
     meta
 }
 

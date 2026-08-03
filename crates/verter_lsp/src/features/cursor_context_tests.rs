@@ -1,5 +1,5 @@
 use super::*;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::carrier_structure::test_carrier_blocks;
 use verter_semantic::analysis::template::*;
 use verter_session::FileAnalysisSnapshot;
 use verter_span::Span;
@@ -149,7 +149,7 @@ fn make_directive_with_modifiers(
 #[test]
 fn test_root_level_outside_all_blocks() {
     let source = "<template><div></div></template>\n<script setup>\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     // Cursor after </script>\n
     let ctx = classify_cursor_context(57, source, &blocks, None);
@@ -163,7 +163,7 @@ fn test_root_level_outside_all_blocks() {
 #[test]
 fn uppercase_tag_at_vue_root_stays_root_level() {
     let source = "<template><div></div></template>\n<DraftCard ";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let cursor = source.find("<DraftCard ").unwrap() + "<DraftCard ".len();
 
     let ctx = classify_cursor_context(cursor as u32, source, &blocks, None);
@@ -176,7 +176,7 @@ fn uppercase_tag_at_vue_root_stays_root_level() {
 #[test]
 fn script_only_vue_does_not_enable_svelte_root_markup() {
     let source = "<script>export default {}</script>\n<DraftCard ";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let cursor = source.len() as u32;
 
     let ctx = classify_cursor_context_for_language(
@@ -195,7 +195,7 @@ fn script_only_vue_does_not_enable_svelte_root_markup() {
 #[test]
 fn svelte_template_element_does_not_disable_root_markup() {
     let source = "<template><span>fragment</span></template>\n<DraftCard ";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let cursor = source.len() as u32;
 
     let ctx = classify_cursor_context_for_language(
@@ -221,7 +221,7 @@ fn svelte_template_element_does_not_disable_root_markup() {
 #[test]
 fn paired_svelte_template_element_opening_and_content_use_template_semantics() {
     let source = "<template >hello</template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let mut template = empty_template();
     template
         .elements
@@ -266,7 +266,7 @@ fn paired_svelte_template_element_opening_and_content_use_template_semantics() {
 #[test]
 fn test_script_block_content() {
     let source = "<script setup>\nconst x = 1\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let ctx = classify_cursor_context(20, source, &blocks, None);
     assert!(
@@ -280,7 +280,7 @@ fn test_script_block_content() {
 fn test_style_block_general() {
     let source =
         "<template><div></div></template>\n<style scoped>\n.foo { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let analysis = empty_analysis();
 
     let ctx = classify_cursor_context(55, source, &blocks, Some(&analysis));
@@ -294,7 +294,7 @@ fn test_style_block_general() {
 #[test]
 fn test_style_block_vbind() {
     let source = "<template><div></div></template>\n<style scoped>\n.foo { color: v-bind(color); }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let analysis = FileAnalysisSnapshot {
         styles: (vec![verter_semantic::analysis::StyleBlockAnalysis {
@@ -324,7 +324,7 @@ fn test_style_block_vbind() {
 #[test]
 fn test_block_opening_tag() {
     let source = "<script setup lang=\"ts\">\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let ctx = classify_cursor_context(10, source, &blocks, None);
     assert!(
@@ -337,7 +337,7 @@ fn test_block_opening_tag() {
 #[test]
 fn test_block_closing_tag() {
     let source = "<script setup>\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let ctx = classify_cursor_context(18, source, &blocks, None);
     assert!(
@@ -354,7 +354,7 @@ fn test_block_closing_tag() {
 #[test]
 fn test_template_tag_name() {
     let source = "<template><div></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -380,7 +380,7 @@ fn test_template_tag_name() {
 #[test]
 fn test_template_closing_tag_name() {
     let source = "<template><div></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -410,7 +410,7 @@ fn test_template_attribute_name_html() {
     //                   0         1         2         3
     //                   0123456789012345678901234567890123456789
     let source = "<template><div class=\"foo\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 31), 25, 25);
@@ -434,7 +434,7 @@ fn test_template_attribute_name_gap() {
     //                   0         1         2         3         4
     //                   01234567890123456789012345678901234567890123456789
     let source = "<template><div class=\"foo\" ></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 33), 27, 27);
@@ -456,7 +456,7 @@ fn test_template_attribute_name_gap() {
 #[test]
 fn test_template_attribute_name_component() {
     let source = "<template><MyComp ></MyComp></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("MyComp", (10, 27), 18, 18);
@@ -489,7 +489,7 @@ fn test_event_modifier_context() {
     //                   0         1         2         3         4         5
     //                   01234567890123456789012345678901234567890123456789012345
     let source = "<template><div @click.prevent.></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 36), 30, 30);
@@ -525,7 +525,7 @@ fn event_handler_value_member_access_is_expression_not_modifier() {
     // EventModifier completions. The sibling `test_event_modifier_context` only pins
     // the modifier-position case; this pins the value-position case it must NOT be.
     let source = r#"<template><button @click="handle($event.)"></button></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let at = source.find("@click").unwrap() as u32;
     let click = source.find("click").unwrap() as u32;
@@ -582,7 +582,7 @@ fn event_handler_value_member_access_is_expression_not_modifier() {
 #[test]
 fn test_vmodel_modifier_context() {
     let source = "<template><input v-model.lazy.></input></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("input", (10, 38), 30, 30);
@@ -620,7 +620,7 @@ fn test_directive_expression() {
     //                   0         1         2         3         4
     //                   01234567890123456789012345678901234567890123456789
     let source = "<template><div v-if=\"show\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 32), 26, 26);
@@ -650,7 +650,7 @@ fn test_event_handler_expression() {
     //                   0         1         2         3         4         5
     //                   012345678901234567890123456789012345678901234567890123456789
     let source = "<template><button @click=\"handleClick\"></button></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("button", (10, 48), 38, 38);
@@ -678,7 +678,7 @@ fn test_event_handler_expression() {
 #[test]
 fn test_dynamic_prop_expression() {
     let source = "<template><div :title=\"msg\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 33), 27, 27);
@@ -711,7 +711,7 @@ fn test_expression_stale_analysis_cursor_past_expr_end() {
     //                    1111111111222222222233333333334444
     //          01234567890123456789012345678901234567890123
     let source = "<template><div :icon=\"action.icon || x\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     // The element span covers the whole <div ...> tag up to </div>
@@ -744,7 +744,7 @@ fn test_expression_at_expr_span_end_boundary() {
     //                    1111111111222222222233
     //          0123456789012345678901234567890123
     let source = "<template><div :icon=\"action.icon\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 40), 34, 34);
@@ -776,7 +776,7 @@ fn test_expression_at_expr_span_end_boundary() {
 #[test]
 fn test_interpolation() {
     let source = "<template><div>{{ count }}</div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 31), 14, 25);
@@ -807,7 +807,7 @@ fn test_interpolation() {
 #[test]
 fn test_static_attribute_value() {
     let source = "<template><div class=\"hello\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 34), 28, 28);
@@ -836,7 +836,7 @@ fn test_static_attribute_value() {
 #[test]
 fn test_text_content() {
     let source = "<template><div>hello world</div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 31), 14, 25);
@@ -867,7 +867,7 @@ fn test_text_content() {
 #[test]
 fn test_attribute_name_existing_attrs() {
     let source = "<template><div class=\"foo\" id=\"bar\" ></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 43), 36, 36);
@@ -906,7 +906,7 @@ fn test_attribute_name_existing_attrs() {
 #[test]
 fn test_template_without_analysis_returns_template_fallback() {
     let source = "<template><div></div></template>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let ctx = classify_cursor_context(12, source, &blocks, None);
     assert!(
@@ -1056,7 +1056,7 @@ fn test_expression_context_unknown_trailing_pipe() {
 #[test]
 fn test_nested_elements_deepest_wins() {
     let source = "<template><div><span ></span></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -1085,7 +1085,7 @@ fn test_nested_elements_deepest_wins() {
 #[test]
 fn test_directive_argument() {
     let source = "<template><div v-slot:default></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 35), 29, 29);
@@ -1120,7 +1120,7 @@ fn test_directive_argument() {
 fn test_slot_name_hash_shorthand_empty() {
     // `<template #|` — the incomplete shorthand is not yet a parsed directive.
     let source = "<template><template #></template></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -1146,7 +1146,7 @@ fn test_slot_name_hash_shorthand_empty() {
 fn test_slot_name_hash_shorthand_partial_on_component() {
     // `<MyComp #he|` — partial slot name on a component element.
     let source = "<template><MyComp #he></MyComp></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -1172,7 +1172,7 @@ fn test_slot_name_hash_shorthand_partial_on_component() {
 fn test_slot_name_longhand_empty_arg() {
     // `<template v-slot:|` — empty longhand argument.
     let source = "<template><template v-slot:></template></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -1198,7 +1198,7 @@ fn test_slot_name_scan_does_not_fire_inside_pattern_value() {
     // `<template #default="{ ti|` — cursor inside the pattern value is NOT a
     // slot-name position.
     let source = "<template><template #default=\"{ ti\"></template></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("template", (10, 34), 34, 27);
@@ -1227,7 +1227,7 @@ fn test_svelte_snippet_name_context() {
     // `{#snippet |` inside a component — completing the slot name the child
     // accepts.
     let source = "<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -1255,7 +1255,7 @@ fn test_svelte_snippet_name_context() {
 fn test_svelte_render_callee_context() {
     // `{@render |` — completing an in-scope snippet name.
     let source = "<ul>\n  {@render \n</ul>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template.elements.push(make_element("ul", (0, 20), 4, 15));
@@ -1278,7 +1278,7 @@ fn test_svelte_render_callee_context() {
 #[test]
 fn svelte_braced_attribute_value_uses_current_source_when_semantics_are_absent() {
     let source = "<IdeSurfaceChild onPick={on} />";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let cursor = (source.find("{on}").expect("attribute expression") + "{on".len()) as u32;
 
     let ctx = classify_cursor_context_for_language(
@@ -1300,7 +1300,7 @@ fn svelte_braced_attribute_value_uses_current_source_when_semantics_are_absent()
 }
 
 fn assert_svelte_source_prop_expression(source: &str, marker: &str, expected_prop: &str) {
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let cursor = (source.find(marker).expect("cursor marker") + marker.len()) as u32;
     let ctx = classify_cursor_context_for_language(
         cursor,
@@ -1435,7 +1435,7 @@ fn nested_comment_template() -> TemplateAnalysisSnapshot {
 
 fn classify_nested_comment_cursor() -> CursorContext {
     let analysis = analysis_with_template(nested_comment_template());
-    let blocks = scan_sfc_blocks(NESTED_COMMENT_SFC);
+    let blocks = test_carrier_blocks(NESTED_COMMENT_SFC);
     classify_cursor_context(
         nested_comment_cursor_offset(),
         NESTED_COMMENT_SFC,
@@ -1489,7 +1489,7 @@ fn cursor_in_uncovered_region_of_root_element_terminates_in_process() {
     template.elements[1].parent_index = None;
     template.elements[1].parent_tag = None;
     let analysis = analysis_with_template(template);
-    let blocks = scan_sfc_blocks(NESTED_COMMENT_SFC);
+    let blocks = test_carrier_blocks(NESTED_COMMENT_SFC);
     let context = classify_cursor_context(
         nested_comment_cursor_offset(),
         NESTED_COMMENT_SFC,

@@ -621,6 +621,7 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
             }
         };
         let companions = match build_carrier_companions(
+            req.host,
             &transition.next,
             req.ide,
             api.as_ref(),
@@ -693,6 +694,7 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     let ide = req.ide.or(fetched_ide.as_ref());
 
     let mut companions = match build_carrier_companions(
+        req.host,
         &committed_state,
         ide,
         api.as_ref(),
@@ -884,6 +886,7 @@ impl std::fmt::Display for CarrierCompanionBuildError {
 }
 
 fn build_carrier_companions(
+    host: &VerterHost,
     next_state: &ProviderSyncState,
     ide: Option<&IdeResponse>,
     api: Option<&verter_session::TscResponse>,
@@ -934,7 +937,7 @@ fn build_carrier_companions(
         let Some(prepared) = prepared else {
             return Err(CarrierCompanionBuildError::ProviderSurfaceUnavailable);
         };
-        companions.push(CarrierCompanion::carrier_ide(
+        let mut companion = CarrierCompanion::carrier_ide(
             Arc::from(ide_path.as_str()),
             prepared,
             ide.source_map.clone(),
@@ -943,9 +946,41 @@ fn build_carrier_companions(
             } else {
                 ScriptKind::Tsx
             },
-        ));
+        );
+        companion.structure = published_structure_stamp(host, canonical_id);
+        companions.push(companion);
     }
     Ok(companions)
+}
+
+fn published_structure_stamp(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> Option<verter_session::external_ts::SnapshotStructureStamp> {
+    let (structure, _) = host.registered_file_structure_snapshot(canonical_id)?;
+    let script_content_ranges =
+        structure
+            .inventory()
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                verter_language::parse_artifact::carrier_inventory::CarrierBlock::Section {
+                    role:
+                        verter_language::parse_artifact::carrier_inventory::SectionRole::Script {
+                            ..
+                        },
+                    syntax,
+                    ..
+                } => Some([syntax.content_span.start, syntax.content_span.end]),
+                _ => None,
+            })
+            .collect();
+    let token = structure.public_artifact_token();
+    Some(verter_session::external_ts::SnapshotStructureStamp {
+        schema_version: 1,
+        artifact_token: Arc::from(token.as_str()),
+        script_content_ranges,
+    })
 }
 
 /// The per-source admission barrier the [`CarrierTransactionCoordinator`] maintains OUTSIDE

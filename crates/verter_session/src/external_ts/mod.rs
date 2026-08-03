@@ -61,7 +61,7 @@ pub use engine::{
     BoundProject, BoundProjectSeal, Diagnostics, DiagnosticsOutcome, EngineBackend,
     EngineCapabilities, EngineError, EnsureProject, EnvDims, OpenState, PublishSnapshot, Query,
     QueryFeature, QueryOutcome, ScratchProject, ScratchProjectSeal, ScriptKind, SnapshotFile,
-    SnapshotRole,
+    SnapshotRole, SnapshotStructureStamp,
 };
 pub use identity_resolver::{
     build_redirect_reference_graph, resolve_reference_canonical_path, resolve_reference_identity,

@@ -26,6 +26,7 @@ test-support = []
 
 [dependencies]
 verter_session = { path = "../verter_session", features = ["session_metrics"] }
+verter_language = { path = "../verter_language" }
 hotpath = { version = "0.16", optional = true }
 verter_audit = { path = "../verter_audit" }
 verter_scheduler = { path = "../verter_scheduler" }

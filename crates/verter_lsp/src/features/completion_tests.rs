@@ -1,5 +1,5 @@
 use super::*;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::carrier_structure::test_carrier_blocks;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
 
@@ -32,7 +32,7 @@ fn make_analysis(
 fn test_template_completions_include_bindings() {
     let source =
         "<template>\n  {{ | }}\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -75,7 +75,7 @@ fn test_template_completions_include_bindings() {
 #[test]
 fn test_script_completions_include_imports() {
     let source = "<script setup>\nimport { ref } from 'vue'\n\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -123,7 +123,7 @@ fn test_script_completions_include_imports() {
 fn test_filters_internal_symbols() {
     // Use a source with actual content so the cursor is inside the block, not on the closing tag
     let source = "<script setup>\n\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -165,7 +165,7 @@ fn test_filters_internal_symbols() {
 #[test]
 fn test_style_returns_css_completions() {
     let source = "<style>\n.foo {}\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(vec![], vec![], vec![]);
@@ -197,7 +197,7 @@ fn test_style_returns_css_completions() {
 #[test]
 fn test_template_excludes_type_only_imports() {
     let source = "<template>\n  <div/>\n</template>\n\n<script setup>\nimport type { Props } from './types'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -247,7 +247,7 @@ fn test_template_excludes_type_only_imports() {
 #[test]
 fn test_class_completions_in_static_class() {
     let source = "<template><div class=\"fo\"></div></template>\n<style scoped>\n.foo { color: red; }\n.bar { color: blue; }\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let css = build_style(source, &blocks);
 
@@ -301,7 +301,7 @@ fn test_class_completions_in_static_class() {
 #[test]
 fn test_no_class_completions_outside_class_attr() {
     let source = "<template><div id=\"app\"></div></template>\n<style scoped>\n.foo {}\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let css = build_style(source, &blocks);
 
@@ -339,7 +339,7 @@ fn test_no_class_completions_outside_class_attr() {
 #[test]
 fn test_class_completions_no_style_block() {
     let source = "<template><div class=\"foo\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = FileAnalysisSnapshot {
@@ -465,7 +465,7 @@ fn make_element_for_completion(
 #[test]
 fn test_class_completions_in_dynamic_class() {
     let source = "<template><div :class=\"{ 'btn': active }\"></div></template>\n<style scoped>\n.btn { color: red; }\n.active { display: block; }\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let css = build_style(source, &blocks);
 
@@ -535,7 +535,7 @@ fn test_class_completions_in_dynamic_class() {
 #[test]
 fn test_no_class_completions_outside_dynamic_string() {
     let source = "<template><div :class=\"{ btn: active }\"></div></template>\n<style scoped>\n.btn { color: red; }\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let css = build_style(source, &blocks);
 
@@ -599,7 +599,7 @@ fn test_no_class_completions_outside_dynamic_string() {
 #[test]
 fn test_event_modifier_completions_click() {
     let source = "<template><div @click.></div></template>\n<script setup>\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = make_event_directive_analysis("div", "click", "@click.", &[], source);
 
@@ -646,7 +646,7 @@ fn test_event_modifier_completions_click() {
 #[test]
 fn test_event_modifier_completions_keyup() {
     let source = "<template><input @keyup.></template>\n<script setup>\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = make_event_directive_analysis("input", "keyup", "@keyup.", &[], source);
 
@@ -687,7 +687,7 @@ fn test_event_modifier_completions_keyup() {
 #[test]
 fn test_event_modifier_completions_mouse() {
     let source = "<template><div @mousedown.></div></template>\n<script setup>\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = make_event_directive_analysis("div", "mousedown", "@mousedown.", &[], source);
 
@@ -724,7 +724,7 @@ fn test_event_modifier_completions_mouse() {
 #[test]
 fn test_no_event_modifier_in_text() {
     let source = "<template><div>text.</div></template>\n<script setup>\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = make_analysis(vec![], vec![], vec![]);
 
@@ -754,7 +754,7 @@ fn test_no_event_modifier_in_text() {
 #[test]
 fn test_event_modifier_completions_chained() {
     let source = "<template><div @click.stop.></div></template>\n<script setup>\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = make_event_directive_analysis("div", "click", "@click.stop.", &["stop"], source);
 
@@ -951,11 +951,14 @@ fn make_vmodel_directive_analysis(
     }
 }
 
-fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_semantic::analysis::StyleBlockAnalysis {
+fn build_style(
+    source: &str,
+    blocks: &[CarrierBlockView],
+) -> verter_semantic::analysis::StyleBlockAnalysis {
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (content_start, content_end) = style_block.content_range();
     let css_content = &source[content_start as usize..content_end as usize];
-    let scoped = style_block.attrs_raw.contains("scoped");
+    let scoped = style_block.is_scoped();
 
     verter_semantic::analysis::style::build_css_style_analysis(
         css_content,
@@ -977,7 +980,7 @@ fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_semantic::analysis::
 #[test]
 fn test_root_completions_empty_file() {
     let source = "";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let pos = Position {
@@ -1021,7 +1024,7 @@ fn test_root_completions_empty_file() {
 #[test]
 fn test_root_completions_with_existing_blocks() {
     let source = "<template>\n  <div/>\n</template>\n\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Position after </template> — at root level
@@ -1063,7 +1066,7 @@ fn test_root_completions_with_existing_blocks() {
 #[test]
 fn svelte_root_whitespace_never_emits_vue_sfc_scaffolds() {
     let source = "<script lang=\"ts\">const value = 1;</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let position = line_index
         .offset_to_position(source.len() as u32)
@@ -1100,7 +1103,7 @@ fn svelte_root_whitespace_never_emits_vue_sfc_scaffolds() {
 #[test]
 fn test_attribute_completions_script() {
     let source = "<script >\nconst x = 1;\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Position inside opening tag (on the space after "script")
@@ -1134,7 +1137,7 @@ fn test_attribute_completions_script() {
 #[test]
 fn test_attribute_completions_script_existing_attrs_filtered() {
     let source = "<script setup lang=\"ts\">\nconst x = 1;\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Position inside opening tag
@@ -1173,7 +1176,7 @@ fn test_attribute_completions_script_existing_attrs_filtered() {
 #[test]
 fn test_attribute_completions_style() {
     let source = "<style >\n.foo {}\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let pos = line_index.offset_to_position(7).unwrap(); // space before ">"
@@ -1206,7 +1209,7 @@ fn test_attribute_completions_style() {
 #[test]
 fn test_no_completions_on_closing_tag() {
     let source = "<script setup>\nconst x = 1;\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let pos = line_index
@@ -1255,7 +1258,7 @@ fn make_analysis_with_template(
 fn test_tag_name_no_script_bindings() {
     // Cursor after `<` in tag name position — should NOT include script bindings like `count`
     let source = "<template>\n  <\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(
@@ -1302,7 +1305,7 @@ fn test_tag_name_no_script_bindings() {
 fn test_tag_name_includes_html_elements() {
     // Cursor after `<` — should include HTML element names
     let source = "<template>\n  <\n</template>\n<script setup>\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(vec![], vec![]);
@@ -1342,7 +1345,7 @@ fn test_tag_name_includes_html_elements() {
 fn test_tag_name_includes_components() {
     // Cursor after `<` — should include imported components
     let source = "<template>\n  <\n</template>\n<script setup>\nimport MyComp from './MyComp.vue'\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(
@@ -1629,7 +1632,7 @@ fn workspace_auto_import_kind_is_class_in_tag_position_but_module_in_expression_
 #[test]
 fn test_tag_name_includes_vue_builtins() {
     let source = "<template>\n  <\n</template>\n<script setup>\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(vec![], vec![]);
@@ -1682,7 +1685,7 @@ fn test_attr_name_no_script_bindings() {
     // Cursor in attribute position `<div |>` — should NOT include `count`
     let source =
         "<template>\n  <div >\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(
@@ -1728,7 +1731,7 @@ fn test_attr_name_no_script_bindings() {
 fn test_attr_name_includes_directives() {
     // Cursor in attribute position `<div |>` — should include Vue directives
     let source = "<template>\n  <div >\n</template>\n<script setup>\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(vec![], vec![]);
@@ -1781,7 +1784,7 @@ fn test_text_content_no_bindings() {
     // Cursor in text content `<div>text|</div>` — should NOT offer bindings as completions
     let source =
         "<template>\n  <div>some text</div>\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(
@@ -1828,7 +1831,7 @@ fn test_mustache_shows_bindings() {
     // Cursor inside mustache `{{ | }}` — should include `count` (already works, regression guard)
     let source =
         "<template>\n  {{ }}\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(
@@ -1872,7 +1875,7 @@ fn test_mustache_shows_bindings() {
 fn test_attr_value_shows_bindings() {
     // Cursor inside attribute value `:prop="|"` — should include `count`
     let source = "<template>\n  <div :foo=\"\"></div>\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Build proper element with directive data
@@ -1962,7 +1965,7 @@ fn test_attr_value_shows_bindings() {
 #[test]
 fn test_vmodel_modifier_completions() {
     let source = "<template><input v-model.></template>\n<script setup>\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = make_vmodel_directive_analysis("input", &[], source);
 
@@ -2010,7 +2013,7 @@ fn test_no_completions_inside_generic_attr_value() {
 const msg = ref('hello')
 </script>
 <template><div>{{ msg }}</div></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Position inside generic="T extends |string" (line 0, character 43)
@@ -2046,7 +2049,7 @@ fn test_no_completions_inside_attrs_attr_value() {
 const msg = ref('hello')
 </script>
 <template><div>{{ msg }}</div></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Position inside attrs="{ class: |string }" (line 0)
@@ -2082,7 +2085,7 @@ fn test_normal_script_attr_completions_outside_ts_values() {
 const msg = ref('hello')
 </script>
 <template><div>{{ msg }}</div></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Position on the opening tag but outside any attribute value (after generic="T" )
@@ -2114,7 +2117,7 @@ const msg = ref('hello')
 #[test]
 fn test_script_completions_have_sort_text() {
     let source = "<script setup>\nlet ddd = 1\n\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -2569,7 +2572,7 @@ fn test_component_prop_completions_from_macros() {
     // Parent SFC: <template><MyChild |></template>
     // The cursor `|` is after `<MyChild ` in attribute position
     let source = "<template>\n  <MyChild >\n</template>\n<script setup>\nimport MyChild from './MyChild.vue'\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Parent analysis: has a component usage for MyChild
@@ -2766,7 +2769,7 @@ fn test_component_prop_completions_from_macros() {
 
 fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
     let source = "<Child ></Child>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let parent_analysis = FileAnalysisSnapshot {
         template: Some(
@@ -3003,7 +3006,7 @@ fn d5_slot_completions(
     parent_analysis: &FileAnalysisSnapshot,
     child: Option<&FileAnalysisSnapshot>,
 ) -> Option<Vec<CompletionItem>> {
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let pos = line_index.offset_to_position(cursor_offset as u32).unwrap();
     let child = child.cloned();
@@ -3179,7 +3182,7 @@ fn test_svelte_snippet_slot_name_completions_from_child_snippet_props() {
         ..Default::default()
     };
 
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
@@ -3276,7 +3279,7 @@ fn test_svelte_render_callee_completions_in_scope_snippets() {
         ..Default::default()
     };
 
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let cursor = source.find("{@render ").unwrap() + "{@render ".len();
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
@@ -3368,7 +3371,7 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
         ..Default::default()
     };
 
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =

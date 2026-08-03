@@ -1,5 +1,5 @@
 use super::*;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::carrier_structure::test_carrier_blocks;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
 
@@ -20,7 +20,7 @@ fn make_analysis(
 fn test_go_to_definition_from_template_to_script_via_span() {
     let source =
         "<template>\n  {{ count }}\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // "const count" in script — find the byte offset of "count" in the declaration
@@ -74,7 +74,7 @@ fn test_go_to_import_with_resolved_canonical_id_no_export_resolver_falls_back_to
     // When resolved_canonical_id is set but no precise export resolver is available,
     // fall back to the import statement span instead of returning None.
     let source = "<script setup>\nimport { ref } from 'vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -127,7 +127,7 @@ fn test_go_to_import_with_resolved_canonical_id_and_export_resolver() {
     // When resolved_canonical_id is set AND resolve_export_location returns a location,
     // returns the precise cross-file location
     let source = "<script setup>\nimport { ref } from 'vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -198,7 +198,7 @@ fn test_go_to_import_with_resolved_canonical_id_and_export_resolver() {
 #[test]
 fn test_go_to_import_falls_back_to_path_resolution_when_resolved_canonical_id_fails() {
     let source = "<script setup>\nimport { Overlay } from './components'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -267,7 +267,7 @@ fn test_go_to_import_falls_back_to_path_resolution_when_resolved_canonical_id_fa
 #[test]
 fn test_go_to_import_without_resolution_falls_back_to_import_span() {
     let source = "<script setup>\nimport { helper } from './utils'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let import_start = source.find("import").unwrap() as u32;
@@ -319,7 +319,7 @@ fn test_go_to_import_without_resolution_falls_back_to_import_span() {
 #[test]
 fn test_go_to_macro_binding_from_template() {
     let source = "<template>\n  {{ props.msg }}\n</template>\n\n<script setup>\nconst props = defineProps<{ msg: string }>()\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let macro_start = source.find("defineProps").unwrap() as u32;
@@ -377,7 +377,7 @@ fn test_go_to_macro_binding_from_template() {
 fn test_no_definition_for_unknown_binding() {
     let source =
         "<template>\n  {{ unknown }}\n</template>\n\n<script setup>\nconst x = 1\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -414,7 +414,7 @@ fn test_no_definition_for_unknown_binding() {
 #[test]
 fn test_no_definition_inside_html_comment() {
     let source = "<template>\n  <!-- MyComponent -->\n  {{ count }}\n</template>\n\n<script setup>\nimport MyComponent from './MyComponent.vue'\nconst count = ref(0)\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -492,7 +492,7 @@ fn test_is_inside_html_comment() {
 #[test]
 fn test_go_to_component_definition_from_template() {
     let source = "<template>\n  <ChildComp />\n</template>\n\n<script setup>\nimport ChildComp from './ChildComp.vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     use verter_semantic::analysis::template::*;
@@ -612,7 +612,7 @@ fn test_to_pascal_case() {
 #[test]
 fn test_css_nav_template_class_to_style() {
     let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n\n<style>\n.btn { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     use verter_semantic::analysis::style::*;
@@ -714,7 +714,7 @@ fn test_css_nav_template_class_to_style() {
 #[test]
 fn test_css_nav_multi_class_attr() {
     let source = "<template>\n  <div class=\"btn primary\"></div>\n</template>\n\n<style>\n.btn { } .primary { }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     use verter_semantic::analysis::style::*;
@@ -812,7 +812,7 @@ fn test_css_nav_multi_class_attr() {
 #[test]
 fn test_css_nav_template_id_to_style() {
     let source = "<template>\n  <div id=\"app\"></div>\n</template>\n\n<style>\n#app { margin: 0; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     use verter_semantic::analysis::style::*;
@@ -900,7 +900,7 @@ fn test_css_nav_template_id_to_style() {
 #[test]
 fn test_css_nav_dynamic_class_object_key_navigates() {
     let source = "<template>\n  <div :class=\"{ active: true }\"></div>\n</template>\n\n<style>\n.active { }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     use verter_semantic::analysis::style::*;
@@ -999,7 +999,7 @@ fn test_css_nav_dynamic_class_object_key_navigates() {
 #[test]
 fn test_css_nav_style_to_template() {
     let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n\n<style>\n.btn { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     use verter_semantic::analysis::style::*;
@@ -1107,7 +1107,7 @@ fn test_css_nav_style_to_template() {
 #[test]
 fn test_import_source_string_navigation() {
     let source = "<script setup>\nimport Foo from './Foo.vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let import_start = source.find("import").unwrap() as u32;
@@ -1170,7 +1170,7 @@ fn test_import_source_string_navigation() {
 #[test]
 fn test_path_alias_resolution_on_binding() {
     let source = "<script setup>\nimport Foo from '@/components/Foo.vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let import_start = source.find("import").unwrap() as u32;
@@ -1295,7 +1295,7 @@ fn test_path_alias_resolution_on_binding() {
 #[test]
 fn test_path_alias_resolution_on_import_string() {
     let source = "<script setup>\nimport Foo from '@/components/Foo.vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let import_start = source.find("import").unwrap() as u32;
@@ -1368,7 +1368,7 @@ fn test_dom_query_selector_navigates_to_element() {
     use verter_semantic::analysis::types::*;
 
     let source = "<template>\n  <button class=\"btn\">Click</button>\n</template>\n\n<script setup>\ndocument.querySelector('.btn')\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Build a selector for .btn
@@ -1476,7 +1476,7 @@ fn test_dom_query_selector_no_match() {
     use verter_semantic::analysis::types::*;
 
     let source = "<template>\n  <div>hello</div>\n</template>\n\n<script setup>\ndocument.querySelector('.missing')\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let parsed = parse_selector(".missing").unwrap();
@@ -1557,7 +1557,7 @@ fn test_dom_query_selector_falls_back_to_css() {
 
     // Template has no .btn element, but style has .btn rule
     let source = "<template>\n  <div>hello</div>\n</template>\n\n<script setup>\ndocument.querySelector('.btn')\n</script>\n\n<style>\n.btn { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -1660,7 +1660,7 @@ fn test_dom_query_selector_falls_back_to_css() {
 #[test]
 fn test_path_alias_resolution_on_component_tag() {
     let source = "<template>\n  <FooComp />\n</template>\n\n<script setup>\nimport FooComp from '@/components/FooComp.vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     use verter_semantic::analysis::template::*;
@@ -1789,7 +1789,7 @@ fn test_path_alias_resolution_on_component_tag() {
 fn test_go_to_definition_event_handler_click() {
     // CTRL+CLICK on `click` in `@click="handleClick"` → navigate to handleClick binding
     let source = "<template>\n  <button @click=\"handleClick\">go</button>\n</template>\n\n<script setup>\nfunction handleClick() {}\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let click_offset = source.find("@click").unwrap();
@@ -1907,7 +1907,7 @@ fn test_go_to_definition_inline_event_no_binding() {
     // CTRL+CLICK on `click` in `@click="count++"` → returns None (inline, no handler binding)
     let source =
         "<template>\n  <button @click=\"count++\">go</button>\n</template>\n\n<script setup>\nlet count = 0\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let click_offset = source.find("@click").unwrap();
@@ -2010,7 +2010,7 @@ fn test_go_to_definition_component_event_name_defers_to_server() {
     use verter_semantic::analysis::template::*;
 
     let source = "<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n\n<script setup>\nfunction handleCustom() {}\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let event_offset = source.find("@custom").unwrap();
@@ -2103,7 +2103,7 @@ fn test_go_to_definition_component_event_name_defers_to_server() {
 fn test_go_to_definition_dollar_props() {
     // CTRL+CLICK on `$props` → navigate to defineProps macro call
     let source = "<template>\n  {{ $props.msg }}\n</template>\n\n<script setup>\nconst props = defineProps<{msg: string}>()\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let props_offset = source.find("$props").unwrap();
@@ -2171,7 +2171,7 @@ fn test_go_to_definition_dollar_props() {
 fn test_go_to_definition_dollar_emit() {
     // CTRL+CLICK on `$emit` → navigate to defineEmits macro call
     let source = "<template>\n  <button @click=\"$emit('done')\">go</button>\n</template>\n\n<script setup>\nconst emit = defineEmits(['done'])\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let emit_offset = source.find("$emit").unwrap();
@@ -2239,7 +2239,7 @@ fn test_go_to_definition_dollar_emit() {
 fn test_go_to_definition_dollar_props_without_macro() {
     // CTRL+CLICK on `$props` without any defineProps → returns None
     let source = "<template>\n  {{ $props.msg }}\n</template>\n\n<script setup>\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let props_offset = source.find("$props").unwrap();
@@ -2281,7 +2281,7 @@ fn test_go_to_definition_dollar_props_without_macro() {
 #[test]
 fn definition_prop_field_type_based() {
     let source = "<template>\n  {{ count }}\n</template>\n\n<script setup lang=\"ts\">\nconst props = defineProps<{ count: number }>()\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Find the span of "count" in the defineProps type parameter
@@ -2370,7 +2370,7 @@ fn definition_prop_field_type_based() {
 #[test]
 fn definition_prop_field_runtime() {
     let source = "<template>\n  {{ name }}\n</template>\n\n<script setup>\ndefineProps({ name: String })\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // Find the span of "name" in the defineProps runtime argument
@@ -2457,7 +2457,7 @@ fn definition_prop_field_runtime() {
 #[test]
 fn definition_binding_takes_precedence_over_prop_field() {
     let source = "<template>\n  {{ count }}\n</template>\n\n<script setup lang=\"ts\">\nconst count = ref(0)\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let script_count_offset = source.rfind("count").unwrap() as u32;
@@ -2548,7 +2548,7 @@ fn definition_binding_takes_precedence_over_prop_field() {
 fn test_vue_default_import_retries_with_default_binding() {
     // When the resolver can't match the local name but CAN match "default", returns the result
     let source = "<script setup>\nimport MyComp from './Child.vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -2621,7 +2621,7 @@ fn test_vue_default_import_retries_with_default_binding() {
 #[test]
 fn test_named_import_non_carrier_no_default_fallback() {
     let source = "<script setup>\nimport { helper } from './utils'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -2667,7 +2667,7 @@ fn test_named_import_non_carrier_no_default_fallback() {
 #[test]
 fn test_component_tag_default_fallback() {
     let source = "<template>\n  <WrappedBtn />\n</template>\n\n<script setup>\nimport WrappedBtn from './WrappedBtn.vue'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     use verter_semantic::analysis::template::*;
@@ -2763,7 +2763,7 @@ fn test_component_tag_default_fallback() {
 #[test]
 fn test_script_context_vue_import_default_fallback() {
     let source = "<script setup>\nimport Comp from './Comp.vue'\nconst x = 1\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -2870,7 +2870,7 @@ fn css_nav_element(
 #[test]
 fn css_class_definition_returns_all_declaring_rules_hierarchy_first() {
     let source = "<template>\n  <div class=\"card\"><span class=\"title\"></span></div>\n</template>\n<style scoped>\n.other .title { color: blue; }\n.card .title { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -2962,7 +2962,7 @@ fn css_class_definition_returns_all_declaring_rules_hierarchy_first() {
 #[test]
 fn css_class_definition_fails_closed_on_no_rule_despite_binding_collision() {
     let source = "<template>\n  <div class=\"primary\"></div>\n</template>\n<script setup>\nconst primary = 1\n</script>\n<style scoped>\n.unrelated { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -3030,7 +3030,7 @@ fn css_class_definition_fails_closed_on_no_rule_despite_binding_collision() {
 #[test]
 fn css_class_definition_reaches_deep_inner_class() {
     let source = "<template>\n  <div class=\"inner\"></div>\n</template>\n<style scoped>\n.wrap :deep(.inner) { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -3090,7 +3090,7 @@ fn css_class_definition_reaches_deep_inner_class() {
 #[test]
 fn css_class_definition_reaches_nested_scss_class() {
     let source = "<template>\n  <div class=\"title\"></div>\n</template>\n<style lang=\"scss\" scoped>\n.card {\n  .title { color: red; }\n}\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -3152,7 +3152,7 @@ fn css_class_definition_reaches_nested_scss_class() {
 #[test]
 fn css_class_definition_kebab_token_at_hyphen_position() {
     let source = "<template>\n  <div class=\"my-card\"></div>\n</template>\n<style scoped>\n.my-card { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -3216,7 +3216,7 @@ fn css_class_definition_kebab_token_at_hyphen_position() {
 /// Build a Svelte-shaped analysis snapshot: no template element IR, markup
 /// class tokens + scoped-by-default scanned styles.
 fn svelte_css_analysis(source: &str) -> FileAnalysisSnapshot {
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (scs, sce) = style_block.content_range();
     let style_css = &source[scs as usize..sce as usize];
@@ -3280,7 +3280,7 @@ fn svelte_css_analysis(source: &str) -> FileAnalysisSnapshot {
 #[test]
 fn svelte_class_attr_definition_to_style_rule() {
     let source = "<div class=\"card\"></div>\n<style>\n.card { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = svelte_css_analysis(source);
 
@@ -3309,7 +3309,7 @@ fn svelte_class_attr_definition_to_style_rule() {
 #[test]
 fn svelte_class_directive_definition_to_style_rule() {
     let source = "<div class:open={cond}></div>\n<style>\n.open { display: block; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = svelte_css_analysis(source);
 
@@ -3338,7 +3338,7 @@ fn svelte_class_directive_definition_to_style_rule() {
 #[test]
 fn svelte_class_token_without_rule_fails_closed() {
     let source = "<div class=\"ghost\"></div>\n<style>\n.real { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = svelte_css_analysis(source);
 
@@ -3363,7 +3363,7 @@ fn svelte_class_token_without_rule_fails_closed() {
 #[test]
 fn svelte_style_class_definition_to_markup_usages() {
     let source = "<div class=\"card\"></div>\n<span class=\"card\"></span>\n<style>\n.card { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let analysis = svelte_css_analysis(source);
 
@@ -3399,7 +3399,7 @@ fn module_class_rule_is_not_a_same_file_definition_target() {
             "<template>\n  <div class=\"btn\"></div>\n</template>\n{style_tag}\n.btn {{ color: red; }}\n</style>\n"
         );
         let source = source.as_str();
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -3466,7 +3466,7 @@ fn module_class_rule_is_not_a_same_file_definition_target() {
 #[test]
 fn module_style_class_token_is_not_a_navigation_origin() {
     let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style module>\n.btn { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();

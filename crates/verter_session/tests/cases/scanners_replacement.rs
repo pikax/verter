@@ -1727,7 +1727,7 @@ fn scanners_replacement_capability_ledger_deleted_row_is_rejected() {
         let rows = ledger["rows"].as_array_mut().expect("ledger rows");
         let position = rows
             .iter()
-            .position(|row| row["symbol"] == "sfc_blocks projection")
+            .position(|row| row["symbol"] == "registered_raw_compile")
             .expect("non-seed discrimination row");
         rows.remove(position);
         rows.len()
@@ -1818,11 +1818,10 @@ fn scanners_replacement_capability_ledger_is_total() {
     }
 
     for required in [
-        "sfcScriptImportAnchor",
-        "findHtmlTagEnd",
         "isFrameworkAttributeNamePosition",
-        "find_opening_tag_end",
         "ScriptDetector",
+        "registered_raw_compile",
+        "external_source_synthetic_parse",
     ] {
         assert!(
             symbols.contains(required),

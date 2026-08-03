@@ -39,8 +39,9 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<crate::carrier_publication_store::RegisteredFileStructure> {
+        let canonical_id = self.resolve_alias_or_canonical(canonical_id);
         self.scheduler
-            .try_get_source(canonical_id)?
+            .try_get_source(&canonical_id)?
             .downcast_data::<host_executor::HostSourceData>()?
             .structure
             .clone()
@@ -55,7 +56,8 @@ impl VerterHost {
         crate::carrier_publication_store::RegisteredFileStructure,
         crate::carrier_publication_store::HostSourceRevisionToken,
     )> {
-        let source = self.scheduler.try_get_source(canonical_id)?;
+        let canonical_id = self.resolve_alias_or_canonical(canonical_id);
+        let source = self.scheduler.try_get_source(&canonical_id)?;
         let data = source.downcast_data::<host_executor::HostSourceData>()?;
         Some((data.structure.clone()?, data.revision_token))
     }
@@ -67,12 +69,25 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<crate::carrier_publication_store::HostSourceRevisionToken> {
+        let canonical_id = self.resolve_alias_or_canonical(canonical_id);
         Some(
             self.scheduler
-                .try_get_source(canonical_id)?
+                .try_get_source(&canonical_id)?
                 .downcast_data::<host_executor::HostSourceData>()?
                 .revision_token,
         )
+    }
+
+    /// Return the content-free schema-8 projection for one committed carrier.
+    /// The projection is derived solely from the registered envelope.
+    pub fn ordered_sfc_structure(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis> {
+        let structure = self.registered_file_structure(canonical_id)?;
+        Some(crate::host_resolve::ordered_sfc_structure_analysis(
+            &structure,
+        ))
     }
 
     /// Get the scheduler's analysis snapshot for a file.

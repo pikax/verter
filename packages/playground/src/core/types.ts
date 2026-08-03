@@ -195,6 +195,8 @@ export interface CompiledFile {
 export class File {
   filename: string;
   code: string;
+  /** Registered, revision-current carrier geometry supplied by the WASM host. */
+  structure: OrderedSfcStructure | null = null;
   compiled: CompiledFile = {
     js: "",
     css: "",
@@ -244,6 +246,53 @@ export class File {
     }
     return false;
   }
+}
+
+export interface StructureRange {
+  sourceSpaceToken: string;
+  start: number;
+  end: number;
+}
+
+export type StructureBlock =
+  | {
+      kind: "section";
+      section: {
+        blockToken: string;
+        role:
+          | { kind: "templateHost" }
+          | { kind: "script"; role: string; dialect: string }
+          | { kind: "style"; dialect: string; scoped: boolean; module: string }
+          | { kind: "custom"; normalizedName: string };
+        openingRange: StructureRange;
+        contentRange: StructureRange;
+        closingRange?: StructureRange;
+        fullRange: StructureRange;
+        attributeInsertionAnchor: StructureRange;
+      };
+      markupRootTokens: string[];
+    }
+  | { kind: "markupRoot"; blockToken: string; markupRootToken: string };
+
+export interface OrderedSfcStructure {
+  schemaVersion: 1;
+  artifactToken: string;
+  blocks: StructureBlock[];
+  markupNodes: Array<{
+    nodeToken: string;
+    parentNodeToken?: string;
+    childNodeTokens: string[];
+    syntax:
+      | {
+          kind: "element";
+          authoredName: { spelling: string; normalized: string; range: StructureRange };
+          openingRange: StructureRange;
+          contentRange: StructureRange;
+          closingRange?: StructureRange;
+          fullRange: StructureRange;
+        }
+      | { kind: string; [key: string]: unknown };
+  }>;
 }
 
 export type OutputMode =

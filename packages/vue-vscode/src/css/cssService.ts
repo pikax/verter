@@ -25,14 +25,14 @@ import {
 import { TextDocument } from "vscode-languageserver-textdocument";
 import * as vscode from "vscode";
 import type { LanguageClient } from "vscode-languageclient/node";
-import type { PatchClient } from "@verter/language-shared";
+import type { PatchClient, DocumentStructureResponseV1 } from "@verter/language-shared";
 import { RequestType } from "@verter/language-shared";
 import {
-  scanStyleBlocks,
+  styleBlocksFromStructure,
   findStyleBlockAt,
   type StyleBlockInfo,
   type StyleLang,
-} from "./styleBlockScanner";
+} from "./styleStructure";
 import { directStyleDocumentText } from "./styleDocumentText";
 import { transpile, type TranspileResult } from "./transpiler";
 import { resolvePreprocessor, type PreprocessorCache } from "./preprocessorResolver";
@@ -60,17 +60,12 @@ function getServiceForLang(lang: StyleLang): CSSLanguageService | null {
 
 // ── Virtual file cache ───────────────────────────────────────────
 
-interface CachedStyleEntry {
-  code: string;
-  lang: string;
-}
-
 interface DocumentCache {
   version: number;
+  openEpoch: string;
+  availability: DocumentStructureResponseV1["kind"] | "transportUnavailable";
   blocks: StyleBlockInfo[];
   source: string;
-  /** Keyed by style block index */
-  virtualFiles: Map<number, CachedStyleEntry>;
   /** Keyed by style block index — transpiled CSS for preprocessors */
   transpiled: Map<number, TranspileResult>;
 }
@@ -84,10 +79,12 @@ export class CssService {
   private warnedMissing = new Set<string>();
   /** Inline diagnostics for missing preprocessor packages (sass, stylus). */
   private diagnostics = vscode.languages.createDiagnosticCollection("verter-preprocessor");
+  private requestNonce = 0;
 
   constructor(
     private getClient: () => PatchClient<LanguageClient>,
     private workspacePath: string | undefined,
+    private getOpenEpoch: (uri: string) => string,
   ) {
     // Pre-resolve preprocessors from the workspace's node_modules
     if (workspacePath) {
@@ -171,9 +168,9 @@ export class CssService {
     uri: string,
     source: string,
     version: number,
-  ): Promise<Array<{ blockIndex: number; diagnostics: CSSDiagnostic[] }>> {
+  ): Promise<Array<{ blockToken: string; diagnostics: CSSDiagnostic[] }>> {
     const entry = await this.ensureCache(uri, source, version);
-    const results: Array<{ blockIndex: number; diagnostics: CSSDiagnostic[] }> = [];
+    const results: Array<{ blockToken: string; diagnostics: CSSDiagnostic[] }> = [];
 
     for (const block of entry.blocks) {
       const service = this.getServiceForBlock(block, entry);
@@ -187,7 +184,7 @@ export class CssService {
         for (const d of diags) {
           d.range = this.toSfcRange(block, d.range);
         }
-        results.push({ blockIndex: block.index, diagnostics: diags });
+        results.push({ blockToken: block.blockToken, diagnostics: diags });
       }
     }
 
@@ -270,14 +267,6 @@ export class CssService {
     }));
   }
 
-  /**
-   * Check if a position is inside a style block.
-   */
-  isInStyleBlock(source: string, line: number, character: number): boolean {
-    const blocks = scanStyleBlocks(source);
-    return findStyleBlockAt(blocks, source, line, character) !== undefined;
-  }
-
   dispose(): void {
     this.cache.clear();
     this.diagnostics.dispose();
@@ -313,7 +302,7 @@ export class CssService {
   ): CSSLanguageService | null {
     // For preprocessors that need transpilation, check if we have transpiled output
     if (block.lang === "sass" || block.lang === "stylus") {
-      return entry.transpiled.has(block.index) ? cssService : null;
+      return entry.transpiled.has(block.legacyPreprocessorIndex) ? cssService : null;
     }
     return getServiceForLang(block.lang);
   }
@@ -325,9 +314,14 @@ export class CssService {
   ): CSSTextDocument | null {
     // For transpiled languages, use transpiled CSS
     if (block.lang === "sass" || block.lang === "stylus") {
-      const transpiled = entry.transpiled.get(block.index);
+      const transpiled = entry.transpiled.get(block.legacyPreprocessorIndex);
       if (!transpiled) return null;
-      return TextDocument.create(`${sfcUri}.style.${block.index}.css`, "css", 1, transpiled.css);
+      return TextDocument.create(
+        `${sfcUri}.style.${block.blockToken}.css`,
+        "css",
+        1,
+        transpiled.css,
+      );
     }
 
     // For direct languages (css, scss, less, postcss), the CSS service MUST
@@ -339,7 +333,7 @@ export class CssService {
     const code = directStyleDocumentText(entry.source, block);
 
     const langId = block.lang === "postcss" ? "css" : block.lang;
-    return TextDocument.create(`${sfcUri}.style.${block.index}.${langId}`, langId, 1, code);
+    return TextDocument.create(`${sfcUri}.style.${block.blockToken}.${langId}`, langId, 1, code);
   }
 
   /**
@@ -383,34 +377,33 @@ export class CssService {
    */
   private async ensureCache(uri: string, source: string, version: number): Promise<DocumentCache> {
     const existing = this.cache.get(uri);
-    if (existing && existing.version === version) {
+    const openEpoch = this.getOpenEpoch(uri);
+    if (existing && existing.version === version && existing.openEpoch === openEpoch) {
       return existing;
     }
 
-    const blocks = scanStyleBlocks(source);
-
-    // Request virtual files from the LSP
-    const virtualFiles = new Map<number, CachedStyleEntry>();
-    const transpiled = new Map<number, TranspileResult>();
-
+    const requestToken = `${openEpoch}:${version}:${++this.requestNonce}`;
+    let response: DocumentStructureResponseV1 | null = null;
     try {
-      const client = this.getClient();
-      const response = await client.sendRequest(RequestType.GetVirtualFiles, {
-        uri,
+      response = await this.getClient().sendRequest(RequestType.GetDocumentStructure, {
+        requestToken,
+        textDocument: { uri },
+        clientOpenEpoch: openEpoch,
+        expectedClientVersion: version,
       });
-
-      if (response?.virtualFiles) {
-        for (const vf of response.virtualFiles) {
-          // Parse "style:N" kind
-          const match = /^style:(\d+)$/.exec(vf.kind);
-          if (!match) continue;
-          const idx = parseInt(match[1], 10);
-          virtualFiles.set(idx, { code: vf.code, lang: vf.lang });
-        }
-      }
     } catch {
-      // LSP might not be ready; fall back to empty
+      response = null;
     }
+    const live = vscode.workspace.textDocuments.find((document) => document.uri.toString() === uri);
+    const admitted =
+      response !== null &&
+      response.requestToken === requestToken &&
+      response.clientOpenEpoch === openEpoch &&
+      response.expectedClientVersion === version &&
+      live?.version === version &&
+      this.getOpenEpoch(uri) === openEpoch;
+    const blocks = admitted && response ? styleBlocksFromStructure(source, response) : [];
+    const transpiled = new Map<number, TranspileResult>();
 
     // Transpile preprocessors if needed (resolved from workspace node_modules)
     // Collect missing-preprocessor diagnostics for this URI atomically.
@@ -424,15 +417,13 @@ export class CssService {
         resolvePreprocessor(block.lang, this.workspacePath, this.preprocessors);
       }
 
-      const vf = virtualFiles.get(block.index);
-      if (!vf) continue;
-
-      const result = await transpile(vf.code, block.lang, uri, this.preprocessors);
+      const authored = directStyleDocumentText(source, block);
+      const result = await transpile(authored, block.lang, uri, this.preprocessors);
       if (result) {
-        transpiled.set(block.index, result);
+        transpiled.set(block.legacyPreprocessorIndex, result);
 
         // Send transpiled CSS back to the host for analysis
-        await this.applyStyleOverride(uri, block.index, result);
+        await this.applyStyleOverride(uri, block.legacyPreprocessorIndex, result);
       } else {
         // Emit an inline diagnostic on the lang="..." attribute
         if (block.langAttributeRange) {
@@ -475,9 +466,10 @@ export class CssService {
 
     const entry: DocumentCache = {
       version,
+      openEpoch,
+      availability: admitted && response ? response.kind : "transportUnavailable",
       blocks,
       source,
-      virtualFiles,
       transpiled,
     };
     this.cache.set(uri, entry);

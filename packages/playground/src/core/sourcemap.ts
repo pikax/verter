@@ -167,6 +167,8 @@ export interface CombineOptions {
   templateCode: string;
   /** Original Vue SFC source. */
   vueSource: string;
+  /** Registered UTF-8 start of the template section opening tag. */
+  templateStartUtf8?: number | null;
   /** Final JS after mergeRenderIntoComponent. */
   finalJs: string;
 }
@@ -184,7 +186,15 @@ export interface CombineOptions {
  * template-only SFCs, shifting all lines by +1.
  */
 export function combineSourceMaps(opts: CombineOptions): string {
-  const { scriptMap, scriptCode, templateMap, templateCode, vueSource, finalJs } = opts;
+  const {
+    scriptMap,
+    scriptCode,
+    templateMap,
+    templateCode,
+    vueSource,
+    templateStartUtf8,
+    finalJs,
+  } = opts;
 
   const scriptParsed = tryParseMap(scriptMap);
   const templateParsed = tryParseMap(templateMap);
@@ -201,9 +211,14 @@ export function combineSourceMaps(opts: CombineOptions): string {
   // It may prepend "const __sfc__ = {};\n" for template-only components.
   const mergeLineOffset = computeMergeLineOffset(scriptCode, finalJs);
 
-  // Determine how many SFC prefix lines (before <template>) are in the template source map.
-  const tplIdx = vueSource.indexOf("<template");
-  const sfcPrefixLines = tplIdx !== -1 ? vueSource.slice(0, tplIdx).split("\n").length - 1 : 0;
+  // The host source map is relative to the full SFC. The registered inventory
+  // supplies the template opening byte offset; unavailable structure fails closed.
+  const prefixBytes =
+    templateStartUtf8 == null
+      ? null
+      : new TextEncoder().encode(vueSource).slice(0, templateStartUtf8);
+  const sfcPrefixLines =
+    prefixBytes?.reduce((count, byte) => count + (byte === 10 ? 1 : 0), 0) ?? 0;
 
   // Determine if the host prepended an import line to the template code.
   // The host prepends "import { ... } from \"vue\"\n" when the template needs vue imports.
