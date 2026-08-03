@@ -1,6 +1,20 @@
 #!/usr/bin/env node
 
-import { execFileSync } from "node:child_process";
+// Campaign-gate execution-proof orchestrator for the scanners-replacement
+// cutover (plan §8.4 `b4` profile, non-broker scope). Run manually by the
+// orchestrator at plan gates — it is NOT a CI job. The durable enforcement is
+// the in-suite structural rails (trybuild/privacy/seals plus the
+// `cases::scanners_replacement` suite) that already run in normal CI; this
+// script proves one clean-tree gate actually executed them.
+//
+// Execution-proof shape (CLAUDE.md "Verification Must Prove Execution"):
+// every declared phase must run, select non-zero work, and record its child
+// exit codes; a missing, failed, or zero-selection phase FAILS — never a
+// silent skip. The run ends with one terminal input-bound summary (tip sha,
+// profile, per-phase counts). The broker/VSIX worker-attestation portions of
+// §8.4 stay EXCLUDED under the recorded user deferral.
+
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -36,6 +50,102 @@ const COHORT_FIELDS = new Set([
   "carrier_cache_serialization_version",
 ]);
 
+// The canonical phase set of this profile. The terminal summary refuses to
+// exist unless every one of these recorded non-zero selected work.
+const B4_PHASES = [
+  "inputs",
+  "prerequisites",
+  "extension-authority",
+  "scanner-free-boundary",
+  "ledger",
+  "schema-cohort",
+  "rust-guards",
+];
+
+// Focused structural/guard suites, run by EXACT name so a deleted or renamed
+// guard surfaces as a zero-selection failure here (execution proof replaces
+// the former source-grep guard inventory).
+const B4_RUST_GUARD_COMMANDS = [
+  [
+    "cargo",
+    [
+      "test",
+      "-p",
+      "verter_session",
+      "--test",
+      "main",
+      "cases::scanners_replacement::scanners_replacement",
+    ],
+  ],
+  [
+    "cargo",
+    [
+      "test",
+      "-p",
+      "verter_session",
+      "--lib",
+      "carrier_artifact_cohort::tests::persisted_carrier_cohort_has_frozen_eight_word_shape",
+    ],
+  ],
+  [
+    "cargo",
+    [
+      "test",
+      "-p",
+      "verter_session",
+      "--lib",
+      "carrier_artifact_cohort::tests::every_cohort_field_uses_exact_equality",
+    ],
+  ],
+  [
+    "cargo",
+    ["test", "-p", "verter_session", "--lib", "registered_file_structure_is_the_envelope_owner"],
+  ],
+  [
+    "cargo",
+    [
+      "test",
+      "-p",
+      "verter_lsp",
+      "--lib",
+      "registered_projection_preserves_duplicate_attributes_and_sealed_refs",
+    ],
+  ],
+  [
+    "cargo",
+    [
+      "test",
+      "-p",
+      "verter_protocol",
+      "--lib",
+      "schema8_full_body_uses_tag_26_and_roundtrips_supported_contract",
+    ],
+  ],
+  [
+    "cargo",
+    [
+      "test",
+      "-p",
+      "verter_session",
+      "--features",
+      "compile-fail",
+      "--test",
+      "main",
+      "is_not_public",
+    ],
+  ],
+];
+
+// Files later phases depend on. A missing prerequisite fails HERE with its
+// name instead of surfacing as an unrelated read error inside a phase.
+const B4_PREREQUISITES = [
+  "docs/arch/scanners-replacement-capability-ledger.json",
+  "schemas/scanners-replacement-v1.schema.json",
+  "packages/vue-vscode/package.json",
+  "packages/playground/scripts/generate-vue-language.ts",
+  "packages/playground/src/editor/vueLanguage.ts",
+];
+
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -64,9 +174,11 @@ function trackedFiles(root) {
 }
 
 export function verifyNoLegacyExtensionAuthority(root = DEFAULT_ROOT, files = trackedFiles(root)) {
+  let selected = 0;
   // PHYSICAL arm: no retired extension tree may exist on disk.
   for (const retired of RETIRED_EXTENSIONS) {
     invariant(!existsSync(join(root, retired)), `${retired} still exists`);
+    selected += 1;
   }
   // TRACKED arm (retired): no retired extension tree may have tracked files.
   for (const retired of RETIRED_EXTENSIONS) {
@@ -74,6 +186,7 @@ export function verifyNoLegacyExtensionAuthority(root = DEFAULT_ROOT, files = tr
       !files.some((path) => path === retired || path.startsWith(`${retired}/`)),
       `${retired} still has tracked files`,
     );
+    selected += 1;
   }
   // TRACKED arm (allowlist): every tracked path under extensions/ must belong
   // to a live extension.
@@ -82,6 +195,7 @@ export function verifyNoLegacyExtensionAuthority(root = DEFAULT_ROOT, files = tr
       LIVE_EXTENSIONS.some((live) => path.startsWith(`${live}/`)),
       `tracked extensions residue outside the live allowlist: ${path}`,
     );
+    selected += 1;
   }
 
   for (const path of files.filter((candidate) => candidate.endsWith("package.json"))) {
@@ -89,6 +203,7 @@ export function verifyNoLegacyExtensionAuthority(root = DEFAULT_ROOT, files = tr
     for (const retired of RETIRED_EXTENSIONS) {
       invariant(!source.includes(retired), `${path} references ${retired}`);
     }
+    selected += 1;
   }
 
   for (const path of [
@@ -103,23 +218,29 @@ export function verifyNoLegacyExtensionAuthority(root = DEFAULT_ROOT, files = tr
     for (const retired of RETIRED_EXTENSIONS) {
       invariant(!source.includes(retired), `${path} references ${retired}`);
     }
+    selected += 1;
   }
+  return selected;
 }
 
 export function verifyScannerFreeBoundary(root = DEFAULT_ROOT, files = trackedFiles(root)) {
+  let selected = 0;
   for (const retired of [
     "crates/verter_lsp/src/documents/sfc_scanner.rs",
     "crates/verter_parser/src/cursor/script_detector.rs",
     "packages/vue-vscode/src/css/styleBlockScanner.ts",
   ]) {
     invariant(!files.includes(retired), `${retired} was reintroduced`);
+    selected += 1;
   }
   for (const fixture of [
     "crates/verter_session/tests/cases/compile-fail/scanners_replacement_raw_parser_public.rs",
     "crates/verter_session/tests/cases/compile-fail/scanners_replacement_script_detector_public.rs",
   ]) {
     invariant(existsSync(join(root, fixture)), `${fixture} compile boundary is missing`);
+    selected += 1;
   }
+  return selected;
 }
 
 export function verifyLedger(root = DEFAULT_ROOT) {
@@ -238,99 +359,124 @@ export function verifyLedger(root = DEFAULT_ROOT) {
   );
   invariant(equalSets(ledgerTargets, PRODUCTION_VSIX_TARGETS), "B-78 ledger target set drifted");
   invariant(equalSets(packageTargets, PRODUCTION_VSIX_TARGETS), "B-78 package target set drifted");
+  return rows.length;
 }
 
-export function verifySchemaAndGuardInventory(root = DEFAULT_ROOT) {
+export function verifySchemaCohort(root = DEFAULT_ROOT) {
   const schema = readJson(root, "schemas/scanners-replacement-v1.schema.json");
   const cohort = new Set(Object.keys(schema.persisted_carrier_artifact_cohort?.fields ?? {}));
   invariant(
     equalSets(cohort, COHORT_FIELDS),
     "persisted carrier cohort is not the exact eight-field set",
   );
+  return cohort.size;
+}
 
-  const guards = new Map([
-    [
-      "crates/verter_session/src/carrier_artifact_cohort.rs",
-      [
-        "persisted_carrier_cohort_has_frozen_eight_word_shape",
-        "every_cohort_field_uses_exact_equality",
-      ],
-    ],
-    [
-      "crates/verter_session/src/carrier_publication_store_tests.rs",
-      ["registered_file_structure_is_the_envelope_owner"],
-    ],
-    [
-      "crates/verter_lsp/src/documents/carrier_structure.rs",
-      ["registered_projection_preserves_duplicate_attributes_and_sealed_refs"],
-    ],
-    [
-      "crates/verter_protocol/src/component_meta.rs",
-      ["schema8_full_body_uses_tag_26_and_roundtrips_supported_contract"],
-    ],
-  ]);
-  for (const [path, names] of guards) {
-    const source = readFileSync(join(root, path), "utf8");
-    for (const name of names) invariant(source.includes(`fn ${name}`), `${path} lacks ${name}`);
+export function verifyPrerequisites(root = DEFAULT_ROOT) {
+  let selected = 0;
+  for (const path of B4_PREREQUISITES) {
+    invariant(existsSync(join(root, path)), `prerequisite missing: ${path}`);
+    selected += 1;
   }
+  return selected;
 }
 
-function run(root, command, args) {
-  console.log(`\n[verify] ${command} ${args.join(" ")}`);
-  execFileSync(command, args, { cwd: root, stdio: "inherit", env: process.env });
+// Real child runner: captures exit code and output (echoed for the operator)
+// instead of inheriting stdio, so selection can be PROVEN from the child's own
+// test summary rather than assumed from exit 0.
+function realExec(command, args, cwd) {
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: "utf8",
+    env: process.env,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  invariant(!result.error, `failed to launch ${command}: ${result.error?.message}`);
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-export function runFocusedRustGuards(root = DEFAULT_ROOT) {
-  run(root, "cargo", [
-    "test",
-    "-p",
-    "verter_session",
-    "--test",
-    "main",
-    "cases::scanners_replacement::scanners_replacement",
-  ]);
-  run(root, "cargo", ["test", "-p", "verter_session", "--lib", "carrier_artifact_cohort::tests::"]);
-  run(root, "cargo", [
-    "test",
-    "-p",
-    "verter_session",
-    "--lib",
-    "registered_file_structure_is_the_envelope_owner",
-  ]);
-  run(root, "cargo", [
-    "test",
-    "-p",
-    "verter_lsp",
-    "--lib",
-    "registered_projection_preserves_duplicate_attributes_and_sealed_refs",
-  ]);
-  run(root, "cargo", [
-    "test",
-    "-p",
-    "verter_protocol",
-    "--lib",
-    "schema8_full_body_uses_tag_26_and_roundtrips_supported_contract",
-  ]);
-  run(root, "cargo", [
-    "test",
-    "-p",
-    "verter_session",
-    "--features",
-    "compile-fail",
-    "--test",
-    "main",
-    "is_not_public",
-  ]);
+function sumPassedTests(stdout) {
+  let passed = 0;
+  for (const match of stdout.matchAll(/test result: \w+\. (\d+) passed;/g)) {
+    passed += Number(match[1]);
+  }
+  return passed;
 }
 
-export function verifyRepository(root = DEFAULT_ROOT, { runCargo = true } = {}) {
+export function runFocusedRustGuards(root = DEFAULT_ROOT, exec = realExec) {
+  const receipts = [];
+  for (const [command, args] of B4_RUST_GUARD_COMMANDS) {
+    const shown = `${command} ${args.join(" ")}`;
+    console.log(`\n[verify] ${shown}`);
+    const { status, stdout } = exec(command, args, root);
+    invariant(status === 0, `rust guard failed (exit ${status}): ${shown}`);
+    const passed = sumPassedTests(stdout);
+    invariant(passed > 0, `rust guard selected zero tests: ${shown}`);
+    receipts.push({ command: shown, exit_code: status, tests_passed: passed });
+  }
+  return receipts;
+}
+
+// The terminal input-bound summary. It refuses to exist unless bound to a tip
+// sha and complete over every canonical phase with non-zero selected work — a
+// run that cannot produce it never reports success.
+export function terminalSummary({ profile, tip, phases, rust_commands = [] }) {
+  invariant(profile === "b4", `unknown profile ${profile}`);
+  invariant(/^[0-9a-f]{40}$/.test(tip ?? ""), "terminal summary must bind the tip sha");
+  for (const name of B4_PHASES) {
+    const entry = phases[name];
+    invariant(
+      entry && Number.isInteger(entry.selected) && entry.selected > 0,
+      `terminal summary missing phase ${name} (a silent skip or zero work)`,
+    );
+  }
+  return {
+    profile,
+    tip,
+    phases: Object.fromEntries(B4_PHASES.map((name) => [name, phases[name]])),
+    rust_commands,
+  };
+}
+
+export function runProfileB4(root = DEFAULT_ROOT, exec = realExec) {
+  const phases = {};
+  const record = (name, work) => {
+    console.log(`\n[verify] phase: ${name}`);
+    const selected = work();
+    invariant(Number.isInteger(selected) && selected > 0, `phase ${name} ran zero work`);
+    phases[name] = { selected };
+  };
+
+  const tip = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   const files = trackedFiles(root);
-  verifyNoLegacyExtensionAuthority(root, files);
-  verifyScannerFreeBoundary(root, files);
-  verifyLedger(root);
-  verifySchemaAndGuardInventory(root);
-  if (runCargo) runFocusedRustGuards(root);
-  console.log("\n[verify] scanners replacement non-broker checks passed");
+  let rustReceipts = [];
+
+  record("inputs", () => {
+    invariant(/^[0-9a-f]{40}$/.test(tip), `unusable tip sha: ${tip}`);
+    invariant(files.length > 0, "tracked-file inventory is empty");
+    // Inputs bound: tip sha + tracked inventory + the toolchain identities.
+    const node = process.version;
+    const cargo = exec("cargo", ["--version"], root);
+    invariant(cargo.status === 0 && cargo.stdout.includes("cargo"), "cargo identity unavailable");
+    console.log(`[verify] tip=${tip} files=${files.length} node=${node} ${cargo.stdout.trim()}`);
+    return 2 + files.length;
+  });
+  record("prerequisites", () => verifyPrerequisites(root));
+  record("extension-authority", () => verifyNoLegacyExtensionAuthority(root, files));
+  record("scanner-free-boundary", () => verifyScannerFreeBoundary(root, files));
+  record("ledger", () => verifyLedger(root));
+  record("schema-cohort", () => verifySchemaCohort(root));
+  record("rust-guards", () => {
+    rustReceipts = runFocusedRustGuards(root, exec);
+    return rustReceipts.reduce((total, receipt) => total + receipt.tests_passed, 0);
+  });
+
+  const summary = terminalSummary({ profile: "b4", tip, phases, rust_commands: rustReceipts });
+  console.log(`\n[verify] SUMMARY ${JSON.stringify(summary)}`);
+  console.log("[verify] scanners replacement b4 orchestration passed");
+  return summary;
 }
 
 function parseArgs(args) {
@@ -344,7 +490,7 @@ function parseArgs(args) {
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   try {
     parseArgs(process.argv.slice(2));
-    verifyRepository();
+    runProfileB4();
   } catch (error) {
     console.error(`[verify] FAIL: ${error.message}`);
     process.exitCode = 1;

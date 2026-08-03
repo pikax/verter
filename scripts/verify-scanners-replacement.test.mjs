@@ -5,9 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  runFocusedRustGuards,
+  terminalSummary,
   verifyLedger,
   verifyNoLegacyExtensionAuthority,
-  verifySchemaAndGuardInventory,
+  verifySchemaCohort,
 } from "./verify-scanners-replacement.mjs";
 
 /// Minimal healthy fixture tree: the playground grammar files plus a clean
@@ -29,8 +31,78 @@ function writeHealthyTree(root) {
 }
 
 test("repository scanner-replacement metadata is internally total", () => {
-  verifyLedger();
-  verifySchemaAndGuardInventory();
+  assert.ok(verifyLedger() > 0, "ledger phase must report the rows it validated");
+  assert.ok(verifySchemaCohort() > 0, "schema phase must report the fields it validated");
+});
+
+/// Fake child-process runner: every command "passes" with the given cargo
+/// stdout, so each control below isolates exactly one execution-proof rail.
+function fakeExec(stdout, status = 0) {
+  return () => ({ status, stdout, stderr: "" });
+}
+
+test("rust guard phase fails on a zero-selection child instead of silently passing", () => {
+  // GREEN control: a passing child with real selected work yields receipts.
+  const receipts = runFocusedRustGuards(
+    ".",
+    fakeExec("running 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored\n"),
+  );
+  assert.ok(receipts.length > 0);
+  assert.ok(receipts.every((r) => r.exit_code === 0 && r.tests_passed === 3));
+
+  // RED control: exit 0 with ZERO selected tests is a silent skip, not a pass.
+  assert.throws(
+    () =>
+      runFocusedRustGuards(".", fakeExec("running 0 tests\ntest result: ok. 0 passed; 0 failed\n")),
+    /selected zero tests/,
+  );
+  // RED control: no cargo summary line at all is likewise zero proven work.
+  assert.throws(
+    () => runFocusedRustGuards(".", fakeExec("compiled fine, no tests emitted\n")),
+    /selected zero tests/,
+  );
+});
+
+test("rust guard phase captures and fails on a non-zero child exit code", () => {
+  assert.throws(
+    () => runFocusedRustGuards(".", fakeExec("test result: FAILED. 2 passed; 1 failed\n", 101)),
+    /exit 101/,
+  );
+});
+
+test("terminal summary refuses a missing or zero-work phase", () => {
+  const completePhases = {
+    inputs: { selected: 4 },
+    prerequisites: { selected: 5 },
+    "extension-authority": { selected: 3 },
+    "scanner-free-boundary": { selected: 5 },
+    ledger: { selected: 47 },
+    "schema-cohort": { selected: 8 },
+    "rust-guards": { selected: 21 },
+  };
+  const tip = "0123456789abcdef0123456789abcdef01234567";
+  // GREEN control: the complete input-bound summary is accepted.
+  const summary = terminalSummary({ profile: "b4", tip, phases: completePhases });
+  assert.equal(summary.tip, tip);
+
+  // RED control: a silently dropped phase must fail, never summarize as clean.
+  const { "rust-guards": _dropped, ...missingPhase } = completePhases;
+  assert.throws(
+    () => terminalSummary({ profile: "b4", tip, phases: missingPhase }),
+    /missing phase rust-guards/,
+  );
+  // RED control: a phase that recorded zero work must fail at the summary too.
+  assert.throws(
+    () =>
+      terminalSummary({
+        profile: "b4",
+        tip,
+        phases: { ...completePhases, ledger: { selected: 0 } },
+      }),
+    /missing phase ledger|zero work/,
+  );
+  // RED control: an unbound summary (no tip sha) is a receipt of nothing.
+  assert.throws(() => terminalSummary({ profile: "b4", tip: "", phases: completePhases }), /tip/);
 });
 
 test("legacy extension reference guard rejects a package regression", () => {

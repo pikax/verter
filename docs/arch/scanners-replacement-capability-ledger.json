@@ -5,6 +5,7 @@
         "scanners-replacement-verter Ã‚Â§6 B0/Ã‚Â§7/Ã‚Â§8.2-8.3",
         "T-B schema ratification v2"
     ],
+    "verification": "scripts/verify-scanners-replacement.mjs is the campaign-gate execution-proof orchestrator for this cutover, run manually by the orchestrator at plan gates (not a CI job); durable enforcement stays the in-suite structural guards that run in normal CI workspace suites.",
     "row_schema": [
         "path",
         "symbol",
