@@ -1,0 +1,19 @@
+error[E0425]: cannot find value `project_registered_carrier` in module `verter_compiler::framework_common`
+ --> tests/cases/compile-fail/registered_carrier_projector_not_public_or_reexported.rs:4:54
+  |
+4 |     let _facade = verter_compiler::framework_common::project_registered_carrier;
+  |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `verter_compiler::framework_common`
+
+error[E0603]: module `registered_carrier_projection` is private
+ --> tests/cases/compile-fail/registered_carrier_projector_not_public_or_reexported.rs:3:44
+  |
+3 |         verter_compiler::framework_common::registered_carrier_projection::project_registered_carrier;
+  |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  -------------------------- function `project_registered_carrier` is not publicly re-exported
+  |                                            |
+  |                                            private module
+  |
+note: the module `registered_carrier_projection` is defined here
+ --> $WORKSPACE/crates/verter_compiler/src/framework_common/mod.rs
+  |
+  | pub(crate) mod registered_carrier_projection;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

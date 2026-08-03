@@ -14,7 +14,7 @@ use verter_language::registered_source_authority::{
 use verter_language::{CarrierAttribute, CarrierBlock, MarkupNodeKind};
 
 use super::registered_carrier_projection::{
-    project_registered_carrier, RegisteredCarrierProjection,
+    project_registered_carrier_for_tests as project_registered_carrier, RegisteredCarrierProjection,
 };
 use super::registry::CarrierCompilerRegistry;
 
@@ -247,6 +247,13 @@ fn registered_projector_closed_variant_matrix_is_exhaustive_for_live_parsers() {
             _ => None,
         })
         .collect::<Vec<_>>();
+    // Parser-bound limitation: `SvelteBlock` carries only its opening and full
+    // spans, not a closing span or recovery fact. Pin the absent projection
+    // channel here until the parser DTO can publish those authored facts.
+    assert!(nodes.iter().all(|node| !matches!(
+        node.kind(),
+        MarkupNodeKind::SvelteControlBlock(block) if block.closing_span.is_some()
+    )));
     assert!(heads
         .iter()
         .any(|head| matches!(head, SvelteControlBlockHead::If { .. })));
@@ -269,6 +276,104 @@ fn registered_projector_closed_variant_matrix_is_exhaustive_for_live_parsers() {
             ..
         }
     )));
+
+    let span_range = |span: verter_language::SourceSpan| (span.start, span.end);
+    let await_node = |opening: &str| {
+        let start = svelte.find(opening).expect("authored await block") as u32;
+        nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.kind(),
+                    MarkupNodeKind::SvelteControlBlock(block)
+                        if block.full_span.start == start
+                )
+            })
+            .expect("projected await block")
+    };
+    let projected_children = |node: &verter_language::MarkupSyntaxNode| {
+        inventory.markup().child_ids()[node.children.start as usize..node.children.end as usize]
+            .iter()
+            .map(|id| &nodes[id.0 as usize])
+            .collect::<Vec<_>>()
+    };
+
+    let then_opening = "{#await promise then value}";
+    let then_start = svelte.find(then_opening).expect("inline then") as u32;
+    let then_node = await_node(then_opening);
+    let MarkupNodeKind::SvelteControlBlock(then_block) = then_node.kind() else {
+        unreachable!("await node kind")
+    };
+    let SvelteControlBlockHead::Await {
+        promise,
+        inline_branch:
+            SvelteAwaitInlineBranch::Then {
+                marker_span,
+                head_span,
+                binding: Some(binding),
+            },
+    } = &then_block.head
+    else {
+        panic!("inline then head")
+    };
+    assert_eq!(span_range(*promise), (then_start + 8, then_start + 15));
+    assert_eq!(span_range(*marker_span), (then_start + 16, then_start + 20));
+    assert_eq!(span_range(*head_span), (then_start + 16, then_start + 26));
+    assert_eq!(span_range(*binding), (then_start + 21, then_start + 26));
+    let then_children = projected_children(then_node);
+    assert_eq!(then_children.len(), 2, "body plus authored catch clause");
+    assert!(matches!(
+        then_children[0].kind(),
+        MarkupNodeKind::Text { content_span }
+            if span_range(*content_span) == (then_start + 27, then_start + 28)
+    ));
+    assert!(matches!(
+        then_children[1].kind(),
+        MarkupNodeKind::SvelteClause(clause)
+            if matches!(clause.head, SvelteClauseHead::Catch { binding: Some(binding) }
+                if span_range(binding) == (then_start + 36, then_start + 41))
+                && span_range(clause.marker_span) == (then_start + 28, then_start + 42)
+    ));
+
+    let catch_opening = "{#await promise catch error}";
+    let catch_start = svelte.find(catch_opening).expect("inline catch") as u32;
+    let catch_node = await_node(catch_opening);
+    let MarkupNodeKind::SvelteControlBlock(catch_block) = catch_node.kind() else {
+        unreachable!("await node kind")
+    };
+    let SvelteControlBlockHead::Await {
+        promise,
+        inline_branch:
+            SvelteAwaitInlineBranch::Catch {
+                marker_span,
+                head_span,
+                binding: Some(binding),
+            },
+    } = &catch_block.head
+    else {
+        panic!("inline catch head")
+    };
+    assert_eq!(span_range(*promise), (catch_start + 8, catch_start + 15));
+    assert_eq!(
+        span_range(*marker_span),
+        (catch_start + 16, catch_start + 21)
+    );
+    assert_eq!(span_range(*head_span), (catch_start + 16, catch_start + 27));
+    assert_eq!(span_range(*binding), (catch_start + 22, catch_start + 27));
+    let catch_children = projected_children(catch_node);
+    assert_eq!(catch_children.len(), 2, "body plus authored then clause");
+    assert!(matches!(
+        catch_children[0].kind(),
+        MarkupNodeKind::Text { content_span }
+            if span_range(*content_span) == (catch_start + 28, catch_start + 29)
+    ));
+    assert!(matches!(
+        catch_children[1].kind(),
+        MarkupNodeKind::SvelteClause(clause)
+            if matches!(clause.head, SvelteClauseHead::Then { binding: Some(binding) }
+                if span_range(binding) == (catch_start + 36, catch_start + 41))
+                && span_range(clause.marker_span) == (catch_start + 29, catch_start + 42)
+    ));
     assert!(heads.iter().any(|head| matches!(
         head,
         SvelteControlBlockHead::Await {
@@ -373,6 +478,23 @@ fn registered_projector_closed_variant_matrix_is_exhaustive_for_live_parsers() {
     ] {
         assert!(attrs.iter().any(|attr| matches!(attr, CarrierAttribute::Directive { family: DirectiveFamily::Svelte(actual), .. } if *actual == expected)));
     }
+    assert!(attrs.iter().all(|attr| !matches!(
+        attr,
+        CarrierAttribute::Directive {
+            family: DirectiveFamily::Svelte(_),
+            local_name: None,
+            ..
+        }
+    )));
+    assert!(attrs.iter().all(|attr| !matches!(
+        attr,
+        CarrierAttribute::Directive {
+            family: DirectiveFamily::Svelte(_),
+            argument: verter_language::DirectiveArgument::Static { .. }
+                | verter_language::DirectiveArgument::Dynamic { .. },
+            ..
+        }
+    )));
     assert!(attrs.iter().any(|attr| matches!(
         attr,
         CarrierAttribute::Directive {
@@ -383,7 +505,7 @@ fn registered_projector_closed_variant_matrix_is_exhaustive_for_live_parsers() {
     assert!(attrs.iter().any(|attr| matches!(attr, CarrierAttribute::Named { value: AttributeValue::Mixed { parts, .. }, .. } if matches!(parts.as_ref(), [AttributeValuePart::Static { .. }, AttributeValuePart::Expression { .. }, AttributeValuePart::Static { .. }]))));
     assert!(nodes.iter().any(|node| matches!(node.kind(), MarkupNodeKind::Element(element) if element.termination == SyntaxTermination::SelfClosing)));
 
-    let vue = r#"<template><svg><path/></svg><math><mi/></math><MyWidget Foo="&copy;"><!-- c -->{{ value }}text</MyWidget><component :is="which"/><br><div v-bind:[key].camel="value" @click.stop="go" v-model="value" v-show="ok" v-if="ok" v-else-if="other" v-else v-for="x in xs" v-slot="slot" v-pre v-cloak v-once v-memo="[x]" v-html="html" v-text="text" v-custom:arg="x"/></div></template>"#;
+    let vue = r#"<template><svg><path/></svg><math><mi/></math><MyWidget Foo="&copy;"><!-- c -->{{ value }}text</MyWidget><component :is="which"/><br><div :id="x" v-bind:[key].camel="value" v-custom:arg="x"/><div v-bind:[key].camel="value" @click.stop="go" v-model="value" v-show="ok" v-if="ok" v-else-if="other" v-else v-for="x in xs" v-slot="slot" v-pre v-cloak v-once v-memo="[x]" v-html="html" v-text="text" v-custom:arg="x"/></div></template>"#;
     let (_, _, accepted) = accepted(
         "file:///workspace/Matrix.vue",
         verter_language::FileLanguage::vue(),
@@ -392,6 +514,50 @@ fn registered_projector_closed_variant_matrix_is_exhaustive_for_live_parsers() {
     let projection = project(&accepted);
     let inventory = projection.inventory();
     inventory.validate().expect("Vue matrix inventory");
+    let vue_attrs = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .flat_map(|node| node.kind().attributes())
+        .collect::<Vec<_>>();
+    assert!(vue_attrs.iter().all(|attr| !matches!(
+        attr,
+        CarrierAttribute::Directive {
+            family: DirectiveFamily::Vue(_),
+            local_name: Some(_),
+            ..
+        }
+    )));
+    assert!(
+        vue_attrs.iter().any(|attr| matches!(
+            attr,
+            CarrierAttribute::Directive {
+                family: DirectiveFamily::Vue(verter_language::VueDirectiveKind::Bind),
+                local_name: None,
+                argument: verter_language::DirectiveArgument::Dynamic {
+                    full_span,
+                    open_span,
+                    expression_span,
+                    close_span: Some(close_span),
+                    ..
+                },
+                ..
+            } if inventory.slice_span(*full_span).expect("dynamic argument full") == "[key]"
+                && inventory.slice_span(*open_span).expect("dynamic argument open") == "["
+                && inventory.slice_span(*expression_span).expect("dynamic argument") == "key"
+                && inventory.slice_span(*close_span).expect("dynamic argument close") == "]"
+        )),
+        "Vue attributes: {vue_attrs:#?}"
+    );
+    assert!(vue_attrs.iter().any(|attr| matches!(
+        attr,
+        CarrierAttribute::Directive {
+            family: DirectiveFamily::Vue(verter_language::VueDirectiveKind::Custom),
+            local_name: None,
+            argument: verter_language::DirectiveArgument::Static { name },
+            ..
+        } if inventory.slice(name.authored).expect("static argument") == "arg"
+    )));
     assert!(inventory.markup().nodes().iter().any(|node| matches!(node.kind(), MarkupNodeKind::Element(element) if element.namespace == verter_language::MarkupNamespace::Svg)));
     assert!(inventory.markup().nodes().iter().any(|node| matches!(node.kind(), MarkupNodeKind::Element(element) if element.namespace == verter_language::MarkupNamespace::MathMl)));
     assert!(inventory.markup().nodes().iter().any(|node| matches!(node.kind(), MarkupNodeKind::Element(element) if element.kind == MarkupElementKind::DynamicComponent)));
@@ -585,43 +751,112 @@ fn registered_projector_signature_is_capability_only() {
     ) -> RegisteredCarrierProjection = project_registered_carrier;
 }
 
-#[derive(Default)]
 struct CapabilityCallVisitor {
     calls: Vec<String>,
+    module_path: Vec<String>,
+}
+
+impl Default for CapabilityCallVisitor {
+    fn default() -> Self {
+        Self::for_module(["verter_compiler"])
+    }
+}
+
+impl CapabilityCallVisitor {
+    const PROJECTOR: [&'static str; 4] = [
+        "verter_compiler",
+        "framework_common",
+        "registered_carrier_projection",
+        "project_registered_carrier",
+    ];
+
+    fn for_module(parts: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            calls: Vec::new(),
+            module_path: parts.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    fn resolve_path(&self, path: &syn::Path) -> Vec<String> {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        let Some(first) = segments.first().map(String::as_str) else {
+            return Vec::new();
+        };
+        if path.leading_colon.is_some() || first == "verter_compiler" {
+            return segments;
+        }
+        if first == "crate" {
+            let mut resolved = vec![self.module_path[0].clone()];
+            resolved.extend(segments.into_iter().skip(1));
+            return resolved;
+        }
+
+        let mut resolved = self.module_path.clone();
+        let mut offset = 0;
+        if first == "self" {
+            offset = 1;
+        } else {
+            while segments.get(offset).is_some_and(|part| part == "super") {
+                if resolved.len() > 1 {
+                    resolved.pop();
+                }
+                offset += 1;
+            }
+        }
+        resolved.extend(segments.into_iter().skip(offset));
+        resolved
+    }
+
+    fn record_projector_path(&mut self, path: &syn::Path) {
+        if self.resolve_path(path) == Self::PROJECTOR {
+            self.calls.push(Self::PROJECTOR.join("::"));
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for CapabilityCallVisitor {
     fn visit_item(&mut self, item: &'ast syn::Item) {
-        let attrs: &[syn::Attribute] = match item {
-            syn::Item::Const(item) => &item.attrs,
-            syn::Item::Enum(item) => &item.attrs,
-            syn::Item::Fn(item) => &item.attrs,
-            syn::Item::Impl(item) => &item.attrs,
-            syn::Item::Mod(item) => &item.attrs,
-            syn::Item::Static(item) => &item.attrs,
-            syn::Item::Struct(item) => &item.attrs,
-            syn::Item::Trait(item) => &item.attrs,
-            _ => &[],
-        };
-        if attrs.iter().any(|attr| {
-            attr.path().is_ident("test")
-                || (attr.path().is_ident("cfg")
-                    && attr.meta.to_token_stream().to_string().contains("test"))
-        }) {
+        if item_is_test_only(item_attrs(item)) {
             return;
+        }
+        if let syn::Item::Mod(module) = item {
+            if let Some((_, items)) = &module.content {
+                self.module_path.push(module.ident.to_string());
+                for item in items {
+                    self.visit_item(item);
+                }
+                self.module_path.pop();
+                return;
+            }
         }
         syn::visit::visit_item(self, item);
     }
 
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(path) = call.func.as_ref() {
-            if let Some(segment) = path.path.segments.last() {
-                if segment.ident == "project_registered_carrier" {
-                    self.calls.push(segment.ident.to_string());
-                }
-            }
+    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+        self.record_projector_path(&expression.path);
+        syn::visit::visit_expr_path(self, expression);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        let mut targets = Vec::new();
+        collect_use_targets(&item.tree, Vec::new(), &mut targets);
+        for target in targets {
+            let path = syn::Path {
+                leading_colon: item.leading_colon,
+                segments: target
+                    .into_iter()
+                    .map(|ident| {
+                        syn::PathSegment::from(syn::Ident::new(&ident, item.use_token.span))
+                    })
+                    .collect(),
+            };
+            self.record_projector_path(&path);
         }
-        syn::visit::visit_expr_call(self, call);
+        syn::visit::visit_item_use(self, item);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
@@ -633,6 +868,160 @@ impl<'ast> Visit<'ast> for CapabilityCallVisitor {
         }
         syn::visit::visit_expr_method_call(self, call);
     }
+}
+
+fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(item) => &item.attrs,
+        syn::Item::Enum(item) => &item.attrs,
+        syn::Item::ExternCrate(item) => &item.attrs,
+        syn::Item::Fn(item) => &item.attrs,
+        syn::Item::ForeignMod(item) => &item.attrs,
+        syn::Item::Impl(item) => &item.attrs,
+        syn::Item::Macro(item) => &item.attrs,
+        syn::Item::Mod(item) => &item.attrs,
+        syn::Item::Static(item) => &item.attrs,
+        syn::Item::Struct(item) => &item.attrs,
+        syn::Item::Trait(item) => &item.attrs,
+        syn::Item::TraitAlias(item) => &item.attrs,
+        syn::Item::Type(item) => &item.attrs,
+        syn::Item::Union(item) => &item.attrs,
+        syn::Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn cfg_possibilities(meta: &syn::Meta) -> (bool, bool) {
+    match meta {
+        syn::Meta::Path(path) if path.is_ident("test") => (false, true),
+        syn::Meta::List(list)
+            if list.path.is_ident("all")
+                || list.path.is_ident("any")
+                || list.path.is_ident("not") =>
+        {
+            let Ok(nested) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return (true, true);
+            };
+            let values = nested.iter().map(cfg_possibilities).collect::<Vec<_>>();
+            if list.path.is_ident("all") {
+                (
+                    values.iter().all(|(can_be_true, _)| *can_be_true),
+                    values.iter().any(|(_, can_be_false)| *can_be_false),
+                )
+            } else if list.path.is_ident("any") {
+                (
+                    values.iter().any(|(can_be_true, _)| *can_be_true),
+                    values.iter().all(|(_, can_be_false)| *can_be_false),
+                )
+            } else if let [value] = values.as_slice() {
+                (value.1, value.0)
+            } else {
+                (true, true)
+            }
+        }
+        _ => (true, true),
+    }
+}
+
+fn item_is_test_only(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if attr.path().is_ident("test") {
+            return true;
+        }
+        attr.path().is_ident("cfg")
+            && attr
+                .parse_args::<syn::Meta>()
+                .is_ok_and(|meta| !cfg_possibilities(&meta).0)
+    })
+}
+
+fn collect_use_targets(tree: &syn::UseTree, prefix: Vec<String>, output: &mut Vec<Vec<String>>) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let mut next = prefix;
+            next.push(path.ident.to_string());
+            collect_use_targets(&path.tree, next, output);
+        }
+        syn::UseTree::Name(name) => {
+            let mut target = prefix;
+            target.push(name.ident.to_string());
+            output.push(target);
+        }
+        syn::UseTree::Rename(rename) => {
+            let mut target = prefix;
+            target.push(rename.ident.to_string());
+            output.push(target);
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_use_targets(tree, prefix.clone(), output);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+#[test]
+fn capability_guard_rejects_aliased_indirect_projector_calls() {
+    let syntax = syn::parse_file(
+        r#"
+        use crate::framework_common::registered_carrier_projection::project_registered_carrier as production_projector;
+
+        fn planted(compiler: &Compiler, accepted: &Accepted) {
+            let indirect = production_projector;
+            let _ = indirect(compiler, accepted);
+        }
+        "#,
+    )
+    .expect("plant parses");
+    let mut calls = CapabilityCallVisitor::default();
+    calls.visit_file(&syntax);
+    assert!(
+        !calls.calls.is_empty(),
+        "an aliased function pointer must retain the projector's canonical identity"
+    );
+}
+
+#[test]
+fn capability_guard_rejects_cfg_not_test_production_calls() {
+    let syntax = syn::parse_file(
+        r#"
+        #[cfg(not(test))]
+        fn planted_not_test(compiler: &Compiler, accepted: &Accepted) {
+            let _ = crate::framework_common::registered_carrier_projection::project_registered_carrier(compiler, accepted);
+        }
+
+        #[cfg(any(test, feature = "production"))]
+        fn planted_any_can_be_production(compiler: &Compiler, accepted: &Accepted) {
+            let _ = crate::framework_common::registered_carrier_projection::project_registered_carrier(compiler, accepted);
+        }
+
+        #[cfg(test)]
+        fn allowed_test_only(compiler: &Compiler, accepted: &Accepted) {
+            let _ = crate::framework_common::registered_carrier_projection::project_registered_carrier(compiler, accepted);
+        }
+
+        #[cfg(all(test, feature = "extra"))]
+        fn allowed_all_requires_test(compiler: &Compiler, accepted: &Accepted) {
+            let _ = crate::framework_common::registered_carrier_projection::project_registered_carrier(compiler, accepted);
+        }
+
+        #[cfg(not(not(test)))]
+        fn allowed_double_negation_requires_test(compiler: &Compiler, accepted: &Accepted) {
+            let _ = crate::framework_common::registered_carrier_projection::project_registered_carrier(compiler, accepted);
+        }
+        "#,
+    )
+    .expect("plant parses");
+    let mut calls = CapabilityCallVisitor::default();
+    calls.visit_file(&syntax);
+    assert_eq!(
+        calls.calls.len(),
+        2,
+        "cfg(not(test)) and cfg(any(test, ...)) remain production-capable; test-required forms do not"
+    );
 }
 
 fn rust_sources(path: &Path, output: &mut Vec<std::path::PathBuf>) {
@@ -652,6 +1041,29 @@ fn rust_sources(path: &Path, output: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+fn rust_source_module_path(workspace: &Path, path: &Path) -> Vec<String> {
+    let relative = path
+        .strip_prefix(workspace.join("crates"))
+        .expect("source belongs to workspace crates");
+    let parts = relative
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    let mut module = vec![parts[0].to_string()];
+    for directory in &parts[2..parts.len().saturating_sub(1)] {
+        module.push((*directory).to_string());
+    }
+    let file = Path::new(parts.last().expect("Rust source file"));
+    let stem = file
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("stem");
+    if !matches!(stem, "lib" | "main" | "mod") {
+        module.push(stem.to_string());
+    }
+    module
+}
+
 #[test]
 fn registered_carrier_projection_is_capability_only() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -665,7 +1077,6 @@ fn registered_carrier_projection_is_capability_only() {
             rust_sources(&source, &mut sources);
         }
     }
-    let mut production_calls = CapabilityCallVisitor::default();
     for path in sources {
         let source = fs::read_to_string(&path).expect("Rust source");
         let syntax = syn::parse_file(&source).unwrap_or_else(|error| {
@@ -674,13 +1085,16 @@ fn registered_carrier_projection_is_capability_only() {
                 path.display()
             )
         });
+        let mut production_calls =
+            CapabilityCallVisitor::for_module(rust_source_module_path(workspace, &path));
         production_calls.visit_file(&syntax);
+        assert!(
+            production_calls.calls.is_empty(),
+            "registered mint/accept/projector calls escaped tests in {}: {:?}",
+            path.display(),
+            production_calls.calls
+        );
     }
-    assert!(
-        production_calls.calls.is_empty(),
-        "registered mint/accept/projector calls escaped tests: {:?}",
-        production_calls.calls
-    );
 
     let projector_source = include_str!("registered_carrier_projection.rs");
     let projector = syn::parse_file(projector_source).expect("projector source parses");
@@ -695,6 +1109,7 @@ fn registered_carrier_projection_is_capability_only() {
         })
         .collect::<Vec<_>>();
     assert_eq!(functions.len(), 1, "exactly one registered projector");
+    assert!(matches!(functions[0].vis, syn::Visibility::Inherited));
     let signature = functions[0].sig.to_token_stream().to_string();
     assert!(signature.contains("& dyn CarrierCompiler"));
     assert!(signature.contains("& AcceptedRegisteredCarrierSource"));
@@ -722,7 +1137,6 @@ fn registered_carrier_projection_is_capability_only() {
         "register_source",
         "register_carrier_grammar",
         "accept_registered_source",
-        "project_registered_carrier",
     ] {
         assert!(
             suite_calls.calls.iter().any(|call| call == required),

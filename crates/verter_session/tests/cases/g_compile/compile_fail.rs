@@ -84,6 +84,23 @@ fn red_raw_registered_carrier_parser_is_not_public() {
     t.compile_fail("tests/cases/compile-fail/scanners_replacement_raw_parser_public.rs");
 }
 
+/// The registered-carrier projector is a compiler-internal capability: an
+/// external crate can neither name its implementation module nor reach a
+/// facade re-export. This privacy rail complements the in-crate resolved-path
+/// guard, so function-pointer and closure indirection cannot cross the crate
+/// boundary unseen.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn registered_carrier_projector_not_public_or_reexported() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail(
+        "tests/cases/compile-fail/registered_carrier_projector_not_public_or_reexported.rs",
+    );
+}
+
 /// The `TscResponse` rendering-channel seal has NO inside: the two code
 /// fields (`code`, `ts_carrier_code`) and the sole from-parts constructor
 /// live in the private `types::tsc_response` CHILD module, so even sibling

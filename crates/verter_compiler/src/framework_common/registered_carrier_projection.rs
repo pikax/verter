@@ -26,7 +26,7 @@ impl RegisteredCarrierProjection {
     }
 }
 
-pub(crate) fn project_registered_carrier(
+fn project_registered_carrier(
     compiler: &dyn CarrierCompiler,
     accepted: &AcceptedRegisteredCarrierSource,
 ) -> RegisteredCarrierProjection {
@@ -81,6 +81,14 @@ pub(crate) fn project_registered_carrier(
         inventory,
         carrier_structure_hash,
     }
+}
+
+#[cfg(test)]
+pub(super) fn project_registered_carrier_for_tests(
+    compiler: &dyn CarrierCompiler,
+    accepted: &AcceptedRegisteredCarrierSource,
+) -> RegisteredCarrierProjection {
+    project_registered_carrier(compiler, accepted)
 }
 
 struct Builder<'a> {
@@ -667,24 +675,38 @@ fn vue_attribute(
     if p.is_directive {
         let (family, prefix_len) = vue_directive(&name_text);
         let prefix = builder.raw_span(p.start, p.start + prefix_len as u32);
-        let local = p.arg_start.zip(p.arg_end).map(|(s, e)| {
-            let authored = builder.raw_span(s, e);
-            let normalized = builder.intern(&builder.source[s as usize..e as usize]);
-            AttributeName {
-                authored: SourceSlice::new(authored),
-                normalized,
-                name_span: authored,
+        let argument = match (p.is_dynamic.unwrap_or(false), p.arg_start, p.arg_end) {
+            (true, Some(start), Some(end)) => {
+                let authored = &builder.source[start as usize..end as usize];
+                let open = authored.find('[').expect("dynamic argument open bracket");
+                let close = authored.rfind(']').expect("dynamic argument close bracket");
+                let inner = &authored[open + 1..close];
+                let expression_start = inner.len() - inner.trim_start().len();
+                let expression_end = inner.trim_end().len();
+                let open = start + open as u32;
+                let close = start + close as u32;
+                DirectiveArgument::Dynamic {
+                    full_span: builder.raw_span(open, close + 1),
+                    open_span: builder.raw_span(open, open + 1),
+                    expression_span: builder.raw_span(
+                        open + 1 + expression_start as u32,
+                        open + 1 + expression_end as u32,
+                    ),
+                    close_span: Some(builder.raw_span(close, close + 1)),
+                    termination: SyntaxTermination::Closed,
+                }
             }
-        });
-        let argument = match (local, p.is_dynamic.unwrap_or(false), p.arg_start, p.arg_end) {
-            (_, true, Some(start), Some(end)) => DirectiveArgument::Dynamic {
-                full_span: builder.raw_span(start.saturating_sub(1), end + 1),
-                open_span: builder.raw_span(start.saturating_sub(1), start),
-                expression_span: builder.raw_span(start, end),
-                close_span: Some(builder.raw_span(end, end + 1)),
-                termination: SyntaxTermination::Closed,
-            },
-            (Some(name), false, _, _) => DirectiveArgument::Static { name },
+            (false, Some(start), Some(end)) => {
+                let authored = builder.raw_span(start, end);
+                let normalized = builder.intern(&builder.source[start as usize..end as usize]);
+                DirectiveArgument::Static {
+                    name: AttributeName {
+                        authored: SourceSlice::new(authored),
+                        normalized,
+                        name_span: authored,
+                    },
+                }
+            }
             _ => DirectiveArgument::None,
         };
         let modifiers = p
@@ -709,7 +731,7 @@ fn vue_attribute(
             id,
             family: DirectiveFamily::Vue(family),
             prefix_span: prefix,
-            local_name: local,
+            local_name: None,
             argument,
             modifiers: Arc::from(modifiers),
             value,
@@ -1395,13 +1417,7 @@ fn svelte_attributes(
                             normalized: local_normalized,
                             name_span: local_span,
                         }),
-                        argument: DirectiveArgument::Static {
-                            name: AttributeName {
-                                authored: SourceSlice::new(local_span),
-                                normalized: local_normalized,
-                                name_span: local_span,
-                            },
-                        },
+                        argument: DirectiveArgument::None,
                         modifiers: Arc::from(modifiers),
                         value: v
                             .value
