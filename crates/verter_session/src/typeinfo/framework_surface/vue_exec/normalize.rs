@@ -1055,7 +1055,16 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
             .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
                 verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
             ));
-        let (description, tags) = member_jsdoc_from_spans(host, member);
+        let (surface_description, surface_tags) = member_jsdoc_from_spans(host, member);
+        let description = surface_description
+            .or_else(|| authored_field.and_then(|field| field.description.as_ref().cloned()));
+        let tags = if surface_tags.is_empty() {
+            authored_field
+                .map(|field| field.tags.clone())
+                .unwrap_or_default()
+        } else {
+            surface_tags
+        };
         let payload_publication = resolved_emit_payload_publication(
             &payload_source,
             authored_field.and_then(crate::authored_evidence_producer::from_analyzed_emit),

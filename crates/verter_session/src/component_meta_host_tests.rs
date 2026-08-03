@@ -98,6 +98,64 @@ fn get_component_meta_returns_some_for_loaded_sfc() {
     assert!(result.is_some(), "should return meta for loaded SFC");
 }
 
+#[test]
+fn overlay_payload_preserves_inline_property_style_emit_jsdoc() {
+    const FILE: &str = "/src/OverlayEmitJsdoc.vue";
+    let host = make_host();
+    let session = host.open_session_batch().unwrap();
+    session
+        .upsert(
+            FILE,
+            r#"<script setup lang="ts">
+defineProps<{
+  label: string
+}>()
+
+defineEmits<{
+  /** Fired on click */
+  click: []
+  close: []
+}>()
+</script>
+<template><div /></template>"#
+                .to_string(),
+        )
+        .unwrap();
+
+    let output = session
+        .get_component_meta_output(FILE)
+        .expect("overlay component-meta output resolves")
+        .expect("overlay SFC produces component-meta output");
+    let (analysis, _resolution, _types) = output.into_parts();
+
+    let click = analysis
+        .events
+        .iter()
+        .find(|event| event.name == "click")
+        .expect("click event must surface");
+    assert_eq!(
+        click.description.as_deref(),
+        Some("Fired on click"),
+        "the NAPI payload lane must preserve exact local authored emit JSDoc"
+    );
+
+    let close = analysis
+        .events
+        .iter()
+        .find(|event| event.name == "close")
+        .expect("close event must surface");
+    assert_eq!(
+        close.description.as_deref(),
+        None,
+        "an undocumented sibling must not inherit the documented event's description"
+    );
+    assert!(
+        close.tags.is_empty(),
+        "an undocumented sibling must not gain fabricated tags, got {:?}",
+        close.tags
+    );
+}
+
 /// FIX-B regression (scalar, `ComponentMetaSession` boundary): a
 /// fail-closed output-materialization failure crossing the host boundary
 /// stays the TYPED `ComponentMetaHostError::OutputMaterialization`

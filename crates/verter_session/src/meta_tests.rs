@@ -25605,6 +25605,56 @@ defineProps<FanoutProps<SourceProps>>()
 }
 
 #[test]
+fn inline_property_style_emit_jsdoc_publishes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/Inline.vue",
+            r#"<script setup lang="ts">
+defineEmits<{
+  /** Fired on click */
+  click: []
+  close: []
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Inline.vue")
+        .expect("component meta resolves");
+
+    let click = meta
+        .events
+        .iter()
+        .find(|event| event.name == "click")
+        .expect("click event must surface");
+    assert_eq!(
+        click.description.as_deref(),
+        Some("Fired on click"),
+        "inline property-style emit's JSDoc description must publish"
+    );
+
+    let close = meta
+        .events
+        .iter()
+        .find(|event| event.name == "close")
+        .expect("close event must surface");
+    assert_eq!(
+        close.description.as_deref(),
+        None,
+        "undocumented event must not gain a fabricated description"
+    );
+    assert!(
+        close.tags.is_empty(),
+        "undocumented event must not gain fabricated tags, got {:?}",
+        close.tags
+    );
+}
+
+#[test]
 fn cross_file_call_signature_emit_jsdoc_publishes() {
     let project = make_project();
     project
