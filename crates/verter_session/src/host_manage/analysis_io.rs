@@ -437,30 +437,65 @@ impl VerterHost {
             .install_raw_template_analysis(template, admission);
     }
 
+    /// Serve the persisted profileless raw-template slot for `canonical`
+    /// ONLY when a proven-current store view still validates the exact
+    /// dynamic-class fact signature the entry was captured under.
+    ///
+    /// ## Ordering is load-bearing (two independent hazards)
+    ///
+    /// The `derived_raw_cache` short-circuits run FIRST and their shard
+    /// guard is RELEASED before the store-view read. This helper is
+    /// reachable from `build_snapshot_from_analysis_snap`, which
+    /// `HostStoreView::build`'s `ImportRoute` re-index reaches through
+    /// `ensure_indexed_ready_serve` — so the read below can run INSIDE a
+    /// store-view build:
+    ///
+    /// 1. **Cost.** `resolver_store_view_read` can cost a token capture,
+    ///    the manager lock and a full-workspace sweep. Paying it before
+    ///    discovering there is no entry to serve charges every
+    ///    analysis-snapshot build for a slot that, for a script file,
+    ///    cannot exist.
+    /// 2. **Cache re-entrancy.** A store-view build re-indexes edge-stale
+    ///    owners, and that re-index can reach
+    ///    `persist_raw_template_analysis`, which takes a WRITE lock on
+    ///    this same `DashMap`. Holding a read guard across the read would
+    ///    self-deadlock on the shard.
+    ///
+    /// The nested store-view read itself is held safe by
+    /// [`crate::resolver_store::StoreViewManager`]'s claim-ownership
+    /// backstop: a re-entrant read on a claim-holding thread is refused
+    /// return-only instead of parking, so `current()` yields `None` here
+    /// and the template is simply declined.
     fn validated_raw_template_analysis(
         &self,
         canonical: &str,
         source_generation: u64,
     ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+        // Cheap map short-circuits first; the shard guard ends with this
+        // block. `ReadSetSignature` is an `Arc<[FactVersionRef]>` carrier,
+        // so cloning it out is a refcount bump, not a fact-set copy.
+        let (template, signature) = {
+            let derived = self.derived_raw_cache().get(canonical)?;
+            let entry = derived.raw_template_analysis()?;
+            if entry.source_generation != source_generation {
+                return None;
+            }
+            (
+                Arc::clone(&entry.template),
+                entry.template_class_signature.clone(),
+            )
+        };
         let current = self.resolver_store_view_read().current()?;
-        let entry = self.derived_raw_cache().get(canonical)?;
-        let entry = entry.raw_template_analysis()?;
-        if entry.source_generation != source_generation {
-            return None;
-        }
         use crate::resolver_core::StoreView;
-        if !entry
-            .template_class_signature
+        if !signature
             .facts
             .iter()
             .all(|fact| current.view().validates(fact))
         {
             return None;
         }
-        crate::fact_signature_helpers::observe_fact_signature(
-            &entry.template_class_signature.facts,
-        );
-        Some(Arc::clone(&entry.template))
+        crate::fact_signature_helpers::observe_fact_signature(&signature.facts);
+        Some(template)
     }
 
     /// Return source-stage import/re-export facts without triggering analysis

@@ -2422,3 +2422,149 @@ fn schema_mismatch_sweep_advances_artifact_generation_token() {
         "the manager reuse token must move with the sweep",
     );
 }
+
+// ── Self-await: a re-entrant read on the claim-holding thread must never park ──
+
+#[test]
+fn reentrant_base_view_on_the_claim_holding_thread_refuses_to_park() {
+    // SOUNDNESS: `CLAUDE.md`'s completion-fence rule — "Waiters on
+    // in-flight work block cooperatively, never busy-spin; SAME-PATH
+    // RECURSION NEVER SELF-AWAITS". The coherent store-view build runs
+    // OUTSIDE the manager lock and legitimately re-indexes edge-stale
+    // owners (`HostStoreView::build`'s `ImportRoute` arm →
+    // `ensure_indexed_ready_serve` → `build_snapshot_from_analysis_snap`),
+    // so an analysis-side helper reached from that re-index CAN re-enter
+    // `StoreViewManager::base_view` on the very thread that holds the
+    // singleflight claim. That thread observes its OWN claim; the `built`
+    // condvar it would park on can only ever be signalled by its own
+    // `BuildClaimGuard::drop`. Parking is therefore a wait-for cycle of
+    // length ONE: a permanent deadlock at zero CPU that takes the host's
+    // whole store-view path with it. The invariant used to be held by a
+    // rustdoc sentence; it is now structural (`build_claim`'s privately-held
+    // `ClaimFlag` + the guard's private field make claim-taking and
+    // owner-registration the same act) and enforced at the manager's single
+    // park chokepoint `park_for_build`.
+    //
+    // Discrimination: arm ONE nested `resolver_store_view_read()` from
+    // inside the next `build_coherent` claim region on this thread, then
+    // drive a cold (token-miss) read. The nested read misses the warm probe
+    // — that is WHY the outer call claimed a build — so it reaches the
+    // would-park arm with `building` set to its own claim.
+    //
+    //   * WITHOUT the backstop the nested read parks forever: the worker
+    //     never reports, `recv_timeout` fires, and the test FAILS PROMPTLY
+    //     (it never hangs the suite). This is the discriminating assertion,
+    //     and it was verified RED against a tree carrying the seam but not
+    //     the backstop.
+    //   * WITH the backstop the park is refused, the nested read is handed
+    //     a fail-closed `ReturnOnly { ReentrantBuildClaim }`, and the
+    //     refusal is loud: `tracing::error!` always, plus a `debug_assert!`
+    //     that in any debug build unwinds the re-entrant caller at the
+    //     exact frame. Both modes are asserted below.
+    //
+    // Anti-vacuity: the per-thread refusal counter MUST be exactly 1. A 0
+    // would mean the nested read never reached the park arm (a fixture that
+    // silently stopped arming the re-entrancy), which is precisely the
+    // "passes regardless" failure this assertion exists to prevent.
+    use crate::resolver_store::{HostStoreView, StoreViewReturnOnlyReason};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (host, _canonical) = host_with_one_file();
+
+    // Warm the manager, then advance the live token so the next read is a
+    // guaranteed cold miss (claim-then-build), and so the NESTED read inside
+    // the claim region also misses the warm probe and reaches the park arm.
+    let _ = host.resolver_store_view_read().into_owned_view();
+    host.bump_store_view_epoch();
+
+    let (tx, rx) = mpsc::channel();
+    let worker_host = Arc::clone(&host);
+    let worker = std::thread::spawn(move || {
+        HostStoreView::arm_reentrant_store_view_read_for_tests();
+        let outer = catch_unwind(AssertUnwindSafe(|| {
+            let _ = worker_host.resolver_store_view_read();
+        }));
+        let panic_message = outer.err().map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&'static str>()
+                        .map(|text| (*text).to_string())
+                })
+                .unwrap_or_default()
+        });
+        let refusal = HostStoreView::self_await_refusal_evidence_for_tests();
+        let nested = HostStoreView::reentrant_store_view_read_observed_for_tests();
+        let _ = tx.send((panic_message, refusal, nested));
+    });
+
+    let (panic_message, (refusals, last_reason), nested) =
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(observed) => {
+                worker
+                    .join()
+                    .expect("the worker thread must not itself panic");
+                observed
+            }
+            Err(_) => panic!(
+                "REGRESSION: base_view PARKED on the `built` condvar while the CURRENT \
+             thread already held the singleflight build claim. Only that same thread's \
+             BuildClaimGuard::drop can signal that condvar, so nothing can ever wake \
+             it — a one-thread deadlock at zero CPU. The park arm must consult claim \
+             ownership (StoreViewManager::park_for_build + build_claim)."
+            ),
+        };
+
+    // The re-entrancy was genuinely ARMED and genuinely REFUSED.
+    assert_eq!(
+        refusals, 1,
+        "the nested read MUST have reached base_view's would-park arm and been refused \
+         exactly ONCE; 0 means this test never armed the re-entrancy and proves nothing"
+    );
+    // Fail-closed, never a view advertised as current.
+    assert_eq!(
+        last_reason,
+        Some(StoreViewReturnOnlyReason::ReentrantBuildClaim),
+        "a refused self-await MUST degrade to ReturnOnly{{ReentrantBuildClaim}} — \
+         ReturnOnly can never publish an entry, reverse-index metadata or a persistent \
+         artifact, and `current()` yields None so no warm validator can use it"
+    );
+
+    if cfg!(debug_assertions) {
+        // Debug/dev/test: the bug is an immediate, fully-symbolised failure
+        // at the exact frame, not a silent degradation.
+        let message = panic_message.expect(
+            "in a debug build a refused self-await MUST fire its debug_assert! so the \
+             latent re-entrancy surfaces immediately instead of degrading silently",
+        );
+        assert!(
+            message.contains("STORE-VIEW SELF-AWAIT"),
+            "the debug failure must name the invariant it caught, got: {message}"
+        );
+        // The assertion unwinds before the fail-closed read can propagate
+        // back to the nested caller, which is exactly why the chokepoint
+        // records the refusal evidence asserted above.
+        assert_eq!(
+            nested, None,
+            "the debug_assert! unwinds the re-entrant caller, so the nested read never \
+             returns a value; the refusal evidence is the observable instead"
+        );
+    } else {
+        // Release: no panic on a user-facing path — the read degrades
+        // fail-closed and the caller declines.
+        assert!(
+            panic_message.is_none(),
+            "a release build must NOT panic on a user-facing store-view read; it \
+             degrades fail-closed instead, got panic: {panic_message:?}"
+        );
+        assert_eq!(
+            nested,
+            Some((false, Some(StoreViewReturnOnlyReason::ReentrantBuildClaim))),
+            "the re-entrant caller must RECEIVE the non-current fail-closed read"
+        );
+    }
+}
