@@ -47,6 +47,37 @@ describe("member value honesty (native)", () => {
     expect(compat?.type).toBe("() => void");
   });
 
+  test("an imported function-or-array prop preserves both native descriptor arms", async () => {
+    const checker = await getChecker();
+    const meta = await checker.getComponentMeta(join(fixtureDir, "MemberValueProps.vue"));
+    const handlers = meta._verter!.props.find((prop) => prop.name === "handlers");
+
+    expect(handlers?.type).toEqual({
+      kind: "union",
+      types: [
+        { kind: "ref", name: "Fn" },
+        {
+          kind: "array",
+          element: { kind: "ref", name: "Fn" },
+        },
+      ],
+    });
+
+    const compat = meta.props.find((prop) => prop.name === "handlers");
+    expect(compat?.schema).toEqual({
+      kind: "enum",
+      type: "(value: string) => void | ((value: string) => void)[]",
+      schema: [
+        {
+          kind: "array",
+          type: "((value: string) => void)[]",
+          schema: [{ kind: "event", type: "(value: string): void", schema: [] }],
+        },
+        { kind: "event", type: "(value: string): void", schema: [] },
+      ],
+    });
+  });
+
   test("an imported object-valued prop publishes the shallow object structure and its nested leaf", async () => {
     const checker = await getChecker();
     const meta = await checker.getComponentMeta(join(fixtureDir, "MemberValueProps.vue"));

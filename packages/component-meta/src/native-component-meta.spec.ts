@@ -73,6 +73,17 @@ describe("nativeComponentMetaToComponentMeta", () => {
     );
 
     expect(published.props[0].rawType).toBe("TerminalDisplayOnly");
+    const perturbed = nativeComponentMetaToComponentMeta(
+      nativeMetaWithProp({
+        name: "value",
+        type: { kind: "primitive", name: "string" },
+        ...publishedTypeFields("HOSTILE_UNION | HOSTILE_ARRAY[]"),
+        required: true,
+        hasDefault: false,
+      }),
+    );
+    expect(perturbed.props[0].type).toEqual(published.props[0].type);
+    expect(perturbed.props[0].rawType).not.toBe(published.props[0].rawType);
     expect(() =>
       nativeComponentMetaToComponentMeta(
         nativeMetaWithProp({

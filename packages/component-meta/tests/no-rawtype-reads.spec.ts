@@ -182,6 +182,122 @@ describe("W7.3: no `*.rawType` reads inside semantic-decision functions in compa
   });
 });
 
+const SEMANTIC_CLASSIFIER_ROOTS = [
+  "classifyCompatPropDescriptor",
+  "classifyCompatEventPayload",
+] as const;
+const FORBIDDEN_SEMANTIC_PROPERTIES = new Set(["rawType", "rawSignature"]);
+const DESCRIPTOR_RENDERERS = new Set([
+  "typeDescriptorToCompatDisplay",
+  "typeDescriptorToString",
+  "normalizeTypeString",
+]);
+const RETIRED_TEXT_ROLE_SYMBOLS = [
+  "stripTopLevelUndefinedFromCompatType",
+  "normalizeCompatUnionArrayPart",
+  "normalizeCompatEventFunctionType",
+  "stripSingleOuterParens",
+  "looksLikeSlotsHelperRawType",
+  "looksLikeUiHelperRawType",
+] as const;
+
+function topLevelFunctionName(statement: ts.Statement): string | undefined {
+  if (ts.isFunctionDeclaration(statement) && statement.name) {
+    return statement.name.text;
+  }
+  if (!ts.isVariableStatement(statement)) {
+    return undefined;
+  }
+  const declaration = statement.declarationList.declarations[0];
+  if (
+    declaration &&
+    ts.isIdentifier(declaration.name) &&
+    declaration.initializer &&
+    (ts.isArrowFunction(declaration.initializer) ||
+      ts.isFunctionExpression(declaration.initializer))
+  ) {
+    return declaration.name.text;
+  }
+  return undefined;
+}
+
+function semanticClassifierViolations(source: ts.SourceFile): {
+  closure: string[];
+  violations: string[];
+} {
+  const functions = new Map<string, ts.Node>();
+  for (const statement of source.statements) {
+    const name = topLevelFunctionName(statement);
+    if (name) {
+      functions.set(name, statement);
+    }
+  }
+
+  const closure = new Set<string>();
+  const pending = [...SEMANTIC_CLASSIFIER_ROOTS];
+  const violations: string[] = [];
+  while (pending.length > 0) {
+    const name = pending.pop()!;
+    if (closure.has(name)) continue;
+    closure.add(name);
+    const declaration = functions.get(name);
+    if (!declaration) {
+      violations.push(`missing semantic classifier root ${name}`);
+      continue;
+    }
+
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isPropertyAccessExpression(node) &&
+        FORBIDDEN_SEMANTIC_PROPERTIES.has(node.name.text)
+      ) {
+        violations.push(`${name} reads ${node.name.text}`);
+      }
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+        const callee = node.expression.text;
+        if (DESCRIPTOR_RENDERERS.has(callee)) {
+          violations.push(`${name} calls descriptor renderer ${callee}`);
+        }
+        if (functions.has(callee) && !closure.has(callee)) {
+          pending.push(callee);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(declaration);
+  }
+
+  return { closure: [...closure].sort(), violations };
+}
+
+describe("A2-05: semantic classifier closure is descriptor-only", () => {
+  const sourceText = readFileSync(CHECKER_PATH, "utf8");
+  const source = ts.createSourceFile(
+    CHECKER_PATH,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const analysis = semanticClassifierViolations(source);
+
+  it("discovers both classifier roots and a non-trivial local call graph", () => {
+    expect(analysis.violations.filter((entry) => entry.startsWith("missing "))).toEqual([]);
+    expect(analysis.closure).toEqual(expect.arrayContaining([...SEMANTIC_CLASSIFIER_ROOTS]));
+    expect(analysis.closure.length).toBeGreaterThan(5);
+  });
+
+  it("forbids display reads and descriptor renderers throughout the classifier closure", () => {
+    expect(analysis.violations).toEqual([]);
+  });
+
+  it("keeps retired text-role helpers absent as a secondary tripwire", () => {
+    for (const symbol of RETIRED_TEXT_ROLE_SYMBOLS) {
+      expect(sourceText).not.toMatch(new RegExp(`\\b${symbol}\\b`));
+    }
+  });
+});
+
 /**
  * Discriminating runtime test: with a `PropMeta` whose `rawType` is a decoy
  * that would break semantics if used to drive a projection, the compat layer

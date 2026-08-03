@@ -32,7 +32,7 @@ use crate::verter::v1::{
     VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 4;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 5;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -1867,7 +1867,7 @@ mod tests {
         assert!(proto.events[0].modifier_ids.is_empty());
 
         // SCHEMA bump landed (2 → 3).
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 4);
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 5);
     }
 
     #[test]

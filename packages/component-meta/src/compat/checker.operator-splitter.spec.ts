@@ -13,7 +13,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { mapPropMeta, mapEventMeta } from "./checker.js";
-import { primitive, ref, union, intersection, literal, func } from "@verter/type-ir";
+import { array, primitive, ref, union, intersection, literal, func } from "@verter/type-ir";
 import type { TypeDescriptor } from "@verter/type-ir";
 import type { PropMeta } from "../types.js";
 
@@ -76,6 +76,61 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
       const result = mapPropMeta(prop);
       // Descriptor structural match wins.
       expect(result.type).toBe('"button" | "submit" | "reset" | undefined');
+    });
+
+    it("classifies structurally equivalent function and array arms without comparing rendered parameter names", () => {
+      const functionArm = func(
+        [{ name: "event", type: ref("MouseEvent"), optional: false }],
+        primitive("void"),
+      );
+      const arrayElement = func(
+        [{ name: "value", type: ref("MouseEvent"), optional: false }],
+        primitive("void"),
+      );
+      const result = mapPropMeta(
+        makeProp({
+          name: "onClick",
+          type: union([functionArm, array(arrayElement)]),
+          rawType: "HOSTILE_DISPLAY",
+          required: true,
+        }),
+      );
+
+      expect(result.schema).toEqual({
+        kind: "enum",
+        type: "((event: MouseEvent) => void) | ((value: MouseEvent) => void)[]",
+        schema: [
+          {
+            kind: "array",
+            type: "((value: MouseEvent) => void)[]",
+            schema: [{ kind: "event", type: "(value: MouseEvent): void", schema: [] }],
+          },
+          { kind: "event", type: "(event: MouseEvent): void", schema: [] },
+        ],
+      });
+    });
+
+    it("does not resurrect an array schema arm from union-looking terminal display", () => {
+      const functionOnly = func(
+        [{ name: "event", type: ref("MouseEvent"), optional: false }],
+        primitive("void"),
+      );
+      const result = mapPropMeta(
+        makeProp({
+          name: "onClick",
+          type: functionOnly,
+          rawType: "((event: MouseEvent) => void) | Array<((event: MouseEvent) => void)>",
+          required: false,
+        }),
+      );
+
+      expect(result.type).toContain("Array<");
+      expect(result.schema).toEqual({
+        kind: "enum",
+        type: "((event: MouseEvent) => void) | Array<((event: MouseEvent) => void)> | undefined",
+        schema: ["(event: MouseEvent) => void", "undefined"],
+      });
+      expect(JSON.stringify(result.schema)).not.toContain('"kind":"array"');
     });
   });
 
@@ -160,6 +215,35 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
       // Structural walk drops the leading event-name literal arm
       // and reconstructs the tuple from remaining parameter descriptors.
       expect(result.type).toBe("[number]");
+    });
+
+    it.each(["void", "undefined", "never"] as const)(
+      "treats primitive %s as a structural empty event payload",
+      (name) => {
+        const result = mapEventMeta({
+          name: "close",
+          payload: primitive(name),
+          rawSignature: "DECOY_SIGNATURE",
+          hasValidator: false,
+          isDeclared: true,
+        });
+
+        expect(result.type).toBe("[]");
+        expect(result.schema).toEqual([]);
+      },
+    );
+
+    it("does not treat unknown('void') diagnostic text as a void payload", () => {
+      const result = mapEventMeta({
+        name: "close",
+        payload: { kind: "unknown", rawType: "void" },
+        rawSignature: "[]",
+        hasValidator: false,
+        isDeclared: true,
+      });
+
+      expect(result.type).toBe("[unknown]");
+      expect(result.schema).toEqual(["unknown"]);
     });
   });
 });

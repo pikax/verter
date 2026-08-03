@@ -22,6 +22,7 @@ import { resolvePath } from "../runtime/engine-key.js";
 import {
   array,
   func,
+  intersection,
   literal,
   object,
   primitive,
@@ -303,7 +304,7 @@ describe("mapPropMeta", () => {
     });
   });
 
-  it("treats comment-fragment raw prop types as lossy", () => {
+  it("keeps hostile terminal display text out of boolean schema classification", () => {
     const prop: PropMeta = {
       name: "active",
       type: primitive("boolean"),
@@ -314,7 +315,12 @@ describe("mapPropMeta", () => {
 
     const result = mapPropMeta(prop);
 
-    expect(result.type).toBe("boolean | undefined");
+    expect(result.type).toBe("te. */ | undefined");
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "te. */ | undefined",
+      schema: ["boolean", "undefined"],
+    });
   });
 
   it("resolves simple ref aliases through the type registry when that is more concrete", () => {
@@ -335,7 +341,7 @@ describe("mapPropMeta", () => {
     expect(result.type).toBe('"single" | "multiple" | undefined');
   });
 
-  it("prefers descriptor text over indexed-access raw prop types", () => {
+  it("keeps indexed-looking terminal display text out of primitive classification", () => {
     const prop: PropMeta = {
       name: "href",
       type: union([primitive("string"), primitive("undefined")]),
@@ -346,10 +352,15 @@ describe("mapPropMeta", () => {
 
     const result = mapPropMeta(prop);
 
-    expect(result.type).toBe("string | undefined");
+    expect(result.type).toBe('NuxtLinkProps["to"] | undefined');
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: 'NuxtLinkProps["to"] | undefined',
+      schema: ["string", "undefined"],
+    });
   });
 
-  it("keeps NuxtLink route-location compat output exact when native resolution degrades to one object arm", () => {
+  it("does not manufacture NuxtLink roles from terminal display text", () => {
     const prop: PropMeta = {
       name: "href",
       type: object([
@@ -363,16 +374,14 @@ describe("mapPropMeta", () => {
 
     const result = mapPropMeta(prop);
 
-    expect(result.type).toBe("string | St | vt | undefined");
-    expect(result.schema).toEqual({
+    expect(result.type).toBe('NuxtLinkProps["to"] | undefined');
+    expect(result.schema).toMatchObject({
       kind: "enum",
-      type: "string | St | vt | undefined",
+      type: 'NuxtLinkProps["to"] | undefined',
       schema: [
-        "string",
-        "undefined",
         {
           kind: "object",
-          type: "vt",
+          type: "{ path: string; replace?: boolean }",
           schema: expect.objectContaining({
             path: expect.objectContaining({
               type: "string",
@@ -380,20 +389,12 @@ describe("mapPropMeta", () => {
             }),
           }),
         },
-        {
-          kind: "object",
-          type: "St",
-          schema: expect.objectContaining({
-            name: expect.objectContaining({
-              type: "Gt",
-            }),
-          }),
-        },
+        "undefined",
       ],
     });
   });
 
-  it("preserves raw literal-plus-Partial union text for prefetchOn compat output", () => {
+  it("does not manufacture prefetch roles from terminal display text", () => {
     const prop: PropMeta = {
       name: "prefetchOn",
       type: object([
@@ -409,15 +410,16 @@ describe("mapPropMeta", () => {
     const result = mapPropMeta(prop);
 
     expect(result.type).toBe(
-      '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }> | undefined',
+      '"visibility" | "interaction" | Partial<{\n    visibility: boolean\n    interaction: boolean\n  }> | undefined',
     );
-    expect(result.schema).toEqual({
+    expect(result.schema).toMatchObject({
       kind: "enum",
-      type: '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }> | undefined',
+      type: expect.stringContaining("Partial<{"),
       schema: [
-        '"interaction"',
-        '"visibility"',
-        "Partial<{ visibility: boolean; interaction: boolean; }>",
+        {
+          kind: "object",
+          type: "{ visibility?: boolean; interaction?: boolean }",
+        },
         "undefined",
       ],
     });
@@ -459,7 +461,7 @@ describe("mapPropMeta", () => {
     );
     const prop: PropMeta = {
       name: "onClick",
-      type: fn,
+      type: union([fn, array(fn)]),
       required: false,
       hasDefault: false,
       rawType:
@@ -496,7 +498,7 @@ describe("mapPropMeta", () => {
     });
   });
 
-  it("keeps bare raw ref text when the native descriptor already expanded it to literals", () => {
+  it("keeps terminal alias display separate from literal-union schema", () => {
     const prop: PropMeta = {
       name: "dir",
       type: union([literal("ltr"), literal("rtl"), primitive("undefined")]),
@@ -507,15 +509,15 @@ describe("mapPropMeta", () => {
 
     const result = mapPropMeta(prop);
 
-    expect(result.type).toBe("Direction | undefined");
+    expect(result.type).toBe("Direction");
     expect(result.schema).toEqual({
       kind: "enum",
-      type: "Direction | undefined",
+      type: "Direction",
       schema: ['"ltr"', '"rtl"', "undefined"],
     });
   });
 
-  it("keeps symbolic indexed-access raw prop types when the descriptor degrades to any", () => {
+  it("classifies an any descriptor independently of indexed terminal display", () => {
     const prop: PropMeta = {
       name: "icon",
       type: union([primitive("string"), primitive("any"), primitive("undefined")]),
@@ -526,10 +528,11 @@ describe("mapPropMeta", () => {
 
     const result = mapPropMeta(prop);
 
-    expect(result.type).toBe('IconProps["name"] | undefined');
+    expect(result.type).toBe("any");
+    expect(result.schema).toBe("any");
   });
 
-  it("keeps symbolic ref raw prop types when the resolved descriptor is overexpanded", () => {
+  it("renders a structural ref through the bounded registry independently of raw display", () => {
     const prop: PropMeta = {
       name: "value",
       type: union([ref("DateValue"), primitive("undefined")]),
@@ -552,7 +555,9 @@ describe("mapPropMeta", () => {
 
     const result = mapPropMeta(prop, undefined, typeRegistry);
 
-    expect(result.type).toBe("DateValue | undefined");
+    expect(result.type).toContain("field0: string");
+    expect(result.type).toContain("field63: string");
+    expect(result.type).toContain("| undefined");
   });
 
   it("keeps nested registry refs shallow in compat prop display and schema", () => {
@@ -625,7 +630,7 @@ describe("mapPropMeta", () => {
     expect(result.type).toBe('Calendar["variants"]["color"] | undefined');
   });
 
-  it("prefers descriptor text over chained indexed-access raw prop types", () => {
+  it("keeps chained indexed terminal display separate from literal-union schema", () => {
     const prop: PropMeta = {
       name: "activeColor",
       type: union([literal("primary"), literal("secondary"), primitive("undefined")]),
@@ -636,10 +641,15 @@ describe("mapPropMeta", () => {
 
     const result = mapPropMeta(prop);
 
-    expect(result.type).toBe('"primary" | "secondary" | undefined');
+    expect(result.type).toBe('Button["variants"]["color"]');
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: 'Button["variants"]["color"]',
+      schema: ['"primary"', '"secondary"', "undefined"],
+    });
   });
 
-  it("prefers registry-resolved object descriptors over symbolic indexed-access raw prop text", () => {
+  it("does not classify a plain object as a slots helper from terminal display text", () => {
     const prop: PropMeta = {
       name: "ui",
       type: object([
@@ -686,10 +696,10 @@ describe("mapPropMeta", () => {
 
     const result = mapPropMeta(prop, undefined, typeRegistry);
 
-    expect(result.type).toBe("{ root?: { base: string; }; } | undefined");
+    expect(result.type).toBe('Button["slots"] | undefined');
     expect(result.schema).toEqual({
       kind: "enum",
-      type: "{ root?: { base: string; }; } | undefined",
+      type: 'Button["slots"] | undefined',
       schema: [
         {
           kind: "object",
@@ -804,7 +814,7 @@ describe("mapPropMeta", () => {
         literal("_parent"),
         literal("_self"),
         literal("_top"),
-        unknown("string & {}"),
+        intersection([primitive("string"), object([])]),
         primitive("null"),
         primitive("undefined"),
       ]),
@@ -860,10 +870,14 @@ describe("mapEventMeta", () => {
   it("maps tuple payload events to schema arrays and resolves registry refs", () => {
     const event: EventMeta = {
       name: "select",
-      payload: tuple([ref("Item"), primitive("boolean")]),
+      payload: {
+        kind: "tuple",
+        elements: [ref("Item"), primitive("boolean")],
+        labels: ["item", "exact"],
+      },
       hasValidator: false,
       isDeclared: true,
-      rawSignature: '(event: "select", item: Item, exact: boolean) => void',
+      rawSignature: "DECOY_SIGNATURE",
     };
     const typeRegistry = new Map<string, any>([
       ["Item", object([{ name: "label", type: primitive("string"), optional: false }])],
@@ -892,20 +906,32 @@ describe("mapEventMeta", () => {
     ]);
   });
 
-  // @ai-generated - Guards tuple parsing when an event payload parameter itself is a function type.
-  it("keeps later tuple parameters when raw signatures include arrow function payloads", () => {
+  // @ai-generated - Guards structural tuple rendering when a payload element is a function type.
+  it("keeps later tuple parameters without parsing raw signatures", () => {
     const event: EventMeta = {
       name: "change",
-      payload: unknown("event tuple"),
+      payload: {
+        kind: "tuple",
+        elements: [
+          func(
+            [
+              { name: "value", type: primitive("string"), optional: false },
+              { name: "count", type: primitive("number"), optional: false },
+            ],
+            primitive("void"),
+          ),
+          primitive("boolean"),
+        ],
+        labels: ["transform", "exact"],
+      },
       hasValidator: false,
       isDeclared: true,
-      rawSignature:
-        '(event: "change", transform: (value: string, count: number) => void, exact: boolean) => void',
+      rawSignature: "DECOY_SIGNATURE",
     };
 
     const result = mapEventMeta(event);
 
-    expect(result.type).toBe("[transform: (value: string, count: number) => void, exact: boolean]");
+    expect(result.type).toBe("[transform: function, exact: boolean]");
   });
 
   it("flattens boolean event payload schemas in literal parity mode", () => {
@@ -1160,7 +1186,7 @@ describe("mapExposedMeta", () => {
   it("maps exposed member", () => {
     const exposed: ExposedMeta = {
       name: "focus",
-      type: unknown("() => void"),
+      type: func([], primitive("void")),
       description: "Focus the input",
     };
 
@@ -1617,11 +1643,18 @@ defineSlots<ButtonSlots>()
       expect(color!.type).toContain("secondary");
       expect(color!.type).not.toContain('Button["variants"]["color"]');
       expect(ui).toBeDefined();
-      expect(ui!.type).toBe("{ base?: ClassNameValue; label?: ClassNameValue; } | undefined");
+      expect(ui!.type).toBe('Button["slots"] | undefined');
       expect(ui!.schema).toEqual({
         kind: "enum",
-        type: "{ base?: ClassNameValue; label?: ClassNameValue; } | undefined",
-        schema: ["{ base?: ClassNameValue; label?: ClassNameValue; }", "undefined"],
+        type: 'Button["slots"] | undefined',
+        schema: [
+          {
+            kind: "object",
+            type: "ComponentSlots<typeof theme>",
+            schema: {},
+          },
+          "undefined",
+        ],
       });
       expect(leading).toBeDefined();
       expect(leading!.type).toContain("ui: {");
@@ -2317,7 +2350,7 @@ defineProps<Props>()
     checker.close();
   });
 
-  it("fails typed on inherited imported call-signature emits through Omit chains", async () => {
+  it("publishes inherited imported call-signature emits through Omit chains structurally", async () => {
     const projectRoot = resolve(
       process.env.TEMP ?? "/tmp",
       `verter-test-imported-inherited-emits-${nextProjectRootId++}`,
@@ -2351,16 +2384,21 @@ defineEmits<ContextMenuContentEmits>()
 <template><div /></template>`,
     );
 
-    // The surviving imported call-signature emits carry composite params
-    // (\`event: Event\`) whose REQUIRED payload tuple has no faithful source
-    // yet — the native query surfaces the typed output-materialization
-    // failure instead of a completed result with fabricated \`unknown\`
-    // payloads. A positive Omit-surface assertion is valid only when the
-    // native callable projection can publish those payload tuples from a
-    // faithful source.
-    await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(
-      /REQUIRED payload|materialization failed/,
+    // The native payload is the authority: the Omit surface carries the
+    // surviving call signatures and their typed tuples without reparsing text.
+    const meta = await checker.getComponentMeta("App.vue");
+    expect(meta.events.map((event) => event.name)).toEqual([
+      "escapeKeyDown",
+      "pointerDownOutside",
+      "focusOutside",
+      "interactOutside",
+      "closeAutoFocus",
+    ]);
+    expect(meta.events.find((event) => event.name === "escapeKeyDown")?.type).toBe(
+      "[event: Event]",
     );
+    expect(meta.events.find((event) => event.name === "closeAutoFocus")?.type).toBe("[]");
+    expect(JSON.stringify(meta.events)).not.toContain("unknown");
 
     checker.close();
   });
@@ -2888,17 +2926,18 @@ defineProps<AvatarProps>()
     expect(chipProp).toBeDefined();
     expect(typeof chipProp!.schema).not.toBe("string");
     if (typeof chipProp!.schema !== "string") {
-      // Without JS resolver, boolean stays as "boolean" (not split to
-      // "false"/"true"), and ChipProps is an opaque ref with empty schema.
-      expect(chipProp!.schema).toEqual({
+      expect(chipProp!.schema).toMatchObject({
         kind: "enum",
         type: "boolean | ChipProps | undefined",
         schema: [
           "boolean",
           {
             kind: "object",
-            type: "ChipProps",
-            schema: {},
+            type: "{ as?: any; text?: string | number }",
+            schema: {
+              as: expect.objectContaining({ type: "any" }),
+              text: expect.objectContaining({ type: "string | number" }),
+            },
           },
           "undefined",
         ],

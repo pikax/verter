@@ -8,6 +8,19 @@ import {
 import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 
 describe("decodeTypedComponentMetaPayload", () => {
+  it("accepts v5 and rejects the retired v4 response", () => {
+    const current = createTestComponentMetaPayload();
+    expect(current.schemaVersion).toBe(5);
+    expect(() =>
+      decodeTypedComponentMetaPayload(
+        toBinary(
+          ComponentMetaPayloadSchema,
+          create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 4 }),
+        ),
+      ),
+    ).toThrow(/expected 5, found 4/);
+  });
+
   it("decodes origin graph from protobuf binary", () => {
     const base = createTestComponentMetaPayload();
     const originGraph = create(OriginGraphSchema, {

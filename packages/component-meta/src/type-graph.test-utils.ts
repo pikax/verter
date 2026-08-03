@@ -109,7 +109,7 @@ export interface TestComponentMetaPayload {
   typeRegistry?: TestTypeRegistryEntry[];
 }
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const NODE_PRIMITIVE = 1;
 const NODE_UNION = 3;

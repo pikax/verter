@@ -2,8 +2,8 @@
  * Discriminating regression tests for the shape-heuristic behaviour.
  *
  * The legacy compat layer's `looksLike*` helpers (`looksLikeBareTypeReference`,
- * `looksLikeIndexedAccessType`, `looksLikeSlotsHelperRawType`,
- * `looksLikeUiHelperRawType`) ran regex / substring checks against
+ * `looksLikeIndexedAccessType` and the slots/UI descriptor-marker predicates)
+ * ran regex / substring checks against
  * `prop.rawType` text.
  *
  * Every helper now switches on `TypeDescriptor.kind`. These tests would
@@ -59,7 +59,7 @@ function makeSlot(
 }
 
 describe("shape-detection heuristics switch on TypeDescriptor.kind (not prop.rawType)", () => {
-  describe("looksLikeSlotsHelperRawType (gate for buildCompatSlotsPropMeta)", () => {
+  describe("slots descriptor marker (gate for compat slots projection)", () => {
     it("projects slots-helper shape when descriptor is a ComponentSlots ref, regardless of rawType decoy", () => {
       // Descriptor: `ComponentSlots<typeof Theme>` — the Vue helper ref kind
       // tag. `unwrapComponentSlotsDescriptor` understands this shape and
@@ -116,10 +116,10 @@ describe("shape-detection heuristics switch on TypeDescriptor.kind (not prop.raw
     });
   });
 
-  describe("looksLikeUiHelperRawType (gate for buildCompatUiBindingType in slot bindings)", () => {
+  describe("UI descriptor marker (gate for compat slot bindings)", () => {
     it("projects UI-helper binding shape when descriptor is a ComponentUI ref, regardless of rawType decoy", () => {
       // Slot binding descriptor: `ComponentUI<typeof Theme>` — the Vue helper
-      // ref. The typed `looksLikeUiHelperRawType` matches the ref
+      // ref. The typed descriptor-marker predicate matches the ref
       // structurally, and `extractCompatUiBindingFieldNames` extracts the slot
       // field names via `unwrapComponentUiDescriptor`.
       const slotsFunctionMap: TypeDescriptor = {
