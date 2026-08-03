@@ -66,7 +66,7 @@ describe("member value honesty (native)", () => {
     const compat = meta.props.find((prop) => prop.name === "handlers");
     expect(compat?.schema).toEqual({
       kind: "enum",
-      type: "(value: string) => void | ((value: string) => void)[]",
+      type: "((value: string) => void) | ((value: string) => void)[]",
       schema: [
         {
           kind: "array",

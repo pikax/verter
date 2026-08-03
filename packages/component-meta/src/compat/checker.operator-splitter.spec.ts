@@ -13,7 +13,17 @@
  */
 import { describe, it, expect } from "vitest";
 import { mapPropMeta, mapEventMeta } from "./checker.js";
-import { array, primitive, ref, union, intersection, literal, func } from "@verter/type-ir";
+import {
+  array,
+  primitive,
+  ref,
+  union,
+  intersection,
+  literal,
+  func,
+  object,
+  typeParameter,
+} from "@verter/type-ir";
 import type { TypeDescriptor } from "@verter/type-ir";
 import type { PropMeta } from "../types.js";
 
@@ -110,6 +120,90 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
       });
     });
 
+    // @ai-generated - Rejects generic function refs whose instantiated arguments differ.
+    it("declines function-array projection when generic alias arguments differ", () => {
+      const genericFn = func(
+        [{ name: "value", type: typeParameter("T"), optional: false }],
+        primitive("void"),
+        { typeParameters: [typeParameter("T")] },
+      );
+      const result = mapPropMeta(
+        makeProp({
+          name: "handler",
+          type: union([ref("Fn", [primitive("string")]), array(ref("Fn", [primitive("number")]))]),
+          rawType: "Fn<string> | Fn<number>[]",
+          required: true,
+        }),
+        undefined,
+        new Map([["Fn", genericFn]]),
+      );
+
+      expect(result.type).toBe("Fn<string> | Fn<number>[]");
+      expect(JSON.stringify(result.schema)).not.toContain('"kind":"event"');
+    });
+
+    // @ai-generated - Requires Numberish classification to consume the complete descriptor.
+    it("declines Numberish projection when an unrelated union arm is present", () => {
+      const result = mapPropMeta(
+        makeProp({
+          type: union([ref("Numberish"), ref("Date")]),
+          rawType: "Numberish | Date",
+          required: true,
+        }),
+      );
+
+      expect(result.type).toBe("Numberish | Date");
+      expect(result.schema).toMatchObject({
+        kind: "enum",
+        type: "Numberish | Date",
+      });
+    });
+
+    // @ai-generated - Requires referrer-policy classification to consume the complete descriptor.
+    it("declines referrer-policy projection when an unrelated union arm is present", () => {
+      const result = mapPropMeta(
+        makeProp({
+          name: "referrerpolicy",
+          type: union([ref("HTMLAttributeReferrerPolicy"), ref("URL")]),
+          rawType: "HTMLAttributeReferrerPolicy | URL",
+          required: true,
+        }),
+      );
+
+      expect(result.type).toBe("HTMLAttributeReferrerPolicy | URL");
+      expect(JSON.stringify(result.schema)).not.toContain('"no-referrer"');
+    });
+
+    // @ai-generated - Requires prefetch classification to reject extra descriptor arms.
+    it("declines prefetch projection when an extra literal arm is present", () => {
+      const partialPair = ref("Partial", [
+        object([
+          { name: "visibility", type: primitive("boolean"), optional: false },
+          { name: "interaction", type: primitive("boolean"), optional: false },
+        ]),
+      ]);
+      const result = mapPropMeta(
+        makeProp({
+          name: "prefetchOn",
+          type: union([
+            literal("visibility"),
+            literal("interaction"),
+            partialPair,
+            literal("idle"),
+          ]),
+          rawType:
+            '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }> | "idle"',
+          required: true,
+        }),
+      );
+
+      expect(result.type).toContain('"idle"');
+      expect(result.schema).toMatchObject({
+        kind: "enum",
+        type: expect.stringContaining('"idle"'),
+      });
+    });
+
     it("does not resurrect an array schema arm from union-looking terminal display", () => {
       const functionOnly = func(
         [{ name: "event", type: ref("MouseEvent"), optional: false }],
@@ -165,6 +259,27 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
       expect(result.type).toContain('"noreferrer"');
       expect(result.type).not.toContain('"a"');
       expect(result.type).not.toContain('"d"');
+    });
+
+    // @ai-generated - Rejects a branded intersection when rendering would erase a constraint.
+    it("declines string-brand projection when the branded intersection has an extra constraint", () => {
+      const result = mapPropMeta(
+        makeProp({
+          name: "target",
+          type: union([
+            literal("_self"),
+            intersection([primitive("string"), object([]), ref("Constraint")]),
+          ]),
+          rawType: '"_self" | (string & {} & Constraint)',
+          required: true,
+        }),
+      );
+
+      expect(result.type).toContain("Constraint");
+      expect(result.schema).toMatchObject({
+        kind: "enum",
+        type: expect.stringContaining("Constraint"),
+      });
     });
   });
 

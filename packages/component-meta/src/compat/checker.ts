@@ -302,14 +302,14 @@ function classifyCompatPropDescriptor(
   if (descriptorIsBooleanish(prop.type)) {
     return { kind: "booleanish" };
   }
-  if (descriptorContainsDirectRef(prop.type, "Numberish")) {
+  if (descriptorIsDirectRefWithOptionalUndefined(prop.type, "Numberish")) {
     return { kind: "numberish" };
   }
   const slotNames = classifyCompatSlotsDescriptor(prop.type);
   if (slotNames) {
     return { kind: "slots", slotNames };
   }
-  if (descriptorContainsDirectRef(prop.type, "HTMLAttributeReferrerPolicy")) {
+  if (descriptorIsDirectRefWithOptionalUndefined(prop.type, "HTMLAttributeReferrerPolicy")) {
     return { kind: "referrerPolicy" };
   }
   const functionArray = classifyFunctionArrayDescriptor(prop.type, typeRegistry);
@@ -332,8 +332,19 @@ function classifyCompatPropDescriptor(
   return { kind: "default" };
 }
 
-function descriptorContainsDirectRef(type: TypeDescriptor, name: string): boolean {
-  return unionArms(type).some((arm) => arm.kind === "ref" && arm.name === name);
+function descriptorIsDirectRefWithOptionalUndefined(type: TypeDescriptor, name: string): boolean {
+  const arms = unionArms(type);
+  return (
+    arms.filter(
+      (arm) => arm.kind === "ref" && arm.name === name && (arm.typeArguments?.length ?? 0) === 0,
+    ).length === 1 &&
+    arms.every(
+      (arm) =>
+        (arm.kind === "ref" && arm.name === name && (arm.typeArguments?.length ?? 0) === 0) ||
+        isUndefinedPrimitive(arm),
+    ) &&
+    arms.filter(isUndefinedPrimitive).length <= 1
+  );
 }
 
 function descriptorIsBooleanish(type: TypeDescriptor): boolean {
@@ -368,7 +379,12 @@ function resolveCompatClassificationDescriptor(
   typeRegistry: Map<string, TypeDescriptor> | undefined,
   seen: Set<string> = new Set(),
 ): TypeDescriptor {
-  if (type.kind !== "ref" || !typeRegistry || seen.has(type.name)) {
+  if (
+    type.kind !== "ref" ||
+    (type.typeArguments?.length ?? 0) > 0 ||
+    !typeRegistry ||
+    seen.has(type.name)
+  ) {
     return type;
   }
   const resolved = typeRegistry.get(type.name);
@@ -420,23 +436,40 @@ function classifyFunctionArrayDescriptor(
 }
 
 function descriptorIsPrefetchOn(type: TypeDescriptor): boolean {
-  const arms = unionArms(stripUndefinedArm(type));
-  const hasVisibility = arms.some((arm) => arm.kind === "literal" && arm.value === "visibility");
-  const hasInteraction = arms.some((arm) => arm.kind === "literal" && arm.value === "interaction");
-  const hasPartialPair = arms.some((arm) => {
-    if (arm.kind !== "ref" || arm.name !== "Partial") return false;
-    const target = arm.typeArguments?.[0];
-    if (!target || target.kind !== "object") return false;
-    const visibility = target.properties.find((property) => property.name === "visibility");
-    const interaction = target.properties.find((property) => property.name === "interaction");
-    return (
-      visibility?.type.kind === "primitive" &&
-      visibility.type.name === "boolean" &&
-      interaction?.type.kind === "primitive" &&
-      interaction.type.name === "boolean"
-    );
-  });
-  return hasVisibility && hasInteraction && hasPartialPair;
+  const stripped = stripUndefinedArm(type);
+  if (stripped.kind !== "union" || stripped.types.length !== 3) {
+    return false;
+  }
+  const arms = stripped.types;
+  return (
+    arms.filter((arm) => arm.kind === "literal" && arm.value === "visibility").length === 1 &&
+    arms.filter((arm) => arm.kind === "literal" && arm.value === "interaction").length === 1 &&
+    arms.filter(descriptorIsPrefetchPartialPair).length === 1
+  );
+}
+
+function descriptorIsPrefetchPartialPair(type: TypeDescriptor): boolean {
+  if (type.kind !== "ref" || type.name !== "Partial" || type.typeArguments?.length !== 1) {
+    return false;
+  }
+  const target = type.typeArguments[0];
+  if (
+    target?.kind !== "object" ||
+    target.properties.length !== 2 ||
+    (target.indexSignatures?.length ?? 0) !== 0 ||
+    (target.callSignatures?.length ?? 0) !== 0 ||
+    (target.constructSignatures?.length ?? 0) !== 0
+  ) {
+    return false;
+  }
+  const visibility = target.properties.find((property) => property.name === "visibility");
+  const interaction = target.properties.find((property) => property.name === "interaction");
+  return (
+    visibility?.type.kind === "primitive" &&
+    visibility.type.name === "boolean" &&
+    interaction?.type.kind === "primitive" &&
+    interaction.type.name === "boolean"
+  );
 }
 
 function descriptorIsNuxtLinkTo(type: TypeDescriptor): boolean {
@@ -482,6 +515,7 @@ function classifyStringBrandArms(type: TypeDescriptor): TypeDescriptor[] | undef
 function isEmptyObjectStringBrand(type: TypeDescriptor): boolean {
   return (
     type.kind === "intersection" &&
+    type.types.length === 2 &&
     type.types.some((entry) => entry.kind === "primitive" && entry.name === "string") &&
     type.types.some(
       (entry) =>
@@ -1170,11 +1204,9 @@ function compatSchemaIncludesTopLevelUndefined(schema: PropertyMetaSchema): bool
 }
 
 /**
- * Returns `baseText` extended with `| undefined` when the prop is optional and
- * the paired descriptor does not already include `undefined` as a top-level
- * union arm. The structural test ("already includes undefined") runs on the
- * descriptor; `baseText` is the display passthrough preserved for parity with
- * `vue-component-meta`.
+ * Returns `baseText` extended with `| undefined` when the prop is optional.
+ * The suffix check only de-duplicates display text; semantic classification
+ * remains descriptor-owned.
  */
 function normalizeOptionalCompatTypeText(
   descriptor: TypeDescriptor,
@@ -1186,7 +1218,8 @@ function normalizeOptionalCompatTypeText(
   if (stripped.kind === "primitive" && stripped.name === "any") {
     return "any";
   }
-  if (descriptorIncludesTopLevelUndefined(descriptor)) {
+  const trimmed = baseText.trim();
+  if (trimmed === "undefined" || trimmed.endsWith("| undefined")) {
     return baseText;
   }
   return `${baseText} | undefined`;
@@ -1976,13 +2009,6 @@ export class ComponentMetaChecker {
       const mappedMeta = nativeComponentMetaToComponentMeta(declaredNativeMeta);
       const result = mapComponentMeta(mappedMeta, this.options, typeRegistry);
       for (const prop of result.props) {
-        if (prop.type === "Booleanish | undefined" || prop.type === "Booleanish") {
-          prop.schema = {
-            kind: "enum",
-            type: prop.type,
-            schema: ['"false"', '"true"', "false", "true", ...(prop.required ? [] : ["undefined"])],
-          };
-        }
         reorderCompatLiteralUnionTypeByDefaultValue(prop);
       }
       return result;

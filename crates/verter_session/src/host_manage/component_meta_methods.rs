@@ -1334,6 +1334,7 @@ impl VerterHost {
                 queued_names: &mut RegistryQueuedNames,
                 output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
                 producer_scope: &RegistryProducerScope,
+                member_ref_policy: crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy,
                 cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
             ) {
                 let mut local_queue = std::collections::VecDeque::new();
@@ -1345,7 +1346,7 @@ impl VerterHost {
                     &mut local_names,
                     &mut local_queue,
                     producer_scope,
-                    crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::PublicationBoundary,
+                    member_ref_policy,
                     cursor,
                 );
                 for pending in local_queue {
@@ -1376,6 +1377,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             producer_scope,
+                            crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                             cursor,
                         );
                     }
@@ -1391,6 +1393,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             producer_scope,
+                            crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                             cursor,
                         );
                     }
@@ -1402,6 +1405,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             producer_scope,
+                            crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                             cursor,
                         );
                         collect_one_filtered_node(
@@ -1411,6 +1415,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             producer_scope,
+                            crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                             cursor,
                         );
                     }
@@ -1423,6 +1428,7 @@ impl VerterHost {
                         queued_names,
                         output,
                         producer_scope,
+                        crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::PublicationBoundary,
                         cursor,
                     );
                 }

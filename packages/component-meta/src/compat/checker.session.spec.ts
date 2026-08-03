@@ -254,4 +254,82 @@ describe("ComponentMetaChecker session requirement", () => {
     expect(meta._verter?.acceptedProps?.map((p: any) => p.name)).toEqual(["label"]);
     expect(meta._verter?.acceptedSurfaceCompleteness).toBe("exact");
   });
+
+  // @ai-generated - Proves terminal display text cannot rewrite a structurally rendered schema.
+  it("keeps Booleanish terminal display text from rewriting a non-Booleanish schema", async () => {
+    const nativeMeta: any = {
+      filePath: "C:/project/src/App.vue",
+      optionsApi: false,
+      props: [
+        {
+          name: "decoy",
+          type: { kind: "primitive", name: "string" },
+          ...resolvedTypeRow("Booleanish"),
+          required: true,
+          hasDefault: false,
+        },
+      ],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      acceptedProps: [],
+      acceptedEvents: [],
+      acceptedSurfaceCompleteness: "exact",
+      rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+      fallthroughSurface: { kind: "none", reason: "noTemplate" },
+    };
+    const checker = new ComponentMetaChecker({ upsert: vi.fn() }, "C:\\project", {}, {
+      closed: false,
+      engine: { state: "active" as const },
+      upsert() {},
+      delete() {},
+      getComponentMeta() {
+        return nativeMeta;
+      },
+      getProvenance() {
+        return "{}";
+      },
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<{ decoy: string }>()</script>`;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    } as any);
+
+    checker.updateFile(
+      "src\\App.vue",
+      `<script setup lang="ts">defineProps<{ decoy: string }>()</script>`,
+    );
+
+    const meta = await checker.getComponentMeta("src\\App.vue");
+
+    expect(meta.props[0]).toMatchObject({
+      name: "decoy",
+      type: "Booleanish",
+      schema: "string",
+    });
+  });
 });

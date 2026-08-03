@@ -224,6 +224,7 @@ describe("shape-detection heuristics switch on TypeDescriptor.kind (not prop.raw
   });
 
   describe("looksLikeIndexedAccessType (used by shouldPreferDescriptorForProp / shouldPreferRawSchemaType)", () => {
+    // @ai-generated - Preserves optionality while terminal indexed text remains display-only.
     it("declines descriptor-over-rawType swap when descriptor is primitive (no indexed-access marker), even if rawType TEXT has bracket syntax", () => {
       // Descriptor: union of `string | undefined` — primitives, NOT indexed access.
       const prop = makeProp({
@@ -242,7 +243,8 @@ describe("shape-detection heuristics switch on TypeDescriptor.kind (not prop.raw
       // rawType passthrough wins → `Foo["bar"]` (normalised
       // single-to-double-quote rendering). (The legacy path produced
       // "string | undefined" via the text-based shape sniff.)
-      expect(result.type).toBe('Foo["bar"]');
+      // Optionality remains descriptor-owned, so display appends `| undefined`.
+      expect(result.type).toBe('Foo["bar"] | undefined');
     });
 
     it("triggers descriptor-over-rawType swap when descriptor is IndexedAccess, regardless of rawType text", () => {

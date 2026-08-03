@@ -81,6 +81,7 @@ The official/native component-meta payload is the semantic authority. `@verter/c
 - Component-meta output must be deterministic for a coherent snapshot/query. The same inputs should produce the same graph identities, metadata shape, and compat-visible meaning.
 - If native code truly cannot represent part of a type, encode that explicitly as a structured unsupported/HardStop-style result with diagnostics/provenance sidecars. Do not silently degrade a representable type to raw text or `unknown`.
 - The native response contract must remain explicit and versioned. If the component-meta payload shape changes, do it as a deliberate schema/API cutover rather than compat-side drift.
+- Component-meta response v5 guarantees a structurally complete descriptor graph for compat classification. Shallow imported refs that a published surface demands must have the required native registry entries (for example, `Fn | Fn[]` retains both arms and publishes `Fn` as callable); unreferenced siblings and package-backed internals remain shallow. Compat never fills a missing registry entry from display text. See [`docs/arch/scanners-replacement-compat-descriptor.md`](../../../docs/arch/scanners-replacement-compat-descriptor.md).
 - Host-owned resolver artifacts, graph artifacts, and encoded payload caches must share one invalidation story. Do not add a second ownership path for the same component-meta query state.
 - Raw graph cycles reaching JS without explicit recursion nodes are native bugs, not a normal compat fallback path.
 
@@ -150,8 +151,13 @@ The native component-meta / typeinfo type resolver — analyzer (`verter_semanti
   structural policy/proof. `Failed` is absorbing; incomplete publication never
   becomes exact. `TerminalTypeDisplay` is minted only by the session output
   sink and may not feed semantic policy. The complete owner, selector, carrier,
-  merge, compat, and version-4 wire rules are in
+  merge, compat, and the original version-4 wire rules are in
   [`docs/arch/scanners-replacement-type-authority.md`](../../../docs/arch/scanners-replacement-type-authority.md).
+- The response-v5 compat cutover is descriptor-only: `unknown` is unsupported,
+  `rawType`/`rawSignature` are terminal display data, and structural role
+  classification precedes rendering. The complete mapping and default checker
+  gate are in
+  [`docs/arch/scanners-replacement-compat-descriptor.md`](../../../docs/arch/scanners-replacement-compat-descriptor.md).
 - Materialise / cold-resolver consumers (`synthesize_define_props_shape_from_known_surface_with_authority`, `slot_field_function_type_expr`, `resolve_component_meta_parts`) construct `TypeExpr::Function`/`TypeExpr::Object` directly from typed inputs — no `format!("(props: { … }) => RT")` synthesise-and-reparse.
 - The JS compat layer (`@verter/component-meta/compat/checker.ts`) walks `prop.type` (`TypeDescriptor` from `@verter/type-ir`) for every semantic decision. `prop.rawType` is display passthrough only — it does not feed any `looksLike*`, `extract*`, `normalize*`, `split*`, `strip*`, `prefer*`, `shouldPrefer*`, `compat*ToString`, or `repairOpaque*` branch. Operator splits use union/intersection tag matching on `TypeDescriptor`, not hand-rolled string operator parsers.
 

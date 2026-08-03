@@ -111,6 +111,19 @@ Compat schema notes:
 - `schema: true` keeps the default consumer-facing behavior.
 - `schema: { literalBooleanSchema: true }` enables benchmark/parity-focused `true | false` enum schema expansion without changing native types or compat display strings.
 
+### Descriptor contract
+
+Component-meta response v5 makes native type descriptors the only semantic
+input to compat classification. Imported shallow refs remain symbolic, but the
+native `typeRegistry` includes demanded workspace-local declarations needed to
+interpret them, such as the callable target of `Fn | Fn[]`.
+
+`unknown` descriptors are unsupported even when `rawType` resembles a known
+type. `rawType` and `rawSignature` are terminal display/diagnostic fields only;
+they never establish a compat role, schema arm, event arity, or support status.
+Compat renders text only after structural classification and has no text-repair
+fallback.
+
 ## Native Vs Compat Contract
 
 The official Verter metadata payload is the semantic source of truth. `./compat` is an interoperability projection for `vue-component-meta`, not a second semantic engine.

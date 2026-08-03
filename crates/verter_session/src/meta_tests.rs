@@ -10433,6 +10433,87 @@ defineProps<{
 }
 
 #[test]
+fn imported_function_array_member_publishes_callable_registry_dependency() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/member-value-props.ts",
+            r#"
+export type Fn = (value: string) => void
+export type Unused = { ignored: number }
+
+export interface MemberValueProps {
+  handlers: Fn | Fn[]
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { MemberValueProps } from './member-value-props'
+
+defineProps<MemberValueProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./member-value-props".to_string(),
+            resolved_canonical_id: Some("/src/member-value-props.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+    let registry_names: std::collections::BTreeSet<_> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+
+    assert!(
+        registry_names.contains("MemberValueProps"),
+        "the imported props root should publish, got {registry_names:?}"
+    );
+    assert!(
+        registry_names.contains("Fn"),
+        "the demanded imported member alias should publish, got {registry_names:?}"
+    );
+    assert!(
+        !registry_names.contains("Unused"),
+        "unreferenced imported siblings must stay out of the registry, got {registry_names:?}"
+    );
+
+    let function_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Fn")
+        .expect("Fn should publish as the member's registry dependency");
+    let function_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(
+            function_entry
+                .type_source
+                .present()
+                .expect("Fn should carry a source"),
+        ),
+        "Fn registry entry",
+    );
+    assert!(
+        matches!(function_ty, TypeExpr::Function(_)),
+        "Fn should preserve its callable structure, got {function_ty:?}"
+    );
+}
+
+#[test]
 fn resolve_component_meta_keeps_imported_generic_public_field_helpers_off_registry() {
     let project = make_project();
     project
