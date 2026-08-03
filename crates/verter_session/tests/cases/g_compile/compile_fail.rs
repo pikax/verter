@@ -63,6 +63,16 @@ fn carrier_access_token_not_constructible_outside_verter_language() {
     t.compile_fail("tests/cases/compile-fail/carrier_access_token_struct_literal.rs");
 }
 
+/// Raw registered-carrier parsing is an internal producer capability. This
+/// inverse expectation stays RED while the public compiler entry point remains
+/// nameable from an external crate.
+#[test]
+#[cfg(feature = "scanners-replacement-red")]
+fn red_raw_registered_carrier_parser_is_not_public() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/scanners_replacement_raw_parser_public.rs");
+}
+
 /// The `TscResponse` rendering-channel seal has NO inside: the two code
 /// fields (`code`, `ts_carrier_code`) and the sole from-parts constructor
 /// live in the private `types::tsc_response` CHILD module, so even sibling

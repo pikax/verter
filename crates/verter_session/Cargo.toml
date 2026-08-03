@@ -66,6 +66,7 @@ external-corpus = []
 # also enforced structurally by the normal build, so a broken seal fails the
 # ordinary compile.
 compile-fail = []
+scanners-replacement-red = []
 # Phase 11b diagnosis benchmark: enables the corpus-driven
 # `repo_first_pass_diagnosis_corpus` integration test that the vitest
 # at `packages/benchmark/src/repo-first-pass.spec.ts` invokes via
