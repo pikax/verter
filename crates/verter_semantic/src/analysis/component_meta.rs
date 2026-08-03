@@ -670,6 +670,10 @@ pub struct StyleAnalysis {
     pub scoped: bool,
     pub is_module: bool,
     pub module_name: Option<String>,
+    /// Sealed artifact-bound block identity carried through from the style
+    /// analysis; the wire boundary revalidates it against the ordered
+    /// structure before minting a public block token.
+    pub block_ref: Option<verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef>,
     pub classes: Vec<String>,
     pub ids: Vec<String>,
     pub custom_properties: Vec<String>,
@@ -3296,6 +3300,7 @@ fn extract_styles(styles: &[crate::analysis::style::StyleBlockAnalysis]) -> Vec<
                 scoped: style.scoped,
                 is_module: style.is_module,
                 module_name: style.module_name.clone(),
+                block_ref: style.block_ref.clone(),
                 classes: css
                     .map(|css| css.classes.iter().map(|class| class.name.clone()).collect())
                     .unwrap_or_default(),

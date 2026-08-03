@@ -206,7 +206,15 @@ impl FrameworkBlockRef {
     }
 
     pub fn block_id(&self) -> verter_language::parse_artifact::carrier_inventory::BlockId {
-        self.local.block
+        self.local.block_id()
+    }
+
+    /// The sealed inventory-minted local ref: the association key analysis
+    /// carriers store and consumers full-identity-join against.
+    pub fn artifact_block_ref(
+        &self,
+    ) -> &verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef {
+        &self.local
     }
 }
 
@@ -344,13 +352,11 @@ impl RegisteredFileStructure {
         &self,
         block: verter_language::parse_artifact::carrier_inventory::BlockId,
     ) -> Option<FrameworkBlockRef> {
-        self.inventory().blocks().get(block.get() as usize)?;
         Some(FrameworkBlockRef {
             artifact: self.artifact_id().clone(),
-            local: verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef {
-                artifact_identity: self.public_artifact_token().0,
-                block,
-            },
+            // Sealed mint: the inventory is the sole authority for the
+            // artifact-bound local ref (content-addressed identity).
+            local: self.inventory().block_ref(block)?,
         })
     }
 

@@ -2,7 +2,12 @@
  * Pure functions computing Monaco decoration arrays from Verter analysis data.
  * No Monaco dependency — returns plain objects that Editor.vue maps to Monaco types.
  */
-import type { FileAnalysis, AnalysisBinding, OrderedSfcStructure } from "../core/types";
+import type {
+  FileAnalysis,
+  AnalysisBinding,
+  AnalysisStyleBlock,
+  OrderedSfcStructure,
+} from "../core/types";
 
 /** Decoration descriptor for a binding in the script block. */
 export interface BindingDecoration {
@@ -194,33 +199,40 @@ export function computeCodeLenses(
     lenses.push({ line, title: "template" });
   }
 
-  // Style block summaries
-  let styleIdx = 0;
+  // Style block summaries. Analyses are associated to structure blocks
+  // EXCLUSIVELY through the opaque sealed block token — never by ordinal.
+  // A style block whose token has no analysis match is typed unavailable:
+  // it gets no analysis-derived summary.
+  const stylesByToken = new Map<string, AnalysisStyleBlock>();
+  for (const style of analysis.styles) {
+    if (style.blockToken !== undefined && style.blockToken !== null) {
+      stylesByToken.set(style.blockToken, style);
+    }
+  }
   for (const styleBlock of structure?.blocks.filter(
     (block) => block.kind === "section" && block.section.role.kind === "style",
   ) ?? []) {
     if (styleBlock.kind !== "section") continue;
     const line = countLines(source, styleBlock.section.openingRange.start);
-    const styleAnalysis = analysis.styles[styleIdx];
+    const styleAnalysis = stylesByToken.get(styleBlock.section.blockToken);
+    if (!styleAnalysis) continue;
     const parts: string[] = [];
 
-    if (styleAnalysis?.scoped) parts.push("scoped");
-    if (styleAnalysis?.isModule) parts.push("module");
-    if (styleAnalysis?.css) {
+    if (styleAnalysis.scoped) parts.push("scoped");
+    if (styleAnalysis.isModule) parts.push("module");
+    if (styleAnalysis.css) {
       const classCount = styleAnalysis.css.classes.length;
       if (classCount > 0) parts.push(`${classCount} class${classCount !== 1 ? "es" : ""}`);
       const ruleCount = styleAnalysis.css.ruleCount;
       if (ruleCount > 0) parts.push(`${ruleCount} rule${ruleCount !== 1 ? "s" : ""}`);
     }
-    if (styleAnalysis?.vBinds.length) {
+    if (styleAnalysis.vBinds.length) {
       parts.push(`${styleAnalysis.vBinds.length} v-bind`);
     }
 
     if (parts.length > 0) {
       lenses.push({ line, title: parts.join(" · ") });
     }
-
-    styleIdx++;
   }
 
   return lenses;

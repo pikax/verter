@@ -312,13 +312,14 @@ fn selector_hover(
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<Hover> {
-    // The sealed block ref is the association authority. Missing producer
+    // The sealed block ref is the association authority: a full-identity
+    // join (artifact identity + block id). Missing or foreign producer
     // identity fails closed; offsets remain span metadata only.
-    let block_id = style_block.block_ref.block_id().get();
+    let block_ref = style_block.block_ref.artifact_block_ref();
     let style = analysis
         .styles
         .iter()
-        .find(|style| style.block_id == Some(block_id))?;
+        .find(|style| style.block_ref.as_ref() == Some(block_ref))?;
     let css = style.css.as_ref()?;
     let template = analysis.template.as_deref()?;
 
@@ -561,7 +562,7 @@ mod tests {
             None,
             content_start,
         );
-        analysis.block_id = Some(style_block.block_ref.block_id().get());
+        analysis.block_ref = Some(style_block.block_ref.artifact_block_ref().clone());
         analysis
     }
 
@@ -640,6 +641,57 @@ mod tests {
             panic!("expected markup hover")
         };
         assert!(contents.value.contains("`.target`"));
+    }
+
+    /// RED fixture where ordinal/naked-local-id and sealed identity DIVERGE:
+    /// a STALE analysis snapshot — built from a superseded revision whose
+    /// style block carries the SAME artifact-local block id at the SAME byte
+    /// offsets — must never join the current structure block. A naked-u32
+    /// join mis-binds it (and hovers the superseded `.aaaaaa` selector); the
+    /// sealed full-identity join fails closed.
+    #[test]
+    fn selector_hover_refuses_stale_artifact_analysis_with_matching_local_id() {
+        let current = "<template><div class=\"target\"/></template><style>.target{}</style>";
+        let stale = "<template><div class=\"target\"/></template><style>.aaaaaa{}</style>";
+        let blocks = test_carrier_blocks(current);
+        let stale_blocks = test_carrier_blocks(stale);
+        let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+        let stale_style_block = stale_blocks.iter().find(|b| b.tag_name == "style").unwrap();
+        assert_eq!(
+            style_block.block_ref.block_id(),
+            stale_style_block.block_ref.block_id(),
+            "fixture premise: identical artifact-local block id"
+        );
+        assert_ne!(
+            style_block.block_ref.artifact_block_ref(),
+            stale_style_block.block_ref.artifact_block_ref(),
+            "fixture premise: distinct sealed artifact identities"
+        );
+
+        // The stale snapshot: the superseded content's analysis, sealed to
+        // the superseded artifact, still claiming the same naked local id.
+        let stale_entry = build_style_for_block(stale, stale_style_block);
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![stale_entry]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![make_element("div", &["target"])],
+                    ..Default::default()
+                })
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let line_index = LineIndex::new_utf16(current);
+        let selector_offset = current.rfind(".target").unwrap() as u32;
+        let position = line_index.offset_to_position(selector_offset).unwrap();
+
+        let hover = css_hover(&position, current, &blocks, Some(&analysis), &line_index);
+        assert!(
+            hover.is_none(),
+            "a stale artifact's analysis must fail closed, never mis-bind \
+             through the naked local id: {hover:?}"
+        );
     }
 
     /// @ai-generated - After '.' in style offers template class names

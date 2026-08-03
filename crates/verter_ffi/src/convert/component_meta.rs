@@ -423,6 +423,27 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
     contract: verter_session::framework::ComponentContractAvailability,
 ) -> FfiComponentMeta {
     let root_info = root_info_to_ffi(&analysis.root_reachability);
+    // Sealed-identity wire tokens for style rows: each style's sealed ref is
+    // revalidated against the ordered structure's inventory before its public
+    // block token is served. Missing structure or a foreign/stale ref yields
+    // no token — consumers treat absence as typed unavailable, never ordinal.
+    let style_token_authority = analysis.ordered_sfc_structure.clone();
+    let style_block_token = move |block_ref: Option<
+        &verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef,
+    >|
+          -> Option<String> {
+        let structure = style_token_authority.as_ref()?;
+        let block_ref = block_ref?;
+        block_ref
+            .validate(&structure.inventory)
+            .then(|| {
+                structure
+                    .block_tokens
+                    .get(block_ref.block_id().get() as usize)
+                    .cloned()
+            })
+            .flatten()
+    };
     let ordered_sfc_structure = match analysis.ordered_sfc_structure.as_ref() {
         Some(structure) => ordered_structure_to_ffi(structure),
         #[cfg(test)]
@@ -790,6 +811,7 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
                 scoped: style.scoped,
                 is_module: style.is_module,
                 module_name: style.module_name,
+                block_token: style_block_token(style.block_ref.as_ref()),
                 classes: style.classes,
                 ids: style.ids,
                 custom_properties: style.custom_properties,

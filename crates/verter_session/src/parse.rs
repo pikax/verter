@@ -1717,6 +1717,36 @@ fn build_preprocessor_requests(
     requests
 }
 
+/// Attach the session public block token to every style analysis whose
+/// SEALED ref revalidates against `structure`'s live inventory. A missing or
+/// foreign ref (stale artifact, different revision) yields NO token — wire
+/// consumers treat absence as typed unavailable, never ordinal. Identity
+/// plumbing only: content facts are untouched. Runs ONCE where a snapshot's
+/// style analyses are built next to their registered structure (the
+/// Source-stage record, the overlay lane, the narrowed-scope rebuild), so
+/// served snapshots keep sharing the stored `Arc` unchanged.
+pub(crate) fn attach_style_block_tokens(
+    structure: &crate::carrier_publication_store::RegisteredFileStructure,
+    styles: &mut [verter_semantic::analysis::StyleBlockAnalysis],
+) {
+    let inventory = structure.inventory();
+    for style in styles.iter_mut() {
+        style.block_token = style
+            .block_ref
+            .as_ref()
+            .filter(|block_ref| block_ref.validate(inventory))
+            .and_then(|block_ref| {
+                let framework_ref = structure.block_ref(block_ref.block_id())?;
+                Some(
+                    structure
+                        .public_block_token(&framework_ref)?
+                        .as_str()
+                        .to_owned(),
+                )
+            });
+    }
+}
+
 /// Build style analyses directly from the accepted inventory. This is the sole
 /// association point between semantic style facts and artifact-local block ids.
 fn build_style_analyses_from_inventory(
@@ -1813,7 +1843,7 @@ fn build_style_analyses_from_inventory(
                         module_name,
                         content_offset,
                     );
-                analysis.block_id = Some(id.get());
+                analysis.block_ref = inventory.block_ref(*id);
                 return Some(analysis);
             }
 
@@ -1867,7 +1897,7 @@ fn build_style_analyses_from_inventory(
                 module_name,
                 content_offset,
             );
-            analysis.block_id = Some(id.get());
+            analysis.block_ref = inventory.block_ref(*id);
             if let Some(css) = &analysis.css {
                 css.debug_assert_valid_spans(sfc_source_len);
             }
@@ -3041,7 +3071,14 @@ const view = <div className="card">hello</div>
         let analysis_ids = snapshot
             .style_analyses
             .iter()
-            .map(|style| style.block_id.expect("sealed style identity"))
+            .map(|style| {
+                let block_ref = style.block_ref.as_ref().expect("sealed style identity");
+                assert!(
+                    block_ref.validate(&artifact.common.inventory),
+                    "sealed ref validates against the owning inventory"
+                );
+                block_ref.block_id().get()
+            })
             .collect::<Vec<_>>();
         assert_eq!(analysis_ids, inventory_ids);
         assert_eq!(
@@ -3672,7 +3709,12 @@ watch(count, (value, oldValue) => {
                 _ => None,
             })
             .expect("inventory style block");
-        assert_eq!(style.block_id, Some(inventory_style_id));
+        let block_ref = style.block_ref.as_ref().expect("sealed style identity");
+        assert_eq!(block_ref.block_id().get(), inventory_style_id);
+        assert!(
+            block_ref.validate(&artifact.common.inventory),
+            "sealed ref validates against the owning inventory"
+        );
         assert!(style.scoped, "svelte styles are scoped by default");
         let css = style.css.as_ref().expect("scanned css facts");
         let card = css.classes.iter().find(|c| c.name == "card").unwrap();

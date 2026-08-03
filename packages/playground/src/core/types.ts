@@ -447,6 +447,13 @@ export interface AnalysisStyleBlock {
   scoped: boolean;
   isModule: boolean;
   moduleName: string | null;
+  /**
+   * Opaque sealed block token binding this analysis to its structure block
+   * (same vocabulary as `StructureSection.blockToken`). Absent when the
+   * sealed identity could not be revalidated — consumers treat absence as
+   * typed unavailable, never an ordinal fallback.
+   */
+  blockToken?: string;
   vBinds: AnalysisVBind[];
   specialPseudos: AnalysisSpecialPseudo[];
   css: AnalysisCss | null;

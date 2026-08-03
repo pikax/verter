@@ -3284,3 +3284,157 @@ fn lint_diagnostics_to_utf16_converts_every_span_in_source_order_agnostic_batche
     assert_eq!(out[0].span.start, 5);
     assert_eq!(out[0].span.end, 9);
 }
+
+// ── Sealed style block token (wire identity) ─────────────────────────
+
+fn sealed_token_host(canonical: &str, source: &str) -> host::VerterHost {
+    let session = host::VerterHost::new_standalone(host::HostConfig::default());
+    let _ = session
+        .upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: host::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("registered carrier");
+    session
+}
+
+/// Public-boundary token join: the FFI styles carry the SAME opaque block
+/// token vocabulary as the ordered structure, one distinct token per style
+/// block, minted only through the revalidated sealed ref.
+#[test]
+fn ffi_styles_carry_validated_public_block_tokens() {
+    let canonical = "/StyleTokens.vue";
+    let session = sealed_token_host(
+        canonical,
+        "<template><div class=\"a\"/></template>\n<style>.a {}</style>\n<style scoped>.b {}</style>",
+    );
+    let (output, _request) = session
+        .get_component_meta_output_with_resolution(canonical)
+        .expect("audited output");
+    let ffi = super::component_meta_output_to_ffi(output.expect("component resolves"));
+
+    let (structure, _) = session
+        .registered_file_structure_snapshot(canonical)
+        .expect("registered structure");
+    let expected: Vec<String> = structure
+        .inventory()
+        .blocks()
+        .iter()
+        .filter_map(|block| match block {
+            verter_language::parse_artifact::carrier_inventory::CarrierBlock::Section {
+                id,
+                role: verter_language::parse_artifact::carrier_inventory::SectionRole::Style { .. },
+                ..
+            } => Some(
+                structure
+                    .public_block_token(&structure.block_ref(*id).unwrap())
+                    .unwrap()
+                    .as_str()
+                    .to_owned(),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(expected.len(), 2, "fixture premise: two style sections");
+
+    let served: Vec<Option<&str>> = ffi
+        .styles
+        .iter()
+        .map(|style| style.block_token.as_deref())
+        .collect();
+    assert_eq!(
+        served,
+        expected
+            .iter()
+            .map(|token| Some(token.as_str()))
+            .collect::<Vec<_>>(),
+        "each FFI style serves the ordered-structure token of its sealed ref"
+    );
+    assert_ne!(expected[0], expected[1], "tokens are distinct per block");
+}
+
+/// A style row whose sealed ref belongs to a DIFFERENT artifact must serve
+/// NO token (typed unavailable) — never a positional or naked-id fallback.
+#[test]
+fn ffi_style_token_fails_closed_for_foreign_artifact_ref() {
+    let canonical = "/Current.vue";
+    let session = sealed_token_host(canonical, "<style>.current {}</style>");
+    let foreign_session = sealed_token_host("/Foreign.vue", "<style>.foreign {}</style>");
+
+    let (structure, _) = session
+        .registered_file_structure_snapshot(canonical)
+        .expect("registered structure");
+    let (foreign_structure, _) = foreign_session
+        .registered_file_structure_snapshot("/Foreign.vue")
+        .expect("registered structure");
+    let style_id = |structure: &host::carrier_publication_store::RegisteredFileStructure| {
+        structure
+            .inventory()
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                verter_language::parse_artifact::carrier_inventory::CarrierBlock::Section {
+                    id,
+                    role:
+                        verter_language::parse_artifact::carrier_inventory::SectionRole::Style {
+                            ..
+                        },
+                    ..
+                } => Some(*id),
+                _ => None,
+            })
+            .expect("style section")
+    };
+    let valid_ref = structure
+        .inventory()
+        .block_ref(style_id(&structure))
+        .unwrap();
+    let foreign_ref = foreign_structure
+        .inventory()
+        .block_ref(style_id(&foreign_structure))
+        .unwrap();
+    assert_eq!(
+        valid_ref.block_id(),
+        foreign_ref.block_id(),
+        "fixture premise: identical artifact-local block id"
+    );
+
+    let style_row = |block_ref| verter_semantic::analysis::component_meta::StyleAnalysis {
+        lang: verter_semantic::analysis::style::StyleAnalysisLang::Css,
+        scoped: false,
+        is_module: false,
+        module_name: None,
+        block_ref,
+        classes: Vec::new(),
+        ids: Vec::new(),
+        custom_properties: Vec::new(),
+        v_binds: Vec::new(),
+        selectors: Vec::new(),
+    };
+    let mut analysis = empty_analysis();
+    analysis.ordered_sfc_structure = Some(
+        host::component_meta_host::ordered_sfc_structure_projection(&structure),
+    );
+    analysis.styles = vec![
+        style_row(Some(valid_ref)),
+        style_row(Some(foreign_ref)),
+        style_row(None),
+    ];
+
+    let ffi = component_meta_parts_to_ffi(analysis, None, Default::default());
+    assert!(
+        ffi.styles[0].block_token.is_some(),
+        "the same-artifact ref mints the token"
+    );
+    assert_eq!(
+        ffi.styles[1].block_token, None,
+        "a foreign artifact's ref fails closed"
+    );
+    assert_eq!(
+        ffi.styles[2].block_token, None,
+        "a ref-less row serves no token"
+    );
+}

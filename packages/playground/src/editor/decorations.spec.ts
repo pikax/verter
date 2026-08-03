@@ -355,6 +355,9 @@ describe("computeCodeLenses", () => {
           scoped: true,
           isModule: false,
           moduleName: null,
+          // The sealed token of the third structure block (script, template,
+          // style) — the sole association key.
+          blockToken: "style-2",
           vBinds: [],
           specialPseudos: [],
           flags: 0,
@@ -379,6 +382,76 @@ describe("computeCodeLenses", () => {
     const analysis = makeAnalysis();
     const lenses = computeCodeLenses(source, analysis, structureFor(source));
     expect(lenses).toEqual([]);
+  });
+
+  it("token-maps style analyses onto structure blocks, never by ordinal", () => {
+    const source =
+      "<style>\n.first { color: red; }\n</style>\n<style scoped>\n.second { color: blue; }\n.third { color: green; }\n</style>";
+    const structure = structureFor(source); // block tokens: style-0, style-1
+    // The analyses arrive REVERSED relative to structure order; only the
+    // opaque block token carries the association.
+    const styleEntry = (blockToken: string, scoped: boolean, classNames: string[]) => ({
+      lang: "css",
+      scoped,
+      isModule: false,
+      moduleName: null,
+      blockToken,
+      vBinds: [],
+      specialPseudos: [],
+      flags: 0,
+      css: {
+        selectors: [],
+        classes: classNames.map((name) => ({ name, start: 0, end: 4 })),
+        ids: [],
+        customProperties: [],
+        atRules: [],
+        ruleCount: classNames.length,
+      },
+    });
+    const analysis = makeAnalysis({
+      styles: [
+        styleEntry("style-1", true, ["second", "third"]),
+        styleEntry("style-0", false, ["first"]),
+      ],
+    });
+
+    const lenses = computeCodeLenses(source, analysis, structure);
+    const styleLenses = lenses.filter((lens) => /class|rule|scoped/.test(lens.title));
+    expect(styleLenses.length).toBe(2);
+    // Structure order is preserved; content is joined by token, not index.
+    expect(styleLenses[0].title).toContain("1 class");
+    expect(styleLenses[0].title).not.toContain("scoped");
+    expect(styleLenses[1].title).toContain("2 classes");
+    expect(styleLenses[1].title).toContain("scoped");
+  });
+
+  it("treats a missing token match as typed unavailable, never ordinal fallback", () => {
+    const source = "<style>\n.a { color: red; }\n</style>";
+    const analysis = makeAnalysis({
+      styles: [
+        {
+          lang: "css",
+          scoped: true,
+          isModule: false,
+          moduleName: null,
+          // A stale artifact's token: no structure block carries it.
+          blockToken: "stale-artifact-style-token",
+          vBinds: [],
+          specialPseudos: [],
+          flags: 0,
+          css: {
+            selectors: [],
+            classes: [{ name: "a", start: 0, end: 2 }],
+            ids: [],
+            customProperties: [],
+            atRules: [],
+            ruleCount: 1,
+          },
+        },
+      ],
+    });
+    const lenses = computeCodeLenses(source, analysis, structureFor(source));
+    expect(lenses.find((lens) => /class|rule|scoped/.test(lens.title))).toBeUndefined();
   });
 });
 

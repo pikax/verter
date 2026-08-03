@@ -133,13 +133,14 @@ fn template_summary(analysis: &FileAnalysisSnapshot) -> String {
 fn style_summary(analysis: &FileAnalysisSnapshot, block: &CarrierBlockView) -> String {
     let is_scoped = block.is_scoped();
 
-    // Associate only through the inventory-derived identity carried by the
-    // sealed block ref. Missing identity fails closed.
-    let block_id = block.block_ref.block_id().get();
+    // Associate only through the sealed block ref: a full-identity join
+    // (artifact identity + block id). Missing or foreign identity fails
+    // closed.
+    let block_ref = block.block_ref.artifact_block_ref();
     let style = analysis
         .styles
         .iter()
-        .find(|style| style.block_id == Some(block_id));
+        .find(|style| style.block_ref.as_ref() == Some(block_ref));
     let style = match style {
         Some(s) => s,
         None => return String::new(),
@@ -276,7 +277,7 @@ mod tests {
                 None,
                 start,
             );
-            style.block_id = Some(block.block_ref.block_id().get());
+            style.block_ref = Some(block.block_ref.artifact_block_ref().clone());
             style
         };
         let first = build(style_blocks[0]);
@@ -297,6 +298,62 @@ mod tests {
         assert!(
             titles[1].contains("2 selectors"),
             "second block: {titles:?}"
+        );
+    }
+
+    /// RED fixture where ordinal/naked-local-id and sealed identity DIVERGE:
+    /// an analysis built from a superseded revision (same artifact-local
+    /// block id, different artifact) must produce NO style lens — a
+    /// naked-u32 join would mis-attach the stale "3 selectors" summary onto
+    /// the current single-selector block.
+    #[test]
+    fn style_code_lens_refuses_stale_artifact_analysis_with_matching_local_id() {
+        let current = "<style>.one {}</style>";
+        let stale = "<style>.a {} .b {} .c {}</style>";
+        let blocks = test_carrier_blocks(current);
+        let stale_blocks = test_carrier_blocks(stale);
+        let style_block = blocks
+            .iter()
+            .find(|block| block.tag_name == "style")
+            .unwrap();
+        let stale_block = stale_blocks
+            .iter()
+            .find(|block| block.tag_name == "style")
+            .unwrap();
+        assert_eq!(
+            style_block.block_ref.block_id(),
+            stale_block.block_ref.block_id(),
+            "fixture premise: identical artifact-local block id"
+        );
+
+        let build = |source: &str, block: &CarrierBlockView| {
+            let (start, end) = block.content_range();
+            let mut style = style::build_css_style_analysis(
+                &source[start as usize..end as usize],
+                style::VueStyleInput::default(),
+                false,
+                false,
+                None,
+                start,
+            );
+            style.block_ref = Some(block.block_ref.artifact_block_ref().clone());
+            style
+        };
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![build(stale, stale_block)]).into(),
+            ..Default::default()
+        };
+        let line_index = LineIndex::new_utf16(current);
+
+        let lenses = code_lenses(&blocks, Some(&analysis), &line_index);
+        assert!(
+            lenses.is_empty(),
+            "a stale artifact's analysis must fail closed (no style lens), \
+             never mis-attach through the naked local id: {:?}",
+            lenses
+                .iter()
+                .map(|lens| lens.command.as_ref().map(|c| c.title.clone()))
+                .collect::<Vec<_>>()
         );
     }
 }

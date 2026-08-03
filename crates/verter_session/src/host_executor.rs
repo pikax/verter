@@ -308,7 +308,7 @@ impl StageExecutor for HostStageExecutor {
                         registered.generation(),
                     )
                 };
-            let parse_snapshot = crate::parse::carrier_snapshot_from_artifact(
+            let mut parse_snapshot = crate::parse::carrier_snapshot_from_artifact(
                 canonical_id,
                 &content,
                 self.config.effective_scope(),
@@ -317,6 +317,9 @@ impl StageExecutor for HostStageExecutor {
                 &framework_parse,
             )
             .expect("published carrier artifact matches its registered language");
+            // Sealed-identity wire tokens attach ONCE at record build, so
+            // every serve reuses the stored styles Arc unchanged.
+            crate::parse::attach_style_block_tokens(&structure, &mut parse_snapshot.style_analyses);
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type =
                 imported_eval_source_type(&file_language, Some(framework_parse.as_ref()));

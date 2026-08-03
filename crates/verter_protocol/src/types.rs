@@ -1566,6 +1566,12 @@ pub struct FfiStyleMeta {
     pub is_module: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_name: Option<String>,
+    /// Opaque sealed block token binding this style analysis to its
+    /// structure block (same vocabulary as the ordered-structure block
+    /// tokens). Absent when the sealed identity could not be revalidated —
+    /// consumers treat absence as typed unavailable, never ordinal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_token: Option<String>,
     pub classes: Vec<String>,
     pub ids: Vec<String>,
     pub custom_properties: Vec<String>,

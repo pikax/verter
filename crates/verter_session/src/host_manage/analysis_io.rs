@@ -546,6 +546,7 @@ impl VerterHost {
                 // `hash_16` of the whole file — no re-hash here).
                 let anchor_revision =
                     crate::types::AnalysisSourceRevision::from_whole_hash(hd.parse.whole_hash);
+                let structure = hd.structure.clone();
                 drop(source_snap);
 
                 let mut script_analysis = if !scope.needs_script_analysis() {
@@ -563,12 +564,18 @@ impl VerterHost {
                     stored_script
                 };
                 let style_analyses = if !scope.needs_style_analysis() {
-                    Arc::new(crate::parse::build_style_analyses_for_artifact(
+                    let mut rebuilt = crate::parse::build_style_analyses_for_artifact(
                         framework_parse.as_deref(),
                         &source,
                         canonical,
                         &self.provenance,
-                    ))
+                    );
+                    // Rebuilt per serve (no shared Arc): attach the sealed
+                    // wire tokens against the record's own structure.
+                    if let Some(structure) = structure.as_ref() {
+                        crate::parse::attach_style_block_tokens(structure, &mut rebuilt);
+                    }
+                    Arc::new(rebuilt)
                 } else {
                     stored_styles
                 };
@@ -727,13 +734,20 @@ impl VerterHost {
                     store_published: false,
                     source_generation: Some(structure.envelope().source().generation().get()),
                 };
-                return Some(self.finalize_analysis_snapshot(
+                let mut snapshot = self.finalize_analysis_snapshot(
                     canonical.as_str(),
                     Self::build_snapshot_from_parse(parse),
                     self.template_analysis_required(),
                     Some(template_inputs),
                     analysis_started,
-                ));
+                );
+                // Overlay-served analysis binds tokens to the OVERLAY
+                // structure — the artifact its sealed refs were minted from.
+                // This snapshot is built per call, so mutating its own
+                // styles Arc never touches shared/stored state.
+                let overlay_styles: &mut Vec<_> = Arc::make_mut(&mut snapshot.styles);
+                crate::parse::attach_style_block_tokens(&structure, overlay_styles);
+                return Some(snapshot);
             }
             // Snapshot AND template inputs from the SAME overlay read:
             // the template derives from the overlay's own bytes, in
@@ -759,7 +773,9 @@ impl VerterHost {
             ));
         }
 
-        // Base path — no overlay coverage; existing flow.
+        // Base path — no overlay coverage; existing flow. Style block tokens
+        // were attached ONCE when the Source-stage record was built, so the
+        // served snapshot reuses the stored Arc unchanged.
         self.get_analysis_snapshot_internal(&canonical, analysis_started)
     }
 

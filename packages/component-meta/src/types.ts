@@ -454,6 +454,12 @@ export interface VueApiCallMeta {
 export interface StyleMeta {
   /** Preprocessor language (`"Css"`, `"Scss"`, `"Less"`, etc.). */
   lang: string;
+  /**
+   * Opaque sealed block token binding this style analysis to its ordered
+   * structure block. Absent means the sealed identity could not be
+   * revalidated — typed unavailable, never an ordinal fallback.
+   */
+  blockToken?: string;
   /** Whether the style block is scoped. */
   scoped: boolean;
   /** Whether this is a CSS module (`<style module>`). */

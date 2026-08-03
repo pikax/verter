@@ -56,10 +56,39 @@ pub enum SourceEncoding {
     Utf8,
 }
 
+/// Sealed artifact-bound block reference.
+///
+/// Fields are private by design: a ref is minted ONLY by its owning
+/// [`CarrierBlockInventory`] (see [`CarrierBlockInventory::block_ref`]), so a
+/// local block id can never be spliced onto a different artifact and a naked
+/// integer can never masquerade as block identity. Consumers associate data
+/// through full-identity equality (artifact identity + block id) and
+/// re-validate against a live inventory via [`ArtifactBlockRef::validate`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArtifactBlockRef {
-    pub artifact_identity: Arc<str>,
-    pub block: BlockId,
+    artifact_identity: Arc<str>,
+    block: BlockId,
+}
+
+impl ArtifactBlockRef {
+    /// Content-addressed identity of the artifact that minted this ref.
+    pub fn artifact_identity(&self) -> &Arc<str> {
+        &self.artifact_identity
+    }
+
+    /// Artifact-local block id. Span metadata for the owning artifact only —
+    /// never a cross-artifact join key on its own.
+    pub fn block_id(&self) -> BlockId {
+        self.block
+    }
+
+    /// True iff this ref was minted by an inventory with `owner`'s identity
+    /// AND still names a block present in `owner`. Fails closed on any
+    /// mismatch (stale artifact, foreign artifact, out-of-range block).
+    pub fn validate(&self, owner: &CarrierBlockInventory) -> bool {
+        (owner.blocks.len() > self.block.get() as usize)
+            && *self.artifact_identity == **owner.artifact_identity_token()
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockContentOriginFingerprint(pub [u8; 32]);
@@ -117,13 +146,27 @@ pub struct DecodedValueKey {
     pub recipe: EntityDecodeRecipe,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct CarrierBlockInventory {
     source_spaces: Arc<[SourceSpaceDescriptor]>,
     normalized_names: Arc<NormalizedNameTable>,
     blocks: Arc<[CarrierBlock]>,
     markup: Arc<MarkupSyntaxArena>,
+    /// Lazily computed content-addressed artifact identity (memo only —
+    /// derived entirely from the fields above, excluded from equality).
+    artifact_identity: std::sync::OnceLock<Arc<str>>,
 }
+
+impl PartialEq for CarrierBlockInventory {
+    fn eq(&self, other: &Self) -> bool {
+        self.source_spaces == other.source_spaces
+            && self.normalized_names == other.normalized_names
+            && self.blocks == other.blocks
+            && self.markup == other.markup
+    }
+}
+
+impl Eq for CarrierBlockInventory {}
 
 impl CarrierBlockInventory {
     pub fn new(
@@ -137,9 +180,78 @@ impl CarrierBlockInventory {
             normalized_names,
             blocks,
             markup,
+            artifact_identity: std::sync::OnceLock::new(),
         };
         inventory.validate()?;
         Ok(inventory)
+    }
+
+    /// Content-addressed identity of this inventory: a digest over every
+    /// source space's identity-bearing content facts plus the carrier
+    /// structure hash. Generation/incarnation facts are deliberately
+    /// EXCLUDED — the same bytes with the same block geometry yield the same
+    /// identity (path-independent), while any content or geometry change
+    /// yields a different one.
+    pub fn artifact_identity_token(&self) -> &Arc<str> {
+        self.artifact_identity.get_or_init(|| {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"verter.sealed-artifact-block-identity.v1\0");
+            out.extend_from_slice(&(self.source_spaces.len() as u32).to_le_bytes());
+            for space in self.source_spaces.iter() {
+                out.extend_from_slice(space.content_hash.as_bytes());
+                out.extend_from_slice(&space.byte_len.to_le_bytes());
+                out.push(match space.encoding {
+                    SourceEncoding::Utf8 => 1,
+                });
+                match &space.identity {
+                    SourceSpaceIdentity::RegisteredSnapshot { snapshot } => {
+                        out.push(1);
+                        // Language projection only — content-addressed, so
+                        // generation/incarnation/authority stay excluded.
+                        out.extend_from_slice(
+                            format!("{:?}", snapshot.resolved_file_language()).as_bytes(),
+                        );
+                        out.push(0);
+                    }
+                    SourceSpaceIdentity::DerivedTransformOutput {
+                        owner,
+                        origin_fingerprint,
+                        transform_chain_fingerprint,
+                        step_index,
+                    } => {
+                        out.push(2);
+                        out.extend_from_slice(owner.artifact_identity.as_bytes());
+                        out.push(0);
+                        out.extend_from_slice(&owner.block.get().to_le_bytes());
+                        out.extend_from_slice(&origin_fingerprint.0);
+                        out.extend_from_slice(&transform_chain_fingerprint.0);
+                        out.extend_from_slice(&step_index.to_le_bytes());
+                    }
+                }
+            }
+            out.extend_from_slice(
+                crate::parse_artifact::carrier_structure_hash::compute_carrier_structure_hash(self)
+                    .as_bytes(),
+            );
+            let digest = crate::registered_source_authority::sha256(&[&out]);
+            let mut token = String::with_capacity(64);
+            for byte in digest {
+                use std::fmt::Write;
+                let _ = write!(token, "{byte:02x}");
+            }
+            Arc::from(token)
+        })
+    }
+
+    /// The SOLE mint authority for sealed block refs: seals
+    /// `(artifact identity, block)` only when `block` names a block present
+    /// in this inventory.
+    pub fn block_ref(&self, block: BlockId) -> Option<ArtifactBlockRef> {
+        self.blocks.get(block.get() as usize)?;
+        Some(ArtifactBlockRef {
+            artifact_identity: Arc::clone(self.artifact_identity_token()),
+            block,
+        })
     }
     pub fn source_spaces(&self) -> &[SourceSpaceDescriptor] {
         &self.source_spaces

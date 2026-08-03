@@ -1145,7 +1145,8 @@ impl VerterHost {
                         existing.module_name.as_deref(),
                         content_offset,
                     );
-                    new_analysis.block_id = existing.block_id;
+                    new_analysis.block_ref = existing.block_ref.clone();
+                    new_analysis.block_token = existing.block_token.clone();
 
                     if let (Some(sm_json), Some(ref mut css)) =
                         (&ov.source_map, &mut new_analysis.css)

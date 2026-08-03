@@ -3724,6 +3724,62 @@ fn get_analysis_resolves_relative_import() {
     );
 }
 
+/// Served style analyses carry the sealed inventory-minted block ref AND the
+/// session-validated public block token — including the external-`src`
+/// deferred block (identity is structure work; content stays deferred).
+#[test]
+fn get_analysis_attaches_sealed_refs_and_validated_public_block_tokens() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/project/Tokens.vue",
+        "<style>.a {}</style>\n<style src=\"./ext.css\"></style>\n<style>.b {}</style>",
+    );
+
+    let analysis = host.get_analysis("/project/Tokens.vue").unwrap();
+    assert_eq!(analysis.styles.len(), 3);
+    let (structure, _) = host
+        .registered_file_structure_snapshot("/project/Tokens.vue")
+        .expect("registered structure");
+    let inventory = structure.inventory();
+
+    let mut seen_tokens = std::collections::HashSet::new();
+    for style in analysis.styles.iter() {
+        let block_ref = style
+            .block_ref
+            .as_ref()
+            .expect("every produced style analysis carries a sealed ref");
+        assert!(
+            block_ref.validate(inventory),
+            "the sealed ref validates against the live registered inventory"
+        );
+        let expected_token = structure
+            .public_block_token(&structure.block_ref(block_ref.block_id()).unwrap())
+            .expect("same artifact")
+            .as_str()
+            .to_owned();
+        assert_eq!(
+            style.block_token.as_deref(),
+            Some(expected_token.as_str()),
+            "the served token is the session public block token for the \
+             sealed ref's block"
+        );
+        assert!(
+            seen_tokens.insert(expected_token),
+            "tokens are distinct per block"
+        );
+    }
+    let deferred = analysis
+        .styles
+        .iter()
+        .find(|style| style.is_external_src_deferred())
+        .expect("external-src style stays a typed deferred analysis");
+    assert!(
+        deferred.block_ref.is_some() && deferred.block_token.is_some(),
+        "deferred content still carries full sealed identity"
+    );
+}
+
 /// @ai-generated - get_analysis resolves imports via alias map
 #[test]
 fn get_analysis_resolves_alias_import() {

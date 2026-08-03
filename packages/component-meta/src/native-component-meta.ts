@@ -469,6 +469,13 @@ export interface NativeStyleMeta {
   scoped: boolean;
   isModule: boolean;
   moduleName?: string;
+  /**
+   * Opaque sealed block token binding this style analysis to its ordered
+   * structure block (same vocabulary as the structure block tokens). Absent
+   * when the sealed identity could not be revalidated — treat absence as
+   * typed unavailable, never an ordinal fallback.
+   */
+  blockToken?: string;
   classes: string[];
   ids: string[];
   customProperties: string[];
@@ -891,6 +898,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       scoped: style.scoped,
       isModule: style.isModule,
       ...(style.moduleName !== undefined ? { moduleName: style.moduleName } : {}),
+      ...(style.blockToken !== undefined ? { blockToken: style.blockToken } : {}),
       classes: [...style.classes],
       ids: [...style.ids],
       customProperties: [...style.customProperties],

@@ -94,10 +94,19 @@ pub struct StyleBlockAnalysis {
     pub is_module: bool,
     pub module_name: Option<String>,
 
-    /// Artifact-local inventory block id. Consumers may associate this analysis
-    /// only through a sealed block reference carrying the same local id.
+    /// Sealed artifact-bound block identity, minted ONLY by the owning
+    /// `CarrierBlockInventory`. The SOLE Rust association key between this
+    /// analysis and a structure block: consumers full-identity-join
+    /// (artifact identity + block id) and fail closed on missing/mismatch.
+    #[serde(skip)]
+    pub block_ref: Option<verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef>,
+
+    /// Opaque public block token for wire consumers (playground/FFI),
+    /// attached at the host serve boundary only after the sealed ref
+    /// revalidates against the live registered structure. Absent means
+    /// "identity unavailable" — wire consumers fail closed, never ordinal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub block_id: Option<u32>,
+    pub block_token: Option<String>,
 
     /// Byte offset of the style block content start within the SFC source.
     /// Stored only for span remapping; it is not block identity.
@@ -682,7 +691,8 @@ pub fn build_scanned_style_analysis(
         scoped,
         is_module,
         module_name: module_name.map(|s| s.to_string()),
-        block_id: None,
+        block_ref: None,
+        block_token: None,
         content_offset,
         v_binds,
         special_pseudos,
@@ -710,7 +720,8 @@ pub fn build_external_src_deferred_style_analysis(
         scoped,
         is_module,
         module_name: module_name.map(|s| s.to_string()),
-        block_id: None,
+        block_ref: None,
+        block_token: None,
         content_offset,
         v_binds: Vec::new(),
         special_pseudos: Vec::new(),
@@ -740,7 +751,8 @@ pub fn build_preprocessor_style_analysis(
         scoped,
         is_module,
         module_name: module_name.map(|s| s.to_string()),
-        block_id: None,
+        block_ref: None,
+        block_token: None,
         content_offset,
         v_binds,
         special_pseudos,
