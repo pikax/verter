@@ -108,6 +108,7 @@ const count = ref(0)
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     );
 
     assert!(hover.is_some(), "Should get hover info for 'count' binding");
@@ -155,6 +156,7 @@ const msg = 'hello'
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     );
     assert!(
         hover.is_some(),
@@ -276,6 +278,7 @@ const msg = 'hello'
         &doc.line_index,
         None,
         None,
+        None,
     );
 
     assert!(def.is_some(), "Should find definition for 'msg'");
@@ -304,6 +307,7 @@ const msg = 'hello'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        None,
         None,
         None,
     );
@@ -359,6 +363,7 @@ const title = 'hello'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        None,
         None,
         None,
     );
@@ -433,6 +438,7 @@ console.log(count)
         analysis.as_ref(),
         &doc.line_index,
         true, // include declaration
+        None,
     );
 
     assert!(refs.is_some(), "Should find references for 'count'");
@@ -3530,6 +3536,7 @@ const count = 42
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     );
 
     // Verter-only hover should exist but NOT contain TSGO type info
@@ -3645,6 +3652,7 @@ const count = 42
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     );
 
     // Positive: verter hover exists and has content
@@ -5197,6 +5205,7 @@ fn integration_hover_on_slot_tag_name() {
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5234,6 +5243,7 @@ fn integration_hover_on_slot_name_attr_value() {
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5267,6 +5277,7 @@ fn integration_hover_on_default_slot_outlet() {
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5301,6 +5312,7 @@ import MyComp from './MyComp.vue'
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5339,6 +5351,7 @@ import MyComp from './MyComp.vue'
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5373,6 +5386,7 @@ import MyComp from './MyComp.vue'
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5459,6 +5473,7 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     )
     .map(|r| r.hover);
     assert!(
@@ -5932,6 +5947,7 @@ fn definition_retries_default_export_for_svelte_carrier() {
         &line_index,
         Some(&resolve_path),
         Some(&resolve_export_location),
+        None,
     );
 
     let result = result.expect("definition must resolve the .svelte default export via retry");

@@ -35,6 +35,7 @@ fn test_template_completions_include_bindings() {
     let source =
         "<template>\n  {{ | }}\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
     let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, false);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -68,7 +69,7 @@ fn test_template_completions_include_bindings() {
         None,
         None,
         false,
-        None,
+        Some(&structure),
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -204,6 +205,7 @@ fn test_style_returns_css_completions() {
 fn test_template_excludes_type_only_imports() {
     let source = "<template>\n  <div/>\n</template>\n\n<script setup>\nimport type { Props } from './types'\n</script>\n";
     let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, false);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -240,7 +242,7 @@ fn test_template_excludes_type_only_imports() {
         None,
         None,
         false,
-        None,
+        Some(&structure),
     );
     assert!(result.is_some());
     // Type-only imports should not appear in template completions
@@ -1331,6 +1333,7 @@ fn test_tag_name_includes_html_elements() {
     // Cursor after `<` — should include HTML element names
     let source = "<template>\n  <\n</template>\n<script setup>\n</script>";
     let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, false);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(vec![], vec![]);
@@ -1347,7 +1350,7 @@ fn test_tag_name_includes_html_elements() {
         None,
         None,
         false,
-        None,
+        Some(&structure),
     );
 
     assert!(result.is_some(), "should return completions for tag names");
@@ -1372,6 +1375,7 @@ fn test_tag_name_includes_components() {
     // Cursor after `<` — should include imported components
     let source = "<template>\n  <\n</template>\n<script setup>\nimport MyComp from './MyComp.vue'\n</script>";
     let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, false);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(
@@ -1407,7 +1411,7 @@ fn test_tag_name_includes_components() {
         None,
         None,
         false,
-        None,
+        Some(&structure),
     );
 
     assert!(result.is_some(), "should return completions for tag names");
@@ -1660,6 +1664,7 @@ fn workspace_auto_import_kind_is_class_in_tag_position_but_module_in_expression_
 fn test_tag_name_includes_vue_builtins() {
     let source = "<template>\n  <\n</template>\n<script setup>\n</script>";
     let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, false);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(vec![], vec![]);
@@ -1676,7 +1681,7 @@ fn test_tag_name_includes_vue_builtins() {
         None,
         None,
         false,
-        None,
+        Some(&structure),
     );
 
     assert!(result.is_some());
@@ -1761,6 +1766,7 @@ fn test_attr_name_includes_directives() {
     // Cursor in attribute position `<div |>` — should include Vue directives
     let source = "<template>\n  <div >\n</template>\n<script setup>\n</script>";
     let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, false);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(vec![], vec![]);
@@ -1777,7 +1783,7 @@ fn test_attr_name_includes_directives() {
         None,
         None,
         false,
-        None,
+        Some(&structure),
     );
 
     assert!(
@@ -1863,6 +1869,7 @@ fn test_mustache_shows_bindings() {
     let source =
         "<template>\n  {{ }}\n</template>\n<script setup>\nconst count = ref(0)\n</script>";
     let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, false);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis_with_template(
@@ -1892,7 +1899,7 @@ fn test_mustache_shows_bindings() {
         None,
         None,
         false,
-        None,
+        Some(&structure),
     );
 
     assert!(result.is_some(), "should return completions in mustache");
@@ -2611,6 +2618,7 @@ fn test_component_prop_completions_from_macros() {
     // The cursor `|` is after `<MyChild ` in attribute position
     let source = "<template>\n  <MyChild >\n</template>\n<script setup>\nimport MyChild from './MyChild.vue'\n</script>";
     let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, false);
     let line_index = LineIndex::new_utf16(source);
 
     // Parent analysis: has a component usage for MyChild
@@ -2760,7 +2768,7 @@ fn test_component_prop_completions_from_macros() {
         None,
         None,
         false,
-        None,
+        Some(&structure),
     );
 
     assert!(result.is_some(), "should return component prop completions");
@@ -2809,6 +2817,7 @@ fn test_component_prop_completions_from_macros() {
 fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
     let source = "<Child ></Child>";
     let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, true);
     let line_index = LineIndex::new_utf16(source);
     let parent_analysis = FileAnalysisSnapshot {
         template: Some(
@@ -2873,7 +2882,7 @@ fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
         None,
         Some("file:///workspace/App.svelte"),
         false,
-        None,
+        Some(&structure),
     )
     .expect("resolved child props")
     .items;

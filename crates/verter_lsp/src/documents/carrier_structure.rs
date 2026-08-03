@@ -5,7 +5,7 @@
 
 use verter_language::parse_artifact::carrier_inventory::{
     AttributeValue, CarrierAttribute, CarrierBlock, MarkupElementSyntax, MarkupNodeKind,
-    TaggedSyntax,
+    SectionRole, TaggedSyntax,
 };
 use verter_session::carrier_publication_store::{
     ArtifactAttributeRef, FrameworkBlockRef, RegisteredFileStructure,
@@ -199,6 +199,233 @@ pub fn markup_element_at(facts: &[MarkupOpenTagFact], offset: u32) -> Option<usi
         .filter(|(_, fact)| offset >= fact.full_start && offset < fact.full_end)
         .min_by_key(|(_, fact)| fact.full_end - fact.full_start)
         .map(|(index, _)| index)
+}
+
+/// One parser-identified markup comment interior from the registered arena.
+/// `interior_start` is the end of the `<!--` opener; `end` is the parser-owned
+/// node end. An `open_ended` comment (no closer retained) extends through the
+/// parser-decided recovery end. Geometry is copied from the arena; no
+/// delimiter is searched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkupCommentFact {
+    pub interior_start: u32,
+    pub end: u32,
+    pub open_ended: bool,
+}
+
+/// Project every markup comment node into [`MarkupCommentFact`]s.
+pub fn project_markup_comment_facts(structure: &RegisteredFileStructure) -> Vec<MarkupCommentFact> {
+    structure
+        .inventory()
+        .markup()
+        .nodes()
+        .iter()
+        .filter_map(|node| match node.kind() {
+            MarkupNodeKind::Comment {
+                opening_span,
+                closing_span,
+                full_span,
+                ..
+            } => Some(MarkupCommentFact {
+                interior_start: opening_span.end,
+                end: full_span.end,
+                open_ended: closing_span.is_none(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `offset` sits inside a parser-identified comment INTERIOR — past
+/// the opener and before the node end (an open-ended comment claims its end
+/// position too, so typing at EOF inside `<!-- …` stays suppressed).
+pub fn offset_in_markup_comment(facts: &[MarkupCommentFact], offset: u32) -> bool {
+    facts.iter().any(|fact| {
+        offset >= fact.interior_start
+            && (offset < fact.end || (fact.open_ended && offset == fact.end))
+    })
+}
+
+/// Cursor-region classification over the registered markup arena, for
+/// analysis-absent fallback classification. Every region is a parser fact;
+/// `None` means no arena node owns the offset (a parser-unowned gap).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkupCursorRegion {
+    /// Inside an element-like node's parser-identified opening span.
+    OpeningTag {
+        name: Option<String>,
+        name_start: u32,
+        name_end: u32,
+    },
+    /// Inside an interpolation node, past the opening delimiter.
+    InterpolationExpression,
+    /// Inside a comment interior.
+    CommentInterior,
+    /// Any other parser-owned position (text, closers, delimiters).
+    Neutral,
+}
+
+/// Innermost arena node owning `offset`, mapped to a [`MarkupCursorRegion`].
+///
+/// Containment is end-exclusive except at the very end of the source, where an
+/// UNTERMINATED span (one whose final byte is not `>`) still owns the typing
+/// position — the live-edit case of an opening tag or comment growing at EOF.
+pub fn markup_cursor_region(
+    structure: &RegisteredFileStructure,
+    offset: u32,
+) -> Option<MarkupCursorRegion> {
+    let inventory = structure.inventory();
+    let source = inventory.source_spaces().first()?.bytes();
+    let source_len = source.len() as u32;
+    let contains = |start: u32, end: u32| {
+        offset >= start
+            && (offset < end
+                || (offset == end
+                    && end == source_len
+                    && start < end
+                    && source.as_bytes().get(end as usize - 1) != Some(&b'>')))
+    };
+
+    let mut best: Option<(u32, MarkupCursorRegion)> = None;
+    let mut consider = |start: u32, end: u32, region: MarkupCursorRegion| {
+        if contains(start, end) {
+            let size = end - start;
+            if best.as_ref().is_none_or(|(best_size, _)| size < *best_size) {
+                best = Some((size, region));
+            }
+        }
+    };
+
+    for node in inventory.markup().nodes() {
+        match node.kind() {
+            MarkupNodeKind::Element(element) => {
+                let full = element.full_span;
+                let region = if contains(element.opening_span.start, element.opening_span.end) {
+                    MarkupCursorRegion::OpeningTag {
+                        name: inventory
+                            .slice(element.authored_name)
+                            .ok()
+                            .map(str::to_string),
+                        name_start: element.opening_name_span.start,
+                        name_end: element.opening_name_span.end,
+                    }
+                } else {
+                    MarkupCursorRegion::Neutral
+                };
+                consider(full.start, full.end, region);
+            }
+            MarkupNodeKind::Recovered {
+                opening_span,
+                opening_name_span,
+                full_span,
+                ..
+            }
+            | MarkupNodeKind::Unknown {
+                opening_span,
+                opening_name_span,
+                full_span,
+                ..
+            } => {
+                let in_opening =
+                    opening_span.is_some_and(|opening| contains(opening.start, opening.end));
+                let region = match (in_opening, opening_span, opening_name_span) {
+                    (true, Some(opening), name_span) => MarkupCursorRegion::OpeningTag {
+                        name: name_span.and_then(|span| {
+                            source
+                                .get(span.start as usize..span.end as usize)
+                                .map(str::to_string)
+                        }),
+                        name_start: name_span.map_or(opening.start + 1, |span| span.start),
+                        name_end: name_span.map_or(opening.start + 1, |span| span.end),
+                    },
+                    _ => MarkupCursorRegion::Neutral,
+                };
+                consider(full_span.start, full_span.end, region);
+            }
+            MarkupNodeKind::Comment {
+                opening_span,
+                full_span,
+                ..
+            } => {
+                let region = if offset >= opening_span.end {
+                    MarkupCursorRegion::CommentInterior
+                } else {
+                    MarkupCursorRegion::Neutral
+                };
+                consider(full_span.start, full_span.end, region);
+            }
+            MarkupNodeKind::Interpolation {
+                opening_span,
+                full_span,
+                ..
+            } => {
+                let region = if offset >= opening_span.end {
+                    MarkupCursorRegion::InterpolationExpression
+                } else {
+                    MarkupCursorRegion::Neutral
+                };
+                consider(full_span.start, full_span.end, region);
+            }
+            MarkupNodeKind::Text { content_span } => {
+                consider(
+                    content_span.start,
+                    content_span.end,
+                    MarkupCursorRegion::Neutral,
+                );
+            }
+            MarkupNodeKind::SvelteControlBlock(block) => {
+                consider(
+                    block.full_span.start,
+                    block.full_span.end,
+                    MarkupCursorRegion::Neutral,
+                );
+            }
+            MarkupNodeKind::SvelteClause(clause) => {
+                consider(
+                    clause.full_span.start,
+                    clause.full_span.end,
+                    MarkupCursorRegion::Neutral,
+                );
+            }
+            MarkupNodeKind::SvelteStandaloneTag(tag) => {
+                consider(
+                    tag.full_span.start,
+                    tag.full_span.end,
+                    MarkupCursorRegion::Neutral,
+                );
+            }
+        }
+    }
+    best.map(|(_, region)| region)
+}
+
+/// Parser-supplied lower bound for lexing a parser-UNOWNED trailing gap: the
+/// closest parsed boundary at or before `offset` — arena node ends, section
+/// opening/closing ends. A cursor inside a raw-text (script/style) section is
+/// never a markup gap: the bound collapses to `offset` (empty window).
+pub fn markup_gap_window_start(structure: &RegisteredFileStructure, offset: u32) -> u32 {
+    let inventory = structure.inventory();
+    let mut floor = 0u32;
+    let mut raise = |end: u32| {
+        if end <= offset && end > floor {
+            floor = end;
+        }
+    };
+    for node in inventory.markup().nodes() {
+        let span = node.kind().full_span();
+        raise(span.end);
+    }
+    for block in inventory.blocks() {
+        if let CarrierBlock::Section { role, syntax, .. } = block {
+            let raw_text = matches!(role, SectionRole::Script { .. } | SectionRole::Style { .. });
+            if raw_text && offset >= syntax.full_span.start && offset < syntax.full_span.end {
+                return offset;
+            }
+            raise(syntax.opening_span.end);
+            raise(syntax.full_span.end);
+        }
+    }
+    floor
 }
 
 #[derive(Debug, Clone)]

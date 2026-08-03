@@ -198,7 +198,8 @@ fn script_only_vue_does_not_enable_svelte_root_markup() {
 #[test]
 fn svelte_template_element_does_not_disable_root_markup() {
     let source = "<template><span>fragment</span></template>\n<DraftCard ";
-    let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
     let cursor = source.len() as u32;
 
     let ctx = classify_cursor_context_for_language(
@@ -207,7 +208,7 @@ fn svelte_template_element_does_not_disable_root_markup() {
         &blocks,
         None,
         Some(CarrierTemplateLanguage::Svelte),
-        None,
+        Some(&structure),
     );
     assert!(
         matches!(
@@ -1126,6 +1127,7 @@ fn test_directive_argument() {
 fn test_slot_name_hash_shorthand_empty() {
     // `<template #|` — the incomplete shorthand is not yet a parsed directive.
     let source = "<template><template #></template></template>";
+    let structure = test_structure(source, false);
     let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
@@ -1135,7 +1137,14 @@ fn test_slot_name_hash_shorthand_empty() {
     let analysis = analysis_with_template(template);
 
     // Cursor right after `#` (offset 21).
-    let ctx = classify_cursor_context(21, source, &blocks, Some(&analysis));
+    let ctx = classify_cursor_context_for_language(
+        21,
+        source,
+        &blocks,
+        Some(&analysis),
+        None,
+        Some(&structure),
+    );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SlotName {
             tag_name,
@@ -1152,6 +1161,7 @@ fn test_slot_name_hash_shorthand_empty() {
 fn test_slot_name_hash_shorthand_partial_on_component() {
     // `<MyComp #he|` — partial slot name on a component element.
     let source = "<template><MyComp #he></MyComp></template>";
+    let structure = test_structure(source, false);
     let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
@@ -1161,7 +1171,14 @@ fn test_slot_name_hash_shorthand_partial_on_component() {
     let analysis = analysis_with_template(template);
 
     // Cursor after `#he` (offset 21).
-    let ctx = classify_cursor_context(21, source, &blocks, Some(&analysis));
+    let ctx = classify_cursor_context_for_language(
+        21,
+        source,
+        &blocks,
+        Some(&analysis),
+        None,
+        Some(&structure),
+    );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SlotName {
             tag_name,
@@ -1178,6 +1195,7 @@ fn test_slot_name_hash_shorthand_partial_on_component() {
 fn test_slot_name_longhand_empty_arg() {
     // `<template v-slot:|` — empty longhand argument.
     let source = "<template><template v-slot:></template></template>";
+    let structure = test_structure(source, false);
     let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
@@ -1187,7 +1205,14 @@ fn test_slot_name_longhand_empty_arg() {
     let analysis = analysis_with_template(template);
 
     // Cursor right after `v-slot:` (offset 27).
-    let ctx = classify_cursor_context(27, source, &blocks, Some(&analysis));
+    let ctx = classify_cursor_context_for_language(
+        27,
+        source,
+        &blocks,
+        Some(&analysis),
+        None,
+        Some(&structure),
+    );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SlotName { tag_name, .. }) => {
             assert_eq!(tag_name, "template");
@@ -1558,6 +1583,246 @@ fn svelte_braced_attribute_requires_parser_facts_not_a_source_scan() {
         ),
         "no parser facts must mean no raw-scan geometry recovery: {ctx:?}"
     );
+}
+
+#[test]
+fn slot_name_recovery_ignores_decoy_component_tag_inside_html_comment() {
+    // `<!-- <Comp #de -->` — the slot token lives inside COMMENT content. A raw
+    // backward `<` scan finds the decoy `<Comp` and fabricates a slot-name
+    // context; the registered arena owns the position as a comment.
+    let source = "<template><div><!-- <Comp #de --> x</div></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = (source.find("#de").expect("slot token") + "#de".len()) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        !matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::SlotName { .. })
+        ),
+        "a comment-interior decoy must never classify as SlotName: {ctx:?}"
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::TextContent)
+        ),
+        "comment interiors are inert text for the classifier: {ctx:?}"
+    );
+}
+
+#[test]
+fn analysis_absent_fallback_ignores_interpolation_decoy_inside_attribute_value() {
+    // `{{decoy` inside a STATIC attribute value. The raw `rfind("{{")` mustache
+    // scan classifies later text content as Interpolation; the arena records no
+    // interpolation node for the quoted value.
+    let source = "<template><div title=\"{{decoy\"> text </div></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = (source.find(" text ").expect("text content") + 3) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::TextContent)
+        ),
+        "an attribute-value {{{{ decoy must not classify text as Interpolation: {ctx:?}"
+    );
+}
+
+#[test]
+fn analysis_absent_fallback_keeps_angle_decoy_in_text_as_text() {
+    // `1 <2` in text content. The raw backward `<` scan fabricates a `<2` tag
+    // and classifies the following text as an attribute-name position; the
+    // arena records the whole run as text.
+    let source = "<template><div> 1 <2 text</div></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = (source.find("text").expect("text content") + 2) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::TextContent)
+        ),
+        "a `<` comparison decoy in text must not fabricate tag geometry: {ctx:?}"
+    );
+}
+
+#[test]
+fn analysis_absent_fallback_treats_comment_interior_as_text() {
+    // `<span` INSIDE a comment. The raw backward scan classifies positions
+    // after it as attribute-name positions on a fabricated `<span` tag.
+    let source = "<template><div><!-- <span --> x</div></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = (source.find("<span").expect("decoy") + "<span ".len()) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::TextContent)
+        ),
+        "comment interiors must classify as text, not fabricated tag markup: {ctx:?}"
+    );
+}
+
+#[test]
+fn analysis_absent_fallback_requires_parser_facts_not_a_source_scan() {
+    // Without registered parser facts the analysis-absent classification must
+    // fail closed: no raw-source tag-geometry rediscovery.
+    let source = "<template><Dra";
+    let blocks = test_carrier_blocks(source);
+    let cursor = source.len() as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        None,
+    );
+    assert!(
+        !matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::TagName { .. })
+        ),
+        "no parser facts must mean no raw-scan tag recovery: {ctx:?}"
+    );
+}
+
+#[test]
+fn analysis_absent_fallback_classifies_tag_name_from_facts() {
+    // Mid-typed `<Dra` at EOF: the still-typed opening tag classifies as a
+    // TagName position with the typed partial, from parser-bounded geometry.
+    let source = "<template><Dra";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let ctx = classify_cursor_context_for_language(
+        source.len() as u32,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::TagName { partial }) => {
+            assert_eq!(partial, "Dra");
+        }
+        other => panic!("expected TagName for mid-typed `<Dra|`, got: {other:?}"),
+    }
+}
+
+#[test]
+fn analysis_absent_fallback_classifies_attribute_position_from_facts() {
+    // `<DraftCard |` at EOF: the parser retains the unterminated opening span;
+    // the cursor past the name classifies as an attribute-name position.
+    let source = "<template><DraftCard ";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let ctx = classify_cursor_context_for_language(
+        source.len() as u32,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::AttributeName {
+            tag_name,
+            is_component,
+            ..
+        }) => {
+            assert_eq!(tag_name, "DraftCard");
+            assert!(is_component);
+        }
+        other => panic!("expected AttributeName for `<DraftCard |`, got: {other:?}"),
+    }
+}
+
+#[test]
+fn analysis_absent_fallback_classifies_unterminated_interpolation() {
+    // `{{ ms` mid-content: the parser drops the unterminated interpolation,
+    // leaving a parser-bounded unowned gap; the bounded gap lex still
+    // classifies the in-progress expression.
+    let source = "<template><div>{{ ms</div></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let ctx = classify_cursor_context_for_language(
+        (source.find("ms").expect("expression") + 2) as u32,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::Interpolation)
+        ),
+        "an in-progress interpolation must classify as Interpolation: {ctx:?}"
+    );
+}
+
+#[test]
+fn svelte_root_midtyped_tag_recovers_within_parser_bounded_gap() {
+    // A mid-typed Svelte ROOT component tag at EOF is dropped by the parser;
+    // the recovery lexes only the parser-bounded unowned trailing gap — the
+    // script block's `1 < 2` decoy sits inside a parsed block and can never
+    // enter the window.
+    let source = "<script>let a = 1 < 2</script>\n<DraftCard ";
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
+    let ctx = classify_cursor_context_for_language(
+        source.len() as u32,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
+    );
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::AttributeName {
+            tag_name,
+            is_component,
+            ..
+        }) => {
+            assert_eq!(tag_name, "DraftCard");
+            assert!(is_component);
+        }
+        other => panic!("expected AttributeName for `<DraftCard |`, got: {other:?}"),
+    }
 }
 
 #[test]

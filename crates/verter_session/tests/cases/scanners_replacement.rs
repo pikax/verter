@@ -889,12 +889,25 @@ fn scanners_replacement_capability_ledger_is_total() {
             .is_some_and(|text| text.contains("RETRACTED")),
         "the retraction of the prior self-attested closure must stay recorded"
     );
-    assert!(
-        ledger["set_equality"]["b52_b91_status"]
-            .as_str()
-            .is_some_and(|status| status.contains("REOPENED")),
-        "B-52/B-91 must remain explicitly reopened while any named residual is open"
-    );
+    let open_residuals = ledger["set_equality"]["open_residual_migrate_rows"]
+        .as_u64()
+        .expect("open_residual_migrate_rows must be a recorded count");
+    let b52_status = ledger["set_equality"]["b52_b91_status"]
+        .as_str()
+        .expect("b52_b91_status must be recorded");
+    if open_residuals == 0 {
+        assert!(
+            b52_status.contains("CLOSED")
+                && !b52_status.contains("REOPENED")
+                && b52_status.contains("DISCOVERY-RECEIPT.md"),
+            "an empty residual set closes B-52/B-91 citing the input-bound receipt"
+        );
+    } else {
+        assert!(
+            b52_status.contains("REOPENED"),
+            "B-52/B-91 must remain explicitly reopened while any named residual is open"
+        );
+    }
     assert_eq!(
         ledger["consumer_matrix"].as_array().map(Vec::len),
         Some(

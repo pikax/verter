@@ -73,9 +73,9 @@
         "explicitly_allowed_references": 0,
         "unclassified_runtime_rows": 0,
         "deferred_runtime_rows": 0,
-        "open_residual_migrate_rows": 2,
-        "b52_b91_status": "REOPENED — 2 named open residual Class-A capabilities remain (cursor_context analysis-absent text-fallback family; definition.rs html-comment scan). Re-closure requires migrating the named residual set and a fresh receipt. No self-attesting count equality is asserted: the discovered-candidate total is the RECEIPT's number (live open residual capabilities at the fixed tip), the row total is the cumulative capability record (migrated + deleted + allowed + open), and they are intentionally different quantities.",
-        "proof": "Evidence lives in the FL2-B DISCOVERY-RECEIPT.md input-bound receipt (fixed tip, input hashes/counts, per-hit dispositions, ledger diff); ledger-internal statistics above are freshness checks of this document only, never discovery proof."
+        "open_residual_migrate_rows": 0,
+        "b52_b91_status": "CLOSED — the FL2-B receipt's 2-capability residual set is EMPTY as of FL2-B2: the cursor_context.rs analysis-absent text-fallback family (slot_name_context_from_source, classify_template_text_fallback) and definition.rs::is_inside_html_comment are migrated to registered-inventory facts (markup cursor regions, comment-region facts, the ruled legal bounded in-gap/current-token lexes). Evidence: the FL2-B input-bound DISCOVERY-RECEIPT.md (fixed tip 49eb6e0707 — its universe stands; FL2-B2 added no new capability) plus the FL2-B2 decoy discriminators recorded on the two rows. No self-attesting count equality is asserted: the discovered-candidate total remains the RECEIPT's number, the row total is the cumulative capability record, and they stay intentionally different quantities.",
+        "proof": "Evidence lives in the FL2-B DISCOVERY-RECEIPT.md input-bound receipt (fixed tip, input hashes/counts, per-hit dispositions, ledger diff) plus the FL2-B2 unit's RED-first decoy tests named on the residual rows; ledger-internal statistics above are freshness checks of this document only, never discovery proof."
     },
     "statistics": {
         "rows_total": 47,
@@ -251,13 +251,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "fl2b_discovery@49eb6e0707:L630,L1096 (residual); migrated braced-attr scans absent",
+            "candidate_evidence": "fl2b_discovery@49eb6e0707:L630,L1096 — MIGRATED (FL2-B: braced-attr scans; FL2-B2: analysis-absent fallback classification + slot-name recovery now registered-arena regions/facts with the ruled legal bounded in-gap and current-token lexes)",
             "processor_authority": null,
             "capability_class": "manual_geometry",
             "disposition": "migrate",
             "acceptance_id": "B-19",
-            "test": "svelte_braced_attribute_survives_decoy_close_tag_literal_in_value",
-            "architecture_guard": "svelte_braced_attribute_requires_parser_facts_not_a_source_scan"
+            "test": "analysis_absent_fallback_ignores_interpolation_decoy_inside_attribute_value; analysis_absent_fallback_keeps_angle_decoy_in_text_as_text; analysis_absent_fallback_treats_comment_interior_as_text; slot_name_recovery_ignores_decoy_component_tag_inside_html_comment; svelte_braced_attribute_survives_decoy_close_tag_literal_in_value",
+            "architecture_guard": "analysis_absent_fallback_requires_parser_facts_not_a_source_scan; svelte_braced_attribute_requires_parser_facts_not_a_source_scan"
         },
         {
             "path": "crates/verter_lsp/src/features/definition.rs",
@@ -267,13 +267,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "fl2b_discovery@49eb6e0707:L911 (NEW find; OPEN residual — named follow-up sub-unit)",
+            "candidate_evidence": "fl2b_discovery@49eb6e0707:L911 — MIGRATED (FL2-B2: is_inside_html_comment deleted; parser comment-region facts (project_markup_comment_facts) plumbed through definition/hover/references)",
             "processor_authority": null,
             "capability_class": "manual_geometry",
             "disposition": "migrate",
             "acceptance_id": "B-52",
-            "test": "PLANNED (follow-up sub-unit): arena comment-span discriminator; see FL2-B DISCOVERY-RECEIPT.md residual set",
-            "architecture_guard": "PLANNED (follow-up sub-unit): structure-plumbed comment facts across definition/hover/references"
+            "test": "navigation_survives_decoy_comment_open_inside_attribute_string; hover_survives_decoy_comment_open_inside_attribute_string; css_references_survive_decoy_comment_open_inside_attribute_string; css_references_suppressed_inside_comment_interior_via_facts; markup_comment_facts_track_parser_comment_spans",
+            "architecture_guard": "comment_suppression_reads_registered_facts_not_raw_source"
         },
         {
             "path": "crates/verter_mcp/src/scanner.rs",

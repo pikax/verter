@@ -170,6 +170,10 @@ pub(super) async fn handle_hover(
             let doc = server.documents.get(uri)?;
             let analysis = server.documents.get_analysis(uri);
             let blocks = project_carrier_blocks_for_document(&doc);
+            let structure = doc
+                .feature_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.structure().clone());
             let native = hover_at_position(
                 position,
                 &doc.source,
@@ -177,6 +181,7 @@ pub(super) async fn handle_hover(
                 analysis.as_ref(),
                 &doc.line_index,
                 ssr_context,
+                structure.as_ref(),
             );
             // D6 Svelte: directive-KEYWORD doc hovers are verter-owned — the
             // provider can never describe the `use:`/`transition:` keyword through

@@ -201,11 +201,26 @@ export function verifyLedger(root = DEFAULT_ROOT) {
       ledger.discovery.retraction.includes("RETRACTED"),
     "the retraction of the prior self-attested closure must stay recorded",
   );
+  const openResiduals = ledger.set_equality.open_residual_migrate_rows;
   invariant(
-    typeof ledger.set_equality.b52_b91_status === "string" &&
-      ledger.set_equality.b52_b91_status.includes("REOPENED"),
-    "B-52/B-91 must remain explicitly reopened while any named residual is open",
+    Number.isInteger(openResiduals) && openResiduals >= 0,
+    "open_residual_migrate_rows must be a recorded count",
   );
+  const b52Status = ledger.set_equality.b52_b91_status;
+  invariant(typeof b52Status === "string", "b52_b91_status must be recorded");
+  if (openResiduals === 0) {
+    invariant(
+      b52Status.includes("CLOSED") &&
+        !b52Status.includes("REOPENED") &&
+        b52Status.includes("DISCOVERY-RECEIPT.md"),
+      "an empty residual set closes B-52/B-91 citing the input-bound receipt",
+    );
+  } else {
+    invariant(
+      b52Status.includes("REOPENED"),
+      "B-52/B-91 must remain explicitly reopened while any named residual is open",
+    );
+  }
   invariant(ledger.set_equality.unclassified_runtime_rows === 0, "unclassified runtime row");
   invariant(ledger.set_equality.deferred_runtime_rows === 0, "deferred runtime row");
   invariant(ledger.consumer_matrix.length === productionRows, "consumer matrix is not total");

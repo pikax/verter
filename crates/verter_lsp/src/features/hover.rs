@@ -2,6 +2,7 @@
 // Enhanced with full resolved type signature, JSDoc from TypeProvider.
 
 use tower_lsp_server::ls_types::*;
+use verter_session::carrier_publication_store::RegisteredFileStructure;
 use verter_session::framework::{
     ComponentContractAvailability, ComponentContractUnsupported, PublicParameter, PublicSlot,
     PublicTypeReference,
@@ -10,7 +11,8 @@ use verter_session::FileAnalysisSnapshot;
 use verter_type_expr::{render_type_expr_display, PublicationResult, TypeExpr};
 
 use crate::documents::carrier_structure::{
-    classify_cursor, parse_opening_tag, CarrierBlockView, CarrierCursorContext,
+    classify_cursor, offset_in_markup_comment, parse_opening_tag, project_markup_comment_facts,
+    CarrierBlockView, CarrierCursorContext,
 };
 use crate::documents::line_index::LineIndex;
 use crate::features::hover_event_tokens::{
@@ -121,6 +123,7 @@ pub fn hover_at_position(
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
     ssr_context: bool,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<VerterHoverResult> {
     let offset = line_index.position_to_offset(position)?;
 
@@ -147,6 +150,7 @@ pub fn hover_at_position(
                         source,
                         analysis.unwrap(),
                         line_index,
+                        structure,
                     );
                 }
             }
@@ -183,6 +187,7 @@ pub fn hover_at_position(
                         source,
                         analysis.unwrap(),
                         line_index,
+                        structure,
                     );
                 }
             }
@@ -213,7 +218,7 @@ pub fn hover_at_position(
     match block {
         Some(b) => match b.tag_name.as_str() {
             "script" => hover_in_script(offset, source, analysis, ssr_context),
-            "template" => hover_in_template(offset, source, analysis, line_index),
+            "template" => hover_in_template(offset, source, analysis, line_index, structure),
             "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index)
                 .map(|h| h.into()),
             _ => {
@@ -227,7 +232,7 @@ pub fn hover_at_position(
                     .iter()
                     .any(|el| offset >= el.span.start as usize && offset < el.span.end as usize)
                 {
-                    hover_in_template(offset, source, analysis, line_index)
+                    hover_in_template(offset, source, analysis, line_index, structure)
                 } else {
                     None
                 }
@@ -241,7 +246,7 @@ pub fn hover_at_position(
                 .iter()
                 .any(|el| offset >= el.span.start as usize && offset < el.span.end as usize)
             {
-                hover_in_template(offset, source, analysis, line_index)
+                hover_in_template(offset, source, analysis, line_index, structure)
             } else {
                 None
             }
@@ -656,9 +661,12 @@ fn hover_in_template(
     source: &str,
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<VerterHoverResult> {
-    // Don't provide hover inside HTML comments
-    if crate::features::definition::is_inside_html_comment(source, offset) {
+    // Don't provide hover inside HTML comments (parser comment-region facts)
+    if structure.is_some_and(|structure| {
+        offset_in_markup_comment(&project_markup_comment_facts(structure), offset as u32)
+    }) {
         return None;
     }
 

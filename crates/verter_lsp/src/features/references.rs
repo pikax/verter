@@ -2,9 +2,12 @@
 // Enhanced with cross-file references from TypeProvider.
 
 use tower_lsp_server::ls_types::*;
+use verter_session::carrier_publication_store::RegisteredFileStructure;
 use verter_session::FileAnalysisSnapshot;
 
-use crate::documents::carrier_structure::CarrierBlockView;
+use crate::documents::carrier_structure::{
+    offset_in_markup_comment, project_markup_comment_facts, CarrierBlockView,
+};
 use crate::documents::line_index::LineIndex;
 // The positional instance-member rule is DEFINED once, next to the rename
 // classifier that owns rename semantics (`features::rename`). References
@@ -36,13 +39,14 @@ pub fn references_at_position(
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
     include_declaration: bool,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<Vec<Location>> {
     let analysis = analysis?;
     let offset = line_index.position_to_offset(position)? as usize;
     let Some(word) = word_at_offset(source, offset) else {
         // No identifier word (e.g. the hyphen of a kebab class token) — the
         // positional CSS path still owns the position.
-        return css_references_at_position(offset, source, blocks, analysis, line_index);
+        return css_references_at_position(offset, source, blocks, analysis, line_index, structure);
     };
 
     // The cursor sits on an instance-member access: a same-named script
@@ -50,7 +54,7 @@ pub fn references_at_position(
     // through to the positional CSS owner (which answers `None` here), never to
     // the name-based branch below.
     if offset_is_instance_member_access(offset as u32, analysis) {
-        return css_references_at_position(offset, source, blocks, analysis, line_index);
+        return css_references_at_position(offset, source, blocks, analysis, line_index, structure);
     }
 
     // Check if this word is a known binding, import, or macro
@@ -66,7 +70,7 @@ pub fn references_at_position(
 
     if !is_binding && !is_import && !is_macro {
         // Try CSS class/id references before returning None
-        return css_references_at_position(offset, source, blocks, analysis, line_index);
+        return css_references_at_position(offset, source, blocks, analysis, line_index, structure);
     }
 
     let mut locations = Vec::new();
@@ -192,9 +196,8 @@ fn css_references_at_position(
     blocks: &[CarrierBlockView],
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<Vec<Location>> {
-    use crate::features::definition::is_inside_html_comment;
-
     // Determine if we're in template or style
     let in_template = blocks.iter().any(|b| {
         b.tag_name == "template" && {
@@ -213,7 +216,9 @@ fn css_references_at_position(
     let target = if in_style {
         find_css_target_in_style_refs(offset, source, analysis)?
     } else if in_template {
-        if is_inside_html_comment(source, offset) {
+        if structure.is_some_and(|structure| {
+            offset_in_markup_comment(&project_markup_comment_facts(structure), offset as u32)
+        }) {
             return None;
         }
         let template = analysis.template.as_deref()?;
@@ -664,6 +669,7 @@ mod tests {
             Some(&analysis),
             &line_index,
             true,
+            None,
         );
         assert!(refs.is_some());
         let refs = refs.unwrap();
@@ -706,6 +712,7 @@ mod tests {
             Some(&analysis),
             &line_index,
             true,
+            None,
         );
         let refs_without_decl = references_at_position(
             &position,
@@ -714,12 +721,95 @@ mod tests {
             Some(&analysis),
             &line_index,
             false,
+            None,
         );
 
         assert!(refs_with_decl.is_some());
         assert!(refs_without_decl.is_some());
         // With declaration should have more entries
         assert!(refs_with_decl.unwrap().len() >= refs_without_decl.unwrap().len());
+    }
+
+    #[test]
+    fn css_references_survive_decoy_comment_open_inside_attribute_string() {
+        // A `'<!--'` STRING LITERAL in a dynamic attribute value. A raw
+        // `rfind("<!--")` scan suppresses every later template CSS reference;
+        // the registered arena records no comment node.
+        let source = "<template>\n  <div :title=\"'<!--'\" class=\"btn\">x</div>\n</template>\n<style>.btn { color: red }</style>\n";
+        let structure = crate::documents::carrier_structure::test_structure(source, false);
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let class_attr_start = source.find("class=\"btn\"").unwrap() as u32;
+        let mut template = verter_semantic::analysis::template::TemplateAnalysisSnapshot::default();
+        template
+            .elements
+            .push(verter_semantic::analysis::template::TemplateElement {
+                tag: "div".to_string(),
+                span: verter_span::Span::new(
+                    source.find("<div").unwrap() as u32,
+                    source.find("</div>").unwrap() as u32 + 6,
+                ),
+                attributes: vec![verter_semantic::analysis::template::TemplateAttribute {
+                    name: "class".to_string(),
+                    value: Some("btn".to_string()),
+                    is_dynamic: false,
+                    span: verter_span::Span::new(class_attr_start, class_attr_start + 11),
+                    name_end: class_attr_start + 5,
+                    value_span: Some(verter_span::Span::new(
+                        class_attr_start + 7,
+                        class_attr_start + 10,
+                    )),
+                }],
+                ..Default::default()
+            });
+        let analysis = FileAnalysisSnapshot {
+            template: Some(template.into()),
+            ..Default::default()
+        };
+
+        let offset = source.find("btn").unwrap();
+        let position = line_index.offset_to_position(offset as u32).unwrap();
+        let refs = references_at_position(
+            &position,
+            source,
+            &blocks,
+            Some(&analysis),
+            &line_index,
+            true,
+            Some(&structure),
+        );
+        assert!(
+            refs.is_some(),
+            "a comment-opener decoy inside a string literal must not suppress CSS references"
+        );
+    }
+
+    #[test]
+    fn css_references_suppressed_inside_comment_interior_via_facts() {
+        // A class token inside a REAL comment: the parser comment-region fact
+        // suppresses the CSS reference path.
+        let source = "<template>\n  <!-- <div class=\"btn\"> -->\n  <div class=\"btn\">x</div>\n</template>\n<style>.btn { color: red }</style>\n";
+        let structure = crate::documents::carrier_structure::test_structure(source, false);
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+        let analysis = FileAnalysisSnapshot::default();
+
+        let offset = source.find("btn").unwrap();
+        let position = line_index.offset_to_position(offset as u32).unwrap();
+        let refs = references_at_position(
+            &position,
+            source,
+            &blocks,
+            Some(&analysis),
+            &line_index,
+            true,
+            Some(&structure),
+        );
+        assert!(
+            refs.is_none(),
+            "a class token inside a comment interior must not produce references"
+        );
     }
 
     #[test]
@@ -741,6 +831,7 @@ mod tests {
             Some(&analysis),
             &line_index,
             true,
+            None,
         );
         assert!(refs.is_none());
     }
@@ -863,8 +954,15 @@ mod tests {
 
         let btn_offset = source.find("btn\"").unwrap();
         let pos = line_index.offset_to_position(btn_offset as u32).unwrap();
-        let refs =
-            references_at_position(&pos, source, &blocks, Some(&analysis), &line_index, true);
+        let refs = references_at_position(
+            &pos,
+            source,
+            &blocks,
+            Some(&analysis),
+            &line_index,
+            true,
+            None,
+        );
         assert!(refs.is_some(), "should find CSS class references");
         let refs = refs.unwrap();
         assert!(
@@ -899,8 +997,15 @@ mod tests {
         let pos = line_index
             .offset_to_position(btn_style_offset as u32)
             .unwrap();
-        let refs =
-            references_at_position(&pos, source, &blocks, Some(&analysis), &line_index, true);
+        let refs = references_at_position(
+            &pos,
+            source,
+            &blocks,
+            Some(&analysis),
+            &line_index,
+            true,
+            None,
+        );
         assert!(
             refs.is_some(),
             "should find CSS class references from style"
@@ -936,8 +1041,15 @@ mod tests {
 
         let id_offset = source.find("app\"").unwrap();
         let pos = line_index.offset_to_position(id_offset as u32).unwrap();
-        let refs =
-            references_at_position(&pos, source, &blocks, Some(&analysis), &line_index, true);
+        let refs = references_at_position(
+            &pos,
+            source,
+            &blocks,
+            Some(&analysis),
+            &line_index,
+            true,
+            None,
+        );
         assert!(refs.is_some(), "should find CSS ID references");
         let refs = refs.unwrap();
         assert!(
@@ -968,8 +1080,15 @@ mod tests {
 
         let foo_offset = source.find("foo\"").unwrap();
         let pos = line_index.offset_to_position(foo_offset as u32).unwrap();
-        let refs =
-            references_at_position(&pos, source, &blocks, Some(&analysis), &line_index, true);
+        let refs = references_at_position(
+            &pos,
+            source,
+            &blocks,
+            Some(&analysis),
+            &line_index,
+            true,
+            None,
+        );
         // Should still find template-only refs or None if no CSS targets detected
         // The important negative: should NOT panic or return wrong results
         if let Some(refs) = refs {

@@ -57,6 +57,7 @@ fn test_go_to_definition_from_template_to_script_via_span() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(result.is_some());
 
@@ -106,6 +107,7 @@ fn test_go_to_import_with_resolved_canonical_id_no_export_resolver_falls_back_to
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -183,6 +185,7 @@ fn test_go_to_import_with_resolved_canonical_id_and_export_resolver() {
         &line_index,
         None,
         Some(&export_resolver),
+        None,
     );
     assert!(result.is_some(), "should navigate with export resolver");
 
@@ -257,6 +260,7 @@ fn test_go_to_import_falls_back_to_path_resolution_when_resolved_canonical_id_fa
         &line_index,
         Some(&resolve_path),
         Some(&export_resolver),
+        None,
     );
     let Some(GotoDefinitionResponse::Scalar(loc)) = result else {
         panic!("expected scalar location");
@@ -302,6 +306,7 @@ fn test_go_to_import_without_resolution_falls_back_to_import_span() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -362,6 +367,7 @@ fn test_go_to_macro_binding_from_template() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(result.is_some());
 
@@ -407,6 +413,7 @@ fn test_no_definition_for_unknown_binding() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(result.is_none());
 }
@@ -414,6 +421,7 @@ fn test_no_definition_for_unknown_binding() {
 #[test]
 fn test_no_definition_inside_html_comment() {
     let source = "<template>\n  <!-- MyComponent -->\n  {{ count }}\n</template>\n\n<script setup>\nimport MyComponent from './MyComponent.vue'\nconst count = ref(0)\n</script>\n";
+    let structure = crate::documents::carrier_structure::test_structure(source, false);
     let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
@@ -463,6 +471,7 @@ fn test_no_definition_inside_html_comment() {
         &line_index,
         None,
         None,
+        Some(&structure),
     );
     assert!(
         result.is_none(),
@@ -471,22 +480,146 @@ fn test_no_definition_inside_html_comment() {
 }
 
 #[test]
-fn test_is_inside_html_comment() {
-    let source = "<div><!-- hello --> world <!-- bye --></div>";
+fn comment_suppression_reads_registered_facts_not_raw_source() {
+    // Same real-comment source, two runs. WITH registered facts navigation is
+    // suppressed; WITHOUT facts it is NOT — proving the suppression comes from
+    // the parser comment-region facts and no raw-source `<!--` scan survives.
+    let source = "<template>\n  <!-- count -->\n  {{ count }}\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
+    let structure = crate::documents::carrier_structure::test_structure(source, false);
+    let blocks = test_carrier_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let script_count_offset = source.rfind("count").unwrap() as u32;
+    let analysis = make_analysis(
+        vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(script_count_offset, script_count_offset + 5),
+            used_in_script: false,
+            used_in_style: false,
+        }],
+        vec![],
+        vec![],
+    );
+
+    // First "count" is inside the comment.
+    let offset = source.find("count").unwrap();
+    let position = line_index.offset_to_position(offset as u32).unwrap();
+
+    let with_facts = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        Some(&structure),
+    );
+    assert!(
+        with_facts.is_none(),
+        "with comment facts, navigation from a comment interior is suppressed"
+    );
+
+    let without_facts = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        without_facts.is_some(),
+        "without facts nothing may re-derive comment geometry from raw source"
+    );
+}
+
+#[test]
+fn navigation_survives_decoy_comment_open_inside_attribute_string() {
+    // A `'<!--'` STRING LITERAL inside a dynamic attribute value. A raw
+    // `rfind("<!--")` scan treats every later template position as
+    // comment-suppressed; the registered arena records no comment node.
+    let source = "<template>\n  <div :title=\"'<!--'\">\n  {{ count }}\n  </div>\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
+    let structure = crate::documents::carrier_structure::test_structure(source, false);
+    let blocks = test_carrier_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let script_count_offset = source.rfind("count").unwrap() as u32;
+    let analysis = make_analysis(
+        vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(script_count_offset, script_count_offset + 5),
+            used_in_script: false,
+            used_in_style: false,
+        }],
+        vec![],
+        vec![],
+    );
+
+    let offset = source.find("count").unwrap();
+    let position = line_index.offset_to_position(offset as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+        Some(&structure),
+    );
+    assert!(
+        result.is_some(),
+        "a comment-opener decoy inside a string literal must not suppress navigation"
+    );
+}
+
+#[test]
+fn markup_comment_facts_track_parser_comment_spans() {
+    use crate::documents::carrier_structure::{
+        offset_in_markup_comment, project_markup_comment_facts, test_structure,
+    };
+
+    let source = "<template><div><!-- hello --> world <!-- bye --></div></template>";
+    let structure = test_structure(source, false);
+    let facts = project_markup_comment_facts(&structure);
+    assert_eq!(facts.len(), 2, "both comments must be arena facts");
+
     // Inside first comment
-    let offset = source.find("hello").unwrap();
-    assert!(is_inside_html_comment(source, offset));
+    let offset = source.find("hello").unwrap() as u32;
+    assert!(offset_in_markup_comment(&facts, offset));
 
     // Between comments (after first -->)
-    let offset = source.find("world").unwrap();
-    assert!(!is_inside_html_comment(source, offset));
+    let offset = source.find("world").unwrap() as u32;
+    assert!(!offset_in_markup_comment(&facts, offset));
 
     // Inside second comment
-    let offset = source.find("bye").unwrap();
-    assert!(is_inside_html_comment(source, offset));
+    let offset = source.find("bye").unwrap() as u32;
+    assert!(offset_in_markup_comment(&facts, offset));
 
-    // Before any comment
-    assert!(!is_inside_html_comment(source, 1));
+    // On the div opening tag, before any comment
+    assert!(!offset_in_markup_comment(&facts, 12));
+
+    // Unterminated comment: everything after the opener stays interior,
+    // including the typing position at EOF.
+    let source = "<template><div><!-- open";
+    let structure = test_structure(source, false);
+    let facts = project_markup_comment_facts(&structure);
+    let offset = source.find("open").unwrap() as u32;
+    assert!(offset_in_markup_comment(&facts, offset));
+    assert!(offset_in_markup_comment(&facts, source.len() as u32));
 }
 
 #[test]
@@ -549,6 +682,7 @@ fn test_go_to_component_definition_from_template() {
         &line_index,
         None,
         None,
+        None,
     );
     // With .vue fallback, navigates to file top even without export resolver
     assert!(result.is_some(), "should navigate to .vue file as fallback");
@@ -587,6 +721,7 @@ fn test_go_to_component_definition_from_template() {
         &line_index,
         None,
         Some(&export_resolver),
+        None,
     );
     assert!(result.is_some(), "should navigate with export resolver");
 
@@ -693,6 +828,7 @@ fn test_css_nav_template_class_to_style() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(
         result.is_some(),
@@ -794,6 +930,7 @@ fn test_css_nav_multi_class_attr() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(result.is_some(), "should navigate to .primary in style");
 
@@ -890,6 +1027,7 @@ fn test_css_nav_template_id_to_style() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(
         result.is_some(),
@@ -976,6 +1114,7 @@ fn test_css_nav_dynamic_class_object_key_navigates() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -1079,6 +1218,7 @@ fn test_css_nav_style_to_template() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(
         result.is_some(),
@@ -1145,6 +1285,7 @@ fn test_import_source_string_navigation() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -1217,6 +1358,7 @@ fn test_path_alias_resolution_on_binding() {
         &line_index,
         Some(&resolver),
         None,
+        None,
     );
     assert!(result.is_some(), "should navigate to .vue file as fallback");
     if let Some(GotoDefinitionResponse::Scalar(loc)) = &result {
@@ -1254,6 +1396,7 @@ fn test_path_alias_resolution_on_binding() {
         &line_index,
         Some(&resolver),
         Some(&export_resolver),
+        None,
     );
     assert!(result.is_some(), "should navigate with export resolver");
 
@@ -1275,6 +1418,7 @@ fn test_path_alias_resolution_on_binding() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -1340,6 +1484,7 @@ fn test_path_alias_resolution_on_import_string() {
         Some(&analysis),
         &line_index,
         Some(&resolver),
+        None,
         None,
     );
     assert!(
@@ -1454,6 +1599,7 @@ fn test_dom_query_selector_navigates_to_element() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(
         result.is_some(),
@@ -1540,6 +1686,7 @@ fn test_dom_query_selector_no_match() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -1636,6 +1783,7 @@ fn test_dom_query_selector_falls_back_to_css() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(
         result.is_some(),
@@ -1725,6 +1873,7 @@ fn test_path_alias_resolution_on_component_tag() {
         &line_index,
         Some(&resolver),
         None,
+        None,
     );
     assert!(result.is_some(), "should navigate to .vue file as fallback");
     if let Some(GotoDefinitionResponse::Scalar(loc)) = &result {
@@ -1764,6 +1913,7 @@ fn test_path_alias_resolution_on_component_tag() {
         &line_index,
         Some(&resolver),
         Some(&export_resolver),
+        None,
     );
     assert!(
         result.is_some(),
@@ -1878,6 +2028,7 @@ fn test_go_to_definition_event_handler_click() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -1997,6 +2148,7 @@ fn test_go_to_definition_inline_event_no_binding() {
         &line_index,
         None,
         None,
+        None,
     );
 
     assert!(
@@ -2087,6 +2239,7 @@ fn test_go_to_definition_component_event_name_defers_to_server() {
         &line_index,
         None,
         None,
+        None,
     );
 
     assert!(
@@ -2148,6 +2301,7 @@ fn test_go_to_definition_dollar_props() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -2218,6 +2372,7 @@ fn test_go_to_definition_dollar_emit() {
         &line_index,
         None,
         None,
+        None,
     );
 
     assert!(
@@ -2263,6 +2418,7 @@ fn test_go_to_definition_dollar_props_without_macro() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -2343,6 +2499,7 @@ fn definition_prop_field_type_based() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -2431,6 +2588,7 @@ fn definition_prop_field_runtime() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -2524,6 +2682,7 @@ fn definition_binding_takes_precedence_over_prop_field() {
         &line_index,
         None,
         None,
+        None,
     );
 
     assert!(result.is_some(), "should find definition");
@@ -2603,6 +2762,7 @@ fn test_vue_default_import_retries_with_default_binding() {
         &line_index,
         None,
         Some(&export_resolver),
+        None,
     );
 
     assert!(result.is_some(), "should resolve via 'default' fallback");
@@ -2654,6 +2814,7 @@ fn test_named_import_non_carrier_no_default_fallback() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );
@@ -2745,6 +2906,7 @@ fn test_component_tag_default_fallback() {
         &line_index,
         None,
         Some(&export_resolver),
+        None,
     );
 
     assert!(
@@ -2819,6 +2981,7 @@ fn test_script_context_vue_import_default_fallback() {
         &line_index,
         None,
         Some(&export_resolver),
+        None,
     );
 
     assert!(
@@ -2930,6 +3093,7 @@ fn css_class_definition_returns_all_declaring_rules_hierarchy_first() {
         &line_index,
         None,
         None,
+        None,
     )
     .expect("class with two declaring rules must navigate");
 
@@ -3019,6 +3183,7 @@ fn css_class_definition_fails_closed_on_no_rule_despite_binding_collision() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(
         result.is_none(),
@@ -3073,6 +3238,7 @@ fn css_class_definition_reaches_deep_inner_class() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     )
@@ -3136,6 +3302,7 @@ fn css_class_definition_reaches_nested_scss_class() {
         &line_index,
         None,
         None,
+        None,
     )
     .expect("nested scss class must be a definition target");
 
@@ -3196,6 +3363,7 @@ fn css_class_definition_kebab_token_at_hyphen_position() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     )
@@ -3294,6 +3462,7 @@ fn svelte_class_attr_definition_to_style_rule() {
         &line_index,
         None,
         None,
+        None,
     )
     .expect("svelte class token must navigate to its rule");
 
@@ -3321,6 +3490,7 @@ fn svelte_class_directive_definition_to_style_rule() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     )
@@ -3352,6 +3522,7 @@ fn svelte_class_token_without_rule_fails_closed() {
         &line_index,
         None,
         None,
+        None,
     );
     assert!(
         result.is_none(),
@@ -3375,6 +3546,7 @@ fn svelte_style_class_definition_to_markup_usages() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     )
@@ -3445,6 +3617,7 @@ fn module_class_rule_is_not_a_same_file_definition_target() {
             &line_index,
             None,
             None,
+            None,
         );
         if module_expected_none {
             assert!(
@@ -3511,6 +3684,7 @@ fn module_style_class_token_is_not_a_navigation_origin() {
         &blocks,
         Some(&analysis),
         &line_index,
+        None,
         None,
         None,
     );

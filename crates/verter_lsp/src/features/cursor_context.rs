@@ -4,8 +4,9 @@ use verter_session::FileAnalysisSnapshot;
 use verter_session::carrier_publication_store::RegisteredFileStructure;
 
 use crate::documents::carrier_structure::{
-    classify_cursor, markup_element_at, markup_open_tag_at, project_markup_open_tags,
-    CarrierBlockView, CarrierCursorContext, MarkupOpenTagFact,
+    classify_cursor, markup_cursor_region, markup_element_at, markup_gap_window_start,
+    markup_open_tag_at, project_markup_open_tags, CarrierBlockView, CarrierCursorContext,
+    MarkupCursorRegion, MarkupOpenTagFact,
 };
 
 // =============================================================================
@@ -217,9 +218,12 @@ pub fn classify_cursor_context_for_language(
             // the scanner's depth-balanced walk fails closed to the
             // first-close boundary on malformed input (e.g. the outer close is
             // missing mid-edit) and rescans from there. Recover the slot-name
-            // context from source before treating it as an SFC block tag.
+            // context from the registered markup facts before treating it as
+            // an SFC block tag.
             if language == Some(CarrierTemplateLanguage::Vue) {
-                if let Some(ctx) = slot_name_context_from_source(offset, source, analysis) {
+                if let Some(ctx) =
+                    slot_name_context_from_markup(offset, source, analysis, structure)
+                {
                     return CursorContext::Template(ctx);
                 }
             }
@@ -262,7 +266,7 @@ pub fn classify_cursor_context_for_language(
 
     match block.tag_name.as_str() {
         "script" => CursorContext::Script,
-        "template" => classify_template_context(offset, source, analysis),
+        "template" => classify_template_context(offset, source, analysis, structure),
         "style" => classify_style_context(offset, blocks, analysis),
         tag_name => {
             // D5: on MALFORMED input the SFC scanner fails closed to the
@@ -270,9 +274,11 @@ pub fn classify_cursor_context_for_language(
             // so a component usage after a closed nested slot template can
             // still surface here as a phantom custom block. A slot-name token
             // inside it is template markup — recover the slot-name context
-            // from source for Vue.
+            // from the registered markup facts for Vue.
             if language == Some(CarrierTemplateLanguage::Vue) {
-                if let Some(ctx) = slot_name_context_from_source(offset, source, analysis) {
+                if let Some(ctx) =
+                    slot_name_context_from_markup(offset, source, analysis, structure)
+                {
                     return CursorContext::Template(ctx);
                 }
             }
@@ -319,7 +325,7 @@ fn classify_root_or_template_context(
     // These fire on a bounded same-line scan before the generic classification;
     // both positions are otherwise indistinguishable from text content.
     if language == Some(CarrierTemplateLanguage::Vue) {
-        if let Some(ctx) = slot_name_context_from_source(offset, source, analysis) {
+        if let Some(ctx) = slot_name_context_from_markup(offset, source, analysis, structure) {
             return CursorContext::Template(ctx);
         }
     }
@@ -386,12 +392,13 @@ fn classify_root_or_template_context(
         Some(CarrierTemplateLanguage::Svelte) | None => true,
     };
     if is_template_position && semantic_position_is_owned {
-        classify_template_context(offset, source, analysis)
+        classify_template_context(offset, source, analysis, structure)
     } else {
-        // Error-tolerant Svelte analysis may not retain an element/component
-        // node for an opening tag that is still being typed. Preserve the
-        // structurally unambiguous uppercase component-tag context from source.
-        let fallback = classify_template_text_fallback(offset, source);
+        // Error-tolerant analysis may not retain an element/component node for
+        // an opening tag that is still being typed. Preserve the structurally
+        // unambiguous uppercase component-tag context from the registered
+        // markup facts (parser-bounded gap recovery included).
+        let fallback = classify_template_fallback(offset, source, structure);
         let is_incomplete_component = match &fallback {
             TemplateCursorContext::TagName { partial } => partial
                 .as_bytes()
@@ -613,46 +620,46 @@ fn nearest_component_ancestor(facts: &[MarkupOpenTagFact], offset: u32) -> Optio
     }
 }
 
-/// D5 slot-name context from source: the cursor sits after a `#partial` or
-/// `v-slot:partial` token inside an open tag. Robust to error-tolerant parses
-/// that dropped the still-typed element/directive; a `>` crossed before the
-/// owning `<` means the cursor is in element CONTENT, never a tag.
-fn slot_name_context_from_source(
+/// D5 slot-name context from the registered markup facts: the cursor sits
+/// after a `#partial` or `v-slot:partial` token inside a parser-identified
+/// opening span. The arena retains still-typed opening tags (error-tolerant
+/// parse), so the opening span is the SOLE tag anchor — no raw-source `<`
+/// discovery; the token check lexes only INSIDE that span. Fails closed
+/// without registered facts.
+fn slot_name_context_from_markup(
     offset: u32,
     source: &str,
     analysis: Option<&FileAnalysisSnapshot>,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<TemplateCursorContext> {
-    let bytes = source.as_bytes();
-    let mut i = (offset as usize).min(source.len());
-    while i > 0 {
-        i -= 1;
-        match bytes[i] {
-            b'<' => break,
-            b'>' | b'{' | b'}' => return None,
-            _ => {}
+    let structure = structure?;
+    let facts = project_markup_open_tags(structure);
+    let index = markup_open_tag_at(&facts, offset).or_else(|| {
+        // Typing at EOF: an unterminated opening span ends exactly at the
+        // cursor. Claim it only when the span's last byte is not `>` (a closed
+        // opening tag at EOF puts the cursor in content, not the tag).
+        if offset as usize != source.len() {
+            return None;
         }
-    }
-    if bytes.get(i) != Some(&b'<') {
+        facts
+            .iter()
+            .enumerate()
+            .filter(|(_, fact)| {
+                offset > fact.opening_start
+                    && offset == fact.opening_end
+                    && source.as_bytes().get(offset as usize - 1) != Some(&b'>')
+            })
+            .max_by_key(|(_, fact)| fact.opening_start)
+            .map(|(index, _)| index)
+    })?;
+    let fact = &facts[index];
+    let tag_name = fact.name.clone().filter(|name| !name.is_empty())?;
+    if offset <= fact.name_end {
         return None;
     }
-    let tag_start = i + 1;
-    if bytes.get(tag_start) == Some(&b'/') {
-        return None;
-    }
-    let mut tag_end = tag_start;
-    while tag_end < source.len()
-        && (bytes[tag_end].is_ascii_alphanumeric()
-            || bytes[tag_end] == b'-'
-            || bytes[tag_end] == b'_')
-    {
-        tag_end += 1;
-    }
-    let tag_name = source.get(tag_start..tag_end)?.to_string();
-    if tag_name.is_empty() || (offset as usize) <= tag_end {
-        return None;
-    }
-    // The whitespace-delimited token immediately before the cursor.
-    let slice = source.get(tag_end..offset as usize)?;
+    // The whitespace-delimited token immediately before the cursor, lexed
+    // inside the parser-identified opening span only.
+    let slice = source.get(fact.name_end as usize..offset as usize)?;
     let token = slice.split_whitespace().last()?;
     if token.contains('=') || (!token.starts_with('#') && !token.starts_with("v-slot:")) {
         return None;
@@ -680,19 +687,21 @@ fn classify_template_context(
     offset: u32,
     source: &str,
     analysis: Option<&FileAnalysisSnapshot>,
+    structure: Option<&RegisteredFileStructure>,
 ) -> CursorContext {
-    // D5 slot-name token scan — a trailing `#partial` / `v-slot:partial`
-    // immediately before the cursor in an open tag. Runs before the AST
-    // classification: error-tolerant parsing may not retain the element or
-    // directive for a tag that is still being typed.
-    if let Some(ctx) = slot_name_context_from_source(offset, source, analysis) {
+    // D5 slot-name token recovery — a trailing `#partial` / `v-slot:partial`
+    // immediately before the cursor in a parser-identified open tag. Runs
+    // before the AST classification: error-tolerant SEMANTIC analysis may not
+    // retain the element or directive for a tag that is still being typed,
+    // while the registered inventory (re-parsed on every change) does.
+    if let Some(ctx) = slot_name_context_from_markup(offset, source, analysis, structure) {
         return CursorContext::Template(ctx);
     }
     let template = match analysis.and_then(|a| a.template.as_ref()) {
         Some(t) => t,
         None => {
-            // No analysis available — fall back to text scanning
-            return CursorContext::Template(classify_template_text_fallback(offset, source));
+            // No analysis available — classify from the registered markup facts
+            return CursorContext::Template(classify_template_fallback(offset, source, structure));
         }
     };
 
@@ -704,7 +713,7 @@ fn classify_template_context(
         None => {
             // Cursor is in template content but not inside any element's span.
             // This can happen between top-level elements or when analysis is incomplete.
-            CursorContext::Template(classify_template_text_fallback(offset, source))
+            CursorContext::Template(classify_template_fallback(offset, source, structure))
         }
     }
 }
@@ -1082,63 +1091,152 @@ fn classify_style_context(
     CursorContext::Style(StyleCursorContext::General)
 }
 
-/// Text-based fallback for template classification when no analysis is available.
-fn classify_template_text_fallback(offset: u32, source: &str) -> TemplateCursorContext {
+/// Analysis-absent template classification from the registered markup facts.
+///
+/// The registered inventory is re-parsed on every document change, so it is
+/// current even when the semantic snapshot is cold or lagging. The arena node
+/// owning the cursor supplies the classification; a parser-UNOWNED gap (the
+/// parser dropped a still-typed fragment) is recovered by a bounded lex that
+/// runs only inside that gap. Fails closed to text content without facts —
+/// raw source is never scanned for delimiters, so decoy `<` / `{{` / `<!--`
+/// literals inside attribute values, comments, or text can never fabricate
+/// tag geometry.
+fn classify_template_fallback(
+    offset: u32,
+    source: &str,
+    structure: Option<&RegisteredFileStructure>,
+) -> TemplateCursorContext {
+    let Some(structure) = structure else {
+        return TemplateCursorContext::TextContent;
+    };
+    match markup_cursor_region(structure, offset) {
+        Some(MarkupCursorRegion::OpeningTag {
+            name,
+            name_start,
+            name_end,
+        }) => {
+            if offset <= name_end {
+                let partial = source
+                    .get(name_start as usize..offset as usize)
+                    .unwrap_or("")
+                    .to_string();
+                TemplateCursorContext::TagName { partial }
+            } else {
+                let tag_name = name.unwrap_or_default();
+                let is_component = tag_name
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| byte.is_ascii_uppercase());
+                TemplateCursorContext::AttributeName {
+                    tag_name,
+                    is_component,
+                    existing_attrs: vec![],
+                }
+            }
+        }
+        Some(MarkupCursorRegion::InterpolationExpression) => TemplateCursorContext::Interpolation,
+        Some(MarkupCursorRegion::CommentInterior) => TemplateCursorContext::TextContent,
+        Some(MarkupCursorRegion::Neutral) => {
+            // A tag being typed inside parser-owned TEXT (`hello <di|`): the
+            // parser still classifies the fragment as text until it parses.
+            // The legal bounded CURRENT-TOKEN lex — token chars walked back,
+            // `<` checked only as the immediately-preceding character — is the
+            // only recovery; comments and interpolations never get it.
+            match current_token_tag_partial(offset, source) {
+                Some(partial) => TemplateCursorContext::TagName { partial },
+                None => TemplateCursorContext::TextContent,
+            }
+        }
+        None => classify_parser_unowned_gap(offset, source, structure),
+    }
+}
+
+/// Legal bounded current-token lex: walk back over tag-name characters from
+/// the cursor (current token only, ≤256 bytes) and accept only when the
+/// immediately-preceding byte is `<`. No delimiter search runs beyond that
+/// single adjacent byte.
+fn current_token_tag_partial(offset: u32, source: &str) -> Option<String> {
+    const CURRENT_TOKEN_LIMIT: usize = 256;
     let offset = offset as usize;
+    if offset > source.len() || !source.is_char_boundary(offset) {
+        return None;
+    }
     let bytes = source.as_bytes();
-    if offset > bytes.len() {
+    let mut start = offset;
+    while start > 0
+        && offset - start < CURRENT_TOKEN_LIMIT
+        && (bytes[start - 1].is_ascii_alphanumeric() || matches!(bytes[start - 1], b'-' | b'_'))
+    {
+        start -= 1;
+    }
+    if start == 0 || bytes[start - 1] != b'<' {
+        return None;
+    }
+    Some(source.get(start..offset)?.to_string())
+}
+
+/// Classify a parser-UNOWNED gap: the region between the closest parsed
+/// boundary and the cursor, which exists only when the parser dropped a
+/// still-typed fragment (mid-typed tag or interpolation). The lex is bounded
+/// to that gap (≤256 bytes) — parsed regions, where string/comment decoys
+/// live, can never enter the window.
+fn classify_parser_unowned_gap(
+    offset: u32,
+    source: &str,
+    structure: &RegisteredFileStructure,
+) -> TemplateCursorContext {
+    const GAP_LEX_LIMIT: u32 = 256;
+    let floor = markup_gap_window_start(structure, offset);
+    let start = floor.max(offset.saturating_sub(GAP_LEX_LIMIT)) as usize;
+    let Some(window) = source.get(start..offset as usize) else {
+        return TemplateCursorContext::TextContent;
+    };
+    // In-progress interpolation opened inside the gap and not closed before
+    // the cursor.
+    if let Some(open) = window.rfind("{{") {
+        if !window[open + 2..].contains("}}") {
+            return TemplateCursorContext::Interpolation;
+        }
+    }
+    let Some(lt) = window.rfind('<') else {
+        return TemplateCursorContext::TextContent;
+    };
+    let candidate = &window[lt + 1..];
+    if candidate.contains('>') || candidate.starts_with(['/', '!', '?']) {
         return TemplateCursorContext::TextContent;
     }
-
-    // Check for mustache context: find `{{` before `}}` scanning backward
-    {
-        let before = &source[..offset];
-        let last_open = before.rfind("{{");
-        let last_close = before.rfind("}}");
-        if let Some(open_pos) = last_open {
-            if last_close.is_none_or(|close_pos| open_pos > close_pos) {
-                return TemplateCursorContext::Interpolation;
+    let name_len = candidate
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        .count();
+    if name_len == 0 {
+        // A bare just-typed `<` offers tag-name completion; anything else in
+        // the gap is text.
+        return if candidate.is_empty() {
+            TemplateCursorContext::TagName {
+                partial: String::new(),
             }
+        } else {
+            TemplateCursorContext::TextContent
+        };
+    }
+    let name_end = start + lt + 1 + name_len;
+    if (offset as usize) <= name_end {
+        TemplateCursorContext::TagName {
+            partial: candidate[..offset as usize - (start + lt + 1)].to_string(),
+        }
+    } else {
+        let tag_name = candidate[..name_len].to_string();
+        let is_component = tag_name
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_uppercase());
+        TemplateCursorContext::AttributeName {
+            tag_name,
+            is_component,
+            existing_attrs: vec![],
         }
     }
-
-    // Scan backward to determine if inside a tag or text content
-    let mut i = offset;
-    while i > 0 {
-        i -= 1;
-        match bytes[i] {
-            b'>' => return TemplateCursorContext::TextContent,
-            b'<' => {
-                let tag_start = i + 1;
-                if tag_start < bytes.len() && bytes[tag_start] == b'/' {
-                    return TemplateCursorContext::TextContent;
-                }
-                // Skip past tag name
-                let mut name_end = tag_start;
-                while name_end < bytes.len()
-                    && (bytes[name_end].is_ascii_alphanumeric()
-                        || bytes[name_end] == b'-'
-                        || bytes[name_end] == b'_')
-                {
-                    name_end += 1;
-                }
-                if offset <= name_end {
-                    let partial = source.get(tag_start..offset).unwrap_or("").to_string();
-                    return TemplateCursorContext::TagName { partial };
-                }
-                return TemplateCursorContext::AttributeName {
-                    tag_name: source.get(tag_start..name_end).unwrap_or("").to_string(),
-                    is_component: source
-                        .as_bytes()
-                        .get(tag_start)
-                        .is_some_and(|b| b.is_ascii_uppercase()),
-                    existing_attrs: vec![],
-                };
-            }
-            _ => {}
-        }
-    }
-    TemplateCursorContext::TextContent
 }
 
 // =============================================================================

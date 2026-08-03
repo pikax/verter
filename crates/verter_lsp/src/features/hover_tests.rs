@@ -241,6 +241,7 @@ fn test_hover_on_binding() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     );
     assert!(hover.is_some());
     let contents = match hover.unwrap().hover.contents {
@@ -288,6 +289,7 @@ fn test_hover_on_import() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     );
     assert!(hover.is_some());
     let contents = match hover.unwrap().hover.contents {
@@ -318,6 +320,7 @@ fn test_hover_outside_blocks() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     );
     assert!(hover.is_none());
 }
@@ -355,6 +358,7 @@ fn test_hover_on_template_binding() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     );
     assert!(hover.is_some());
 }
@@ -394,6 +398,7 @@ fn test_hover_on_vue_api_call_site() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     );
     assert!(hover.is_some());
     let contents = match hover.unwrap().hover.contents {
@@ -424,6 +429,7 @@ fn test_no_hover_on_unknown_word() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     );
     assert!(hover.is_none());
 }
@@ -431,6 +437,7 @@ fn test_no_hover_on_unknown_word() {
 #[test]
 fn test_no_hover_inside_html_comment() {
     let source = "<template>\n  <!-- count -->\n  {{ count }}\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
+    let structure = crate::documents::carrier_structure::test_structure(source, false);
     let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
@@ -465,6 +472,7 @@ fn test_no_hover_inside_html_comment() {
         Some(&analysis),
         &line_index,
         false,
+        Some(&structure),
     );
     assert!(hover.is_none(), "should not hover inside HTML comment");
 
@@ -479,8 +487,52 @@ fn test_no_hover_inside_html_comment() {
         Some(&analysis),
         &line_index,
         false,
+        Some(&structure),
     );
     assert!(hover2.is_some(), "should hover on binding outside comment");
+}
+
+#[test]
+fn hover_survives_decoy_comment_open_inside_attribute_string() {
+    // A `'<!--'` STRING LITERAL inside a dynamic attribute value. A raw
+    // `rfind("<!--")` scan suppresses every later template hover; the
+    // registered arena records no comment node.
+    let source = "<template>\n  <div :title=\"'<!--'\">\n  {{ count }}\n  </div>\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
+    let structure = crate::documents::carrier_structure::test_structure(source, false);
+    let blocks = test_carrier_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let analysis = make_analysis(
+        vec![AnalyzedBinding {
+            name: "count".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: true,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
+        }],
+        vec![],
+        vec![],
+    );
+
+    let offset = source.find("count").unwrap();
+    let position = line_index.offset_to_position(offset as u32).unwrap();
+    let hover = hover_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        Some(&structure),
+    );
+    assert!(
+        hover.is_some(),
+        "a comment-opener decoy inside a string literal must not suppress hover"
+    );
 }
 
 #[test]
@@ -551,7 +603,15 @@ fn test_hover_on_component_shows_prop_constness() {
     let pos = line_index
         .offset_to_position((comp_offset + 1) as u32)
         .unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false);
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    );
 
     assert!(hover.is_some(), "should provide hover on component element");
     let contents = match hover.unwrap().hover.contents {
@@ -773,7 +833,15 @@ fn test_hover_on_component_with_no_props() {
     let pos = line_index
         .offset_to_position((comp_offset + 1) as u32)
         .unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false);
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    );
 
     assert!(
         hover.is_some(),
@@ -869,7 +937,15 @@ fn test_hover_on_element_shows_css_rules() {
     let pos = line_index
         .offset_to_position((div_offset + 1) as u32)
         .unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false);
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    );
 
     assert!(hover.is_some(), "should provide hover on template element");
     let contents = match hover.unwrap().hover.contents {
@@ -896,7 +972,7 @@ fn test_hover_on_script_tag_name() {
 
     // Hover on "script" in opening tag (offset 1 = 's')
     let pos = line_index.offset_to_position(1).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(hover.is_some(), "should hover on script tag name");
     let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
@@ -916,7 +992,7 @@ fn test_hover_on_template_tag_name() {
     let line_index = LineIndex::new_utf16(source);
 
     let pos = line_index.offset_to_position(1).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(hover.is_some(), "should hover on template tag name");
     let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
@@ -937,7 +1013,7 @@ fn test_hover_on_setup_attr() {
     // "setup" starts at offset 8 in "<script setup lang=\"ts\">"
     let setup_offset = source.find("setup").unwrap();
     let pos = line_index.offset_to_position(setup_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(hover.is_some(), "should hover on setup attribute");
     let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
@@ -961,7 +1037,7 @@ fn test_hover_on_lang_attr() {
 
     let lang_offset = source.find("lang").unwrap();
     let pos = line_index.offset_to_position(lang_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(hover.is_some(), "should hover on lang attribute");
     let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
@@ -978,7 +1054,7 @@ fn test_hover_on_scoped_attr() {
 
     let scoped_offset = source.find("scoped").unwrap();
     let pos = line_index.offset_to_position(scoped_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(hover.is_some(), "should hover on scoped attribute");
     let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
@@ -999,7 +1075,7 @@ fn test_hover_on_closing_tag() {
     // Closing tag: "</script>" — hover on it
     let close_offset = blocks[0].close_tag_start + 2; // skip "</"
     let pos = line_index.offset_to_position(close_offset).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(hover.is_some(), "should hover on closing tag");
     let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
@@ -1017,7 +1093,7 @@ fn test_no_hover_at_root_level() {
     // Between blocks — root level
     let between = blocks[0].close_tag_end;
     let pos = line_index.offset_to_position(between).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(hover.is_none(), "should not hover at root level");
 }
 
@@ -1029,7 +1105,7 @@ fn test_hover_on_attrs_attribute() {
 
     let attrs_offset = source.find("attrs").unwrap();
     let pos = line_index.offset_to_position(attrs_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(hover.is_some(), "should hover on attrs attribute");
     let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
@@ -1046,7 +1122,7 @@ fn test_hover_on_custom_block_tag() {
     let line_index = LineIndex::new_utf16(source);
 
     let pos = line_index.offset_to_position(1).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(hover.is_some(), "should hover on custom block tag");
     let contents = match hover.unwrap().hover.contents {
         HoverContents::Markup(m) => m.value,
@@ -1119,7 +1195,15 @@ fn test_hover_on_component_attr_does_not_show_constness() {
 
     // Hover on `:icon` — should NOT return constness hover
     let pos = line_index.offset_to_position(icon_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false);
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    );
 
     // Should be None (or at least not contain constness info)
     if let Some(h) = hover {
@@ -1212,7 +1296,15 @@ fn test_hover_on_div_class_attr_does_not_show_css() {
 
     // Hover on "class" attribute name — should NOT show CSS rules
     let pos = line_index.offset_to_position(class_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false);
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    );
 
     if let Some(h) = hover {
         let contents = match h.hover.contents {
@@ -1304,8 +1396,16 @@ fn test_hover_on_ref_attr_does_not_show_import() {
     let pos = line_index
         .offset_to_position(template_ref_offset as u32)
         .unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
-        .expect("template ref attribute hover should exist");
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    )
+    .expect("template ref attribute hover should exist");
     let contents = match hover.hover.contents {
         HoverContents::Markup(m) => m.value,
         _ => panic!("expected markup"),
@@ -1387,8 +1487,16 @@ fn native_event_directive_hover_shows_vue_source_token() {
 
     // Hover inside `click`.
     let pos = line_index.offset_to_position(click_pos + 2).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
-        .expect("native event directive hover should exist");
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    )
+    .expect("native event directive hover should exist");
     let contents = markup(&hover);
     assert!(
         contents.contains("@click"),
@@ -1443,8 +1551,16 @@ fn v_on_long_form_hover_canonicalizes_provenance_to_at_form() {
     let analysis = template_only_analysis(native_event_element("button", dir));
 
     let pos = line_index.offset_to_position(click_pos + 2).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
-        .expect("v-on:click hover should exist");
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    )
+    .expect("v-on:click hover should exist");
     assert_eq!(
         hover.source_token,
         Some(HoverSourceToken::EventDirective {
@@ -1499,8 +1615,16 @@ fn v_model_directive_name_hover_shows_vue_source_token() {
     // Hover inside `v-model` (the directive name, before the arg).
     let name_pos = source.find("v-model").unwrap() as u32 + 2; // inside `v-model`
     let pos = line_index.offset_to_position(name_pos).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
-        .expect("v-model directive name hover should exist");
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    )
+    .expect("v-model directive name hover should exist");
     let contents = markup(&hover);
     assert!(
         contents.contains("v-model"),
@@ -1529,8 +1653,16 @@ fn v_model_arg_hover_shows_vue_source_token() {
     // Hover inside `show` (the arg, after `v-model:`).
     let arg_pos = source.find(":show").unwrap() as u32 + 2; // inside `show`
     let pos = line_index.offset_to_position(arg_pos).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
-        .expect("v-model arg hover should exist");
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    )
+    .expect("v-model arg hover should exist");
     let contents = markup(&hover);
     assert!(
         contents.contains("show"),
@@ -1579,8 +1711,16 @@ fn event_modifier_stop_hover() {
 
     // Hover inside `stop`.
     let pos = line_index.offset_to_position(stop_pos + 1).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
-        .expect("event modifier hover should exist");
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    )
+    .expect("event modifier hover should exist");
     let contents = markup(&hover);
     assert!(
         contents.contains(".stop"),
@@ -1612,7 +1752,8 @@ fn event_modifier_stop_hover() {
             &blocks,
             Some(&analysis),
             &line_index,
-            false
+            false,
+            None,
         )
         .is_some(),
         "hovering on the leading `.` of a modifier should resolve a hover"
@@ -1647,8 +1788,16 @@ fn mouse_event_modifier_left_is_mouse_button_not_arrow_key() {
     let analysis = template_only_analysis(native_event_element("button", dir));
 
     let pos = line_index.offset_to_position(left_pos + 1).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
-        .expect("mouse-button modifier hover should exist");
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    )
+    .expect("mouse-button modifier hover should exist");
     let contents = markup(&hover);
     assert!(
         contents.contains("mouse button"),
@@ -1697,6 +1846,7 @@ fn no_value_event_modifier_hover() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     )
     .expect("no-value event token hover should exist");
     assert!(
@@ -1714,6 +1864,7 @@ fn no_value_event_modifier_hover() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     )
     .expect("no-value modifier hover should exist");
     let mod_contents = markup(&mod_hover);
@@ -1763,7 +1914,15 @@ fn test_hover_on_ref_in_interpolation_still_shows_import() {
     // Find "ref" in the template interpolation
     let ref_offset = source.find("ref(0)").unwrap();
     let pos = line_index.offset_to_position(ref_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false);
+    let hover = hover_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+        None,
+    );
 
     assert!(
         hover.is_some(),
@@ -1793,7 +1952,7 @@ const x = 1;
     // Hover on the "generic" attribute NAME → should show SFC docs
     let name_offset = source.find("generic").unwrap();
     let pos = line_index.offset_to_position(name_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(
         hover.is_some(),
         "should show SFC docs when hovering on 'generic' attribute name"
@@ -1812,7 +1971,7 @@ const x = 1;
     // to delegate to TypeProvider
     let value_offset = source.find("T extends").unwrap();
     let pos = line_index.offset_to_position(value_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(
         hover.is_none(),
         "should return None for cursor inside generic value (delegates to TypeProvider)"
@@ -1830,7 +1989,7 @@ const x = 1;
     // Hover INSIDE the attrs value "{ class: string }" → should return None
     let value_offset = source.find("class: string").unwrap();
     let pos = line_index.offset_to_position(value_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(
         hover.is_none(),
         "should return None for cursor inside attrs value (delegates to TypeProvider)"
@@ -1848,7 +2007,7 @@ const x = 1;
     // Hover inside `lang="ts"` value → should still show SFC attr docs (not generic/attrs)
     let value_offset = source.find("ts").unwrap();
     let pos = line_index.offset_to_position(value_offset as u32).unwrap();
-    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false);
+    let hover = hover_at_position(&pos, source, &blocks, None, &line_index, false, None);
     assert!(
         hover.is_some(),
         "should show SFC docs for lang attribute value (not delegated)"
@@ -1931,6 +2090,7 @@ fn class_token_hover_shows_rule_description() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     )
     .expect("class token with a rule must hover");
     let contents = match hover.hover.contents {
@@ -1981,6 +2141,7 @@ fn class_token_hover_fails_closed_without_rule_despite_binding() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     );
     assert!(
         hover.is_none(),
@@ -2005,6 +2166,7 @@ fn class_token_hover_lists_multiple_rules() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     )
     .expect("hover on multi-rule class");
     let contents = match hover.hover.contents {
@@ -2077,6 +2239,7 @@ fn svelte_class_token_hover_shows_rule() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     )
     .expect("svelte class token with a rule must hover");
     let contents = match hover.hover.contents {
@@ -2108,6 +2271,7 @@ fn svelte_class_token_hover_fails_closed_without_rule() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     );
     assert!(hover.is_none(), "rule-less svelte class token: no hover");
 }
@@ -2158,6 +2322,7 @@ fn module_class_rule_never_renders_in_class_token_hover() {
         Some(&analysis),
         &line_index,
         false,
+        None,
     );
     assert!(
         hover.is_none(),

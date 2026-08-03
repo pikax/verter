@@ -13,7 +13,11 @@ use verter_semantic::analysis::types::{DomQueryCallSite, DomQueryKind};
 use verter_semantic::analysis::{match_selector, MatchResult};
 use verter_session::FileAnalysisSnapshot;
 
-use crate::documents::carrier_structure::CarrierBlockView;
+use verter_session::carrier_publication_store::RegisteredFileStructure;
+
+use crate::documents::carrier_structure::{
+    offset_in_markup_comment, project_markup_comment_facts, CarrierBlockView,
+};
 use crate::documents::line_index::LineIndex;
 
 pub use super::sentinel_uris::SAME_FILE_URI;
@@ -37,7 +41,7 @@ pub use super::sentinel_uris::SAME_FILE_URI_STR;
 /// Takes `(canonical_id, binding_name)` and returns a `Location` with precise range.
 /// When this returns `None`, the function also returns `None` for cross-file imports,
 /// letting the type provider handle it (it can navigate to the exact symbol).
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn definition_at_position(
     position: &Position,
     source: &str,
@@ -46,6 +50,7 @@ pub fn definition_at_position(
     line_index: &LineIndex,
     resolve_path: Option<&dyn Fn(&str) -> Option<String>>,
     resolve_export_location: Option<&dyn Fn(&str, &str) -> Option<Location>>,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<GotoDefinitionResponse> {
     let analysis = analysis?;
     let offset = line_index.position_to_offset(position)? as usize;
@@ -68,7 +73,11 @@ pub fn definition_at_position(
             .iter()
             .any(|el| offset >= el.span.start as usize && offset < el.span.end as usize)
     });
-    if in_template && is_inside_html_comment(source, offset) {
+    if in_template
+        && structure.is_some_and(|structure| {
+            offset_in_markup_comment(&project_markup_comment_facts(structure), offset as u32)
+        })
+    {
         return None;
     }
 
@@ -904,18 +913,6 @@ fn dom_query_css_fallback(
 }
 
 use crate::utils::word_at_offset;
-
-/// Check whether a byte offset falls inside an HTML comment (`<!-- ... -->`).
-pub fn is_inside_html_comment(source: &str, offset: usize) -> bool {
-    let before = &source[..offset];
-    let comment_start = before.rfind("<!--");
-    let comment_end = before.rfind("-->");
-    match (comment_start, comment_end) {
-        (Some(start), Some(end)) => start > end,
-        (Some(_), None) => true,
-        _ => false,
-    }
-}
 
 /// Convert a kebab-case or snake_case string to PascalCase.
 fn to_pascal_case(s: &str) -> String {

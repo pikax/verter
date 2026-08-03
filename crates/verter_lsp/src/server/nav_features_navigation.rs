@@ -217,6 +217,10 @@ pub(super) async fn handle_goto_definition(
             return Some(barrel_def);
         }
 
+        let structure = doc
+            .feature_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.structure().clone());
         let mut def = definition_at_position(
             position,
             &doc.source,
@@ -225,6 +229,7 @@ pub(super) async fn handle_goto_definition(
             &doc.line_index,
             resolve_fn,
             resolve_export_fn,
+            structure.as_ref(),
         )?;
 
         // Fix up sentinel URIs: if the definition is in the same file, use the document URI
@@ -796,6 +801,10 @@ pub(super) async fn handle_references(
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
         let blocks = project_carrier_blocks_for_document(&doc);
+        let structure = doc
+            .feature_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.structure().clone());
         let mut locations = references_at_position(
             position,
             &doc.source,
@@ -803,6 +812,7 @@ pub(super) async fn handle_references(
             analysis.as_ref(),
             &doc.line_index,
             include_declaration,
+            structure.as_ref(),
         )?;
 
         // Fix up sentinel URIs
