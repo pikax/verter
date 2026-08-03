@@ -46,6 +46,35 @@ impl VerterHost {
             .clone()
     }
 
+    /// Clone the structure and revision stamp from one committed source record.
+    #[doc(hidden)]
+    pub fn registered_file_structure_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> Option<(
+        crate::carrier_publication_store::RegisteredFileStructure,
+        crate::carrier_publication_store::HostSourceRevisionToken,
+    )> {
+        let source = self.scheduler.try_get_source(canonical_id)?;
+        let data = source.downcast_data::<host_executor::HostSourceData>()?;
+        Some((data.structure.clone()?, data.revision_token))
+    }
+
+    /// Return the projection host's local revision stamp for the same Source-stage
+    /// record that owns the registered carrier structure.
+    #[doc(hidden)]
+    pub fn registered_source_revision_token(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::carrier_publication_store::HostSourceRevisionToken> {
+        Some(
+            self.scheduler
+                .try_get_source(canonical_id)?
+                .downcast_data::<host_executor::HostSourceData>()?
+                .revision_token,
+        )
+    }
+
     /// Get the scheduler's analysis snapshot for a file.
     pub fn scheduler_analysis(
         &self,

@@ -13,6 +13,7 @@ use parking_lot::RwLock;
 use dashmap::DashMap;
 use tower_lsp_server::ls_types::*;
 use verter_session::{
+    carrier_publication_store::{HostSourceRevisionToken, RegisteredFileStructure},
     CompileProfile, FileLanguage, HostUpdateResult, IdeResponse, StyleOverrideEntry,
     StyleOverrideRequest, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
@@ -31,6 +32,7 @@ pub struct DocumentRegistry {
     pub(crate) host: Arc<VerterHost>,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
+    next_open_incarnation: std::sync::atomic::AtomicU64,
     /// Default compile profile for TSX generation (LSP mode).
     pub(crate) tsx_profile: Arc<RwLock<CompileProfile>>,
     /// Negotiated position encoding from the client (LSP 3.17).
@@ -75,11 +77,37 @@ pub struct DocumentRegistry {
     /// immediately before projection installation.
     #[cfg(test)]
     before_projection_install_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
+    /// TEST SEAM: a one-shot callback after semantic work completes and before
+    /// its captured document/envelope identity is admitted for publication.
+    #[cfg(test)]
+    before_semantic_publish_hook: parking_lot::Mutex<Option<BeforeSemanticPublishHook>>,
+    /// TEST SEAM: a one-shot callback immediately after the document read that
+    /// followed the former early semantic-cache invalidation in `did_change`.
+    #[cfg(test)]
+    after_early_semantic_invalidation_window_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
+    /// TEST SEAM: a one-shot callback immediately before `did_change`
+    /// reacquires the document shard while preparing its revision commit.
+    #[cfg(test)]
+    before_change_document_reacquire_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
+    /// TEST SEAM: a one-shot callback after semantic admission succeeds while
+    /// the document shard is still held.
+    #[cfg(test)]
+    after_semantic_admission_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
+    /// TEST SEAM: a one-shot callback immediately before semantic cache
+    /// publication. Tests use it to race an admitted result against an edit.
+    #[cfg(test)]
+    before_semantic_cache_publication_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
 }
 
 /// TEST SEAM callback type — see [`DocumentRegistry::after_compile_hook`].
 #[cfg(test)]
 pub(crate) type AfterCompileHook = Box<dyn FnOnce(&DocumentRegistry, &Uri) + Send>;
+
+/// TEST SEAM callback type — `Some` plants a structure candidate at the final
+/// publication join so one identity fence can be discriminated independently.
+#[cfg(test)]
+pub(crate) type BeforeSemanticPublishHook =
+    Box<dyn FnOnce(&DocumentRegistry, &Uri) -> Option<RegisteredFileStructure> + Send>;
 
 /// Tracked state for an open document.
 ///
@@ -91,10 +119,12 @@ pub struct DocumentState {
     pub canonical_id: String,
     /// Current document version (from LSP client).
     pub version: i32,
+    pub document_revision: DocumentRevisionId,
     /// Current source text.
     pub source: Arc<str>,
     /// Precomputed line index for byte-offset ↔ LSP Position conversion.
-    pub line_index: LineIndex,
+    pub line_index: Arc<LineIndex>,
+    pub feature_snapshot: Option<Arc<DocumentFeatureSnapshot>>,
     /// The document's provider projection (rebuilt on each document change):
     /// the source↔provider position mapper plus the discriminant of which
     /// provider buffer this document projects into (`CarrierIde` for a Vue /
@@ -112,25 +142,130 @@ pub struct DocumentState {
     pub virtual_source_uri: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DocumentOpenIncarnation(u64);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DocumentEditGeneration(u64);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DocumentRevisionId {
+    open_incarnation: DocumentOpenIncarnation,
+    edit_generation: DocumentEditGeneration,
+}
+
+impl DocumentRevisionId {
+    fn opened(open_incarnation: u64) -> Self {
+        Self {
+            open_incarnation: DocumentOpenIncarnation(open_incarnation),
+            edit_generation: DocumentEditGeneration(0),
+        }
+    }
+
+    fn edited(self) -> Self {
+        Self {
+            open_incarnation: self.open_incarnation,
+            edit_generation: DocumentEditGeneration(self.edit_generation.0.wrapping_add(1)),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SemanticAnalysisEnvelope {
+    document_revision: DocumentRevisionId,
+    semantic_host_revision: HostSourceRevisionToken,
+    structure: RegisteredFileStructure,
+    analysis: Arc<verter_session::FileAnalysisSnapshot>,
+}
+
+impl SemanticAnalysisEnvelope {
+    pub fn document_revision(&self) -> DocumentRevisionId {
+        self.document_revision
+    }
+
+    pub fn semantic_host_revision(&self) -> HostSourceRevisionToken {
+        self.semantic_host_revision
+    }
+
+    pub fn structure(&self) -> &RegisteredFileStructure {
+        &self.structure
+    }
+
+    pub fn analysis(&self) -> &Arc<verter_session::FileAnalysisSnapshot> {
+        &self.analysis
+    }
+}
+
+#[derive(Clone)]
+pub struct DocumentFeatureSnapshot {
+    document_revision: DocumentRevisionId,
+    client_version: i32,
+    line_index: Arc<LineIndex>,
+    structure: RegisteredFileStructure,
+    projection_host_revision: HostSourceRevisionToken,
+    analysis: Option<SemanticAnalysisEnvelope>,
+}
+
+impl DocumentFeatureSnapshot {
+    pub fn document_revision(&self) -> DocumentRevisionId {
+        self.document_revision
+    }
+
+    pub fn client_version(&self) -> i32 {
+        self.client_version
+    }
+
+    pub fn line_index(&self) -> &Arc<LineIndex> {
+        &self.line_index
+    }
+
+    pub fn structure(&self) -> &RegisteredFileStructure {
+        &self.structure
+    }
+
+    pub fn source(&self) -> &str {
+        self.structure.source().bytes()
+    }
+
+    pub fn source_arc(&self) -> &Arc<str> {
+        self.structure.source().source_arc()
+    }
+
+    pub fn projection_host_revision(&self) -> HostSourceRevisionToken {
+        self.projection_host_revision
+    }
+
+    pub fn analysis(&self) -> Option<&SemanticAnalysisEnvelope> {
+        self.analysis.as_ref()
+    }
+}
+
 /// Immutable identity for one open-document revision.
 ///
 /// LSP versions are not globally unique: clients may reuse a version after a
-/// close/reopen and buggy clients may even replace text without incrementing
-/// it. The source allocation therefore participates in the identity fence.
-/// Every registry write installs a fresh `Arc<str>`, so pointer equality also
-/// distinguishes the close/reopen ABA case when the text is unchanged.
+/// close/reopen and buggy clients may replace text without incrementing it.
+/// The registry-owned revision distinguishes both cases independently of bytes.
 #[derive(Clone)]
 pub(crate) struct DocumentSnapshotIdentity {
     pub(crate) version: i32,
+    revision: DocumentRevisionId,
     source: Arc<str>,
 }
 
 impl DocumentRegistry {
+    fn next_document_revision(&self) -> DocumentRevisionId {
+        DocumentRevisionId::opened(
+            self.next_open_incarnation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
     pub fn new(host: Arc<VerterHost>) -> Self {
         let (semantic_ready_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             host,
             documents: DashMap::new(),
+            next_open_incarnation: std::sync::atomic::AtomicU64::new(1),
             tsx_profile: Arc::new(RwLock::new(CompileProfile {
                 source_map: true,
                 target: verter_session::CompileTarget::IDE
@@ -151,6 +286,16 @@ impl DocumentRegistry {
             after_compile_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             before_projection_install_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            before_semantic_publish_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            after_early_semantic_invalidation_window_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            before_change_document_reacquire_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            after_semantic_admission_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            before_semantic_cache_publication_hook: parking_lot::Mutex::new(None),
         }
     }
 
@@ -342,7 +487,9 @@ impl DocumentRegistry {
             let state = DocumentState {
                 canonical_id: uri_str.clone(),
                 version: params.version,
-                line_index: LineIndex::new(&source, self.encoding()),
+                document_revision: self.next_document_revision(),
+                line_index: Arc::new(LineIndex::new(&source, self.encoding())),
+                feature_snapshot: None,
                 source,
                 projection: None,
                 language_id: params.language_id.clone(),
@@ -355,7 +502,7 @@ impl DocumentRegistry {
 
         let canonical_id = uri_to_canonical_id(&params.uri);
         self.semantic_snapshots.remove(&canonical_id);
-        let source: Arc<str> = Arc::from(params.text.as_str());
+        let submitted_source: Arc<str> = Arc::from(params.text.as_str());
 
         let file_language = self.document_file_language(&params.language_id, &canonical_id);
         // Every framework CARRIER (Vue OR Svelte) projects an IDE TSX file +
@@ -365,10 +512,17 @@ impl DocumentRegistry {
         let result = self.host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
-            source: source.clone(),
+            source: submitted_source.clone(),
             file_language: file_language.clone(),
             aliases: vec![],
         });
+
+        // Every did_open is a new document lifetime, even when the client reuses
+        // its version. Restore the VFS overlay membership removed by did_close so
+        // an interactive repair cannot reload the retired incarnation from disk.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.host
+            .notify_upsert(&canonical_id, Arc::clone(&submitted_source));
 
         // Trigger compilation to populate the TSX cache (upsert only parses).
         // IDE-sync: drive the IDE/TSX surface, NOT the runtime `Main` node — a
@@ -380,7 +534,15 @@ impl DocumentRegistry {
                 .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read())
         });
 
-        let line_index = LineIndex::new(&source, self.encoding());
+        let registered = is_carrier
+            .then(|| self.host.registered_file_structure_snapshot(&canonical_id))
+            .flatten();
+        let source = registered
+            .as_ref()
+            .map(|(structure, _)| Arc::clone(structure.source().source_arc()))
+            .unwrap_or(submitted_source);
+        let line_index = Arc::new(LineIndex::new(&source, self.encoding()));
+        let document_revision = self.next_document_revision();
 
         // Build the document's provider projection.
         // Always build on did_open — even if the host reports `changed: false`
@@ -403,7 +565,7 @@ impl DocumentRegistry {
                 .and_then(|tsx| PositionMapper::from_json(tsx.source_map.as_ref()?).ok())
                 .map(DocumentProviderProjection::carrier_ide)
         } else {
-            Self::build_self_file_projection(&canonical_id, &source, &[], &line_index)
+            Self::build_self_file_projection(&canonical_id, &source, &[], line_index.as_ref())
         };
         if let Some(outcome) = &carrier_compile {
             self.account_carrier_ide_content_verdict(
@@ -418,8 +580,19 @@ impl DocumentRegistry {
         let state = DocumentState {
             canonical_id,
             version: params.version,
-            line_index,
+            document_revision,
+            line_index: Arc::clone(&line_index),
             source,
+            feature_snapshot: registered.map(|(structure, projection_host_revision)| {
+                Arc::new(DocumentFeatureSnapshot {
+                    document_revision,
+                    client_version: params.version,
+                    line_index,
+                    structure,
+                    projection_host_revision,
+                    analysis: None,
+                })
+            }),
             projection,
             language_id: params.language_id.clone(),
             virtual_source_uri: None,
@@ -448,21 +621,30 @@ impl DocumentRegistry {
             if entry.virtual_source_uri.is_some() {
                 let source: Arc<str> = Arc::from(text);
                 entry.version = version;
-                entry.line_index = LineIndex::new(&source, self.encoding());
+                entry.document_revision = entry.document_revision.edited();
+                entry.line_index = Arc::new(LineIndex::new(&source, self.encoding()));
                 entry.source = source;
+                entry.feature_snapshot = None;
                 return HostUpdateResult::no_change(entry.canonical_id.clone());
             }
         }
 
         let canonical_id = uri_to_canonical_id(uri);
-        self.semantic_snapshots.remove(&canonical_id);
-        let source: Arc<str> = Arc::from(text);
+        let submitted_source: Arc<str> = Arc::from(text);
 
         let stored_language_id = self
             .documents
             .get(&uri_str)
             .map(|d| d.language_id.clone())
             .unwrap_or_default();
+        #[cfg(test)]
+        if let Some(hook) = self
+            .after_early_semantic_invalidation_window_hook
+            .lock()
+            .take()
+        {
+            hook(self, uri);
+        }
         let file_language = self.document_file_language(&stored_language_id, &canonical_id);
         // Carrier-general: every framework carrier (Vue OR Svelte) re-compiles
         // its IDE TSX on change.
@@ -472,7 +654,7 @@ impl DocumentRegistry {
         let result = self.host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
-            source: source.clone(),
+            source: submitted_source.clone(),
             file_language,
             aliases: vec![],
         });
@@ -486,7 +668,8 @@ impl DocumentRegistry {
         // §6b.D2b — route through `host.notify_upsert` so the route-only
         // shallow cache is evicted alongside the workspace overlay write.
         #[cfg(not(target_arch = "wasm32"))]
-        self.host.notify_upsert(&canonical_id, source.clone());
+        self.host
+            .notify_upsert(&canonical_id, submitted_source.clone());
 
         // A document commit owes the document's TEXT. It does not owe the IDE
         // TSX, and it must not pay for it per keystroke.
@@ -527,7 +710,19 @@ impl DocumentRegistry {
         // generation-local single-flight collapses concurrent requests onto
         // one compile. A genuinely later request retries, which is required
         // for scheduler cancellation and other transient failures to recover.
-        let new_line_index = LineIndex::new(&source, self.encoding());
+        let registered = is_carrier
+            .then(|| self.host.registered_file_structure_snapshot(&canonical_id))
+            .flatten();
+        let source = registered
+            .as_ref()
+            .map(|(structure, _)| Arc::clone(structure.source().source_arc()))
+            .unwrap_or(submitted_source);
+        let new_line_index = Arc::new(LineIndex::new(&source, self.encoding()));
+
+        #[cfg(test)]
+        if let Some(hook) = self.before_change_document_reacquire_hook.lock().take() {
+            hook(self, uri);
+        }
 
         // Rebuild the document's provider projection.
         let prior_projection = || {
@@ -547,15 +742,28 @@ impl DocumentRegistry {
             // extension → `None`). The prelude offset is content-independent;
             // rebuild it whole-line (rewrite segments get refined by the
             // server once the resolver is ready).
-            Self::build_self_file_projection(&canonical_id, &source, &[], &new_line_index)
+            Self::build_self_file_projection(&canonical_id, &source, &[], new_line_index.as_ref())
         };
 
         if let Some(mut entry) = self.documents.get_mut(&uri_str) {
+            let document_revision = entry.document_revision.edited();
             entry.version = version;
-            entry.line_index = new_line_index;
+            entry.document_revision = document_revision;
+            entry.line_index = Arc::clone(&new_line_index);
             entry.source = source;
             entry.projection = projection;
+            entry.feature_snapshot = registered.map(|(structure, projection_host_revision)| {
+                Arc::new(DocumentFeatureSnapshot {
+                    document_revision,
+                    client_version: version,
+                    line_index: new_line_index,
+                    structure,
+                    projection_host_revision,
+                    analysis: None,
+                })
+            });
         }
+        self.semantic_snapshots.remove(&canonical_id);
 
         result.unwrap_or_else(|e| {
             tracing::error!("upsert failed for {}: {:?}", uri_str, e);
@@ -651,6 +859,7 @@ impl DocumentRegistry {
         let document = self.documents.get(uri.as_str())?;
         Some(DocumentSnapshotIdentity {
             version: document.version,
+            revision: document.document_revision,
             source: Arc::clone(&document.source),
         })
     }
@@ -662,7 +871,7 @@ impl DocumentRegistry {
         snapshot: &DocumentSnapshotIdentity,
     ) -> bool {
         self.documents.get(uri.as_str()).is_some_and(|document| {
-            document.version == snapshot.version && Arc::ptr_eq(&document.source, &snapshot.source)
+            document.version == snapshot.version && document.document_revision == snapshot.revision
         })
     }
 
@@ -679,11 +888,19 @@ impl DocumentRegistry {
         install: impl FnOnce(&DocumentState) -> R,
     ) -> Option<R> {
         let document = self.documents.get(uri.as_str())?;
-        if document.version != snapshot.version || !Arc::ptr_eq(&document.source, &snapshot.source)
-        {
+        if document.version != snapshot.version || document.document_revision != snapshot.revision {
             return None;
         }
         Some(install(&document))
+    }
+
+    /// Return one immutable carrier feature snapshot for the current revision.
+    pub fn feature_snapshot(&self, uri: &Uri) -> Option<Arc<DocumentFeatureSnapshot>> {
+        self.documents
+            .get(uri.as_str())?
+            .feature_snapshot
+            .as_ref()
+            .map(Arc::clone)
     }
 
     /// Get the document's provider projection (the source↔provider mapper +
@@ -930,8 +1147,7 @@ impl DocumentRegistry {
                 .map(DocumentProviderProjection::carrier_ide);
             projection_installed = projection.is_some();
             let mut entry = self.documents.get_mut(uri.as_str())?;
-            if entry.version != attempted.version || !Arc::ptr_eq(&entry.source, &attempted.source)
-            {
+            if entry.version != attempted.version || entry.document_revision != attempted.revision {
                 return None;
             }
             entry.projection = projection;
@@ -1374,6 +1590,53 @@ mod tests {
         registry.did_open(&item);
 
         assert!(!registry.snapshot_identity_is_current(&uri, &captured));
+    }
+
+    #[test]
+    fn carrier_feature_snapshot_is_atomic_and_revision_stamped() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///home/user/App.vue".parse().unwrap();
+        let source = "<template><div>same</div></template>";
+
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 7,
+            text: source.to_string(),
+        });
+        let first = registry.feature_snapshot(&uri).expect("carrier snapshot");
+        assert_eq!(first.client_version(), 7);
+        assert_eq!(first.source(), source);
+        assert!(Arc::ptr_eq(
+            first.source_arc(),
+            first.structure().envelope().source().source_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            first.structure().envelope(),
+            registry
+                .host()
+                .registered_file_structure("/home/user/App.vue")
+                .unwrap()
+                .envelope()
+        ));
+
+        registry.did_change(&uri, 7, source);
+        let edited = registry.feature_snapshot(&uri).expect("edited snapshot");
+        assert_ne!(first.document_revision(), edited.document_revision());
+
+        registry.did_close(&uri);
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 7,
+            text: source.to_string(),
+        });
+        let reopened = registry.feature_snapshot(&uri).expect("reopened snapshot");
+        assert_ne!(edited.document_revision(), reopened.document_revision());
+        assert_ne!(first.document_revision(), reopened.document_revision());
     }
 
     #[test]

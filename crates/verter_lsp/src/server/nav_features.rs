@@ -508,7 +508,7 @@ impl CompletionSourceContext {
 #[derive(Clone)]
 struct CompletionDocumentIdentity {
     version: i32,
-    source: std::sync::Arc<str>,
+    document_revision: crate::documents::DocumentRevisionId,
 }
 
 fn completion_document_identity(
@@ -520,7 +520,7 @@ fn completion_document_identity(
         .get(uri)
         .map(|document| CompletionDocumentIdentity {
             version: document.version,
-            source: std::sync::Arc::clone(&document.source),
+            document_revision: document.document_revision,
         })
 }
 
@@ -530,7 +530,7 @@ fn completion_document_identity_matches(
 ) -> bool {
     match (before, after) {
         (Some(before), Some(after)) => {
-            before.version == after.version && std::sync::Arc::ptr_eq(&before.source, &after.source)
+            before.version == after.version && before.document_revision == after.document_revision
         }
         (None, None) => true,
         _ => false,
@@ -704,7 +704,7 @@ async fn handle_completion_attempt(
         let doc = server.documents.get(uri)?;
         Some(NativeCompletionSnapshot {
             source: doc.source.clone(),
-            line_index: doc.line_index.clone(),
+            line_index: doc.line_index.as_ref().clone(),
             analysis: server.documents.get_analysis(uri),
             blocks: scan_sfc_blocks_for_document(&doc),
             canonical_id: crate::documents::uri_to_canonical_id(uri),

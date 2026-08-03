@@ -392,5 +392,338 @@ async fn optional_semantic_analysis_is_isolated_and_published_asynchronously() {
                 "background {language_id} semantic snapshot should publish without inline request computation"
             )
         });
+        let feature = registry
+            .feature_snapshot(&uri)
+            .expect("carrier feature snapshot");
+        let semantic = feature
+            .analysis()
+            .expect("semantic enrichment must publish into the same snapshot");
+        assert_eq!(semantic.document_revision(), feature.document_revision());
+        assert_eq!(
+            semantic.structure().artifact_id(),
+            feature.structure().artifact_id()
+        );
+        assert!(
+            Arc::ptr_eq(
+                semantic.structure().envelope(),
+                feature.structure().envelope()
+            ),
+            "semantic publication must retain the document's exact sealed envelope"
+        );
+        let semantic_host = registry
+            .semantic_host
+            .read()
+            .clone()
+            .expect("semantic host");
+        assert_eq!(
+            semantic.semantic_host_revision(),
+            semantic_host
+                .registered_source_revision_token(&uri_to_canonical_id(&uri))
+                .expect("semantic Source-stage revision token")
+        );
+        assert_ne!(
+            semantic.semantic_host_revision().host_instance,
+            feature.projection_host_revision().host_instance,
+            "projection and semantic hosts retain distinct identity domains"
+        );
     }
+}
+
+fn semantic_test_registry() -> Arc<DocumentRegistry> {
+    let projection_host = Arc::new(verter_session::VerterHost::new_standalone(
+        verter_session::HostConfig {
+            analysis_scope: Some(verter_semantic::analysis::AnalysisScope::IMPORTS),
+            ..verter_session::HostConfig::default()
+        },
+    ));
+    let registry = Arc::new(DocumentRegistry::new(projection_host));
+    registry.set_semantic_analysis_enabled(true);
+    registry
+}
+
+const SEMANTIC_REVISION_A: &str =
+    "<script setup lang=\"ts\">\nconst value = 'a'\n</script>\n<template>{{ value }}</template>";
+const SEMANTIC_REVISION_B: &str =
+    "<script setup lang=\"ts\">\nconst value = 'b'\n</script>\n<template>{{ value }}</template>";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn in_flight_semantic_completion_is_rejected_after_edit() {
+    let registry = semantic_test_registry();
+    let uri: Uri = "file:///workspace/Edit.vue".parse().unwrap();
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SEMANTIC_REVISION_A.to_string(),
+    });
+    let captured = registry
+        .feature_snapshot(&uri)
+        .expect("captured feature snapshot");
+
+    registry.set_before_semantic_publish_hook_for_test(Box::new(|registry, uri| {
+        let _ = registry.did_change(uri, 2, SEMANTIC_REVISION_B);
+        Some(
+            registry
+                .feature_snapshot(uri)
+                .expect("edited feature snapshot inside publication seam")
+                .structure()
+                .clone(),
+        )
+    }));
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+
+    let current = registry
+        .feature_snapshot(&uri)
+        .expect("current feature snapshot");
+    assert_ne!(captured.document_revision(), current.document_revision());
+    assert_eq!(current.client_version(), 2);
+    assert_eq!(current.source(), SEMANTIC_REVISION_B);
+    assert!(
+        current.analysis().is_none(),
+        "the stale completion must never attach to the edited document"
+    );
+    assert!(
+        registry
+            .cached_semantic_analysis(&uri_to_canonical_id(&uri))
+            .is_none(),
+        "the stale completion must not enter the semantic snapshot cache"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn committed_edit_invalidates_post_admission_semantic_publication() {
+    let registry = semantic_test_registry();
+    let uri: Uri = "file:///workspace/PostAdmissionEdit.vue".parse().unwrap();
+    let canonical_id = uri_to_canonical_id(&uri);
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SEMANTIC_REVISION_A.to_string(),
+    });
+    let mut ready = registry.subscribe_semantic_ready();
+
+    let (early_window_reached_tx, early_window_reached_rx) = std::sync::mpsc::channel();
+    let (resume_change_tx, resume_change_rx) = std::sync::mpsc::channel();
+    registry.set_after_early_semantic_invalidation_window_hook_for_test(Box::new(move |_, _| {
+        early_window_reached_tx
+            .send(())
+            .expect("test observes the former early invalidation window");
+        resume_change_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("semantic admission releases the edit");
+    }));
+
+    let (reacquire_attempted_tx, reacquire_attempted_rx) = std::sync::mpsc::channel();
+    let publication_canonical_id = canonical_id.clone();
+    registry.set_before_change_document_reacquire_hook_for_test(Box::new(move |registry, _| {
+        reacquire_attempted_tx
+            .send(())
+            .expect("test observes the document shard reacquire attempt");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !registry
+            .semantic_snapshots
+            .contains_key(&publication_canonical_id)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "old semantic publication reaches the cache"
+            );
+            std::thread::yield_now();
+        }
+    }));
+
+    let edit_registry = Arc::clone(&registry);
+    let edit_uri = uri.clone();
+    let edit = std::thread::spawn(move || {
+        let _ = edit_registry.did_change(&edit_uri, 2, SEMANTIC_REVISION_B);
+    });
+    early_window_reached_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("edit reaches the former early invalidation window");
+
+    registry.set_after_semantic_admission_hook_for_test(Box::new(move |_, _| {
+        resume_change_tx
+            .send(())
+            .expect("release edit after semantic admission");
+        reacquire_attempted_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("edit reaches the blocked document shard reacquire");
+    }));
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+    edit.join().expect("edit thread joins");
+
+    let current = registry
+        .feature_snapshot(&uri)
+        .expect("edited feature snapshot");
+    assert_eq!(current.client_version(), 2);
+    assert_eq!(current.source(), SEMANTIC_REVISION_B);
+    assert!(
+        current.analysis().is_none(),
+        "the old semantic result must not attach to the edited document"
+    );
+    let published = ready
+        .try_recv()
+        .expect("the forced old task publishes ready");
+    assert_eq!(published.canonical_id, canonical_id);
+    assert_eq!(published.version, 1);
+    assert!(
+        registry.cached_semantic_analysis(&canonical_id).is_none(),
+        "the committed edit must invalidate the old ready publication"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admitted_semantic_publication_is_atomic_with_edit_invalidation() {
+    let registry = semantic_test_registry();
+    let uri: Uri = "file:///workspace/AtomicSemanticPublication.vue"
+        .parse()
+        .unwrap();
+    let canonical_id = uri_to_canonical_id(&uri);
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SEMANTIC_REVISION_A.to_string(),
+    });
+    let mut ready = registry.subscribe_semantic_ready();
+
+    let (early_window_reached_tx, early_window_reached_rx) = std::sync::mpsc::channel();
+    let (resume_change_tx, resume_change_rx) = std::sync::mpsc::channel();
+    registry.set_after_early_semantic_invalidation_window_hook_for_test(Box::new(move |_, _| {
+        early_window_reached_tx
+            .send(())
+            .expect("test observes the former early invalidation window");
+        resume_change_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("semantic admission releases the edit");
+    }));
+
+    let (reacquire_attempted_tx, reacquire_attempted_rx) = std::sync::mpsc::channel();
+    registry.set_before_change_document_reacquire_hook_for_test(Box::new(move |_, _| {
+        reacquire_attempted_tx
+            .send(())
+            .expect("test observes the document shard reacquire attempt");
+    }));
+
+    let (edit_committed_tx, edit_committed_rx) = std::sync::mpsc::channel();
+    let edit_registry = Arc::clone(&registry);
+    let edit_uri = uri.clone();
+    let edit = std::thread::spawn(move || {
+        let _ = edit_registry.did_change(&edit_uri, 2, SEMANTIC_REVISION_B);
+        let _ = edit_committed_tx.send(());
+    });
+    early_window_reached_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("edit reaches the former early invalidation window");
+
+    registry.set_after_semantic_admission_hook_for_test(Box::new(move |_, _| {
+        resume_change_tx
+            .send(())
+            .expect("release edit after semantic admission");
+        reacquire_attempted_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("edit reaches the document shard reacquire attempt");
+    }));
+    let edit_committed_before_publication = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_early_commit = Arc::clone(&edit_committed_before_publication);
+    registry.set_before_semantic_cache_publication_hook_for_test(Box::new(move |_, _| {
+        if edit_committed_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok()
+        {
+            observed_early_commit.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }));
+
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+    edit.join().expect("edit thread joins");
+
+    let current = registry
+        .feature_snapshot(&uri)
+        .expect("edited feature snapshot");
+    assert_eq!(current.client_version(), 2);
+    assert_eq!(current.source(), SEMANTIC_REVISION_B);
+    assert!(current.analysis().is_none());
+    assert!(
+        registry.cached_semantic_analysis(&canonical_id).is_none(),
+        "revision-A cache publication must not survive revision-B commit and invalidation"
+    );
+    assert!(
+        !edit_committed_before_publication.load(std::sync::atomic::Ordering::SeqCst),
+        "revision-B commit and invalidation must not split revision-A admission from publication"
+    );
+    let published = ready
+        .try_recv()
+        .expect("the admitted semantic task publishes ready before the edit commits");
+    assert_eq!(published.canonical_id, canonical_id);
+    assert_eq!(published.version, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identical_text_version_close_reopen_rejects_old_semantic_completion() {
+    let registry = semantic_test_registry();
+    let uri: Uri = "file:///workspace/Reopen.vue".parse().unwrap();
+    let item = TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 7,
+        text: SEMANTIC_REVISION_A.to_string(),
+    };
+    let _ = registry.did_open(&item);
+    let captured = registry
+        .feature_snapshot(&uri)
+        .expect("captured feature snapshot");
+    let reopen_item = item.clone();
+
+    registry.set_before_semantic_publish_hook_for_test(Box::new(move |registry, uri| {
+        registry.did_close(uri);
+        let _ = registry.did_open(&reopen_item);
+        Some(
+            registry
+                .feature_snapshot(uri)
+                .expect("reopened feature snapshot inside publication seam")
+                .structure()
+                .clone(),
+        )
+    }));
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+
+    let reopened = registry
+        .feature_snapshot(&uri)
+        .expect("reopened feature snapshot");
+    assert_ne!(captured.document_revision(), reopened.document_revision());
+    assert_eq!(reopened.client_version(), captured.client_version());
+    assert_eq!(reopened.source(), captured.source());
+    assert_ne!(
+        reopened.structure().artifact_id(),
+        captured.structure().artifact_id(),
+        "reopen advances the projection host's source identity"
+    );
+    assert!(
+        reopened.analysis().is_none(),
+        "the previous lifetime's completion must never attach after reopen"
+    );
+    assert!(
+        registry
+            .cached_semantic_analysis(&uri_to_canonical_id(&uri))
+            .is_none(),
+        "the previous lifetime's completion must not enter the semantic snapshot cache"
+    );
 }

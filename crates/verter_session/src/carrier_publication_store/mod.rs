@@ -211,7 +211,7 @@ pub struct RegisteredFileStructure {
 }
 
 impl RegisteredFileStructure {
-    pub fn new(envelope: Arc<FrameworkArtifactEnvelope>) -> Self {
+    pub(crate) fn new(envelope: Arc<FrameworkArtifactEnvelope>) -> Self {
         Self { envelope }
     }
     pub fn envelope(&self) -> &Arc<FrameworkArtifactEnvelope> {
@@ -219,6 +219,20 @@ impl RegisteredFileStructure {
     }
     pub fn artifact(&self) -> &Arc<FrameworkParseArtifact> {
         self.envelope.artifact()
+    }
+
+    pub fn artifact_id(&self) -> &FrameworkArtifactId {
+        self.envelope.id()
+    }
+
+    pub fn source(&self) -> &RegisteredSourceSnapshot {
+        self.envelope.source()
+    }
+
+    pub fn inventory(
+        &self,
+    ) -> &Arc<verter_language::parse_artifact::carrier_inventory::CarrierBlockInventory> {
+        self.envelope.inventory()
     }
 }
 

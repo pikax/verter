@@ -74,7 +74,7 @@ fn open(source: &str) -> Opened {
     let _ = registry.did_open(&item);
 
     let ide = registry.get_ide(&uri).expect("LSP must produce IDE TSX");
-    let vue_li = registry.get(&uri).unwrap().line_index.clone();
+    let vue_li = registry.get(&uri).unwrap().line_index.as_ref().clone();
     let tsx_li = LineIndex::new(&ide.code, registry.encoding());
     let mapper = registry.get_position_mapper(&uri);
     Opened {

@@ -56,9 +56,8 @@ fn merge_semantic_prop_definitions(
 
 #[derive(Clone)]
 pub(super) struct SemanticSnapshot {
-    pub(super) version: i32,
-    pub(super) source: Arc<str>,
-    pub(super) analysis: verter_session::FileAnalysisSnapshot,
+    pub(super) document_revision: DocumentRevisionId,
+    pub(super) analysis: Arc<verter_session::FileAnalysisSnapshot>,
 }
 
 #[derive(Clone, Debug)]
@@ -135,18 +134,21 @@ impl DocumentRegistry {
     /// by version + source identity checks, so handlers only ever observe a fully
     /// committed immutable snapshot and never wait for its construction.
     pub fn schedule_semantic_analysis(self: &Arc<Self>, uri: &Uri) {
+        let _ = self.spawn_semantic_analysis(uri);
+    }
+
+    fn spawn_semantic_analysis(self: &Arc<Self>, uri: &Uri) -> Option<tokio::task::JoinHandle<()>> {
         if !self.semantic_analysis_enabled() {
-            return;
+            return None;
         }
-        let Some(document) = self.documents.get(uri.as_str()) else {
-            return;
-        };
+        let document = self.documents.get(uri.as_str())?;
         if document.virtual_source_uri.is_some() {
-            return;
+            return None;
         }
         let uri_key = uri.as_str().to_string();
         let canonical_id = document.canonical_id.clone();
         let version = document.version;
+        let document_revision = document.document_revision;
         let source = Arc::clone(&document.source);
         let file_language = self.document_file_language(&document.language_id, &canonical_id);
         let is_framework_carrier = file_language.is_framework_carrier();
@@ -156,19 +158,19 @@ impl DocumentRegistry {
         drop(document);
 
         let registry = Arc::clone(self);
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             #[cfg(not(test))]
             tokio::time::sleep(std::time::Duration::from_millis(750)).await;
 
             if !registry.semantic_analysis_enabled()
-                || !registry.document_snapshot_is_current(&uri_key, version, &source)
+                || !registry.document_snapshot_is_current(&uri_key, document_revision)
             {
                 return;
             }
             let serial = Arc::clone(&registry.semantic_serial);
             let _guard = serial.lock().await;
             if !registry.semantic_analysis_enabled()
-                || !registry.document_snapshot_is_current(&uri_key, version, &source)
+                || !registry.document_snapshot_is_current(&uri_key, document_revision)
             {
                 return;
             }
@@ -273,38 +275,157 @@ impl DocumentRegistry {
                         analysis.template = Some(Arc::new(template));
                     }
                 }
-                Some(analysis)
+                let semantic_structure = is_framework_carrier
+                    .then(|| host.registered_file_structure_snapshot(&work_canonical))
+                    .flatten();
+                Some((analysis, semantic_structure))
             })
             .await
             .ok()
             .flatten();
 
-            if let Some(analysis) = analysis {
-                if registry.semantic_analysis_enabled()
-                    && registry.document_snapshot_is_current(&uri_key, version, &source)
-                {
-                    registry.semantic_snapshots.insert(
-                        canonical_id.clone(),
-                        SemanticSnapshot {
-                            version,
-                            source,
-                            analysis,
-                        },
-                    );
-                    let _ = registry.semantic_ready_tx.send(SemanticReady {
-                        canonical_id,
-                        uri: uri_key,
-                        version,
-                    });
+            if let Some((analysis, semantic_structure)) = analysis {
+                #[cfg(test)]
+                let semantic_structure = {
+                    let mut semantic_structure = semantic_structure;
+                    if let Some(hook) = registry.before_semantic_publish_hook.lock().take() {
+                        let hook_uri: Uri = uri_key.parse().expect("scheduled URI remains valid");
+                        if let Some(planted_structure) = hook(&registry, &hook_uri) {
+                            semantic_structure =
+                                semantic_structure.map(|(_, semantic_host_revision)| {
+                                    (planted_structure, semantic_host_revision)
+                                });
+                        }
+                    }
+                    semantic_structure
+                };
+
+                if !registry.semantic_analysis_enabled() {
+                    return;
                 }
+                let analysis = Arc::new(analysis);
+                let Some(mut document) = registry.documents.get_mut(&uri_key) else {
+                    return;
+                };
+                if document.document_revision != document_revision {
+                    return;
+                }
+                if is_framework_carrier {
+                    let (Some(feature), Some((structure, semantic_host_revision))) =
+                        (document.feature_snapshot.as_ref(), semantic_structure)
+                    else {
+                        return;
+                    };
+                    if structure.artifact_id() != feature.structure.artifact_id() {
+                        return;
+                    }
+                    let same_envelope =
+                        Arc::ptr_eq(structure.envelope(), feature.structure.envelope());
+                    debug_assert!(
+                        same_envelope,
+                        "validated semantic and document artifact IDs must retain one sealed envelope"
+                    );
+                    if !same_envelope {
+                        return;
+                    }
+                    document.feature_snapshot = Some(Arc::new(DocumentFeatureSnapshot {
+                        document_revision,
+                        client_version: document.version,
+                        line_index: Arc::clone(&document.line_index),
+                        structure: feature.structure.clone(),
+                        projection_host_revision: feature.projection_host_revision,
+                        analysis: Some(SemanticAnalysisEnvelope {
+                            document_revision,
+                            semantic_host_revision,
+                            structure,
+                            analysis: Arc::clone(&analysis),
+                        }),
+                    }));
+                }
+                #[cfg(test)]
+                if let Some(hook) = registry.after_semantic_admission_hook.lock().take() {
+                    let hook_uri: Uri = uri_key.parse().expect("scheduled URI remains valid");
+                    hook(&registry, &hook_uri);
+                }
+                #[cfg(test)]
+                if let Some(hook) = registry
+                    .before_semantic_cache_publication_hook
+                    .lock()
+                    .take()
+                {
+                    let hook_uri: Uri = uri_key.parse().expect("scheduled URI remains valid");
+                    hook(&registry, &hook_uri);
+                }
+                registry.semantic_snapshots.insert(
+                    canonical_id.clone(),
+                    SemanticSnapshot {
+                        document_revision,
+                        analysis,
+                    },
+                );
+                let _ = registry.semantic_ready_tx.send(SemanticReady {
+                    canonical_id,
+                    uri: uri_key,
+                    version,
+                });
+                drop(document);
             }
-        });
+        }))
     }
 
-    fn document_snapshot_is_current(&self, uri: &str, version: i32, source: &Arc<str>) -> bool {
+    #[cfg(test)]
+    pub(super) fn set_before_semantic_publish_hook_for_test(
+        &self,
+        hook: super::BeforeSemanticPublishHook,
+    ) {
+        *self.before_semantic_publish_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_after_early_semantic_invalidation_window_hook_for_test(
+        &self,
+        hook: super::AfterCompileHook,
+    ) {
+        *self.after_early_semantic_invalidation_window_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_before_change_document_reacquire_hook_for_test(
+        &self,
+        hook: super::AfterCompileHook,
+    ) {
+        *self.before_change_document_reacquire_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_after_semantic_admission_hook_for_test(&self, hook: super::AfterCompileHook) {
+        *self.after_semantic_admission_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_before_semantic_cache_publication_hook_for_test(
+        &self,
+        hook: super::AfterCompileHook,
+    ) {
+        *self.before_semantic_cache_publication_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn schedule_semantic_analysis_for_test(
+        self: &Arc<Self>,
+        uri: &Uri,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        self.spawn_semantic_analysis(uri)
+    }
+
+    fn document_snapshot_is_current(
+        &self,
+        uri: &str,
+        document_revision: DocumentRevisionId,
+    ) -> bool {
         self.documents
             .get(uri)
-            .is_some_and(|document| document.version == version && document.source == *source)
+            .is_some_and(|document| document.document_revision == document_revision)
     }
 
     /// Return optional full enrichment when current, otherwise the bounded BUILD
@@ -313,8 +434,8 @@ impl DocumentRegistry {
         let canonical_id = self.get_canonical_id(uri)?;
         if let Some(document) = self.documents.get(uri.as_str()) {
             if let Some(snapshot) = self.semantic_snapshots.get(&canonical_id) {
-                if snapshot.version == document.version && snapshot.source == document.source {
-                    return Some(snapshot.analysis.clone());
+                if snapshot.document_revision == document.document_revision {
+                    return Some(snapshot.analysis.as_ref().clone());
                 }
             }
         }
@@ -335,7 +456,7 @@ impl DocumentRegistry {
         self.semantic_analysis_enabled()
             .then(|| self.semantic_snapshots.get(canonical_id))
             .flatten()
-            .map(|snapshot| snapshot.analysis.clone())
+            .map(|snapshot| snapshot.analysis.as_ref().clone())
     }
 }
 
