@@ -8,7 +8,7 @@ use std::path::Path;
 use verter_audit::record::RequestAuditRecord;
 
 use crate::io::load_records_from_dir;
-use crate::summary::kind_label;
+use crate::summary::{kind_label, target_label};
 use crate::OutputFormat;
 
 /// Run the `record` subcommand. Returns a process exit code: `0` on
@@ -75,7 +75,11 @@ pub(crate) fn run(request_id: &str, dir: &Path, format: OutputFormat) -> i32 {
 fn render_text(out: &mut impl Write, source_path: &str, record: &RequestAuditRecord) {
     let _ = writeln!(out, "verter-audit-inspect record  source={source_path}");
     let _ = writeln!(out, "  request_id:        {}", record.request_id);
-    let _ = writeln!(out, "  canonical_id:      {}", record.canonical_id);
+    let _ = writeln!(
+        out,
+        "  target:             {}",
+        target_label(record.target_identity.as_ref(), &record.canonical_id)
+    );
     let _ = writeln!(out, "  kind:              {}", kind_label(&record.kind));
     let _ = writeln!(
         out,

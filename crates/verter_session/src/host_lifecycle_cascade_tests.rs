@@ -133,7 +133,7 @@ fn alias_keyed_set_exact_resolutions_behaves_like_canonical_keyed() {
     // (a) The workspace exact table must land under the CANONICAL id:
     // canonical-keyed import resolution sees the pushed route.
     assert_eq!(
-        host.resolve_import_via_workspace(canonical, "exact-pkg")
+        host.resolve_import_transient(canonical, "exact-pkg")
             .as_deref(),
         Some("/node_modules/exact-pkg/index.d.ts"),
         "alias-keyed set_exact_resolutions must store the exact table under \
@@ -173,7 +173,7 @@ fn set_exact_resolutions_canonicalizes_resolution_target_ids() {
     );
 
     assert_eq!(
-        host.resolve_import_via_workspace(canonical, "win-pkg")
+        host.resolve_import_transient(canonical, "win-pkg")
             .as_deref(),
         Some("c:/proj/node_modules/win-pkg/index.d.ts"),
         "set_exact_resolutions must canonicalize resolution target ids on \

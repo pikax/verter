@@ -2,21 +2,16 @@ use super::*;
 
 /// Apply the MERGED-EDIT COMPLETENESS GATE to a cross-file rename result.
 ///
-/// - [`ChildPropRenameClass::Confirmed`]: the merged `WorkspaceEdit` MUST satisfy
-///   [`workspace_edit_satisfies_child_prop_rename`] (edits BOTH the prop
-///   declaration AND the parent `.vue` usage at their EXACT full ranges). If it does
-///   not — including a [`ChildPropDeclarationProof::Unknown`] declaration (no
-///   resolved target to prove) — the whole rename fails closed → `None`. This is
-///   the fix for the usage-only-partial gap: a confirmed child-prop rename whose
-///   merged edit lacks the declaration (e.g. tsgo, synthesis leg could not be
-///   produced; or an unresolvable imported type) returns NO edit rather than a
-///   usage-only partial. Provider-AGNOSTIC: a result whose declaration leg already
-///   lands (a tsserver native leg, or a provider's imported-member edit) passes even
-///   when Verter's own synthesis could not locate it (no `is_tsgo`/`is_tsserver`
-///   branch).
+/// - [`ChildPropRenameClass::Confirmed`]: always refuse. Declaration plus the
+///   initiating parent proves only two positive occurrences; it cannot prove
+///   that no sibling parent still uses the old prop name. The early shared
+///   rename-plan classification normally prevents this class from reaching the
+///   provider at all; this gate is the defense-in-depth boundary for any missed
+///   classification.
 /// - [`ChildPropRenameClass::NotChildProp`]: do NOT gate. The provider's own merged
-///   result is returned untouched — not a confirmed cross-file child-prop rename, so
-///   Verter must not suppress an otherwise-valid provider result.
+///   result is returned untouched. Public prop-shaped cursors are classified
+///   before this point, including unresolved component usages, so this arm is
+///   reserved for ordinary non-prop renames.
 ///
 /// Inspects ONLY the merged source `WorkspaceEdit`, so it is a pure function of
 /// `(merged, class, new_name)` — unit-testable without a live provider.
@@ -25,33 +20,11 @@ pub(super) fn gate_cross_file_child_prop_rename(
     rename_class: &ChildPropRenameClass,
     new_name: &str,
 ) -> Option<WorkspaceEdit> {
-    let ChildPropRenameClass::Confirmed(target) = rename_class else {
+    let ChildPropRenameClass::Confirmed(_) = rename_class else {
         return merged;
     };
-    // The resolved declaration target's URI + range — `Unknown` yields no URI/range
-    // (a `None` range fails the per-leg proof, so the whole gate fails closed).
-    let (expected_decl_uri, expected_decl_range) = match &target.declaration {
-        ChildPropDeclarationProof::Known { uri, range, .. } => (Some(uri), *range),
-        ChildPropDeclarationProof::Unknown => (None, None),
-    };
-    let satisfied = merged
-        .as_ref()
-        .zip(expected_decl_uri)
-        .is_some_and(|(edit, decl_uri)| {
-            workspace_edit_satisfies_child_prop_rename(
-                edit,
-                decl_uri,
-                expected_decl_range,
-                &target.usage.parent_uri,
-                target.expected_parent_usage_range,
-                new_name,
-            )
-        });
-    if satisfied {
-        merged
-    } else {
-        None
-    }
+    let _ = new_name;
+    None
 }
 
 /// The dropped provider locations NO completeness gate covers — the ones that
@@ -117,11 +90,10 @@ pub(super) fn unguarded_rename_drops<'a>(
 
 /// Canonicalize and prove the final rename transaction, or fail closed.
 ///
-/// 1. MERGED-EDIT COMPLETENESS GATE: for a CONFIRMED cross-file child-prop
-///    rename the emitted `WorkspaceEdit` must edit BOTH the prop declaration AND
-///    the parent `.vue` usage at their EXACT full ranges, or the whole rename
-///    returns no edit — never a usage-only / decl-only partial. A `NotChildProp`
-///    result passes through untouched. See [`gate_cross_file_child_prop_rename`].
+/// 1. CROSS-FILE CHILD-PROP DEFENSE: every CONFIRMED child-prop result is
+///    refused. Declaration + initiating parent cannot prove sibling-parent
+///    completeness. A `NotChildProp` result passes through untouched; the early
+///    public-prop classifier keeps prop-shaped cursors out of that arm.
 /// 2. Dedupe, folding every URI spelling of the request's file onto `uri`.
 /// 3. SAME-FILE COMPLETENESS GATE: see [`same_file_rename_is_complete`].
 pub(super) fn finalize_rename_transaction(
@@ -185,9 +157,8 @@ pub(super) fn finalize_rename_transaction(
 /// therefore also vouches for no dropped companion leg
 /// ([`unguarded_rename_drops`]).
 ///
-/// A CONFIRMED cross-file child-prop rename is exempt: it re-anchors the
-/// initiating usage edit itself and is already held to the stricter
-/// declaration+usage proof of [`gate_cross_file_child_prop_rename`].
+/// A CONFIRMED cross-file child-prop rename is exempt from this second proof
+/// because [`gate_cross_file_child_prop_rename`] has already refused it.
 pub(super) fn same_file_rename_is_complete(
     emitted: Option<&WorkspaceEdit>,
     uri: &Uri,

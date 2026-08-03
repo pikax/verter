@@ -21,7 +21,10 @@
 //! rename to skip any of its own checks.
 
 use tower_lsp_server::ls_types::{Position, Range, Uri, WorkspaceEdit};
+use verter_span::LspPosition;
 
+use crate::documents::line_index::LineIndex;
+use crate::documents::position_map::PositionMapper;
 use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::features::rename::{
     classify_rename_target, MarkupOccurrenceInventory, RenameTarget, RenameTargetClass,
@@ -48,6 +51,39 @@ pub(super) enum RenameAdmission {
     Decline,
     /// Fail closed with a user-visible reason and NO edit.
     Refuse(tower_lsp_server::jsonrpc::Error),
+}
+
+pub(crate) enum SvelteRenameScriptFactState<'a> {
+    ExactSyntax(&'a verter_semantic::analysis::framework_facts::svelte::ExactSveltePropsCalls),
+    SyntaxIncomplete,
+    Unavailable,
+    NotApplicable,
+}
+
+impl<'a> SvelteRenameScriptFactState<'a> {
+    pub(crate) fn from_svelte_evidence(
+        evidence: &'a verter_session::framework::script_facts::ScriptFactEvidence<
+            verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+        >,
+    ) -> Self {
+        match evidence {
+            verter_session::framework::script_facts::ScriptFactEvidence::Exact(exact) => {
+                Self::ExactSyntax(exact.facts().syntax().props_calls())
+            }
+            verter_session::framework::script_facts::ScriptFactEvidence::Partial(partial) => {
+                match partial.exact_syntax() {
+                    Some(syntax) => Self::ExactSyntax(syntax.props_calls()),
+                    None => Self::SyntaxIncomplete,
+                }
+            }
+            verter_session::framework::script_facts::ScriptFactEvidence::Unavailable(_) => {
+                Self::Unavailable
+            }
+            verter_session::framework::script_facts::ScriptFactEvidence::NotApplicable(_) => {
+                Self::NotApplicable
+            }
+        }
+    }
 }
 
 /// The shared rename admission gate.
@@ -197,6 +233,14 @@ impl RenameTargetResolution {
         let target = (|| {
             let doc = server.documents.get(uri)?;
             let analysis = server.documents.get_analysis(uri);
+            let is_svelte = carrier_language_for(&doc.canonical_id)
+                .is_some_and(|language| language.is_svelte());
+            let svelte_script_facts = is_svelte.then(|| {
+                server
+                    .documents
+                    .host()
+                    .resolve_svelte_script_facts(&doc.canonical_id)
+            });
             // Post-read validation (fail closed): only an analysis proven to
             // describe THESE bytes may classify THIS cursor.
             let host_source = server.documents.host().get_source(&doc.canonical_id)?;
@@ -216,6 +260,50 @@ impl RenameTargetResolution {
                 analysis.as_ref(),
                 &doc.line_index,
             );
+            let svelte_script_facts_refuse = match svelte_script_facts
+                .as_ref()
+                .map(SvelteRenameScriptFactState::from_svelte_evidence)
+            {
+                Some(SvelteRenameScriptFactState::ExactSyntax(props_calls)) => {
+                    doc.line_index
+                        .position_to_offset(position)
+                        .is_some_and(|offset| {
+                            svelte_props_call_requires_public_refusal_at(props_calls, offset)
+                        })
+                        || svelte_native_edit_touches_public_key(
+                            &target,
+                            props_calls,
+                            &doc.line_index,
+                        )
+                }
+                Some(
+                    SvelteRenameScriptFactState::SyntaxIncomplete
+                    | SvelteRenameScriptFactState::Unavailable
+                    | SvelteRenameScriptFactState::NotApplicable,
+                ) => true,
+                None => false,
+            };
+            // Typed public members and legacy `export let` declarations are
+            // covered by the public-API projection. Untyped `$props()` roles
+            // come from their exact producer-owned key/binding inventories. A
+            // native same-name occurrence set that reaches any exact public-key
+            // span is unsafe as a whole even when the cursor names another
+            // symbol, so it takes the same refusal path.
+            if is_svelte
+                && (svelte_script_facts_refuse
+                    || svelte_public_prop_at(
+                        server,
+                        &doc.canonical_id,
+                        &doc.source,
+                        &doc.line_index,
+                        position,
+                    ))
+            {
+                target.class = RenameTargetClass::PublicComponentProp;
+                target.same_file_ranges.clear();
+                target.same_file_enumeration =
+                    SameFileEnumeration::Partial(UnenumeratedRegion::NoOccurrenceInventory);
+            }
             // THE ONE grant of the markup conjunct. The classifier leaves it
             // ungranted (fail-closed); this owner knows the file's carrier and so
             // is the only place that can assert the capability.
@@ -235,6 +323,11 @@ impl RenameTargetResolution {
     /// revoke the native edit's completeness.
     pub(super) fn is_css(&self) -> bool {
         matches!(self.target.class, RenameTargetClass::Css)
+    }
+
+    /// Whether this cursor is positively classified as a public component prop.
+    pub(super) fn is_public_component_prop(&self) -> bool {
+        matches!(self.target.class, RenameTargetClass::PublicComponentProp)
     }
 
     /// What the emitted transaction must prove about the REQUESTED file — the
@@ -269,6 +362,7 @@ impl RenameTargetResolution {
             SameFileEnumeration::Complete
         );
         match (self.target.class, self.target.anchor) {
+            (RenameTargetClass::PublicComponentProp, _) => SameFileProof::Unprovable,
             (RenameTargetClass::Native | RenameTargetClass::Css, _) => SameFileProof::Requires {
                 ranges: self.target.same_file_ranges.clone(),
                 enumerates_whole_file: whole_file,
@@ -312,6 +406,9 @@ impl RenameTargetResolution {
     /// The prepare projection of this resolution — see [`RenamePlan`].
     pub(super) fn prepare_plan(&self) -> RenamePlan {
         match (self.target.class, self.target.anchor) {
+            // No offer: the editor must never begin a public-prop rename the
+            // direct request is required to refuse.
+            (RenameTargetClass::PublicComponentProp, _) => RenamePlan::Decline,
             // Verter's own analysis is the authority and its range is exact.
             (RenameTargetClass::Native | RenameTargetClass::Css, Some(range)) => {
                 RenamePlan::Offer(range)
@@ -325,6 +422,109 @@ impl RenameTargetResolution {
             _ => RenamePlan::Decline,
         }
     }
+}
+
+/// Whether an exact `$props()` key/binding span requires public-prop refusal.
+///
+/// A public key always refuses, including a shorthand span that also appears
+/// as a local binding. A local-only binding refuses only when its call's key
+/// set is open. Positions in neither inventory are unchanged.
+fn svelte_props_call_requires_public_refusal_at<E>(facts: &E, offset: u32) -> bool
+where
+    E: verter_semantic::analysis::framework_facts::NegativeEvidence<
+        Observation = verter_semantic::analysis::framework_facts::svelte::SveltePropsCall,
+    >,
+{
+    facts.observations().iter().any(|props_call| {
+        props_call
+            .public_keys
+            .iter()
+            .any(|key| key.span.contains_offset(offset))
+            || (props_call.has_rest
+                && props_call
+                    .local_bindings
+                    .iter()
+                    .any(|binding| binding.span.contains_offset(offset)))
+    })
+}
+
+/// Whether Verter's proposed native same-file edit set intersects an exact
+/// `$props()` public-key span.
+///
+/// Native occurrence collection is spelling-based within the file. An
+/// unrelated symbol with the same spelling can therefore propose an edit at a
+/// public key. The producer-owned public-key spans are the safety boundary: any
+/// intersection refuses the whole rename rather than changing component API.
+fn svelte_native_edit_touches_public_key<E>(
+    target: &RenameTarget,
+    facts: &E,
+    line_index: &LineIndex,
+) -> bool
+where
+    E: verter_semantic::analysis::framework_facts::NegativeEvidence<
+        Observation = verter_semantic::analysis::framework_facts::svelte::SveltePropsCall,
+    >,
+{
+    if target.class != RenameTargetClass::Native {
+        return false;
+    }
+
+    target.same_file_ranges.iter().any(|range| {
+        let Some(start) = line_index.position_to_offset(&range.start) else {
+            return false;
+        };
+        let Some(end) = line_index.position_to_offset(&range.end) else {
+            return false;
+        };
+
+        facts.observations().iter().any(|props_call| {
+            props_call
+                .public_keys
+                .iter()
+                .any(|key| start < key.span.end && key.span.start < end)
+        })
+    })
+}
+
+/// Whether the existing Svelte public-API projection maps the authored cursor
+/// as a local public prop name.
+///
+/// The projector emits source-map runs only for byte-verified prop-name
+/// anchors. Mapping succeeds only inside one such exact run. Convert the
+/// negotiated editor position through the document's byte offset into UTF-16,
+/// which is the source-map coordinate convention.
+fn svelte_public_prop_at(
+    server: &VerterLanguageServer,
+    canonical_id: &str,
+    source: &str,
+    line_index: &LineIndex,
+    position: &Position,
+) -> bool {
+    let Some(offset) = line_index.position_to_offset(position) else {
+        return false;
+    };
+    let Some(utf16_position) = LineIndex::new_utf16(source).offset_to_position(offset) else {
+        return false;
+    };
+    let Some(source_map) = server
+        .documents
+        .host()
+        .get_public_api_projection(canonical_id)
+        .ok()
+        .flatten()
+        .and_then(|projection| projection.response.source_map)
+    else {
+        return false;
+    };
+    let Ok(mapper) = PositionMapper::from_json(&source_map) else {
+        return false;
+    };
+    mapper
+        .carrier_to_tsx(LspPosition::new(
+            utf16_position.line,
+            utf16_position.character,
+        ))
+        .is_some()
 }
 
 /// What the emitted rename transaction must prove about the requested file — see

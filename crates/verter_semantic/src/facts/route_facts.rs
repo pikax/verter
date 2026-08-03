@@ -39,25 +39,28 @@ use super::SymbolSpace;
 // Lens
 // ---------------------------------------------------------------------------
 
-/// The resolved import target of a local import binding — the full three-field
-/// view (specifier + original exported name + optionally-resolved canonical)
-/// the route producer classifies `Ref` sites against.
+/// The AUTHORED import target of a local import binding — the specifier
+/// plus the original exported name — that the route producer classifies
+/// `Ref` sites against.
+///
+/// PARSE DOMAIN: no resolved canonical. Resolution is a resolve-domain
+/// answer demanded live from the workspace resolution authority; baking
+/// it into a route fact made the fact go stale whenever the dependency
+/// file set moved, without the owner's own bytes changing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportRouteTarget {
     /// The authored import specifier (e.g. `./types`, `reka-ui`).
     pub source_specifier: Arc<str>,
     /// The original exported name in the source module.
     pub imported_name: Arc<str>,
-    /// The resolved canonical file id, when the specifier resolved.
-    pub canonical_id: Option<Arc<str>>,
 }
 
 /// Hash-free import/header classification view for the route-fact producer.
 ///
 /// A SECOND view of the same shallow tables the fingerprint lens reads — NOT a
-/// widening of `CrossDeclLens`/`ShallowLens` (R12: the fingerprint grammar
-/// carries only the source specifier; this lens carries the full import target
-/// including the resolve-domain canonical, and never feeds a hash).
+/// widening of `CrossDeclLens`/`ShallowLens`. Both views are parse domain;
+/// this one additionally carries the imported name and header type-symbol
+/// membership, and never feeds a hash.
 pub trait RouteFactLens {
     /// Resolve a local name to its import target. `None` ⇒ not an import
     /// binding (a local declaration, a type parameter, or an unknown name —
@@ -886,7 +889,6 @@ fn external_ref(
         local_name,
         source_specifier: target.source_specifier.to_string(),
         imported_name: target.imported_name.to_string(),
-        canonical_id: target.canonical_id.clone(),
         route,
     }
 }

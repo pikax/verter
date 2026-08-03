@@ -4,9 +4,9 @@
 //! Each `handle_<method>` function has a sibling `handle_<method>_with_audit`
 //! variant that:
 //!
-//! 1. Resolves the canonical id from the request URI.
+//! 1. Resolves the tagged target identity from the request URI.
 //! 2. Opens an [`verter_session::host_lsp_audit::LspAuditSession`] keyed by
-//!    [`verter_audit::payloads::tags::LspMethodTag`] and the canonical.
+//!    [`verter_audit::payloads::tags::LspMethodTag`] and target identity.
 //! 3. Runs the handler under the same explicitly configured request deadline
 //!    whether audit is enabled or disabled. The audit SLO is observational.
 //! 4. On `Ok(value)`: assembles a populated
@@ -25,26 +25,34 @@ use std::sync::Arc;
 
 use tower_lsp_server::ls_types::{Position, Uri};
 use verter_audit::payloads::tags::LspMethodTag;
-use verter_audit::{LspRequestPayload, RequestAuditRecord};
+use verter_audit::{LspRequestPayload, RequestAuditRecord, RequestTargetIdentity};
 use verter_session::host_lsp_audit::LspAuditSession;
 use verter_session::VerterHost;
 
-/// Resolve a canonical id for `uri` against the host's document
-/// registry. Returns the URI string verbatim when the registry has
-/// no entry — the audit record carries the raw URI as the canonical
-/// in that case so downstream tools can correlate by file even when
-/// canonicalisation has not run yet.
-pub fn canonical_id_for_uri(host: &VerterHost, uri: &Uri) -> String {
-    let raw = uri.as_str();
-    let _ = host;
-    raw.to_string()
+/// Resolve the audit target identity for `uri`.
+///
+/// Registered documents carry the exact production registry identity.
+/// Unregistered documents carry the raw request URI so request-before-open
+/// traffic remains correlatable without predicting a later canonical form.
+pub fn target_identity_for_uri(
+    documents: &crate::documents::DocumentRegistry,
+    uri: &Uri,
+) -> RequestTargetIdentity {
+    match documents.get_canonical_id(uri) {
+        Some(canonical_id) => RequestTargetIdentity::RegisteredCanonical(canonical_id),
+        None => RequestTargetIdentity::UnregisteredUri(uri.as_str().to_string()),
+    }
 }
 
 /// Build an [`LspAuditSession`] for the request. Returns
 /// [`LspAuditSession::Noop`] when audit is disabled or the consumer
 /// filter rejects the kind.
-pub fn begin(host: &Arc<VerterHost>, method: LspMethodTag, canonical_id: &str) -> LspAuditSession {
-    host.lsp_audit_begin(method, canonical_id)
+pub fn begin(
+    host: &Arc<VerterHost>,
+    method: LspMethodTag,
+    target_identity: RequestTargetIdentity,
+) -> LspAuditSession {
+    host.lsp_audit_begin(method, target_identity)
 }
 
 /// Build a `Position`-bound payload base for a hover / goto-def /
@@ -53,13 +61,14 @@ pub fn begin(host: &Arc<VerterHost>, method: LspMethodTag, canonical_id: &str) -
 /// handler body produces a result.
 pub fn payload_with_position(
     method: LspMethodTag,
-    canonical_id: &str,
+    target_identity: &RequestTargetIdentity,
     position: &Position,
 ) -> LspRequestPayload {
     LspRequestPayload {
         method,
         position: Some(verter_audit::payloads::lsp::PositionInfo {
-            canonical_id: canonical_id.to_string(),
+            canonical_id: target_identity.legacy_canonical_id().to_string(),
+            target_identity: Some(target_identity.clone()),
             line: position.line,
             character: position.character,
         }),
@@ -128,7 +137,7 @@ where
 /// Run an async handler body under audit and any explicitly configured request
 /// deadline.
 ///
-/// `method`, `canonical_id`, and `position` are used to construct the audit
+/// `method`, `target_identity`, and `position` are used to construct the audit
 /// session and the position-bound payload base. `method` also selects the
 /// observational audit SLO and the explicit diagnostic/test deadline from
 /// [`verter_session::types::LspMethodTimeoutsConfig`]. `body` is the handler
@@ -144,7 +153,7 @@ where
 pub async fn run_with_audit<T, F, P>(
     host: &Arc<VerterHost>,
     method: LspMethodTag,
-    canonical_id: String,
+    target_identity: RequestTargetIdentity,
     position: Option<Position>,
     body: F,
     populate: P,
@@ -163,14 +172,14 @@ where
         return run_with_deadline(deadline, body).await;
     }
 
-    let session = begin(host, method.clone(), &canonical_id);
     let mut base_payload = match position.as_ref() {
-        Some(pos) => payload_with_position(method.clone(), &canonical_id, pos),
+        Some(pos) => payload_with_position(method.clone(), &target_identity, pos),
         None => LspRequestPayload {
             method: method.clone(),
             ..LspRequestPayload::default()
         },
     };
+    let session = begin(host, method.clone(), target_identity);
 
     let started = std::time::Instant::now();
     let outcome = run_with_deadline(deadline, body).await;
@@ -203,5 +212,145 @@ where
             }
             Err(rpc_err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::documents::DocumentRegistry;
+    use tower_lsp_server::ls_types::TextDocumentItem;
+    use verter_audit::RequestTargetIdentity;
+    use verter_session::HostConfig;
+
+    #[test]
+    fn target_identity_for_file_uri_matches_production_document_identity() {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let documents = DocumentRegistry::new(Arc::clone(&host));
+        let uri: Uri = "file:///C:/Users/dev/my%20project/App.ts"
+            .parse()
+            .expect("fixture URI must parse");
+
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "typescript".to_string(),
+            version: 1,
+            text: "export const value = 1;".to_string(),
+        });
+
+        let production_id = documents
+            .get_canonical_id(&uri)
+            .expect("production registry must record the open document");
+        let audit_identity = target_identity_for_uri(&documents, &uri);
+
+        assert_eq!(
+            audit_identity,
+            RequestTargetIdentity::RegisteredCanonical(production_id.clone())
+        );
+        assert_eq!(production_id, "c:/Users/dev/my project/App.ts");
+        assert_ne!(production_id, uri.as_str());
+    }
+
+    #[test]
+    fn target_identity_for_encoded_virtual_uri_matches_production_document_identity() {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let documents = DocumentRegistry::new(Arc::clone(&host));
+        let uri: Uri =
+            "verter-virtual:///ide.tsx?sourceUri=file%3A%2F%2F%2FC%3A%2FUsers%2Fdev%2FApp.vue"
+                .parse()
+                .expect("fixture URI must parse");
+
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "typescriptreact".to_string(),
+            version: 1,
+            text: "export default {};".to_string(),
+        });
+
+        let production_id = documents
+            .get_canonical_id(&uri)
+            .expect("production registry must record the open virtual document");
+        let audit_identity = target_identity_for_uri(&documents, &uri);
+
+        assert_eq!(
+            audit_identity,
+            RequestTargetIdentity::RegisteredCanonical(production_id.clone())
+        );
+        assert_eq!(production_id, uri.as_str());
+        assert_ne!(
+            production_id,
+            "verter-virtual:///ide.tsx?sourceUri=file:///C:/Users/dev/App.vue"
+        );
+    }
+
+    #[test]
+    fn unregistered_uris_produce_distinct_envelope_and_position_identities() {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig {
+            audit_enabled: true,
+            ..HostConfig::default()
+        }));
+        let documents = DocumentRegistry::new(Arc::clone(&host));
+        let uri_a: Uri = "file:///C:/Users/dev/A.vue"
+            .parse()
+            .expect("fixture URI must parse");
+        let uri_b: Uri = "file:///C:/Users/dev/B.vue"
+            .parse()
+            .expect("fixture URI must parse");
+
+        assert_eq!(documents.get_canonical_id(&uri_a), None);
+        assert_eq!(documents.get_canonical_id(&uri_b), None);
+
+        let identity_a = target_identity_for_uri(&documents, &uri_a);
+        let identity_b = target_identity_for_uri(&documents, &uri_b);
+        assert_eq!(
+            identity_a,
+            RequestTargetIdentity::UnregisteredUri(uri_a.as_str().to_string())
+        );
+        assert_eq!(
+            identity_b,
+            RequestTargetIdentity::UnregisteredUri(uri_b.as_str().to_string())
+        );
+        assert_ne!(identity_a, identity_b);
+        assert_ne!(identity_a, RequestTargetIdentity::NotApplicable);
+        assert_ne!(identity_b, RequestTargetIdentity::NotApplicable);
+
+        let position = Position {
+            line: 4,
+            character: 7,
+        };
+        let record_a = begin(&host, LspMethodTag::Completion, identity_a.clone())
+            .finalize_ok(payload_with_position(
+                LspMethodTag::Completion,
+                &identity_a,
+                &position,
+            ))
+            .expect("first audit session must publish");
+        let record_b = begin(&host, LspMethodTag::Completion, identity_b.clone())
+            .finalize_ok(payload_with_position(
+                LspMethodTag::Completion,
+                &identity_b,
+                &position,
+            ))
+            .expect("second audit session must publish");
+
+        assert_eq!(record_a.target_identity.as_ref(), Some(&identity_a));
+        assert_eq!(record_b.target_identity.as_ref(), Some(&identity_b));
+        assert_ne!(record_a.target_identity, record_b.target_identity);
+        assert_eq!(record_a.canonical_id, "");
+        assert_eq!(record_b.canonical_id, "");
+
+        let position_a = record_a
+            .lsp_payload()
+            .and_then(|payload| payload.position.as_ref())
+            .expect("first position identity must be present");
+        let position_b = record_b
+            .lsp_payload()
+            .and_then(|payload| payload.position.as_ref())
+            .expect("second position identity must be present");
+        assert_eq!(position_a.target_identity, record_a.target_identity);
+        assert_eq!(position_b.target_identity, record_b.target_identity);
+        assert_ne!(position_a.target_identity, position_b.target_identity);
+        assert_eq!(position_a.canonical_id, "");
+        assert_eq!(position_b.canonical_id, "");
     }
 }

@@ -378,9 +378,8 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// instead so the view is built ONCE at the request boundary and
     /// threaded down.
     ///
-    /// `impl ResolverContext for VerterHost::resolver_store_view` rebuilds
-    /// a full workspace snapshot on every call — the cost the per-request hoist
-    /// hoists to per-request scope.
+    /// The host implementation obtains the manager-owned O(1) root capture;
+    /// request contexts retain and reuse that fixed view.
     #[track_caller]
     fn resolver_store_view(&self) -> HostStoreView;
 
@@ -392,20 +391,14 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// [`crate::resolver_core::HostResolverContext`] (or, for
     /// session-bearing requests, a
     /// [`crate::resolver_core::SessionResolverContext`]).
-    /// Resolver-tier consumers consult the borrow on every cache
-    /// validation; the per-call full-workspace snapshot the pre-6.c
-    /// rail performed is replaced by one snapshot per request.
+    /// Resolver-tier consumers consult the borrow on every cache validation;
+    /// no consumer rebuilds or enumerates the host.
     ///
     /// The bare `impl ResolverContext for VerterHost::store_view` panics —
     /// a bare `&VerterHost` owns no view to borrow. Production code MUST
     /// construct a `HostResolverContext::new(host, &view)` at the request
     /// entry point. Tests / mocks that want the convenience of a bare host
     /// MUST build a view first and wrap it.
-    ///
-    /// `#[allow(dead_code)]` is intentional during the 6.c substrate
-    /// window — the borrow-returning method has no production callers
-    /// yet. The hot-path conversion commit (C) wires consumers; removing
-    /// the allow at that point is a stub-prevention follow-up.
     ///
     /// Returns `&dyn StoreView` (not the concrete [`HostStoreView`]) so
     /// the trait stays dyn-compatible AND so a request-bound implementer
@@ -1104,7 +1097,17 @@ impl ResolverContext for crate::VerterHost {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        crate::VerterHost::resolve_type_dependency_canonical(self, owner_canonical, import_source)
+        match crate::VerterHost::resolve_type_dependency_canonical(
+            self,
+            owner_canonical,
+            import_source,
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(_) => {
+                note_non_cacheable_read_fan_out(NonCacheableReadReason::UnrootableRoute);
+                None
+            }
+        }
     }
 
     #[inline]

@@ -100,12 +100,6 @@ fn assert_single_build(provenance: &MetaProvenanceSnapshot, label: &str) {
          build (got {})",
         provenance.indexed_ready_materializes,
     );
-    assert_eq!(
-        provenance.indexed_ready_edge_refreshes, 0,
-        "{label}: a cold build must not detour through the edge-refresh lane \
-         (got {})",
-        provenance.indexed_ready_edge_refreshes,
-    );
     // The dedup fixtures are `.ts` files: NO lane may run an SFC
     // structure parse for them (a non-zero count means a host lane
     // misclassified the canonical or re-parsed through the SFC path).
@@ -242,10 +236,6 @@ fn clear_compile_cache_retains_fresh_indexed_ready() {
     assert_eq!(
         provenance.indexed_ready_materializes, 0,
         "the retained artifact must serve without re-materialising"
-    );
-    assert_eq!(
-        provenance.indexed_ready_edge_refreshes, 0,
-        "no route/project mutation happened, so no edge refresh either"
     );
     assert_eq!(
         format!("{cold_expr:?}"),
@@ -533,10 +523,10 @@ fn route_mutation_refreshes_edges_without_reparse() {
     let cold = host
         .ensure_indexed_ready(owner)
         .expect("owner must materialise");
+    let _ = &cold;
     assert_eq!(
-        cold.import_routes
-            .get("./dep")
-            .and_then(|r| r.resolved_canonical_id.as_deref()),
+        host.resolve_type_dependency_canonical_shallow(owner, "./dep")
+            .as_deref(),
         Some(dep),
         "pre-mutation route must point at dep.ts"
     );
@@ -555,53 +545,44 @@ fn route_mutation_refreshes_edges_without_reparse() {
 
     let refreshed = host
         .ensure_indexed_ready(owner)
-        .expect("owner must re-materialise its route surface");
+        .expect("owner must still serve its parse artifact");
+    let _ = &refreshed;
     assert_eq!(
-        refreshed
-            .import_routes
-            .get("./dep")
-            .and_then(|r| r.resolved_canonical_id.as_deref()),
+        host.resolve_type_dependency_canonical_shallow(owner, "./dep")
+            .as_deref(),
         Some(dep2),
         "post-mutation route must point at dep2.ts"
     );
     let provenance = snap(&host);
+    // STRONGER than the deleted edge-refresh contract: a route mutation
+    // costs the owner's artifact NOTHING at all. The artifact is a
+    // content-addressed PARSE product with no resolved target on it, so
+    // a route mutation cannot stale it — there is no re-parse, no eval-env
+    // rebuild, no route-surface refresh and no re-materialise.
     assert_eq!(
         provenance.eval_program_parses, 0,
-        "a route mutation must NOT re-parse the owner (content unchanged); \
-         the edge-refresh path reuses the content-addressed payload"
+        "a route mutation must NOT re-parse the owner (content unchanged)"
     );
     assert_eq!(
         provenance.eval_env_builds, 0,
-        "a route mutation must NOT rebuild the eval env — the edge refresh \
-         reuses the artifact's canonical env"
+        "a route mutation must NOT rebuild the eval env"
     );
     assert_eq!(
-        provenance.indexed_ready_edge_refreshes, 1,
-        "the route surface must be rebuilt through exactly one edge refresh \
-         (got {})",
-        provenance.indexed_ready_edge_refreshes,
+        provenance.indexed_ready_materializes, 0,
+        "a route mutation must NOT re-materialise the artifact (got {})",
+        provenance.indexed_ready_materializes,
     );
 
-    // SECOND identical read: the refreshed artifact must have physically
-    // LANDED in the store. A republish swallowed by the store's no-op
-    // equivalence gate leaves the stored stamp stale, so every subsequent
-    // read re-runs the full edge refresh — once-ness demands delta 0 here.
+    // SECOND identical read: the SAME stored artifact, still free.
     host.provenance().reset();
     let second = host
         .ensure_indexed_ready(owner)
-        .expect("second read must serve the refreshed artifact");
+        .expect("second read must serve the stored artifact");
     assert!(
         Arc::ptr_eq(&second, &refreshed),
-        "second read must serve the STORED refreshed artifact (fast hit), \
-         not a rebuilt one"
+        "second read must serve the SAME stored artifact (fast hit)"
     );
     let second_read = snap(&host);
-    assert_eq!(
-        second_read.indexed_ready_edge_refreshes, 0,
-        "the refreshed artifact must serve warm on the second read — a \
-         non-zero delta means the republish never landed (got {})",
-        second_read.indexed_ready_edge_refreshes,
-    );
     assert_eq!(
         second_read.indexed_ready_materializes, 0,
         "the second read must not re-materialise (got {})",
@@ -646,53 +627,44 @@ fn project_mutation_refreshes_edges_without_reparse() {
 
     let refreshed = host
         .ensure_indexed_ready(owner)
-        .expect("owner must refresh its route surface");
+        .expect("owner must still serve its parse artifact");
+    let _ = &refreshed;
     assert_eq!(
-        refreshed
-            .import_routes
-            .get("./dep")
-            .and_then(|r| r.resolved_canonical_id.as_deref()),
+        host.resolve_type_dependency_canonical_shallow(owner, "./dep")
+            .as_deref(),
         Some(dep),
         "route target is unchanged by this particular project mutation"
     );
     let provenance = snap(&host);
+    // STRONGER than the deleted stamp-refresh contract: a project
+    // mutation costs the owner's artifact NOTHING. It is a
+    // content-addressed PARSE product carrying no project stamp and no
+    // resolved target, so a project-graph move cannot stale it.
     assert_eq!(
         provenance.eval_program_parses, 0,
         "a project mutation must NOT re-parse an unchanged canonical"
     );
     assert_eq!(
         provenance.eval_env_builds, 0,
-        "a project mutation must NOT rebuild the eval env — the edge refresh \
-         reuses the artifact's canonical env"
+        "a project mutation must NOT rebuild the eval env"
     );
     assert_eq!(
-        provenance.indexed_ready_edge_refreshes, 1,
-        "the cross-file-edge surface must refresh exactly once (got {})",
-        provenance.indexed_ready_edge_refreshes,
+        provenance.indexed_ready_materializes, 0,
+        "a project mutation must NOT re-materialise the artifact (got {})",
+        provenance.indexed_ready_materializes,
     );
 
-    // SECOND identical read: this mutation did NOT retarget the route, so
-    // the refreshed surface is hash-identical to the stale one — exactly
-    // the case a stamp-blind store equivalence gate swallows. The stamp-only
-    // republish must still land; a non-zero refresh delta here means every
-    // future read of every unaffected cross-file-edge canonical re-runs the
-    // full edge refresh forever.
+    // SECOND identical read: the SAME stored artifact, still free. A
+    // stamp-only republish lane would show up here as per-read churn.
     host.provenance().reset();
     let second = host
         .ensure_indexed_ready(owner)
-        .expect("second read must serve the refreshed artifact");
+        .expect("second read must serve the stored artifact");
     assert!(
         Arc::ptr_eq(&second, &refreshed),
-        "second read must serve the STORED refreshed artifact (fast hit), \
-         not a rebuilt one"
+        "second read must serve the SAME stored artifact (fast hit)"
     );
     let second_read = snap(&host);
-    assert_eq!(
-        second_read.indexed_ready_edge_refreshes, 0,
-        "a stamp-only republish must land — non-zero delta means the store \
-         swallowed it and the canonical refreshes per read forever (got {})",
-        second_read.indexed_ready_edge_refreshes,
-    );
     assert_eq!(
         second_read.indexed_ready_materializes, 0,
         "the second read must not re-materialise (got {})",
@@ -905,13 +877,10 @@ fn follower_arriving_after_mutation_does_not_adopt_fenced_flight_result() {
          leader's fenced (superseded) artifact as current",
     );
     assert_eq!(
-        follower_result
-            .import_routes
-            .get("./dep")
-            .and_then(|r| r.resolved_canonical_id.as_deref()),
+        host.resolve_type_dependency_canonical_shallow(owner, "./dep")
+            .as_deref(),
         Some(dep2),
-        "the post-mutation follower must observe the post-mutation route \
-         table",
+        "the post-mutation follower must observe the post-mutation route",
     );
     // The fenced leader published NOTHING (ReturnOnly never publishes);
     // the store's current artifact is the follower's re-run product.
@@ -965,16 +934,12 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
         "a fresh artifact must carry the live parse-env stamp",
     );
 
-    // Forge a stored candidate whose parse env MOVED (and whose project
-    // stamp is stale so the reuse gates actually consult the dimension).
+    // Forge a stored candidate whose parse env MOVED — the one dimension
+    // the reuse gate consults.
     let forge = |parse_env_hash: crate::types::Hash16| crate::project_type_store::IndexedReady {
         whole_hash: built.whole_hash,
         shallow_state: Arc::clone(&built.shallow_state),
-        import_routes: Arc::clone(&built.import_routes),
-        import_route_hash: built.import_route_hash,
-        route_hash: built.route_hash,
-        edge_generation: built.edge_generation,
-        project_generation: built.project_generation.wrapping_sub(1),
+        built_at_content_generation: built.built_at_content_generation,
         parse_env_hash,
         raw_source: Arc::clone(&built.raw_source),
         eval_source: Arc::clone(&built.eval_source),
@@ -1015,244 +980,48 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
         "a moved parse env must force a FULL rematerialise"
     );
     assert_eq!(
-        provenance.indexed_ready_edge_refreshes, 0,
-        "a moved parse env must NOT take the parse-reusing edge refresh"
-    );
-    assert_eq!(
         rebuilt.parse_env_hash, live_env,
         "the rebuilt artifact carries the live parse-env stamp"
     );
 
-    // Symmetric control: an EQUAL parse-env stamp with the same stale
-    // project stamp still takes the edge refresh (no re-parse).
+    // Symmetric control (anti-vacuity): an EQUAL parse-env stamp is
+    // reusable outright — no re-parse, no re-materialise, and no
+    // route-surface refresh, because the artifact bakes no route for a
+    // mutation to stale. That the moved-env arm above DID re-materialise
+    // is therefore attributable to the parse env alone.
     host.project_type_store()
         .indexed()
         .insert(Arc::from(owner), Arc::new(forge(live_env)));
     host.provenance().reset();
-    let refreshed = host
+    let reused = host
         .ensure_indexed_ready(owner)
-        .expect("owner must refresh its route surface");
+        .expect("owner must serve its stored artifact");
     let control = snap(&host);
     assert_eq!(
         control.eval_program_parses, 0,
-        "an unmoved parse env must reuse the retained parse (edge refresh)"
+        "an unmoved parse env must not re-parse"
     );
     assert_eq!(
-        control.indexed_ready_edge_refreshes, 1,
-        "an unmoved parse env with a stale project stamp takes the edge \
-         refresh"
+        control.indexed_ready_materializes, 0,
+        "an unmoved parse env must not re-materialise"
     );
     assert!(
-        host.indexed_surface_is_current(owner, &refreshed),
-        "the refreshed surface is current"
+        host.indexed_surface_is_current(owner, &reused),
+        "the reused surface is current"
     );
 }
 
-/// The edge-refresh publish fence covers the parse-env reuse gate: the
-/// flight's fence generations are captured BEFORE the gate compares the
-/// live parse env against the candidate's stamp, so a parse-env-moving
-/// mutation (which always bumps `project_generation`) landing between
-/// the gate and the publish DECLINES the refresh publish (ReturnOnly)
-/// instead of landing an artifact that pairs a CURRENT
-/// `project_generation` stamp with a payload parsed under the
-/// superseded env. That pairing is forged-current:
-/// `indexed_surface_is_current` short-circuits on a current project
-/// stamp as proof of parse-env currency, so the entry would warm-serve
-/// the stale-parsed payload indefinitely — unrejectable read-side.
-///
-/// The live parse env is driven through the test-only
-/// `parse_env_override` (the production parse dimension derives solely
-/// from constant workspace parser flags today, so no public mutation
-/// can move it); the override flip is paired with a route-resolution
-/// push so the emulated mutation bumps `project_generation` exactly as
-/// every real parse-env-moving mutation does.
-#[test]
-fn parse_env_mutation_between_reuse_gate_and_refresh_declines_the_edge_refresh_publish() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let host = make_host(&[]);
-    let owner = "/workspace/src/owner.ts";
-    let dep = "/workspace/src/dep.ts";
-    let other = "/workspace/src/other.ts";
-    upsert(&host, dep, "export type P = { a: 1 };\n");
-    upsert(&host, other, "export type Other = { o: 1 };\n");
-    upsert(
-        &host,
-        owner,
-        "import type { P } from './dep';\nexport type Owner = P;\n",
-    );
-    let built = host
-        .ensure_indexed_ready(owner)
-        .expect("owner must materialise");
-    let baseline_env = host.host_view_env_hashes_for(owner).parse_env_hash;
-    assert_eq!(
-        built.parse_env_hash, baseline_env,
-        "anti-vacuity: a fresh artifact carries the live parse-env stamp",
-    );
-
-    // Stale the candidate's project stamp WITHOUT moving content or
-    // parse env so the next read takes the edge-refresh arm.
-    land_unrelated_route_mutation(&host, other, dep);
-
-    let mut moved_env = baseline_env;
-    moved_env[0] = moved_env[0].wrapping_add(1);
-
-    // Arm the gate seam: AFTER the reuse gate compared the live parse
-    // env against the candidate's stamp, land the parse-env-moving
-    // mutation — the override flip plus a value-distinct route push so
-    // `project_generation` bumps, exactly the coupling every real
-    // parse-env-moving mutation carries.
-    let seam_fired = Arc::new(AtomicBool::new(false));
-    {
-        let host_for_hook = Arc::clone(&host);
-        let seam_fired = Arc::clone(&seam_fired);
-        // Re-entrancy guard: the route push below can itself reach a
-        // gated read; a nested fire must not recurse into another push.
-        let in_hook = AtomicBool::new(false);
-        *host.edge_refresh_gate_seam_hook.lock() = Some(Arc::new(move || {
-            if in_hook.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            seam_fired.store(true, Ordering::SeqCst);
-            *host_for_hook.parse_env_override.lock() = Some(moved_env);
-            host_for_hook.set_exact_resolutions(
-                other,
-                vec![verter_workspace::ExactResolution {
-                    specifier: "./fence_probe_parse_env".to_string(),
-                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                    kind: verter_workspace::ResolveRequestKind::TypeImport,
-                    resolved_canonical_id: Some(dep.to_string()),
-                    possible_canonical_ids: vec![dep.to_string()],
-                }],
-            );
-            in_hook.store(false, Ordering::SeqCst);
-        }));
-    }
-
-    let _served = host
-        .ensure_indexed_ready(owner)
-        .expect("the raced read must still serve its caller");
-    *host.edge_refresh_gate_seam_hook.lock() = None;
-    assert!(
-        seam_fired.load(Ordering::SeqCst),
-        "anti-vacuity: the raced read must have taken the edge-refresh arm",
-    );
-    let live_env = host.host_view_env_hashes_for(owner).parse_env_hash;
-    assert_eq!(
-        live_env, moved_env,
-        "anti-vacuity: the live parse env moved"
-    );
-
-    // THE PIN: no stored artifact may pair a CURRENT project stamp with
-    // a parse-env stamp that differs from the live env — the
-    // forged-current combination the reader gate short-circuits on
-    // (current project stamp ⇒ parse env unmoved).
-    if let Some(stored) = host
-        .project_type_store()
-        .indexed()
-        .get(owner, built.whole_hash)
-    {
-        let current_generation = host.project_type_store().current_project_generation();
-        assert!(
-            !(stored.project_generation == current_generation && stored.parse_env_hash != live_env),
-            "the raced edge refresh published a forged-current artifact: a \
-             CURRENT project stamp over a payload parsed under the \
-             superseded env — the reader gate short-circuits on the project \
-             stamp as proof of parse-env currency, so this entry warm-serves \
-             stale parse state unrejectably",
-        );
-    }
-
-    // Recovery: the next read must re-materialise under the live env
-    // (full re-parse), publish, and the read after must warm-hit it.
-    host.provenance().reset();
-    let recovered = host
-        .ensure_indexed_ready(owner)
-        .expect("the post-mutation read must serve");
-    assert_eq!(
-        recovered.parse_env_hash, live_env,
-        "the post-mutation read must serve an artifact parsed under the \
-         LIVE env, never the stale-parsed payload",
-    );
-    let provenance = snap(&host);
-    assert_eq!(
-        provenance.eval_program_parses, 1,
-        "the moved parse env must force the full re-materialise (re-parse \
-         under the live env)",
-    );
-    assert_eq!(
-        provenance.indexed_ready_edge_refreshes, 0,
-        "the moved parse env must never take the parse-reusing edge refresh",
-    );
-    host.provenance().reset();
-    let warm = host
-        .ensure_indexed_ready(owner)
-        .expect("the warm read must serve");
-    assert!(
-        Arc::ptr_eq(&warm, &recovered),
-        "the recovered artifact must have published and serve warm",
-    );
-    assert_eq!(
-        snap(&host).indexed_ready_materializes,
-        0,
-        "the warm read must not re-materialise",
-    );
-}
-
-/// Negative control: the gate seam armed with a NO-OP hook must not
-/// change the edge-refresh outcome — the refresh publishes, no
-/// re-parse, and the second read serves the stored refreshed artifact
-/// warm. Proves the raced decline above is the fence acting on the
-/// mutation, not the seam perturbing the flight.
-#[test]
-fn unmoved_parse_env_through_the_gate_seam_still_publishes_the_edge_refresh() {
-    let host = make_host(&[]);
-    let owner = "/workspace/src/owner.ts";
-    let dep = "/workspace/src/dep.ts";
-    let other = "/workspace/src/other.ts";
-    upsert(&host, dep, "export type P = { a: 1 };\n");
-    upsert(&host, other, "export type Other = { o: 1 };\n");
-    upsert(
-        &host,
-        owner,
-        "import type { P } from './dep';\nexport type Owner = P;\n",
-    );
-    let _built = host
-        .ensure_indexed_ready(owner)
-        .expect("owner must materialise");
-    land_unrelated_route_mutation(&host, other, dep);
-
-    *host.edge_refresh_gate_seam_hook.lock() = Some(Arc::new(|| {}));
-    host.provenance().reset();
-    let refreshed = host
-        .ensure_indexed_ready(owner)
-        .expect("the gated read must serve");
-    *host.edge_refresh_gate_seam_hook.lock() = None;
-
-    let provenance = snap(&host);
-    assert_eq!(
-        provenance.indexed_ready_edge_refreshes, 1,
-        "the project-stale read takes exactly one edge refresh",
-    );
-    assert_eq!(
-        provenance.eval_program_parses, 0,
-        "an unmoved parse env reuses the retained parse",
-    );
-
-    host.provenance().reset();
-    let second = host
-        .ensure_indexed_ready(owner)
-        .expect("the second read must serve");
-    assert!(
-        Arc::ptr_eq(&second, &refreshed),
-        "the refreshed artifact must have published and serve warm",
-    );
-    assert_eq!(
-        snap(&host).indexed_ready_edge_refreshes,
-        0,
-        "the published refresh serves warm — no second refresh",
-    );
-}
+// The edge-refresh reuse-gate seam pair
+// (`parse_env_mutation_between_reuse_gate_and_refresh_declines_the_edge_refresh_publish`
+// and its no-op negative control) is DELETED with the lane it exercised.
+// `IndexedReady` is a content-addressed PARSE artifact: no route mutation
+// can stale it, so there is no route-only refresh materialise and no
+// gate→refresh window to race. The surviving reuse gate is parse-env
+// equality alone (pinned by
+// `indexed_surface_reuse_is_parse_env_only_never_content_generation` in
+// `host_manage_tests`), and a parse-env move routes through the FULL
+// materialise, whose own pre-publish fence is exercised by the
+// `park_first_materialize_pre_fence` family below.
 
 /// Sustained-churn bounded fallback: a claimant that loses the lane
 /// election on EVERY bounded attempt, with every won flight fenced by a
@@ -1423,7 +1192,7 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
             follower.join().unwrap()
         });
 
-    let follower_result =
+    let _follower_result =
         follower_result.expect("the bounded fallback must still serve the caller");
     assert!(
         follower_non_cacheable,
@@ -1452,10 +1221,12 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
         host.project_type_store().indexed().get_any(owner).is_none(),
         "no fenced flight may have published an artifact",
     );
-    assert!(
-        !host.indexed_surface_is_current(owner, &follower_result),
-        "the served fallback is a known-superseded surface",
-    );
+    // The served fallback's SUPERSESSION is expressed by the empty store
+    // above plus the non-cacheability mark, not by a stamp on the
+    // artifact: `IndexedReady` carries no generation stamp any more, and
+    // its one reuse gate (parse-env equality) is unmoved by the content
+    // churn this test drives. Asserting `!indexed_surface_is_current`
+    // here would be asserting a property the artifact no longer models.
 
     // Negative control: a clean (published) serve marks NO non-cacheability.
     *host.materialize_seam_hook.lock() = None;
@@ -1536,36 +1307,19 @@ fn import_dependency_mutation_mid_flight_trips_the_publish_fence() {
 
     // ReturnOnly serving to the flight's own caller: the pre-mutation
     // route surface (sanity — proves the flight really raced).
-    assert_eq!(
-        stale_flight_result
-            .import_routes
-            .get("./dep")
-            .and_then(|r| r.resolved_canonical_id.as_deref()),
-        Some(dep),
-        "the raced flight resolved against the pre-mutation table",
-    );
-    // The mutation must have made the flight's stamps stale.
-    assert!(
-        !host.indexed_surface_is_current(owner, &stale_flight_result),
-        "a surface built against the superseded route table must not \
-         pass the currency gate after the mutation",
-    );
+    let _ = &stale_flight_result;
     // The discriminator: a fresh read must observe the POST-mutation
-    // route table. Pre-fix the fenceless flight published its stale
-    // surface, which then passed `indexed_surface_is_current` and was
-    // served warm here.
+    // route target. The parse artifact bakes no target, so the answer
+    // comes from the one resolution authority — which the mutation moved.
     let fresh = host
         .ensure_indexed_ready(owner)
         .expect("post-mutation read must materialise");
     assert_eq!(
-        fresh
-            .import_routes
-            .get("./dep")
-            .and_then(|r| r.resolved_canonical_id.as_deref()),
+        host.resolve_type_dependency_canonical_shallow(owner, "./dep")
+            .as_deref(),
         Some(dep2),
-        "a post-mutation read must observe the post-mutation route table \
-         — the raced flight must not have published its stale surface as \
-         current",
+        "a post-mutation read must observe the post-mutation route target \
+         — no raced flight may pin the pre-mutation answer",
     );
     assert!(
         host.indexed_surface_is_current(owner, &fresh),
@@ -1631,10 +1385,6 @@ fn set_import_dependencies_bumps_only_on_actual_route_change() {
         "the retained artifact must stay current across a no-op re-push",
     );
     let provenance = snap(&host);
-    assert_eq!(
-        provenance.indexed_ready_edge_refreshes, 0,
-        "a no-op re-push must not force an edge refresh"
-    );
     assert_eq!(
         provenance.eval_program_parses, 0,
         "a no-op re-push must not force a re-parse"
@@ -1889,10 +1639,6 @@ fn route_fact_capture_is_side_effect_free() {
             "{label}: fact capture must not materialise",
         );
         assert_eq!(
-            provenance.indexed_ready_edge_refreshes, 0,
-            "{label}: fact capture must not edge-refresh",
-        );
-        assert_eq!(
             provenance.eval_program_parses, 0,
             "{label}: fact capture must not parse",
         );
@@ -1922,11 +1668,30 @@ fn route_fact_capture_is_side_effect_free() {
     );
     assert_no_builds(&snap(&host), "never-materialised capture");
 
-    // 2. STALE surface (route mutation moved the project stamp): capture
-    //    declines instead of refreshing.
+    // 2. PARSE-ENV-STALE surface: capture declines instead of
+    //    refreshing. (The route-mutation arm this replaces cannot exist
+    //    any more — a route mutation stales no artifact, because the
+    //    artifact bakes no route. Parse-env equality is the whole reuse
+    //    gate, so it is the whole stale class.)
     let _ = host
         .ensure_indexed_ready(owner)
         .expect("owner must materialise");
+    let baseline_env = host.host_view_env_hashes_for(owner).parse_env_hash;
+    let mut moved_env = baseline_env;
+    moved_env[0] = moved_env[0].wrapping_add(1);
+    *host.parse_env_override.lock() = Some(moved_env);
+    host.provenance().reset();
+    let stale_capture =
+        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
+    assert!(
+        stale_capture.is_none(),
+        "a stale surface's capture must decline (None), never refresh it",
+    );
+    assert_no_builds(&snap(&host), "stale-surface capture");
+    *host.parse_env_override.lock() = None;
+
+    // A route mutation, by contrast, stales NOTHING: the capture keeps
+    // answering from the unchanged artifact and still builds nothing.
     host.set_exact_resolutions(
         owner,
         vec![verter_workspace::ExactResolution {
@@ -1938,13 +1703,13 @@ fn route_fact_capture_is_side_effect_free() {
         }],
     );
     host.provenance().reset();
-    let stale_capture =
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
     assert!(
-        stale_capture.is_none(),
-        "a stale surface's capture must decline (None), never refresh it",
+        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route)
+            .is_some(),
+        "a route mutation does not stale a PARSE artifact — its Route \
+         digest keeps answering",
     );
-    assert_no_builds(&snap(&host), "stale-surface capture");
+    assert_no_builds(&snap(&host), "route-mutation capture");
 
     // 3. CONTENT-STALE candidate (owner edited, never re-materialised):
     //    capture declines, builds nothing.
@@ -1972,8 +1737,9 @@ fn route_fact_capture_is_side_effect_free() {
     let current_capture =
         host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
     assert_eq!(
-        current_capture, current.route_hash,
-        "a current surface's capture observes the stored route_hash",
+        current_capture,
+        current.route_surface_hash(),
+        "a current surface's capture observes its own route-surface digest",
     );
     assert!(
         current_capture.is_some(),
@@ -2216,12 +1982,10 @@ fn set_exact_resolutions_replacement_reroutes_and_identical_repush_is_noop() {
 
     host.set_exact_resolutions(owner, exact(dep1));
     let _ = host.ensure_indexed_ready(owner);
-    let first = host
+    let _ = host
         .ensure_indexed_ready(owner)
-        .expect("owner materialises")
-        .import_routes
-        .get("./dep")
-        .and_then(|r| r.resolved_canonical_id.clone());
+        .expect("owner materialises");
+    let first = host.resolve_type_dependency_canonical_shallow(owner, "./dep");
     assert_eq!(
         first.as_deref(),
         Some(dep1),
@@ -2230,12 +1994,8 @@ fn set_exact_resolutions_replacement_reroutes_and_identical_repush_is_noop() {
 
     // REPLACEMENT: the old exact must stop serving.
     host.set_exact_resolutions(owner, exact(dep2));
-    let second = host
-        .ensure_indexed_ready(owner)
-        .expect("owner re-serves")
-        .import_routes
-        .get("./dep")
-        .and_then(|r| r.resolved_canonical_id.clone());
+    let _ = host.ensure_indexed_ready(owner).expect("owner re-serves");
+    let second = host.resolve_type_dependency_canonical_shallow(owner, "./dep");
     assert_eq!(
         second.as_deref(),
         Some(dep2),
@@ -2311,7 +2071,7 @@ fn land_unrelated_route_mutation(host: &VerterHost, other: &str, target: &str) {
 /// admitted into the shared `prepared_decl_bundles` cache. The fenced
 /// artifact's route surface was resolved against superseded state, while
 /// the bundle's fact stamps (owner whole-hash; ImportRoute hash via
-/// `generation_current_import_route_hash`) are computed from the LIVE
+/// the owner's import-route witness) are computed from the LIVE
 /// post-mutation state — so the recorded facts genuinely match a fresh
 /// view and the read-side fact rail cannot reject the entry. Admission
 /// itself must decline; the caller is still served (its request
@@ -2412,7 +2172,7 @@ fn bundle_built_from_fenced_indexed_ready_is_served_but_not_admitted() {
 /// publication status must flow BY VALUE through that reader and gate
 /// the shared-cache insert exactly like the standard producer: the
 /// fenced flight's caller is still served its bundle, but the entry —
-/// whose fact stamps (`generation_current_import_route_hash`) are read
+/// whose fact stamps (the owner's import-route witness) are read
 /// from the LIVE post-mutation state while its payload was computed
 /// from the superseded route surface — must never go warm.
 #[test]
@@ -2806,17 +2566,20 @@ fn unmasked_owner_with_overlay_only_helper_route_never_publishes_base_key() {
     let served = host
         .materialize_overlay_indexed_ready_with_view(owner, &view)
         .expect("the materialiser must serve the requesting session");
-    // Sanity: the served artifact really is view-influenced — route
-    // discovery resolved the overlay-only helper for the unmasked owner.
+    // Sanity: the overlay-only helper really is invisible to the base
+    // workspace, so a base-key publication of a session-scoped artifact
+    // would be observable.
     assert_eq!(
+        host.resolve_type_dependency_canonical_shallow(owner, "./helper"),
+        None,
+        "sanity: the base workspace cannot resolve the overlay-only helper",
+    );
+    assert!(
         served
-            .import_routes
-            .get("./helper")
-            .and_then(|r| r.resolved_canonical_id.as_deref()),
-        Some(helper),
-        "sanity: overlay route discovery must resolve the overlay-only \
-         helper for the unmasked owner (the view-influence this test \
-         isolates)",
+            .shallow_state
+            .import_target("H")
+            .is_some_and(|target| target.source_specifier == "./helper"),
+        "sanity: the served artifact carries the owner's AUTHORED specifier",
     );
     // The view-influenced artifact must NOT be readable through the
     // base (legacy) key space. The owner is unmasked, so the served
@@ -4029,8 +3792,12 @@ fn seed_artifact_only_vue(host: &VerterHost, canonical: &str, source: &str) {
     let mut artifact = crate::project_type_store::IndexedReady::new_for_test(crate::hash::hash_16(
         source.as_bytes(),
     ));
-    artifact.edge_generation = host.ws().content_generation();
-    artifact.project_generation = host.project_type_store().current_project_generation();
+    artifact.built_at_content_generation = host.ws().content_generation();
+    // The reuse gate is parse-env equality, so a seeded artifact must
+    // carry the LIVE parse-env stamp or every read re-materialises it
+    // (which would ingress the canonical into the scheduler and vacate
+    // this lane's coverage).
+    artifact.parse_env_hash = host.host_view_env_hashes_for(canonical).parse_env_hash;
     artifact.raw_source = Arc::from(source);
     host.project_type_store()
         .indexed()
@@ -4141,13 +3908,21 @@ fn vue_fatal_script_parse_defaults_outputs_without_second_parse() {
     );
 }
 
+/// Number of unresolvable specifiers an owner needs before the union of
+/// its per-specifier resolution observations exceeds
+/// `FACT_SIGNATURE_CAP` (1,024). Each miss contributes its complete
+/// exhausted probe set, so a couple of hundred is comfortably over the
+/// bound while staying a fast fixture. Overflow is the reachable
+/// unrootable shape: a single miss roots fine on its own observations.
+const WITNESS_OVERFLOW_SPECIFIERS: usize = 250;
+
 /// Strict-admission empty-facts is a SUPPRESSION signal, not just a
 /// RouteDb-local negative-cache pattern — UNROOTABLE-WILDCARD arm. A
 /// route entry concluded over an owner whose unresolved `export *`
-/// edge cannot be rooted in any `ImportRoute` fact (the owner serves
-/// from the artifact-only authority and publishes no import-route
-/// surface) is served with EMPTY facts and never persisted by
-/// `RouteDb`. But an ENCLOSING traced cold compute (a semantic-memo
+/// edges cannot be rooted in an import-route RESOLUTION WITNESS (here:
+/// the union of their observations OVERFLOWS `FACT_SIGNATURE_CAP`, so
+/// the witness cannot represent the complete observation set) is
+/// served with EMPTY facts and never persisted by `RouteDb`. But an ENCLOSING traced cold compute (a semantic-memo
 /// build, a component-meta proof producer) observes NOTHING from an
 /// empty fact list — its own fact stamps validate against the live
 /// view while the folded route silently retargets the moment the
@@ -4161,44 +3936,32 @@ fn vue_fatal_script_parse_defaults_outputs_without_second_parse() {
 /// admissions.
 #[test]
 fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
-    // An UNRESOLVABLE earlier wildcard, then a RESOLVABLE later one:
-    // the walk records the unresolved `./missing` edge and still
-    // resolves `Shared` through `./present`.
-    const BARREL_SOURCE: &str = "export * from './missing';\nexport * from './present';\n";
-    let ghost = "/workspace/src/ghost.ts";
-    // `ghost.ts` exists in the VFS (so import edges to it resolve) but
-    // is NEVER upserted/loaded — the route walk serves it from the
-    // artifact-only authority.
-    let host = make_host(&[(ghost, BARREL_SOURCE)]);
-    let template = "/workspace/src/index.ts";
+    // MANY unresolvable wildcards, then a RESOLVABLE one: the walk
+    // records every unresolved edge and still resolves `Shared`
+    // through `./present`. The unresolved-edge rooting loop builds one
+    // witness over ALL of them, and their combined observation set
+    // exceeds `FACT_SIGNATURE_CAP` — the one shape that reaches the
+    // unrootable arm now that a single known-miss specifier roots
+    // perfectly well on its own exhausted probe set.
+    let host = make_host(&[]);
+    let barrel = "/workspace/src/index.ts";
     let present = "/workspace/src/present.ts";
     upsert(&host, present, "export type Shared = { a: 1 };\n");
-    upsert(&host, template, BARREL_SOURCE);
+    let mut source = String::new();
+    for index in 0..WITNESS_OVERFLOW_SPECIFIERS {
+        source.push_str(&format!("export * from './missing{index}';\n"));
+    }
+    source.push_str("export * from './present';\n");
+    upsert(&host, barrel, &source);
 
-    // Build a REAL barrel artifact from the same content, then seed it
-    // for the artifact-only `ghost` canonical with NO import-route
-    // surface: the owner shape whose unresolved wildcard edge has no
-    // `ImportRoute` fact rail to root on (its wildcards resolve into
-    // walk-local edges only — nothing ever publishes `import_routes`
-    // for it). Every UPSERTED owner bakes a covering table (the
-    // IndexedReady bake records a known-miss entry for every declared
-    // specifier), so the artifact-only seed is the one shape that
-    // reaches the unrootable arm.
-    host.ensure_indexed_ready(template)
-        .expect("the template barrel must index");
-    let template_hash = host.get_whole_hash(template).expect("template tracked");
-    let baked = host
-        .project_type_store()
-        .indexed()
-        .get(template, template_hash)
-        .expect("the baked template artifact");
-    let mut unrooted = (*baked).clone();
-    unrooted.import_routes = Arc::new(rustc_hash::FxHashMap::default());
-    unrooted.edge_generation = host.ws().content_generation();
-    unrooted.project_generation = host.project_type_store().current_project_generation();
-    host.project_type_store()
-        .indexed()
-        .insert(Arc::from(ghost), Arc::new(unrooted));
+    // Precondition: the owner's witness genuinely overflows, so the
+    // rooting loop cannot represent its observations.
+    assert!(
+        host.owner_import_route_witness_for_tests(barrel).is_none(),
+        "fixture invariant: {WITNESS_OVERFLOW_SPECIFIERS} unresolvable \
+         wildcard sources must overflow the fact-signature bound — \
+         otherwise the unrootable arm is not exercised",
+    );
 
     // The producer-level observable: run the route-entry build inside
     // an installed fact tracer — the SAME wrapper every enclosing cold
@@ -4206,7 +3969,7 @@ fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
     // component-meta proof producers) installs around its cold body —
     // and read the chokepoint flag its admission gates consult.
     let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-        host.build_named_type_export_route_entry(ghost, "Shared")
+        host.build_named_type_export_route_entry(barrel, "Shared")
     });
     let suppression_raised = matches!(
         finalise,
@@ -4220,7 +3983,7 @@ fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
     );
     assert!(
         facts.is_empty(),
-        "precondition: the unresolved ./missing edge cannot be rooted — \
+        "precondition: the unresolved wildcard edges cannot be rooted — \
          the entry is served with the empty-facts strict-admission signal",
     );
 
@@ -4284,11 +4047,12 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
 
 /// Strict-admission refusal is a SUPPRESSION signal, not just a
 /// producer-local non-admission — OWNER-IMPORT-SURFACE UNROOTED-SKIP
-/// arm. A surface built over an owner with an unresolvable direct
-/// import (the specifier is SKIPPED) that cannot be rooted in the
-/// owner's `ImportRoute` fact rail (the owner serves from the
-/// artifact-only authority and publishes no import-route surface) is
-/// served to the caller and refused its OWN warm admission. But an
+/// arm. A surface built over an owner with unresolvable direct imports
+/// (the specifiers are SKIPPED) that cannot be rooted in the owner's
+/// import-route RESOLUTION WITNESS (here: their combined observation
+/// set OVERFLOWS `FACT_SIGNATURE_CAP`, so the witness cannot represent
+/// it and is never truncated into a partial signature) is served to the
+/// caller and refused its OWN warm admission. But an
 /// ENCLOSING traced cold compute (a semantic-memo build, a
 /// component-meta proof producer) observes NOTHING from the refusal —
 /// no route walk runs for the skipped specifier, the canonical-resolve
@@ -4304,41 +4068,33 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
 /// route exit already does for the route-walk shape of the same hole.
 #[test]
 fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
-    // An UNRESOLVABLE direct import: the surface build skips the
-    // `Missing` binding and records `./missing` as an unresolved
-    // source that must be rooted in the owner's `ImportRoute` rail.
-    const OWNER_SOURCE: &str =
-        "import type { Missing } from './missing';\nexport type Uses = Missing;\n";
-    let ghost = "/workspace/src/ghost.ts";
-    // `ghost.ts` exists in the VFS (so its content pins) but is NEVER
-    // upserted/loaded — the surface build serves it from the
-    // artifact-only authority.
-    let host = make_host(&[(ghost, OWNER_SOURCE)]);
-    let template = "/workspace/src/index.ts";
-    upsert(&host, template, OWNER_SOURCE);
+    // MANY unresolvable direct imports: the surface build skips every
+    // `Missing` binding and records each `./missingN` as an unresolved
+    // source that must be rooted in the owner's witness. Their combined
+    // observation set exceeds `FACT_SIGNATURE_CAP`, so the witness is
+    // unrootable — the one shape that reaches the unrooted-skip arm now
+    // that a single skipped specifier roots perfectly well on its own
+    // exhausted probe set.
+    let host = make_host(&[]);
+    let owner = "/workspace/src/index.ts";
+    let mut source = String::new();
+    for index in 0..WITNESS_OVERFLOW_SPECIFIERS {
+        source.push_str(&format!(
+            "import type {{ Missing{index} }} from './missing{index}';\n"
+        ));
+    }
+    source.push_str("export type Uses = Missing0;\n");
+    upsert(&host, owner, &source);
+    host.ensure_indexed_ready(owner)
+        .expect("the owner must index");
 
-    // Build a REAL artifact from the same content, then seed it for
-    // the artifact-only `ghost` canonical with NO import-route
-    // surface: the owner shape whose skipped specifier has no
-    // `ImportRoute` fact rail to root on. Every UPSERTED owner bakes a
-    // covering table (the IndexedReady bake records a known-miss entry
-    // for every declared specifier), so the artifact-only seed is the
-    // one shape that reaches the unrooted-skip arm.
-    host.ensure_indexed_ready(template)
-        .expect("the template owner must index");
-    let template_hash = host.get_whole_hash(template).expect("template tracked");
-    let baked = host
-        .project_type_store()
-        .indexed()
-        .get(template, template_hash)
-        .expect("the baked template artifact");
-    let mut unrooted = (*baked).clone();
-    unrooted.import_routes = Arc::new(rustc_hash::FxHashMap::default());
-    unrooted.edge_generation = host.ws().content_generation();
-    unrooted.project_generation = host.project_type_store().current_project_generation();
-    host.project_type_store()
-        .indexed()
-        .insert(Arc::from(ghost), Arc::new(unrooted));
+    // Precondition: the owner's witness genuinely overflows.
+    assert!(
+        host.owner_import_route_witness_for_tests(owner).is_none(),
+        "fixture invariant: {WITNESS_OVERFLOW_SPECIFIERS} unresolvable \
+         import sources must overflow the fact-signature bound — \
+         otherwise the unrooted-skip arm is not exercised",
+    );
 
     // The producer-level observable: run the surface build inside an
     // installed fact tracer — the SAME wrapper every enclosing cold
@@ -4347,7 +4103,7 @@ fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
     // chokepoint flag its admission gates consult.
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
     let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-        host.owner_import_surface(ghost)
+        host.owner_import_surface(owner)
     });
     let suppression_raised = matches!(
         finalise,
@@ -4357,13 +4113,13 @@ fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
     assert_eq!(
         snap(&host).owner_import_surface_unrooted_skip_refusals,
         before + 1,
-        "precondition: the skipped ./missing specifier cannot be rooted \
+        "precondition: the skipped ./missingN specifiers cannot be rooted \
          — the build takes the unrooted-skip refusal arm",
     );
     assert!(
         host.project_type_store()
             .owner_import_surfaces()
-            .get(ghost, surface.owner_whole_hash)
+            .get(owner, surface.owner_whole_hash)
             .is_none(),
         "precondition: the unrooted surface is served, never persisted \
          (refused its own warm admission)",
@@ -4425,14 +4181,11 @@ fn rooted_import_skip_does_not_raise_enclosing_suppression() {
     assert!(
         surface.read_set_signature.facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                ..
-            } if canonical_id == owner
+            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+                if inner.resolution_fact().is_some()
         )),
-        "the skipped specifier is rooted in the owner's ImportRoute \
-         fact — the rail that moves when the missing target appears",
+        "the skipped specifier is rooted on the owner's resolution \
+         witness — the rail that moves when the missing target appears",
     );
     assert!(
         host.project_type_store()

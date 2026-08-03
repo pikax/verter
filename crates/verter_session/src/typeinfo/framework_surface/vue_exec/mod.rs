@@ -89,6 +89,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::types::{AnalyzedMacroKind, JsdocTag};
 use verter_type_expr::{TypeExpr, TypeExprScope};
 
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;

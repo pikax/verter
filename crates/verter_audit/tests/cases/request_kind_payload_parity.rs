@@ -130,6 +130,9 @@ fn typeinfo_graph_payload_accessor_returns_some() {
     let mut record = RequestAuditRecord {
         request_id: 1,
         canonical_id: "/foo.ts".to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            "/foo.ts".to_string(),
+        )),
         kind: RequestKind::TypeInfoGraph,
         parent_request_id: None,
         from_cache: false,

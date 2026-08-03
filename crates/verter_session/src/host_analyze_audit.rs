@@ -244,6 +244,9 @@ impl VerterHost {
         let record = RequestAuditRecord {
             request_id,
             canonical_id: canonical_id.to_string(),
+            target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+                canonical_id,
+            )),
             kind: RequestKind::SemanticAnalysis,
             parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
             // Envelope `from_cache` mirrors the IndexedReady probe
@@ -320,6 +323,9 @@ fn noop_semantic_analysis_record(
     RequestAuditRecord {
         request_id,
         canonical_id: canonical_id.to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+            canonical_id,
+        )),
         kind: RequestKind::SemanticAnalysis,
         parent_request_id,
         from_cache,

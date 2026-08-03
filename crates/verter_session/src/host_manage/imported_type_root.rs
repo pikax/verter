@@ -180,8 +180,8 @@ impl VerterHost {
         let audit_started = self.config.audit_enabled.then(Instant::now);
 
         let normalized_canonical = self
-            .resolve_eval_dependency_canonical(dep_canonical)
-            .unwrap_or_else(|| dep_canonical.to_string());
+            .normalized_analysis_canonical(dep_canonical)
+            .into_owned();
 
         // `ImportedRootDb` owns the OUTERMOST cacheability scope: the
         // route walk inside the resolve closure rides `ensure_indexed_ready_serve`
@@ -251,8 +251,8 @@ impl VerterHost {
                             defining_symbol,
                         } => crate::resolver_core::ImportedRootResult::Resolved {
                             canonical_source: self
-                                .resolve_eval_dependency_canonical(defining_canonical.as_str())
-                                .unwrap_or(defining_canonical),
+                                .normalized_analysis_canonical(defining_canonical.as_str())
+                                .into_owned(),
                             owner: defining_owner,
                             resolved_symbol: defining_symbol,
                         },

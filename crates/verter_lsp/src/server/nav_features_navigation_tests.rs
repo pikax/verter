@@ -149,7 +149,6 @@ mod synthesized_rename_injection_tests {
 #[cfg(test)]
 mod cross_file_rename_gate_tests {
     use super::super::nav_features_navigation_rename_gate::gate_cross_file_child_prop_rename;
-    use super::super::workspace_edit_satisfies_child_prop_rename;
     use crate::server::child_prop_rename::{
         ChildPropDeclarationProof, ChildPropRenameClass, ChildPropUsage, ConfirmedChildPropRename,
     };
@@ -360,9 +359,9 @@ mod cross_file_rename_gate_tests {
     }
 
     #[test]
-    fn confirmed_inline_both_legs_present_is_returned() {
-        // INLINE case: BOTH legs present at the expected ranges with the right new
-        // text → the gate passes and returns the merged edit.
+    fn confirmed_inline_both_legs_present_still_refuses_without_sibling_proof() {
+        // Declaration + initiating usage are both present, but neither proves
+        // that no sibling parent usage exists.
         let merged = edit_with(vec![
             (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
             (decl_uri(), vec![te(decl_range(), "fooRenamed")]),
@@ -372,19 +371,16 @@ mod cross_file_rename_gate_tests {
             &confirmed_known_inline(),
             "fooRenamed",
         );
-        let returned = result.expect("a complete Confirmed rename (both legs) must be returned");
-        let changes = returned.changes.expect("changes present");
         assert!(
-            changes.contains_key(&parent_uri()) && changes.contains_key(&decl_uri()),
-            "the returned edit must keep both the parent usage and declaration legs"
+            result.is_none(),
+            "declaration + initiating parent are not a complete workspace usage proof"
         );
     }
 
     #[test]
-    fn confirmed_imported_both_legs_present_is_returned() {
-        // IMPORTED case: the declaration edit is the provider's own native edit in the
-        // THIRD file. BOTH legs present at the resolved ranges → the gate passes. This
-        // is the parity case (no Verter synthesis; the provider edits the member).
+    fn confirmed_imported_both_legs_present_still_refuses_without_sibling_proof() {
+        // A provider-native edit of the third-file declaration plus the
+        // initiating usage still says nothing about sibling parents.
         let merged = edit_with(vec![
             (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
             (imported_decl_uri(), vec![te(decl_range(), "fooRenamed")]),
@@ -395,9 +391,8 @@ mod cross_file_rename_gate_tests {
             "fooRenamed",
         );
         assert!(
-            result.is_some(),
-            "a Confirmed imported-type rename whose third-file declaration edit is present \
-             must pass the gate (provider-agnostic: the provider's native member edit satisfies it)"
+            result.is_none(),
+            "an imported declaration + initiating parent still lacks complete usage proof"
         );
     }
 
@@ -424,11 +419,9 @@ mod cross_file_rename_gate_tests {
     }
 
     #[test]
-    fn confirmed_child_leg_from_provider_passes_without_synthesis() {
-        // The gate is provider-AGNOSTIC — it inspects the merged result, not whether
-        // Verter synthesis ran. A both-legs-present edit passes regardless of the
-        // declaration leg's ORIGIN (tsserver native, tsgo synthesis, or imported
-        // member). Proves the gate does NOT regress tsserver.
+    fn confirmed_child_leg_from_provider_still_refuses_without_sibling_proof() {
+        // A provider-supplied declaration edit is a positive location, not
+        // proof that every parent usage was enumerated.
         let merged = edit_with(vec![
             (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
             (decl_uri(), vec![te(decl_range(), "fooRenamed")]),
@@ -439,73 +432,50 @@ mod cross_file_rename_gate_tests {
             "fooRenamed",
         );
         assert!(
-            result.is_some(),
-            "a Confirmed rename whose declaration leg is present (from the provider) must pass \
-             the gate even without Verter synthesis (no provider regression)"
-        );
-    }
-
-    // ── Full-range (start AND end) equality, not start-only ─────────────────────
-
-    #[test]
-    fn confirmed_wrong_span_same_start_at_decl_fails_closed() {
-        // FULL-RANGE DISCRIMINATOR: an edit at the right declaration START but a WRONG
-        // END (right anchor, wrong span) must NOT satisfy the declaration leg. Against
-        // a start-only check the outcomes diverge (start-only: passes; full-range: fails).
-        let wrong_end = rng(5, 11, 99); // same start (5:11) as decl_range, different end
-        let merged = edit_with(vec![
-            (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
-            (decl_uri(), vec![te(wrong_end, "fooRenamed")]),
-        ]);
-        let result = gate_cross_file_child_prop_rename(
-            Some(merged),
-            &confirmed_known_inline(),
-            "fooRenamed",
-        );
-        assert!(
             result.is_none(),
-            "an edit at the right declaration start but WRONG end (wrong span) must fail the \
-             full-range gate — a start-only check is too weak"
+            "a provider declaration leg cannot prove sibling-parent completeness"
         );
     }
 
     #[test]
-    fn confirmed_wrong_span_same_start_at_parent_usage_fails_closed() {
-        // Parent-usage leg: a right-start wrong-end parent usage edit must also fail
-        // the full-range gate.
-        let wrong_end = rng(3, 9, 99); // same start (3:9) as parent_usage_range, different end
-        let merged = edit_with(vec![
-            (parent_uri(), vec![te(wrong_end, "fooRenamed")]),
-            (decl_uri(), vec![te(decl_range(), "fooRenamed")]),
-        ]);
-        let result = gate_cross_file_child_prop_rename(
-            Some(merged),
-            &confirmed_known_inline(),
-            "fooRenamed",
-        );
-        assert!(
-            result.is_none(),
-            "an edit at the right parent-usage start but WRONG end must fail the full-range gate"
-        );
-    }
-
-    #[test]
-    fn confirmed_wrong_new_text_at_decl_fails_closed() {
-        // An edit at the right declaration range but with the WRONG new text does NOT
-        // satisfy the leg → fail closed. Guards a stray same-range edit.
-        let merged = edit_with(vec![
-            (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
-            (decl_uri(), vec![te(decl_range(), "WRONG")]),
-        ]);
-        let result = gate_cross_file_child_prop_rename(
-            Some(merged),
-            &confirmed_known_inline(),
-            "fooRenamed",
-        );
-        assert!(
-            result.is_none(),
-            "an edit at the declaration range with the wrong new_text must NOT satisfy the gate"
-        );
+    fn confirmed_refusal_is_independent_of_edit_span_and_text() {
+        // Every `Confirmed` result is refused before span/text details could
+        // authorize it. Keep representative payload variants to prove those
+        // details cannot weaken the unconditional defense-in-depth refusal.
+        let variants = [
+            (
+                "declaration wrong end",
+                edit_with(vec![
+                    (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
+                    (decl_uri(), vec![te(rng(5, 11, 99), "fooRenamed")]),
+                ]),
+            ),
+            (
+                "parent usage wrong end",
+                edit_with(vec![
+                    (parent_uri(), vec![te(rng(3, 9, 99), "fooRenamed")]),
+                    (decl_uri(), vec![te(decl_range(), "fooRenamed")]),
+                ]),
+            ),
+            (
+                "declaration wrong replacement text",
+                edit_with(vec![
+                    (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
+                    (decl_uri(), vec![te(decl_range(), "WRONG")]),
+                ]),
+            ),
+        ];
+        for (label, merged) in variants {
+            let result = gate_cross_file_child_prop_rename(
+                Some(merged),
+                &confirmed_known_inline(),
+                "fooRenamed",
+            );
+            assert!(
+                result.is_none(),
+                "a Confirmed result must refuse regardless of {label}"
+            );
+        }
     }
 
     // ── NotChildProp: never over-gate a non-child rename ────────────────────────
@@ -550,56 +520,6 @@ mod cross_file_rename_gate_tests {
             result.is_none(),
             "a Confirmed rename with no precise declaration range must fail closed (None)"
         );
-    }
-
-    #[test]
-    fn satisfies_helper_full_range_and_both_legs() {
-        // Direct unit of the satisfaction predicate: both legs at FULL range → true;
-        // missing either → false; None range → false; right-start wrong-end → false.
-        let both = edit_with(vec![
-            (parent_uri(), vec![te(parent_usage_range(), "x")]),
-            (decl_uri(), vec![te(decl_range(), "x")]),
-        ]);
-        assert!(workspace_edit_satisfies_child_prop_rename(
-            &both,
-            &decl_uri(),
-            Some(decl_range()),
-            &parent_uri(),
-            Some(parent_usage_range()),
-            "x"
-        ));
-        // Missing declaration leg → false.
-        let usage_only = edit_with(vec![(parent_uri(), vec![te(parent_usage_range(), "x")])]);
-        assert!(!workspace_edit_satisfies_child_prop_rename(
-            &usage_only,
-            &decl_uri(),
-            Some(decl_range()),
-            &parent_uri(),
-            Some(parent_usage_range()),
-            "x"
-        ));
-        // None expected declaration range → false (fail closed).
-        assert!(!workspace_edit_satisfies_child_prop_rename(
-            &both,
-            &decl_uri(),
-            None,
-            &parent_uri(),
-            Some(parent_usage_range()),
-            "x"
-        ));
-        // Right declaration START but WRONG END → false (full-range, not start-only).
-        let wrong_end = edit_with(vec![
-            (parent_uri(), vec![te(parent_usage_range(), "x")]),
-            (decl_uri(), vec![te(rng(5, 11, 99), "x")]),
-        ]);
-        assert!(!workspace_edit_satisfies_child_prop_rename(
-            &wrong_end,
-            &decl_uri(),
-            Some(decl_range()),
-            &parent_uri(),
-            Some(parent_usage_range()),
-            "x"
-        ));
     }
 }
 

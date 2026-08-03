@@ -92,7 +92,7 @@ fn demand_prop_type(
 /// derived fact records `./theme` as unresolved; the fact-validation
 /// oracle re-resolves that known-miss specifier against the current
 /// workspace generation at validate time
-/// (`generation_current_import_route_hash`). Reverting that — letting
+/// (the owner's import-route witness). Reverting that — letting
 /// the warm negative resolution validate against its own stale
 /// `ImportRoute` snapshot — keeps the re-evaluation returning the
 /// unresolved carrier and the `TypeExpr::Object` assertion fails.

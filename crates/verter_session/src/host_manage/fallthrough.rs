@@ -182,12 +182,18 @@ impl VerterHost {
             if import.is_type_only {
                 continue;
             }
-            let Some(dep_canonical) = self.resolve_loaded_dependency_canonical(
+            let dep_canonical = match self.resolve_loaded_dependency_canonical(
                 owner_canonical_id,
                 import.source.as_str(),
                 verter_workspace::ResolveRequestKind::EsmImport,
-            ) else {
-                continue;
+            ) {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    let Some(dep_canonical) = admitted.into_result() else {
+                        continue;
+                    };
+                    dep_canonical
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => return None,
             };
             for binding in import.bindings.iter() {
                 if binding.is_type_only || matches!(binding.kind, ImportBindingKind::Namespace) {

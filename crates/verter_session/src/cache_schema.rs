@@ -81,7 +81,10 @@
 ///   closed instead of inferring from display text.
 /// - `7` — call-signature emit declaration spans. Version `6` analyzer-bearing
 ///   entries cannot prove an exact declaration-span JSDoc join.
-pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 7;
+/// - `8` — authored-only import targets. Version `7` shallow artifacts may
+///   retain a resolved canonical beside the authored source specifier, creating
+///   a second import-resolution authority; version `8` removes that field.
+pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 8;
 
 /// Trait surface every participating Db implements. The implementation is a
 /// trivial getter — the reason it exists at all is so the architecture-guard

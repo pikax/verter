@@ -265,7 +265,11 @@ pub struct VueRuntimeCompileExtras {
 /// Bumped 4 to 5: analyzed call-signature emit fields retain their declaration
 /// span for exact occurrence joins. This mirrors the session's
 /// `LEGACY_PARSER_VERSION` 4 to 5 bump.
-pub const VUE_CARRIER_PARSER_VERSION: u32 = 5;
+///
+/// Bumped 5 to 6: shallow import targets are authored-only and no longer retain
+/// a resolved canonical. This mirrors the session's `LEGACY_PARSER_VERSION`
+/// 5 to 6 bump.
+pub const VUE_CARRIER_PARSER_VERSION: u32 = 6;
 
 /// The Vue carrier compiler — the reference [`CarrierCompiler`].
 ///

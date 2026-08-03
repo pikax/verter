@@ -2610,7 +2610,7 @@ fn workspace_accessor_returns_same_arc() {
 }
 
 #[test]
-fn resolve_import_via_workspace_uses_exact_resolutions() {
+fn resolve_import_transient_uses_exact_resolutions() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -2630,7 +2630,7 @@ fn resolve_import_via_workspace_uses_exact_resolutions() {
     let host = VerterHost::new(HostConfig::default(), ws);
 
     // Positive: exact resolution works
-    let resolved = host.resolve_import_via_workspace("/src/App.vue", "./Child.vue");
+    let resolved = host.resolve_import_transient("/src/App.vue", "./Child.vue");
     assert_eq!(
         resolved.as_deref(),
         Some("/src/Child.vue"),
@@ -2638,7 +2638,7 @@ fn resolve_import_via_workspace_uses_exact_resolutions() {
     );
 
     // Negative: non-existent specifier returns None
-    let not_found = host.resolve_import_via_workspace("/src/App.vue", "./Missing.vue");
+    let not_found = host.resolve_import_transient("/src/App.vue", "./Missing.vue");
     assert!(
         not_found.is_none(),
         "should return None for unresolved imports"
@@ -2713,11 +2713,11 @@ fn ensure_compiled_hydrates_vue_compile_blockers_via_workspace_resolution() {
 }
 
 #[test]
-fn resolve_import_via_workspace_returns_none_for_no_resolution() {
+fn resolve_import_transient_returns_none_for_no_resolution() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
     // Negative: standalone workspace has no resolutions
-    let result = host.resolve_import_via_workspace("/src/App.vue", "./anything");
+    let result = host.resolve_import_transient("/src/App.vue", "./anything");
     assert!(
         result.is_none(),
         "standalone workspace should not resolve arbitrary imports"
@@ -2786,8 +2786,8 @@ fn set_workspace_swaps_resolution_source() {
     // Swap the workspace.
     host.set_workspace(new_ws.clone() as Arc<dyn verter_workspace::WorkspaceAccess>);
 
-    // Positive: resolve_import_via_workspace should use the new workspace.
-    let result = host.resolve_import_via_workspace("/src/App.vue", "./Btn.vue");
+    // Positive: resolve_import_transient should use the new workspace.
+    let result = host.resolve_import_transient("/src/App.vue", "./Btn.vue");
     assert_eq!(
         result.as_deref(),
         Some("/src/Btn.vue"),
@@ -2796,7 +2796,7 @@ fn set_workspace_swaps_resolution_source() {
 
     // Negative: the old standalone workspace should no longer be used.
     // (The new workspace doesn't have an arbitrary specifier.)
-    let no_result = host.resolve_import_via_workspace("/src/App.vue", "./NotExist.vue");
+    let no_result = host.resolve_import_transient("/src/App.vue", "./NotExist.vue");
     assert!(
         no_result.is_none(),
         "specifiers not in the new workspace should not resolve"
@@ -2982,7 +2982,7 @@ fn workspace_resolution_is_phase_0_primary() {
     // Positive: workspace-backed resolution should resolve ./types ->
     // /src/types.ts even though the host's `import_routes` fast path
     // has no entry for it.
-    let result = host.resolve_import_via_workspace("/src/App.vue", "./types");
+    let result = host.resolve_import_transient("/src/App.vue", "./types");
     assert_eq!(
         result.as_deref(),
         Some("/src/types.ts"),
@@ -2990,7 +2990,7 @@ fn workspace_resolution_is_phase_0_primary() {
     );
 
     // Negative: random specifiers still don't resolve.
-    let no_result = host.resolve_import_via_workspace("/src/App.vue", "./nonexistent");
+    let no_result = host.resolve_import_transient("/src/App.vue", "./nonexistent");
     assert!(
         no_result.is_none(),
         "unresolvable specifiers should still return None"
@@ -4167,6 +4167,7 @@ mod upsert_compile_cache_tests {
         let fresh = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
+        crate::host_construction::configure_workspace_test_projects(fresh.as_ref());
         host.set_workspace(fresh.clone());
         assert!(
             fresh.reverse_deps_for("/src/types.ts").is_empty(),
@@ -4226,6 +4227,7 @@ mod upsert_compile_cache_tests {
         let ws_b = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
+        crate::host_construction::configure_workspace_test_projects(ws_b.as_ref());
         host.set_workspace(ws_b.clone());
 
         // Structural re-upsert (different source) — runs the full

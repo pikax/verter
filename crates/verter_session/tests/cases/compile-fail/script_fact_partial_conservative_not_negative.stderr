@@ -1,0 +1,21 @@
+error[E0277]: the trait bound `ConservativeObservations<'_, SveltePropsCall>: NegativeEvidence` is not satisfied
+  --> tests/cases/compile-fail/script_fact_partial_conservative_not_negative.rs:17:32
+   |
+17 |     requires_exact_props_calls(&props_calls);
+   |     -------------------------- ^^^^^^^^^^^^ the trait `NegativeEvidence` is not implemented for `ConservativeObservations<'_, SveltePropsCall>`
+   |     |
+   |     required by a bound introduced by this call
+   |
+help: the trait `NegativeEvidence` is implemented for `ExactSveltePropsCalls`
+  --> $WORKSPACE/crates/verter_semantic/src/analysis/framework_facts/svelte.rs
+   |
+   | impl NegativeEvidence for ExactSveltePropsCalls {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `requires_exact_props_calls`
+  --> tests/cases/compile-fail/script_fact_partial_conservative_not_negative.rs:9:8
+   |
+ 7 | fn requires_exact_props_calls<E>(evidence: &E)
+   |    -------------------------- required by a bound in this function
+ 8 | where
+ 9 |     E: NegativeEvidence<Observation = SveltePropsCall>,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `requires_exact_props_calls`

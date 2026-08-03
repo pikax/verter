@@ -580,26 +580,38 @@ pub(super) async fn handle_did_open(
         // TEST SEAM: suppressed so the cross-file-rename child-closed lane proves
         // `handle_rename`'s own sync-before-query is the sole sync of the child API.
         && !server.suppress_imported_carrier_prewarm;
-    let imported_carrier_priority_ids = collect_imported_carrier_priority_ids_from_specifiers(
-        &result.import_specifiers,
-        current_canonical_id.as_deref(),
-        |parent, specifier| server.resolve_import_specifier(parent, specifier),
-    );
+    let imported_carrier_priority_ids =
+        collect_imported_carrier_priority_ids_from_specifiers_for_publication(
+            &result.import_specifiers,
+            current_canonical_id.as_deref(),
+            |parent, specifier| server.resolve_import_specifier_for_publication(parent, specifier),
+        );
+    if let Err(refusal) = &imported_carrier_priority_ids {
+        tracing::debug!(
+            "did_open: imported-carrier prewarm refused for {}: {:?}",
+            uri.as_str(),
+            refusal.reason()
+        );
+    }
     // Signal the background scanner to prioritize this file's directory
     if let Some(scanner) = server.workspace_scanner.lock().await.as_ref() {
         if let Some(canonical_id) = current_canonical_id.as_ref() {
             scanner.signal_priority(canonical_id.clone());
         }
-        for import_id in &imported_carrier_priority_ids {
-            scanner.signal_priority(import_id.clone());
+        if let Ok(import_ids) = &imported_carrier_priority_ids {
+            for import_id in import_ids {
+                scanner.signal_priority(import_id.clone());
+            }
         }
     }
 
     if prewarm_imported_carrier_apis {
-        for import_id in &imported_carrier_priority_ids {
-            let _ = server
-                .sync_imported_carrier_api_lightweight(import_id)
-                .await;
+        if let Ok(import_ids) = &imported_carrier_priority_ids {
+            for import_id in import_ids {
+                let _ = server
+                    .sync_imported_carrier_api_lightweight(import_id)
+                    .await;
+            }
         }
     }
 
@@ -635,13 +647,15 @@ pub(super) async fn handle_did_open(
         && !prewarm_imported_carrier_apis
         && !server.suppress_imported_carrier_prewarm
     {
-        for import_id in &imported_carrier_priority_ids {
-            let should_sync =
-                !server.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
-            if should_sync {
-                let _ = server
-                    .sync_imported_carrier_api_lightweight(import_id)
-                    .await;
+        if let Ok(import_ids) = &imported_carrier_priority_ids {
+            for import_id in import_ids {
+                let should_sync =
+                    !server.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
+                if should_sync {
+                    let _ = server
+                        .sync_imported_carrier_api_lightweight(import_id)
+                        .await;
+                }
             }
         }
     }

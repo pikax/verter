@@ -509,6 +509,9 @@ impl AuditBuilder {
 
         RequestAuditRecord {
             request_id: self.request_id,
+            target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+                self.canonical_id.clone(),
+            )),
             canonical_id: self.canonical_id,
             kind: RequestKind::ComponentMeta,
             parent_request_id,

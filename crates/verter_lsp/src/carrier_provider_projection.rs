@@ -16,7 +16,7 @@ use verter_workspace::{FilesystemWorkspace, WorkspaceRead, CARRIER_API_VIRTUAL_S
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::TransformedBufferMap;
-use crate::project_resolver::{ResolvePhase, ResolveRequest, ResolveRequestKind};
+use crate::project_resolver::{ResolvePhase, ResolveRequestKind};
 
 /// The exact bytes a provider holds for a carrier companion, together with the
 /// generated→provider map that describes *those* bytes.
@@ -89,39 +89,62 @@ impl PreparedCarrierProviderSurface {
 
 fn owner_resolves_verter_types(
     workspace: Option<&FilesystemWorkspace>,
+    published: Option<&Arc<verter_workspace::PublishedRoot>>,
     canonical_id: &str,
-) -> bool {
-    let resolved = workspace
-        .and_then(FilesystemWorkspace::load_published)
-        .and_then(|published| {
-            let workspace = workspace?;
-            published.snapshot.resolver.resolve_with_reader(
-                workspace,
-                &ResolveRequest {
-                    importer_id: canonical_id.to_string(),
-                    specifier: "@verter/types".to_string(),
-                    kind: ResolveRequestKind::TypeImport,
-                    phase: ResolvePhase::ProviderGraph,
-                },
-            )
-        });
-    if resolved.is_some() {
-        return true;
-    }
-
-    let mut current = std::path::Path::new(canonical_id).parent();
-    while let Some(directory) = current {
-        let manifest = directory.join("node_modules/@verter/types/package.json");
-        let exists = workspace.map_or_else(
-            || manifest.is_file(),
-            |workspace| workspace.file_exists(&manifest.to_string_lossy().replace('\\', "/")),
-        );
-        if exists {
-            return true;
+) -> Result<bool, verter_workspace::ResolutionPublicationRefusal> {
+    let Some(workspace) = workspace else {
+        return Ok(false);
+    };
+    let Some(published) = published else {
+        return Ok(false);
+    };
+    let outcome = WorkspaceRead::resolve_import_at_published(
+        workspace,
+        published,
+        canonical_id,
+        "@verter/types",
+        verter_workspace::ResolutionContext {
+            kind: ResolveRequestKind::TypeImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    );
+    match outcome.into_publication() {
+        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+            Ok(admitted.result().is_some())
         }
-        current = directory.parent();
+        verter_workspace::ResolutionPublication::Refused(refusal) => Err(refusal),
     }
-    false
+}
+
+fn provider_resolution_fence_is_current(
+    workspace: Option<&FilesystemWorkspace>,
+    published: Option<&Arc<verter_workspace::PublishedRoot>>,
+    content_generation: Option<u64>,
+) -> bool {
+    let Some(workspace) = workspace else {
+        return true;
+    };
+    if content_generation != Some(WorkspaceRead::content_generation(workspace)) {
+        return false;
+    }
+    match (published, workspace.load_published()) {
+        (Some(expected), Some(current)) => Arc::ptr_eq(expected, &current),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn expect_admitted<T>(
+    publication: Result<T, verter_workspace::ResolutionPublicationRefusal>,
+    context: &str,
+) -> T {
+    match publication {
+        Ok(value) => value,
+        Err(refusal) => {
+            panic!("{context}: {:?}", refusal.reason())
+        }
+    }
 }
 
 /// Prepare the complete provider surface for a carrier companion in ONE pass:
@@ -140,26 +163,51 @@ pub(crate) fn prepare_carrier_provider_surface(
     generated: &str,
     encoding: tower_lsp_server::ls_types::PositionEncodingKind,
     virtualize_verter_types: bool,
-) -> PreparedCarrierProviderSurface {
+) -> Result<PreparedCarrierProviderSurface, verter_workspace::ResolutionPublicationRefusal> {
+    let published = workspace.and_then(FilesystemWorkspace::load_published);
+    if workspace.is_some()
+        && !published
+            .as_ref()
+            .is_some_and(|published| !published.snapshot.projects.is_empty())
+    {
+        return Err(verter_workspace::ResolutionPublicationRefusal::new(
+            verter_audit::NonAdmissionReason::ResolutionUntrackedBackend,
+        ));
+    }
+    let content_generation = workspace.map(WorkspaceRead::content_generation);
     // BOTH the import specifier and the overlay path derive from the ONE
     // descriptor naming authority — never a locally-formatted string — so the
     // published sidecar can never drift from what `classify_carrier_companion`
     // recognizes (the drift that silently dropped the sidecar from the SHARED
     // overlay). Round-trip-guarded by
     // `published_provider_paths_classify_as_companions_of_their_carrier`.
-    let verter_types_specifier = (virtualize_verter_types
-        && !owner_resolves_verter_types(workspace, canonical_id))
-    .then(|| verter_session::framework::descriptor::verter_types_import_specifier(provider_path))
-    .flatten();
+    #[allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
+    // keep admitted miss visibly distinct from refusal
+    let owner_resolves_verter_types = if virtualize_verter_types {
+        owner_resolves_verter_types(workspace, published.as_ref(), canonical_id)?
+    } else {
+        false
+    };
+    let verter_types_specifier = if virtualize_verter_types && !owner_resolves_verter_types {
+        verter_session::framework::descriptor::verter_types_import_specifier(provider_path)
+    } else {
+        None
+    };
 
     let (prepared, rewrote_verter_types) = prepare_carrier_provider_imports_with_verter_types(
         workspace,
+        published.as_ref(),
         canonical_id,
         generated,
         encoding,
         verter_types_specifier.as_deref(),
-    );
-    PreparedCarrierProviderSurface {
+    )?;
+    if !provider_resolution_fence_is_current(workspace, published.as_ref(), content_generation) {
+        return Err(verter_workspace::ResolutionPublicationRefusal::new(
+            verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
+        ));
+    }
+    Ok(PreparedCarrierProviderSurface {
         prepared,
         // The overlay is only a live dependency when an import actually points at
         // it; a carrier that never mentions `@verter/types` needs no overlay file.
@@ -172,7 +220,7 @@ pub(crate) fn prepare_carrier_provider_surface(
                 verter_session::framework::descriptor::verter_types_sidecar_path(provider_path)
             })
             .flatten(),
-    }
+    })
 }
 
 /// Whether every exact configured owner explicitly permits authored carrier
@@ -204,15 +252,33 @@ pub(crate) fn prepare_carrier_provider_imports(
     canonical_id: &str,
     generated: &str,
     encoding: tower_lsp_server::ls_types::PositionEncodingKind,
-) -> PreparedCarrierProviderContent {
-    prepare_carrier_provider_imports_with_verter_types(
+) -> Result<PreparedCarrierProviderContent, verter_workspace::ResolutionPublicationRefusal> {
+    let published = workspace.and_then(FilesystemWorkspace::load_published);
+    if workspace.is_some()
+        && !published
+            .as_ref()
+            .is_some_and(|published| !published.snapshot.projects.is_empty())
+    {
+        return Err(verter_workspace::ResolutionPublicationRefusal::new(
+            verter_audit::NonAdmissionReason::ResolutionUntrackedBackend,
+        ));
+    }
+    let content_generation = workspace.map(WorkspaceRead::content_generation);
+    let publication = prepare_carrier_provider_imports_with_verter_types(
         workspace,
+        published.as_ref(),
         canonical_id,
         generated,
         encoding,
         None,
     )
-    .0
+    .map(|(prepared, _)| prepared);
+    if !provider_resolution_fence_is_current(workspace, published.as_ref(), content_generation) {
+        return Err(verter_workspace::ResolutionPublicationRefusal::new(
+            verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
+        ));
+    }
+    publication
 }
 
 /// Returns the prepared surface plus whether an `@verter/types` reference was
@@ -220,13 +286,14 @@ pub(crate) fn prepare_carrier_provider_imports(
 /// adjacent overlay only when something imports it).
 fn prepare_carrier_provider_imports_with_verter_types(
     workspace: Option<&FilesystemWorkspace>,
+    published: Option<&Arc<verter_workspace::PublishedRoot>>,
     canonical_id: &str,
     generated: &str,
     encoding: tower_lsp_server::ls_types::PositionEncodingKind,
     verter_types_specifier: Option<&str>,
-) -> (PreparedCarrierProviderContent, bool) {
-    let published = workspace.and_then(FilesystemWorkspace::load_published);
-    let rewrite_carrier_imports = !published.as_ref().is_some_and(|published| {
+) -> Result<(PreparedCarrierProviderContent, bool), verter_workspace::ResolutionPublicationRefusal>
+{
+    let rewrite_carrier_imports = !published.is_some_and(|published| {
         published.ownership_ready
             && configured_owners_allow_authored_carrier_specifiers(
                 &published.snapshot,
@@ -234,13 +301,13 @@ fn prepare_carrier_provider_imports_with_verter_types(
             )
     });
     if !rewrite_carrier_imports && verter_types_specifier.is_none() {
-        return (
+        return Ok((
             PreparedCarrierProviderContent {
                 content: Arc::from(generated),
                 rewrites: TransformedBufferMap::identity(),
             },
             false,
-        );
+        ));
     }
 
     let allocator = Allocator::new();
@@ -270,13 +337,16 @@ fn prepare_carrier_provider_imports_with_verter_types(
             if !rewrite_carrier_imports {
                 continue;
             }
-            let resolved = published.as_ref().and_then(|published| {
-                let workspace = workspace?;
-                published.snapshot.resolver.resolve_with_reader(
+            let resolved = if let Some(published) = published {
+                let Some(workspace) = workspace else {
+                    continue;
+                };
+                let outcome = WorkspaceRead::resolve_import_at_published(
                     workspace,
-                    &ResolveRequest {
-                        importer_id: canonical_id.to_string(),
-                        specifier: specifier.to_string(),
+                    published,
+                    canonical_id,
+                    specifier,
+                    verter_workspace::ResolutionContext {
                         kind: if reference.is_type_only {
                             ResolveRequestKind::TypeImport
                         } else {
@@ -284,11 +354,31 @@ fn prepare_carrier_provider_imports_with_verter_types(
                         },
                         phase: ResolvePhase::ProviderGraph,
                     },
-                )
-            });
+                );
+                match outcome.into_publication() {
+                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                        admitted.into_result()
+                    }
+                    verter_workspace::ResolutionPublication::Refused(refusal) => {
+                        return Err(refusal);
+                    }
+                }
+            } else {
+                None
+            };
             match resolved {
                 Some(resolved) if verter_workspace::path_is_carrier(&resolved.source_id) => {
-                    resolved.provider_specifier
+                    if resolved
+                        .provider_specifier
+                        .ends_with(CARRIER_API_VIRTUAL_SUFFIX)
+                    {
+                        resolved.provider_specifier
+                    } else {
+                        format!(
+                            "{}{}",
+                            resolved.provider_specifier, CARRIER_API_VIRTUAL_SUFFIX
+                        )
+                    }
                 }
                 _ if verter_workspace::path_is_carrier(specifier) => {
                     format!("{specifier}{CARRIER_API_VIRTUAL_SUFFIX}")
@@ -331,22 +421,22 @@ fn prepare_carrier_provider_imports_with_verter_types(
         // (an edit crossing a line boundary). Fail closed: deliver the compiler
         // bytes UNPROJECTED with the identity map rather than a buffer whose
         // positions would silently mislead every provider-backed feature.
-        return (
+        return Ok((
             PreparedCarrierProviderContent {
                 content: Arc::from(generated),
                 rewrites: TransformedBufferMap::identity(),
             },
             false,
-        );
+        ));
     };
 
-    (
+    Ok((
         PreparedCarrierProviderContent {
             content: Arc::from(content),
             rewrites,
         },
         rewrote_verter_types,
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -357,11 +447,14 @@ mod tests {
     #[test]
     fn non_true_policy_rewrites_only_framework_carriers_and_tracks_columns() {
         let source = "import C from './C.vue'; import x from './x.ts'; void C; void x;\n";
-        let prepared = prepare_carrier_provider_imports(
-            None,
-            "/ws/App.vue",
-            source,
-            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        let prepared = expect_admitted(
+            prepare_carrier_provider_imports(
+                None,
+                "/ws/App.vue",
+                source,
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            ),
+            "no workspace resolution is needed",
         );
         assert!(prepared.content().contains("'./C.vue.verter.ts'"));
         assert!(prepared.content().contains("'./x.ts'"));
@@ -375,6 +468,79 @@ mod tests {
                 .character,
             original_semicolon + CARRIER_API_VIRTUAL_SUFFIX.len() as u32
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn published_filesystem_resolution_prepares_a_complete_provider_surface() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let temp_root = temp.path().to_string_lossy().replace('\\', "/");
+        // The tempdir path is resolved and the fixture carrier is written
+        // through the workspace's own disk boundary (`NativeFs`), never a
+        // consumer-local `std::fs` probe: `realpath` is what the published
+        // resolution world keys on (on macOS `/var` is a symlink to
+        // `/private/var`), and routing the write through `WorkspaceAccess`
+        // is what feeds the C1 evidence bridge its invalidation signal.
+        let root = {
+            let probe = FilesystemWorkspace::new(verter_workspace::FilesystemOptions {
+                roots: vec![temp_root.clone()],
+                eager_preload: false,
+            });
+            verter_workspace::WorkspaceRead::realpath(&probe, &temp_root)
+                .expect("canonical tempdir")
+        };
+        let canonical_id = format!("{root}/App.vue");
+        let child = format!("{root}/Child.vue");
+        let workspace = FilesystemWorkspace::new(verter_workspace::FilesystemOptions {
+            roots: vec![root.clone()],
+            eager_preload: false,
+        });
+        verter_workspace::WorkspaceAccess::write_file(
+            &workspace,
+            &child,
+            "<script>export default {};</script>",
+        )
+        .expect("write child carrier");
+        verter_workspace::WorkspaceAccess::configure_resolver(
+            &workspace,
+            vec![verter_workspace::IdeProjectConfig::new(
+                root.clone(),
+                root,
+                None,
+            )],
+        );
+        let published = workspace.load_published().expect("published resolver");
+        assert!(
+            !configured_owners_allow_authored_carrier_specifiers(
+                &published.snapshot,
+                &canonical_id,
+            ),
+            "the default project must require compatibility projection"
+        );
+        let source = "import Child from './Child.vue'; void Child;\n";
+
+        let prepared = expect_admitted(
+            prepare_carrier_provider_imports(
+                Some(&workspace),
+                &canonical_id,
+                source,
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            ),
+            "the Engine-owned published filesystem view is a complete resolution world",
+        );
+
+        assert!(
+            prepared.content().contains("'./Child.vue.verter.ts'"),
+            "the admitted published snapshot must retain the carrier rewrite: {}",
+            prepared.content()
+        );
+        assert!(
+            !prepared.content().contains("from './Child.vue';"),
+            "the provider product must not retain the unresolved authored carrier specifier"
+        );
+
+        // Mutation recipe: route the published provider flow through the direct
+        // untracked FilesystemWorkspace outcome. Preparation returns None.
     }
 
     /// A position AFTER the rewritten specifiers on a rewritten import line must
@@ -394,11 +560,14 @@ mod tests {
     #[test]
     fn positions_after_same_line_rewrites_land_on_the_delivered_bytes() {
         let generated = "import A from './A.vue'; import B from './B.vue'; void A; void B;\n";
-        let prepared = prepare_carrier_provider_imports(
-            None,
-            "/ws/App.vue",
-            generated,
-            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        let prepared = expect_admitted(
+            prepare_carrier_provider_imports(
+                None,
+                "/ws/App.vue",
+                generated,
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            ),
+            "no workspace resolution is needed",
         );
         let provider = prepared.content().to_string();
         assert!(provider.contains("'./A.vue.verter.ts'"));
@@ -451,13 +620,16 @@ mod tests {
     #[test]
     fn one_pass_surface_maps_columns_past_both_rewrite_families() {
         let generated = "import C from './C.vue';\nimport type { X } from '@verter/types';\nconst value: X = {} as X; void C;\n";
-        let surface = prepare_carrier_provider_surface(
-            None,
-            "/ws/App.vue",
-            "/ws/App.vue.tsx",
-            generated,
-            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
-            true,
+        let surface = expect_admitted(
+            prepare_carrier_provider_surface(
+                None,
+                "/ws/App.vue",
+                "/ws/App.vue.tsx",
+                generated,
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+                true,
+            ),
+            "no workspace resolution is needed",
         );
 
         let provider = surface.prepared().content().to_string();
@@ -508,13 +680,16 @@ mod tests {
     /// even on the engine that virtualizes it.
     #[test]
     fn surface_without_verter_types_import_publishes_no_overlay() {
-        let surface = prepare_carrier_provider_surface(
-            None,
-            "/ws/App.vue",
-            "/ws/App.vue.tsx",
-            "import C from './C.vue'; void C;\n",
-            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
-            true,
+        let surface = expect_admitted(
+            prepare_carrier_provider_surface(
+                None,
+                "/ws/App.vue",
+                "/ws/App.vue.tsx",
+                "import C from './C.vue'; void C;\n",
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+                true,
+            ),
+            "no workspace resolution is needed",
         );
         assert_eq!(surface.virtual_verter_types_path(), None);
         assert!(surface.prepared().content().contains("'./C.vue.verter.ts'"));

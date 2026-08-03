@@ -222,6 +222,13 @@ impl crate::traits::WorkspaceRead for CountingReader {
         self.files.contains(&normalize_canonical_id(canonical_id))
     }
 
+    fn resolution_event_bridge_complete(&self) -> bool {
+        // The fixture is immutable after construction, so every possible
+        // resolver-visible mutation is complete before an Engine transaction
+        // can capture it.
+        true
+    }
+
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         self.realpath_count.fetch_add(1, Ordering::Relaxed);
         self.realpaths
@@ -2769,18 +2776,25 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
     {
         use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
         use crate::resolver::IdeProjectCompilerOptions;
-        let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
-            root: "/repo".to_string(),
-            rank: ProjectRank::Inferred,
-            tsconfig_path: None,
-            root_files: vec![],
-            extensions: vec![],
-            workspace_root: "/repo".to_string(),
-            workspace_aliases: vec![],
-            compiler_options: IdeProjectCompilerOptions::default(),
-            references: vec![],
-            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
-        }]);
+        let graph = ProjectGraph::from_configs(
+            ["/repo", "/repo/node_modules/pkg"]
+                .into_iter()
+                .map(|root| VfsProjectConfig {
+                    root: root.to_string(),
+                    rank: ProjectRank::Inferred,
+                    tsconfig_path: None,
+                    root_files: vec![],
+                    extensions: vec![],
+                    workspace_root: root.to_string(),
+                    workspace_aliases: vec![],
+                    compiler_options: IdeProjectCompilerOptions::default(),
+                    references: vec![],
+                    membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new(
+                        root,
+                    )),
+                })
+                .collect(),
+        );
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
     }
@@ -2809,7 +2823,6 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
         .resolve_import(&reader, "/repo/src/App.vue", "pkg", ctx)
         .expect("warm resolution should succeed");
     let after_second_provenance = engine.vfs_provenance.snapshot();
-
     assert_eq!(second, first, "warm cache hit should reuse the same result");
     assert_eq!(
         reader.file_exists_calls(),

@@ -326,11 +326,8 @@ fn resolve_import_binding_from_facts(
     {
         let state = &entry.shallow_state;
         if let Some(target) = state.import_target_in(owner, local_name) {
-            let resolved_id = if target.canonical_id.is_empty() {
-                ctx.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)?
-            } else {
-                target.canonical_id.clone()
-            };
+            let resolved_id =
+                ctx.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)?;
             return resolve_imported_type_root_identity(ctx, &resolved_id, &target.imported_name);
         }
     }
@@ -415,11 +412,7 @@ fn resolve_namespace_import_canonical_from_facts(
         }
         _ => return None,
     };
-    if target.canonical_id.is_empty() {
-        ctx.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)
-    } else {
-        Some(target.canonical_id.clone())
-    }
+    ctx.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)
 }
 
 fn resolve_imported_type_root_identity(

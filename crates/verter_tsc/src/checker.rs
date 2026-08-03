@@ -153,6 +153,15 @@ type TscDeclarationRows = Vec<(PathBuf, String, PathBuf)>;
 /// per-source projection failures.
 type DeclarationStageResult = (Vec<Diagnostic>, Vec<PathBuf>, Vec<PublicApiFailure>);
 
+/// Canonical store/module identity for a filesystem path.
+///
+/// In particular, this folds Windows drive letters so host keys and generated
+/// import specifiers cannot disagree solely because one originated in a
+/// `PathBuf` (`D:/...`) and the other in TypeScript (`d:/...`).
+fn canonical_path_id(path: &Path) -> String {
+    verter_span::path::canonicalize_path(&path.to_string_lossy())
+}
+
 /// Generate public-API stub carriers for cross-component type resolution.
 ///
 /// For each `.vue` file, generates a stub containing the component's public API
@@ -185,7 +194,7 @@ fn generate_public_api_stubs(
     // input order, one per id.
     let canonical_ids: Vec<String> = vue_files
         .iter()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .map(|path| canonical_path_id(path))
         .collect();
     let responses = {
         let id_refs: Vec<&str> = canonical_ids.iter().map(String::as_str).collect();
@@ -300,7 +309,7 @@ fn generate_all_tsx(
     let macro_inputs: Vec<verter_compiler::compile::VueMacroSemanticInput> = vue_files
         .iter()
         .map(|vue_path| {
-            let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+            let canonical_id = canonical_path_id(vue_path);
             host.vue_macro_semantic_input(&canonical_id, CompileTarget::TSX)
         })
         .collect();
@@ -322,7 +331,7 @@ fn generate_all_tsx(
                 .unwrap_or("Component");
             let component_name = sanitize_component_name(raw_name);
 
-            let filename = vue_path.to_string_lossy().replace('\\', "/");
+            let filename = canonical_path_id(vue_path);
             let alloc = Allocator::default();
             let options = CodegenOptions {
                 filename: Some(filename),
@@ -362,7 +371,7 @@ fn generate_all_tsx(
             // EMPTY `DefineComponent<{}, {}, any>`. Without this the widening
             // is simply absent for every alias-importing consumer, which is the
             // headline case of issue #97 for a project using `paths`.
-            let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+            let canonical_id = canonical_path_id(vue_path);
             code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
 
             // Append inline source map so `map_tsc_position()` can remap errors.
@@ -432,7 +441,7 @@ fn generate_all_tsc(
     // advanced the store-view token). Slots come back in input order, one per id.
     let canonical_ids: Vec<String> = vue_files
         .iter()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .map(|path| canonical_path_id(path))
         .collect();
     let responses = {
         let id_refs: Vec<&str> = canonical_ids.iter().map(String::as_str).collect();
@@ -670,7 +679,7 @@ pub fn run(
             ))
         })?;
         admission.admit(vue_path, &source);
-        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+        let canonical_id = canonical_path_id(vue_path);
         let _update = host
             .upsert(UpsertRequest {
                 canonical_id: Some(canonical_id.clone()),
@@ -1984,6 +1993,75 @@ enum SpecifierExpect {
     NextString,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SignificantByteScanWork {
+    /// Source bytes classified by the shared forward lexical walk.
+    bytes_scanned: usize,
+    /// Identifier positions that read the running significant byte.
+    identifier_lookups: usize,
+}
+
+/// Previous-significant-byte state carried by the existing forward specifier
+/// lexer. Strings, templates, and comments advance the work cursor without
+/// changing `last_significant`; code-level bytes update it in source order.
+#[derive(Default)]
+struct SignificantByteState {
+    last_significant: Option<u8>,
+    cursor: usize,
+    work: SignificantByteScanWork,
+}
+
+impl SignificantByteState {
+    fn previous_for_identifier(&mut self, start: usize) -> Option<u8> {
+        debug_assert_eq!(
+            self.cursor, start,
+            "significant-byte state must advance with the lexical scanner"
+        );
+        self.work.identifier_lookups += 1;
+        self.last_significant
+    }
+
+    fn skip_insignificant(&mut self, start: usize, end: usize) {
+        debug_assert_eq!(
+            self.cursor, start,
+            "insignificant lexical runs must be consumed in source order"
+        );
+        self.work.bytes_scanned += end - start;
+        self.cursor = end;
+    }
+
+    fn consume_identifier(&mut self, start: usize, end: usize, last_byte: u8) {
+        debug_assert_eq!(
+            self.cursor, start,
+            "identifier tokens must be consumed in source order"
+        );
+        debug_assert!(end > start, "an identifier token must not be empty");
+        self.work.bytes_scanned += end - start;
+        self.cursor = end;
+        self.last_significant = Some(last_byte);
+    }
+
+    fn consume_code_byte(&mut self, offset: usize, byte: u8) {
+        debug_assert_eq!(
+            self.cursor, offset,
+            "code bytes must be consumed in source order"
+        );
+        self.work.bytes_scanned += 1;
+        self.cursor = offset + 1;
+        if !byte.is_ascii_whitespace() {
+            self.last_significant = Some(byte);
+        }
+    }
+
+    fn finish(self, len: usize) -> SignificantByteScanWork {
+        debug_assert_eq!(
+            self.cursor, len,
+            "the lexical scanner must classify every source byte"
+        );
+        self.work
+    }
+}
+
 /// Lexical carrier-specifier lowering over module-specifier positions: copies
 /// `code` to the output verbatim, lowering ONLY the carrier specifier that
 /// occupies a genuine module-specifier position. It recognizes the
@@ -2014,11 +2092,23 @@ fn lower_carrier_specifiers_in_module_positions(
     code: &str,
     vue_ts_map: &HashMap<String, PathBuf>,
 ) -> String {
+    lower_carrier_specifiers_in_module_positions_observed(code, vue_ts_map, |_, _| {}).0
+}
+
+fn lower_carrier_specifiers_in_module_positions_observed<F>(
+    code: &str,
+    vue_ts_map: &HashMap<String, PathBuf>,
+    mut observe_identifier: F,
+) -> (String, SignificantByteScanWork)
+where
+    F: FnMut(usize, Option<u8>),
+{
     let bytes = code.as_bytes();
     let len = bytes.len();
     let mut result = String::with_capacity(len);
     let mut i = 0usize;
     let mut expect = SpecifierExpect::None;
+    let mut significant = SignificantByteState::default();
 
     while i < len {
         let b = bytes[i];
@@ -2031,6 +2121,7 @@ fn lower_carrier_specifiers_in_module_positions(
                 i += 1;
             }
             result.push_str(&code[start..i]);
+            significant.skip_insignificant(start, i);
             continue;
         }
 
@@ -2043,6 +2134,7 @@ fn lower_carrier_specifiers_in_module_positions(
             }
             i = (i + 2).min(len); // consume closing `*/` (or run to EOF)
             result.push_str(&code[start..i]);
+            significant.skip_insignificant(start, i);
             continue;
         }
 
@@ -2080,11 +2172,13 @@ fn lower_carrier_specifiers_in_module_positions(
                 i += 1;
             }
             result.push_str(&code[start..i]);
+            significant.skip_insignificant(start, i);
             continue;
         }
 
         // String literal (single or double quote).
         if b == b'\'' || b == b'"' {
+            let start = i;
             let quote = b;
             let content_start = i + 1;
             let mut j = content_start;
@@ -2127,6 +2221,7 @@ fn lower_carrier_specifiers_in_module_positions(
             } else {
                 i = j; // unterminated — already at EOF
             }
+            significant.skip_insignificant(start, i);
             continue;
         }
 
@@ -2149,7 +2244,9 @@ fn lower_carrier_specifiers_in_module_positions(
             // (Matching INSIDE a longer identifier like `importer`/`fromage` is
             // already prevented by the `is_ident_start`/`is_ident_continue` token
             // boundary; this guard covers the `.`-prefixed member-access case.)
-            let member_access = prev_significant_byte(bytes, start) == Some(b'.');
+            let previous_significant = significant.previous_for_identifier(start);
+            observe_identifier(start, previous_significant);
+            let member_access = previous_significant == Some(b'.');
             if !member_access {
                 match word {
                     "import" => {
@@ -2175,6 +2272,7 @@ fn lower_carrier_specifiers_in_module_positions(
                     _ => {}
                 }
             }
+            significant.consume_identifier(start, i, bytes[i - 1]);
             continue;
         }
 
@@ -2185,10 +2283,11 @@ fn lower_carrier_specifiers_in_module_positions(
             expect = SpecifierExpect::None;
         }
         result.push(b as char);
+        significant.consume_code_byte(i, b);
         i += 1;
     }
 
-    result
+    (result, significant.finish(len))
 }
 
 /// Whether `b` can start a JS/TS identifier-or-keyword token. Word boundaries
@@ -2233,11 +2332,11 @@ fn next_significant_byte(bytes: &[u8], mut i: usize) -> Option<u8> {
     None
 }
 
-/// The last significant code byte strictly BEFORE index `start`, or `None` when
-/// no code-level byte precedes it. Used by the specifier scanner's leading-context
-/// guard to tell a keyword introducer (`import`/`export`/`from` at a
-/// statement/expression position) from a member name (`obj.import(…)`,
-/// `obj?.import(…)`, `obj.from(…)`), whose prior significant byte is `.`.
+/// Test oracle for the last significant code byte strictly BEFORE index
+/// `start`, or `None` when no code-level byte precedes it. Production carries
+/// [`SignificantByteState`] with the forward specifier lexer; this independent
+/// from-byte-zero implementation proves the running value at every identifier
+/// lookup.
 ///
 /// The lexical state at `start` is established by scanning FORWARD from the
 /// beginning of `bytes` with the SAME string / template / block-comment / line-
@@ -2260,6 +2359,7 @@ fn next_significant_byte(bytes: &[u8], mut i: usize) -> Option<u8> {
 /// scanners consistent. Escaped backticks (`` \` ``) inside a template do not close
 /// it (and an escape pair inside a single/double string is consumed), so a string
 /// or template that spans physical lines is tracked across them.
+#[cfg(test)]
 fn prev_significant_byte(bytes: &[u8], start: usize) -> Option<u8> {
     let len = bytes.len();
     let end = start.min(len);
@@ -2351,6 +2451,10 @@ fn prev_significant_byte(bytes: &[u8], start: usize) -> Option<u8> {
     }
     last_significant
 }
+
+#[cfg(test)]
+#[path = "checker_significant_byte_tests.rs"]
+mod checker_significant_byte_tests;
 
 /// The rewrite decision for a single quoted import specifier.
 enum Rewrite {
@@ -4730,13 +4834,14 @@ const ident = KnownComp_vue_thing;
 
     /// LEADING-CONTEXT GUARD, comment-tolerant lookback: the member-access guard
     /// must see the `.` qualifier even when a `//` line comment OR a `/* */` block
-    /// comment sits between the `.` and the `import` member name. `prev_significant_byte`
-    /// skips BOTH comment forms in reverse, so `loader. // note\n import("x")` is
-    /// recognised as a property access (`import` qualified by `.`) and its string
-    /// argument is left verbatim — never routed to the carrier stub. The negative
-    /// control (a genuine `import("x")` whose only preceding token is a line comment
-    /// on its OWN line, with no `.` qualifier) still rewrites, proving the lookback
-    /// did not over-suppress real introducers.
+    /// comment sits between the `.` and the `import` member name. The running
+    /// significant-byte state skips BOTH comment forms, so
+    /// `loader. // note\n import("x")` is recognised as a property access
+    /// (`import` qualified by `.`) and its string argument is left verbatim —
+    /// never routed to the carrier stub. The negative control (a genuine
+    /// `import("x")` whose only preceding token is a line comment on its OWN
+    /// line, with no `.` qualifier) still rewrites, proving the lookback did not
+    /// over-suppress real introducers.
     #[test]
     fn lower_tsc_validation_carrier_specifiers_member_access_lookback_skips_line_comments() {
         let mut map = HashMap::new();
@@ -5920,7 +6025,7 @@ defineProps<{ msg: string }>()
         .unwrap();
 
         let host = VerterHost::new_standalone(HostConfig::default());
-        let canonical_id = child_vue.to_string_lossy().replace('\\', "/");
+        let canonical_id = canonical_path_id(&child_vue);
         let source = fs::read_to_string(&child_vue).unwrap();
         let _ = host
             .upsert(UpsertRequest {

@@ -82,10 +82,7 @@ impl std::fmt::Display for Violation {
 }
 
 /// Whitelisted writer methods for the positive route map.
-const ROUTE_MAP_ADMIT_ALLOWED_FNS: &[&str] = &[
-    "set_import_dependencies",
-    "cache_positive_import_route_result",
-];
+const ROUTE_MAP_ADMIT_ALLOWED_FNS: &[&str] = &["set_import_dependencies"];
 
 /// Whitelisted reset methods for the positive route map.
 const ROUTE_MAP_CLEAR_ALLOWED_FNS: &[&str] = &["configure_projects", "finish_upsert_post_commit"];
@@ -689,17 +686,22 @@ fn format_violations(violations: &[Violation]) -> String {
 
 /// Positive-route admission allow-list.
 ///
-/// `DerivedRawState.import_routes` may be mutated only by:
-///   * `VerterHost::set_import_dependencies` — full snapshot writer;
-///   * `VerterHost::cache_positive_import_route_result` — positive-only
-///     point admission;
+/// `DerivedRawState.import_routes` is the CALLER-SUPPLIED authoritative
+/// route table and may be mutated only by:
+///   * `VerterHost::set_import_dependencies` — the caller's snapshot;
 ///   * `VerterHost::configure_projects` — lifecycle clear;
 ///   * `VerterHost::finish_upsert_post_commit` — lifecycle clear.
 ///
-/// Any other writer flagged here means a new admission path was added
-/// without being routed through the canonical helper. The fix is to
-/// either call `cache_positive_import_route_result` (positive-only) or
-/// `set_import_dependencies` (full snapshot with known-miss admission).
+/// The host memoises NO resolution here: the workspace's own bounded
+/// owner-edge candidate slot is the one resolution memo, validated
+/// per-reader against a captured immutable resolution world. A second
+/// host-side copy needed a global `content_generation` equality to
+/// decide whether it was still true — the last global-generation
+/// warm-resolution validity test in the session — so the memo and its
+/// stamp were deleted together.
+///
+/// Any other writer flagged here means a host-side route memo was
+/// reintroduced.
 #[test]
 fn import_routes_writer_allow_list() {
     let crate_root = workspace_root().join("crates/verter_session/src");
@@ -725,15 +727,13 @@ fn import_routes_writer_allow_list() {
     assert!(
         route_violations.is_empty(),
         "`import_routes_writer_allow_list` violation:\n{}\n\n\
-         `DerivedRawState.import_routes` is a two-mode admission field.\n\
-           * Positive route point admission: `cache_positive_import_route_result`.\n\
+         `DerivedRawState.import_routes` is the caller-supplied table.\n\
            * Full caller-supplied snapshot: `set_import_dependencies`.\n\
            * Lifecycle clear: `configure_projects`, `finish_upsert_post_commit`.\n\
-         If you need to publish a host-resolved positive route from a\n\
-         new caller, route through `cache_positive_import_route_result`.\n\
-         If you need to publish a bundler-supplied snapshot with known\n\
-         misses, route through `set_import_dependencies`. Do not add a\n\
-         new direct producer.",
+         There is NO host-side positive-route memo: a host-resolved route\n\
+         is memoised by the workspace owner-edge candidate slot alone.\n\
+         If you need to publish a bundler-supplied snapshot, route through\n\
+         `set_import_dependencies`. Do not add a new direct producer.",
         format_violations(&route_violations)
     );
 }
@@ -742,49 +742,32 @@ fn import_routes_writer_allow_list() {
 // Guard 2: strict known-miss sidecar — single producer.
 // ---------------------------------------------------------------------------
 
-/// Strict guard on the known-miss generation sidecar.
+/// The known-miss generation sidecar is DELETED from production
+/// source.
 ///
-/// `DerivedRawState.import_routes_known_miss_recorded_at_generation`
-/// admission is single-producer. The full-snapshot writer
-/// (`set_import_dependencies`) computes the per-specifier generation
-/// table from the caller's snapshot and assigns the whole map. The
-/// two lifecycle reset methods (`configure_projects` and
-/// `finish_upsert_post_commit`) may `.clear()` the sidecar
-/// alongside `import_routes`. No other writer is allowed —
-/// admitting from a non-snapshot producer would re-stamp a known
-/// miss at the current `content_generation` and incorrectly extend a
-/// stale negative answer that should have re-resolved.
+/// Global-generation equality is not a warm-resolution validity test:
+/// a negative answer re-resolves through the one owner-edge authority,
+/// whose fact witness decides whether the miss still holds. A
+/// reintroduced per-specifier generation stamp would silently pin a
+/// stale negative answer current for the remainder of a generation.
 #[test]
-fn known_miss_generation_sidecar_strict() {
+fn known_miss_generation_sidecar_is_deleted() {
     let crate_root = workspace_root().join("crates/verter_session/src");
-    let mut violations = Vec::new();
-    for file in walk_production_rs_files(&crate_root) {
-        scan_file(&file, &mut violations);
-    }
-    let sidecar_violations: Vec<_> = violations
+    let offenders: Vec<String> = walk_production_rs_files(&crate_root)
         .into_iter()
-        .filter(|v| {
-            v.op.contains("import_routes_known_miss_recorded_at_generation")
-                || v.detail
-                    .contains("on `import_routes_known_miss_recorded_at_generation`")
-                || v.detail
-                    .contains("`import_routes_known_miss_recorded_at_generation`")
+        .filter(|file| {
+            std::fs::read_to_string(file)
+                .is_ok_and(|src| src.contains("import_routes_known_miss_recorded_at_generation"))
         })
+        .map(|file| file.display().to_string())
         .collect();
     assert!(
-        sidecar_violations.is_empty(),
-        "`known_miss_generation_sidecar_strict` violation:\n{}\n\n\
-         `DerivedRawState.import_routes_known_miss_recorded_at_generation`\n\
-         is single-producer. Snapshot assignment only inside\n\
-         `set_import_dependencies`; `.clear()` only inside\n\
-         `configure_projects` and `finish_upsert_post_commit`.\n\
-         Any other writer admits a known-miss generation stamp from a\n\
-         non-snapshot producer, which incorrectly extends a stale\n\
-         negative answer. If you need to admit known misses, route\n\
-         through `set_import_dependencies`; positive-only point\n\
-         admissions must use `cache_positive_import_route_result`\n\
-         (which never touches the sidecar).",
-        format_violations(&sidecar_violations)
+        offenders.is_empty(),
+        "`import_routes_known_miss_recorded_at_generation` is deleted; a \
+         known-miss re-resolves through the one owner-edge authority rather \
+         than being pinned current by a global content generation. Still \
+         referenced in:\n{}",
+        offenders.join("\n")
     );
 }
 
@@ -792,105 +775,53 @@ fn known_miss_generation_sidecar_strict() {
 // Guard 3: positive-route helper sentinel — discriminating identity
 // ---------------------------------------------------------------------------
 
-/// Sentinel — the positive-route producer must
-/// continue to exist with the correct shape. If a future refactor
-/// either deletes `cache_positive_import_route_result` (folding it
-/// into another method) or weakens its body to no longer construct a
-/// positive `DependencyResolution`, this guard fails.
+/// INVERTED-POLARITY successor to the positive-route helper sentinel.
 ///
-/// Discriminating property: the helper exists, lives in
-/// `host_resolve/dependency_resolution.rs`, has a body that
-/// constructs `resolved_canonical_id: Some(...)` and a non-empty
-/// `possible_canonical_ids` vector, and does NOT mention
-/// `import_routes_known_miss_recorded_at_generation`.
+/// The helper it guarded (`cache_positive_import_route_result`) was the
+/// host's positive-route MEMO producer. It duplicated the workspace's
+/// bounded owner-edge candidate slot and, being a plain map with no
+/// witness, needed a global `content_generation` stamp
+/// (`PositiveRouteStamp`) to decide whether an entry was still true —
+/// the last global-generation warm-resolution validity test in the
+/// session. Both are DELETED.
+///
+/// Discriminating property: neither the helper nor its stamp exists in
+/// production source, and the surviving `DerivedRawState.import_routes`
+/// writers are the caller-supplied snapshot plus the two lifecycle
+/// clears (Guard 1 above). A refactor that reintroduces a host-side
+/// positive-route memo fails here.
 #[test]
-fn positive_route_helper_shape() {
-    let path =
-        workspace_root().join("crates/verter_session/src/host_resolve/dependency_resolution.rs");
-    let src =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
-    let parsed =
-        syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
-
-    let mut found = false;
-    let mut has_some_resolved = false;
-    let mut has_candidate_vec = false;
-    let mut writes_sidecar = false;
-
-    for item in &parsed.items {
-        if let syn::Item::Impl(item_impl) = item {
-            collect_positive_helper(item_impl, &mut |body_src: &str| {
-                found = true;
-                if body_src.contains("resolved_canonical_id : Some")
-                    || body_src.contains("resolved_canonical_id: Some")
-                {
-                    has_some_resolved = true;
-                }
-                if body_src.contains("possible_canonical_ids : vec !")
-                    || body_src.contains("possible_canonical_ids: vec!")
-                {
-                    has_candidate_vec = true;
-                }
-                if body_src.contains("import_routes_known_miss_recorded_at_generation") {
-                    writes_sidecar = true;
-                }
-            });
-        }
-    }
-
-    assert!(
-        found,
-        "expected `cache_positive_import_route_result` to exist on `impl VerterHost` \
-         in `crates/verter_session/src/host_resolve/dependency_resolution.rs`; \
-         the helper is the canonical positive-route producer"
-    );
-    assert!(
-        has_some_resolved,
-        "`cache_positive_import_route_result` must construct a positive \
-         `DependencyResolution` with `resolved_canonical_id: Some(...)` — \
-         a positive admission must carry a resolved canonical"
-    );
-    assert!(
-        has_candidate_vec,
-        "`cache_positive_import_route_result` must populate \
-         `possible_canonical_ids: vec![...]` with at least one candidate — \
-         an empty candidate list with no resolved id is a known-miss \
-         shape and would route through `set_import_dependencies` instead"
-    );
-    assert!(
-        !writes_sidecar,
-        "`cache_positive_import_route_result` must NOT reference \
-         `import_routes_known_miss_recorded_at_generation`; the positive \
-         producer is sidecar-free by design"
-    );
-}
-
-fn collect_positive_helper(item_impl: &ItemImpl, mut on_body: impl FnMut(&str)) {
-    let receiver_is_verter_host = match &*item_impl.self_ty {
-        syn::Type::Path(tp) => tp
-            .path
-            .segments
-            .last()
-            .map(|s| s.ident == "VerterHost")
-            .unwrap_or(false),
-        _ => false,
-    };
-    if !receiver_is_verter_host {
-        return;
-    }
-    for item in &item_impl.items {
-        if let syn::ImplItem::Fn(f) = item {
-            if f.sig.ident == "cache_positive_import_route_result" {
-                let body = quote_block_source(&f.block);
-                on_body(&body);
+fn positive_route_memo_producer_is_deleted() {
+    let crate_root = workspace_root().join("crates/verter_session/src");
+    let mut offenders: Vec<String> = Vec::new();
+    for file in walk_production_rs_files(&crate_root) {
+        let Ok(src) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for retired in [
+            "cache_positive_import_route_result",
+            "PositiveRouteStamp",
+            "import_routes_positive_recorded_at_generation",
+        ] {
+            if src.contains(retired) {
+                offenders.push(format!("{}: {retired}", file.display()));
             }
         }
     }
-}
+    assert!(
+        offenders.is_empty(),
+        "the host-side positive-route memo and its generation stamp are \
+         DELETED — the workspace owner-edge candidate slot is the one \
+         resolution memo, validated per-reader against a captured \
+         immutable resolution world:\n{}",
+        offenders.join("\n")
+    );
 
-fn quote_block_source(block: &Block) -> String {
-    use quote::ToTokens;
-    block.to_token_stream().to_string()
+    // Anti-vacuity: the scanner really did read production source.
+    assert!(
+        !walk_production_rs_files(&crate_root).is_empty(),
+        "the production source walk must find files"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -898,22 +829,23 @@ fn quote_block_source(block: &Block) -> String {
 // ---------------------------------------------------------------------------
 
 /// `configure_projects` and `finish_upsert_post_commit` are the two
-/// lifecycle reset producers. Both clear `import_routes` AND the
-/// known-miss generation sidecar — leaving the sidecar populated after
-/// either reset would carry a stale generation stamp into the next
-/// admission cycle. This sentinel asserts the symmetry directly.
+/// lifecycle reset producers. Both clear `import_routes`, and neither
+/// may resurrect a known-miss generation sidecar: currency for a
+/// negative answer is decided by re-resolution through the one
+/// owner-edge authority, never by a global generation stamp carried
+/// across a reset.
 ///
 /// `finish_upsert_post_commit` is the per-canonical post-commit step of
 /// the shared upsert engine (`upsert_many_with_priority`); it owns the
-/// owner-source-update own-cache drain, so the route + sidecar clears
-/// live in this function.
+/// owner-source-update own-cache drain, so the route clear lives in
+/// this function.
 ///
-/// Discriminating property: searching the function bodies textually
-/// for both `import_routes.clear()` and
-/// `import_routes_known_miss_recorded_at_generation` ... `.clear()`.
-/// If a future refactor drops either clear, this test fails.
+/// Discriminating property: searching the function bodies textually for
+/// `import_routes.clear()`, and for the ABSENCE of any known-miss
+/// sidecar clear. If a future refactor drops either clear, or
+/// reintroduces the sidecar, this test fails.
 #[test]
-fn lifecycle_reset_clears_both_route_and_sidecar() {
+fn lifecycle_reset_clears_the_route_mirror_without_a_generation_sidecar() {
     let lifecycle = workspace_root().join("crates/verter_session/src/host_lifecycle.rs");
     let upsert = workspace_root().join("crates/verter_session/src/host_upsert.rs");
 
@@ -935,33 +867,22 @@ fn lifecycle_reset_clears_both_route_and_sidecar() {
     // `quote::ToTokens` renders the body as space-separated tokens,
     // so `entry.import_routes.clear()` becomes
     // `entry . import_routes . clear ()`. Match the tokenised form.
-    assert!(
-        cp_body.contains("import_routes . clear ("),
-        "`configure_projects` must clear `import_routes` during project resolver \
-         reconfiguration; got body:\n{cp_body}"
-    );
-    assert!(
-        cp_body.contains("import_routes_known_miss_recorded_at_generation . clear ("),
-        "lifecycle symmetry: `configure_projects` must ALSO clear \
-         `import_routes_known_miss_recorded_at_generation` to keep the known-miss \
-         sidecar in lockstep with `import_routes` on project-graph reset. \
-         Without the sidecar clear, a stale `content_generation` stamp survives \
-         the reset and would suppress re-resolution after the next admission. \
-         Body did not contain `import_routes_known_miss_recorded_at_generation . clear ( ... )`:\n\
-         {cp_body}"
-    );
-
-    assert!(
-        ups_body.contains("import_routes . clear ("),
-        "`finish_upsert_post_commit` must clear `import_routes` on owner source \
-         update; got body:\n{ups_body}"
-    );
-    assert!(
-        ups_body.contains("import_routes_known_miss_recorded_at_generation . clear ("),
-        "`finish_upsert_post_commit` must clear \
-         `import_routes_known_miss_recorded_at_generation` alongside \
-         `import_routes`; got body:\n{ups_body}"
-    );
+    for (label, body) in [
+        ("configure_projects", &cp_body),
+        ("finish_upsert_post_commit", &ups_body),
+    ] {
+        assert!(
+            body.contains("import_routes . clear ("),
+            "`{label}` must clear `import_routes`; got body:\n{body}"
+        );
+        assert!(
+            !body.contains("import_routes_known_miss_recorded_at_generation"),
+            "`{label}` must NOT carry a known-miss generation sidecar — a \
+             negative answer re-resolves through the one owner-edge \
+             authority instead of being pinned by a global generation \
+             stamp; got body:\n{body}"
+        );
+    }
 }
 
 fn find_fn_body(parsed: &syn::File, target_fn: &str) -> Option<String> {
@@ -1005,15 +926,13 @@ fn find_fn_body_in_item(item: &syn::Item, target_fn: &str) -> Option<String> {
 // Guard 5: snapshot writer keeps writing both fields.
 // ---------------------------------------------------------------------------
 
-/// `set_import_dependencies` is the single producer that admits both
-/// `import_routes` (full snapshot) AND
-/// `import_routes_known_miss_recorded_at_generation` (computed
-/// per-specifier from the caller's known misses). If a future
-/// refactor drops either write, the snapshot writer no longer admits
-/// known misses correctly and the strict guard above silently passes
-/// while the contract has weakened.
+/// `set_import_dependencies` is the single producer that admits the
+/// full `import_routes` snapshot. It must NOT also admit a known-miss
+/// generation sidecar: a negative answer is not evidence that the
+/// answer is still negative, so its currency is decided by
+/// re-resolution through the one owner-edge authority.
 #[test]
-fn set_import_dependencies_writes_both_route_and_sidecar() {
+fn set_import_dependencies_writes_the_route_snapshot_without_a_generation_sidecar() {
     let path = workspace_root().join("crates/verter_session/src/host_manage/analysis_io.rs");
     let src =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
@@ -1030,10 +949,9 @@ fn set_import_dependencies_writes_both_route_and_sidecar() {
          body did not contain the assignment:\n{body}"
     );
     assert!(
-        body.contains(". import_routes_known_miss_recorded_at_generation = known_miss_generations"),
-        "`set_import_dependencies` must admit the known-miss sidecar via \
-         `value_mut().import_routes_known_miss_recorded_at_generation = \
-         known_miss_generations`; body did not contain the sidecar assignment:\n{body}"
+        !body.contains("import_routes_known_miss_recorded_at_generation"),
+        "`set_import_dependencies` must NOT admit a known-miss generation \
+         sidecar; body still referenced one:\n{body}"
     );
 }
 
@@ -1083,8 +1001,28 @@ fn scanner_discriminating_property_fixtures() {
         "scanner failed to flag arbitrary-method import_routes insert"
     );
 
-    // Fixture C: positive helper insert — ACCEPTED.
+    // Fixture C: the caller-supplied snapshot writer — ACCEPTED.
     let fixture_c = r#"
+        impl VerterHost {
+            fn set_import_dependencies(&self) {
+                let mut derived = self.derived_raw_cache().entry("x".to_string()).or_default();
+                derived
+                    .value_mut()
+                    .import_routes
+                    .insert("y".to_string(), Default::default());
+            }
+        }
+    "#;
+    assert!(
+        scan_fixture_violations(fixture_c).is_empty(),
+        "scanner incorrectly flagged the caller-supplied snapshot writer: {:?}",
+        scan_fixture_violations(fixture_c)
+    );
+
+    // Fixture C2: the DELETED host-side positive-route memo producer —
+    // FLAGGED. Its name is no longer on the allow-list, so a refactor
+    // that reintroduces it is caught rather than grandfathered.
+    let fixture_c2 = r#"
         impl VerterHost {
             fn cache_positive_import_route_result(&self) {
                 let mut derived = self.derived_raw_cache().entry("x".to_string()).or_default();
@@ -1096,9 +1034,8 @@ fn scanner_discriminating_property_fixtures() {
         }
     "#;
     assert!(
-        scan_fixture_violations(fixture_c).is_empty(),
-        "scanner incorrectly flagged the canonical positive helper insert: {:?}",
-        scan_fixture_violations(fixture_c)
+        !scan_fixture_violations(fixture_c2).is_empty(),
+        "scanner failed to flag a reintroduced host-side positive-route memo"
     );
 
     // Fixture D: lifecycle clear of both fields — ACCEPTED.
@@ -1244,16 +1181,15 @@ fn scanner_discriminating_property_fixtures() {
         "scanner failed to flag arbitrary-method `import_routes.iter_mut()` mutable iteration"
     );
 
-    // Fixture L: canonical positive helper that uses
+    // Fixture L: the caller-supplied snapshot writer using
     // `.entry(_).or_default()` directly on `import_routes` —
-    // ACCEPTED. This shape isn't used by the production helper today
-    // (it inserts via `.insert(_)` instead) but the scanner must
-    // still permit it inside the admission allow-list so a future
-    // refactor can use the Entry API without re-opening the false
-    // negative.
+    // ACCEPTED. This shape isn't used by the production writer today
+    // (it assigns the whole map instead) but the scanner must still
+    // permit it inside the admission allow-list so a future refactor
+    // can use the Entry API without re-opening the false negative.
     let fixture_l = r#"
         impl VerterHost {
-            fn cache_positive_import_route_result(&self) {
+            fn set_import_dependencies(&self) {
                 let mut derived = self.derived_raw_cache().entry("x".to_string()).or_default();
                 let _ = derived.value_mut().import_routes.entry("y".to_string()).or_default();
             }
@@ -1261,7 +1197,7 @@ fn scanner_discriminating_property_fixtures() {
     "#;
     assert!(
         scan_fixture_violations(fixture_l).is_empty(),
-        "scanner incorrectly flagged the canonical positive helper entry-chain: {:?}",
+        "scanner incorrectly flagged the caller-supplied writer's entry-chain: {:?}",
         scan_fixture_violations(fixture_l)
     );
 

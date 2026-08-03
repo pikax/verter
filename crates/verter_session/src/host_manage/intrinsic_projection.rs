@@ -100,14 +100,23 @@ impl VerterHost {
         specifier: &str,
     ) -> Option<String> {
         let owner = self.owning_project_ownership(owner_canonical_id)?;
-        let resolved = self.ws().resolve_import_for_project(
-            &owner,
-            specifier,
-            verter_workspace::ResolutionContext {
-                phase: verter_workspace::ResolvePhase::ProviderGraph,
-                kind: verter_workspace::ResolveRequestKind::TypeImport,
-            },
-        )?;
+        let publication = self
+            .ws()
+            .resolve_import_for_project_outcome(
+                &owner,
+                specifier,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::ProviderGraph,
+                    kind: verter_workspace::ResolveRequestKind::TypeImport,
+                },
+            )
+            .into_publication();
+        let resolved = match publication {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                admitted.into_result()?
+            }
+            verter_workspace::ResolutionPublication::Refused(_) => return None,
+        };
         let _ = self.ensure_indexed_ready_serve(&resolved.source_id);
         Some(resolved.source_id)
     }

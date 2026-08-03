@@ -593,43 +593,29 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
         .upsert_base("/inner.ts", "export interface Inner {}")
         .unwrap();
 
-    // import_routes lives on DerivedRawState (D48 split).
-    let mut entry = project
+    // Materialise the owner so it publishes a route surface.
+    let _ = project
         .host()
-        .derived_raw_cache()
-        .entry("/index.ts".to_string())
-        .or_default();
-    entry.value_mut().import_routes.insert(
-        "./inner".to_string(),
-        crate::types::DependencyResolution {
-            specifier: "./inner".to_string(),
-            resolved_canonical_id: Some("/inner.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        },
-    );
-    drop(entry);
+        .ensure_indexed_ready_serve("/index.ts")
+        .expect("the wildcard reexporter must materialise");
 
-    let import_route_hash = {
-        let entry = project
-            .host()
-            .derived_raw_cache()
-            .get("/index.ts")
-            .expect("derived_raw_cache entry should exist");
-        crate::resolver_store::hash_import_route_targets(&entry.import_routes)
-    };
+    let route_hash = project
+        .host()
+        .current_derived_fact_hash("/index.ts", crate::resolver_core::DerivedFactKind::Route)
+        .expect("a materialised wildcard reexporter must publish a Route fact");
 
     assert!(project.host().fact_versions_match(&[
         crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-            hash: import_route_hash,
+            kind: crate::resolver_core::DerivedFactKind::Route,
+            hash: route_hash,
         },
     ]));
 
     assert!(!project.host().fact_versions_match(&[
         crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+            kind: crate::resolver_core::DerivedFactKind::Route,
             hash: [9; 16],
         },
     ]));
@@ -971,21 +957,10 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         .get_whole_hash("/index.ts")
         .expect("whole hash should exist");
 
-    // import_routes lives on DerivedRawState (D48 split).
-    let mut entry = project
+    let _ = project
         .host()
-        .derived_raw_cache()
-        .entry("/index.ts".to_string())
-        .or_default();
-    entry.value_mut().import_routes.insert(
-        "./inner".to_string(),
-        crate::types::DependencyResolution {
-            specifier: "./inner".to_string(),
-            resolved_canonical_id: Some("/inner.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        },
-    );
-    drop(entry);
+        .ensure_indexed_ready_serve("/index.ts")
+        .expect("the wildcard reexporter must materialise");
 
     let facts = project
         .host()
@@ -1000,25 +975,24 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                ..
-            } if canonical_id == "/index.ts"
+            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+                if inner.resolution_fact().is_some()
         )),
-        "dependency fact versions should include an ImportRoute fact for the file",
+        "dependency fact versions should include the owner's import-route \
+         RESOLUTION WITNESS for the file; got {facts:?}",
     );
     assert!(
         facts.iter().all(|fact| matches!(
             fact,
             crate::resolver_core::FactVersionRef::FileWholeHash { .. }
                 | crate::resolver_core::FactVersionRef::DerivedFactHash {
-                    kind: crate::resolver_core::DerivedFactKind::Route
-                        | crate::resolver_core::DerivedFactKind::ImportRoute,
+                    kind: crate::resolver_core::DerivedFactKind::Route,
                     ..
                 }
+                | crate::resolver_core::FactVersionRef::ResolveImports(_)
         )),
-        "dependency fact versions should only publish file, route, and importer-route facts",
+        "dependency fact versions should only publish file, route, and \
+         resolve-domain import facts; got {facts:?}",
     );
 }
 
@@ -1059,38 +1033,37 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
         })
     );
     assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-            hash: {
-                let files = crate::shared::read_lock(&project.host().files);
-                let entry = files.get("/index.ts").expect("file entry should exist");
-                crate::resolver_store::hash_import_route_targets(&entry.import_routes)
-            },
-        }),
-        "non-scheduler store views must track importer-route facts"
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+                if inner.resolution_fact().is_some()
+        )),
+        "non-scheduler store views must track the owner's import-route \
+         RESOLUTION WITNESS; got {facts:?}"
     );
     assert!(
         facts.iter().all(|fact| matches!(
             fact,
             crate::resolver_core::FactVersionRef::FileWholeHash { .. }
                 | crate::resolver_core::FactVersionRef::DerivedFactHash {
-                    kind: crate::resolver_core::DerivedFactKind::Route
-                        | crate::resolver_core::DerivedFactKind::ImportRoute,
+                    kind: crate::resolver_core::DerivedFactKind::Route,
                     ..
                 }
+                | crate::resolver_core::FactVersionRef::ResolveImports(_)
         )),
-        "non-scheduler dependency fact versions should only publish file, route, and importer-route facts",
+        "non-scheduler dependency fact versions should only publish file, \
+         route, and resolve-domain import facts; got {facts:?}",
     );
 }
 
-// `ImportRoute` facts emit only when `current_cached_import_route_hash`
-// (live-host read) returns Some; the live-host path has no equivalent
-// to "under store view" semantics. Stale deps are rejected at warm-read
-// time by `StoreView::validates_fact_signature` revalidating the
-// recorded fact signature against the live host.
+// The import-route witness emits only when the owner's authored
+// specifiers resolve through an admitting transaction; the live-host
+// path has no equivalent to "under store view" semantics. Stale deps
+// are rejected at warm-read time by
+// `StoreView::validates_fact_signature` revalidating the recorded fact
+// signature against the live host.
 #[test]
-fn current_dependency_fact_versions_emits_import_route_hash_when_cache_populated() {
+fn current_dependency_fact_versions_emits_import_route_witness_when_cache_populated() {
     let project = make_project();
     project
         .upsert_base("/theme.ts", r#"export default { color: "red" }"#)
@@ -1118,16 +1091,14 @@ defineProps<{ ui: typeof theme }>()
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                ..
-            }
+            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+                if inner.resolution_fact().is_some()
         )) || facts.iter().any(|fact| matches!(
             fact,
             crate::resolver_core::FactVersionRef::FileWholeHash { .. }
         )),
-        "live-host fact capture should emit either an ImportRoute hash or a \
-         FileWholeHash fact for tracked dependencies",
+        "live-host fact capture should emit either an import-route resolution \
+         witness or a FileWholeHash fact for tracked dependencies",
     );
 }
 
@@ -3620,7 +3591,7 @@ defineProps<{
 ///
 /// Discrimination property: the fix that makes the `ImportRoute`
 /// derived-fact hash reflect the *current* resolution of a known-miss
-/// specifier (`generation_current_import_route_hash`) is what breaks
+/// specifier (the owner's import-route witness) is what breaks
 /// this test if reverted. Without it, the warm negative resolution
 /// validates against its own stale `ImportRoute` snapshot and the
 /// re-evaluation keeps returning `Unknown { raw: "semanticMiss" }`.
@@ -9688,7 +9659,6 @@ defineProps<FancyProps>()
             possible_canonical_ids: Vec::new(),
         }],
     );
-
     let meta = project
         .host()
         .get_component_meta("/src/Consumer.vue")
@@ -17502,6 +17472,13 @@ export interface Editor {
 "#,
         )
         .unwrap();
+    assert!(
+        project
+            .host()
+            .workspace_read()
+            .is_package_backed("/node_modules/editor-lib/index.d.ts"),
+        "fixture requires package-backed dependency classification"
+    );
     project
         .upsert_base(
             "/src/App.vue",
@@ -18929,6 +18906,10 @@ defineProps<{
 #[test]
 fn link_props_keep_inherited_html_attrs_across_vue_ignore_utility_heritage() {
     let project = make_project();
+    project.host().notify_upsert(
+        "/node_modules/vue-router/package.json",
+        Arc::from(r#"{"name":"vue-router","types":"./index.d.ts"}"#),
+    );
     project
         .upsert_base(
             "/node_modules/vue-router/index.d.ts",

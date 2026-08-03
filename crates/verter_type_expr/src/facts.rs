@@ -1088,9 +1088,6 @@ pub struct ExternalRouteRefFact {
     pub source_specifier: String,
     /// The original exported name in the source module.
     pub imported_name: String,
-    /// The resolved canonical file id of the target, when the specifier resolved
-    /// (`None` for an unresolved / not-yet-resolved specifier).
-    pub canonical_id: Option<Arc<str>>,
     /// The remaining route demand on the imported symbol.
     pub route: RouteDemand,
 }
@@ -3056,6 +3053,9 @@ pub struct SvelteScriptFactsFact {
     pub bindable_members: Arc<[String]>,
     /// Named `Snippet` imports with package-validated symbol identity.
     pub snippet_imports: Arc<[SvelteSnippetImportFact]>,
+    /// Props members whose imported `Snippet` binding was validated through
+    /// the resolved symbol identities above.
+    pub validated_snippet_members: Arc<[String]>,
     /// Legacy props.
     pub legacy_props: Arc<[SvelteLegacyPropFact]>,
     /// The `createEventDispatcher<E>()` type-arg authored-type payload ref,

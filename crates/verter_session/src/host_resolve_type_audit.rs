@@ -396,6 +396,9 @@ impl VerterHost {
         let record = RequestAuditRecord {
             request_id,
             canonical_id: canonical_hint.to_string(),
+            target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+                canonical_hint,
+            )),
             kind: RequestKind::TypeResolution,
             parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
             from_cache: false,
@@ -442,6 +445,9 @@ fn noop_type_resolution_record(
     RequestAuditRecord {
         request_id,
         canonical_id: canonical_id.to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+            canonical_id,
+        )),
         kind: RequestKind::TypeResolution,
         parent_request_id: parent_request_id.map(|id| id.to_string()),
         from_cache: false,

@@ -170,6 +170,10 @@ impl CountingWorkspace {
 }
 
 impl verter_workspace::WorkspaceRead for CountingWorkspace {
+    fn capture_resolution_world(&self) -> Option<Arc<verter_workspace::CapturedResolutionWorld>> {
+        verter_workspace::WorkspaceRead::capture_resolution_world(self.inner.as_ref())
+    }
+
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         *self
             .read_counts
@@ -226,6 +230,21 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         self.inner.resolve_import(importer_id, specifier, ctx)
     }
 
+    fn resolve_import_outcome(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> verter_workspace::ResolutionOutcome {
+        *self
+            .resolve_counts
+            .lock()
+            .entry((importer_id.to_string(), specifier.to_string()))
+            .or_default() += 1;
+        self.inner
+            .resolve_import_outcome(importer_id, specifier, ctx)
+    }
+
     fn content_generation(&self) -> u64 {
         self.inner.content_generation()
     }
@@ -237,6 +256,10 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
     /// harness reason rather than a semantic one.
     fn is_package_backed(&self, canonical_id: &str) -> bool {
         self.inner.is_package_backed(canonical_id)
+    }
+
+    fn resolution_fact_generation(&self) -> u64 {
+        self.inner.resolution_fact_generation()
     }
 
     fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
@@ -1337,24 +1360,28 @@ export type { FancyProps }"#,
         facts
             .shallow_state
             .import_target("FancyProps")
-            .map(|target| target.canonical_id.as_str()),
+            .map(|target| target.source_specifier.as_str()),
+        Some("./inner.js"),
+        "the rebuilt shallow surface retains the AUTHORED specifier",
+    );
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow(canonical_id, "./inner.js")
+            .as_deref(),
         Some("/workspace/node_modules/lib/dist/inner.d.ts"),
-        "rebuilt imported cache entries must publish the upgraded declaration route",
+        "the live route authority must resolve the upgraded declaration route",
     );
 }
 
-/// The generation-current `ImportRoute` hash is consulted on a
-/// cache-VALIDATION / read path (`HostStoreView` derived-hash
-/// construction). Building that hash must be side-effect-free: it may
+/// The owner's import-route RESOLUTION WITNESS is built by producers
+/// that must not disturb the state they are recording. Building it may
 /// re-resolve a known-miss specifier to observe whether the dependency
 /// has appeared, but it must not materialize a shallow-only importer
 /// into the indexed `FileArtifactStore`, nor mutate the importer's
 /// host-owned import-route / dependency caches.
 ///
-/// Scenario: `/workspace/src/importer.ts` records `./theme` as a
-/// known-miss in `DerivedRawState.import_routes` (the importer has no
-/// indexed `IndexedReady` — only the route table). `./theme.ts` is then
-/// added, so the workspace `content_generation` advances and the
+/// Scenario: `/workspace/src/importer.ts` authors `./theme`, which is
+/// recorded as a known-miss (the importer has no indexed `IndexedReady`
+/// — only the route table). `./theme.ts` is then added, so the
 /// previously-unresolvable specifier now resolves.
 ///
 /// Discrimination property: a known-miss re-resolve that routes through
@@ -1364,14 +1391,15 @@ export type { FancyProps }"#,
 /// importer into the indexed store) and then `resolve_workspace_dependency_and_cache`
 /// → `cache_positive_import_route_result` (which rewrites the known-miss
 /// entry to a positive resolution and registers the new dependency).
-/// This test fails if the oracle re-resolves through that side-effecting
+/// This test fails if the builder re-resolves through that side-effecting
 /// path: post-call the importer would be in the indexed store and
 /// `import_routes["./theme"]` would be a positive resolution. A
 /// side-effect-free workspace re-resolve keeps the indexed store and
-/// the route/dependency caches untouched while still folding the
-/// now-resolvable target into the returned hash.
+/// the route/dependency caches untouched while still observing the
+/// now-resolvable target, so the pre-appearance witness stops
+/// validating.
 #[test]
-fn generation_current_import_route_hash_oracle_is_side_effect_free() {
+fn owner_import_route_witness_is_side_effect_free() {
     let host = make_host();
     let importer = "/workspace/src/importer.ts";
     upsert_non_sfc(
@@ -1405,9 +1433,21 @@ fn generation_current_import_route_hash_oracle_is_side_effect_free() {
         route_is_known_miss("after set_import_dependencies"),
         "./theme must start as a known-miss before the dependency is added"
     );
-    let hash_before_dep = host
-        .generation_current_import_route_hash(importer)
-        .expect("oracle must produce a hash while ./theme is unresolved");
+    let view_before_dep = host.resolver_store_view_read().into_owned_view();
+    let witness_before_dep = host
+        .owner_import_route_witness_for_tests(importer)
+        .expect("the builder must produce a witness while ./theme is unresolved");
+    assert!(
+        !witness_before_dep.is_empty(),
+        "the known-miss must have observed at least one resolver fact — an \
+         empty witness would make the invalidation assertion vacuous"
+    );
+    for fact in &witness_before_dep {
+        assert!(
+            crate::resolver_core::StoreView::validates(&view_before_dep, fact),
+            "precondition: {fact:?} must validate against the view it was captured from"
+        );
+    }
 
     // Add `./theme.ts`, advancing the workspace `content_generation` so
     // the previously-unresolvable specifier now resolves. The
@@ -1440,22 +1480,24 @@ fn generation_current_import_route_hash_oracle_is_side_effect_free() {
         .map(|entry| entry.dependencies.clone())
         .unwrap_or_default();
 
-    // Invoke the oracle on the cache-validation read path. It must
-    // re-resolve `./theme` against the current workspace generation
-    // WITHOUT materializing the importer or mutating its caches.
-    let hash_after_dep = host
-        .generation_current_import_route_hash(importer)
-        .expect("oracle must produce a hash after ./theme becomes resolvable");
+    // Build the witness again on the producer path. It must re-resolve
+    // `./theme` against the current world WITHOUT materializing the
+    // importer or mutating its caches.
+    let _witness_after_dep = host
+        .owner_import_route_witness_for_tests(importer)
+        .expect("the builder must produce a witness after ./theme becomes resolvable");
 
     let importer_indexed_after = host.project_type_store().indexed().get_any(importer);
     assert_eq!(
         importer_indexed_before.is_some(),
         importer_indexed_after.is_some(),
-        "oracle must NOT change whether the importer is materialized in the indexed store"
+        "the witness builder must NOT change whether the importer is \
+         materialized in the indexed store"
     );
     assert!(
-        route_is_known_miss("after oracle"),
-        "oracle must NOT rewrite the ./theme known-miss to a positive import-route resolution"
+        route_is_known_miss("after witness"),
+        "the witness builder must NOT rewrite the ./theme known-miss to a \
+         positive import-route resolution"
     );
     let dependencies_after = host
         .dependency_cache()
@@ -1464,106 +1506,90 @@ fn generation_current_import_route_hash_oracle_is_side_effect_free() {
         .unwrap_or_default();
     assert_eq!(
         dependencies_before, dependencies_after,
-        "oracle must NOT register theme.ts in the importer's dependency set"
+        "the witness builder must NOT register theme.ts in the importer's \
+         dependency set"
     );
 
-    // The re-resolve must still be absence-sensitive: the appearance of
-    // theme.ts folds into the hash so dependent caches invalidate.
-    assert_ne!(
-        hash_before_dep, hash_after_dep,
-        "oracle hash must change once the previously-unresolvable ./theme resolves"
+    // The witness must still be absence-sensitive: the appearance of
+    // theme.ts advances exactly the fact the miss observed, so a warm
+    // entry rooted on the pre-appearance witness stops validating.
+    let view_after_dep = host.resolver_store_view_read().into_owned_view();
+    assert!(
+        witness_before_dep
+            .iter()
+            .any(|fact| !crate::resolver_core::StoreView::validates(&view_after_dep, fact)),
+        "the pre-appearance witness must stop validating once the \
+         previously-unresolvable ./theme resolves. Witness: \
+         {witness_before_dep:?}"
     );
 }
 
-/// `generation_current_import_route_hash` reads a file's route table
-/// from two sources: the content-pinned `IndexedReady.import_routes`
-/// snapshot, and — when the indexed snapshot is unavailable — the
-/// live-tracked `DerivedRawState.import_routes` table.
+/// The CALLER-DECLARED specifier is covered by the owner's import-route
+/// witness.
 ///
-/// `IndexedReady.import_routes` is the import-target surface captured
-/// at index time. It is empty for a file with no statically-routed
-/// imports. A route can still be added to that file *after* indexing:
-/// on-demand resolutions (compile prefetch, external `src=` handling)
-/// route through `resolve_workspace_dependency_and_cache` →
-/// `cache_positive_import_route_result`, which writes only
-/// `DerivedRawState.import_routes` (and the dependency set) — it does
-/// NOT back-fill or re-materialise the already-published `IndexedReady`.
+/// The deleted `ImportRoute` digest composed an owner's route table from
+/// two resolved sources — the content-pinned `IndexedReady.import_routes`
+/// snapshot MERGED with the caller-supplied `DerivedRawState.import_routes`
+/// table — and the source-selection order between them was a live defect
+/// class. `IndexedReady` retains no route table at all now, and the host
+/// memoises no resolution, so `DerivedRawState.import_routes` is
+/// exclusively the CALLER-SUPPLIED authoritative push. There is nothing to
+/// select between.
 ///
-/// So an indexed file can simultaneously hold an EMPTY content-pinned
-/// `IndexedReady.import_routes` and a POPULATED
-/// `DerivedRawState.import_routes`. The oracle must fall through the
-/// empty indexed snapshot to the populated `DerivedRawState` table,
-/// otherwise it returns `None`, no `ImportRoute` derived fact is
-/// recorded for the file, and dependent caches keyed on that fact
-/// cannot observe a route change.
+/// The witness inventory therefore reads that table's KEYS — the caller's
+/// DECLARED request identities, a request-domain input; the resolved VALUES
+/// are never read. Without them a purely synthetic bundler specifier with
+/// no authored counterpart in the owner's source would contribute nothing
+/// to the witness, and a consumer rooted on the witness would never observe
+/// it retargeting.
 ///
-/// Discrimination property: this test fixes the route table into the
-/// empty-`IndexedReady` + populated-`DerivedRawState` state and asserts
-/// the oracle returns `Some(hash)` matching the `DerivedRawState`
-/// routes. It FAILS if the oracle treats a present-but-empty
-/// `IndexedReady.import_routes` as the authoritative (empty) route
-/// table and short-circuits to `None`; it PASSES once the empty
-/// indexed table defers to the `DerivedRawState` fallback.
+/// This fixes an import-free owner with a caller-pushed route and asserts
+/// BOTH directions: the witness OBSERVES the pushed specifier, and it stops
+/// validating when that specifier's target disappears.
 #[test]
-fn generation_current_import_route_hash_empty_indexed_falls_through_to_derived_raw() {
+fn import_route_witness_covers_caller_pushed_unauthored_specifiers() {
     let host = make_host();
 
-    // The dependency exists before anything else, so an on-demand
-    // resolution against it produces a POSITIVE route.
+    // The dependency exists before anything else, so the caller-supplied
+    // route can be independently re-admitted by Engine.
     let dep = "/workspace/src/prefetch_dep.ts";
     upsert_non_sfc(&host, dep, "export interface Dep { ok: boolean }\n");
 
-    // The owner has NO `import` statements — nothing the indexer can
-    // route into `IndexedReady.import_routes`. Its indexed route table
-    // is therefore empty.
+    // The owner has NO `import` statements — nothing the indexer can put
+    // in its authored specifier inventory.
     let owner = "/workspace/src/prefetch_owner.ts";
     upsert_non_sfc(&host, owner, "export const marker = 1\n");
 
-    // Materialise the owner's `IndexedReady` BEFORE any route is
-    // recorded. Because the owner imports nothing, `import_routes` is
-    // empty and `import_route_hash` is `None`.
     let indexed = host
         .ensure_indexed_ready(owner)
         .expect("owner IndexedReady must materialise");
     assert!(
-        indexed.import_routes.is_empty(),
-        "fixture invariant: an import-free owner must materialise an EMPTY \
-         IndexedReady.import_routes — otherwise the empty-indexed path is \
+        indexed.shallow_state.import_targets.is_empty()
+            && indexed.shallow_state.wildcard_reexports.is_empty(),
+        "fixture invariant: an import-free owner must materialise a shallow \
+         surface with NO cross-file edges — otherwise the caller-only path is \
          not exercised",
     );
     assert!(
-        indexed.import_route_hash.is_none(),
-        "fixture invariant: an empty IndexedReady.import_routes carries no \
-         import_route_hash (every producer gates it on !is_empty())",
+        host.owner_import_route_witness_for_tests(owner)
+            .expect("an owner with a readable parse surface is rootable")
+            .is_empty(),
+        "fixture invariant: before the push there is nothing to observe",
     );
 
-    // A compile-prefetch-style on-demand resolution. This routes
-    // through `resolve_workspace_dependency_and_cache` →
-    // `cache_positive_import_route_result`, which writes the positive
-    // route into `DerivedRawState.import_routes` ONLY — it does not
-    // evict or re-materialise the owner's `IndexedReady`.
-    let resolved = host.resolve_type_dependency_canonical(owner, "./prefetch_dep");
-    assert_eq!(
-        resolved.as_deref(),
-        Some(dep),
-        "precondition: the on-demand resolution must resolve ./prefetch_dep",
-    );
+    // Publish an explicit caller route. Its stored target is only the
+    // caller's statement; the witness re-resolves the specifier itself.
+    host.set_import_dependencies(owner, vec![exact_dependency("./prefetch_dep", dep)]);
 
-    // The owner's content-pinned `IndexedReady` survived the resolution
-    // and STILL carries an empty route table — the prefetch landed only
-    // in `DerivedRawState`. If this is non-empty the fixture has been
-    // invalidated and the empty-indexed path is no longer exercised.
     let indexed_after = host
         .current_content_pinned_indexed(owner)
         .expect("owner IndexedReady must still be content-pinned-current");
     assert!(
-        indexed_after.import_routes.is_empty(),
-        "fixture invariant: cache_positive_import_route_result must NOT \
-         back-fill IndexedReady.import_routes — it stays empty while the \
-         route lands in DerivedRawState",
+        indexed_after.shallow_state.import_targets.is_empty(),
+        "fixture invariant: a caller route push must NOT back-fill the \
+         parse-domain shallow surface — the route lands only in \
+         DerivedRawState",
     );
-
-    // `DerivedRawState.import_routes` now carries the positive route.
     let derived_routes = host
         .derived_raw_cache()
         .get(owner)
@@ -1575,25 +1601,39 @@ fn generation_current_import_route_hash_empty_indexed_falls_through_to_derived_r
     assert!(
         !VerterHost::import_route_is_known_miss(derived_route),
         "fixture invariant: ./prefetch_dep resolves to an existing file, so \
-         its DerivedRawState route is a POSITIVE resolution",
+         its caller-supplied route is a POSITIVE resolution",
     );
 
-    // Discriminator: with an EMPTY content-pinned IndexedReady route
-    // table and a POPULATED DerivedRawState route table, the oracle
-    // must fall through to the DerivedRawState routes and return
-    // `Some(hash)`. Pre-fix the present-but-empty IndexedReady snapshot
-    // shadows the DerivedRawState fallback and the oracle returns
-    // `None` — no ImportRoute fact, dependent caches miss the change.
-    let oracle_hash = host.generation_current_import_route_hash(owner);
-    let expected_hash = crate::resolver_store::hash_import_route_targets(&derived_routes);
-    assert_eq!(
-        oracle_hash,
-        Some(expected_hash),
-        "an empty content-pinned IndexedReady.import_routes must NOT hide a \
-         populated DerivedRawState route table: the oracle must fall through \
-         to DerivedRawState and return its route hash. Pre-fix the empty \
-         IndexedReady snapshot wins the route-source selection and the \
-         oracle short-circuits to None.",
+    let view_before = host.resolver_store_view_read().into_owned_view();
+    let witness = host
+        .owner_import_route_witness_for_tests(owner)
+        .expect("an owner with a readable parse surface must produce a rootable witness");
+    assert!(
+        !witness.is_empty(),
+        "CALLER-PUSHED BLIND SPOT: a caller-declared specifier with no authored \
+         counterpart must enter the witness inventory, or a consumer rooted on \
+         the witness never observes it retargeting",
+    );
+    for fact in &witness {
+        assert!(
+            crate::resolver_core::StoreView::validates(&view_before, fact),
+            "precondition: {fact:?} must validate against the view it was captured from"
+        );
+    }
+
+    // The caller re-pushes the specifier at a DIFFERENT target — the
+    // owner's own bytes do not move, and nothing it AUTHORS changes.
+    let retarget = "/workspace/src/prefetch_dep2.ts";
+    upsert_non_sfc(&host, retarget, "export interface Dep { ok: boolean }\n");
+    host.set_import_dependencies(owner, vec![exact_dependency("./prefetch_dep", retarget)]);
+
+    let view_after = host.resolver_store_view_read().into_owned_view();
+    assert!(
+        witness
+            .iter()
+            .any(|fact| !crate::resolver_core::StoreView::validates(&view_after, fact)),
+        "the witness must stop validating once the caller-pushed specifier's \
+         target disappears. Witness: {witness:?}"
     );
 }
 
@@ -1970,14 +2010,20 @@ defineProps<Props>()
         view.whole_hash("/src/dep.ts").is_some(),
         "captured store view should include transitive dependency whole hashes"
     );
-    assert!(
-        view.derived_hash(
-            "/src/types.ts",
-            crate::resolver_core::DerivedFactKind::ImportRoute,
-        )
-        .is_some(),
-        "captured store view should snapshot transitive import-route hashes"
-    );
+    // The import-route rail is resolve-domain now: the view captures the
+    // immutable resolution world rather than snapshotting a per-owner
+    // route digest, and the transitive owner's witness validates against
+    // that capture.
+    let witness = host
+        .owner_import_route_witness_for_tests("/src/types.ts")
+        .expect("a tracked transitive owner must produce a rootable witness");
+    for fact in &witness {
+        assert!(
+            crate::resolver_core::StoreView::validates(&view, fact),
+            "the captured store view must validate the transitive owner's \
+             import-route witness fact {fact:?}"
+        );
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2046,13 +2092,17 @@ defineProps<Props>()
         view.whole_hash("/src/dep.ts").is_some(),
         "store view should still capture tracked whole hashes for transitive dependencies",
     );
+    // The import-route rail moved to the resolve domain: the build must
+    // snapshot NO per-owner route digest for it (composing one is what
+    // forced the build to re-resolve every published owner).
     assert!(
         view.derived_hash(
             "/src/types.ts",
-            crate::resolver_core::DerivedFactKind::ImportRoute,
+            crate::resolver_core::DerivedFactKind::Route
         )
-        .is_some(),
-        "store view should snapshot tracked import-route hashes from host-owned dependency state without materializing module facts",
+        .is_none(),
+        "an unmaterialised tracked canonical must not gain a route digest \
+         from the store-view build",
     );
 
     let resolved = host.resolve_type_dependency_canonical_shallow("/src/Consumer.vue", "./types");
@@ -2554,6 +2604,10 @@ fn store_view_seeded_imported_barrel_backfills_wildcard_import_routes() {
     let shared = "/workspace/node_modules/pkg/dist/shared.d.ts";
     ws.inject_file(barrel, "export * from './shared.js'\n");
     ws.inject_file(shared, "export interface Shared { label?: string }\n");
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json",
+        r#"{"name":"pkg","types":"./dist/index.d.ts"}"#,
+    );
 
     let host = VerterHost::new(
         HostConfig {
@@ -2574,9 +2628,8 @@ fn store_view_seeded_imported_barrel_backfills_wildcard_import_routes() {
         "barrel should publish its wildcard reexport",
     );
     assert_eq!(
-        facts.shallow_state.wildcard_reexports[0].canonical_id,
-        shared,
-        "seeded IndexedReady must backfill wildcard canonical IDs even when the store view had no exact-resolution snapshot",
+        facts.shallow_state.wildcard_reexports[0].source_specifier, "./shared.js",
+        "the seeded IndexedReady retains the AUTHORED wildcard specifier",
     );
 
     ws.reset_resolves();
@@ -2588,8 +2641,8 @@ fn store_view_seeded_imported_barrel_backfills_wildcard_import_routes() {
     );
     assert_eq!(
         ws.resolve_count(barrel, "./shared.js"),
-        0,
-        "seeded wildcard routes should not bounce back to the live workspace resolver",
+        1,
+        "a persistent shallow lookup must re-enter Engine instead of treating the seeded wildcard route as publication authority",
     );
 }
 
@@ -2865,7 +2918,7 @@ fn resolve_dep_source_reuses_cached_source_without_loading_dependency_into_host_
 }
 
 #[test]
-fn cached_import_route_is_reused_by_internal_and_public_import_lookups() {
+fn internal_and_public_import_lookups_reenter_engine_admission() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file("/workspace/src/dep.ts", "export const dep = 1");
     let host = VerterHost::new(
@@ -2914,16 +2967,16 @@ import { dep } from "@/dep"
     assert_eq!(
         second.as_deref(),
         Some("/workspace/src/dep.ts"),
-        "public resolve_import should reuse the same cached canonical route"
+        "public resolve_import should resolve the same admitted canonical route"
     );
     assert_eq!(
         third, first,
-        "subsequent internal lookups should keep hitting the promoted cache entry"
+        "subsequent internal lookups should keep returning the admitted route"
     );
     assert_eq!(
         ws.resolve_count("/workspace/src/App.vue", "@/dep"),
-        1,
-        "workspace resolve_import should run once before the cached dependency resolution is reused"
+        3,
+        "every persistent consumer must re-enter the workspace Engine instead of treating a host route cache as publication authority"
     );
 }
 
@@ -10304,6 +10357,10 @@ fn shallow_state_prefers_declaration_companion_for_runtime_js_dependencies() {
         "/workspace/node_modules/pkg/dist/index.d.ts".to_string(),
         Arc::from("export interface Props { label: string }\n"),
     );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json".to_string(),
+        Arc::from(r#"{"name":"pkg","types":"./dist/index.d.ts"}"#),
+    );
 
     let host = VerterHost::new(HostConfig::default(), ws);
 
@@ -10382,28 +10439,36 @@ fn resolve_eval_dependency_canonical_prefers_declaration_companion_shallowly() {
     );
 }
 
-/// DISCRIMINATING regression (RouteDb stale-serve hole 1, wildcard-hash-
-/// stability behavior): the indexed shallow surface for a barrel must
-/// resolve its `export *` wildcard edges to real canonical ids through the
-/// shared `resolve_route_edge_canonical` policy, so the wildcard target
-/// enters the `DerivedFactKind::Route` surface hash. A surface built with a
-/// `NullResolver` (every wildcard `canonical_id` empty) is target-blind: a
-/// route depending on the wildcard target stale-serves when that target's
-/// resolution changes.
+/// Inverted-polarity successor to the two deleted baked-wildcard-canonical
+/// regressions (RouteDb stale-serve holes 1 + 2's producer-agreement half).
 ///
-/// FAILS on a regression where the wildcard `canonical_id` is `""` (empty)
-/// and the route hash is target-blind. PASSES while the indexed
-/// materialiser resolves `./impl` to `/workspace/impl.ts` through the
-/// shared route-edge policy.
+/// Those pinned that the indexed materialiser BAKED the same wildcard target
+/// as the shared route-edge policy, because a producer disagreement between
+/// two resolutions of the same edge stale-served every route depending on it.
+/// The artifact bakes nothing now: the shallow surface retains the AUTHORED
+/// specifier and every consumer demands the target from the one route-edge
+/// authority, so the disagreement class is gone by construction.
+///
+/// What remains testable — and is asserted here in both directions — is that
+/// the surviving authority is TS-first and that the parse artifact really is
+/// target-free. FAILS against a regression that reintroduces a baked target
+/// (the surface would have to carry one) or that makes the live authority
+/// pick the runtime `.js`.
 #[test]
-fn indexed_barrel_wildcard_surface_resolves_edge_canonicals() {
+fn indexed_barrel_wildcard_surface_is_specifier_only_and_resolves_ts_first() {
     let ws = Arc::new(CountingWorkspace::new());
-    ws.inject_file("/workspace/index.ts", "export * from './impl';\n");
-    ws.inject_file("/workspace/impl.ts", "export type Impl = { id: number };\n");
+    let barrel = "/workspace/index.ts";
+    // PLAIN `export *` (not `export type *`) — the EsmImport-classified shape,
+    // which is exactly where the two producers used to diverge.
+    ws.inject_file(barrel, "export * from './runtime';\n");
+    // `./runtime` has a runtime `.js` WITH a `.d.ts` declaration companion: the
+    // shared policy picks the `.d.ts`, a raw EsmImport resolve picks the `.js`.
+    ws.inject_file("/workspace/runtime.js", "export const Runtime = true\n");
+    ws.inject_file("/workspace/runtime.d.ts", "export type Runtime = boolean\n");
     let host = VerterHost::new(HostConfig::default(), ws.clone());
     // A configured project makes the workspace resolver resolve relative
     // specifiers (mirrors a real workspace; a bare unconfigured workspace
-    // cannot resolve `./impl`).
+    // cannot resolve `./runtime`).
     host.configure_projects(vec![
         verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             "/workspace".to_string(),
@@ -10413,7 +10478,7 @@ fn indexed_barrel_wildcard_surface_resolves_edge_canonicals() {
     ]);
 
     let indexed = host
-        .ensure_indexed_ready("/workspace/index.ts")
+        .ensure_indexed_ready(barrel)
         .expect("indexed materialiser must produce an artifact for the barrel");
     let wildcards = &indexed.shallow_state.wildcard_reexports;
     assert_eq!(
@@ -10422,73 +10487,29 @@ fn indexed_barrel_wildcard_surface_resolves_edge_canonicals() {
         "the barrel has exactly one `export *` wildcard reexport"
     );
     assert_eq!(
-        wildcards[0].canonical_id, "/workspace/impl.ts",
-        "the indexed surface MUST resolve the wildcard edge to the impl \
-         canonical (NOT an empty NullResolver id) — an empty canonical keeps \
-         the wildcard target out of the route-surface hash, stale-serving \
-         every route that depends on it"
-    );
-}
-
-/// DISCRIMINATING regression: an INDEXED barrel's PLAIN (non-type) `export *`
-/// wildcard edge must resolve through the shared TS-first route-edge policy
-/// (`resolve_route_edge_canonical`), matching the route-traversal and overlay
-/// surfaces. A bare `export *` source IS captured in `export_signatures`, so
-/// the indexed materialiser's `resolve_missing` loop resolves it — but for a
-/// PLAIN `export *` it classifies the source as `EsmImport` and bakes the
-/// runtime `.js` `source_id` without TS-first normalization. The shared policy
-/// (used by route traversal + overlay) maps a `.js`-with-`.d.ts`-companion
-/// source to the `.d.ts` declaration, so the indexed surface diverged — a
-/// producer disagreement that `hash_route_surface` (which hashes
-/// `wildcard.canonical_id`) turns into a stale serve.
-///
-/// FAILS pre-fix: the indexed wildcard edge bakes `/workspace/runtime.js`.
-/// PASSES post-fix: the wildcard pass overwrites it with the shared-policy
-/// `/workspace/runtime.d.ts`, matching the route-edge oracle.
-#[test]
-fn indexed_plain_export_star_resolves_wildcard_edge_through_ts_first_policy() {
-    let ws = Arc::new(CountingWorkspace::new());
-    let barrel = "/workspace/index.ts";
-    // PLAIN `export *` (not `export type *`) — the EsmImport-classified shape.
-    ws.inject_file(barrel, "export * from './runtime';\n");
-    // `./runtime` has a runtime `.js` WITH a `.d.ts` declaration companion: the
-    // shared policy picks the `.d.ts`, a raw EsmImport resolve picks the `.js`.
-    ws.inject_file("/workspace/runtime.js", "export const Runtime = true\n");
-    ws.inject_file("/workspace/runtime.d.ts", "export type Runtime = boolean\n");
-    let host = VerterHost::new(HostConfig::default(), ws.clone());
-
-    let oracle = host.resolve_route_edge_canonical(barrel, "./runtime");
-    assert_eq!(
-        oracle.as_deref(),
-        Some("/workspace/runtime.d.ts"),
-        "precondition: the shared route-edge policy is TS-first (.d.ts companion)"
+        wildcards[0].source_specifier, "./runtime",
+        "the published surface retains the AUTHORED wildcard specifier"
     );
 
-    let indexed = host
-        .ensure_indexed_ready(barrel)
-        .expect("indexed materialiser must produce an artifact for the barrel");
-    let baked = indexed
-        .import_routes
-        .get("./runtime")
-        .and_then(|r| r.resolved_canonical_id.clone());
+    // The ONE authority resolves it, TS-first. This is the answer every
+    // consumer of that wildcard now demands.
     assert_eq!(
-        baked.as_deref(),
+        host.resolve_route_edge_canonical(barrel, "./runtime")
+            .as_deref(),
         Some("/workspace/runtime.d.ts"),
-        "the indexed plain `export *` wildcard edge MUST resolve through the shared \
-         TS-first route-edge policy (.d.ts companion), not bake the EsmImport `.js`"
+        "the shared route-edge policy is TS-first (.d.ts companion), and it is \
+         the only place the wildcard target comes from"
     );
-    let wildcard = indexed
-        .shallow_state
-        .wildcard_reexports
-        .iter()
-        .find(|w| w.source_specifier == "./runtime")
-        .map(|w| w.canonical_id.clone());
-    assert_eq!(
-        wildcard.as_deref(),
-        Some("/workspace/runtime.d.ts"),
-        "the baked wildcard `canonical_id` (digested by `hash_route_surface`) MUST \
-         equal the shared route-edge oracle so the indexed surface agrees with \
-         route traversal / overlay"
+
+    // Negative: materialising the barrel must not have published the
+    // runtime `.js` as a resolved dependency artifact behind the TS-first
+    // answer's back.
+    assert!(
+        host.project_type_store
+            .indexed()
+            .get_any("/workspace/runtime.js")
+            .is_none(),
+        "the TS-first edge must not drag the runtime `.js` into the artifact store"
     );
 }
 
@@ -10500,8 +10521,8 @@ fn indexed_plain_export_star_resolves_wildcard_edge_through_ts_first_policy() {
 /// — so when the target appeared (the provider's own content unchanged) the
 /// recorded facts still revalidated and the stale Miss was served forever.
 ///
-/// The fix roots such a Miss in the `DerivedFactKind::ImportRoute` rail:
-/// `generation_current_import_route_hash` re-resolves the provider's known-miss
+/// The fix roots such a Miss in the import-route witness rail:
+/// the owner's import-route witness re-resolves the provider's known-miss
 /// specifiers against the live workspace, so the recorded fact changes the
 /// moment `./missing` resolves — invalidating the cached Miss. (If that fact
 /// cannot be produced, the route entry is not admitted, so a cold re-resolve
@@ -10561,7 +10582,7 @@ fn unresolvable_wildcard_route_miss_reresolves_after_target_appears() {
 /// and `prepared_decl`'s `resolve_missing` records it in `import_routes` as a
 /// known-miss `DependencyResolution { resolved_canonical_id: None,
 /// possible_canonical_ids: [] }` — WITHOUT any sibling, resolvable or not.
-/// `generation_current_import_route_hash` therefore already detects the
+/// the owner's import-route witness therefore already detects the
 /// known-miss and re-resolves `./missing` against the live workspace, so the
 /// recorded `ImportRoute` fact MOVES the moment `./missing` appears and the
 /// cached `Miss` invalidates.
@@ -10628,11 +10649,9 @@ fn mixed_barrel_indexed_wildcard_known_miss_already_rooted_via_export_signatures
 
 /// DISCRIMINATING regression (route-surface seed, negative-route staleness):
 /// the base `build_indexed_route_surface` seed loop must NOT re-bake a
-/// `set_import_dependencies` known-miss whose recorded `content_generation`
-/// is stale against the live file set. A known-miss admitted at generation G
-/// carries its admission generation in the
-/// `import_routes_known_miss_recorded_at_generation` sidecar precisely so a
-/// later file appearance (which advances `content_generation`) forces a
+/// `set_import_dependencies` known-miss that is stale against the live file
+/// set. A known-miss carries no currency stamp at all precisely so a
+/// later file appearance forces a
 /// re-resolve — but the seed loop gated only on the POSITIVE stamp sidecar,
 /// so the unstamped-positive known-miss seeded unconditionally,
 /// `resolve_missing` skipped it (`import_routes.contains_key`), and the
@@ -10676,18 +10695,29 @@ fn base_seed_does_not_rebake_stale_known_miss_after_target_appears() {
     let first = host
         .ensure_indexed_ready("/workspace/owner.ts")
         .expect("owner IndexedReady materialises");
-    let first_route = first
-        .import_routes
-        .get("./missing")
-        .expect("precondition: the known-miss seeds into the indexed surface");
-    assert!(
-        first_route.resolved_canonical_id.is_none()
-            && first_route.possible_canonical_ids.is_empty(),
-        "precondition: while ./missing does not exist the seeded route is a known-miss"
+    assert_eq!(
+        first
+            .shallow_state
+            .exports
+            .values()
+            .filter_map(|export| match export {
+                crate::resolver_core::ExportTarget::Reexport {
+                    source_specifier, ..
+                } => Some(source_specifier.as_str()),
+                crate::resolver_core::ExportTarget::Local { .. } => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["./missing"],
+        "precondition: the owner's authored reexport specifier is published"
+    );
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./missing"),
+        None,
+        "precondition: while ./missing does not exist the specifier resolves to nothing"
     );
 
-    // The target appears — `content_generation` advances past the
-    // known-miss admission generation.
+    // The target appears. The owner's own content — hence its published
+    // artifact — does NOT change.
     upsert_non_sfc(
         &host,
         "/workspace/missing.ts",
@@ -10696,17 +10726,18 @@ fn base_seed_does_not_rebake_stale_known_miss_after_target_appears() {
 
     let second = host
         .ensure_indexed_ready("/workspace/owner.ts")
-        .expect("owner IndexedReady re-materialises");
-    let second_route = second
-        .import_routes
-        .get("./missing")
-        .expect("the refreshed surface still tracks the ./missing specifier");
+        .expect("owner IndexedReady stays served");
     assert_eq!(
-        second_route.resolved_canonical_id.as_deref(),
+        second.whole_hash, first.whole_hash,
+        "the owner's parse artifact is unchanged — this is a dependency-set move"
+    );
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./missing")
+            .as_deref(),
         Some("/workspace/missing.ts"),
-        "STALE NEGATIVE ROUTE: the route-surface seed re-baked a known-miss whose \
-         recorded generation is stale against the live file set; the seed must \
-         skip it so `resolve_missing` re-resolves against the live workspace"
+        "STALE NEGATIVE ROUTE: a specifier that becomes resolvable must resolve \
+         through the live authority — no artifact, seed loop, or host memo may \
+         pin the earlier miss"
     );
 }
 
@@ -10748,13 +10779,25 @@ fn overlay_seed_does_not_rebake_stale_known_miss_after_target_appears() {
     let first = host
         .materialize_overlay_indexed_ready_with_view("/workspace/owner.ts", &view)
         .expect("overlay IndexedReady materialises");
-    let first_route = first
-        .import_routes
-        .get("./missing")
-        .expect("precondition: the known-miss seeds into the overlay surface");
-    assert!(
-        first_route.resolved_canonical_id.is_none(),
-        "precondition: while ./missing does not exist the seeded route is a known-miss"
+    assert_eq!(
+        first
+            .shallow_state
+            .exports
+            .values()
+            .filter_map(|export| match export {
+                crate::resolver_core::ExportTarget::Reexport {
+                    source_specifier, ..
+                } => Some(source_specifier.as_str()),
+                crate::resolver_core::ExportTarget::Local { .. } => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["./missing"],
+        "precondition: the overlay surface publishes the authored specifier"
+    );
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./missing"),
+        None,
+        "precondition: while ./missing does not exist the specifier resolves to nothing"
     );
 
     upsert_non_sfc(
@@ -10765,16 +10808,18 @@ fn overlay_seed_does_not_rebake_stale_known_miss_after_target_appears() {
 
     let second = host
         .materialize_overlay_indexed_ready_with_view("/workspace/owner.ts", &view)
-        .expect("overlay IndexedReady re-materialises");
-    let second_route = second
-        .import_routes
-        .get("./missing")
-        .expect("the refreshed overlay surface still tracks the ./missing specifier");
+        .expect("overlay IndexedReady stays served");
     assert_eq!(
-        second_route.resolved_canonical_id.as_deref(),
+        second.whole_hash, first.whole_hash,
+        "the overlay's parse artifact is unchanged — this is a dependency-set move"
+    );
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./missing")
+            .as_deref(),
         Some("/workspace/missing.ts"),
-        "STALE NEGATIVE ROUTE (overlay): the overlay seed re-baked a known-miss \
-         whose recorded generation is stale against the live file set"
+        "STALE NEGATIVE ROUTE (overlay): a specifier that becomes resolvable must \
+         resolve through the live authority — no overlay artifact may pin the \
+         earlier miss"
     );
 }
 
@@ -10786,9 +10831,9 @@ fn overlay_seed_does_not_rebake_stale_known_miss_after_target_appears() {
 /// not move on a file appearance — `resolve_owner_direct_import` kept
 /// returning `None` forever after the target appeared.
 ///
-/// The fix roots the skip in the `DerivedFactKind::ImportRoute` rail (the
+/// The fix roots the skip in the import-route witness rail (the
 /// same rail that roots unresolvable wildcard route misses):
-/// `generation_current_import_route_hash` re-resolves the owner's known-miss
+/// the owner's import-route witness re-resolves the owner's known-miss
 /// specifiers against the live workspace, so the recorded fact MOVES the
 /// moment `./missing` resolves and the warm surface read declines.
 ///
@@ -10833,20 +10878,19 @@ fn owner_import_surface_unresolved_direct_import_reresolves_after_target_appears
     );
 }
 
-/// DISCRIMINATING regression (edge-currency oracle, bindingless imports): a
-/// file whose ONLY cross-file construct is a specifier-less import
-/// (`import './dep';` — no bindings) still bakes a dependency-set-derived
-/// route into `IndexedReady.import_routes`, so its surface MUST be subject
-/// to the edge-currency oracle. The shallow edge inventory was built from
-/// `extracted.bindings` only, so such a file reported
-/// `has_cross_file_edges() == false`, the oracle judged the surface
-/// permanently edge-current, and a dependency-set change (the target
-/// appearing) never re-resolved the baked known-miss.
+/// DISCRIMINATING regression (bindingless imports): a file whose ONLY
+/// cross-file construct is a specifier-less import (`import './dep';` — no
+/// bindings) must still have that specifier in its AUTHORED inventory and
+/// must still resolve it live once the target appears.
 ///
-/// FAILS pre-fix: the re-read serves the stale known-miss (surface judged
-/// edge-current forever). PASSES post-fix: the bindingless import is part of
-/// the shallow edge inventory, the surface goes edge-stale, and the route
-/// re-resolves to the now-existing target.
+/// The failure this originally caught was an edge-currency blind spot: the
+/// bindingless import was missing from the shallow edge inventory, so an
+/// artifact carrying a baked known-miss for it was judged permanently
+/// edge-current. No artifact bakes a target now, so the surviving half of
+/// the invariant is the inventory itself plus the live re-resolution —
+/// which is also what the owner's import-route WITNESS is built from, so a
+/// specifier missing from the inventory would silently drop out of the
+/// witness too.
 #[test]
 fn bindingless_import_surface_reresolves_after_target_appears() {
     let host = make_host();
@@ -10864,51 +10908,66 @@ fn bindingless_import_surface_reresolves_after_target_appears() {
         "import './dep';\nexport const owner = 1;\n",
     );
 
-    let first = host
+    let _first = host
         .ensure_indexed_ready("/workspace/owner.ts")
         .expect("owner IndexedReady materialises");
-    let first_route = first
-        .import_routes
-        .get("./dep")
-        .expect("precondition: the bindingless import enters import_routes");
-    assert!(
-        first_route.resolved_canonical_id.is_none(),
-        "precondition: while ./dep does not exist the baked route is a known-miss"
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./dep"),
+        None,
+        "precondition: while ./dep does not exist the specifier resolves to nothing"
     );
+    let witness_before = host
+        .owner_import_route_witness_for_tests("/workspace/owner.ts")
+        .expect("the owner must produce a rootable witness");
+    assert!(
+        !witness_before.is_empty(),
+        "INVENTORY BLIND SPOT: a bindingless (side-effect) import is a \
+         cross-file edge and must appear in the owner's AUTHORED specifier \
+         inventory — an empty witness means it dropped out"
+    );
+    let view_before = host.resolver_store_view_read().into_owned_view();
+    for fact in &witness_before {
+        assert!(
+            crate::resolver_core::StoreView::validates(&view_before, fact),
+            "precondition: {fact:?} must validate against the view it was captured from"
+        );
+    }
 
     upsert_non_sfc(&host, "/workspace/dep.ts", "export const dep = 1;\n");
 
-    let second = host
-        .ensure_indexed_ready("/workspace/owner.ts")
-        .expect("owner IndexedReady re-reads");
-    let second_route = second
-        .import_routes
-        .get("./dep")
-        .expect("the surface still tracks the ./dep specifier");
     assert_eq!(
-        second_route.resolved_canonical_id.as_deref(),
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./dep")
+            .as_deref(),
         Some("/workspace/dep.ts"),
-        "EDGE-ORACLE BLIND SPOT: a bindingless (side-effect) import is a \
-         cross-file edge; the surface must go edge-stale when the dependency \
-         file set moves and re-resolve the baked known-miss"
+        "the bindingless import must re-resolve live once its target appears"
+    );
+    let view_after = host.resolver_store_view_read().into_owned_view();
+    assert!(
+        witness_before
+            .iter()
+            .any(|fact| !crate::resolver_core::StoreView::validates(&view_after, fact)),
+        "the pre-appearance witness must stop validating — otherwise a consumer \
+         rooted on it warm-serves the miss forever. Witness: {witness_before:?}"
     );
 }
 
-/// DISCRIMINATING regression (`ImportRoute` fact currency, host-memoized
-/// positives): `generation_current_import_route_hash` must re-resolve a
-/// host-memoized POSITIVE route whose recorded generation is stale against
-/// the live file set — not only known-misses. A prefetch-class positive
-/// (`cache_positive_import_route_result`) recorded `./dep →
-/// /workspace/dep.js` at generation G; when the `.d.ts` companion appears
-/// at G+1 the stamp goes stale, but the hash's "every specifier resolved ⇒
-/// stable" fast path kept hashing the old `.js` target, so the `ImportRoute`
-/// fact never moved and dependents warm-validated against a stale route.
+/// DISCRIMINATING regression (import-route currency, POSITIVE
+/// retarget): the owner's resolution witness must move when an
+/// already-resolving specifier RETARGETS, not only when a known-miss
+/// becomes resolvable. A prefetch-class positive recorded `./dep →
+/// /workspace/dep.js`; when the `.d.ts` companion appears the TS-first
+/// policy retargets the edge, while neither the owner's bytes nor the
+/// old target's bytes move.
 ///
-/// FAILS pre-fix: the hash is unchanged after the retarget. PASSES
-/// post-fix: the stale-stamped positive re-resolves (side-effect-free) and
-/// the hash moves.
+/// This is precisely the case an "answer-shaped" rail cannot see. The
+/// shared type-route policy probes the `TypeImport` lane FIRST, and only
+/// that probe's absence observation changes here — the final admitted
+/// transaction (the `EsmImport` fallback, pre-appearance) would report an
+/// unchanged signature. So the witness builder must record every
+/// resolution it drives, including the intermediate lane. FAILS if the
+/// builder keeps only the returned carrier's own signature.
 #[test]
-fn generation_current_import_route_hash_reresolves_stale_stamped_positive() {
+fn import_route_witness_moves_when_a_positive_retargets() {
     let host = make_host();
     host.configure_projects(vec![
         verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
@@ -10925,19 +10984,28 @@ fn generation_current_import_route_hash_reresolves_stale_stamped_positive() {
         "import { dep } from './dep';\nexport const owner = dep;\n",
     );
 
-    // Host-memoized positive: the prefetch class records the route with the
-    // generation captured at resolve time.
-    let captured_generation = host.ws().content_generation();
-    host.cache_positive_import_route_result_for_tests(
-        "/workspace/owner.ts",
-        "./dep",
-        "/workspace/dep.js",
-        captured_generation,
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./dep")
+            .as_deref(),
+        Some("/workspace/dep.js"),
+        "precondition: with no companion present the edge resolves to the runtime .js"
     );
 
-    let before = host
-        .generation_current_import_route_hash("/workspace/owner.ts")
-        .expect("the memoized positive yields an ImportRoute hash");
+    let view_before = host.resolver_store_view_read().into_owned_view();
+    let witness_before = host
+        .owner_import_route_witness_for_tests("/workspace/owner.ts")
+        .expect("the resolving positive yields a rootable witness");
+    assert!(
+        !witness_before.is_empty(),
+        "the positive must have observed at least one resolver fact — an \
+         empty witness would make the retarget assertion vacuous"
+    );
+    for fact in &witness_before {
+        assert!(
+            crate::resolver_core::StoreView::validates(&view_before, fact),
+            "precondition: {fact:?} must validate against the view it was captured from"
+        );
+    }
 
     // The declaration companion appears — the dependency file set moves and
     // the TS-first policy now retargets `./dep` to the `.d.ts`.
@@ -10947,32 +11015,37 @@ fn generation_current_import_route_hash_reresolves_stale_stamped_positive() {
         "export declare const dep: number;\n",
     );
 
-    let after = host
-        .generation_current_import_route_hash("/workspace/owner.ts")
-        .expect("the route table still yields an ImportRoute hash");
-    assert_ne!(
-        before, after,
-        "STALE POSITIVE ROUTE FACT: a stamp-stale host-memoized positive must \
-         re-resolve against the live workspace when the ImportRoute hash is \
-         produced — otherwise dependents warm-validate against the retargeted \
-         route forever"
+    let view_after = host.resolver_store_view_read().into_owned_view();
+    assert!(
+        witness_before
+            .iter()
+            .any(|fact| !crate::resolver_core::StoreView::validates(&view_after, fact)),
+        "STALE POSITIVE ROUTE WITNESS: the appearance of the higher-priority \
+         .d.ts companion must invalidate the pre-retarget witness — otherwise \
+         dependents warm-validate against the retargeted route forever. \
+         Witness: {witness_before:?}"
     );
 }
 
-/// Pins the C1 capture-before-resolve stamp discipline at the producer:
-/// `cache_positive_import_route_result` records the CALLER-captured
-/// generation (taken before the resolution it memoizes), never a live
-/// re-read at record time. A mutation that lands between resolve and record
-/// therefore leaves the stamp conservatively STALE — the entry is refused
-/// as generation-current and re-resolves — instead of forging a "current"
-/// stamp onto a possibly-retargeted resolution.
+/// INVERTED-POLARITY successor to
+/// `positive_route_stamp_is_caller_captured_not_live_at_record_time`.
 ///
-/// Pre-fix this test does not compile: the producer's signature had no
-/// caller-captured generation (it stamped a live read after the resolve),
-/// which is exactly the unsoundness — the API could not express
-/// capture-before-resolve.
+/// That case pinned the capture-before-resolve discipline of the HOST
+/// positive-route memo: a stamp taken after the resolve could forge
+/// currency onto a retargeted answer. The memo is deleted — it duplicated
+/// the workspace's own bounded owner-edge candidate slot, and being a
+/// plain map with no witness it needed a global `content_generation`
+/// equality to decide whether it was still true, which was the last
+/// global-generation warm-resolution validity test in the session.
+///
+/// The successor asserts the DELETION: driving the host's own resolution
+/// of an owner's import populates NO host-side route memo. Only a caller
+/// push (`set_import_dependencies`) may write that table, and it is then
+/// the caller's statement verbatim.
+///
+/// FAILS if any host resolution path re-introduces a memo write.
 #[test]
-fn positive_route_stamp_is_caller_captured_not_live_at_record_time() {
+fn host_resolution_populates_no_host_side_route_memo() {
     let host = make_host();
     host.configure_projects(vec![
         verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
@@ -10989,31 +11062,42 @@ fn positive_route_stamp_is_caller_captured_not_live_at_record_time() {
         "import { dep } from './dep';\nexport const owner = dep;\n",
     );
 
-    // The caller captures the generation, resolves, and THEN a concurrent
-    // mutation advances the workspace before the record lands.
-    let captured_generation = host.ws().content_generation();
-    upsert_non_sfc(&host, "/workspace/unrelated.ts", "export const u = 1;\n");
-    host.cache_positive_import_route_result_for_tests(
-        "/workspace/owner.ts",
-        "./dep",
-        "/workspace/dep.ts",
-        captured_generation,
+    // Drive every host route lane over the owner's authored specifier.
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow("/workspace/owner.ts", "./dep")
+            .as_deref(),
+        Some("/workspace/dep.ts"),
+        "fixture invariant: the edge really does resolve, so the memo would \
+         have had something to record"
+    );
+    let _ = host.ensure_indexed_ready("/workspace/owner.ts");
+    let _ = host.prepared_decl_bundle("/workspace/owner.ts");
+    let _ = host.owner_import_route_witness_for_tests("/workspace/owner.ts");
+
+    assert!(
+        host.derived_raw_cache()
+            .get("/workspace/owner.ts")
+            .is_none_or(|derived| derived.import_routes.is_empty()),
+        "HOST ROUTE MEMO REINTRODUCED: `DerivedRawState.import_routes` is the \
+         CALLER-SUPPLIED table only; a host-side memo duplicates the workspace \
+         owner-edge slot and needs a global-generation validity stamp"
     );
 
-    let live_generation = host.ws().content_generation();
-    assert_ne!(
-        captured_generation, live_generation,
-        "fixture invariant: the workspace moved between capture and record"
+    // Positive control: a CALLER push does land, so the assertion above is
+    // not vacuously true for want of a writable table.
+    host.set_import_dependencies(
+        "/workspace/owner.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./dep".to_string(),
+            resolved_canonical_id: Some("/workspace/dep.ts".to_string()),
+            possible_canonical_ids: vec!["/workspace/dep.ts".to_string()],
+        }],
     );
-    let derived = host
-        .derived_raw_cache()
-        .get("/workspace/owner.ts")
-        .expect("the record landed in DerivedRawState");
     assert!(
-        !derived.import_route_is_generation_current("./dep", live_generation),
-        "CAPTURE-BEFORE-RESOLVE: the recorded stamp must be the caller-captured \
-         generation, so a mutation between resolve and record leaves the entry \
-         conservatively stale (harmless re-resolve) instead of forging currency"
+        host.derived_raw_cache()
+            .get("/workspace/owner.ts")
+            .is_some_and(|derived| derived.import_routes.contains_key("./dep")),
+        "the caller-supplied table must still be writable by its one writer"
     );
 }
 
@@ -11022,7 +11106,7 @@ fn positive_route_stamp_is_caller_captured_not_live_at_record_time() {
 /// edges are `export *` wildcards (`export * from './missing'; export * from
 /// './present';`) is a wildcard-only provider: its wildcards resolve into a
 /// local `dep_edges` map and are NOT published into `import_routes`, so
-/// `generation_current_import_route_hash(owner)` returns `None`. The hole-2
+/// `import_route_witness_for_specifiers(owner, ..)` returns `None`. The hole-2
 /// rooting loop fed that `None` through `?`, dropping the WHOLE route entry —
 /// so a valid result resolved via the LATER wildcard (`./present`) was returned
 /// as `None` (no value served at all). "Do not admit to cache" was wrongly
@@ -11100,7 +11184,7 @@ fn route_resolved_via_later_wildcard_not_dropped_by_unresolvable_earlier_wildcar
 /// Two independent rails enforce this, and the test guards the end-to-end
 /// behaviour rather than isolating either:
 /// - The coverage-checked `ImportRoute` admission
-///   (`generation_current_import_route_hash_covering_sources`): the rooting
+///   (`import_route_witness_for_specifiers`): the rooting
 ///   loop admits an `ImportRoute` fact ONLY when the produced hash covers
 ///   EVERY unresolved wildcard source the traversal hit; a partial table that
 ///   omits `./missing` yields no fact, so the `Miss` is returned with EMPTY
@@ -11408,27 +11492,27 @@ fn non_wildcard_route_fact_retargets_via_edge_refresh_on_warm_host() {
     assert_eq!(
         warm_result, fresh_result,
         "the WARM host MUST return the SAME retargeted target as a FRESH host \
-         once ./runtime.ts appears — a NON-wildcard named-reexport surface \
-         bakes dependency-set-derived edges exactly like a wildcard surface, \
-         so the shared edge-currency oracle must stale it on a \
-         content-generation advance"
+         once ./runtime.ts appears — a NON-wildcard named-reexport edge is a \
+         resolve-domain answer exactly like a wildcard edge, so the warm \
+         host's route entry must root on the resolution witness and recompute"
     );
-    let provenance = warm.provenance().snapshot();
-    assert_eq!(
-        provenance.indexed_ready_edge_refreshes, 1,
-        "the stale non-wildcard owner surface must take exactly one cheap \
-         edge-refresh (route surface rebuilt, content payload reused; got {})",
-        provenance.indexed_ready_edge_refreshes
-    );
+    // STRONGER than the deleted edge-refresh contract: the retarget costs
+    // the OWNER's artifact nothing. Its named-reexport surface names the
+    // AUTHORED specifier, so the dependency-set move is answered entirely
+    // on the resolve domain. The per-host `indexed_ready_materializes`
+    // counter cannot state that: the appearing dependency legitimately
+    // materialises ITSELF in this window, so a host-wide zero would be
+    // false. The owner-precise claim is the `Arc::ptr_eq` identity
+    // assertion below.
     let after_refresh = warm
         .ensure_indexed_ready(index)
-        .expect("edge-refreshed route artifact must remain published");
+        .expect("the owner's route artifact must remain published");
     assert!(
-        Arc::ptr_eq(
-            &before_refresh.route_inventory,
-            &after_refresh.route_inventory
-        ),
-        "edge refresh must reuse the content-addressed route inventory",
+        Arc::ptr_eq(&before_refresh, &after_refresh),
+        "the retarget must leave the OWNER's artifact byte-for-byte in place \
+         — the same Arc, never a rebuilt one (the per-host materialize \
+         counter also sees the newly-appeared TARGET's own first build, so \
+         artifact identity is the owner-scoped statement)",
     );
     assert!(Arc::ptr_eq(
         &after_refresh.route_inventory,
@@ -11476,20 +11560,26 @@ fn non_wildcard_route_fact_resolves_after_dependency_appears_on_warm_host() {
     );
 }
 
-/// DISCRIMINATING unit test for the shared edge-currency oracle
-/// `route_surface_is_edge_current`. ANY cross-file-edge surface (wildcard
-/// reexports, named reexports, plain import targets, AND import-route-only
-/// tables — the external `src=` / caller-pushed class whose edges the
-/// shallow inventory never sees) stamped at a baked generation is
-/// edge-stale once `content_generation` advances past it; a surface with
-/// NO cross-file edges (nothing dependency-set-derived to go stale) stays
-/// edge-current regardless. This is the single predicate every route-fact
-/// producer and the materializer reuse share, for base and session-overlay
-/// `IndexedReady` surfaces alike (`IndexedReady.edge_generation`); it takes
-/// the ARTIFACT so the complete `IndexedReady::has_cross_file_edges`
-/// authority — not the blind shallow component — decides edge-bearing.
+/// INVERTED-POLARITY successor to
+/// `edge_currency_oracle_stales_wildcard_surface_after_generation_advance`.
+///
+/// That case pinned the shared edge-currency oracle: ANY surface carrying a
+/// cross-file edge went stale the moment the global `content_generation`
+/// advanced, because the artifact baked resolved dependency canonicals that
+/// a dependency-set move could retarget. The artifact bakes none now — it
+/// is a content-addressed PARSE artifact — so the oracle, both of its
+/// stamps, and the whole route-only edge-refresh materialise lane are
+/// deleted.
+///
+/// This pins the replacement in BOTH directions:
+///
+/// * a `content_generation` advance stales NOTHING, for every edge shape
+///   (a reintroduced global stamp fails here — it is the exact opposite of
+///   the deleted assertions);
+/// * a PARSE-ENV move still stales every surface, so the surviving gate is
+///   not vacuously true.
 #[test]
-fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
+fn indexed_surface_reuse_is_parse_env_only_never_content_generation() {
     use crate::resolver_core::shallow_file_state::{
         ExportTarget, ImportTarget, ShallowFileState, WildcardReexport,
     };
@@ -11498,14 +11588,13 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file("/workspace/x.ts", "export const a = 1;\n");
     let host = VerterHost::new(HostConfig::default(), ws.clone());
-    let baked = host.ws().content_generation();
+    let baked_generation = host.ws().content_generation();
 
     enum EdgeShape {
         None,
         Wildcard,
         NamedReexport,
         ImportTarget,
-        ImportRouteOnly,
     }
     let make_artifact = |shape: EdgeShape| {
         let routes = Arc::new(
@@ -11514,13 +11603,11 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
         let mut exports = FxHashMap::default();
         let mut wildcard_reexports = Vec::new();
         let mut import_targets = FxHashMap::default();
-        let mut import_routes = FxHashMap::default();
         match shape {
             EdgeShape::None => {}
             EdgeShape::Wildcard => wildcard_reexports.push(WildcardReexport {
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 source_specifier: "./dep".to_string(),
-                canonical_id: String::new(),
             }),
             EdgeShape::NamedReexport => {
                 exports.insert(
@@ -11528,7 +11615,6 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
                     ExportTarget::Reexport {
                         source_specifier: "./dep".to_string(),
                         original_name: "Foo".to_string(),
-                        canonical_id: "/workspace/dep.ts".to_string(),
                         is_type: true,
                     },
                 );
@@ -11540,17 +11626,6 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
                         source_specifier: "./dep".to_string(),
                         imported_name: "Foo".to_string(),
                         is_namespace: false,
-                        canonical_id: "/workspace/dep.ts".to_string(),
-                    },
-                );
-            }
-            EdgeShape::ImportRouteOnly => {
-                import_routes.insert(
-                    "./dep".to_string(),
-                    crate::types::DependencyResolution {
-                        specifier: "./dep".to_string(),
-                        resolved_canonical_id: Some("/workspace/dep.ts".to_string()),
-                        possible_canonical_ids: vec!["/workspace/dep.ts".to_string()],
                     },
                 );
             }
@@ -11569,92 +11644,78 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
             Arc::from(""),
             Arc::from(""),
         );
-        artifact.import_routes = Arc::new(import_routes);
-        artifact.edge_generation = baked;
+        artifact.built_at_content_generation = baked_generation;
+        artifact.parse_env_hash = host
+            .host_view_env_hashes_for("/workspace/x.ts")
+            .parse_env_hash;
         artifact
     };
-    let wildcard = make_artifact(EdgeShape::Wildcard);
-    let named_reexport = make_artifact(EdgeShape::NamedReexport);
-    let import_bearing = make_artifact(EdgeShape::ImportTarget);
-    let route_only = make_artifact(EdgeShape::ImportRouteOnly);
-    let no_edges = make_artifact(EdgeShape::None);
+    let shapes = [
+        ("wildcard", make_artifact(EdgeShape::Wildcard)),
+        ("named reexport", make_artifact(EdgeShape::NamedReexport)),
+        ("import target", make_artifact(EdgeShape::ImportTarget)),
+        ("no edges", make_artifact(EdgeShape::None)),
+    ];
 
-    // Before any change: every surface is edge-current at its baked gen.
-    assert!(host.route_surface_is_edge_current(&wildcard));
-    assert!(host.route_surface_is_edge_current(&named_reexport));
-    assert!(host.route_surface_is_edge_current(&import_bearing));
-    assert!(host.route_surface_is_edge_current(&route_only));
-    assert!(host.route_surface_is_edge_current(&no_edges));
+    for (label, artifact) in &shapes {
+        assert!(
+            host.indexed_surface_is_current("/workspace/x.ts", artifact),
+            "precondition: the {label} surface starts current"
+        );
+    }
 
     // A dependency-set change advances content_generation past `baked`.
     ws.inject_file("/workspace/y.ts", "export const b = 2;\n");
-    assert_ne!(host.ws().content_generation(), baked);
+    assert_ne!(host.ws().content_generation(), baked_generation);
 
-    // EVERY cross-file-edge surface is now edge-stale (its baked edges
-    // depend on the dependency file set); only the no-edge surface stays
-    // edge-current.
-    assert!(
-        !host.route_surface_is_edge_current(&wildcard),
-        "a wildcard-bearing surface MUST be edge-stale once content_generation \
-         advances past its baked-edge generation"
-    );
-    assert!(
-        !host.route_surface_is_edge_current(&named_reexport),
-        "a named-reexport surface bakes a resolved dependency canonical and \
-         MUST be edge-stale once content_generation advances past its \
-         baked-edge generation"
-    );
-    assert!(
-        !host.route_surface_is_edge_current(&import_bearing),
-        "an import-target-bearing surface bakes resolved dependency canonicals \
-         and MUST be edge-stale once content_generation advances past its \
-         baked-edge generation"
-    );
-    assert!(
-        !host.route_surface_is_edge_current(&route_only),
-        "an IMPORT-ROUTE-ONLY surface bakes resolved dependency canonicals in \
-         its route table — invisible to the shallow component — and MUST be \
-         edge-stale once content_generation advances past its baked-edge \
-         generation"
-    );
-    assert!(
-        host.route_surface_is_edge_current(&no_edges),
-        "a surface with no cross-file edges carries nothing \
-         dependency-set-derived and stays edge-current regardless of \
-         content_generation"
-    );
+    for (label, artifact) in &shapes {
+        assert!(
+            host.indexed_surface_is_current("/workspace/x.ts", artifact),
+            "GLOBAL EDGE STAMP REINTRODUCED: the {label} surface is a PARSE \
+             artifact — it bakes no resolved target — so a content-generation \
+             advance anywhere in the workspace must NOT stale it. Staling here \
+             is the O(published owners) re-index that was removed."
+        );
+    }
+
+    // The surviving gate is real: a parse-env move DOES stale every surface.
+    *host.parse_env_override.lock() = Some([0xABu8; 16]);
+    for (label, artifact) in &shapes {
+        assert!(
+            !host.indexed_surface_is_current("/workspace/x.ts", artifact),
+            "a moved parse environment MUST stale the {label} surface — its \
+             framework_parse / shallow_state / decl_bodies were produced under \
+             the superseded environment"
+        );
+    }
+    *host.parse_env_override.lock() = None;
 }
 
-/// DISCRIMINATING regression (edge-currency authority — the import-route-only
-/// hole): an artifact whose ONLY cross-file edges live in
-/// `IndexedReady.import_routes` (no shallow-inventory edge: no import
-/// targets, no reexports, no bindingless imports) MUST be judged edge-stale
-/// by `indexed_surface_is_current` once `content_generation` advances past
-/// its `edge_generation`. The baked route targets are dependency-set-derived
-/// exactly like a wildcard edge: a file appearing or retargeting moves them
-/// while the owner's own content stays put.
+/// INVERTED-POLARITY successor to
+/// `import_route_only_artifact_goes_edge_stale_after_generation_advance`.
 ///
-/// Production shape: a caller-supplied route snapshot
-/// (`set_import_dependencies`) for a specifier the file's own source never
-/// names — the SFC external `src=` class lands in the same
-/// import-route-only shape via the compile prefetch memos.
+/// That case pinned the import-route-only hole: an artifact whose ONLY
+/// cross-file edges lived in `IndexedReady.import_routes` (a caller-pushed
+/// route for a specifier the file's own source never names — the SFC
+/// external `src=` class) had to be judged edge-STALE on a global
+/// `content_generation` advance, because those baked targets were
+/// dependency-set-derived.
 ///
-/// FAILS pre-fix: the edge gate consulted only the SHALLOW
-/// `has_cross_file_edges` predicate, so the import-route-only artifact
-/// stayed "edge-current" forever across content-generation moves — stale
-/// route facts and compile slots survived retargets. PASSES post-fix: the
-/// gate consults the complete `IndexedReady::has_cross_file_edges`
-/// authority and stales the surface.
+/// The artifact carries no route table now, so there is no such shape and
+/// no stamp to judge it by. The property that mattered — a caller-pushed
+/// route retargeting must be OBSERVABLE — moved onto the resolve domain,
+/// and it is asserted here in both directions: the artifact does NOT stale
+/// on an unrelated content-generation move, while the owner's import-route
+/// witness DOES stop validating when the pushed specifier retargets.
 #[test]
-fn import_route_only_artifact_goes_edge_stale_after_generation_advance() {
+fn caller_pushed_route_retarget_is_witnessed_not_artifact_staled() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file("/workspace/side.ts", "export const side = 1;\n");
     let host = VerterHost::new(HostConfig::default(), ws.clone());
 
     upsert_non_sfc(&host, "/workspace/plain.ts", "export const x = 1;\n");
     // Caller-supplied route for a specifier the file's own source never
-    // mentions: the artifact's ONLY cross-file edge lives in
-    // `import_routes`; the shallow inventory stays edge-free.
+    // mentions: the owner's authored inventory stays empty.
     host.set_import_dependencies(
         "/workspace/plain.ts",
         vec![crate::types::DependencyResolution {
@@ -11667,49 +11728,59 @@ fn import_route_only_artifact_goes_edge_stale_after_generation_advance() {
     let indexed = host
         .ensure_indexed_ready("/workspace/plain.ts")
         .expect("plain.ts must materialise an IndexedReady");
-    // Fixture sanity: the import-route-only shape this pin is about.
-    assert!(
-        !indexed.import_routes.is_empty(),
-        "fixture: the caller-supplied route must be baked into \
-         IndexedReady.import_routes"
-    );
     assert!(
         !indexed.shallow_state.has_shallow_cross_file_edges(),
-        "fixture: the shallow inventory must carry NO cross-file edge — the \
-         route table is the artifact's only edge"
+        "fixture: the owner authors NO cross-file edge — the caller push is \
+         the only route"
     );
     assert!(
         host.indexed_surface_is_current("/workspace/plain.ts", &indexed),
-        "precondition: the freshly built artifact is current at its baked \
-         generation"
+        "precondition: the freshly built artifact is current"
     );
 
-    // A dependency-set change advances content_generation while the owner's
-    // content stays put.
+    let view_before = host.resolver_store_view_read().into_owned_view();
+    let witness = host
+        .owner_import_route_witness_for_tests("/workspace/plain.ts")
+        .expect("the owner must produce a rootable witness");
+    assert!(
+        !witness.is_empty(),
+        "precondition: the caller-pushed specifier must be witnessed — an \
+         empty witness would make the retarget assertion vacuous"
+    );
+    for fact in &witness {
+        assert!(
+            crate::resolver_core::StoreView::validates(&view_before, fact),
+            "precondition: {fact:?} must validate against the view it was captured from"
+        );
+    }
+
+    // A dependency-set change advances content_generation while the
+    // owner's content stays put.
     ws.inject_file("/workspace/unrelated.ts", "export const u = 1;\n");
 
     assert!(
-        !host.indexed_surface_is_current("/workspace/plain.ts", &indexed),
-        "IMPORT-ROUTE-ONLY HOLE: an artifact whose only cross-file edges \
-         live in IndexedReady.import_routes must be judged edge-STALE once \
-         content_generation advances past its edge_generation — the shallow \
-         predicate alone is blind to baked route targets, so stale route \
-         facts and compile slots would survive retargets"
+        host.indexed_surface_is_current("/workspace/plain.ts", &indexed),
+        "GLOBAL EDGE STAMP REINTRODUCED: the parse artifact bakes no route \
+         target, so an unrelated content-generation advance must NOT stale it"
     );
 
-    // No-over-decline arm: a genuinely edge-free artifact (no shallow
-    // edges AND an empty route table) stays current across the same move.
-    upsert_non_sfc(&host, "/workspace/loner.ts", "export const y = 2;\n");
-    let loner = host
-        .ensure_indexed_ready("/workspace/loner.ts")
-        .expect("loner.ts must materialise an IndexedReady");
-    assert!(loner.import_routes.is_empty());
-    ws.inject_file("/workspace/unrelated2.ts", "export const u2 = 1;\n");
+    // Now the pushed specifier's target actually moves.
+    host.set_import_dependencies(
+        "/workspace/plain.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./side".to_string(),
+            resolved_canonical_id: Some("/workspace/unrelated.ts".to_string()),
+            possible_canonical_ids: vec!["/workspace/unrelated.ts".to_string()],
+        }],
+    );
+    let view_after = host.resolver_store_view_read().into_owned_view();
     assert!(
-        host.indexed_surface_is_current("/workspace/loner.ts", &loner),
-        "an artifact with no cross-file edges at all carries nothing \
-         dependency-set-derived and must stay current across \
-         content-generation moves"
+        witness
+            .iter()
+            .any(|fact| !crate::resolver_core::StoreView::validates(&view_after, fact)),
+        "a caller-pushed route RETARGET must invalidate the owner's witness — \
+         that is where the currency the deleted artifact stamp used to carry \
+         now lives. Witness: {witness:?}"
     );
 }
 
@@ -11848,10 +11919,7 @@ fn overlay_materializer_esm_fallback_normalizes_like_shared_route_edge_policy() 
     ));
     assert_eq!(overlay.route_inventory.wildcard_reexports.len(), 1);
 
-    let recorded = overlay
-        .import_routes
-        .get("runtimedep")
-        .and_then(|r| r.resolved_canonical_id.clone());
+    let recorded = host.resolve_route_edge_canonical(barrel, "runtimedep");
     assert_eq!(
         recorded.as_deref(),
         Some("/workspace/runtime.d.ts"),
@@ -11919,13 +11987,10 @@ fn overlay_materializer_wildcard_reuse_retargets_after_base_file_set_change() {
         &first.shallow_state.route_inventory
     ));
     assert_eq!(
-        first
-            .import_routes
-            .get("./runtime")
-            .and_then(|r| r.resolved_canonical_id.clone())
+        host.resolve_route_edge_canonical(barrel, "./runtime")
             .as_deref(),
         Some("/workspace/runtime/index.ts"),
-        "precondition: the overlay bakes the directory-index edge while it is the \
+        "precondition: ./runtime resolves to the directory index while it is the \
          only ./runtime target"
     );
 
@@ -11939,10 +12004,8 @@ fn overlay_materializer_wildcard_reuse_retargets_after_base_file_set_change() {
     let fresh = fresh_host
         .materialize_overlay_indexed_ready_with_view(barrel, &fresh_view)
         .expect("fresh overlay materialiser produces an IndexedReady");
-    let fresh_target = fresh
-        .import_routes
-        .get("./runtime")
-        .and_then(|r| r.resolved_canonical_id.clone());
+    let _ = &fresh;
+    let fresh_target = fresh_host.resolve_route_edge_canonical(barrel, "./runtime");
     assert_eq!(
         fresh_target.as_deref(),
         Some("/workspace/runtime.ts"),
@@ -11960,10 +12023,8 @@ fn overlay_materializer_wildcard_reuse_retargets_after_base_file_set_change() {
         &warm.route_inventory,
         &warm.shallow_state.route_inventory
     ));
-    let warm_target = warm
-        .import_routes
-        .get("./runtime")
-        .and_then(|r| r.resolved_canonical_id.clone());
+    let _ = &warm;
+    let warm_target = host.resolve_route_edge_canonical(barrel, "./runtime");
     assert_eq!(
         warm_target, fresh_target,
         "the WARM session host MUST retarget ./runtime to the SAME target as a FRESH \
@@ -12020,14 +12081,12 @@ fn overlay_reader_retargets_wildcard_after_base_file_set_change() {
     let first = host
         .materialize_overlay_indexed_ready_with_view(barrel, &view)
         .expect("overlay materializes");
+    let _ = &first;
     assert_eq!(
-        first
-            .import_routes
-            .get("./runtime")
-            .and_then(|r| r.resolved_canonical_id.clone())
+        host.resolve_route_edge_canonical(barrel, "./runtime")
             .as_deref(),
         Some("/workspace/runtime/index.ts"),
-        "precondition: the overlay bakes the directory-index edge"
+        "precondition: ./runtime resolves to the directory index"
     );
     // BASE file-set change: a more-specific `./runtime.ts` appears.
     ws.inject_file("/workspace/runtime.ts", "export type Runtime = boolean;\n");
@@ -12040,16 +12099,16 @@ fn overlay_reader_retargets_wildcard_after_base_file_set_change() {
     let ctx = crate::resolver_core::SessionResolverContext::new(&host, &view, &base, overlay);
     let warm = ResolverContext::indexed_for_current_content(&ctx, barrel)
         .expect("session context returns overlay indexed");
-    let target = warm
-        .import_routes
-        .get("./runtime")
-        .and_then(|r| r.resolved_canonical_id.clone());
+    assert!(
+        warm.shallow_state.has_wildcard_reexports(),
+        "the session context still serves the overlay barrel's wildcard surface"
+    );
+    let target = host.resolve_route_edge_canonical(barrel, "./runtime");
     assert_eq!(
         target.as_deref(),
         Some("/workspace/runtime.ts"),
-        "the overlay READER must retarget the wildcard edge after a base file-set \
-         change — re-materialising the overlay surface (not serving the stale baked \
-         edge, and not falling back to base)"
+        "the wildcard edge must retarget after a base file-set change — the \
+         surface names the AUTHORED specifier and the one authority resolves it"
     );
 }
 
@@ -12080,30 +12139,32 @@ fn base_shallow_reader_retargets_wildcard_after_dependency_set_change() {
     let first = host
         .ensure_indexed_ready(barrel)
         .expect("indexed materialiser produces the barrel");
+    let _ = &first;
     assert_eq!(
-        first
-            .import_routes
-            .get("./runtime")
-            .and_then(|r| r.resolved_canonical_id.clone())
+        host.resolve_route_edge_canonical(barrel, "./runtime")
             .as_deref(),
         Some("/workspace/runtime/index.ts"),
-        "precondition: the barrel bakes the directory-index edge"
+        "precondition: ./runtime resolves to the directory index"
     );
     ws.inject_file("/workspace/runtime.ts", "export type Runtime = boolean;\n");
     let state = host
         .shallow_file_state(barrel)
         .expect("base shallow reader returns a surface");
-    let target = state
-        .wildcard_reexports
-        .iter()
-        .find(|w| w.source_specifier == "./runtime")
-        .map(|w| w.canonical_id.clone());
     assert_eq!(
-        target.as_deref(),
+        state
+            .wildcard_reexports
+            .iter()
+            .map(|w| w.source_specifier.as_str())
+            .collect::<Vec<_>>(),
+        vec!["./runtime"],
+        "the base shallow reader serves the AUTHORED wildcard specifier"
+    );
+    assert_eq!(
+        host.resolve_route_edge_canonical(barrel, "./runtime")
+            .as_deref(),
         Some("/workspace/runtime.ts"),
-        "the base shallow reader MUST retarget the wildcard edge after a dependency \
-         file-set change — re-indexing from base content rather than serving the \
-         stale baked directory-index edge"
+        "the wildcard edge MUST retarget after a dependency file-set change — no \
+         artifact may pin the directory-index answer"
     );
 }
 
@@ -12140,17 +12201,21 @@ fn session_unmasked_reader_retargets_wildcard_after_dependency_set_change() {
     let state = host
         .routed_shallow_state_with_view(barrel, Some(&view))
         .expect("session-unmasked reader returns a surface");
-    let target = state
-        .wildcard_reexports
-        .iter()
-        .find(|w| w.source_specifier == "./runtime")
-        .map(|w| w.canonical_id.clone());
     assert_eq!(
-        target.as_deref(),
+        state
+            .wildcard_reexports
+            .iter()
+            .map(|w| w.source_specifier.as_str())
+            .collect::<Vec<_>>(),
+        vec!["./runtime"],
+        "the session-unmasked frontier reader serves the AUTHORED specifier"
+    );
+    assert_eq!(
+        host.resolve_route_edge_canonical(barrel, "./runtime")
+            .as_deref(),
         Some("/workspace/runtime.ts"),
-        "the session-unmasked frontier reader MUST retarget the wildcard edge after \
-         a dependency file-set change — falling through to the gated base route path \
-         rather than serving the stale baked directory-index clone"
+        "the wildcard edge MUST retarget after a dependency file-set change — the \
+         reader hands out a parse surface and the one authority resolves it"
     );
 }
 
@@ -12201,17 +12266,18 @@ fn artifact_only_wildcard_barrel_edge_stale_does_not_recurse() {
     // MUST terminate (no stack overflow) and re-index to the FRESH target.
     let result = host
         .artifact_current_indexed(foreign)
-        .expect("artifact-only reader re-indexes the edge-stale wildcard barrel");
-    let target = result
-        .import_routes
-        .get("./runtime")
-        .and_then(|r| r.resolved_canonical_id.clone());
+        .expect("artifact-only reader serves the wildcard barrel");
+    assert!(
+        result.shallow_state.has_wildcard_reexports(),
+        "the artifact-only reader MUST terminate and serve the wildcard surface — \
+         never recurse"
+    );
     assert_eq!(
-        target.as_deref(),
+        host.resolve_route_edge_canonical(foreign, "./runtime")
+            .as_deref(),
         Some("/workspace/runtime.ts"),
-        "the artifact-only reader MUST terminate and re-index to the fresh \
-         ./runtime.ts target — never recurse, never serve the stale baked \
-         runtime/index.ts edge"
+        "the artifact-only owner's wildcard edge resolves to the FRESH \
+         ./runtime.ts target — no artifact pins the directory-index answer"
     );
     // The sibling readers over the same canonical also terminate + retarget.
     assert!(host.shallow_file_state(foreign).is_some());
@@ -12965,6 +13031,10 @@ fn base_eval_env_prefers_declaration_companion_for_runtime_js_dependencies() {
         "/workspace/node_modules/pkg/dist/index.d.ts".to_string(),
         Arc::from("export declare function useForwardProps<T>(value: T): T\n"),
     );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/package.json".to_string(),
+        Arc::from(r#"{"name":"pkg","types":"./dist/index.d.ts"}"#),
+    );
 
     let host = VerterHost::new(HostConfig::default(), ws);
 
@@ -13649,10 +13719,23 @@ export type TargetEmits = { change: [value: string] }
         ),
         "TargetEmits should resolve through the cached shallow barrel route",
     );
-    assert_eq!(
+    // The barrel's wildcard target is a RESOLVE-domain answer: the seeded
+    // parse artifact names `./target` and nothing more, so the lookup
+    // resolves it. The count is bounded by the number of matching-stem
+    // wildcard hops the two lookups traverse (one each) — never by the
+    // barrel's total sibling count, which is what the laziness contract
+    // is actually about (asserted directly below).
+    assert!(
+        ws.resolve_count("/src/types/index.ts", "./target") <= 2,
+        "the barrel's matching wildcard resolves at most once per lookup \
+         (got {})",
         ws.resolve_count("/src/types/index.ts", "./target"),
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./a"),
         0,
-        "once the barrel facts are seeded, root lookup should reuse the cached wildcard route without another workspace resolve",
+        "an unrelated earlier wildcard sibling must never be resolved — the \
+         walk stops at the matching stem",
     );
 }
 
@@ -13696,21 +13779,32 @@ fn prepared_type_decl_keeps_export_only_barrels_shallow_for_missing_local_symbol
         prepared.is_none(),
         "prepared decl lookup on an export-only barrel should stay local and defer route resolution",
     );
-    assert_eq!(
-        ws.resolve_count("/src/types/index.ts", "./a"),
-        0,
-        "missing local prepared decl lookup must not resolve earlier wildcard siblings",
-    );
-    assert_eq!(
-        ws.resolve_count("/src/types/index.ts", "./b"),
-        0,
-        "missing local prepared decl lookup must not resolve intermediate wildcard siblings",
-    );
-    assert_eq!(
-        ws.resolve_count("/src/types/index.ts", "./target"),
-        0,
-        "missing local prepared decl lookup must not resolve the eventual wildcard target",
-    );
+    // Laziness, restated for the resolve-domain rooting rail.
+    //
+    // The bundle roots on the owner's import-route RESOLUTION WITNESS,
+    // so the owner's OWN authored specifiers are necessarily observed —
+    // that observation IS the rail, and a lookup that skipped it would
+    // publish an entry no dependency appearance could invalidate. What
+    // must still not happen is the BREADTH WALK: each owner specifier is
+    // observed at most once, and no wildcard sibling's SOURCE is opened
+    // to hunt for the missing local symbol.
+    for specifier in ["./a", "./b", "./target"] {
+        assert!(
+            ws.resolve_count("/src/types/index.ts", specifier) <= 1,
+            "missing local prepared decl lookup must observe {specifier} at \
+             most once — a repeated resolve is the breadth walk this pins \
+             against (got {})",
+            ws.resolve_count("/src/types/index.ts", specifier),
+        );
+    }
+    for sibling in ["/src/types/a.ts", "/src/types/b.ts", "/src/types/target.ts"] {
+        assert_eq!(
+            ws.read_count(sibling),
+            0,
+            "missing local prepared decl lookup must not OPEN the wildcard \
+             sibling {sibling} — the barrel stays shallow",
+        );
+    }
 }
 
 /// Laziness pin for a LOCAL-export root resolve, narrowed to the
@@ -14143,21 +14237,27 @@ fn current_dependency_fact_versions_keeps_imported_barrel_route_facts_shallow() 
         &std::collections::BTreeSet::new(),
     );
 
-    assert_eq!(
-        ws.resolve_count("/src/types/index.ts", "./a"),
-        0,
-        "captured fact-version lookup must not resolve earlier wildcard siblings for route hashing",
-    );
-    assert_eq!(
-        ws.resolve_count("/src/types/index.ts", "./b"),
-        0,
-        "captured fact-version lookup must not resolve intermediate wildcard siblings for route hashing",
-    );
-    assert_eq!(
-        ws.resolve_count("/src/types/index.ts", "./target"),
-        0,
-        "captured fact-version lookup must not resolve the matched wildcard target for route hashing",
-    );
+    // Laziness, restated for the resolve-domain rooting rail: the
+    // capture OBSERVES the owner's own authored specifiers (that is the
+    // import-route witness), each at most once, and opens no wildcard
+    // sibling source to do it.
+    for specifier in ["./a", "./b", "./target"] {
+        assert!(
+            ws.resolve_count("/src/types/index.ts", specifier) <= 1,
+            "captured fact-version lookup must observe {specifier} at most \
+             once for route rooting — a repeated resolve is the live \
+             wildcard replay this pins against (got {})",
+            ws.resolve_count("/src/types/index.ts", specifier),
+        );
+    }
+    for sibling in ["/src/types/a.ts", "/src/types/b.ts", "/src/types/target.ts"] {
+        assert_eq!(
+            ws.read_count(sibling),
+            0,
+            "captured fact-version lookup must not OPEN the wildcard sibling \
+             {sibling} — the imported barrel's route facts stay shallow",
+        );
+    }
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
@@ -14341,14 +14441,17 @@ fn store_view_import_routes_do_not_depend_on_live_owner_state() {
         .expect("barrel should materialize shallow export state");
     let view = host.resolver_store_view_read().into_owned_view();
 
-    assert!(
-        view.derived_hash(
-            "/src/types/index.ts",
-            crate::resolver_core::DerivedFactKind::ImportRoute,
-        )
-        .is_some(),
-        "captured store views should snapshot module-facts-backed import-route hashes without reconstructing the old structural shadow path",
-    );
+    let witness = host
+        .owner_import_route_witness_for_tests("/src/types/index.ts")
+        .expect("a materialised barrel must produce a rootable import-route witness");
+    for fact in &witness {
+        assert!(
+            crate::resolver_core::StoreView::validates(&view, fact),
+            "captured store views must validate the owner's import-route \
+             witness fact {fact:?} against their captured resolution world, \
+             without reconstructing the old structural shadow path",
+        );
+    }
 
     ws.reset_resolves();
     ws.remove_file("/src/types/index.ts");
@@ -14380,10 +14483,10 @@ fn store_view_import_routes_do_not_depend_on_live_owner_state() {
     // wildcard canonical agrees with the route-traversal / overlay surfaces.
     assert_eq!(
         ws.resolve_count("/src/types/index.ts", "./target"),
-        2,
+        1,
         "a wildcard-bearing barrel re-validates its baked `export *` edge once \
-         content_generation advances (edge-currency): one EsmImport resolve plus \
-         one shared-policy TS-first resolve, still resolving correctly",
+         content_generation advances (edge-currency) through the shared TS-first \
+         Engine policy, still resolving correctly without trusting the baked route",
     );
 }
 
@@ -14424,13 +14527,14 @@ export interface LinkProps extends SharedProps {
         entry.export_signatures.is_some(),
         "export-only shallow state should still capture export signatures",
     );
-    // The import `./shared` provides `SharedProps` which is used by the
-    // exported `LinkProps` heritage clause.  Module-facts materializes all
-    // import routes eagerly (needed by the shallow state resolver and
-    // component-meta pipelines), so at most one workspace resolve is expected.
-    assert!(
-        ws.resolve_count("/src/Link.vue", "./shared") <= 1,
-        "module-facts should resolve the import at most once",
+    // The materialiser performs ZERO import resolution now — the artifact
+    // it publishes is a pure parse/index product — so the only producer
+    // re-entering Engine here is the scheduler dependency producer.
+    assert_eq!(
+        ws.resolve_count("/src/Link.vue", "./shared"),
+        1,
+        "only the scheduler dependency producer resolves during materialisation; \
+         the indexed materialiser must resolve nothing",
     );
 }
 

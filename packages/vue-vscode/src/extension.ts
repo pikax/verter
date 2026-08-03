@@ -841,8 +841,10 @@ async function startVueLanguageServer(
   // TextMate grammar for both carriers (source.vue / source.svelte).
   const activeFrameworks = frameworkClientLanguageIds();
 
-  // Options to control the language client
-  const clientOptions: LanguageClientOptions = {
+  // Build options for each client instance. Initialization-only settings must
+  // be read here so every restart initializes the replacement server from the
+  // workspace's current configuration.
+  const buildClientOptions = (): LanguageClientOptions => ({
     documentSelector: [
       // Framework carriers only. Plain TS/JS buffers are synchronized below
       // without registering competing editor features.
@@ -1075,14 +1077,14 @@ async function startVueLanguageServer(
         return [...(cssHighlights ?? []), ...(lspResult ?? [])];
       },
     },
-  };
+  });
 
   let client = createLanguageServer(
     buildServerOptions(binaryPath, rootPath, context.extensionPath, log, [
       ...sharedTsgo.lspArgs,
       ...editorTsserver.lspArgs,
     ]),
-    clientOptions,
+    buildClientOptions(),
   );
   const getClient = () => client as unknown as PatchClient<LanguageClient>;
   const plainScriptSync = new PlainScriptDocumentSync();
@@ -1623,7 +1625,7 @@ async function startVueLanguageServer(
               ...sharedTsgo.lspArgs,
               ...editorTsserver.lspArgs,
             ]),
-            clientOptions,
+            buildClientOptions(),
           );
           bindPlainScriptSync(client);
           registerTypeProviderPidListener(client);

@@ -88,7 +88,7 @@ mod read_set_signature_unit_tests {
             fact_filewhole("/wholehash.ts", 1),
             fact_derived("/derived.ts", 2),
             fact_parse("/parse.ts", 3),
-            FactVersionRef::ResolveImports(crate::resolver_core::ResolveImportsFactRef {
+            FactVersionRef::ResolveImports(crate::resolver_core::ResolveImportsFactRef::Semantic {
                 canonical_id: "/resolve.ts".to_string(),
                 key: FactKey::SyntacticExportSet,
                 lane: FactLane::Semantic,

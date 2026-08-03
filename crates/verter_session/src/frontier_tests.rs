@@ -78,6 +78,10 @@ impl CountingWorkspace {
 }
 
 impl verter_workspace::WorkspaceRead for CountingWorkspace {
+    fn capture_resolution_world(&self) -> Option<Arc<verter_workspace::CapturedResolutionWorld>> {
+        verter_workspace::WorkspaceRead::capture_resolution_world(self.inner.as_ref())
+    }
+
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         *self
             .read_counts
@@ -119,8 +123,22 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         self.inner.resolve_import(importer_id, specifier, ctx)
     }
 
+    fn resolve_import_outcome(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> verter_workspace::ResolutionOutcome {
+        self.inner
+            .resolve_import_outcome(importer_id, specifier, ctx)
+    }
+
     fn content_generation(&self) -> u64 {
         self.inner.content_generation()
+    }
+
+    fn resolution_fact_generation(&self) -> u64 {
+        self.inner.resolution_fact_generation()
     }
 
     fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {

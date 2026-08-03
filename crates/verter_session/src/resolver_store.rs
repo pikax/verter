@@ -7,12 +7,10 @@ use std::sync::OnceLock;
 
 /// Per-call-site counter for [`HostStoreView::from_host_read`] invocations.
 ///
-/// **Per-call-site instrumentation.** `HostStoreView::from_host` rebuilds
-/// the entire workspace snapshot on every call; the dominant cost
-/// surfaces as `host_store_view_from_host_builds` per-Button counts in
-/// the audit-record diagnostic counters. To attribute those builds
-/// back to specific warm-hit validator call sites (the Bug 2 hypothesis
-/// the 3-way consult identified), every entry into `from_host`
+/// **Per-call-site instrumentation.** `HostStoreView::from_host` obtains the
+/// token-keyed base view on every call; a stable-token hit is an `Arc` clone,
+/// while a miss performs one O(1) root capture. To attribute those requests
+/// back to specific warm-hit validator call sites, every entry into `from_host`
 /// records `std::panic::Location::caller()` and bumps a per-site
 /// counter. The `#[track_caller]` rail on `from_host`,
 /// `VerterHost::resolver_store_view`, the
@@ -23,9 +21,8 @@ use std::sync::OnceLock;
 /// to the actual cache layer paying for them, not to the deepest
 /// `from_host` body call site.
 ///
-/// **Cost is negligible:** each call performs one `DashMap` lookup
-/// (sub-µs) vs the multi-ms workspace sweep `from_host` itself does,
-/// so the counter stays production-on. The map is keyed by
+/// **Cost is negligible:** each call performs one `DashMap` lookup, so the
+/// counter stays production-on. The map is keyed by
 /// `&'static Location<'static>` — `track_caller` locations are
 /// `'static` by language guarantee, so pointer identity is stable and
 /// the key set is bounded by the number of distinct call sites in the
@@ -40,37 +37,37 @@ fn from_host_site_table() -> &'static DashMap<&'static Location<'static>, Atomic
     FROM_HOST_BY_SITE.get_or_init(DashMap::new)
 }
 
-/// Process-wide count of ACTUAL base-view sweeps — incremented once per
+/// Process-wide count of actual coherent base-view build attempts — incremented once per
 /// `HostStoreView::build_coherent` entry, NOT per `from_host` call.
 ///
 /// Distinct from [`FROM_HOST_BY_SITE`] / the per-request
 /// `host_store_view_from_host_builds` diagnostic, which count every
 /// `from_host` call INCLUDING the cheap token-stable
 /// `Arc<StoreViewSnapshot>`-clone hits that the [`StoreViewManager`]
-/// serves without sweeping. A batch-saturation gate keys off THIS
-/// counter (full-workspace sweeps) to assert that a warm batch performs
-/// ~O(1) sweeps rather than O(N) — the call-count counter cannot make
+/// serves without rebuilding. A batch-saturation gate keys off THIS
+/// counter to assert that a warm batch performs ~O(1) root captures rather
+/// than O(N) — the call-count counter cannot make
 /// that distinction because a manager hit and a manager miss both bump
 /// it.
 static STORE_VIEW_COHERENT_BUILD_SWEEPS: AtomicU64 = AtomicU64::new(0);
 
-/// Number of actual full-workspace base-view sweeps performed since the
+/// Number of coherent base-view build attempts performed since the
 /// last [`reset_store_view_coherent_build_sweeps`]. A batch-saturation
-/// gate reads this to verify the [`StoreViewManager`] collapses a warm
-/// batch onto ~O(1) sweeps.
+/// gate reads this to verify the [`StoreViewManager`] collapses a warm batch
+/// onto ~O(1) captures.
 #[must_use]
 pub fn store_view_coherent_build_sweeps() -> u64 {
     STORE_VIEW_COHERENT_BUILD_SWEEPS.load(Ordering::Relaxed)
 }
 
-/// Reset the actual-sweep counter — for tests / benches that want a
+/// Reset the coherent-build counter — for tests / benches that want a
 /// clean delta around a batch.
 pub fn reset_store_view_coherent_build_sweeps() {
     STORE_VIEW_COHERENT_BUILD_SWEEPS.store(0, Ordering::Relaxed);
 }
 
 /// Test-only: live count of ENROLLED threads currently inside
-/// `build_coherent`'s full-workspace sweep region. Incremented on entry,
+/// `build_coherent`'s root-capture region. Incremented on entry,
 /// decremented on exit — but ONLY for threads that opted in via
 /// [`enroll_concurrent_sweep_gauge`]. Enrollment isolates the gauge from
 /// unrelated parallel store-view tests (whose sweeper threads never enroll),
@@ -111,7 +108,7 @@ pub(crate) fn enroll_concurrent_sweep_gauge() {
     CONCURRENT_SWEEP_GAUGE_PARTICIPANT.with(|c| c.set(true));
 }
 
-/// Test-only: the peak number of concurrent full-workspace sweeps observed
+/// Test-only: the peak number of concurrent coherent build attempts observed
 /// since the last reset. The final-fallback singleflight regression asserts
 /// this stays `<= 1` (no parallel unclaimed sweeps under churn + contention).
 #[cfg(test)]
@@ -173,7 +170,7 @@ pub(crate) fn reset_store_view_peak_concurrent_sweeps() {
     STORE_VIEW_PEAK_CONCURRENT_SWEEPS.store(0, Ordering::Relaxed);
 }
 
-/// Test-only: when `true`, each `build_coherent` sweep holds a short fixed
+/// Test-only: when `true`, each `build_coherent` attempt holds a short fixed
 /// delay inside the concurrent-sweep gauge window. The delay widens the
 /// window so genuinely-parallel UNCLAIMED sweeps reliably overlap and the
 /// peak gauge observes them, without depending on incidental timing. Under
@@ -193,8 +190,8 @@ pub(crate) fn arm_store_view_sweep_overlap_hold(armed: bool) {
 /// Test-only RAII guard that bumps the live concurrent-sweep gauge on
 /// construction (updating the peak) and drops it on `Drop` — but ONLY on an
 /// ENROLLED thread ([`enroll_concurrent_sweep_gauge`]). Armed for the
-/// duration of each `build_coherent` full-workspace sweep so a parallel
-/// UNCLAIMED sweep across enrolled threads is observable as a peak `> 1`.
+/// duration of each `build_coherent` attempt so a parallel UNCLAIMED build
+/// across enrolled threads is observable as a peak `> 1`.
 /// When the overlap hold is armed, an enrolled `enter` sleeps briefly to
 /// widen the overlap window. A non-enrolled thread (an unrelated parallel
 /// store-view test's sweeper) is a no-op, so it never perturbs the gauge.
@@ -351,6 +348,7 @@ pub(crate) struct ComponentMetaStoreCounters {
     pub dep_signature_merges: u64,
     pub dep_signature_intern_hits: u64,
 }
+#[cfg(test)]
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -361,7 +359,7 @@ use std::sync::Arc;
 /// retries when a mutation lands mid-build. Exceeding the bound is a
 /// genuinely contended host; the builder then reports the build as
 /// [`SnapshotBuildOutcome::Superseded`] rather than publishing a view
-/// whose per-canonical snapshots could be torn across a mutation.
+/// whose roots and token could be torn across a mutation.
 const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 
 /// Complete validity oracle for a [`StoreViewSnapshot`].
@@ -458,11 +456,10 @@ pub(crate) struct StoreViewValidationToken {
     /// * a successful first-time `ensure_loaded` — a load that adds a
     ///   scheduler node + `derived_raw_cache` state (`whole_hashes`
     ///   membership / known-miss tags);
-    /// * a positive import-route admission
-    ///   ([`VerterHost::cache_positive_import_route_result`]) — which
-    ///   writes `DerivedRawState.import_routes`, the source the base view
-    ///   snapshots as the `ImportRoute` derived-hash domain (via
-    ///   `generation_current_import_route_hash`).
+    /// * a resolved dependency-EDGE registration
+    ///   ([`VerterHost::record_resolved_dependency_edge`]) — which writes
+    ///   `DependencyState.dependencies`, the reverse-dependency
+    ///   bookkeeping.
     ///
     /// Included in the `StoreViewManager` REUSE oracle (either mutation
     /// invalidates the cached base view) but EXCLUDED from
@@ -479,15 +476,10 @@ pub(crate) struct StoreViewValidationToken {
     /// WITHOUT any host-side epoch or generation necessarily moving
     /// (no `verter_session` handler observes `DirectoryTreeDirty`).
     ///
-    /// The snapshot build is edge-currency-dependent on this LIVE value:
-    /// `route_surface_is_edge_current` gates every Route/ImportRoute
-    /// derived hash (base build, overlay re-root, completion overlay)
-    /// against it at BUILD time. A cached snapshot whose gates were
-    /// evaluated pre-mutation must therefore MISS once it advances —
-    /// without this dimension the manager would keep validating warm
-    /// entries across a watcher recovery or an edge-staleness transition
-    /// (a dependency appeared / retargeted while the owner's content
-    /// stayed put) for the snapshot's lifetime.
+    /// A file-set mutation can supersede the captured source and resolution
+    /// roots even while an owner's bytes stay unchanged. A cached view must
+    /// therefore MISS once this advances; path-precise resolution validity
+    /// itself remains owned by the captured resolution world and its facts.
     ///
     /// Included in BOTH the `StoreViewManager` REUSE oracle and
     /// [`Self::externally_superseded_by`]: unlike the two additive
@@ -496,6 +488,50 @@ pub(crate) struct StoreViewValidationToken {
     /// only a real external file-set mutation does — so folding it into
     /// the supersession fingerprint cannot self-fence promotion.
     pub(crate) content_generation: u64,
+    /// Monotonic count of resolution FACT VERSIONS the workspace's
+    /// resolution world has minted
+    /// ([`verter_workspace::WorkspaceRead::resolution_fact_generation`]).
+    ///
+    /// The snapshot RETAINS an `Arc<CapturedResolutionWorld>` and answers
+    /// every `ResolveImportsFactRef::Resolution` validation out of that
+    /// frozen capture. Without this dimension a manager-cached view could
+    /// be reused indefinitely across a resolution-visible mutation that
+    /// moved no other dimension — the reader-driven evidence refresh and
+    /// the observed-value fold both advance fact versions inside the
+    /// resolution-world write gate without touching content, project,
+    /// artifact, load, env or overlay state — and it would keep
+    /// validating witnesses those advances had just invalidated.
+    ///
+    /// This is NOT world identity and NOT a validity oracle: validity
+    /// stays fact-precise inside the captured world. The counter decides
+    /// only whether the RETAINED capture is still the right snapshot to
+    /// answer from. A first-observation baseline fill mints no version,
+    /// so a cold compute's own discovery does not churn it.
+    ///
+    /// Included in BOTH the `StoreViewManager` REUSE oracle and
+    /// [`Self::externally_superseded_by`], and so in the lane identity and
+    /// the compat token that derive from it. Every mint is an EXTERNAL
+    /// change entering the world, never a compute's own discovery:
+    ///
+    /// * a first-observation baseline fill mints NOTHING — both the
+    ///   observed-value fold and the reader-driven evidence refresh record
+    ///   an unseen value without advancing a version, which is exactly the
+    ///   "own work" case `artifact_generation` / `load_generation` are
+    ///   excluded for;
+    /// * the fold advances a version only on a CONFLICT with the recorded
+    ///   baseline — state newer than the captured root;
+    /// * the evidence refresh advances one only when a re-read value MOVED;
+    /// * exact-table, project-publication and mutation-protocol advances are
+    ///   external by construction.
+    ///
+    /// So the criterion stated for `content_generation` above holds here
+    /// too, and excluding it would leave the fence, the lane and the compat
+    /// token blind to an exact retarget: `set_exact_resolutions` moves this
+    /// dimension and no other, so two views straddling a retarget would fold
+    /// to the same `u64`, a leader would promote a pre-retarget result, and
+    /// the request-scoped bundle memo would re-serve pre-retarget edges to
+    /// the very stability retry that exists to escape them.
+    pub(crate) resolution_fact_generation: u64,
     /// Folded env-hash bundle (R21). Self-contained defence: even if a
     /// future workspace mutator changed env without bumping a
     /// generation, the fold would still distinguish the views.
@@ -531,8 +567,8 @@ pub(crate) struct OverlayIdentity {
 impl StoreViewValidationToken {
     /// Whether `self` was SUPERSEDED by an EXTERNAL mutation relative to
     /// `later` — i.e. a `store_view_epoch` / `project_generation` /
-    /// `content_generation` / env / identity change happened between the
-    /// two captures.
+    /// `content_generation` / `resolution_fact_generation` / env / identity
+    /// change happened between the two captures.
     ///
     /// Deliberately EXCLUDES `artifact_generation` / `load_generation`:
     /// a cold compute
@@ -549,6 +585,7 @@ impl StoreViewValidationToken {
         self.store_view_epoch != later.store_view_epoch
             || self.project_generation != later.project_generation
             || self.content_generation != later.content_generation
+            || self.resolution_fact_generation != later.resolution_fact_generation
             || self.env_hash_fold != later.env_hash_fold
             || self.project_identity != later.project_identity
             || self.overlay_identity != later.overlay_identity
@@ -556,8 +593,9 @@ impl StoreViewValidationToken {
 
     /// A `u64` fingerprint folding ONLY the EXTERNAL-supersession
     /// dimensions ([`Self::externally_superseded_by`]: `store_view_epoch`,
-    /// `project_generation`, `content_generation`, `env_hash_fold`,
-    /// `project_identity`, `overlay_identity`).
+    /// `project_generation`, `content_generation`,
+    /// `resolution_fact_generation`, `env_hash_fold`, `project_identity`,
+    /// `overlay_identity`).
     ///
     /// Two tokens fold to the same value iff neither externally
     /// supersedes the other (up to hash collision); they fold to
@@ -581,6 +619,7 @@ impl StoreViewValidationToken {
         self.store_view_epoch.hash(&mut hasher);
         self.project_generation.hash(&mut hasher);
         self.content_generation.hash(&mut hasher);
+        self.resolution_fact_generation.hash(&mut hasher);
         self.env_hash_fold.hash(&mut hasher);
         self.project_identity.hash(&mut hasher);
         self.overlay_identity.hash(&mut hasher);
@@ -599,6 +638,7 @@ impl StoreViewValidationToken {
             artifact_generation: host.project_type_store.indexed().artifact_generation(),
             load_generation: host.current_load_generation(),
             content_generation: host.ws().content_generation(),
+            resolution_fact_generation: host.ws().resolution_fact_generation(),
             env_hash_fold: fold_env_hashes(&env_hashes),
             project_identity: host.host_view_project_identity(),
             overlay_identity: None,
@@ -610,8 +650,9 @@ impl StoreViewValidationToken {
     /// ([`crate::resolver_core::StoreViewCompatToken::validity_fingerprint`]).
     ///
     /// Folds the EXTERNAL-supersession dimensions ONLY (`store_view_epoch`,
-    /// `project_generation`, `content_generation`, `env_hash_fold`,
-    /// `project_identity`, `overlay_identity`) — identical to
+    /// `project_generation`, `content_generation`,
+    /// `resolution_fact_generation`, `env_hash_fold`, `project_identity`,
+    /// `overlay_identity`) — identical to
     /// [`Self::external_supersession_fingerprint`]. This is the SAME oracle
     /// the request executors' promotion fence (`is_stable`) compares, and it
     /// MUST be: the coalescing lane hands a LEADER's stable result to
@@ -640,42 +681,58 @@ impl StoreViewValidationToken {
     }
 }
 
-/// Token-relevant raw inputs captured ONCE, before any per-canonical
-/// snapshotting begins, so the entire snapshot is built under a single
-/// coherent token.
+/// Token-relevant raw inputs and immutable store roots captured ONCE, so the
+/// root-backed snapshot is built under a single coherent token.
 ///
-/// **No-torn-snapshot contract.** `HostStoreView::build` populates the
-/// per-canonical / per-domain snapshot maps (`whole_hashes`,
-/// `file_facts`, `derived_hashes`, …) one source at a time. Every
-/// token-relevant by-value dimension (the two additive generations,
-/// the env-hash bundle, the project identity, the project generation)
-/// MUST be read BEFORE that population window opens and stamped into the
-/// view unchanged — never re-read live near the end of the build. If a
-/// dimension is read late, a mid-build mutation that advances it WITHOUT
-/// moving `store_view_epoch` (e.g. a resolve-extensions / env-hash
-/// update, or a `project_generation` bump) would leave the view's
-/// reconstructed token reflecting the NEW value while the snapshot maps
-/// were captured under the OLD value, and the post-build coherence check
-/// (`live_token == captured`) would accept a TORN view as coherent.
+/// **No-torn-snapshot contract.** Every token-relevant by-value dimension and
+/// each immutable root/retention lease MUST come from the same capture window
+/// and be stamped into the view unchanged. A late live re-read could otherwise
+/// pair a new token dimension with old roots and let the post-build coherence
+/// check accept a torn view.
 ///
-/// Capturing all inputs first closes that hole: the snapshot maps and the
-/// token both derive from the SAME read window, so the post-build
+/// Capturing all inputs first closes that hole: the roots and token derive
+/// from the SAME read window, so the post-build
 /// comparison against the LIVE token detects any mid-build advance of any
 /// dimension and forces a retry / `Superseded`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PreBuildTokenInputs {
     store_view_epoch: u64,
     project_generation: u64,
     artifact_generation: u64,
     load_generation: u64,
     content_generation: u64,
+    resolution_fact_generation: u64,
     env_hashes: crate::session_view::EnvHashes,
     project_identity: crate::file_artifact_store::ProjectIdentity,
+    /// The workspace's immutable published resolution world, captured in
+    /// the SAME pre-build read window as every other dimension (O(1): two
+    /// `ArcSwap` loads under the stable-epoch fence — no owner or fact
+    /// enumeration). Stamped into the snapshot so the resolve-imports
+    /// `Resolution` validator reads this exact composition and never the
+    /// Engine's live registry.
+    /// Every root and store handle the view will address, captured in the
+    /// SAME read window as every other dimension and SEALED: the builder
+    /// can move it into the root token and nothing else.
+    ///
+    /// The two roots inside it are RETENTION LEASES, not merely names.
+    /// While the built view holds them, `FileArtifactStore` may not
+    /// physically reclaim any artifact version, canonical→keys index entry
+    /// or augmentation-index entry the view's world contained, and the
+    /// scheduler may not drop any source version visible at the captured
+    /// epoch. Capturing `(canonical, content_hash)` identity alone is what
+    /// let an earlier view name an artifact the store had already freed: a
+    /// `FileNode` holds only its CURRENT snapshots, so `bump_generation`
+    /// makes the prior source immediately unreachable.
+    ///
+    /// Capturing it is O(1) in host size — two lease captures, two
+    /// `ArcSwap` loads and four `Arc` clones, with no artifact, canonical,
+    /// augmentation-target or scheduler-node enumeration.
+    root_capture: crate::store_view_roots::RootCapture,
 }
 
 impl PreBuildTokenInputs {
     /// Capture every token-relevant raw input from the host in one read
-    /// window, before snapshotting begins.
+    /// window, before the roots are sealed into the snapshot.
     fn capture(host: &VerterHost) -> Self {
         Self {
             store_view_epoch: host.current_store_view_epoch(),
@@ -683,8 +740,10 @@ impl PreBuildTokenInputs {
             artifact_generation: host.project_type_store.indexed().artifact_generation(),
             load_generation: host.current_load_generation(),
             content_generation: host.ws().content_generation(),
+            resolution_fact_generation: host.ws().resolution_fact_generation(),
             env_hashes: host.host_view_env_hashes(),
             project_identity: host.host_view_project_identity(),
+            root_capture: crate::store_view_roots::RootCapture::capture(host),
         }
     }
 
@@ -697,6 +756,7 @@ impl PreBuildTokenInputs {
             artifact_generation: self.artifact_generation,
             load_generation: self.load_generation,
             content_generation: self.content_generation,
+            resolution_fact_generation: self.resolution_fact_generation,
             env_hash_fold: fold_env_hashes(&self.env_hashes),
             project_identity: self.project_identity,
             overlay_identity: None,
@@ -723,7 +783,7 @@ fn fold_env_hashes(env: &crate::session_view::EnvHashes) -> Hash16 {
 /// Outcome of a no-torn-return snapshot build. When the host mutates
 /// faster than the builder can complete a coherent capture, the
 /// builder reports [`Self::Superseded`] instead of treating the build as
-/// publishable — its per-canonical snapshots straddle a mutation.
+/// publishable — its roots and token straddle a mutation.
 ///
 /// `Superseded` still carries the freshest built view. That view is NOT
 /// coherent against the live host (it was stamped under the stale
@@ -802,8 +862,7 @@ pub(crate) enum StoreViewReturnOnlyReason {
     Superseded,
     /// The reading thread ALREADY HOLDS this manager's singleflight build
     /// claim: a store-view build re-entered
-    /// [`StoreViewManager::base_view`] on the claim-holding thread (the
-    /// `ImportRoute` re-index reaching an analysis-side store-view read).
+    /// [`StoreViewManager::base_view`] on the claim-holding thread.
     /// The `built` condvar such a caller would park on can only be
     /// signalled by its own `BuildClaimGuard::drop`, so parking is a
     /// one-thread deadlock. The manager refuses to park and hands the
@@ -891,8 +950,8 @@ impl ColdSeedHostStoreView {
     ///
     /// The session-bound cold-compute path
     /// ([`crate::resolver_core::SessionResolverContext::from_cold_seed`])
-    /// needs the overlay-rooted form of the seed (per-canonical snapshots
-    /// re-rooted, the coalescing fingerprint recomputed) while preserving
+    /// needs the overlay-rooted form of the seed (the overlay override root
+    /// attached, the coalescing fingerprint recomputed) while preserving
     /// the seed's `current` flag — so a `ReturnOnly` seed stays non-current
     /// after overlaying and its derived request-bound view fails every
     /// `validates*` closed. This is the ONLY currentness-preserving
@@ -1242,17 +1301,18 @@ impl StoreViewRead {
 
 /// Immutable, `Arc`-shareable per-view snapshot.
 ///
-/// Holds every by-value snapshot dimension a validator reads. Wrapped in
-/// an `Arc` by [`HostStoreView`] so cloning a view is a refcount bump
-/// rather than a deep map copy — this is what lets
-/// [`StoreViewManager`] hand the same workspace snapshot to every batch
-/// job for the cost of an `Arc::clone`.
+/// Two fields: the overlay-set fingerprint, and the sealed root token
+/// every per-canonical answer is derived from. Wrapped in an `Arc` by
+/// [`HostStoreView`] so cloning a view is a refcount bump — this is what
+/// lets [`StoreViewManager`] hand the same workspace snapshot to every
+/// batch job for the cost of an `Arc::clone`.
 ///
-/// `with_session_overlay` re-roots a session's overlaid canonicals via
-/// copy-on-write (`Arc::make_mut`): the SHARED base snapshot is never
-/// mutated in place — the first session write clones the inner snapshot,
-/// leaving the manager-cached base pristine for concurrent base readers.
-#[derive(Debug, Clone)]
+/// `with_session_overlay` attaches the session's O(overlay-set) override
+/// layer via copy-on-write (`Arc::make_mut`): the SHARED base snapshot is
+/// never mutated in place — the first session write clones the inner
+/// snapshot, leaving the manager-cached base pristine for concurrent base
+/// readers.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct StoreViewSnapshot {
     /// Overlay-set fingerprint of the active session view (R29 +
     /// overlay isolation). `0` for a base / overlay-free view;
@@ -1272,69 +1332,16 @@ pub(crate) struct StoreViewSnapshot {
     /// that key. Mirrors the SINGLE derivation in
     /// [`crate::session_view::augmentation_population_for_view`].
     session_overlay_fingerprint: u64,
-    whole_hashes: FxHashMap<String, Hash16>,
-    derived_hashes: FxHashMap<(String, crate::resolver_core::DerivedFactKind), Hash16>,
-    /// Route-surface-domain snapshot — augmentation-index fingerprints
-    /// keyed by a structural representation of the
-    /// `(target_kind_tag, target_payload)` shape. Validation against
-    /// `RouteSurfaceFactRef::ModuleAugmentationIndexShape` consults
-    /// this map (R29 + G1 + R26). An absent key means the
-    /// augmentation-index entry has not yet been populated — the
-    /// validator returns `false` so the downstream cache misses.
-    route_surface_index_fingerprints: FxHashMap<RouteSurfaceIndexShapeKey, Hash16>,
-    /// Parse-domain snapshot (R26): per-canonical `Arc<FileFacts>`
-    /// captured at view-build time. The validator for `ParseFactRef`
-    /// reads through this map; one `Arc::clone` per tracked file at
-    /// build time, wait-free hash compares thereafter.
-    file_facts: FxHashMap<String, std::sync::Arc<crate::file_artifact_store::FileFacts>>,
-    /// Resolve-imports-domain handle (R26): `Arc` clone of the
-    /// project store's `ResolvedImportFactsDb`. Immutable-by-key
-    /// (content-addressed): a fixed handle reads correct values
-    /// without a snapshot rebuild, so it does NOT enter the validation
-    /// token. The validator composes `ResolvedImportFactsKey` from the
-    /// fact + this view's tracked `whole_hashes` / known-miss tags /
-    /// `env_hashes`.
-    resolved_import_facts:
-        Option<std::sync::Arc<crate::resolved_import_facts::ResolvedImportFactsDb>>,
-    /// Per-canonical known-miss generation tag captured at view-build
-    /// time. Folds the owner's
-    /// `DerivedRawState::import_routes_known_miss_recorded_at_generation`
-    /// so the validator composes the same `known_miss_generation` key
-    /// dimension the producer admitted under. Absent → `[0u8; 16]`.
-    resolved_import_facts_known_miss_tags: FxHashMap<String, Hash16>,
-    /// Route-surface-domain handle (R26): `Arc` clone of the project
-    /// store's `RouteDb`. Immutable-by-key like `resolved_import_facts`;
-    /// not in the validation token.
-    route_db: Option<std::sync::Arc<crate::resolver_core::route_db::RouteDb>>,
-    /// Env-hash bundle (R21) captured at view-build time.
-    env_hashes: crate::session_view::EnvHashes,
-    /// Project identity captured at view-build time (R21).
-    project_identity: crate::file_artifact_store::ProjectIdentity,
-    /// Monotonic project generation captured at view-build time. The
-    /// validator for `FactVersionRef::ProjectGeneration` compares a
-    /// fact's observed generation against this snapshot.
-    project_generation: u64,
-    /// Canonicals the active session has TOMBSTONED (overlay-Deleted).
-    /// Empty on a base (non-session) view — only `with_session_overlay`
-    /// populates it. Keeps a tombstoned canonical distinguishable from a
-    /// genuinely-untracked one: the `FileWholeHash` / `DirectSource`
-    /// validator arms reject a tombstoned canonical before the lazy
-    /// untracked-accept rule.
-    tombstoned_canonicals: std::collections::HashSet<String>,
-    /// Per-canonical view-current SOURCE-ENV artifact identity —
-    /// `(parse_env_hash, parser_version, file_language_id)` of the
-    /// base artifact serving the canonical's live content. Captured in
-    /// [`HostStoreView::snapshot_file_facts_into`] via the shared
-    /// [`SourceEnvIdentity::live_for_artifact_key`] construction
-    /// (parser-version/language from the artifact KEY, parse-env from
-    /// the canonical's LIVE per-canonical env). The strict
-    /// [`crate::resolver_core::StoreView::validates_file_source_env`]
-    /// branch compares a recorded
-    /// [`crate::resolver_core::FactVersionRef::FileSourceEnv`] fact
-    /// against this map: an absent entry REJECTS (no untracked
-    /// optimistic accept — a contributor identity the view cannot
-    /// confirm must miss).
-    source_envs: FxHashMap<String, SourceEnvIdentity>,
+    /// The sealed ROOT TOKEN this view was captured from.
+    ///
+    /// Every per-canonical answer a validator needs — the tracked whole
+    /// hash, the parse-domain `FileFacts`, the `Route` derived hash, the
+    /// contributor source-env identity, the augmentation-index
+    /// fingerprint — is derived from these roots by exact point lookup on
+    /// demand ([`crate::store_view_roots::StoreViewRoots::resolve_canonical`]).
+    /// None of them is copied per owner at build time, so capture cost is
+    /// independent of how many files the host tracks.
+    roots: crate::store_view_roots::StoreViewRoots,
 }
 
 /// The view-current source-env identity of one canonical's artifact:
@@ -1354,9 +1361,10 @@ impl SourceEnvIdentity {
     /// The LIVE source-env identity for `key`'s canonical — the SINGLE
     /// construction point shared by the fact producer
     /// ([`crate::fact_signature_helpers::observe_file_source_env_from_artifact_key`])
-    /// and the validate-side snapshot seeding
-    /// ([`HostStoreView::snapshot_file_facts_into`]), so record and
-    /// validate compare the same dimensions by construction.
+    /// and the validate-side root-relative read
+    /// ([`crate::store_view_roots::StoreViewRoots::resolve_canonical`]),
+    /// so record and validate compare the same dimensions by
+    /// construction.
     ///
     /// `parser_version` / `file_language_id` come from the artifact KEY
     /// itself (the exact identity of the artifact the read served
@@ -1381,26 +1389,6 @@ impl SourceEnvIdentity {
             ),
             parser_version: key.parser_version,
             file_language_id: key.file_language_id.clone(),
-        }
-    }
-}
-
-impl Default for StoreViewSnapshot {
-    fn default() -> Self {
-        Self {
-            session_overlay_fingerprint: 0,
-            whole_hashes: FxHashMap::default(),
-            derived_hashes: FxHashMap::default(),
-            route_surface_index_fingerprints: FxHashMap::default(),
-            file_facts: FxHashMap::default(),
-            resolved_import_facts: None,
-            resolved_import_facts_known_miss_tags: FxHashMap::default(),
-            route_db: None,
-            env_hashes: crate::session_view::EnvHashes::default(),
-            project_identity: crate::file_artifact_store::ProjectIdentity([0u8; 16]),
-            project_generation: 0,
-            tombstoned_canonicals: std::collections::HashSet::new(),
-            source_envs: FxHashMap::default(),
         }
     }
 }
@@ -1434,28 +1422,19 @@ pub struct HostStoreView {
     /// [`Self::validation_token`] can reconstruct the token's
     /// `content_generation` dimension without re-reading the host.
     content_generation: u64,
-}
-
-/// Structural key for snapshotting `ModuleAugmentationIndexShape`
-/// fingerprints into [`HostStoreView`]. Mirrors the parallel
-/// optional fields of `FactKey::ModuleAugmentationIndexShape`, plus the
-/// augmentation-index `population` dimension.
-///
-/// `population` keeps the base and session augmenter-set fingerprints in
-/// DISTINCT snapshot slots: the store's augmentation index holds both a
-/// `(target, Base) → base_fp` and a `(target, Session(fp)) → session_fp`
-/// entry, and folding them into a population-blind key would collide
-/// (last-writer-wins), letting a base fact validate against a session
-/// fingerprint or vice versa. The route-surface validator composes the
-/// active view's population ([`HostStoreView::augmentation_population`])
-/// so warm validation is population-aware.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RouteSurfaceIndexShapeKey {
-    pub target_kind_tag: verter_semantic::facts::registry::AugmentationTargetKindTag,
-    pub external_specifier: Option<String>,
-    pub resolved_relative_canonical: Option<String>,
-    pub wildcard_pattern: Option<String>,
-    pub population: crate::file_artifact_store::AugmentationPopulation,
+    /// Resolution fact-version generation captured at build time (same
+    /// single pre-build read window) so [`Self::validation_token`] can
+    /// reconstruct that token dimension without re-reading the host.
+    resolution_fact_generation: u64,
+    /// Per-view memo of canonicals this view has actually been asked
+    /// about — O(request footprint), populated on demand, never at build
+    /// time. It is a COST mechanism, not a correctness one: every entry
+    /// is a pure function of `snapshot.roots` and the canonical, so
+    /// discarding it changes how long validation takes and nothing else.
+    /// Shared by `Arc` with every clone of this view (they answer for the
+    /// same roots); a session overlay mints a fresh one because it
+    /// answers differently.
+    memo: Arc<crate::store_view_roots::StoreViewMemo>,
 }
 
 impl Default for HostStoreView {
@@ -1473,6 +1452,8 @@ impl Default for HostStoreView {
             artifact_generation: 0,
             load_generation: 0,
             content_generation: 0,
+            resolution_fact_generation: 0,
+            memo: Arc::new(crate::store_view_roots::StoreViewMemo::default()),
         }
     }
 }
@@ -1522,17 +1503,16 @@ thread_local! {
     };
 
     /// Test-only knob: when armed, the next `build` call on this thread
-    /// performs an env-hash mutation IN THE MIDDLE of the build —
-    /// AFTER the per-canonical snapshot maps are populated but BEFORE the
-    /// token-relevant env-hash / project-identity dimensions are stamped.
+    /// performs an env-hash mutation after the root token is sealed but before
+    /// the coherent-build post-check.
     /// The mutation advances `resolve_env_hash` WITHOUT bumping
     /// `store_view_epoch`. One-shot; disarmed on fire.
     ///
     /// Drives the build-coherence regression: with a LATE env read inside
     /// `build`, the view's reconstructed token would reflect the NEW
     /// (post-mutation) env while the snapshot maps were captured under the
-    /// OLD env, and the post-build coherence check (which compared a token
-    /// reconstructed from the same late reads) would accept the TORN view
+    /// OLD env, and a post-build check based on the same late reads would
+    /// accept the torn view
     /// as coherent. With the pre-capture stamp the view's token reflects
     /// the OLD env, the post-build LIVE token reflects the NEW env, the
     /// comparison mismatches, and the attempt is treated as superseded.
@@ -1617,14 +1597,9 @@ thread_local! {
     /// `resolver_store_view_read()` from INSIDE the singleflight claim
     /// region, on the claim-holding thread.
     ///
-    /// This reproduces the production self-await geometry in one step.
-    /// In production the nested read arrives the long way round:
-    /// `HostStoreView::build`'s `ImportRoute` arm re-indexes an edge-stale
-    /// owner through `ensure_indexed_ready_serve`, that reaches
-    /// `build_snapshot_from_analysis_snap`, and an analysis-side helper
-    /// there reads the store view. Every frame between the claim and the
-    /// nested read is irrelevant to the deadlock: what matters is that the
-    /// SAME thread that holds `building` re-enters
+    /// This reproduces the self-await geometry directly. The O(1) production
+    /// builder does not re-index or enumerate owners; the backstop still
+    /// protects the manager if any future claim-holding path re-enters
     /// [`StoreViewManager::base_view`] and reaches the would-park arm.
     /// The knob arms exactly that.
     ///
@@ -1818,9 +1793,9 @@ impl HostStoreView {
         host.store_view_manager().base_view(host)
     }
 
-    /// Build a coherent base snapshot or report supersession (no-torn
-    /// return). The final attempt never treats a view whose per-canonical
-    /// snapshots could straddle a mutation as publishable. The
+    /// Build a coherent root-backed base snapshot or report supersession
+    /// (no-torn return). The final attempt never treats a capture whose roots
+    /// and token could straddle a mutation as publishable. The
     /// [`StoreViewManager`] retries on `Superseded` (a concurrent winner
     /// may have published a coherent view in the meantime), and on
     /// retry-cap exhaustion hands the carried freshest view back
@@ -1831,12 +1806,12 @@ impl HostStoreView {
         // the caller return-only instead of producing nothing.
         let mut freshest: Option<HostStoreView> = None;
         for _ in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
-            // Count every ACTUAL full-workspace sweep (one per `build`
+            // Count every actual coherent root capture (one per `build`
             // attempt). A batch-saturation gate reads this to verify the
-            // `StoreViewManager` collapses a warm batch onto ~O(1) sweeps
+            // `StoreViewManager` collapses a warm batch onto ~O(1) captures
             // — distinct from the `from_host` call count, which also bumps
             // on the cheap token-stable Arc-clone hits the manager serves
-            // without sweeping.
+            // without rebuilding.
             STORE_VIEW_COHERENT_BUILD_SWEEPS.fetch_add(1, Ordering::Relaxed);
             #[cfg(test)]
             COHERENT_BUILD_SWEEPS_THIS_THREAD.with(|c| c.set(c.get().saturating_add(1)));
@@ -1853,8 +1828,8 @@ impl HostStoreView {
                 panic!("FORCE_BUILD_PANIC: injected mid-build panic");
             }
             // Capture the COMPLETE set of token-relevant raw inputs ONCE,
-            // before any per-canonical snapshotting begins, and build the
-            // entire snapshot under that single captured token. `build`
+            // before the roots are sealed, and build the root-backed snapshot
+            // under that single captured token. `build`
             // stamps the view's token-relevant dimensions from this capture
             // (NOT from late live re-reads), so the view's own token equals
             // `pre.token()` exactly — there is no separately-reconstructed
@@ -1869,22 +1844,18 @@ impl HostStoreView {
             // regression. One-shot; only the first gated builder is held.
             #[cfg(test)]
             TEST_BUILD_GATE.wait_if_armed();
-            // Test-only: arm the concurrent-sweep gauge across the ACTUAL
-            // workspace sweep (`build`). Held only for the build itself (not
-            // the gate park above), so the PEAK reflects threads genuinely
-            // sweeping in parallel. An UNCLAIMED final-fallback sweep
+            // Test-only: arm the concurrency gauge across the actual O(1)
+            // build. Held only for the build itself (not the gate park above),
+            // so the PEAK reflects parallel build attempts. An UNCLAIMED fallback
             // (the defect) overlaps another build and drives the peak > 1;
             // the singleflight claim keeps it at 1.
             #[cfg(test)]
             let _sweep_gauge = ConcurrentSweepGauge::enter();
             // Test-only: perform ONE nested `resolver_store_view_read()` from
-            // INSIDE the claim region, on the claim-holding thread —
-            // the production self-await geometry, armed directly. In
-            // production the nested read arrives through `Self::build`'s
-            // `ImportRoute` re-index → `ensure_indexed_ready_serve` →
-            // `build_snapshot_from_analysis_snap`; the intervening frames are
-            // irrelevant to the deadlock. One-shot and thread-local, so
-            // unrelated parallel tests never see it.
+            // INSIDE the claim region, on the claim-holding thread. This arms
+            // the self-await refusal geometry directly without adding a host
+            // dependency or enumeration to the O(1) production builder.
+            // One-shot and thread-local, so unrelated parallel tests never see it.
             #[cfg(test)]
             if FORCE_REENTRANT_STORE_VIEW_READ_ONCE.with(|c| {
                 let armed = c.get();
@@ -1899,7 +1870,7 @@ impl HostStoreView {
                     )));
                 });
             }
-            let view = Self::build(host, &pre, session_id);
+            let view = Self::build(&pre, session_id);
             debug_assert_eq!(
                 view.validation_token(),
                 pre_token,
@@ -1956,48 +1927,13 @@ impl HostStoreView {
         SnapshotBuildOutcome::Superseded { view }
     }
 
-    /// Drop every per-canonical / per-domain snapshot for a
-    /// session-deleted (tombstoned) canonical — there is no current
-    /// content for it. Removing its `whole_hashes`, `file_facts`, and
-    /// `derived_hashes` entries makes strict validation reject any warm
-    /// entry rooted on the now-deleted file (`validates_self_root_whole_hash`
-    /// rejects an untracked self-root; `validates_parse_domain` rejects
-    /// a real fact hash for an untracked file; the `derived_hashes`
-    /// validators reject an absent entry), so the consumer recomputes.
-    ///
-    /// The canonical is also recorded in [`Self::tombstoned_canonicals`].
-    /// Removal from `whole_hashes` alone makes the canonical look
-    /// *untracked* to the lazy [`StoreView::validates`] `FileWholeHash`
-    /// / `DirectSource` arms — whose untracked branch optimistically
-    /// accepts a genuine cross-file dependency loaded after the view
-    /// snapshot. A tombstoned canonical is a *deleted* file, not a
-    /// genuinely-untracked dependency, so a cross-file `FileWholeHash`
-    /// dependency on it MUST be rejected; the tombstone set lets
-    /// `validates` distinguish the two.
-    fn drop_tombstoned_canonical_snapshots(snapshot: &mut StoreViewSnapshot, canonical: &str) {
-        snapshot.whole_hashes.remove(canonical);
-        snapshot.file_facts.remove(canonical);
-        snapshot.source_envs.remove(canonical);
-        for kind in [
-            crate::resolver_core::DerivedFactKind::Route,
-            crate::resolver_core::DerivedFactKind::ImportRoute,
-            crate::resolver_core::DerivedFactKind::DirectSource,
-        ] {
-            snapshot
-                .derived_hashes
-                .remove(&(canonical.to_owned(), kind));
-        }
-        snapshot.tombstoned_canonicals.insert(canonical.to_owned());
-    }
-
     /// Re-root this view against a [`SessionView`]'s overlay so
     /// warm-read validation observes the session's CURRENT content
-    /// identity rather than the base host's — across **every**
-    /// per-canonical / per-domain snapshot, not just `whole_hashes`.
+    /// identity rather than the base host's — across every point lookup
+    /// routed through the overlay override root.
     ///
-    /// `HostStoreView::build` snapshots every per-canonical field from
-    /// the scheduler / `FileArtifactStore` — i.e. the **base** content
-    /// of every tracked canonical. A query executed under a
+    /// `HostStoreView::build` captures immutable base roots from the scheduler
+    /// and `FileArtifactStore`. A query executed under a
     /// [`crate::resolver_core::SessionResolverContext`] roots its
     /// cached values (semantic-graph `MemoEntry` self-roots, the
     /// path-precise fact rail, the legacy whole-hash rail) on the
@@ -2008,62 +1944,51 @@ impl HostStoreView {
     /// view would compare overlay-rooted facts against base snapshots
     /// and miss on every call.
     ///
-    /// Per-canonical / per-domain field treatment for the session's
-    /// overlay canonicals:
+    /// Per-canonical treatment for the session's overlay canonicals, as
+    /// [`crate::store_view_roots::Override`] entries on the session root:
     ///
-    /// - **`whole_hashes`** — overlay-Upsert: set to
-    ///   [`SessionView::overlay_content_hash_for`]; tombstone: removed.
+    /// - **whole hash** — overlay-Upsert: `Value` of
+    ///   [`SessionView::overlay_content_hash_for`]; tombstone: the
+    ///   canonical joins the tombstone set and resolves to nothing.
     ///   The self-root `FileWholeHash` validator (`validates` /
     ///   `validates_self_root_whole_hash`) and the `DirectSource`
-    ///   `DerivedFactHash` arm read this map; re-rooting it closes
-    ///   them. It is also the `content_hash` dimension the
-    ///   `resolve-imports` validator composes its
-    ///   `ResolvedImportFactsKey` from, so re-rooting steers that
-    ///   content-addressed `DashMap` lookup at the overlay slot.
-    /// - **`file_facts`** — overlay-Upsert: refreshed from the overlay
+    ///   `DerivedFactHash` arm read it; overriding it closes them. It is
+    ///   also the `content_hash` dimension the `resolve-imports`
+    ///   validator composes its `ResolvedImportFactsKey` from, so the
+    ///   override steers that content-addressed lookup at the overlay
+    ///   slot.
+    /// - **`FileFacts`** — overlay-Upsert: `Value` of the overlay
     ///   `FileArtifacts` (via
     ///   [`OverlayArtifactIdentity::lookup_overlay_artifacts`](crate::host_manage::overlay_materialize::OverlayArtifactIdentity::lookup_overlay_artifacts),
     ///   which rebuilds the exact overlay-scoped key — raw-owner hash +
     ///   discriminator, normalised analysis canonical — and is
-    ///   content-pinned); tombstone: removed.
-    ///   `validates_parse_domain` reads this per-canonical
-    ///   `Arc<FileFacts>` snapshot — a `Parse` fact pinned to the
-    ///   overlay version validates against the overlay's `FileFacts`.
-    /// - **`derived_hashes`** (`Route` / `ImportRoute`) — overlay-Upsert:
-    ///   refreshed from the overlay `IndexedReady`
-    ///   (`hash_route_surface` over the overlay `shallow_state`, and the
-    ///   overlay `import_route_hash`); tombstone: removed alongside the
-    ///   `DirectSource` entry. `validates` reads these per-`(canonical,
-    ///   kind)` hashes; refreshing keeps an overlay-rooted
-    ///   `DerivedFactHash` validating against overlay content.
-    /// - **`resolved_import_facts`** / **`route_db`** — `Arc` clones of
+    ///   content-pinned), else `Absent`. `validates_parse_domain` reads
+    ///   it, so a `Parse` fact pinned to the overlay version validates
+    ///   against the overlay's `FileFacts`.
+    /// - **`Route` derived hash** — overlay-Upsert: `Value` of
+    ///   `hash_route_surface` over the overlay `shallow_state` when the
+    ///   overlay surface was built under the current parse environment, else
+    ///   `Absent`.
+    /// - **source-env identity** — always `Absent`: the base identity no
+    ///   longer describes the artifact this session serves, so a recorded
+    ///   `FileSourceEnv` fact must reject strictly rather than validate
+    ///   against the base identity.
+    /// - **`resolved_import_facts`** / **`route_db`** — `Arc` handles to
     ///   the project store's content-addressed `DashMap`s. They are
     ///   shared and hold both the base and the overlay candidates; the
-    ///   overlay candidate is reached because `whole_hashes` (the
-    ///   `content_hash` key dimension) is re-rooted above. No
-    ///   per-canonical re-root needed on the handle itself.
-    /// - **`resolved_import_facts_known_miss_tags`** — the
-    ///   `known_miss_generation` key dimension is generation-scoped, not
-    ///   content-scoped; a pure overlay content edit does not advance
-    ///   the project generation, so the base snapshot is correct.
-    /// - **`route_surface_index_fingerprints`** — keyed by the
-    ///   structural augmentation-target shape PLUS the augmentation
-    ///   `population` dimension, not by canonical / content hash. The
-    ///   snapshot mirrors the store's overlay-aware augmentation index:
-    ///   it carries both the `(target, Base) → base_fp` and the
-    ///   `(target, Session(fp)) → session_fp` entries, so a session
-    ///   read's `EffectiveExportSet` consumer validates against the
-    ///   session fingerprint and a base read against the base one. The
-    ///   base snapshot is carried unchanged because population
-    ///   discrimination lives in the key, not in a per-canonical
-    ///   re-root: the validator composes [`Self::augmentation_population`]
-    ///   (derived from the snapshot's `session_overlay_fingerprint`,
-    ///   re-rooted below) so it selects the correct-population slot.
+    ///   overlay candidate is reached because the whole-hash override
+    ///   (the `content_hash` key dimension) points at it. No
+    ///   per-canonical override on the handle itself.
+    /// - **augmentation-index fingerprints** — a root-relative point
+    ///   lookup whose `AugmentationTargetKey` carries the `population`
+    ///   dimension, so a session read validates against the
+    ///   `Session(fingerprint)` augmenter set and a base read against
+    ///   `Base`; the two can never cross-validate. No per-canonical
+    ///   override.
     /// - **`snapshot.session_overlay_fingerprint`** — re-rooted from
     ///   `view.fingerprint()` so [`Self::augmentation_population`]
-    ///   reports `Session(fingerprint)` for this view; the route-surface
-    ///   validator composes the matching population slot.
-    /// - **`env_hashes`** / **`project_identity`** / **`project_generation`**
+    ///   reports `Session(fingerprint)` for this view.
+    /// - **env hashes** / **project identity** / **project generation**
     ///   / **`compat_token`** / **`mutation_epoch`** / **`session_id`** —
     ///   view-level identity, not per-canonical content; untouched.
     ///
@@ -2074,9 +1999,8 @@ impl HostStoreView {
     /// still misses — exactly as the un-overlaid view validates against
     /// the base's current content.
     ///
-    /// A canonical the session TOMBSTONED (overlay-Deleted) has its
-    /// base per-canonical snapshots dropped — see
-    /// [`Self::drop_tombstoned_canonical_snapshots`]. Tombstones are
+    /// A canonical the session TOMBSTONED (overlay-Deleted) resolves to
+    /// nothing at all through this view. Tombstones are
     /// reported by [`SessionView::tombstoned_canonicals`], iterated
     /// independently of [`SessionView::overlay_canonicals`]: a session
     /// can delete a file without re-upserting it (so it has no overlay
@@ -2090,10 +2014,10 @@ impl HostStoreView {
     /// ## Copy-on-write
     ///
     /// The shared base `Arc<StoreViewSnapshot>` is **never mutated in
-    /// place**. The first overlay/tombstone re-root clones the inner
-    /// snapshot via `Arc::make_mut`, leaving the manager-cached base
-    /// pristine for concurrent base readers. A view with no overlay
-    /// canonicals and no tombstones returns the shared `Arc` untouched.
+    /// place**. Attaching the session root clones the inner snapshot via
+    /// `Arc::make_mut`, leaving the manager-cached base pristine for
+    /// concurrent base readers. A view with no overlay canonicals and no
+    /// tombstones returns the shared `Arc` untouched.
     /// The overlay identity (session id + a structural fingerprint of
     /// the masked canonical set) is folded into the validation token so
     /// two requests with different completion/session overlays carry
@@ -2198,120 +2122,76 @@ impl HostStoreView {
         // producer's `augmentation_population_for_view` derivation.
         snapshot.session_overlay_fingerprint = view.fingerprint();
 
+        // Build the session's O(overlay-set) override layer. It is
+        // sized by the SESSION's own overlay and tombstone sets — never
+        // by the host's owner count — and it is the only per-canonical
+        // state a view carries.
+        let mut session = crate::store_view_roots::SessionOverlayRoot::default();
+
         // Tombstone-only canonicals: deleted by the session and never
-        // re-upserted, so absent from `overlay_canonicals()`. This is
-        // the delete-case analogue of the overlay-Upsert re-rooting
-        // below — without it a warm entry rooted on a session-deleted
-        // file's BASE content would still validate.
+        // re-upserted, so absent from `overlay_canonicals()`. Without
+        // them a warm entry rooted on a session-deleted file's BASE
+        // content would still validate.
         for canonical in &tombstones {
-            Self::drop_tombstoned_canonical_snapshots(snapshot, canonical);
+            session.tombstones.insert(canonical.clone());
         }
 
         for canonical in &overlay_canonicals {
             if view.is_tombstoned(canonical) {
                 // Both an overlay-source key AND tombstoned — the
                 // tombstone wins over a stale overlay-source entry.
-                Self::drop_tombstoned_canonical_snapshots(snapshot, canonical);
+                session.tombstones.insert(canonical.clone());
+                session.canonicals.remove(canonical);
                 continue;
             }
             let Some(overlay_hash) = view.overlay_content_hash_for(canonical) else {
                 continue;
             };
-            // Re-root the self-root whole-hash rail.
-            snapshot
-                .whole_hashes
-                .insert(canonical.clone(), overlay_hash);
-
-            // The base source-env identity no longer describes the
-            // artifact this session serves for the canonical; drop it
-            // so a recorded `FileSourceEnv` fact REJECTS strictly
-            // (miss + recompute) instead of validating against the
-            // base identity. The session-scoped identity re-root lands
-            // with the producer that records session-scoped source-env
-            // observations.
-            snapshot.source_envs.remove(canonical);
-
-            // Refresh the per-domain parse-fact + derived-fact
-            // snapshots from the overlay artifact. `canonical` is the
-            // RAW overlay owner (from `overlay_canonicals()`);
-            // `lookup_overlay_artifacts` builds the exact overlay
-            // artifact key — the raw-owner overlay hash + discriminator
-            // with the NORMALISED `analysis_canonical` as
+            // Resolve the overlay artifact for this canonical. `canonical`
+            // is the RAW overlay owner (from `overlay_canonicals()`);
+            // `lookup_overlay_artifacts` builds the exact overlay artifact
+            // key — the raw-owner overlay hash + discriminator with the
+            // NORMALISED `analysis_canonical` as
             // `FileArtifactKey.canonical` — so it returns the overlay
             // `FileArtifacts` candidate (not the base one) even when
             // `normalize(raw) != raw`.
+            //
+            // An UNMATERIALISED overlay artifact yields `Absent` overrides,
+            // not `Inherit`: the base per-domain state describes the
+            // pre-overlay bytes, so falling through to it would validate an
+            // entry rooted on the overlay against base content. Absence is
+            // the correct R3 outcome under stale producer state.
             let overlay_artifact_identity = host.overlay_artifact_identity(canonical);
-            match overlay_artifact_identity.lookup_overlay_artifacts(host, view) {
-                Some(overlay_artifacts) => {
-                    snapshot.file_facts.insert(
-                        canonical.clone(),
-                        std::sync::Arc::clone(&overlay_artifacts.facts),
-                    );
-                    let overlay_indexed = &overlay_artifacts.indexed;
+            let overlay_artifacts = overlay_artifact_identity.lookup_overlay_artifacts(host, view);
+            let (facts, route_hash) = match overlay_artifacts {
+                Some(artifacts) => {
+                    let overlay_indexed = &artifacts.indexed;
                     // Edge-currency gate. A wildcard-bearing overlay surface
                     // bakes its `export *` edge `canonical_id`s from the
                     // dependency file set; once `content_generation` advances
-                    // past its edge generation BOTH the route-surface hash and
-                    // the import-route hash are stale. Suppress both derived
-                    // hashes (the same outcome as an unmaterialised overlay
-                    // artifact below) so a warm entry rooted on them fails
-                    // validation and recomputes through the edge-gated readers,
-                    // which re-materialise the overlay surface — rather than
-                    // copying a stale hash into the view.
+                    // past its edge generation the route-surface hash is stale.
+                    // Suppress the derived hash (the same outcome as an
+                    // unmaterialised overlay artifact) so a warm entry rooted
+                    // on it fails validation and recomputes through the
+                    // edge-gated readers, which re-materialise the overlay
+                    // surface — rather than carrying a stale hash on the view.
                     let edge_current = host.indexed_surface_is_current(canonical, overlay_indexed);
-                    if overlay_indexed.shallow_state.has_resolvable_surface() && edge_current {
-                        snapshot.derived_hashes.insert(
-                            (
-                                canonical.clone(),
-                                crate::resolver_core::DerivedFactKind::Route,
-                            ),
-                            hash_route_surface(&overlay_indexed.shallow_state),
-                        );
-                    } else {
-                        snapshot.derived_hashes.remove(&(
-                            canonical.clone(),
-                            crate::resolver_core::DerivedFactKind::Route,
-                        ));
-                    }
-                    match overlay_indexed.import_route_hash {
-                        Some(hash) if edge_current => {
-                            snapshot.derived_hashes.insert(
-                                (
-                                    canonical.clone(),
-                                    crate::resolver_core::DerivedFactKind::ImportRoute,
-                                ),
-                                hash,
-                            );
-                        }
-                        _ => {
-                            snapshot.derived_hashes.remove(&(
-                                canonical.clone(),
-                                crate::resolver_core::DerivedFactKind::ImportRoute,
-                            ));
-                        }
-                    }
+                    let route = (overlay_indexed.shallow_state.has_resolvable_surface()
+                        && edge_current)
+                        .then(|| hash_route_surface(&overlay_indexed.shallow_state));
+                    (Some(std::sync::Arc::clone(&artifacts.facts)), route)
                 }
-                None => {
-                    // The overlay artifact has not been materialised
-                    // yet. The base per-domain snapshots are stale
-                    // relative to the overlay content; drop them so
-                    // `validates_parse_domain` / the `DerivedFactHash`
-                    // validator reject any entry rooted on the overlay
-                    // and the consumer cold-recomputes (the correct R3
-                    // outcome under stale producer state — same shape
-                    // as an absent base snapshot).
-                    snapshot.file_facts.remove(canonical);
-                    snapshot.derived_hashes.remove(&(
-                        canonical.clone(),
-                        crate::resolver_core::DerivedFactKind::Route,
-                    ));
-                    snapshot.derived_hashes.remove(&(
-                        canonical.clone(),
-                        crate::resolver_core::DerivedFactKind::ImportRoute,
-                    ));
-                }
-            }
+                None => (None, None),
+            };
+            session.canonicals.insert(
+                canonical.clone(),
+                crate::store_view_roots::OverlayCanonical::upsert(overlay_hash, facts, route_hash),
+            );
         }
+        snapshot.roots.with_session(session);
+        // The overlaid view answers differently from the base view it was
+        // cloned from, so it must not inherit the base view's memo.
+        self.memo = Arc::new(crate::store_view_roots::StoreViewMemo::default());
         // The overlay re-rooted the snapshot AND set a new overlay
         // identity, both of which feed the complete validation token.
         // Recompute the coalescing-lane fingerprint so an overlaid view
@@ -2319,6 +2199,67 @@ impl HostStoreView {
         // differently-overlaid) view.
         self.compat_token = self.compute_compat_token();
         self
+    }
+
+    /// The leased artifact-membership root this view was built against.
+    ///
+    /// Reads through it (`FileArtifactStore::artifacts_at_root`,
+    /// `indexed_at_root`, `artifact_keys_at_root`,
+    /// `augmenter_set_at_root`) answer for THIS view's world, not the
+    /// current one, and are guaranteed reachable for the view's whole
+    /// lifetime. `None` only on the detached
+    /// [`HostStoreView::default`].
+    ///
+    /// The production read surface every parse-domain, route-derived,
+    /// source-env and augmentation validator goes through is
+    /// [`crate::store_view_roots::StoreViewRoots::artifact_root`]; this
+    /// accessor exposes the same lease to the retention tests, which
+    /// assert the `Arc` keeps an evicted world reachable.
+    #[cfg(test)]
+    pub(crate) fn artifact_root(
+        &self,
+    ) -> Option<&Arc<crate::file_artifact_store::FileArtifactRoot>> {
+        self.snapshot.roots.artifact_root()
+    }
+
+    /// The scheduler SOURCE root this view leases.
+    ///
+    /// The production authority for a canonical's tracked whole hash:
+    /// [`verter_scheduler::source_root::SchedulerSourceRoot::lookup`] is
+    /// an as-of read sealed to the captured epoch, so a view still
+    /// answers for its own source world after the live `FileNode`s have
+    /// been bumped, replaced or removed. Production reads go through
+    /// [`crate::store_view_roots::StoreViewRoots::source_root`]; this
+    /// accessor exposes the same lease to the retention tests.
+    #[cfg(test)]
+    pub(crate) fn source_root(
+        &self,
+    ) -> Option<&Arc<verter_scheduler::source_root::SchedulerSourceRoot>> {
+        self.snapshot.roots.source_root()
+    }
+
+    /// Test-only: perform ONE owner read through this view's captured
+    /// roots, bypassing the per-view memo, optionally inside a store-view
+    /// BUILD scope.
+    ///
+    /// This is the anti-vacuity seam for `store_view_owner_visits`. The
+    /// gate's zero is only evidence if a read on this exact path DOES
+    /// move the counter when it happens inside a build scope, and does
+    /// NOT when it happens outside one; a control calls this both ways and
+    /// requires both. The memo is bypassed deliberately — a memoized
+    /// answer is not a root read, and a control that could be satisfied by
+    /// a cache hit would prove nothing about the instrumentation.
+    #[cfg(test)]
+    pub(crate) fn owner_read_through_roots_for_tests(
+        &self,
+        canonical_id: &str,
+        inside_build_scope: bool,
+    ) -> Option<Hash16> {
+        let _scope = inside_build_scope.then(crate::store_view_roots::StoreViewBuildScope::enter);
+        self.snapshot
+            .roots
+            .resolve_canonical(canonical_id, self.content_generation)
+            .whole_hash
     }
 
     /// Augmentation-index population identity for this view (overlay
@@ -2337,206 +2278,139 @@ impl HostStoreView {
         }
     }
 
+    /// This view's complete per-canonical answer, resolved through the
+    /// captured roots by exact point lookup and memoized per view.
+    ///
+    /// Every validator arm reads through here. There is no owner list to
+    /// consult and no enumeration on a miss: a canonical the roots do not
+    /// place is simply absent.
+    fn canonical_view(&self, canonical: &str) -> Arc<crate::store_view_roots::CanonicalView> {
+        if let Some(hit) = self.memo.get(canonical) {
+            return hit;
+        }
+        // Computed OUTSIDE the memo lock (the lock is a leaf and is never
+        // held across a store or workspace read). A lost race recomputes a
+        // value equal by construction, so first-writer-wins is sound.
+        let resolved = Arc::new(
+            self.snapshot
+                .roots
+                .resolve_canonical(canonical, self.content_generation),
+        );
+        self.memo.insert(canonical, &resolved);
+        resolved
+    }
+
+    /// The tracked whole-content hash for `canonical` under this view.
+    pub(crate) fn whole_hash(&self, canonical_id: &str) -> Option<Hash16> {
+        self.canonical_view(canonical_id).whole_hash
+    }
+
+    fn is_tombstoned(&self, canonical_id: &str) -> bool {
+        self.snapshot.roots.is_tombstoned(canonical_id)
+    }
+
     /// The validation token under which this view was built. The base
     /// token is captured by [`StoreViewManager`]; a session-overlaid
     /// view re-derives it from the shared snapshot + its frozen overlay
     /// identity so the token reflects the overlay.
     pub(crate) fn validation_token(&self) -> StoreViewValidationToken {
+        let env = &self.snapshot.roots.project_env_root;
         StoreViewValidationToken {
             store_view_epoch: self.mutation_epoch,
-            project_generation: self.snapshot.project_generation,
+            project_generation: env.project_generation,
             artifact_generation: self.artifact_generation,
             load_generation: self.load_generation,
             content_generation: self.content_generation,
-            env_hash_fold: fold_env_hashes(&self.snapshot.env_hashes),
-            project_identity: self.snapshot.project_identity,
+            resolution_fact_generation: self.resolution_fact_generation,
+            env_hash_fold: fold_env_hashes(&env.env_hashes),
+            project_identity: env.project_identity,
             overlay_identity: self.overlay_identity,
         }
     }
 
-    fn build(host: &VerterHost, pre: &PreBuildTokenInputs, session_id: Option<u64>) -> Self {
+    /// Compose the sealed root token. Deliberately takes NO `&VerterHost`.
+    ///
+    /// That absence is the structural half of "the build enumerates
+    /// nothing": with no host in scope there is no scheduler, no artifact
+    /// store, no workspace and no candidate store to walk, and the one
+    /// store-bearing input — `pre.root_capture` — has private fields whose
+    /// only operation is `StoreViewRoots::seal`. The dynamic half is
+    /// `store_view_owner_visits`, counted for the duration of the
+    /// [`StoreViewBuildScope`](crate::store_view_roots::StoreViewBuildScope)
+    /// entered below and required to be zero by
+    /// `marginal_admit_reopens_no_routing_regardless_of_host_size`.
+    fn build(pre: &PreBuildTokenInputs, session_id: Option<u64>) -> Self {
+        let _build_scope = crate::store_view_roots::StoreViewBuildScope::enter();
         // EVERY token-relevant by-value dimension comes from the single
-        // `pre` capture taken BEFORE the per-canonical snapshot population
-        // window opened. They are NEVER re-read live here — re-reading any
-        // of them late (after the snapshot maps were populated) would let a
+        // `pre` capture taken before the roots are sealed. They are NEVER
+        // re-read live here — a late read would let a
         // mid-build mutation that advanced a dimension WITHOUT bumping
         // `store_view_epoch` produce a view whose token reflects the NEW
-        // value while its snapshot maps were captured under the OLD value;
+        // value while its roots were captured under the OLD value;
         // `build_coherent`'s post-build coherence check (which compares the
         // PRE-build captured token against the live token) would then accept
         // that TORN view as coherent. Stamping every dimension from `pre`
-        // keeps the snapshot maps and the token coherent under one read
+        // keeps the roots and token coherent under one read
         // window; any mid-build advance is caught by the post-build
         // comparison and forces a retry / `Superseded`.
         let snapshot_epoch = pre.store_view_epoch;
         let artifact_generation = pre.artifact_generation;
         let load_generation = pre.load_generation;
         let content_generation = pre.content_generation;
-        let mut snapshot = StoreViewSnapshot::default();
+        let resolution_fact_generation = pre.resolution_fact_generation;
+        // The ENTIRE build: a fixed number of scalar reads and `Arc`
+        // clones into one sealed root token. No owner list is enumerated,
+        // no per-owner answer is copied, and nothing here grows with the
+        // number of files the host tracks.
+        //
+        // Per-canonical answers are derived on demand by exact point lookups
+        // through the roots below (`HostStoreView::canonical_view`). The roots
+        // are RETENTION LEASES, so the captured world remains reachable after
+        // the live host advances or evicts newer state.
+        //
+        // `seal` moves the already-captured handles into the token: the
+        // scheduler source root, the artifact root (exact keys, the
+        // canonical→keys index AND the module-augmentation index), the
+        // published project graph, the resolution-currency root, the two
+        // R26 candidate stores and the stores the roots ADDRESS. Every one
+        // of them was read in `pre`'s single window and none is re-read
+        // live here — a mid-build advance is caught by `build_coherent`'s
+        // post-build token comparison. A session attaches its override
+        // layer later, in `with_session_overlay`.
+        let snapshot = StoreViewSnapshot {
+            session_overlay_fingerprint: 0,
+            roots: crate::store_view_roots::StoreViewRoots::seal(
+                &pre.root_capture,
+                pre.env_hashes,
+                pre.project_identity,
+                pre.project_generation,
+            ),
+        };
 
-        {
-            let mut canonical_ids = host.scheduler.node_ids();
-            canonical_ids.extend(host.compile_cache().iter().map(|entry| entry.key().clone()));
-            canonical_ids.sort();
-            canonical_ids.dedup();
-
-            for canonical_id in canonical_ids {
-                if let Some(source) = host.scheduler.try_get_source(&canonical_id) {
-                    snapshot
-                        .whole_hashes
-                        .insert(canonical_id.clone(), source.whole_hash);
-                }
-
-                if !snapshot.whole_hashes.contains_key(&canonical_id) {
-                    if let Some(state) = host.effective_file_state(&canonical_id, None) {
-                        snapshot
-                            .whole_hashes
-                            .insert(canonical_id.clone(), state.whole_hash);
-                    }
-                }
-
-                // The known-miss generation sidecar
-                // lives on DerivedRawState (D48 split);
-                // capture it so the validator can compose
-                // `ResolvedImportFactsKey.known_miss_generation`
-                // identically to the producer. The per-specifier
-                // `import_routes` themselves are NOT snapshotted: no
-                // `HostStoreView` validator reads them — the
-                // import-route domain validates through `derived_hashes`
-                // (`ImportRoute` kind) and the content-addressed
-                // `resolved_import_facts` handle instead.
-                if let Some(entry) = host.derived_raw_cache().get(&canonical_id) {
-                    let tag = crate::resolved_import_facts::compute_known_miss_generation_tag(
-                        &entry.import_routes_known_miss_recorded_at_generation,
-                    );
-                    snapshot
-                        .resolved_import_facts_known_miss_tags
-                        .insert(canonical_id.clone(), tag);
-                }
-            }
-        }
-
-        // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-
-        // Snapshot FileArtifactStore entries into the store view. The
-        // `IndexedReady` artifact is the SOLE route-surface source —
-        // identical to the producer (`current_derived_fact_hash(Route)`), so
-        // producer and validator stay on one source order.
-        for (canonical_id, indexed) in host.project_type_store.indexed().snapshot_all() {
-            let canonical_str = canonical_id.as_ref().to_owned();
-            // The tracked current whole hash for this canonical: the
-            // value seeded earlier from `effective_file_state`, or — for
-            // an artifact-only canonical the single authority gate
-            // accepts — `indexed.whole_hash`. A canonical with NO
-            // scheduler state that fails the gate (absent file,
-            // scheduler-superseded leftover) contributes NOTHING: the
-            // accessors reject it, so manufacturing a tracked hash from
-            // the artifact itself would let stale
-            // FileWholeHash/Route/file facts validate against state no
-            // read path will serve.
-            let tracked_whole_hash = match snapshot.whole_hashes.get(&canonical_str) {
-                Some(tracked) => *tracked,
-                None => {
-                    if !host
-                        .artifact_only_candidate_is_fresh(&canonical_str, indexed.edge_generation)
-                    {
-                        continue;
-                    }
-                    snapshot
-                        .whole_hashes
-                        .insert(canonical_str.clone(), indexed.whole_hash);
-                    indexed.whole_hash
-                }
-            };
-            // A current-content `IndexedReady` (`indexed.whole_hash ==
-            // tracked`) is the route-surface authority for this
-            // canonical. The `Route` derived fact is contributed only
-            // when the current indexed surface is route-resolvable AND
-            // edge-current: a wildcard-bearing artifact whose baked
-            // `export *` edges are stale (a dependency appeared /
-            // retargeted while this file's content stayed put) must not
-            // contribute its stale `Route` hash, so a warm entry rooted
-            // on the stale hash recomputes.
-            if indexed.whole_hash == tracked_whole_hash
-                && host.indexed_surface_is_current(&canonical_str, &indexed)
-                && indexed.shallow_state.has_resolvable_surface()
-            {
-                snapshot.derived_hashes.insert(
-                    (
-                        canonical_str.clone(),
-                        crate::resolver_core::DerivedFactKind::Route,
-                    ),
-                    hash_route_surface(&indexed.shallow_state),
-                );
-            }
-            // The `ImportRoute` derived fact must reflect the
-            // generation-current import-target surface. A file with
-            // an unresolvable specifier carries a known-miss in its
-            // content-pinned `IndexedReady.import_route_hash`; that
-            // snapshot would otherwise be served unchanged after a
-            // new file satisfies the specifier (the importer's
-            // content, hence its `IndexedReady`, does not change), so
-            // a dependent cache entry would validate against a stale
-            // miss. `generation_current_import_route_hash`
-            // re-resolves the miss specifiers against the current
-            // workspace so the validator observes the appearance.
-            if let Some(hash) = host.generation_current_import_route_hash(&canonical_str) {
-                snapshot.derived_hashes.insert(
-                    (
-                        canonical_str,
-                        crate::resolver_core::DerivedFactKind::ImportRoute,
-                    ),
-                    hash,
-                );
-            }
-        }
-
-        Self::snapshot_tracked_import_route_hashes(&mut snapshot, host);
-        Self::snapshot_augmentation_index_into(&mut snapshot, host.project_type_store.indexed());
-        Self::snapshot_file_facts_into(&mut snapshot, host, host.project_type_store.indexed());
-        // R26 per-domain producer handles captured at view-build
-        // time. Cheap `Arc::clone` per snapshot; reads through the
-        // handles are wait-free against concurrent writers because
-        // both `ResolvedImportFactsDb` and `RouteDb` shard by key
-        // (DashMap-backed).
-        snapshot.resolved_import_facts = Some(std::sync::Arc::clone(
-            host.project_type_store.resolved_import_facts_handle(),
-        ));
-        snapshot.route_db = Some(host.project_type_store.routes_handle());
-
-        // Test-only: inject an env-hash mutation HERE — after every
-        // per-canonical snapshot map was populated under `pre`'s env, but
-        // before the token-relevant env / identity dimensions are stamped.
-        // The mutation advances `resolve_env_hash` WITHOUT bumping
-        // `store_view_epoch`, deterministically reproducing the mid-build
-        // non-epoch dimension change. Because the stamps below read from
-        // `pre` (NOT live), the view's token reflects the OLD env while the
-        // post-build live token reflects the NEW env → the coherence check
-        // mismatches and the attempt is treated as superseded. (Were the
-        // stamps to re-read live env here, the view's token would also
-        // reflect the NEW env and the torn view would be accepted.)
+        // Test-only: inject an env-hash mutation HERE — after the root
+        // token was sealed under `pre`'s env. The mutation advances
+        // `resolve_env_hash` WITHOUT bumping `store_view_epoch`,
+        // deterministically reproducing the mid-build non-epoch dimension
+        // change. Because the sealed `project_env_root` carries `pre`'s
+        // env (NOT a live re-read), the view's token reflects the OLD env
+        // while the post-build live token reflects the NEW env → the
+        // coherence check mismatches and the attempt is treated as
+        // superseded. (Were the root to re-read live env here, the view's
+        // token would also reflect the NEW env and the torn view would be
+        // accepted.) The workspace handle comes from the sealed capture's
+        // `cfg(test)`-only accessor: production build code has no path
+        // from a capture to a workspace, which is what keeps enumeration
+        // unexpressible here.
         #[cfg(test)]
         if FORCE_MID_BUILD_ENV_BUMP.with(|c| {
             let armed = c.get();
             c.set(false);
             armed
         }) {
-            host.ws()
+            pre.root_capture
+                .workspace_for_test_injection()
                 .set_default_resolve_extensions(vec![".zzzmidbuildext".to_string()]);
         }
-
-        // R21 env-hash + project-identity + project-generation capture,
-        // taken from the single `pre` read window (NOT re-read live here)
-        // so the snapshot maps and the validation token stay coherent under
-        // one token. Required for `ResolvedImportFactsKey` +
-        // `EffectiveExportSetKey` composition inside the per-domain
-        // validators (env / identity) and the
-        // `FactVersionRef::ProjectGeneration` validator (project
-        // generation) — a warm read rejects a value rooted on a superseded
-        // generation.
-        snapshot.env_hashes = pre.env_hashes;
-        snapshot.project_identity = pre.project_identity;
-        snapshot.project_generation = pre.project_generation;
 
         let mut view = Self {
             // Interim placeholder — `compute_compat_token()` below recomputes
@@ -2554,144 +2428,11 @@ impl HostStoreView {
             artifact_generation,
             load_generation,
             content_generation,
+            resolution_fact_generation,
+            memo: Arc::new(crate::store_view_roots::StoreViewMemo::default()),
         };
         view.compat_token = view.compute_compat_token();
         view
-    }
-
-    /// Snapshot `Arc<FileFacts>` per canonical from the indexed
-    /// store. One refcount bump per tracked file at view-build time;
-    /// parse-domain validation reads through these handles
-    /// wait-free against concurrent writers because each entry is
-    /// immutable.
-    ///
-    /// If multiple `(content_hash, parse_env_hash)` variants coexist
-    /// for one canonical (the multi-candidate cache shape under R20),
-    /// the first one encountered wins — subsequent variants do not
-    /// overwrite. The view's `whole_hashes` map records the canonical
-    /// content hash; a path-precise consumer that observed against
-    /// a parse-env-hash variant outside this snapshot will miss
-    /// validation and recompute against the current variant.
-    fn snapshot_file_facts_into(
-        snapshot: &mut StoreViewSnapshot,
-        host: &VerterHost,
-        store: &crate::file_artifact_store::FileArtifactStore,
-    ) {
-        // Snapshot ONLY the `FileFacts` variant whose `content_hash`
-        // matches the view's tracked `whole_hashes[canonical]` —
-        // that is the source-of-truth content hash for the
-        // canonical under this view. Other variants (stale
-        // candidates from prior content generations) coexist in
-        // the multi-candidate store per R20 but must NOT back the
-        // parse-domain validator: a path-precise consumer observed
-        // against the live content, so its validation MUST consult
-        // the live content's facts.
-        //
-        // When the artifact store has not yet been refreshed for
-        // the new content (lazy `ensure_indexed_ready_serve` has not run
-        // yet), the `file_facts` entry for that canonical stays
-        // ABSENT. The parse-domain validator interprets absence as
-        // a miss (`validates_parse_domain` returns `false` for any
-        // observed real-hash fact under an absent entry) — the
-        // consumer falls through to cold recompute, which is the
-        // correct R3 outcome under stale producer state.
-        //
-        // Targeted read: only the view's TRACKED canonicals can
-        // contribute (everything else fails the `whole_hashes` gate by
-        // definition), so iterate the tracked set and resolve each
-        // canonical's live-hash variants through the canonical→keys
-        // index — never a whole-store snapshot `Vec` (that scan is
-        // O(total live entries incl. stale content generations) per
-        // view build and allocated a `String` per non-matching entry).
-        let whole_hashes = &snapshot.whole_hashes;
-        let source_envs = &mut snapshot.source_envs;
-        let file_facts = &mut snapshot.file_facts;
-        for (canonical_str, tracked_hash) in whole_hashes {
-            store.for_each_artifact_for_canonical_content(
-                canonical_str,
-                *tracked_hash,
-                |key, artifacts| {
-                    // View-current SOURCE-ENV identity for the canonical:
-                    // parser-version/language from the artifact KEY itself
-                    // (never re-derived from the path), parse-env from the
-                    // canonical's LIVE per-canonical env — the shared
-                    // `SourceEnvIdentity::live_for_artifact_key`
-                    // construction the fact producer also uses, so record
-                    // and validate compare the same dimensions by
-                    // construction (the base key's own `parse_env_hash`
-                    // slot is the zero sentinel, not an env identity).
-                    // Base keys only: an overlay-scoped key carries a
-                    // session discriminator in its `parse_env_hash`
-                    // dimension and must never seed the base view's
-                    // identity map.
-                    if key.is_base() {
-                        source_envs.insert(
-                            canonical_str.clone(),
-                            SourceEnvIdentity::live_for_artifact_key(host, key),
-                        );
-                    }
-                    file_facts.insert(
-                        canonical_str.clone(),
-                        std::sync::Arc::clone(&artifacts.facts),
-                    );
-                },
-            );
-        }
-    }
-
-    fn snapshot_tracked_import_route_hashes(snapshot: &mut StoreViewSnapshot, host: &VerterHost) {
-        let canonical_ids: Vec<String> = snapshot.whole_hashes.keys().cloned().collect();
-        let empty_import_routes = FxHashMap::default();
-        let empty_import_route_hash = hash_import_route_targets(&empty_import_routes);
-
-        for canonical_id in canonical_ids {
-            if snapshot.derived_hashes.contains_key(&(
-                canonical_id.clone(),
-                crate::resolver_core::DerivedFactKind::ImportRoute,
-            )) {
-                continue;
-            }
-
-            // Generation-current `ImportRoute` fact for files not
-            // covered by the `IndexedReady` snapshot loop above —
-            // re-resolves known-miss specifiers against the current
-            // workspace so a previously-unresolvable dependency's
-            // appearance is observable by the validator.
-            let import_route_hash = host.generation_current_import_route_hash(&canonical_id);
-
-            snapshot.derived_hashes.insert(
-                (
-                    canonical_id.clone(),
-                    crate::resolver_core::DerivedFactKind::ImportRoute,
-                ),
-                import_route_hash.unwrap_or(empty_import_route_hash),
-            );
-        }
-    }
-
-    /// `build`-time variant operating on the under-construction
-    /// [`StoreViewSnapshot`] (R29 + G1).
-    fn snapshot_augmentation_index_into(
-        snapshot: &mut StoreViewSnapshot,
-        artifact_store: &crate::file_artifact_store::FileArtifactStore,
-    ) {
-        for (key, fingerprint) in artifact_store.snapshot_augmentation_index_fingerprints() {
-            let snap_key = RouteSurfaceIndexShapeKey {
-                target_kind_tag: augmentation_target_kind_tag_for(&key.target),
-                external_specifier: augmentation_target_external_specifier(&key.target),
-                resolved_relative_canonical: augmentation_target_resolved_relative_canonical(
-                    &key.target,
-                ),
-                wildcard_pattern: augmentation_target_wildcard_pattern(&key.target),
-                // Carry the population from the store's
-                // `AugmentationTargetKey` so base and session
-                // fingerprints stay in distinct snapshot slots.
-                population: key.population,
-            };
-            snapshot
-                .route_surface_index_fingerprints
-                .insert(snap_key, fingerprint);
-        }
     }
 
     /// Epoch dimension of this view's snapshot. Test-only accessor: the
@@ -2703,21 +2444,23 @@ impl HostStoreView {
         self.mutation_epoch
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn whole_hash(&self, canonical_id: &str) -> Option<Hash16> {
-        self.snapshot.whole_hashes.get(canonical_id).copied()
-    }
-
+    /// The view's derived hash for a `(canonical, kind)` pair.
+    ///
+    /// `DirectSource` is a content-hash alias for the tracked whole hash;
+    /// `Route` is the route-surface digest of the canonical's
+    /// current-content, current-parse-env `IndexedReady` as seen through
+    /// the artifact root.
     #[allow(dead_code)]
     pub(crate) fn derived_hash(
         &self,
         canonical_id: &str,
         kind: crate::resolver_core::DerivedFactKind,
     ) -> Option<Hash16> {
-        self.snapshot
-            .derived_hashes
-            .get(&(canonical_id.to_string(), kind))
-            .copied()
+        let resolved = self.canonical_view(canonical_id);
+        match kind {
+            crate::resolver_core::DerivedFactKind::DirectSource => resolved.whole_hash,
+            crate::resolver_core::DerivedFactKind::Route => resolved.route_hash,
+        }
     }
 
     pub(crate) fn invalid_fact_details(
@@ -2735,7 +2478,7 @@ impl HostStoreView {
     fn describe_invalid_fact(&self, fact: &crate::resolver_core::FactVersionRef) -> Option<String> {
         match fact {
             crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                match self.snapshot.whole_hashes.get(canonical_id) {
+                match self.whole_hash(canonical_id).as_ref() {
                     Some(current) if current == hash => None,
                     Some(current) => Some(format!(
                         "FileWholeHash mismatch canonical={} expected={hash:?} actual={current:?}",
@@ -2752,16 +2495,8 @@ impl HostStoreView {
                 kind,
                 hash,
             } => {
-                let current = match kind {
-                    crate::resolver_core::DerivedFactKind::DirectSource => {
-                        self.snapshot.whole_hashes.get(canonical_id)
-                    }
-                    _ => self
-                        .snapshot
-                        .derived_hashes
-                        .get(&(canonical_id.clone(), *kind)),
-                };
-                match current {
+                let current = self.derived_hash(canonical_id, *kind);
+                match current.as_ref() {
                     Some(current) if current == hash => None,
                     Some(current) => Some(format!(
                         "DerivedFactHash mismatch canonical={} kind={kind:?} expected={hash:?} actual={current:?}",
@@ -2782,10 +2517,9 @@ impl HostStoreView {
                 "ParseFactRef canonical={} key={:?} lane={:?} expected={:?}",
                 p.canonical_id, p.key, p.lane, p.expected_hash
             )),
-            crate::resolver_core::FactVersionRef::ResolveImports(r) => Some(format!(
-                "ResolveImportsFactRef canonical={} key={:?} lane={:?} expected={:?}",
-                r.canonical_id, r.key, r.lane, r.expected_hash
-            )),
+            crate::resolver_core::FactVersionRef::ResolveImports(r) => {
+                Some(format!("ResolveImportsFactRef {r:?}"))
+            }
             crate::resolver_core::FactVersionRef::RouteSurface(r) => Some(format!(
                 "RouteSurfaceFactRef canonical={} key={:?} lane={:?} expected={:?}",
                 r.canonical_id, r.key, r.lane, r.expected_hash
@@ -2796,10 +2530,10 @@ impl HostStoreView {
                 parser_version,
                 file_language_id,
             } => {
-                if self.snapshot.tombstoned_canonicals.contains(canonical_id) {
+                if self.is_tombstoned(canonical_id) {
                     return Some(format!("FileSourceEnv tombstoned canonical={canonical_id}"));
                 }
-                match self.snapshot.source_envs.get(canonical_id) {
+                match self.canonical_view(canonical_id).source_env.as_ref() {
                     Some(live)
                         if live.parse_env_hash == *parse_env_hash
                             && live.parser_version == *parser_version
@@ -2820,12 +2554,12 @@ impl HostStoreView {
                 }
             }
             crate::resolver_core::FactVersionRef::ProjectGeneration { generation } => {
-                if self.snapshot.project_generation == *generation {
+                let current = self.snapshot.roots.project_env_root.project_generation;
+                if current == *generation {
                     None
                 } else {
                     Some(format!(
-                        "ProjectGeneration mismatch expected={generation} actual={}",
-                        self.snapshot.project_generation
+                        "ProjectGeneration mismatch expected={generation} actual={current}"
                     ))
                 }
             }
@@ -2852,15 +2586,45 @@ impl HostStoreView {
         }
     }
 
+    /// Resolution-currency arm of the resolve-imports domain (R26).
+    ///
+    /// The SINGLE body both resolve-imports entry points route a
+    /// [`crate::resolver_core::ResolveImportsFactRef::Resolution`] fact
+    /// through. It compares the fact's observed
+    /// `ResolutionFactVersion` against the version this view's CAPTURED
+    /// resolution world reports for that key — the workspace-owned
+    /// `CapturedResolutionWorld` is the one authority for the arm, so there
+    /// is no second validator, cache, or signature type here.
+    ///
+    /// The view never consults the Engine's live resolution registry: a view
+    /// answers for the world it captured, and only for that world. A witness
+    /// minted after a resolution-visible mutation carries the post-mutation
+    /// version for every fact the mutation moved, so it fails against a view
+    /// captured before it; a pre-mutation witness fails against a view
+    /// captured after it. Facts neither world moved agree in both, which is
+    /// the fact-precise validity the design requires (world IDENTITY is
+    /// explicitly not a cross-root warm-validity oracle).
+    ///
+    /// A view with NO captured world validates nothing on this arm.
+    fn validates_resolution_fact(
+        &self,
+        fact: &crate::resolver_core::ResolveImportsFactRef,
+    ) -> bool {
+        match self.snapshot.roots.resolution_root.as_ref() {
+            Some(world) => world.validates_resolve_imports_fact(fact),
+            None => false,
+        }
+    }
+
     /// Overlay-aware variant of
     /// [`crate::resolver_core::StoreView::validates_resolve_imports_domain`]:
     /// composes the `ResolvedImportFactsKey` against the supplied
-    /// `content_hash` rather than `self.snapshot.whole_hashes[canonical]`. Used
+    /// `content_hash` rather than the view's own tracked whole hash. Used
     /// by [`crate::resolver_core::RequestStoreView`] when a canonical
     /// was promoted into the per-request completion overlay after the
     /// base view was built. All other key
-    /// dimensions (`parse_env_hash`, `resolve_env_hash`,
-    /// `resolver_version`, `known_miss_generation`) compose against
+    /// dimensions (`parse_env_hash`, `resolve_env_hash`, and
+    /// `resolver_version`) compose against
     /// the base view's snapshot unchanged.
     pub(crate) fn validates_resolve_imports_domain_for_content_hash(
         &self,
@@ -2870,54 +2634,63 @@ impl HostStoreView {
         use verter_semantic::facts::registry::FactLane;
         use verter_semantic::facts::FactKey;
         const ZERO_HASH: Hash16 = [0u8; 16];
+        let crate::resolver_core::ResolveImportsFactRef::Semantic {
+            canonical_id,
+            key: fact_key,
+            lane,
+            expected_hash,
+        } = fact
+        else {
+            // A resolution-currency fact carries no per-canonical content
+            // dimension: it validates against the captured resolution world
+            // alone, so the overlay-supplied content hash is irrelevant to it.
+            return self.validates_resolution_fact(fact);
+        };
 
-        let facts_db = match self.snapshot.resolved_import_facts.as_ref() {
+        let facts_db = match self.snapshot.roots.resolved_import_facts.as_ref() {
             Some(db) => db,
             None => return false,
         };
 
-        // `known_miss_generation`:
-        // captured at view-build time from
-        // `DerivedRawState::import_routes_known_miss_recorded_at_generation`.
-        // Absent entries → `[0u8; 16]` so an owner that never had
-        // `set_import_dependencies` called still composes the same
-        // key value the producer admitted under (the producer also
-        // reads `[0u8; 16]` when there is no `DerivedRawState`
-        // entry yet).
-        let known_miss_generation = self
-            .snapshot
-            .resolved_import_facts_known_miss_tags
-            .get(fact.canonical_id.as_str())
-            .copied()
-            .unwrap_or(ZERO_HASH);
-
         let key = crate::resolved_import_facts::ResolvedImportFactsKey {
-            canonical: std::sync::Arc::from(fact.canonical_id.as_str()),
+            canonical: std::sync::Arc::from(canonical_id.as_str()),
             content_hash,
-            parse_env_hash: self.snapshot.env_hashes.parse_env_hash,
-            resolve_env_hash: self.snapshot.env_hashes.resolve_env_hash,
+            parse_env_hash: self
+                .snapshot
+                .roots
+                .project_env_root
+                .env_hashes
+                .parse_env_hash,
+            resolve_env_hash: self
+                .snapshot
+                .roots
+                .project_env_root
+                .env_hashes
+                .resolve_env_hash,
             resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
-            known_miss_generation,
         };
 
-        let facts = match facts_db.get(&key) {
+        // The candidate must root its own path-precise resolution witness in
+        // THIS view. That is
+        // what makes a specifier's appearance, disappearance, or
+        // retarget reject a bundle admitted before it: the resolution
+        // state rides on the candidate, not on a key dimension.
+        let facts = match facts_db.get_if_valid(&key, self) {
             Some(f) => f,
-            // Cache slot absent — the consumer observed a real fact
-            // hash but the resolve-imports producer has not yet
-            // populated the entry under this view. Reject so the
-            // caller recomputes through the producer (which will
-            // populate the cache + re-emit).
-            None => return fact.expected_hash == ZERO_HASH,
+            // No candidate validates — either the slot is cold or every
+            // retained bundle predates a resolution change. Reject so
+            // the caller recomputes through the producer (which
+            // populates the store + re-emits).
+            None => return *expected_hash == ZERO_HASH,
         };
 
         // Pick the lane that the consumer observed under.
-        let pick_lane = |f: &std::sync::Arc<verter_semantic::facts::registry::Fact>| match fact.lane
-        {
+        let pick_lane = |f: &std::sync::Arc<verter_semantic::facts::registry::Fact>| match lane {
             FactLane::Semantic => f.semantic_hash,
             FactLane::Display => f.display_hash,
         };
 
-        match &fact.key {
+        match fact_key {
             FactKey::ResolvedImportClause {
                 specifier,
                 binding,
@@ -2931,7 +2704,7 @@ impl HostStoreView {
                     && entry.resolved_canonical.as_ref().map(|c| c.as_ref())
                         == Some(resolved_canonical.as_ref())
                     && entry.resolved_source_name == *resolved_source_name
-                    && pick_lane(&entry.fact) == fact.expected_hash
+                    && pick_lane(&entry.fact) == *expected_hash
             }),
             FactKey::ResolvedReexportBinding {
                 specifier,
@@ -2948,7 +2721,7 @@ impl HostStoreView {
                     && entry.resolved_canonical.as_ref().map(|c| c.as_ref())
                         == Some(resolved_canonical.as_ref())
                     && entry.resolved_source_name == *resolved_source_name
-                    && pick_lane(&entry.fact) == fact.expected_hash
+                    && pick_lane(&entry.fact) == *expected_hash
             }),
             // Non-resolve-imports FactKey shapes do not belong to
             // the resolve-imports domain. The dispatch layer routes
@@ -2958,36 +2731,13 @@ impl HostStoreView {
     }
 }
 
-pub(crate) fn hash_import_route_targets(
-    resolutions: &FxHashMap<String, crate::types::DependencyResolution>,
-) -> Hash16 {
-    let mut entries: Vec<_> = resolutions.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-
-    hash16_from_sorted(|hasher| {
-        for (specifier, resolution) in &entries {
-            0u8.hash(hasher);
-            specifier.hash(hasher);
-            // Borrowed form of the historical owned-`Option<String>` feed:
-            // `Option<&str>` hashes byte-identically (discriminant + str
-            // bytes), so the digest is unchanged while the per-entry clone
-            // allocation is gone. Pinned by
-            // `import_route_target_digest_formula_is_pinned`.
-            resolution
-                .resolved_canonical_id
-                .as_deref()
-                .or_else(|| resolution.effective_target())
-                .hash(hasher);
-        }
-    })
-}
-
 /// Digest a [`crate::resolver_core::ShallowFileState`]'s route surface,
 /// memoized per state.
 ///
-/// The digest is a pure function of the state's routing surface
-/// (`exports` with targets, `wildcard_reexports`, `import_targets`,
-/// `whole_hash`), and that surface is immutable once the state is
+/// The digest is a pure function of the state's AUTHORED routing
+/// surface (`exports` with their routing shape, `wildcard_reexports`,
+/// `import_targets`, `whole_hash`) — pure parse domain, no resolved
+/// canonical — and that surface is immutable once the state is
 /// `Arc`-published (routing mutations — the test routing-table
 /// constructor and the synthesised-`default` injection — happen during
 /// construction, strictly before the first hash), so the sort+hash
@@ -3001,14 +2751,13 @@ pub(crate) fn hash_route_surface(state: &crate::resolver_core::ShallowFileState)
 
 fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -> Hash16 {
     hash16_from_sorted(|hasher| {
-        // Hash sorted exports WITH their routing targets. A named
-        // reexport bakes a resolved dependency canonical exactly like a
-        // wildcard edge does; hashing only the export NAME would leave
-        // the `Route` fact blind to a dependency-set retarget (a
-        // `.d.ts` companion or a more-specific sibling appearing moves
-        // `Reexport.canonical_id` while the owner's content — and the
-        // export name set — stays put), so a stale cached route would
-        // keep validating against the refreshed surface.
+        // Hash sorted exports WITH their routing shape. Everything
+        // digested here is PARSE domain — authored specifiers, exported
+        // and original names, type-only-ness, local owners. No resolved
+        // canonical enters the digest: a dependency-set retarget moves
+        // no byte of the owner's authored routing surface, and the
+        // consumer that cares roots on the owner's resolve-domain
+        // import-route WITNESS instead.
         let mut exports: Vec<(
             &str,
             &crate::resolver_core::shallow_file_state::ExportTarget,
@@ -3032,13 +2781,11 @@ fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -
                 crate::resolver_core::shallow_file_state::ExportTarget::Reexport {
                     source_specifier,
                     original_name,
-                    canonical_id,
                     is_type,
                 } => {
                     1u8.hash(hasher);
                     source_specifier.hash(hasher);
                     original_name.hash(hasher);
-                    canonical_id.hash(hasher);
                     is_type.hash(hasher);
                 }
             }
@@ -3047,12 +2794,11 @@ fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -
         // Hash wildcard reexport source specifiers in declaration order.
         for wildcard in &state.wildcard_reexports {
             wildcard.source_specifier.hash(hasher);
-            wildcard.canonical_id.hash(hasher);
         }
 
-        // Hash sorted import targets — baked dependency canonicals the
-        // prepared-decl / bare-name chains traverse; a retarget moves
-        // the route surface the same way a reexport retarget does.
+        // Hash sorted import targets — the authored specifier / imported
+        // name / namespace-ness the prepared-decl and bare-name chains
+        // traverse.
         let mut import_targets: Vec<(
             &str,
             &crate::resolver_core::shallow_file_state::ImportTarget,
@@ -3067,7 +2813,6 @@ fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -
             target.source_specifier.hash(hasher);
             target.imported_name.hash(hasher);
             target.is_namespace.hash(hasher);
-            target.canonical_id.hash(hasher);
         }
 
         // Hash the file content hash.
@@ -3090,53 +2835,42 @@ fn hash16_from_sorted(f: impl Fn(&mut rustc_hash::FxHasher)) -> Hash16 {
     out
 }
 
-/// Map an [`AugmentationTargetKind`] into the parallel-fields shape
-/// the parse-domain [`FactKey::ModuleAugmentationIndexShape`] +
-/// audit-event variants use.
-pub(crate) fn augmentation_target_kind_tag_for(
-    target: &crate::file_artifact_store::AugmentationTargetKind,
-) -> verter_semantic::facts::registry::AugmentationTargetKindTag {
+/// Rebuild an [`AugmentationTargetKind`](crate::file_artifact_store::AugmentationTargetKind)
+/// from the parallel-fields shape the parse-domain
+/// `FactKey::ModuleAugmentationIndexShape` carries.
+///
+/// The consumer's fact records a content-free target SHAPE; the store's
+/// augmentation index is keyed by the typed target. This is the inverse
+/// the route-surface validator needs to turn that shape back into an
+/// exact point lookup through the artifact root.
+///
+/// Returns `None` when the payload does not match the tag — a malformed
+/// shape names no entry, and the validator fails closed on it.
+fn augmentation_target_kind_from_shape(
+    tag: verter_semantic::facts::registry::AugmentationTargetKindTag,
+    external_specifier: Option<&str>,
+    resolved_relative_canonical: Option<&str>,
+    wildcard_pattern: Option<&str>,
+) -> Option<crate::file_artifact_store::AugmentationTargetKind> {
     use crate::file_artifact_store::AugmentationTargetKind;
-    use verter_semantic::facts::registry::AugmentationTargetKindTag;
-    match target {
-        AugmentationTargetKind::ExternalSpecifier(_) => {
-            AugmentationTargetKindTag::ExternalSpecifier
+    use verter_semantic::facts::registry::{
+        AugmentationTargetKindTag, InternedGlobPattern, InternedSpecifier,
+    };
+    match tag {
+        AugmentationTargetKindTag::ExternalSpecifier => Some(
+            AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(external_specifier?)),
+        ),
+        AugmentationTargetKindTag::ResolvedRelativeCanonical => {
+            Some(AugmentationTargetKind::ResolvedRelativeCanonical(
+                std::sync::Arc::from(resolved_relative_canonical?),
+            ))
         }
-        AugmentationTargetKind::ResolvedRelativeCanonical(_) => {
-            AugmentationTargetKindTag::ResolvedRelativeCanonical
+        AugmentationTargetKindTag::WildcardAmbient => Some(
+            AugmentationTargetKind::WildcardAmbient(InternedGlobPattern::from(wildcard_pattern?)),
+        ),
+        AugmentationTargetKindTag::GlobalAugmentation => {
+            Some(AugmentationTargetKind::GlobalAugmentation)
         }
-        AugmentationTargetKind::WildcardAmbient(_) => AugmentationTargetKindTag::WildcardAmbient,
-        AugmentationTargetKind::GlobalAugmentation => AugmentationTargetKindTag::GlobalAugmentation,
-    }
-}
-
-pub(crate) fn augmentation_target_external_specifier(
-    target: &crate::file_artifact_store::AugmentationTargetKind,
-) -> Option<String> {
-    use crate::file_artifact_store::AugmentationTargetKind;
-    match target {
-        AugmentationTargetKind::ExternalSpecifier(spec) => Some(spec.as_ref().to_owned()),
-        _ => None,
-    }
-}
-
-pub(crate) fn augmentation_target_resolved_relative_canonical(
-    target: &crate::file_artifact_store::AugmentationTargetKind,
-) -> Option<String> {
-    use crate::file_artifact_store::AugmentationTargetKind;
-    match target {
-        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => Some(canon.as_ref().to_owned()),
-        _ => None,
-    }
-}
-
-pub(crate) fn augmentation_target_wildcard_pattern(
-    target: &crate::file_artifact_store::AugmentationTargetKind,
-) -> Option<String> {
-    use crate::file_artifact_store::AugmentationTargetKind;
-    match target {
-        AugmentationTargetKind::WildcardAmbient(pat) => Some(pat.as_ref().to_owned()),
-        _ => None,
     }
 }
 
@@ -3151,16 +2885,24 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 // Session-tombstoned canonical: the file is DELETED in
                 // this session. A cross-file `FileWholeHash` dependency
                 // on a deleted file is invalid — reject before the lazy
-                // untracked-accept rule below. `with_session_overlay`
-                // removed the canonical from `whole_hashes`, so without
-                // this guard it would fall into the `None => true`
-                // untracked branch and a parent entry depending on the
-                // deleted file would still validate.
-                if self.snapshot.tombstoned_canonicals.contains(canonical_id) {
+                // untracked-accept rule below. A tombstoned canonical
+                // resolves to nothing through the roots, so without this
+                // guard it would fall into the `None => true` untracked
+                // branch and a parent entry depending on the deleted file
+                // would still validate.
+                if self.is_tombstoned(canonical_id) {
                     return false;
                 }
-                match self.snapshot.whole_hashes.get(canonical_id) {
+                let resolved = self.canonical_view(canonical_id);
+                match resolved.whole_hash.as_ref() {
                     Some(current) => current == hash,
+                    // The view's world HELD this canonical, but its
+                    // content authority withdrew the answer (the file is
+                    // gone, or the scheduler took authority mid-flight).
+                    // Not an absence — reject, so the entry recomputes
+                    // instead of validating against a hash nothing in
+                    // this view can confirm.
+                    None if resolved.whole_hash_withdrawn => false,
                     // File not tracked by this store view — it was loaded as a
                     // dependency AFTER the view snapshot was taken. Accept it:
                     // the facts were just materialized from current disk/workspace
@@ -3177,25 +2919,28 @@ impl crate::resolver_core::StoreView for HostStoreView {
             } => match kind {
                 crate::resolver_core::DerivedFactKind::DirectSource => {
                     // `DirectSource` is a content-hash alias for
-                    // `FileWholeHash` (it reads `whole_hashes`) — apply
-                    // the same tombstone rejection so the
-                    // removal-makes-it-look-untracked window cannot be
+                    // `FileWholeHash` (it reads the tracked whole hash) —
+                    // apply the same tombstone rejection so the
+                    // absence-looks-untracked window cannot be
                     // re-exploited on the `DirectSource` rail.
-                    if self.snapshot.tombstoned_canonicals.contains(canonical_id) {
+                    if self.is_tombstoned(canonical_id) {
                         return false;
                     }
-                    match self.snapshot.whole_hashes.get(canonical_id) {
+                    let resolved = self.canonical_view(canonical_id);
+                    match resolved.whole_hash.as_ref() {
                         Some(current) => current == hash,
+                        // Withdrawn by the artifact-only authority —
+                        // reject (same reasoning as FileWholeHash above).
+                        None if resolved.whole_hash_withdrawn => false,
                         // Untracked dependency file — accept (same reasoning
                         // as FileWholeHash above).
                         None => true,
                     }
                 }
-                _ => self
-                    .snapshot
-                    .derived_hashes
-                    .get(&(canonical_id.clone(), *kind))
-                    .is_some_and(|current| current == hash),
+                crate::resolver_core::DerivedFactKind::Route => self
+                    .canonical_view(canonical_id)
+                    .route_hash
+                    .is_some_and(|current| current == *hash),
             },
             // R26 per-domain variants — route to the per-domain
             // validators. `HostStoreView` participates in the
@@ -3239,13 +2984,13 @@ impl crate::resolver_core::StoreView for HostStoreView {
             // path-alias, SDK, workspace-folder, project-graph) bumps
             // the counter and rejects the entry.
             crate::resolver_core::FactVersionRef::ProjectGeneration { generation } => {
-                self.snapshot.project_generation == *generation
+                self.snapshot.roots.project_env_root.project_generation == *generation
             }
         }
     }
 
     fn tracks_file(&self, canonical_id: &str) -> bool {
-        self.snapshot.whole_hashes.contains_key(canonical_id)
+        self.whole_hash(canonical_id).is_some()
     }
 
     /// Direct read of the snapshotted `DerivedFactHash` for a
@@ -3257,10 +3002,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
         canonical_id: &str,
         kind: crate::resolver_core::DerivedFactKind,
     ) -> Option<crate::resolver_core::ResolverHash16> {
-        self.snapshot
-            .derived_hashes
-            .get(&(canonical_id.to_owned(), kind))
-            .copied()
+        HostStoreView::derived_hash(self, canonical_id, kind)
     }
 
     /// Strict self-root `FileWholeHash` validation.
@@ -3280,7 +3022,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
         canonical_id: &str,
         hash: &crate::resolver_core::ResolverHash16,
     ) -> bool {
-        match self.snapshot.whole_hashes.get(canonical_id) {
+        match self.whole_hash(canonical_id).as_ref() {
             Some(current) => current == hash,
             // Untracked self-root canonical — the entry's own file is
             // not in this view. Reject: the warm read misses and
@@ -3293,8 +3035,8 @@ impl crate::resolver_core::StoreView for HostStoreView {
     ///
     /// Compares the recorded `(parse_env_hash, parser_version,
     /// file_language_id)` against the view-current artifact identity
-    /// snapshotted for `canonical_id` (captured in
-    /// `snapshot_file_facts_into` via the shared
+    /// resolved for `canonical_id` through the artifact root via the
+    /// shared
     /// [`SourceEnvIdentity::live_for_artifact_key`] construction the
     /// fact producer also uses). A tombstoned canonical rejects
     /// first; a canonical with NO snapshotted identity — untracked,
@@ -3310,10 +3052,10 @@ impl crate::resolver_core::StoreView for HostStoreView {
         parser_version: u32,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool {
-        if self.snapshot.tombstoned_canonicals.contains(canonical_id) {
+        if self.is_tombstoned(canonical_id) {
             return false;
         }
-        match self.snapshot.source_envs.get(canonical_id) {
+        match self.canonical_view(canonical_id).source_env.as_ref() {
             Some(live) => {
                 live.parse_env_hash == parse_env_hash
                     && live.parser_version == parser_version
@@ -3342,7 +3084,8 @@ impl crate::resolver_core::StoreView for HostStoreView {
     /// the registry it recorded, so absence is a discriminating miss.
     fn validates_parse_domain(&self, fact: &crate::resolver_core::ParseFactRef) -> bool {
         const ZERO_HASH: Hash16 = [0u8; 16];
-        let facts = match self.snapshot.file_facts.get(fact.canonical_id.as_str()) {
+        let resolved = self.canonical_view(fact.canonical_id.as_str());
+        let facts = match resolved.file_facts.as_ref() {
             Some(f) => f,
             // Untracked file — accept if the observed hash was the
             // zero sentinel (producer saw the file as unavailable
@@ -3373,11 +3116,9 @@ impl crate::resolver_core::StoreView for HostStoreView {
     /// Resolve-imports-domain validator (R26).
     ///
     /// Compose `ResolvedImportFactsKey { canonical, content_hash,
-    /// parse_env_hash, resolve_env_hash, resolver_version,
-    /// known_miss_generation }` from the fact's `canonical_id`, the
-    /// view's tracked `whole_hashes[canonical]`,
-    /// `resolved_import_facts_known_miss_tags[canonical]`, and the
-    /// view's `env_hashes`. Look up the matching
+    /// parse_env_hash, resolve_env_hash, resolver_version }` from the fact's
+    /// `canonical_id`, the view's root-backed content hash, and the view's
+    /// environment hashes. Look up the matching
     /// `Arc<ResolvedImportFacts>` from the captured
     /// `ResolvedImportFactsDb` handle and compare the per-binding
     /// `semantic_hash` / `display_hash` (per `fact.lane`) of the
@@ -3406,15 +3147,27 @@ impl crate::resolver_core::StoreView for HostStoreView {
         fact: &crate::resolver_core::ResolveImportsFactRef,
     ) -> bool {
         const ZERO_HASH: Hash16 = [0u8; 16];
+        let crate::resolver_core::ResolveImportsFactRef::Semantic {
+            canonical_id,
+            expected_hash,
+            ..
+        } = fact
+        else {
+            // Resolution-currency arm — validated against the captured
+            // immutable resolution world (see
+            // [`HostStoreView::validates_resolution_fact`]), which is keyed
+            // by resolver observation, not by owner content.
+            return self.validates_resolution_fact(fact);
+        };
 
         // R26 producer: untracked-file optimistic-accept window. A
         // path-precise resolve-imports consumer that observed against
         // a sentinel hash (`ZERO_HASH`) means "this file produced no
         // value at observation time"; accept that observation against
         // an untracked file (still produces no value).
-        let content_hash = match self.snapshot.whole_hashes.get(fact.canonical_id.as_str()) {
-            Some(h) => *h,
-            None => return fact.expected_hash == ZERO_HASH,
+        let content_hash = match self.whole_hash(canonical_id.as_str()) {
+            Some(h) => h,
+            None => return *expected_hash == ZERO_HASH,
         };
 
         self.validates_resolve_imports_domain_for_content_hash(fact, content_hash)
@@ -3447,39 +3200,50 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 resolved_relative_canonical,
                 wildcard_pattern,
             } => {
-                let key = RouteSurfaceIndexShapeKey {
-                    target_kind_tag: *target_kind_tag,
-                    external_specifier: external_specifier.as_ref().map(|s| s.as_ref().to_owned()),
-                    resolved_relative_canonical: resolved_relative_canonical
-                        .as_ref()
-                        .map(|s| s.as_ref().to_owned()),
-                    wildcard_pattern: wildcard_pattern.as_ref().map(|s| s.as_ref().to_owned()),
-                    // CONTENT-ADDRESSED population: a session view validates
-                    // against the `Session(overlay-set fingerprint)` augmenter
-                    // set, a base view against `Base`. This is the
-                    // augmentation-INDEX population (the fingerprint IS its
-                    // content view identity), deliberately DISTINCT from the
-                    // `EffectiveExportSet` arm below, which composes the
-                    // CONTENT-FREE `EffectiveExportSetScope` (R6). The index
-                    // snapshot is fresh per fingerprint, so a session
-                    // membership/content change moves the fingerprint and the
-                    // validated lookup misses. The fact carries no population
-                    // (a content-free target shape); the population is the
-                    // VIEW's, via the SAME derivation as the producer.
-                    population: self.augmentation_population(),
+                // Reconstruct the store's `AugmentationTargetKind` from
+                // the fact's content-free target shape. The remaining key
+                // dimensions the fact does not carry — project identity,
+                // resolve env, lib env — come from this view's project-env
+                // root, which is strictly MORE precise than the collapsed
+                // shape-only snapshot this replaced: two projects' `"vue"`
+                // augmentations can no longer land in one slot.
+                let Some(target) = augmentation_target_kind_from_shape(
+                    *target_kind_tag,
+                    external_specifier.as_ref().map(|s| s.as_ref()),
+                    resolved_relative_canonical.as_ref().map(|s| s.as_ref()),
+                    wildcard_pattern.as_ref().map(|s| s.as_ref()),
+                ) else {
+                    // A shape whose payload does not match its tag is not a
+                    // target this store can hold. Fail closed.
+                    return false;
                 };
-                match self.snapshot.route_surface_index_fingerprints.get(&key) {
-                    Some(current) => current == &fact.expected_hash,
-                    // Absent from the snapshot — the augmentation
-                    // index has not been populated under this view.
-                    // Refuse the candidate so the consumer recomputes
-                    // through the cold path (which will populate the
-                    // index).
+                // CONTENT-ADDRESSED population: a session view validates
+                // against the `Session(overlay-set fingerprint)` augmenter
+                // set, a base view against `Base`. This is the
+                // augmentation-INDEX population (the fingerprint IS its
+                // content view identity), deliberately DISTINCT from the
+                // `EffectiveExportSet` arm below, which composes the
+                // CONTENT-FREE `EffectiveExportSetScope` (R6). The index
+                // entry is fresh per fingerprint, so a session
+                // membership/content change moves the fingerprint and the
+                // validated lookup misses. The fact carries no population
+                // (a content-free target shape); the population is the
+                // VIEW's, via the SAME derivation as the producer.
+                match self
+                    .snapshot
+                    .roots
+                    .augmentation_fingerprint(target, self.augmentation_population())
+                {
+                    Some(current) => current == fact.expected_hash,
+                    // No entry visible from this view's artifact root — the
+                    // augmentation index has not been populated under this
+                    // view. Refuse the candidate so the consumer recomputes
+                    // through the cold path (which will populate the index).
                     None => false,
                 }
             }
             FactKey::EffectiveExportSet => {
-                let route_db = match self.snapshot.route_db.as_ref() {
+                let route_db = match self.snapshot.roots.route_db.as_ref() {
                     Some(db) => db,
                     None => return false,
                 };
@@ -3496,9 +3260,14 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 // quadruple.
                 let target_key = crate::resolver_core::route_db::EffectiveExportSetKey {
                     provider_canonical: fact.canonical_id.clone(),
-                    project_identity: self.snapshot.project_identity,
-                    resolve_env_hash: self.snapshot.env_hashes.resolve_env_hash,
-                    lib_env_hash: self.snapshot.env_hashes.lib_env_hash,
+                    project_identity: self.snapshot.roots.project_env_root.project_identity,
+                    resolve_env_hash: self
+                        .snapshot
+                        .roots
+                        .project_env_root
+                        .env_hashes
+                        .resolve_env_hash,
+                    lib_env_hash: self.snapshot.roots.project_env_root.env_hashes.lib_env_hash,
                     // Compose the view's CONTENT-FREE session scope (R6) so a
                     // session consumer validates against the session slot, a
                     // base consumer against the base slot. The overlay content
@@ -3524,11 +3293,9 @@ impl crate::resolver_core::StoreView for HostStoreView {
 /// Caches one immutable `Arc<StoreViewSnapshot>`-backed base
 /// [`HostStoreView`] keyed by its [`StoreViewValidationToken`].
 ///
-/// Batch component-meta rebuilds the full-workspace base view once per
-/// job today (the dominant repeated CPU cost). The manager turns that
-/// into a build-once / share-by-`Arc`-clone discipline: while the token
+/// The manager applies a build-once / share-by-`Arc`-clone discipline: while the token
 /// is unchanged, [`Self::base_view`] hands back a refcount-bumped clone
-/// of the cached view instead of re-sweeping the workspace. On a token
+/// of the cached view instead of recapturing roots. On a token
 /// change the next caller rebuilds and republishes; concurrent callers
 /// that observe the same stale token cooperatively converge on whichever
 /// build lands first under the lock.
@@ -3541,20 +3308,16 @@ impl crate::resolver_core::StoreView for HostStoreView {
 ///
 /// `cached` is the published token-keyed base view. `building` is the
 /// singleflight claim: while it is set, a builder owns the in-flight
-/// cold sweep and concurrent token-miss callers WAIT on `built` rather
-/// than launching their own parallel sweeps.
+/// root capture and concurrent token-miss callers WAIT on `built` rather
+/// than launching parallel builds.
 /// Structural confinement for the [`StoreViewManager`] singleflight build
 /// claim, and the self-await backstop built on it.
 ///
 /// `CLAUDE.md`'s completion-fence rule — *"Waiters on in-flight work block
 /// cooperatively, never busy-spin; **same-path recursion never
-/// self-awaits**"* — used to be held here by a rustdoc sentence only. That
-/// is not enough: the coherent build runs OUTSIDE the manager lock and
-/// legitimately re-indexes edge-stale owners
-/// ([`HostStoreView::build`]'s `ImportRoute` arm →
-/// `ensure_indexed_ready_serve`), so any analysis-side helper reached from
-/// that re-index CAN re-enter [`StoreViewManager::base_view`] on the
-/// claim-holding thread. Such a thread observes its OWN claim and would
+/// self-awaits**"*. The coherent build runs OUTSIDE the manager lock and
+/// can be re-entered by a future claim-holding helper. Such a thread observes
+/// its OWN claim and would
 /// park on the `built` condvar that only its own [`BuildClaimGuard`]'s
 /// `Drop` can signal — a wait-for cycle of length one, at zero CPU,
 /// forever, taking the host's whole store-view path with it.
@@ -3617,7 +3380,7 @@ mod build_claim {
     pub(super) struct ClaimFlag(bool);
 
     impl ClaimFlag {
-        /// Whether a builder currently owns the in-flight cold sweep.
+        /// Whether a builder currently owns the in-flight cold build.
         pub(super) fn is_claimed(&self) -> bool {
             self.0
         }
@@ -3657,7 +3420,7 @@ mod build_claim {
             debug_assert!(
                 !state.building.is_claimed(),
                 "the singleflight claim must be free when it is taken \
-                 (double-claim would run parallel full-workspace sweeps)"
+                 (double-claim would run parallel coherent builds)"
             );
             state.building.0 = true;
             HELD_CLAIMS.with(|held| held.borrow_mut().push(manager_key(manager)));
@@ -3729,9 +3492,16 @@ struct StoreViewManagerState {
 
 /// Caches one immutable `Arc<StoreViewSnapshot>`-backed base view keyed
 /// by its [`StoreViewValidationToken`], with a singleflight cold-build
-/// claim so concurrent token-miss callers do not run N parallel
-/// full-workspace sweeps.
+/// claim so concurrent token-miss callers do not run N parallel builds.
 #[derive(Debug, Default)]
+/// **Lock rank.** `state` is OUTER to both root registries: publishing a
+/// new cached view drops the previous one under the `state` guard, and
+/// that `Drop` releases the view's leases —
+/// `SchedulerSourceDirectory::publish` and `FileArtifactStore`'s live-root
+/// registry are both acquired inside it. Neither registry is ever held
+/// while taking `state`, and a view is never dropped while holding a
+/// registry lock, so the edge is one-directional. A future path that
+/// takes `state` from inside either registry would close the cycle.
 pub(crate) struct StoreViewManager {
     state: parking_lot::Mutex<StoreViewManagerState>,
     /// Signalled when a builder publishes (or abandons) the in-flight
@@ -3771,9 +3541,8 @@ impl StoreViewManager {
     /// ## Self-await is refused
     ///
     /// The ONLY behaviour change is for a caller that already holds THIS
-    /// manager's claim on THIS thread. The coherent build runs outside the
-    /// lock and legitimately re-indexes edge-stale owners, so a nested
-    /// store-view read can arrive here from inside a build. Its `building`
+    /// manager's claim on THIS thread. A nested store-view read from any
+    /// claim-holding path observes its own `building`
     /// observation is its OWN claim, and the condvar it would park on can
     /// only be signalled by its own guard: a wait-for cycle of length one,
     /// at zero CPU, permanent. `CLAUDE.md`'s "same-path recursion never
@@ -3835,14 +3604,13 @@ impl StoreViewManager {
                 "STORE-VIEW SELF-AWAIT: base_view was re-entered on the thread holding \
                  its own build claim. Parking here would deadlock permanently, so the \
                  read was degraded to ReturnOnly. Fix the re-entrant caller: a helper \
-                 reachable from HostStoreView::build (its ImportRoute re-index reaches \
-                 ensure_indexed_ready_serve and the analysis-snapshot build) must not \
-                 acquire a store view. See CLAUDE.md: same-path recursion never \
+                 reachable while holding the store-view build claim must not acquire \
+                 another store view. See CLAUDE.md: same-path recursion never \
                  self-awaits."
             );
             return ParkDecision::RefusedSelfAwait(read);
         }
-        // A builder on ANOTHER thread owns the in-flight cold sweep: park
+        // A builder on ANOTHER thread owns the in-flight cold build: park
         // cooperatively until it publishes or abandons.
         #[cfg(test)]
         {
@@ -3871,7 +3639,7 @@ impl StoreViewManager {
     /// The returned [`HostStoreView`] clone is cheap: its
     /// `Arc<StoreViewSnapshot>` is shared with the cached entry, so a
     /// stable-token hit costs one refcount bump rather than a
-    /// full-workspace sweep.
+    /// coherent root capture.
     ///
     /// ## Singleflight (canonical-dependency-cache rule)
     ///
@@ -3879,16 +3647,14 @@ impl StoreViewManager {
     /// true`) and runs `build_coherent` OUTSIDE the lock; concurrent
     /// token-miss callers WAIT on the `built` condvar and then clone the
     /// winner's published `Arc<StoreViewSnapshot>` instead of each
-    /// running a parallel full-workspace sweep. This collapses the first
+    /// running a parallel coherent build. This collapses the first
     /// wave after any token change onto one materialization (without it,
-    /// N batch workers all pass the warm probe and run N sweeps — the
+    /// N batch workers all pass the warm probe and run N builds — the
     /// exact CPU waste this manager exists to remove).
     ///
     /// The build runs strictly outside the lock, so unrelated readers are
-    /// never serialised behind it. A builder CAN nevertheless re-enter
-    /// `base_view` while holding its own claim — the build legitimately
-    /// re-indexes edge-stale owners, and any analysis-side helper reached
-    /// from that re-index may read the store view — so "no self-await" is
+    /// never serialised behind it. Any future claim-holding helper could still
+    /// re-enter `base_view`, so "no self-await" is
     /// not left to call-site discipline. [`Self::park_for_build`] is the
     /// manager's single park site and it consults
     /// [`build_claim::claim_held_by_current_thread`]: a caller that already
@@ -3985,7 +3751,7 @@ impl StoreViewManager {
                     }
                 }
                 if state.building.is_claimed() {
-                    // A builder owns the in-flight cold sweep. Park until it
+                    // A builder owns the in-flight cold build. Park until it
                     // publishes. On wake the live host token may have advanced
                     // (a host mutation while we slept, or the winner was
                     // superseded to a still newer token), so we restart the
@@ -4723,38 +4489,64 @@ impl VerterHost {
 
 #[cfg(test)]
 impl HostStoreView {
-    /// Test-only constructor: a view that tracks exactly the supplied
-    /// `whole_hashes` map and is otherwise [`HostStoreView::default`].
+    /// Test-only constructor: a detached view that tracks exactly the
+    /// supplied whole hashes.
     ///
-    /// `whole_hashes` is a private field, so the unit tests in the
-    /// sibling `resolver_store_tests` module cannot build the view via
-    /// a struct literal — they construct it through this helper.
+    /// Expressed through the SAME override layer a session overlay uses —
+    /// there is no second per-canonical mechanism. The view leases no
+    /// host, so the root-relative base answer is empty and the overrides
+    /// are the whole answer.
     pub(crate) fn with_whole_hashes_for_tests(whole_hashes: FxHashMap<String, Hash16>) -> Self {
-        Self {
-            snapshot: Arc::new(StoreViewSnapshot {
-                whole_hashes,
-                ..StoreViewSnapshot::default()
-            }),
-            ..Self::default()
-        }
+        Self::with_source_env_snapshot_for_tests(
+            whole_hashes,
+            FxHashMap::default(),
+            std::collections::HashSet::new(),
+        )
     }
 
-    /// Test-only constructor: a view tracking the supplied
-    /// `whole_hashes`, per-canonical source-env identities, and
-    /// tombstone set — the three snapshot dimensions the strict
-    /// `FileSourceEnv` validation branch consults. Otherwise
-    /// [`HostStoreView::default`].
+    /// Test-only constructor: a detached view tracking the supplied whole
+    /// hashes, per-canonical source-env identities, and tombstone set —
+    /// the three dimensions the strict `FileSourceEnv` validation branch
+    /// consults.
     pub(crate) fn with_source_env_snapshot_for_tests(
         whole_hashes: FxHashMap<String, Hash16>,
         source_envs: FxHashMap<String, SourceEnvIdentity>,
         tombstoned_canonicals: std::collections::HashSet<String>,
     ) -> Self {
+        use crate::store_view_roots::{OverlayCanonical, Override, SessionOverlayRoot};
+        let mut session = SessionOverlayRoot {
+            tombstones: tombstoned_canonicals,
+            ..SessionOverlayRoot::default()
+        };
+        for (canonical, hash) in whole_hashes {
+            session.canonicals.insert(
+                canonical,
+                OverlayCanonical {
+                    whole_hash: Override::Value(hash),
+                    file_facts: Override::Inherit,
+                    route_hash: Override::Inherit,
+                    source_env: Override::Inherit,
+                },
+            );
+        }
+        for (canonical, identity) in source_envs {
+            session
+                .canonicals
+                .entry(canonical)
+                .or_insert_with(|| OverlayCanonical {
+                    whole_hash: Override::Inherit,
+                    file_facts: Override::Inherit,
+                    route_hash: Override::Inherit,
+                    source_env: Override::Inherit,
+                })
+                .source_env = Override::Value(identity);
+        }
+        let mut roots = crate::store_view_roots::StoreViewRoots::default();
+        roots.with_session(session);
         Self {
             snapshot: Arc::new(StoreViewSnapshot {
-                whole_hashes,
-                source_envs,
-                tombstoned_canonicals,
-                ..StoreViewSnapshot::default()
+                session_overlay_fingerprint: 0,
+                roots,
             }),
             ..Self::default()
         }
@@ -4773,10 +4565,30 @@ impl HostStoreView {
         canonical: &str,
         identity: SourceEnvIdentity,
     ) -> Self {
+        use crate::store_view_roots::{OverlayCanonical, Override};
         let mut snapshot = (*self.snapshot).clone();
-        snapshot.source_envs.insert(canonical.to_string(), identity);
+        let mut session = snapshot
+            .roots
+            .session_root
+            .as_ref()
+            .map(|root| (**root).clone())
+            .unwrap_or_default();
+        session
+            .canonicals
+            .entry(canonical.to_owned())
+            .or_insert_with(|| OverlayCanonical {
+                whole_hash: Override::Inherit,
+                file_facts: Override::Inherit,
+                route_hash: Override::Inherit,
+                source_env: Override::Inherit,
+            })
+            .source_env = Override::Value(identity);
+        snapshot.roots.with_session(session);
         Self {
             snapshot: Arc::new(snapshot),
+            // The replaced identity changes what this view answers, so it
+            // must not inherit the source view's memo.
+            memo: Arc::new(crate::store_view_roots::StoreViewMemo::default()),
             ..self.clone()
         }
     }
@@ -4894,26 +4706,25 @@ impl HostStoreView {
         FORCE_PUBLISH_DECLINE_ONCE.with(|c| c.set(true));
     }
 
-    /// Test-only: drive a SINGLE `build` attempt with a mid-build env-hash
-    /// mutation injected AFTER the per-canonical snapshot maps are populated
-    /// but BEFORE the token dimensions are stamped (the
+    /// Test-only: drive a SINGLE `build` attempt with an env-hash mutation
+    /// injected after the root token is sealed (the
     /// [`FORCE_MID_BUILD_ENV_BUMP`] one-shot knob, which advances
     /// `resolve_env_hash` WITHOUT bumping `store_view_epoch`).
     ///
     /// Returns `(view, pre_token, live_token)` where `pre_token` is the
-    /// single complete token captured BEFORE snapshotting and `live_token`
+    /// single complete token captured before root sealing and `live_token`
     /// is captured AFTER the build (reflecting the mid-build env mutation).
     ///
     /// Discriminates the build-coherence contract:
     ///
     /// * `view.validation_token()` MUST equal `pre_token` (the view was
     ///   stamped entirely from the pre-build capture, so its env fold
-    ///   matches the snapshot maps that were also captured under the OLD
+    ///   matches the roots that were also captured under the OLD
     ///   env) and MUST differ from `live_token` (which reflects the NEW
     ///   env) — so `build_coherent` rejects the attempt and retries.
     /// * Were `build` to re-read env LATE, `view.validation_token()` would
     ///   equal `live_token` (both the NEW env), and the torn view (NEW-env
-    ///   token over OLD-env snapshot maps) would be accepted as coherent.
+    ///   token over OLD-env roots) would be accepted as coherent.
     pub(crate) fn build_one_attempt_with_mid_build_env_bump_for_tests(
         host: &VerterHost,
     ) -> (
@@ -4924,7 +4735,7 @@ impl HostStoreView {
         let pre = PreBuildTokenInputs::capture(host);
         let pre_token = pre.token();
         FORCE_MID_BUILD_ENV_BUMP.with(|c| c.set(true));
-        let view = Self::build(host, &pre, None);
+        let view = Self::build(&pre, None);
         // Defensive: ensure the knob is disarmed even if `build` did not
         // reach the firing point (it always does, but keep it leak-proof).
         FORCE_MID_BUILD_ENV_BUMP.with(|c| c.set(false));
@@ -4940,9 +4751,26 @@ impl HostStoreView {
     /// test to simulate a base view that pre-dates a mid-request
     /// `ensure_loaded` promotion of the canonical.
     pub(crate) fn forget_whole_hash_for_tests(&mut self, canonical: &str) {
-        Arc::make_mut(&mut self.snapshot)
-            .whole_hashes
-            .remove(canonical);
+        use crate::store_view_roots::{OverlayCanonical, Override};
+        let snapshot = Arc::make_mut(&mut self.snapshot);
+        let mut session = snapshot
+            .roots
+            .session_root
+            .as_ref()
+            .map(|root| (**root).clone())
+            .unwrap_or_default();
+        session
+            .canonicals
+            .entry(canonical.to_owned())
+            .or_insert_with(|| OverlayCanonical {
+                whole_hash: Override::Inherit,
+                file_facts: Override::Inherit,
+                route_hash: Override::Inherit,
+                source_env: Override::Inherit,
+            })
+            .whole_hash = Override::Absent;
+        snapshot.roots.with_session(session);
+        self.memo = Arc::new(crate::store_view_roots::StoreViewMemo::default());
     }
 
     /// Test-only: peek the view's `whole_hashes` entry for a canonical
@@ -4950,8 +4778,23 @@ impl HostStoreView {
     /// reads the owner's authoritative content hash here so it can
     /// stage the overlay's `whole_hashes` entry with the same hash
     /// the producer admitted under.
+    /// Test-only: how many canonicals this view has actually RESOLVED.
+    ///
+    /// The request-footprint witness the O(1)-build tests read: a build
+    /// leaves it at zero at every host size, and it moves by exactly one
+    /// per distinct canonical a validator demands.
+    pub(crate) fn memo_len_for_tests(&self) -> usize {
+        self.memo.len()
+    }
+
+    /// Test-only: the view's tracked whole hash for a canonical, resolved
+    /// through the captured roots exactly as every validator does.
+    pub(crate) fn whole_hash_for_tests(&self, canonical: &str) -> Option<Hash16> {
+        self.whole_hash(canonical)
+    }
+
     pub(crate) fn whole_hashes_get_for_tests(&self, canonical: &str) -> Option<Hash16> {
-        self.snapshot.whole_hashes.get(canonical).copied()
+        self.whole_hash(canonical)
     }
 
     /// Test-only: raw pointer identity of the shared
@@ -4985,7 +4828,7 @@ impl HostStoreView {
     /// its retries and reports supersession. Returns `true` iff the
     /// outcome was [`SnapshotBuildOutcome::Superseded`] — i.e. the
     /// builder refused to publish a torn view. Discriminates against the
-    /// retired "retry 3× then return-anyway" behaviour, which would have
+    /// unsafe "retry 3× then return-anyway" behavior, which would have
     /// published a (potentially torn) view rather than reporting
     /// supersession.
     pub(crate) fn build_coherent_is_superseded_for_tests(host: &VerterHost) -> bool {
@@ -4998,10 +4841,26 @@ impl HostStoreView {
     }
 }
 
-/// Marginal-admit cost characterisation for [`HostStoreView::build`] —
-/// declared here rather than in `lib.rs` (which is line-ceiling guarded
-/// by `cases::g_misc1::no_lib_rs_growth`), following the same
+#[cfg(test)]
+#[path = "resolution_currency_spec_tests.rs"]
+mod resolution_currency_spec_tests;
+/// O(1) store-view build: the capture does no per-owner work, and the
+/// captured roots answer for the view's own world. Declared here rather
+/// than in `lib.rs` (which is line-ceiling guarded by
+/// `cases::g_misc1::no_lib_rs_growth`), following the same
 /// `#[cfg(test)] #[path]` pattern `host_resolve.rs` uses.
+#[cfg(test)]
+#[path = "store_view_o1_build_tests.rs"]
+mod store_view_o1_build_tests;
+
+/// Marginal-admit cost characterisation for [`HostStoreView::build`] —
+/// declared here for the same reason.
 #[cfg(test)]
 #[path = "store_view_marginal_admit_tests.rs"]
 mod store_view_marginal_admit_tests;
+#[cfg(test)]
+#[path = "store_view_resolution_currency_contract_tests.rs"]
+mod store_view_resolution_currency_contract_tests;
+#[cfg(test)]
+#[path = "store_view_resolution_root_tests.rs"]
+mod store_view_resolution_root_tests;

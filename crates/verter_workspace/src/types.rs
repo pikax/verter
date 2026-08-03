@@ -9,7 +9,7 @@ pub struct ProjectOwnership {
 }
 
 /// Resolution kind for an import or external source request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResolveRequestKind {
     EsmImport,
     TypeImport,
@@ -18,7 +18,7 @@ pub enum ResolveRequestKind {
 }
 
 /// Which dependency graph is asking for resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResolvePhase {
     CodegenBlocker,
     ProviderGraph,
@@ -149,6 +149,12 @@ pub struct VfsProvenance {
     pub dir_index_dirty_rescan_count: AtomicU64,
     pub native_fs_read_dir_count: AtomicU64,
     pub native_fs_read_file_miss_count: AtomicU64,
+    /// Live resolution-evidence reads: one per syscall issued by the
+    /// independent evidence rail, which is the ONLY rail allowed to bypass
+    /// the event-invalidated caches. Warm reuse is zero-syscall WITHIN a
+    /// content generation, so a non-zero delta across repeated demands in one
+    /// generation is a defect this counter makes visible.
+    pub resolution_evidence_live_read_count: AtomicU64,
 }
 
 impl VfsProvenance {
@@ -167,6 +173,9 @@ impl VfsProvenance {
             native_fs_read_file_miss_count: self
                 .native_fs_read_file_miss_count
                 .load(Ordering::Relaxed),
+            resolution_evidence_live_read_count: self
+                .resolution_evidence_live_read_count
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -182,6 +191,8 @@ impl VfsProvenance {
         self.native_fs_read_dir_count.store(0, Ordering::Relaxed);
         self.native_fs_read_file_miss_count
             .store(0, Ordering::Relaxed);
+        self.resolution_evidence_live_read_count
+            .store(0, Ordering::Relaxed);
     }
 }
 
@@ -194,4 +205,5 @@ pub struct VfsProvenanceSnapshot {
     pub dir_index_dirty_rescan_count: u64,
     pub native_fs_read_dir_count: u64,
     pub native_fs_read_file_miss_count: u64,
+    pub resolution_evidence_live_read_count: u64,
 }

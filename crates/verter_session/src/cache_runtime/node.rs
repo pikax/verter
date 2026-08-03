@@ -31,6 +31,7 @@ use super::lookup_publish::cooperative_admit_with_lookup_publish;
 use super::singleflight::{
     cooperative_admit_with_post_publish_by_flight_key, ComputeAdmission, InflightTable,
 };
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::{FactReadSetFinalise, ResolverContext, StoreViewCompatToken};
 
 /// Per-compute context threaded into a node's `compute` / `validate`.

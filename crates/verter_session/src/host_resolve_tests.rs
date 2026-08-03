@@ -4195,7 +4195,7 @@ fn cold_ensure_compiled_miss_does_not_read_store_view_in_cache_check() {
     // hashes match) confirm a candidate slot worth validating. A cold miss
     // (no `ProfileState` at all, or a present `ProfileState` with no slot for
     // this profile) falls through to recompile WITHOUT paying for a
-    // full-workspace store-view snapshot.
+    // store-view root capture.
     //
     // The COLD miss (`compile_cache().get() == None`) is the state where a
     // file's SOURCE is present in the scheduler but its `compile_cache`
@@ -4304,7 +4304,7 @@ fn session_get_virtual_file_profile_miss_does_not_read_store_view() {
     // `CompileOutputNodeFactValidatedSession::lookup` invokes ONLY after its
     // cheap slot-present + carrier + hash predicates pass, so this
     // profile-miss path falls through to recompile WITHOUT paying for a
-    // full-workspace store-view snapshot.
+    // store-view root capture.
     //
     // Discrimination via the same per-thread warm-validation counter used by
     // the `ensure_compiled` pair. A self-contained SFC (no cross-file deps)

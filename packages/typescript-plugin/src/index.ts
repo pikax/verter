@@ -288,6 +288,36 @@ function sameStorePath(reader: DiskCarrierStoreReader, left: string, right: stri
   return reader.canonicalPath(left) === reader.canonicalPath(right);
 }
 
+/** Resolve a relative module path in the path dialect of its containing file. */
+function resolveModulePath(containingFile: string, moduleName: string): string {
+  const containing = normalizePath(containingFile);
+  const specifier = normalizePath(moduleName);
+  if (/^[A-Za-z]:\//.test(containing) || containing.startsWith("//")) {
+    const windowsContaining = containing.replace(/\//g, "\\");
+    const windowsSpecifier = specifier.replace(/\//g, "\\");
+    return normalizePath(
+      path.win32.resolve(path.win32.dirname(windowsContaining), windowsSpecifier),
+    );
+  }
+  if (containing.startsWith("/")) {
+    return path.posix.resolve(path.posix.dirname(containing), specifier);
+  }
+  return normalizePath(path.resolve(path.dirname(containingFile), moduleName));
+}
+
+/** Preserve already-absolute manifest/TypeScript identities across host OSes. */
+function absoluteStorePath(fileName: string): string {
+  const normalized = normalizePath(fileName);
+  if (
+    normalized.startsWith("/") ||
+    normalized.startsWith("//") ||
+    /^[A-Za-z]:\//.test(normalized)
+  ) {
+    return normalized;
+  }
+  return normalizePath(path.resolve(fileName));
+}
+
 /**
  * The `@verter/typescript-plugin` is a THIN SYNCHRONOUS READER over the Rust
  * `verter_lsp`-published on-disk carrier-snapshot store. The Rust LSP is the
@@ -1284,7 +1314,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (!/^\.\.?[\\/]/.test(moduleName) || !moduleName.endsWith(".verter.js")) {
         return undefined;
       }
-      const jsAlias = normalizePath(path.resolve(path.dirname(containingFile), moduleName));
+      const jsAlias = resolveModulePath(containingFile, moduleName);
       const provider = `${jsAlias.slice(0, -".js".length)}.ts`;
       const owned = store.ownedSourceFor(provider);
       return owned?.role === "CarrierApi" && sameStorePath(store, owned.provider_uri, provider)
@@ -1380,7 +1410,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
         // An already-IDE-carrier-shaped relative specifier resolves to itself.
         if (isRelativeVueTs(moduleName)) {
-          const resolved = path.resolve(path.dirname(containingFile), moduleName);
+          const resolved = resolveModulePath(containingFile, moduleName);
           return {
             extension: providerExtension(resolved),
             isExternalLibraryImport: false,
@@ -1394,7 +1424,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // redirect target here; when the API carrier is not servable the plugin
         // abstains (see `importedCarrierForSource`).
         if (isRelativeVue(moduleName)) {
-          const resolved = path.resolve(path.dirname(containingFile), moduleName);
+          const resolved = resolveModulePath(containingFile, moduleName);
           observedCarrierImportKeys.add(activeKey(resolved));
           const importedCarrier = importedCarrierForSource(resolved);
           if (importedCarrier) {
@@ -1429,10 +1459,9 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         if (!carrierSource) {
           return;
         }
-        observedCarrierImportKeys.add(activeKey(normalizePath(path.resolve(carrierSource))));
-        const importedCarrier = importedCarrierForSource(
-          normalizePath(path.resolve(carrierSource)),
-        );
+        const absoluteCarrierSource = absoluteStorePath(carrierSource);
+        observedCarrierImportKeys.add(activeKey(absoluteCarrierSource));
+        const importedCarrier = importedCarrierForSource(absoluteCarrierSource);
         if (!importedCarrier) {
           return;
         }
@@ -2409,7 +2438,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         return verterTypesVirtualPath;
       }
       if (isRelativeVueTs(moduleName)) {
-        return path.resolve(path.dirname(containingFile), moduleName);
+        return resolveModulePath(containingFile, moduleName);
       }
       if (isRelativeVue(moduleName)) {
         // NAVIGATION, not module resolution: "go to `./Comp.vue`" targets the
@@ -2417,7 +2446,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // through a generated companion (and mapping back) would make
         // ctrl-click on an import specifier depend on publication state — the
         // source file is navigable the moment it exists on disk.
-        const resolved = normalizePath(path.resolve(path.dirname(containingFile), moduleName));
+        const resolved = resolveModulePath(containingFile, moduleName);
         return _fileExists(resolved) || store.ownedSourceFor(resolved) !== undefined
           ? resolved
           : undefined;

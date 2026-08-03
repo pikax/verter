@@ -349,7 +349,7 @@ $border: #555;
     expect(transformed).toBeDefined();
     expect(transformed.code).toContain("[data-v-");
     expect(transformed.code).toContain(".second");
-    expect(transformed.code).toContain("blue");
+    expect(transformed.code).toContain("color: #00f;");
     expect(transformed.code).not.toContain(".first");
   });
 

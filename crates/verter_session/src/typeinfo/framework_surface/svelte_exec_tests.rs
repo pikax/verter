@@ -159,6 +159,85 @@ fn host_with_svelte(
 }
 
 #[test]
+fn unavailable_script_facts_surface_is_partial_not_missing() {
+    let canonical = "/UnavailableFacts.svelte";
+    let source = "<script lang=\"ts\">\n\
+                  let { first } = $props();\n\
+                  let { second } = $props();\n\
+                  </script>";
+    let (host, view) = host_with_svelte(canonical, source);
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+
+    let outcome = resolve_svelte_surface(&host, &ctx, canonical, SvelteSurfaceSource::RunesProps);
+    let ResolvedOutcome::Partial { value, diagnostics } = outcome else {
+        panic!("unavailable script facts must surface as Partial, got {outcome:?}");
+    };
+    assert!(
+        value.props.is_none(),
+        "no exact props DTO may be fabricated"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("absence is not authoritative")),
+        "the partial outcome explains why an empty surface is not a negative"
+    );
+}
+
+#[test]
+fn recovered_script_syntax_taints_every_syntax_owned_surface() {
+    let canonical = "/RecoveredSyntax.svelte";
+    let source = "<script lang=\"ts\">\n\
+                  let { value = $bindable(), onselect }: {\n\
+                    value: string;\n\
+                    onselect: (id: number) => void;\n\
+                  } = $props();\n\
+                  export const focus = () => {};\n\
+                  return;\n\
+                  </script>";
+    let (host, view) = host_with_svelte(canonical, source);
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+
+    for source in [
+        SvelteSurfaceSource::RunesProps,
+        SvelteSurfaceSource::Bindable,
+        SvelteSurfaceSource::CallbackPropEvents,
+        SvelteSurfaceSource::InstanceExports,
+    ] {
+        let outcome = resolve_svelte_surface(&host, &ctx, canonical, source);
+        assert!(
+            matches!(outcome, ResolvedOutcome::Partial { .. }),
+            "recovered syntax must not publish an exact {source:?} surface: {outcome:?}"
+        );
+    }
+
+    let legacy_canonical = "/RecoveredLegacy.svelte";
+    let legacy_source = "<script lang=\"ts\">\n\
+                         export let count: number;\n\
+                         return;\n\
+                         </script>";
+    let (legacy_host, legacy_view) = host_with_svelte(legacy_canonical, legacy_source);
+    let legacy_overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let legacy_ctx = crate::resolver_core::HostResolverContext::from_current(
+        &legacy_host,
+        &legacy_view,
+        legacy_overlay,
+    );
+    let outcome = resolve_svelte_surface(
+        &legacy_host,
+        &legacy_ctx,
+        legacy_canonical,
+        SvelteSurfaceSource::LegacyExportLet,
+    );
+    assert!(
+        matches!(outcome, ResolvedOutcome::Partial { .. }),
+        "recovered legacy syntax must not publish an exact props surface: {outcome:?}"
+    );
+}
+
+#[test]
 fn instance_export_type_resolution_uses_the_exact_binding_owner() {
     let canonical = "/OwnerExact.svelte";
     let source = "<script module lang=\"ts\">\n\
@@ -174,8 +253,9 @@ fn instance_export_type_resolution_uses_the_exact_binding_owner() {
 
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, canonical)
-        .expect("svelte facts");
+        .expect_exact("svelte facts");
     let export = facts
+        .syntax()
         .instance_exports
         .iter()
         .find(|export| export.exported_name == "shared")
@@ -371,9 +451,9 @@ fn public_api_resolves_local_dispatcher_interface_through_shared_surface() {
         .expect("load the component into the public-API runtime");
     let facts = host
         .resolve_svelte_script_facts(component)
-        .expect("resolved Svelte script facts");
+        .expect_exact("resolved Svelte script facts");
     assert!(
-        facts.dispatcher_events.is_some(),
+        facts.resolution().dispatcher_events.is_some(),
         "the package-backed createEventDispatcher import must validate before public projection: \
          {facts:?}"
     );
@@ -435,8 +515,8 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
     // the callable through the SAME shared substrate the normalizer uses.
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let row_member = surface
@@ -1170,8 +1250,12 @@ fn assert_callback_row_param_resolves_precisely(
 ) {
     let facts = host
         .resolve_svelte_script_facts_with_ctx(ctx, canonical)
-        .expect("svelte script facts");
-    let props_type = facts.props_type.as_ref().expect("props type payload");
+        .expect_exact("svelte script facts");
+    let props_type = facts
+        .syntax()
+        .props_type
+        .as_ref()
+        .expect("props type payload");
     let props_surface = navigate_param_to_object_surface(ctx, canonical, props_type)
         .expect("the `$props` object surface resolves");
     let member = props_surface
@@ -1685,8 +1769,8 @@ fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
 
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let filtered = retain_test_snippet_members(&surface, &["row"]);
@@ -1755,8 +1839,8 @@ fn snippet_declref_tuple_params_resolve_to_ordered_dto_bindings() {
 
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let row = surface
@@ -1835,8 +1919,8 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
 
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let props_owner = verter_type_expr::TopLevelOwnerId::instance(0);
     let preparation = ctx
         .prepared_decl_bundle(component)
@@ -1998,8 +2082,12 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     );
     let recovered_facts = host
         .resolve_svelte_script_facts_with_ctx(&recovered_ctx, component)
-        .expect("svelte facts after the dependency appears");
-    let recovered_props = recovered_facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts after the dependency appears");
+    let recovered_props = recovered_facts
+        .syntax()
+        .props_type
+        .as_ref()
+        .expect("props type");
     let recovered_surface =
         navigate_param_to_object_surface(&recovered_ctx, component, recovered_props)
             .expect("props surface after recovery");
@@ -2072,8 +2160,8 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
 
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");

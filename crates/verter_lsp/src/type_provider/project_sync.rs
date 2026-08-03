@@ -317,23 +317,39 @@ impl ProjectSync {
     /// by [`Self::prepare_tsx_surface`] and read back through
     /// [`Self::carrier_preparation_failure`], which the debounced diagnostic
     /// pass publishes as `verter(carrier-provider-unavailable)`.
+    #[allow(clippy::manual_ok_err)] // read-only accessor; publishers use the typed sibling below
     pub(crate) fn carrier_provider_surface(
         &self,
         path: &str,
         generated: &str,
     ) -> Option<PreparedCarrierProviderContent> {
+        match self.carrier_provider_surface_for_publication(path, generated) {
+            Ok(prepared) => Some(prepared),
+            Err(_) => None,
+        }
+    }
+
+    /// Prepare a carrier surface for a provider publication.
+    ///
+    /// Unlike the read-only convenience accessor above, this retains preparation
+    /// failure as a distinct state so a publisher cannot mistake refusal for a
+    /// genuine empty companion set and retract an earlier complete product.
+    pub(crate) fn carrier_provider_surface_for_publication(
+        &self,
+        path: &str,
+        generated: &str,
+    ) -> Result<PreparedCarrierProviderContent, TypeProviderError> {
         match self.delivered_carrier_surface_for(path, generated) {
             Some(delivered) => {
                 // The engine holds a surface prepared from exactly these bytes,
                 // so nothing about this buffer is dark — an older recorded
                 // failure must not outlive that and keep a diagnostic alive.
                 self.clear_carrier_preparation_failure(path);
-                Some(delivered)
+                Ok(delivered)
             }
-            None => match self.prepare_tsx_surface(path, generated) {
-                Ok(prepared) => Some(prepared.prepared),
-                Err(_) => None,
-            },
+            None => self
+                .prepare_tsx_surface(path, generated)
+                .map(|prepared| prepared.prepared),
         }
     }
 
@@ -880,6 +896,59 @@ mod tests {
         ProjectSync::new(Arc::new(mock.clone()), mode)
     }
 
+    /// A managed-tsgo sync bound to a real published `FilesystemWorkspace`
+    /// rooted at `root`.
+    ///
+    /// Whether the owner already has `@verter/types` is a RESOLUTION question,
+    /// and the workspace Engine is the one authority that answers it. A sync
+    /// with no workspace has no resolution authority at all, so it can only
+    /// serve the fallback; binding one is what lets an installed package win.
+    /// Returns the canonicalized root so callers derive carrier paths from the
+    /// same identity the resolver canonicalizes to.
+    fn workspace_bound_managed_tsgo_sync(
+        mock: &MockTypeProvider,
+        root: &std::path::Path,
+    ) -> (
+        ProjectSync,
+        String,
+        Arc<verter_workspace::FilesystemWorkspace>,
+    ) {
+        let root = std::fs::canonicalize(root)
+            .expect("canonical owner root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root = root.strip_prefix("//?/").unwrap_or(&root).to_string();
+        let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        ));
+        workspace.add_explicit_project(verter_workspace::VfsProjectConfig {
+            root: root.clone(),
+            rank: verter_workspace::ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: Vec::new(),
+            extensions: vec![
+                ".ts".to_string(),
+                ".tsx".to_string(),
+                ".d.ts".to_string(),
+                ".vue".to_string(),
+            ],
+            workspace_root: root.clone(),
+            workspace_aliases: Vec::new(),
+            compiler_options: Default::default(),
+            references: Vec::new(),
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new(&root),
+            ),
+        });
+        let sync = ProjectSync::new_with_kind_and_workspace(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+            Arc::new(parking_lot::RwLock::new(Some(Arc::clone(&workspace)))),
+        );
+        (sync, root, workspace)
+    }
+
     /// A carrier preparation that genuinely CANNOT be modelled still fails
     /// closed — and the reason survives the read, under the key the user-facing
     /// lookup uses (the carrier SOURCE, not the companion path), so a first-open
@@ -1382,17 +1451,12 @@ mod tests {
     #[tokio::test]
     async fn managed_tsgo_keeps_old_virtual_types_when_installed_transition_fails() {
         let owner = tempfile::tempdir().expect("temporary owner");
-        let provider_path = owner.path().join("src/App.vue.tsx");
-        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
-        let provider_path = provider_path.to_string_lossy().into_owned();
+        std::fs::create_dir_all(owner.path().join("src")).expect("provider parent");
+        let mock = MockTypeProvider::new();
+        let (sync, root, workspace) = workspace_bound_managed_tsgo_sync(&mock, owner.path());
+        let provider_path = format!("{root}/src/App.vue.tsx");
         let virtual_path = format!("{provider_path}.__verter_types.d.ts");
         let source = "import type { GlobalComponentType } from \"@verter/types\";\n";
-        let mock = MockTypeProvider::new();
-        let sync = ProjectSync::new_with_kind(
-            Arc::new(mock.clone()),
-            ProjectSyncMode::FullProject,
-            TypeProviderKind::Tsgo,
-        );
         sync.open_tsx(&provider_path, source)
             .await
             .expect("initial virtual publication succeeds");
@@ -1409,11 +1473,33 @@ mod tests {
             "export type Installed = true;\n",
         )
         .expect("installed declarations");
+        // The install must enter through the workspace's mutation protocol,
+        // exactly as the editor's file watcher delivers it. Writing behind
+        // the Engine's back leaves the earlier MISS witness valid, so the
+        // installed transition never fires and this case stops testing the
+        // rollback ordering it exists for. `DirectoryTreeDirty` is the
+        // watcher event for a subtree whose member set the Engine cannot
+        // enumerate — an install is precisely that.
+        workspace.apply_changes(vec![
+            verter_workspace::WorkspaceChange::DirectoryTreeDirty {
+                prefix: format!("{root}/node_modules"),
+            },
+        ]);
         mock.set_fail_sync_path(&provider_path);
 
         assert!(sync.sync_tsx(&provider_path, source).await.is_err());
 
         let calls = mock.file_sync_calls();
+        // Fixture invariant: the installed transition ACTUALLY fired. Without
+        // it the sync would simply re-publish the virtual overlay and the
+        // length assertion below would be measuring the wrong path.
+        assert!(
+            !calls.iter().skip(2).any(
+                |call| matches!(call, MockCall::UpdateFile { path, .. } if path == &virtual_path)
+            ),
+            "fixture invariant: the install must be observed, so the virtual \
+             overlay must NOT be re-published: {calls:?}"
+        );
         assert_eq!(
             calls.len(),
             3,
@@ -1502,17 +1588,12 @@ mod tests {
             "export type Installed = true;\n",
         )
         .expect("package declarations");
-        let provider_path = owner.path().join("src/App.vue.tsx");
-        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
-        let provider_path = provider_path.to_string_lossy().into_owned();
+        std::fs::create_dir_all(owner.path().join("src")).expect("provider parent");
         let source =
             "import type { GlobalComponentType } from \"@verter/types\";\ntype T = GlobalComponentType<\"X\">;\n";
         let mock = MockTypeProvider::new();
-        let sync = ProjectSync::new_with_kind(
-            Arc::new(mock.clone()),
-            ProjectSyncMode::FullProject,
-            TypeProviderKind::Tsgo,
-        );
+        let (sync, root, _workspace) = workspace_bound_managed_tsgo_sync(&mock, owner.path());
+        let provider_path = format!("{root}/src/App.vue.tsx");
 
         sync.open_tsx(&provider_path, source)
             .await

@@ -2646,10 +2646,9 @@ impl DependencyResolution {
 
     /// A "known miss": the resolver answered with NO resolved canonical,
     /// no candidates, and therefore no effective target. A known-miss is
-    /// a generation-scoped negative answer — its currency is governed by
-    /// the owner's known-miss generation sidecar
-    /// ([`DerivedRawState::import_routes_known_miss_recorded_at_generation`]),
-    /// never served as an unconditional authoritative route.
+    /// never served as an authoritative route — it re-resolves through
+    /// the one owner-edge authority, whose fact witness decides whether
+    /// the miss still holds.
     pub(crate) fn is_known_miss(&self) -> bool {
         self.resolved_canonical_id.is_none()
             && self.effective_target().is_none()
@@ -2735,14 +2734,10 @@ impl ProfileState {
 /// freshness: stale route mirrors are cleared owner-scoped and stale
 /// reads miss by validation). See the §3.4.2 invalidation matrix.
 ///
-/// `import_routes` is a sub-mirror of
-/// [`crate::project_type_store::IndexedReady`]`.import_routes`: same content,
-/// different invalidation trigger. Source-content change for the owner drops
-/// this DerivedRawState entry (along with the IndexedReady entry it mirrored);
-/// profile-flag change preserves DerivedRawState while leaving IndexedReady
-/// untouched. The asymmetry that motivated D48 is the per-domain trigger
-/// independence — keeping `import_routes` here means a profile-flag sweep
-/// no longer drops the resolved-route cache redundantly.
+/// `import_routes` is the CALLER-SUPPLIED authoritative route table, not a
+/// mirror of any artifact: `IndexedReady` retains no resolved target.
+/// Source-content change for the owner drops this DerivedRawState entry;
+/// profile-flag change preserves it.
 /// A lazily computed template analysis pinned to the scheduler node
 /// generation of the source it derives from — the
 /// [`DerivedRawState::raw_template_analysis`] slot's validity rail.
@@ -2847,10 +2842,19 @@ impl RawTemplateSlotAdmission {
 
 #[derive(Debug, Default)]
 pub struct DerivedRawState {
-    /// Sub-mirror of [`IndexedReady.import_routes`](crate::project_type_store::IndexedReady).
-    /// Same content, different invalidation trigger from the IndexedReady source —
-    /// see the §3.4.2 invalidation matrix on the rehoming doc. Source content change
-    /// for the owner drops this; profile-flag change preserves it.
+    /// The CALLER-SUPPLIED authoritative route table
+    /// ([`crate::VerterHost::set_import_dependencies`] — a bundler
+    /// telling the host how ITS resolver resolves, re-pushed on the
+    /// bundler's own watch events). Serves until the caller replaces it;
+    /// its currency rides the workspace `ExactResolution` facts the same
+    /// push installs, so a caller-pushed specifier is witnessed exactly
+    /// like any other resolution.
+    ///
+    /// The host memoises NO resolution here. `IndexedReady` is a
+    /// parse/index artifact that mirrors nothing, and the one resolution
+    /// memo is the workspace's bounded owner-edge candidate slot.
+    /// Source content change for the owner drops this; profile-flag
+    /// change preserves it.
     pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
 
     /// Cached TSC extract keyed by whole_hash. On read: stored hash must match
@@ -2913,53 +2917,6 @@ pub struct DerivedRawState {
     /// cache across no-op reloads. `None` triggers the conservative bump that
     /// matches pre-fix behavior.
     pub(crate) evicted_whole_hash: Option<Hash16>,
-
-    /// Per-specifier workspace `content_generation` recorded when a
-    /// known-miss `DependencyResolution` (no resolved canonical and
-    /// no candidates) was admitted to `import_routes`. R3/R26/R28:
-    /// the reader must re-resolve once the workspace's
-    /// `content_generation` advances past the recorded value — a new
-    /// canonical may now satisfy the specifier. Missing entries are
-    /// treated as "never recorded" → the reader forces a fresh
-    /// resolution.
-    pub(crate) import_routes_known_miss_recorded_at_generation: FxHashMap<String, u64>,
-
-    /// Per-specifier [`PositiveRouteStamp`] recorded when the HOST
-    /// memoized a positive `DependencyResolution` into `import_routes`
-    /// (`cache_positive_import_route_result` — the single positive point
-    /// producer). A positive resolution is a dependency-set-derived edge
-    /// exactly like a known-miss: a file appearing or retargeting (a
-    /// `.d.ts` companion, a more-specific sibling shadowing a directory
-    /// index, a resolve-extension change) can move it while the owner's
-    /// own content stays put, so readers and the route-surface rebuild
-    /// treat a stamped entry as current ONLY while its recorded
-    /// generation equals the live `content_generation`, re-resolving
-    /// otherwise — through the stamp's RECORDED resolution lane, so the
-    /// re-resolve replays exactly the resolution the memo captured.
-    /// Entries WITHOUT a stamp are caller-supplied authoritative routes
-    /// (`set_import_dependencies` — the bundler tells the host how
-    /// ITS resolver resolves, and re-pushes on its own watch events):
-    /// those serve unconditionally until replaced. The sidecar is
-    /// cleared wherever `import_routes` is cleared or wholesale
-    /// replaced.
-    pub(crate) import_routes_positive_recorded_at_generation: FxHashMap<String, PositiveRouteStamp>,
-}
-
-/// Sidecar record for one HOST-MEMOIZED positive `import_routes` entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PositiveRouteStamp {
-    /// Workspace `content_generation` the CALLER captured BEFORE
-    /// performing the resolution this stamp records (capture-before-
-    /// resolve: a mutation landing between resolve and record leaves the
-    /// stamp conservatively stale, never forged-current).
-    pub(crate) generation: u64,
-    /// The workspace resolution lane (`ResolveRequestKind`) the memo was
-    /// produced through. A generation-stale entry re-resolves through
-    /// the SAME lane: exact resolutions are keyed `(specifier, phase,
-    /// kind)`, so replaying a different lane (e.g. the type-route chain
-    /// for an `SfcSrcAttr` memo) would miss the caller's exact row and
-    /// diverge recorder from validator.
-    pub(crate) kind: verter_workspace::ResolveRequestKind,
 }
 
 impl DerivedRawState {
@@ -3012,69 +2969,6 @@ impl DerivedRawState {
                 template_class_signature,
             });
         }
-    }
-
-    /// Whether the `import_routes` entry for `specifier` may be served /
-    /// seeded as current at `current_generation`. `true` for unstamped
-    /// entries (caller-supplied authoritative routes and known-misses —
-    /// the latter carry their own sidecar and re-resolution rail);
-    /// `false` for a host-memoized positive whose recorded generation no
-    /// longer matches the live `content_generation` (the dependency file
-    /// set moved — the entry must re-resolve).
-    pub(crate) fn import_route_is_generation_current(
-        &self,
-        specifier: &str,
-        current_generation: u64,
-    ) -> bool {
-        self.import_routes_positive_recorded_at_generation
-            .get(specifier)
-            .is_none_or(|stamp| stamp.generation == current_generation)
-    }
-
-    /// The resolution lane recorded on a HOST-MEMOIZED positive
-    /// `import_routes` entry, when one exists. `None` for unstamped
-    /// (caller-supplied authoritative) entries and known-misses. A
-    /// generation-stale stamped positive re-resolves through this lane so
-    /// the re-resolution replays exactly the resolution the memo captured
-    /// (exact resolutions are kind-keyed).
-    pub(crate) fn positive_route_resolution_kind(
-        &self,
-        specifier: &str,
-    ) -> Option<verter_workspace::ResolveRequestKind> {
-        self.import_routes_positive_recorded_at_generation
-            .get(specifier)
-            .map(|stamp| stamp.kind)
-    }
-
-    /// The COMPLETE per-entry freshness oracle for an `import_routes`
-    /// entry — the single predicate every seed loop and warm read site
-    /// consults before treating a stored route as current:
-    ///
-    /// * **Known-miss** — current ONLY while its known-miss sidecar
-    ///   stamp equals the live `content_generation`. A missing stamp
-    ///   means "never recorded" and is treated as stale (fail closed):
-    ///   a file appearing after the miss was recorded advances the
-    ///   generation, so the specifier must re-resolve against the live
-    ///   file set.
-    /// * **Host-memoized positive** (positive sidecar stamp present) —
-    ///   current ONLY while the stamp equals the live generation; the
-    ///   stamp is captured BEFORE the resolution it records, so a race
-    ///   leaves it conservatively stale.
-    /// * **Caller-supplied authoritative positive** (no stamp) — serves
-    ///   until replaced; the caller re-pushes on its own watch events.
-    pub(crate) fn import_route_entry_is_generation_current(
-        &self,
-        specifier: &str,
-        resolution: &DependencyResolution,
-        current_generation: u64,
-    ) -> bool {
-        if resolution.is_known_miss() {
-            return self
-                .import_routes_known_miss_recorded_at_generation
-                .get(specifier)
-                .is_some_and(|recorded| *recorded == current_generation);
-        }
-        self.import_route_is_generation_current(specifier, current_generation)
     }
 }
 
@@ -3453,10 +3347,6 @@ pub struct MetaProvenance {
     /// Cold `IndexedReady` materialisations (base + overlay
     /// materialiser bodies). Exactly 1 per cold canonical build.
     pub indexed_ready_materializes: std::sync::atomic::AtomicU64,
-    /// Route-surface edge refreshes that reused the content-addressed
-    /// `IndexedReady` payload (no re-parse) and rebuilt only the route
-    /// surface after a route-resolution mutation.
-    pub indexed_ready_edge_refreshes: std::sync::atomic::AtomicU64,
 
     // ── Contention instrumentation ──────────────────────────────────────
     /// `VerterHost::ensure_loaded` invocation count.
@@ -3535,7 +3425,7 @@ pub struct MetaProvenance {
     pub owner_import_surface_overflow_refusals: std::sync::atomic::AtomicU64,
     /// Admission refusals for `OwnerImportSurfaceDb` because an
     /// unresolved direct import could not be rooted in the owner's
-    /// `ImportRoute` fact rail (no coverage for the skipped specifier).
+    /// path-precise resolution witness (no coverage for the skipped specifier).
     /// The surface is served to the caller but never cached — the next
     /// request cold-recomputes against the live workspace.
     pub owner_import_surface_unrooted_skip_refusals: std::sync::atomic::AtomicU64,
@@ -3600,7 +3490,6 @@ impl Default for MetaProvenance {
             decl_bodies_lowered: std::sync::atomic::AtomicU64::new(0),
             shallow_state_builds: std::sync::atomic::AtomicU64::new(0),
             indexed_ready_materializes: std::sync::atomic::AtomicU64::new(0),
-            indexed_ready_edge_refreshes: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_calls: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_wait_ns: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_work_ns: std::sync::atomic::AtomicU64::new(0),
@@ -3869,7 +3758,6 @@ impl MetaProvenance {
             decl_bodies_lowered: self.decl_bodies_lowered.load(Relaxed),
             shallow_state_builds: self.shallow_state_builds.load(Relaxed),
             indexed_ready_materializes: self.indexed_ready_materializes.load(Relaxed),
-            indexed_ready_edge_refreshes: self.indexed_ready_edge_refreshes.load(Relaxed),
             ensure_loaded_calls: self.ensure_loaded_calls.load(Relaxed),
             ensure_loaded_wait_ns: self.ensure_loaded_wait_ns.load(Relaxed),
             ensure_loaded_work_ns: self.ensure_loaded_work_ns.load(Relaxed),
@@ -3970,7 +3858,6 @@ impl MetaProvenance {
         self.decl_bodies_lowered.store(0, Relaxed);
         self.shallow_state_builds.store(0, Relaxed);
         self.indexed_ready_materializes.store(0, Relaxed);
-        self.indexed_ready_edge_refreshes.store(0, Relaxed);
         self.ensure_loaded_calls.store(0, Relaxed);
         self.ensure_loaded_wait_ns.store(0, Relaxed);
         self.ensure_loaded_work_ns.store(0, Relaxed);
@@ -4110,7 +3997,6 @@ pub struct MetaProvenanceSnapshot {
     pub decl_bodies_lowered: u64,
     pub shallow_state_builds: u64,
     pub indexed_ready_materializes: u64,
-    pub indexed_ready_edge_refreshes: u64,
     /// Contention instrumentation counters surfaced through the
     /// host's `MetaProvenance`.
     pub ensure_loaded_calls: u64,

@@ -198,7 +198,10 @@ fn finish_populates_component_meta_kind_and_payload() {
 fn component_meta_payload_accessor_returns_none_for_other_kinds() {
     let record = RequestAuditRecord {
         request_id: 1,
-        canonical_id: String::new(),
+        canonical_id: "/other.ts".to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            "/other.ts".to_string(),
+        )),
         kind: RequestKind::TypeResolution,
         parent_request_id: None,
         from_cache: false,

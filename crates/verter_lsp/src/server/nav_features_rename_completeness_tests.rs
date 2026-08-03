@@ -235,6 +235,37 @@ async fn rename_at(
         .expect("rename request succeeds")
 }
 
+fn rename_query_count(provider: &crate::type_provider::mock::MockTypeProvider) -> usize {
+    provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                crate::type_provider::mock::MockCall::GetRenameLocations { .. }
+            )
+        })
+        .count()
+}
+
+fn assert_public_prop_refusal(error: &tower_lsp_server::jsonrpc::Error) {
+    assert_eq!(
+        error.code,
+        tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803),
+        "public component-prop refusal must use LSP RequestFailed"
+    );
+    assert!(
+        error.message.contains("complete cross-file usage proof"),
+        "the error must explain the missing completeness proof, got {:?}",
+        error.message
+    );
+    assert!(
+        error.message.contains("no rename edit was produced"),
+        "the error must make the no-edit outcome explicit, got {:?}",
+        error.message
+    );
+}
+
 async fn references_at(
     server: &VerterLanguageServer,
     uri: &Uri,
@@ -254,6 +285,613 @@ async fn references_at(
         })
         .await
         .expect("references request succeeds")
+}
+
+/// A child-side Vue public prop is not renameable until the workspace can prove
+/// every parent usage has been enumerated. Prepare must not advertise it, and a
+/// direct request must fail before the provider rename authority is queried.
+#[tokio::test]
+async fn vue_define_props_member_refuses_before_provider_rename() {
+    const SOURCE: &str =
+        "<script setup lang=\"ts\">\ndefineProps<{ title: string }>()\n</script>\n";
+    let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
+    let f = fixture_with_provider(SOURCE, Some(provider.clone())).await;
+    let position = position_of(SOURCE, "title: string", 2);
+    let before = rename_query_count(&provider);
+
+    let prepared = prepare_rename_at(f.server(), &f.uri, position).await;
+    assert!(
+        prepared.is_none(),
+        "prepare must not offer a public component-prop rename"
+    );
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "prepare must classify the public prop without probing provider rename"
+    );
+
+    let result = rename_result_at(f.server(), &f.uri, position, "heading").await;
+    let error = result.expect_err(
+        "a direct public component-prop rename must return a clear error, never a WorkspaceEdit",
+    );
+    assert_public_prop_refusal(&error);
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "direct rename must refuse before calling the provider"
+    );
+    f.shutdown().await;
+}
+
+/// The Svelte public-API projector maps local `$props()` member names exactly
+/// back to the authored declaration. That public key must not fall through the
+/// `NotChildProp` / provider-only path merely because Vue macro analysis does
+/// not classify it.
+#[tokio::test]
+async fn svelte_props_member_refuses_without_provider_passthrough() {
+    const SOURCE: &str =
+        "<script lang=\"ts\">\nlet { title }: { title: string } = $props();\n</script>\n";
+    let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
+    let f = fixture_for_carrier(
+        SOURCE,
+        Some(provider.clone()),
+        crate::TypeProviderKind::Tsgo,
+        "App.svelte",
+        "svelte",
+    )
+    .await;
+    let position = position_of(SOURCE, "{ title: string", 3);
+    let before = rename_query_count(&provider);
+
+    let prepared = prepare_rename_at(f.server(), &f.uri, position).await;
+    assert!(
+        prepared.is_none(),
+        "prepare must not offer a Svelte public prop rename"
+    );
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "prepare must not probe provider rename for a Svelte public prop"
+    );
+
+    let result = rename_result_at(f.server(), &f.uri, position, "heading").await;
+    let error = result.expect_err(
+        "a Svelte public prop must fail closed instead of reaching provider passthrough",
+    );
+    assert_public_prop_refusal(&error);
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "the Svelte public prop must be refused before provider rename"
+    );
+    f.shutdown().await;
+}
+
+/// An untyped `$props()` shorthand is both a public key and a local binding.
+/// The public-key role wins, so both prepare and direct rename must refuse
+/// without consulting the provider.
+#[tokio::test]
+async fn svelte_untyped_props_shorthand_refuses_before_provider_rename() {
+    const SOURCE: &str =
+        "<script lang=\"ts\">\nlet { title } = $props();\nconsole.log(title)\n</script>\n";
+    let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
+    let f = fixture_for_carrier(
+        SOURCE,
+        Some(provider.clone()),
+        crate::TypeProviderKind::Tsgo,
+        "Untyped.svelte",
+        "svelte",
+    )
+    .await;
+    let position = position_of(SOURCE, "{ title }", 3);
+    let before = rename_query_count(&provider);
+
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, position)
+            .await
+            .is_none(),
+        "prepare must not offer an untyped Svelte public prop"
+    );
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "prepare must classify the shorthand without probing provider rename"
+    );
+    let error = rename_result_at(f.server(), &f.uri, position, "heading")
+        .await
+        .expect_err("a shorthand public prop must refuse instead of producing an edit");
+    assert_public_prop_refusal(&error);
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "direct shorthand rename must refuse before calling the provider"
+    );
+    f.shutdown().await;
+
+    const NO_PROPS_SOURCE: &str =
+        "<script lang=\"ts\">\nconst title = 1;\nconsole.log(title);\n</script>\n";
+    let unaffected = fixture_for_carrier(
+        NO_PROPS_SOURCE,
+        None,
+        crate::TypeProviderKind::Tsgo,
+        "NoProps.svelte",
+        "svelte",
+    )
+    .await;
+    let ordinary_position = position_of(NO_PROPS_SOURCE, "const title", "const ".len());
+    let edit = rename_result_at(
+        unaffected.server(),
+        &unaffected.uri,
+        ordinary_position,
+        "heading",
+    )
+    .await
+    .expect("ordinary rename in a Svelte file without `$props()` succeeds")
+    .expect("ordinary binding rename produces an edit");
+    assert_eq!(
+        edit_starts(&edit, &unaffected.uri),
+        vec![(1, 6), (2, 12)],
+        "a Svelte file without `$props()` is unaffected"
+    );
+    unaffected.shutdown().await;
+}
+
+/// Source and native analysis are both available, but duplicate `$props()`
+/// calls make the provider's resolved validation unavailable. The rename
+/// consumer must refuse the whole file instead of treating unavailable facts
+/// as an exact empty inventory and skipping the public-prop guards.
+#[tokio::test]
+async fn svelte_rename_refuses_when_script_fact_validation_is_unavailable() {
+    const SOURCE: &str = "<script lang=\"ts\">\nlet { first } = $props();\nlet { second } = $props();\nconst ordinary = 1;\nconsole.log(ordinary);\n</script>\n";
+    let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
+    let f = fixture_for_carrier(
+        SOURCE,
+        Some(provider.clone()),
+        crate::TypeProviderKind::Tsgo,
+        "UnavailableFacts.svelte",
+        "svelte",
+    )
+    .await;
+    let position = position_of(SOURCE, "const ordinary", "const ".len());
+    let before = rename_query_count(&provider);
+
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, position)
+            .await
+            .is_none(),
+        "prepare must not offer a rename when script-fact validation is unavailable"
+    );
+    let error = rename_result_at(f.server(), &f.uri, position, "renamed")
+        .await
+        .expect_err("unavailable script facts must fail closed");
+    assert_public_prop_refusal(&error);
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "the refusal must happen before provider rename"
+    );
+    f.shutdown().await;
+}
+
+#[test]
+fn svelte_rename_script_fact_state_preserves_evidence_distinctions() {
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+
+    fn inspect(
+        canonical: &str,
+        source: &str,
+        language: FileLanguage,
+        assertion: impl FnOnce(crate::server::rename_plan::SvelteRenameScriptFactState<'_>),
+    ) {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: canonical.to_string(),
+                source: Arc::from(source),
+                file_language: language,
+                aliases: Vec::new(),
+            })
+            .expect("upsert script-fact state fixture");
+        let evidence = host.resolve_svelte_script_facts(canonical);
+        let state = crate::server::rename_plan::SvelteRenameScriptFactState::from_svelte_evidence(
+            &evidence,
+        );
+        assertion(state);
+    }
+
+    inspect(
+        "/ExactEmpty.svelte",
+        "<script>const ordinary = 1;</script>",
+        FileLanguage::svelte(),
+        |state| match state {
+            crate::server::rename_plan::SvelteRenameScriptFactState::ExactSyntax(calls) => {
+                assert!(calls.is_empty(), "exact-empty remains authoritative");
+            }
+            _ => panic!("exact-empty must retain exact syntax authority"),
+        },
+    );
+    inspect(
+        "/ResolutionPartial.svelte",
+        "<script lang=\"ts\">import type { Snippet } from 'svelte';\n\
+         let { row }: { row: Snippet } = $props();</script>",
+        FileLanguage::svelte(),
+        |state| match state {
+            crate::server::rename_plan::SvelteRenameScriptFactState::ExactSyntax(calls) => {
+                assert_eq!(
+                    calls.iter().count(),
+                    1,
+                    "resolution partiality retains exact syntax authority"
+                );
+            }
+            _ => panic!("resolution-only partiality must retain exact syntax"),
+        },
+    );
+    inspect(
+        "/SyntaxPartial.svelte",
+        "<script lang=\"ts\">let { row } = $props(); return;</script>",
+        FileLanguage::svelte(),
+        |state| {
+            assert!(matches!(
+                state,
+                crate::server::rename_plan::SvelteRenameScriptFactState::SyntaxIncomplete
+            ))
+        },
+    );
+    inspect(
+        "/Unavailable.svelte",
+        "<script>let { first } = $props(); let { second } = $props();</script>",
+        FileLanguage::svelte(),
+        |state| {
+            assert!(matches!(
+                state,
+                crate::server::rename_plan::SvelteRenameScriptFactState::Unavailable
+            ))
+        },
+    );
+    inspect(
+        "/NotApplicable.vue",
+        "<script setup>const ordinary = 1;</script>",
+        FileLanguage::vue(),
+        |state| {
+            assert!(matches!(
+                state,
+                crate::server::rename_plan::SvelteRenameScriptFactState::NotApplicable
+            ))
+        },
+    );
+}
+
+/// An aliased `$props()` entry has two distinct exact spans. The public key
+/// refuses, while the closed-call local alias remains an ordinary local rename.
+#[tokio::test]
+async fn svelte_untyped_props_alias_public_key_refuses_but_local_binding_renames() {
+    const SOURCE: &str =
+        "<script lang=\"ts\">\nlet { title: localTitle } = $props();\nconsole.log(localTitle)\n</script>\n";
+    let f = fixture_for_carrier(
+        SOURCE,
+        None,
+        crate::TypeProviderKind::Tsgo,
+        "Alias.svelte",
+        "svelte",
+    )
+    .await;
+    let public_key_position = position_of(SOURCE, "{ title:", 3);
+
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, public_key_position)
+            .await
+            .is_none(),
+        "prepare must not offer the aliased public key"
+    );
+    let error = rename_result_at(f.server(), &f.uri, public_key_position, "heading")
+        .await
+        .expect_err("the aliased public key must refuse instead of producing an edit");
+    assert_public_prop_refusal(&error);
+
+    let local_binding_position = position_of(SOURCE, "localTitle", 3);
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, local_binding_position)
+            .await
+            .is_some(),
+        "the closed-call local alias remains renameable"
+    );
+    let edit = rename_result_at(f.server(), &f.uri, local_binding_position, "heading")
+        .await
+        .expect("local alias rename request succeeds")
+        .expect("the ordinary local-binding path emits a same-file edit");
+    assert_eq!(
+        edit_starts(&edit, &f.uri),
+        vec![(1, 13), (2, 12)],
+        "only the local alias declaration and use are renamed"
+    );
+    f.shutdown().await;
+}
+
+/// A same-named import precedes an aliased `$props()` key. The native occurrence
+/// scan currently conflates their spellings, so its proposed import rename would
+/// also overwrite the public key. Refuse that whole transaction rather than
+/// changing the component API through an unrelated symbol rename.
+#[tokio::test]
+async fn svelte_props_refuses_native_edit_that_would_touch_same_named_public_key() {
+    const SOURCE: &str = "<script lang=\"ts\">\nimport { title } from \"./constants\";\nlet { title: localTitle } = $props();\nconsole.log(localTitle);\n</script>\n";
+    let f = fixture_for_carrier(
+        SOURCE,
+        None,
+        crate::TypeProviderKind::Tsgo,
+        "ImportedAlias.svelte",
+        "svelte",
+    )
+    .await;
+    let public_key_position = position_of(SOURCE, "let { title", "let { ".len());
+
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, public_key_position)
+            .await
+            .is_none(),
+        "the `$props()` public key must not be mistaken for the import"
+    );
+    let error = rename_result_at(f.server(), &f.uri, public_key_position, "heading")
+        .await
+        .expect_err("the `$props()` public key must refuse");
+    assert_public_prop_refusal(&error);
+
+    let import_position = position_of(SOURCE, "import { title", "import { ".len());
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, import_position)
+            .await
+            .is_none(),
+        "prepare must not offer a rename whose native edit would touch a `$props()` public key"
+    );
+    let error = rename_result_at(f.server(), &f.uri, import_position, "heading")
+        .await
+        .expect_err("a native edit touching a public key must refuse, never emit a WorkspaceEdit");
+    assert_public_prop_refusal(&error);
+    f.shutdown().await;
+}
+
+/// A rest element makes a `$props()` call's public-key set open. No binding in
+/// that call can be proven local-only, including an aliased binding and the
+/// rest binding itself.
+#[tokio::test]
+async fn svelte_props_open_rest_call_bindings_refuse_before_provider_rename() {
+    const SOURCE: &str = "<script lang=\"ts\">\nlet { title: localTitle, ...rest } = $props();\nconsole.log(localTitle, rest);\n</script>\n";
+    let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
+    let f = fixture_for_carrier(
+        SOURCE,
+        Some(provider.clone()),
+        crate::TypeProviderKind::Tsgo,
+        "Rest.svelte",
+        "svelte",
+    )
+    .await;
+    let before = rename_query_count(&provider);
+
+    for position in [
+        position_of(SOURCE, "localTitle", 3),
+        position_of(SOURCE, "...rest", 3),
+    ] {
+        assert!(
+            prepare_rename_at(f.server(), &f.uri, position)
+                .await
+                .is_none(),
+            "prepare must not offer a binding from an open `$props()` call"
+        );
+        let error = rename_result_at(f.server(), &f.uri, position, "renamed")
+            .await
+            .expect_err("a binding from an open `$props()` call must refuse");
+        assert_public_prop_refusal(&error);
+    }
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "open-call bindings must refuse before provider rename"
+    );
+    f.shutdown().await;
+}
+
+/// Svelte classifies an undestructured `$props()` binding as an open rest-prop
+/// surface, so renaming the whole-object binding cannot be proven local-only.
+#[tokio::test]
+async fn svelte_undestructured_props_binding_refuses_before_provider_rename() {
+    const SOURCE: &str =
+        "<script lang=\"ts\">\nlet props = $props();\nconsole.log(props.title);\n</script>\n";
+    let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
+    let f = fixture_for_carrier(
+        SOURCE,
+        Some(provider.clone()),
+        crate::TypeProviderKind::Tsgo,
+        "WholeProps.svelte",
+        "svelte",
+    )
+    .await;
+    let position = position_of(SOURCE, "let props", "let ".len());
+    let before = rename_query_count(&provider);
+
+    assert!(
+        prepare_rename_at(f.server(), &f.uri, position)
+            .await
+            .is_none(),
+        "prepare must not offer an undestructured `$props()` binding"
+    );
+    let error = rename_result_at(f.server(), &f.uri, position, "componentProps")
+        .await
+        .expect_err("an undestructured `$props()` binding must refuse");
+    assert_public_prop_refusal(&error);
+    assert_eq!(
+        rename_query_count(&provider),
+        before,
+        "undestructured `$props()` must refuse before provider rename"
+    );
+    f.shutdown().await;
+}
+
+/// Unrelated script bindings elsewhere in a Svelte `$props()` file remain
+/// ordinary local renames.
+#[tokio::test]
+async fn ordinary_svelte_binding_elsewhere_in_props_file_still_renames() {
+    const SOURCE: &str = "<script lang=\"ts\">\nconst beforeValue = 1;\nlet { title } = $props();\nconst afterValue = 2;\nconsole.log(beforeValue, afterValue);\n</script>\n";
+    let f = fixture_for_carrier(
+        SOURCE,
+        None,
+        crate::TypeProviderKind::Tsgo,
+        "Mixed.svelte",
+        "svelte",
+    )
+    .await;
+    for (needle, delta, new_name, expected) in [
+        (
+            "const beforeValue",
+            "const before".len(),
+            "renamedBefore",
+            vec![(1, 6), (4, 12)],
+        ),
+        (
+            "const afterValue",
+            "const after".len(),
+            "renamedAfter",
+            vec![(3, 6), (4, 25)],
+        ),
+    ] {
+        let position = position_of(SOURCE, needle, delta);
+        let edit = rename_result_at(f.server(), &f.uri, position, new_name)
+            .await
+            .expect("ordinary script rename request succeeds")
+            .expect("an unrelated binding in a `$props()` file stays renameable");
+        assert_eq!(
+            edit_starts(&edit, &f.uri),
+            expected,
+            "only the unrelated binding declaration and usage are renamed"
+        );
+    }
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn vue_runtime_options_and_svelte_legacy_prop_declarations_refuse() {
+    for (source, needle, delta, file_name, language_id) in [
+        (
+            "<script setup lang=\"ts\">\ndefineProps({ title: String })\n</script>\n",
+            "title: String",
+            2,
+            "Runtime.vue",
+            "vue",
+        ),
+        (
+            "<script lang=\"ts\">\nexport default { props: { title: String } }\n</script>\n",
+            "title: String",
+            2,
+            "Options.vue",
+            "vue",
+        ),
+        (
+            "<script lang=\"ts\">\nexport let title: string;\n</script>\n",
+            "title: string",
+            2,
+            "Legacy.svelte",
+            "svelte",
+        ),
+    ] {
+        let f = fixture_for_carrier(
+            source,
+            None,
+            crate::TypeProviderKind::Tsgo,
+            file_name,
+            language_id,
+        )
+        .await;
+        let position = position_of(source, needle, delta);
+        assert!(
+            prepare_rename_at(f.server(), &f.uri, position)
+                .await
+                .is_none(),
+            "{file_name}: prepare must not offer a public prop"
+        );
+        let error = rename_result_at(f.server(), &f.uri, position, "heading")
+            .await
+            .expect_err("public prop declaration must return no WorkspaceEdit");
+        assert_public_prop_refusal(&error);
+        f.shutdown().await;
+    }
+}
+
+/// A component usage remains prop-shaped even when child resolution fails.
+/// This is the exact `NotChildProp` fallthrough hole: absence of a resolved
+/// child cannot authorize provider passthrough.
+#[tokio::test]
+async fn unresolved_component_prop_usage_refuses_before_provider_rename() {
+    for (source, file_name, language_id) in [
+        (
+            "<script setup lang=\"ts\">\nconst value = 'x'\n</script>\n<template><MissingChild :title=\"value\" /></template>\n",
+            "Parent.vue",
+            "vue",
+        ),
+        (
+            "<script lang=\"ts\">\nconst value = 'x';\n</script>\n<MissingChild title={value} />\n",
+            "Parent.svelte",
+            "svelte",
+        ),
+    ] {
+        let provider = Arc::new(crate::type_provider::mock::MockTypeProvider::new());
+        let f = fixture_for_carrier(
+            source,
+            Some(provider.clone()),
+            crate::TypeProviderKind::Tsgo,
+            file_name,
+            language_id,
+        )
+        .await;
+        let position = position_of(source, "title", 2);
+        let before = rename_query_count(&provider);
+        let error = rename_result_at(f.server(), &f.uri, position, "heading")
+            .await
+            .expect_err("an unresolved prop-shaped cursor must fail closed");
+        assert_public_prop_refusal(&error);
+        assert_eq!(
+            rename_query_count(&provider),
+            before,
+            "{file_name}: unresolved child must not reach provider rename"
+        );
+        f.shutdown().await;
+    }
+}
+
+/// Ordinary script bindings remain renameable in both carrier frameworks. This
+/// is the negative control for the public-prop-only refusal.
+#[tokio::test]
+async fn ordinary_vue_and_svelte_script_bindings_still_produce_workspace_edits() {
+    for (source, file_name, language_id) in [
+        (
+            "<script setup lang=\"ts\">\nconst localValue = 1\nconsole.log(localValue)\n</script>\n",
+            "App.vue",
+            "vue",
+        ),
+        (
+            "<script lang=\"ts\">\nconst localValue = 1;\nconsole.log(localValue);\n</script>\n",
+            "App.svelte",
+            "svelte",
+        ),
+    ] {
+        let f = fixture_for_carrier(
+            source,
+            None,
+            crate::TypeProviderKind::Tsgo,
+            file_name,
+            language_id,
+        )
+        .await;
+        let position = position_of(source, "const localValue", "const local".len());
+        let edit = rename_result_at(f.server(), &f.uri, position, "renamedValue")
+            .await
+            .expect("ordinary script rename request succeeds")
+            .expect("ordinary script binding still produces a WorkspaceEdit");
+        assert_eq!(
+            edit_starts(&edit, &f.uri),
+            vec![(1, 6), (2, 12)],
+            "{file_name}: only the declaration and script use are renamed"
+        );
+        f.shutdown().await;
+    }
 }
 
 fn location_starts(locations: &[tower_lsp_server::ls_types::Location]) -> Vec<(u32, u32)> {

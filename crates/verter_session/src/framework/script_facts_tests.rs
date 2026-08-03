@@ -7,7 +7,6 @@
 use super::*;
 use crate::cache_runtime::SignatureAdmission;
 use crate::resolver_core::{FactVersionRef, PermissiveStoreView, StoreView, StoreViewCompatToken};
-use verter_semantic::analysis::framework_facts::FrameworkScriptCandidates;
 
 fn candidate_key(canonical: &str, content: [u8; 16]) -> CandidateSlotKey {
     CandidateSlotKey {
@@ -23,13 +22,29 @@ fn candidate_key(canonical: &str, content: [u8; 16]) -> CandidateSlotKey {
     }
 }
 
-fn fixture_candidates() -> FrameworkScriptCandidates {
-    FrameworkScriptCandidates {
-        adapter_id: FrameworkAdapterId::new("fixture-fw"),
-        provider_version: 1,
-        stable_hash: [1u8; 16],
-        payload: Arc::new(()),
-    }
+fn fixture_candidates() -> ExactFrameworkScriptCandidates {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_semantic::analysis::framework_facts::{
+        capture_script_candidates, ScriptFactProvider,
+    };
+
+    let provider: Arc<dyn ScriptFactProvider> = Arc::new(fixtures::FixtureProvider {
+        gate: verter_semantic::analysis::framework_facts::ScriptFactSyntaxGate::CarrierLanguage(
+            fixtures::fixture_language(),
+        ),
+        requires_capability: false,
+    });
+    let allocator = Allocator::default();
+    let program = Parser::new(&allocator, "const value = 1;", SourceType::ts())
+        .parse()
+        .program;
+    capture_script_candidates(&[provider], "const value = 1;", &program)
+        .per_provider
+        .into_iter()
+        .next()
+        .expect("fixture provider captures exact candidates")
 }
 
 #[test]
@@ -53,13 +68,16 @@ fn candidate_store_is_content_addressed_hit_and_version_miss() {
 #[test]
 fn carrier_parser_v4_candidate_is_rejected_by_v5_key() {
     const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 4;
-    assert_eq!(
-        crate::file_artifact_store::LEGACY_PARSER_VERSION,
-        PREVIOUS_CARRIER_PARSER_VERSION + 1
+    const CALL_SIGNATURE_SPAN_PARSER_VERSION: u32 = 5;
+    assert!(
+        crate::file_artifact_store::LEGACY_PARSER_VERSION >= CALL_SIGNATURE_SPAN_PARSER_VERSION
     );
 
     let store = FrameworkScriptCandidateStore::new();
-    let current = candidate_key("/Fixture.vue", [3u8; 16]);
+    let current = CandidateSlotKey {
+        parser_version: CALL_SIGNATURE_SPAN_PARSER_VERSION,
+        ..candidate_key("/Fixture.vue", [3u8; 16])
+    };
     let stale = CandidateSlotKey {
         parser_version: PREVIOUS_CARRIER_PARSER_VERSION,
         ..current.clone()
@@ -75,7 +93,37 @@ fn carrier_parser_v4_candidate_is_rejected_by_v5_key() {
     store.insert(current.clone(), fixture_candidates());
     assert!(
         store.get(&current).is_some(),
-        "a v5 candidate roundtrips under the current key"
+        "a v5 candidate roundtrips under the v5 key"
+    );
+}
+
+// @ai-generated - Pins the authored-only import-target carrier invalidation boundary.
+#[test]
+fn carrier_parser_v5_candidate_is_rejected_by_v6_key() {
+    const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 5;
+    assert_eq!(
+        crate::file_artifact_store::LEGACY_PARSER_VERSION,
+        PREVIOUS_CARRIER_PARSER_VERSION + 1
+    );
+
+    let store = FrameworkScriptCandidateStore::new();
+    let current = candidate_key("/AuthoredImport.vue", [6u8; 16]);
+    let stale = CandidateSlotKey {
+        parser_version: PREVIOUS_CARRIER_PARSER_VERSION,
+        ..current.clone()
+    };
+    store.insert(stale.clone(), fixture_candidates());
+
+    assert!(store.get(&stale).is_some(), "the planted v5 row exists");
+    assert!(
+        store.get(&current).is_none(),
+        "the authored-import-only v6 key rejects the v5 carrier candidate"
+    );
+
+    store.insert(current.clone(), fixture_candidates());
+    assert!(
+        store.get(&current).is_some(),
+        "a v6 candidate roundtrips under the current key"
     );
 }
 
@@ -123,7 +171,12 @@ fn resolved_fact_warm_read_requires_same_generation_and_fact_rail() {
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(
         vec![cross_file].into_boxed_slice(),
     )));
-    store.publish_if_cacheable(key.clone(), fixture_payload(), &admission, 5);
+    store.publish_if_cacheable(
+        key.clone(),
+        ExactScriptFacts::new(fixture_payload()),
+        &admission,
+        5,
+    );
 
     // Same gen + permissive view ⇒ warm hit.
     assert!(store.get_with_view(&key, &PermissiveStoreView, 5).is_some());
@@ -141,14 +194,19 @@ fn overflowed_admission_never_warms_the_store_return_only() {
     // caller but the store is NOT warmed (the no-poison invariant).
     let admission =
         SignatureAdmission::from_finalise(crate::resolver_core::FactReadSetFinalise::Overflow);
-    let stored = store.publish_if_cacheable(key.clone(), fixture_payload(), &admission, 5);
-    // The computed value is handed back...
-    assert!(
-        verter_semantic::analysis::framework_facts::downcast_fact_payload::<
-            fixtures::FixtureFactPayload,
-        >(Arc::clone(&stored.payload))
-        .is_some()
+    let stored = store.publish_if_cacheable(
+        key.clone(),
+        ExactScriptFacts::new(fixture_payload()),
+        &admission,
+        5,
     );
+    // The computed value is handed back...
+    assert!(stored
+        .payload
+        .facts()
+        .as_any()
+        .downcast_ref::<fixtures::FixtureFactPayload>()
+        .is_some());
     // ...but the store stays empty — the overflowed result was NOT warmed.
     assert!(store.is_empty());
     assert!(store.get_with_view(&key, &PermissiveStoreView, 5).is_none());
@@ -159,12 +217,208 @@ fn cacheable_admission_warms_exactly_one_entry() {
     let store = FrameworkScriptFactStore::new();
     let key = resolved_fact_key("/a.ts");
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::empty());
-    store.publish_if_cacheable(key, fixture_payload(), &admission, 5);
+    store.publish_if_cacheable(key, ExactScriptFacts::new(fixture_payload()), &admission, 5);
     assert_eq!(store.len(), 1, "a Cacheable admission warms one entry");
 }
 
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_language::FileLanguage;
+
+#[test]
+fn props_less_svelte_facts_are_exact_empty_and_warm_as_negative_evidence() {
+    use verter_semantic::analysis::framework_facts::{svelte::SveltePropsCall, NegativeEvidence};
+
+    fn authoritative_absence<E>(evidence: &E) -> bool
+    where
+        E: NegativeEvidence<Observation = SveltePropsCall>,
+    {
+        evidence.observations().is_empty()
+    }
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/proj/NoProps.svelte".to_string(),
+            source: Arc::from("<script lang=\"ts\">const ordinary = 1;</script>"),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert props-less Svelte file");
+
+    let evidence = host.resolve_svelte_script_facts("/proj/NoProps.svelte");
+    let ScriptFactEvidence::Exact(exact) = evidence else {
+        panic!("a clean props-less Svelte file must produce exact evidence");
+    };
+    assert!(
+        authoritative_absence(exact.facts().syntax().props_calls()),
+        "exact-empty is authoritative absence, not unresolved facts"
+    );
+    assert_eq!(
+        host.framework_script_caches().candidates.len(),
+        1,
+        "the exact-empty candidate is a cacheable negative entry"
+    );
+    assert_eq!(
+        host.framework_script_caches().facts.len(),
+        1,
+        "the exact-empty resolved fact is warm-admitted"
+    );
+
+    assert!(
+        matches!(
+            host.resolve_svelte_script_facts("/proj/NoProps.svelte"),
+            ScriptFactEvidence::Exact(_)
+        ),
+        "the warm negative entry replays as exact"
+    );
+}
+
+#[test]
+fn unresolved_resolution_keeps_exact_syntax_facts_but_does_not_warm() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/proj/UnresolvedSnippet.svelte";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.to_string(),
+            source: Arc::from(
+                "<script lang=\"ts\">\n\
+                 import type { Snippet } from 'svelte';\n\
+                 let { row }: { row: Snippet<[string]> } = $props();\n\
+                 </script>",
+            ),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert unresolved-snippet Svelte file");
+
+    let ScriptFactEvidence::Partial(partial) = host.resolve_svelte_script_facts(canonical) else {
+        panic!("unresolved snippet provenance must be partial");
+    };
+    assert_eq!(
+        partial.reason(),
+        ScriptFactPartialReason::UnresolvedImportProvenance
+    );
+    assert!(
+        partial.exact_syntax().is_some(),
+        "resolution-only partiality retains producer-proven syntax completeness"
+    );
+    let mut props_call_count = 0;
+    partial
+        .conservative_svelte_observations()
+        .props_calls()
+        .visit(|_| props_call_count += 1);
+    assert_eq!(
+        props_call_count, 1,
+        "resolution failure cannot erase the observed syntax call"
+    );
+    let mut resolved_snippet_count = 0;
+    partial
+        .conservative_svelte_observations()
+        .resolved_snippet_imports()
+        .visit(|_| resolved_snippet_count += 1);
+    assert_eq!(
+        resolved_snippet_count, 0,
+        "an unresolved import is not a conservative positive identity"
+    );
+    assert_eq!(
+        host.framework_script_caches().candidates.len(),
+        1,
+        "exact syntax capture may warm independently"
+    );
+    assert!(
+        host.framework_script_caches().facts.is_empty(),
+        "partial resolved facts are never warm-admitted"
+    );
+}
+
+#[test]
+fn recoverable_parse_produces_partial_cold_evidence() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/proj/Recovered.svelte";
+    let source = "<script lang=\"ts\">\n\
+                  let { title } = $props();\n\
+                  return;\n\
+                  </script>";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert recoverably malformed Svelte file");
+
+    let ScriptFactEvidence::Partial(partial) = host.resolve_svelte_script_facts(canonical) else {
+        panic!("recoverable parsing cannot mint exact script-fact evidence");
+    };
+    assert_eq!(partial.reason(), ScriptFactPartialReason::SyntaxRecovery);
+    assert!(
+        partial.exact_syntax().is_none(),
+        "a recovered parser result cannot expose exact syntax authority"
+    );
+    let mut props_call_count = 0;
+    partial
+        .conservative_svelte_observations()
+        .props_calls()
+        .visit(|_| props_call_count += 1);
+    assert_eq!(
+        props_call_count, 1,
+        "the recovered positive `$props()` observation remains conservatively usable"
+    );
+    assert!(
+        host.framework_script_caches().candidates.is_empty(),
+        "a recovered candidate inventory is not exact enough to warm"
+    );
+    assert!(
+        host.framework_script_caches().facts.is_empty(),
+        "recovered resolved facts remain cold"
+    );
+}
+
+#[test]
+fn validation_unavailable_with_live_source_and_analysis_does_not_warm() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/proj/DuplicateProps.svelte";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.to_string(),
+            source: Arc::from(
+                "<script>\n\
+                 let { first } = $props();\n\
+                 let { second } = $props();\n\
+                 const ordinary = first + second;\n\
+                 </script>",
+            ),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert duplicate-props Svelte file");
+
+    assert!(host.get_source(canonical).is_some(), "source is available");
+    assert!(
+        host.get_analysis(canonical).is_some(),
+        "semantic analysis is available"
+    );
+    assert!(matches!(
+        host.resolve_svelte_script_facts(canonical),
+        ScriptFactEvidence::Unavailable(ref unavailable)
+            if unavailable.reason()
+                == ScriptFactUnavailableReason::ValidationProducedNoFacts
+    ));
+    assert_eq!(
+        host.framework_script_caches().candidates.len(),
+        1,
+        "the exact capture remains independently cacheable"
+    );
+    assert!(
+        host.framework_script_caches().facts.is_empty(),
+        "unavailable validation is never warm-admitted"
+    );
+}
 
 fn host_with_files() -> std::sync::Arc<VerterHost> {
     let host = std::sync::Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -204,7 +458,7 @@ fn fixture_provider_resolves_validates_and_caches_end_to_end() {
         &registration,
         "/proj/Consumer.ts",
     )
-    .expect("the consumer imports the framework package, so facts resolve");
+    .expect_exact("the consumer imports the framework package, so facts resolve");
     assert_eq!(facts.resolved_specifier, "./node_modules/fixture-fw/index");
     // The content-addressed candidate slot was filled.
     assert!(
@@ -218,8 +472,8 @@ fn fixture_provider_resolves_validates_and_caches_end_to_end() {
     );
     // The cached entry's read-set ROOTS the payload against the owner's
     // IMPORT-ROUTE surface (not just whole-hashes) — a re-route that leaves
-    // file contents unchanged must still invalidate. (If the ImportRoute
-    // fact were dropped, this assertion fails.)
+    // file contents unchanged must still invalidate. (If the resolution
+    // witness were dropped, this assertion fails.)
     let stored = host
         .framework_script_caches()
         .facts
@@ -228,17 +482,14 @@ fn fixture_provider_resolves_validates_and_caches_end_to_end() {
     let has_import_route_fact = stored.read_set_signature.facts.iter().any(|f| {
         matches!(
             f,
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                ..
-            } if canonical_id == "/proj/Consumer.ts"
+            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+                if inner.resolution_fact().is_some()
         )
     });
     assert!(
         has_import_route_fact,
-        "the cached resolved fact must observe the owner's ImportRoute \
-             derived fact so a re-route invalidates it"
+        "the cached resolved fact must observe the owner's import-route \
+             RESOLUTION WITNESS so a re-route invalidates it"
     );
     // Second resolve: warm hit returns the same typed payload.
     let facts2 = resolve_script_facts::<fixtures::FixtureFactPayload>(
@@ -246,7 +497,7 @@ fn fixture_provider_resolves_validates_and_caches_end_to_end() {
         &registration,
         "/proj/Consumer.ts",
     )
-    .expect("warm hit");
+    .expect_exact("warm hit");
     assert_eq!(facts2.resolved_specifier, facts.resolved_specifier);
 }
 
@@ -278,7 +529,7 @@ fn fenced_import_serve_refuses_script_facts_publication() {
         &registration,
         "/proj/Consumer.ts",
     )
-    .expect("control: the consumer imports the framework package, so facts resolve");
+    .expect_exact("control: the consumer imports the framework package, so facts resolve");
     assert_eq!(
         facts_c.resolved_specifier,
         "./node_modules/fixture-fw/index"
@@ -306,14 +557,9 @@ fn fenced_import_serve_refuses_script_facts_publication() {
         .store(false, Ordering::Relaxed);
 
     // The value is still SERVED to THIS caller (ReturnOnly).
-    assert!(
-        facts.is_some(),
-        "a fenced import-route serve still serves the caller (ReturnOnly)",
-    );
-    assert_eq!(
-        facts.unwrap().resolved_specifier,
-        "./node_modules/fixture-fw/index"
-    );
+    let facts =
+        facts.expect_exact("a fenced import-route serve still serves the caller (ReturnOnly)");
+    assert_eq!(facts.resolved_specifier, "./node_modules/fixture-fw/index");
     // ...but the facts entry is NOT published (poison refused).
     assert!(
         host.framework_script_caches().facts.is_empty(),
@@ -374,7 +620,7 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
         &registration,
         "/proj/Consumer.ts",
     )
-    .expect("control: the consumer imports the framework package, so facts resolve");
+    .expect_exact("control: the consumer imports the framework package, so facts resolve");
     assert_eq!(
         control_facts.resolved_specifier,
         "./node_modules/fixture-fw/index"
@@ -417,15 +663,11 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
     );
 
     // (1) The payload is still SERVED to this caller (ReturnOnly).
-    assert!(
-        facts.is_some(),
+    let facts = facts.expect_exact(
         "an overflowed import-route tracer still serves the caller (ReturnOnly): refusal is \
-             CACHE-ONLY",
+         CACHE-ONLY",
     );
-    assert_eq!(
-        facts.unwrap().resolved_specifier,
-        "./node_modules/fixture-fw/index"
-    );
+    assert_eq!(facts.resolved_specifier, "./node_modules/fixture-fw/index");
 
     // (2) ...but the facts entry is NOT published. THE load-bearing assertion.
     assert!(
@@ -526,10 +768,8 @@ fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
         "the overflow must land on the NAMED import-route scope even though a foreign scope ran \
          first",
     );
-    assert!(
-        facts.is_some(),
-        "the refusal stays CACHE-ONLY: the payload is still served (ReturnOnly)",
-    );
+    let _facts = facts
+        .expect_exact("the refusal stays CACHE-ONLY: the payload is still served (ReturnOnly)");
     assert!(
         host.framework_script_caches().facts.is_empty(),
         "POISON: the import-route scope's overflow did not refuse the publication. The count was \
@@ -550,19 +790,20 @@ fn capability_off_refuses_through_the_real_host() {
         &registration,
         "/proj/Consumer.ts",
     );
-    assert!(
-        facts.is_none(),
-        "the consumed capability bit is OFF on the real host, so the \
-             provider refuses to emit resolved facts"
-    );
+    assert!(matches!(
+        facts,
+        ScriptFactEvidence::Unavailable(ref unavailable)
+            if unavailable.reason()
+                == ScriptFactUnavailableReason::ValidationProducedNoFacts
+    ));
     // The refusal does NOT warm the resolved-fact store.
     assert!(host.framework_script_caches().facts.is_empty());
 }
 
 #[test]
-fn no_provider_registration_is_zero_cost_none() {
-    // A registration with no provider answers None without touching the
-    // host's parse/analysis at all (the steady-state zero-cost path).
+fn no_provider_registration_is_zero_cost_not_applicable() {
+    // A registration with no provider answers NotApplicable without touching
+    // the host's parse/analysis at all (the steady-state zero-cost path).
     let host = host_with_files();
     let registration = fixtures::import_gated_capability_free_fixture_registration();
     let empty_registration = FrameworkRegistration {
@@ -574,14 +815,19 @@ fn no_provider_registration_is_zero_cost_none() {
         &empty_registration,
         "/proj/Consumer.ts",
     );
-    assert!(facts.is_none());
+    assert!(matches!(
+        facts,
+        ScriptFactEvidence::NotApplicable(ref not_applicable)
+            if not_applicable.reason()
+                == ScriptFactNotApplicableReason::ProviderNotRegistered
+    ));
     assert!(host.framework_script_caches().candidates.is_empty());
 }
 
 #[test]
-fn gate_miss_file_does_not_import_specifier_resolves_none() {
+fn gate_miss_file_does_not_import_specifier_is_not_applicable() {
     // A file that does NOT import the gated specifier selects no provider
-    // (the gate misses), so no facts resolve.
+    // (the gate misses), so this provider is not applicable.
     let host = std::sync::Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let _ = host
         .upsert(UpsertRequest {
@@ -598,5 +844,9 @@ fn gate_miss_file_does_not_import_specifier_resolves_none() {
         &registration,
         "/proj/Unrelated.ts",
     );
-    assert!(facts.is_none(), "the gate misses — no provider is active");
+    assert!(matches!(
+        facts,
+        ScriptFactEvidence::NotApplicable(ref not_applicable)
+            if not_applicable.reason() == ScriptFactNotApplicableReason::ProviderGateMiss
+    ));
 }

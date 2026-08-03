@@ -212,8 +212,10 @@ exposes EXACTLY two ops:
   parse-domain artifact materialization internally (ensure-loaded → read
   the `framework_parse` slot → token-gated downcast) and hands back ONLY the
   typed carrier, never `FrameworkParseArtifact` / `IndexedReady`.
-- `script_facts_for::<T: FrameworkScriptFactPayload>(canonical) -> Option<Arc<T>>`
-  — drives the resolved-validation half on demand.
+- `script_facts_for::<T: FrameworkScriptFactPayload>(canonical) ->
+  ScriptFactEvidence<T>` — drives the resolved-validation half on demand while
+  preserving exact (including exact-empty), partial, unavailable, and
+  not-applicable states.
 
 It never resolves types, indexes a file, runs OXC, calls
 `ProjectSemanticDispatch`, or reads a `StoreView`. Pinned by
@@ -360,7 +362,11 @@ The seam splits across the crate that owns each domain:
   `active_providers` slice; an EMPTY slice is the byte-identical pre-existing
   path with ZERO capture work (`script_fact_providers_zero_cost_on_miss`).
   `ScriptFactSyntaxGate` is closed + exact-valued (`CarrierLanguage` /
-  `ImportSpecifier`) — no predicate arm.
+  `ImportSpecifier`) — no predicate arm. The session capture path mints
+  `ExactFrameworkScriptCandidates`, including an exact-empty entry, only when
+  its OXC parse completes without syntax diagnostics. A recovered parse carries
+  positive-only candidate observations into a partial result and never
+  populates either script-fact store; cache absence means only “not computed.”
 - **Resolved-validation half** (`framework/script_facts.rs`). Driven on
   demand by `script_facts_for`. The `ActiveProviderIndex` (rebuilt per
   registry construction; `is_empty()` fast path) is the shared gate
@@ -373,15 +379,23 @@ The seam splits across the crate that owns each domain:
   `validate` receives NEUTRAL data (`ResolvedValidationCx`: candidates,
   resolved-import targets, a capability lookup) so the trait stays free of
   session resolver types. Publication is `SignatureAdmission::Cacheable`-only
-  (overflow ⇒ `ReturnOnly`, no warm); the cold tracer observes the owner's
-  `ImportRoute` fact (a re-route stale-serves otherwise). The provider
-  rejects userland look-alikes and refuses emission when a consumed
-  capability bit is OFF.
+  and accepts only producer-minted `ExactScriptFacts` (overflow ⇒ `ReturnOnly`,
+  no warm); partial and unavailable results never warm. The cold tracer
+  observes the owner's request-bound path-precise resolution witness (a
+  re-route stale-serves otherwise).
+  `ScriptFactEvidence` preserves exact, partial, unavailable, and
+  not-applicable top-level outcomes without collapsing them to `Option`.
+  `PartialScriptFacts` has no whole-payload accessor: Svelte consumers use
+  `conservative_svelte_observations()` for positive-only degradation, while
+  `exact_syntax()` exposes a separate producer-proven syntax facet only for
+  resolution-partial evidence.
 
-NO production provider registers in this program — Vue's macro analysis
-stays inside the shallow pass, so the seam is exercised by an in-tree
-fixture provider. A later framework vertical's provider drives the resolved
-path in production.
+Svelte registers the production provider. Its payload separates exact
+syntax-owned facts (`ExactSveltePropsCalls`, props type syntax, defaults,
+bindables, legacy props, instance/module exports) from resolution-owned
+`Snippet` and dispatcher provenance. Import-resolution failure therefore
+cannot erase already-exact `$props()` geometry. Vue's macro analysis stays
+inside the shallow pass.
 
 ## Component-default synth
 

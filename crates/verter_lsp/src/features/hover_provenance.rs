@@ -340,6 +340,9 @@ mod tests {
         let mut base = RequestAuditRecord {
             request_id: 42,
             canonical_id: "/c.vue".into(),
+            target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+                "/c.vue".into(),
+            )),
             kind: RequestKind::ComponentMeta,
             parent_request_id: None,
             timings: RequestTimingAudit::default(),

@@ -262,35 +262,22 @@ pub(crate) fn observe_compile_tier_dependencies(
         observe_file_whole_hash(host, &resolved);
     }
 
-    // 5. Owner `ImportRoute` derived fact — the route-retarget pin.
+    // 5. Owner import-route witness — the route-retarget pin.
     //    Every dep-side fact above is recorded against the canonical a
     //    specifier RESOLVED TO at compile time; none of them moves when
     //    a route mutation (`set_exact_resolutions` /
     //    `configure_projects`) retargets the specifier while both the
     //    owner's and the old target's content stay put. The owner's
-    //    generation-current `ImportRoute` hash is the discriminating
-    //    dimension: the base store view snapshots it per tracked
-    //    canonical (empty-table hash when the owner has no route
-    //    surface), so recording the compile-time value here makes the
-    //    warm validation fail the moment the owner's effective
+    //    import-route RESOLUTION WITNESS is the discriminating
+    //    dimension: resolving the owner's authored specifiers fans the
+    //    sealed transactions' observations onto this compute's tracer,
+    //    so warm validation fails the moment the owner's effective
     //    specifier→canonical mapping changes — the slot re-derives
     //    under the new route instead of serving the pre-retarget
     //    output. Observed only for route-consuming compiles (a compile
-    //    with no cross-file specifiers has no route surface to pin);
-    //    the empty-table fallback mirrors the view-build convention so
-    //    producer and validator agree byte-for-byte on the no-routes
-    //    representation.
+    //    with no cross-file specifiers has no route surface to pin).
     if !script_imports.is_empty() || !macro_type_deps.is_empty() || !external_requests.is_empty() {
-        let import_route_hash = host
-            .generation_current_import_route_hash(canonical_id)
-            .unwrap_or_else(|| {
-                crate::resolver_store::hash_import_route_targets(&rustc_hash::FxHashMap::default())
-            });
-        crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::DerivedFactHash {
-            canonical_id: canonical_id.to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-            hash: import_route_hash,
-        });
+        host.observe_owner_import_route_witness(canonical_id);
     }
 }
 
@@ -420,41 +407,50 @@ fn symbol_space_for_import(import: &AnalyzedImport) -> SymbolSpace {
     }
 }
 
-/// Resolve a script-import source specifier to a canonical id via
-/// the owner's `import_routes` sub-mirror on `DerivedRawState`.
+/// Resolve a script-import source specifier to a canonical id.
 ///
-/// Returns `None` when the import is unresolved (typical for
-/// external specifiers like `'vue'` without a workspace fallback);
-/// the caller treats unresolved deps as "no fact observation" and
-/// the compile cache still validates via the augmentation
-/// fingerprint observation for augmented specifiers.
+/// The CALLER-SUPPLIED authoritative table
+/// (`DerivedRawState.import_routes` — a bundler telling the host how ITS
+/// resolver resolves) wins when it names the specifier: that is the
+/// canonical the compile actually consumed. Everything else resolves
+/// through the one owner-edge authority, whose warm candidate is the
+/// same answer the compile's own prefetch drove moments earlier.
 ///
-/// Deliberately AS-CONSUMED — no per-entry freshness-oracle consult.
+/// Returns `None` when the import is unresolved (typical for external
+/// specifiers like `'vue'` without a workspace fallback); the caller
+/// treats unresolved deps as "no fact observation" and the compile cache
+/// still validates via the augmentation fingerprint observation for
+/// augmented specifiers.
+///
 /// The dep-side observations this read feeds (`Export` /
-/// `MemberPresence` / `FileWholeHash`) must describe the canonical the
-/// compile ACTUALLY READ, and the compile and this producer consume
-/// the SAME mirror: the cold-compute prefetch
-/// (`prefetch_compile_tier_observation_targets`) re-resolves and
-/// re-stamps every entry this emission reads — script imports and
-/// macro deps unconditionally, `src=` memos through the per-entry
-/// oracle — immediately before the tracer runs. Re-resolving here
-/// against the live workspace would observe facts for a file the
-/// compile never read. Route-level drift is the step-5 `ImportRoute`
-/// fact's job: its producer/validator
-/// (`generation_current_import_route_hash`) consults the per-entry
-/// oracle and re-resolves stale entries, so a post-compile retarget
-/// mismatches on warm validation and the slot re-derives.
+/// `MemberPresence` / `FileWholeHash`) describe the canonical the
+/// compile READ. Route-level drift is the import-route WITNESS's job:
+/// it resolves the owner's authored specifiers and records the
+/// resulting observations, so a post-compile retarget advances an
+/// observed fact, warm validation fails, and the slot re-derives.
 fn resolve_import_source_to_canonical(
     host: &VerterHost,
     canonical_id: &str,
     source: &str,
 ) -> Option<String> {
-    let derived = host.derived_raw_cache().get(canonical_id)?;
-    let resolution = derived.import_routes.get(source)?;
-    resolution
-        .resolved_canonical_id
-        .clone()
-        .or_else(|| resolution.effective_target().map(str::to_string))
+    if let Some(caller_supplied) = host
+        .derived_raw_cache()
+        .get(canonical_id)
+        .and_then(|derived| {
+            derived.import_routes.get(source).and_then(|resolution| {
+                resolution
+                    .resolved_canonical_id
+                    .clone()
+                    .or_else(|| resolution.effective_target().map(str::to_string))
+            })
+        })
+    {
+        return Some(caller_supplied);
+    }
+    match host.resolve_type_dependency_canonical(canonical_id, source) {
+        verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+        verter_workspace::ResolutionPublication::Refused(_) => None,
+    }
 }
 
 /// Observe the augmentation-index fingerprint for every imported

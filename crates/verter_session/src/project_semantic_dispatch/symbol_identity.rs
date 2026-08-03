@@ -124,16 +124,9 @@ impl ProjectSemanticDispatch<'_> {
         let mut terminal_import_source: Option<Arc<str>> = None;
 
         if let Some(specifier) = import_type_specifier {
-            observe_import_route_fact(self.ctx, owner_canonical);
-            let serve = self
+            let target = self
                 .ctx
-                .ensure_indexed_ready_serve(owner_canonical)
-                .ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
-            let target = serve
-                .indexed
-                .import_routes
-                .get(specifier.as_ref())
-                .and_then(|route| route.effective_target())
+                .resolve_type_dependency_canonical(owner_canonical, specifier.as_ref())
                 .ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
             import_edge = Some((
                 Arc::from(owner_canonical),
@@ -144,7 +137,7 @@ impl ProjectSemanticDispatch<'_> {
             terminal_import_source = Some(Arc::clone(&specifier));
             let (resolved, route_facts) = self
                 .ctx
-                .resolve_imported_type_root_with_facts(target, head.as_ref());
+                .resolve_imported_type_root_with_facts(&target, head.as_ref());
             self.ctx.observe_borrowed_signature(&route_facts);
             let _terminal = resolved.ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
             current_canonical = Arc::from(target);
@@ -176,11 +169,17 @@ impl ProjectSemanticDispatch<'_> {
                     Some(ExportTarget::Reexport {
                         source_specifier,
                         original_name,
-                        canonical_id,
                         ..
                     }) => {
                         terminal_import_source = Some(Arc::from(source_specifier.as_str()));
-                        current_canonical = Arc::from(canonical_id.as_str());
+                        let target = self
+                            .ctx
+                            .resolve_type_dependency_canonical(
+                                current_canonical.as_ref(),
+                                source_specifier,
+                            )
+                            .ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
+                        current_canonical = Arc::from(target);
                         current_owner = verter_type_expr::TopLevelOwnerId::instance(0);
                         head = Arc::from(original_name.as_str());
                         continue;
@@ -212,14 +211,20 @@ impl ProjectSemanticDispatch<'_> {
                         Arc::clone(&routed_name),
                     ));
                 }
-                let (resolved, route_facts) = self.ctx.resolve_imported_type_root_with_facts(
-                    &target.canonical_id,
-                    routed_name.as_ref(),
-                );
+                let target_canonical = self
+                    .ctx
+                    .resolve_type_dependency_canonical(
+                        current_canonical.as_ref(),
+                        &target.source_specifier,
+                    )
+                    .ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
+                let (resolved, route_facts) = self
+                    .ctx
+                    .resolve_imported_type_root_with_facts(&target_canonical, routed_name.as_ref());
                 self.ctx.observe_borrowed_signature(&route_facts);
                 let _terminal =
                     resolved.ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
-                current_canonical = Arc::from(target.canonical_id.as_str());
+                current_canonical = Arc::from(target_canonical);
                 current_owner = verter_type_expr::TopLevelOwnerId::instance(0);
                 head = routed_name;
                 resolve_export = true;
@@ -634,21 +639,6 @@ impl ProjectSemanticDispatch<'_> {
     ) -> SymbolIdentityDemandOutcome {
         self.fold_local_partial_completeness(reason_partial_set(reason));
         SymbolIdentityDemandOutcome::Partial(reason)
-    }
-}
-
-fn observe_import_route_fact(ctx: &dyn crate::resolver_core::ResolverContext, canonical: &str) {
-    if let Some(route_hash) = ctx
-        .host_for_fact_tracer_install()
-        .generation_current_import_route_hash(canonical)
-    {
-        crate::fact_signature_helpers::observe_fact_signature(&[
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: canonical.to_string(),
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                hash: route_hash,
-            },
-        ]);
     }
 }
 

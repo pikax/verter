@@ -140,7 +140,7 @@ export interface PollBudgetSpec {
  * is excluded: it guards a cross-process file lock, not a Mocha-surface poll.
  *
  * By that method, over `suite/**`, `lib/**` and `helpers.ts`: 15 default-budget
- * functions and 11 inline loops — 26 sites, all 26 registry-backed. Two earlier
+ * functions and 12 inline loops — 27 sites, all 27 registry-backed. Two earlier
  * counts in this file were asserted rather than derived and were both wrong; this
  * one states its method so the next one need not be taken on trust.
  *
@@ -287,6 +287,10 @@ export const POLL_BUDGETS = {
   // ready line, so the two MCP activation tests poll the log instead of
   // reading it once.
   activationMcpReady: { budgetMs: 20_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
+  hoverProvenanceRestart: {
+    budgetMs: DEFAULT_POLL_BUDGET_MS,
+    parentTimeoutMs: SUITE_TIMEOUT_MS,
+  },
   diagnosticsUnresolvedRetry: { budgetMs: 20_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
   diagnosticsClearRetry: { budgetMs: 20_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
   confidenceProbe: { budgetMs: 10_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
@@ -415,6 +419,20 @@ export const POLL_SEQUENCES = {
     reason:
       "the v-slot case opens a carrier and then probes four positions — the slot local and its " +
       "member, each first waited for and then measured — all in series in one test",
+  },
+  hoverProvenanceSetup: {
+    members: ["waitForFileReady", "hoverProvenanceRestart"],
+    parentTimeoutMs: SUITE_TIMEOUT_MS,
+    reason:
+      "the suite setup opens the shared fixture and may reset a stale provenance setting, " +
+      "waiting for both file readiness and the replacement server under one hook deadline",
+  },
+  hoverProvenanceRestartRoundTrip: {
+    members: ["hoverProvenanceRestart", "measureHover", "measureHover"],
+    parentTimeoutMs: 60_000,
+    reason:
+      "the provenance case waits for the configuration-driven replacement server, then makes " +
+      "two hover requests around the background-enrichment pause under one test deadline",
   },
 } as const satisfies Record<string, PollSequenceSpec>;
 

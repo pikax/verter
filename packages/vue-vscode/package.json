@@ -149,7 +149,7 @@
         "verter.analysis.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Enable the Verter Analysis sidebar and isolated background semantic enrichment. TypeScript IDE features remain independent."
+          "description": "Enable the Verter Analysis sidebar and isolated background semantic enrichment. TypeScript IDE features remain independent. Changing this setting restarts the language server."
         },
         "verter.decorations.vueApiCalls": {
           "type": "boolean",
@@ -337,12 +337,12 @@
         "verter.hover.nativeSemantics": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Enable Verter's native semantic and framework-structural hover contribution. Disabled by default so the selected TypeScript provider exclusively owns the hover hot path."
+          "markdownDescription": "Enable Verter's native semantic and framework-structural hover contribution. Disabled by default so the selected TypeScript provider exclusively owns the hover hot path. Changing this setting restarts the language server."
         },
         "verter.hover.provenance": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "**Experimental**: Append a **Provenance** markdown section to hover responses, listing files loaded during the hover's component-meta resolution and key derivation counters. The first hover returns the legacy payload; subsequent hovers at the same position include the cached enriched section. Cache is LRU-bounded to 100 entries and invalidates on `didChange` for the hovered file (transitive dependency changes do NOT invalidate — codified limitation). Requires the LSP host to have `audit_enabled` + `footprint_capture` enabled for the enrichment to populate."
+          "markdownDescription": "**Experimental**: Append a **Provenance** markdown section to hover responses, listing files loaded during the hover's component-meta resolution and key derivation counters. The first hover returns the legacy payload; subsequent hovers at the same position include the cached enriched section. Cache is LRU-bounded to 100 entries and invalidates on `didChange` for the hovered file (transitive dependency changes do NOT invalidate — codified limitation). Requires the LSP host to have `audit_enabled` + `footprint_capture` enabled for the enrichment to populate. Changing this setting restarts the language server."
         }
       }
     },

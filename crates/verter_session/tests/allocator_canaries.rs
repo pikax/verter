@@ -442,7 +442,7 @@ mod canary_signature_fingerprint_zero_alloc {
                 lane: FactLane::Semantic,
                 expected_hash: [3u8; 16],
             }),
-            FactVersionRef::ResolveImports(ResolveImportsFactRef {
+            FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
                 canonical_id: "/w/imports.ts".to_string(),
                 key: FactKey::Export {
                     name: "Bar".into(),

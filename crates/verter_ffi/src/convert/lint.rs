@@ -3,7 +3,7 @@
 
 use crate::types::*;
 
-use super::offset::byte_offset_to_utf16;
+use super::offset::OffsetIndex;
 
 pub fn lint_diagnostics_to_utf16(
     mut diagnostics: Vec<verter_diagnostics::LintDiagnostic>,
@@ -12,10 +12,16 @@ pub fn lint_diagnostics_to_utf16(
     let Some(source) = source else {
         return diagnostics;
     };
+    if diagnostics.is_empty() {
+        return diagnostics;
+    }
 
+    // One index per source, reused for every span: a per-span prefix rescan
+    // is O(offset) and a file's diagnostics are spread across the whole file.
+    let index = OffsetIndex::new(source);
     for d in &mut diagnostics {
-        let start = byte_offset_to_utf16(source, d.span.start);
-        let end = byte_offset_to_utf16(source, d.span.end);
+        let start = index.to_utf16(d.span.start);
+        let end = index.to_utf16(d.span.end);
         d.span = verter_span::Span::new(start, end);
     }
 

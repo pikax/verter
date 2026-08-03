@@ -14,10 +14,10 @@ use crate::resolver_core::ValueDeclIdentity;
 use crate::types::*;
 use crate::VerterHost;
 
+use super::resolve_eval_dependency_canonical_with;
 use super::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
-    is_raw_import_specifier_id, log_snapshot_debug, resolve_eval_dependency_canonical_with,
-    ComputedEvaluatedTypes,
+    is_raw_import_specifier_id, log_snapshot_debug, ComputedEvaluatedTypes,
 };
 
 impl VerterHost {
@@ -39,8 +39,8 @@ impl VerterHost {
             format!("owner={} store_view={}", canonical_id, false),
         );
         let resolved_canonical_id = self
-            .resolve_eval_dependency_canonical(canonical_id)
-            .unwrap_or_else(|| canonical_id.to_string());
+            .normalized_analysis_canonical(canonical_id)
+            .into_owned();
         // The base whole-file eval env is the memo-backed product of the
         // canonical's `IndexedReady`: `ensure_indexed_ready_serve` performs the
         // one cold materialise (or joins the published artifact), and the
@@ -466,8 +466,8 @@ impl VerterHost {
         crate::fact_signature_helpers::observe_fact_signature(&chain_facts);
         let (canonical_id, owner, name) = route_result.resolved()?;
         let canonical_id = self
-            .resolve_eval_dependency_canonical(canonical_id)
-            .unwrap_or_else(|| canonical_id.to_string());
+            .normalized_analysis_canonical(canonical_id)
+            .into_owned();
         Some(ValueDeclIdentity {
             canonical_id,
             owner,
@@ -586,6 +586,7 @@ impl VerterHost {
         template_inputs: Option<crate::types::VueTemplateInputs>,
         analysis_started: Option<Instant>,
     ) -> FileAnalysisSnapshot {
+        verter_workspace::probe_scope!(FINALIZE_SNAPSHOT);
         self.resolve_snapshot_imports(canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
         if needs_template_analysis {
@@ -675,6 +676,13 @@ impl VerterHost {
         None
     }
 
+    /// Test-only oracle for the former direct-probe normalizer.
+    ///
+    /// Production resolution-derived state must go through
+    /// [`Self::normalized_analysis_canonical`], whose target is minted by an
+    /// Engine-owned transaction. Keeping this helper out of production makes a
+    /// direct `file_exists` result structurally unable to reach a durable sink.
+    #[cfg(test)]
     pub(crate) fn resolve_eval_dependency_canonical(&self, dep_canonical: &str) -> Option<String> {
         // Request-scoped POSITIVE-ONLY memo
         // (`RequestContext::dep_canonical_memo`). One request
@@ -717,9 +725,67 @@ impl VerterHost {
             return std::borrow::Cow::Borrowed(canonical_id);
         }
 
-        self.resolve_eval_dependency_canonical(canonical_id)
-            .map(std::borrow::Cow::Owned)
-            .unwrap_or_else(|| std::borrow::Cow::Borrowed(canonical_id))
+        // A non-runtime canonical with an explicit extension has no
+        // declaration-companion decision to make. This preserves the
+        // zero-resolution hot path for `.ts`, `.d.ts`, framework carriers,
+        // and virtual artifacts.
+        //
+        // Only a RUNTIME JavaScript dialect can have a separate declaration
+        // companion, and the classified `FileLanguage` row is the sole
+        // dialect authority — the path suffix is never re-sniffed here.
+        if std::path::Path::new(canonical_id).extension().is_some() {
+            let prefers_type_companion = matches!(
+                self.language_classifier
+                    .classify(canonical_id)
+                    .script_source_type(),
+                Some(
+                    verter_language::ScriptSourceType::Js(_)
+                        | verter_language::ScriptSourceType::Jsx(_)
+                )
+            );
+            if !prefers_type_companion {
+                return std::borrow::Cow::Borrowed(canonical_id);
+            }
+        }
+
+        let mut refused = false;
+        let resolved = resolve_eval_dependency_canonical_with(canonical_id, |candidate| {
+            if refused {
+                return false;
+            }
+            match self.resolve_for_persistent_state(
+                canonical_id,
+                candidate,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::TypeImport,
+                },
+            ) {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    admitted.result().is_some()
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => {
+                    refused = true;
+                    false
+                }
+            }
+        });
+
+        if refused {
+            // The original canonical remains useful to this query, but no
+            // resolution-derived mapping may be retained. Taint every
+            // enclosing cacheability scope so a caller folding this fallback
+            // serves ReturnOnly.
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+            );
+            return std::borrow::Cow::Borrowed(canonical_id);
+        }
+
+        match resolved {
+            Some(resolved) if resolved != canonical_id => std::borrow::Cow::Owned(resolved),
+            _ => std::borrow::Cow::Borrowed(canonical_id),
+        }
     }
 
     pub(crate) fn cache_dependency_candidates_from_snapshot(
@@ -731,23 +797,13 @@ impl VerterHost {
 
         if let Some(serve) = self.ensure_indexed_ready_serve(owner_canonical_id) {
             let facts = &serve.indexed;
-            // Baked-edge currency gate. The artifact's cross-file edge
-            // `canonical_id`s were resolved at materialise time; a
-            // FENCED (ReturnOnly) serve carries edges baked against the
-            // pre-mutation file set, so trusting them would track the
-            // superseded dependency targets. Consume baked edges only
-            // from a store-published serve (published artifacts are
-            // store-current at publish; a stale one re-materialises
-            // through the serve's own currency gates); a fenced serve
-            // re-resolves every raw source specifier through the live
-            // resolver instead — the same discipline as the
-            // augmentation probe's re-export walk.
-            let baked_edges_current = serve.store_published;
+            // The shallow routing surface is parse domain: it names the
+            // AUTHORED specifiers, never a target. Every edge resolves
+            // here through the one live route-edge authority, so a
+            // dependency that appeared or retargeted since the artifact
+            // was built is tracked — the failure mode a baked target had
+            // by construction.
             for target in facts.shallow_state.import_targets.values() {
-                if baked_edges_current && !target.canonical_id.is_empty() {
-                    candidates.insert(target.canonical_id.clone());
-                    continue;
-                }
                 if let Some(resolved) =
                     self.resolve_route_type_edge(owner_canonical_id, &target.source_specifier)
                 {
@@ -757,14 +813,10 @@ impl VerterHost {
 
             for export in facts.shallow_state.exports.values() {
                 if let crate::resolver_core::ExportTarget::Reexport {
-                    canonical_id,
-                    source_specifier,
-                    ..
+                    source_specifier, ..
                 } = export
                 {
-                    if baked_edges_current && !canonical_id.is_empty() {
-                        candidates.insert(canonical_id.clone());
-                    } else if let Some(resolved) =
+                    if let Some(resolved) =
                         self.resolve_route_type_edge(owner_canonical_id, source_specifier)
                     {
                         candidates.insert(resolved);
@@ -773,9 +825,7 @@ impl VerterHost {
             }
 
             for wildcard in &facts.shallow_state.wildcard_reexports {
-                if baked_edges_current && !wildcard.canonical_id.is_empty() {
-                    candidates.insert(wildcard.canonical_id.clone());
-                } else if let Some(resolved) =
+                if let Some(resolved) =
                     self.resolve_route_type_edge(owner_canonical_id, &wildcard.source_specifier)
                 {
                     candidates.insert(resolved);

@@ -59,6 +59,9 @@ fn publish_component_meta_record(host: &Arc<VerterHost>, canonical: &str) -> u64
     let record = RequestAuditRecord {
         request_id,
         canonical_id: canonical.to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            canonical.to_string(),
+        )),
         kind: RequestKind::ComponentMeta,
         parent_request_id: None,
         timings: RequestTimingAudit::default(),
@@ -82,7 +85,10 @@ fn publish_component_meta_record(host: &Arc<VerterHost>, canonical: &str) -> u64
 /// Drive the `LspAuditSession` lifecycle so a record lands in the
 /// store with a known `request_id`. Returns the published request id.
 fn publish_lsp_record(host: &Arc<VerterHost>, method: LspMethodTag, canonical: &str) -> u64 {
-    let session = host.lsp_audit_begin(method.clone(), canonical);
+    let session = host.lsp_audit_begin(
+        method.clone(),
+        verter_audit::RequestTargetIdentity::RegisteredCanonical(canonical.to_string()),
+    );
     let request_id = session
         .request_id()
         .expect("Active session must expose its id");
@@ -90,6 +96,9 @@ fn publish_lsp_record(host: &Arc<VerterHost>, method: LspMethodTag, canonical: &
         method,
         position: Some(verter_audit::payloads::lsp::PositionInfo {
             canonical_id: canonical.to_string(),
+            target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+                canonical.to_string(),
+            )),
             line: 1,
             character: 2,
         }),

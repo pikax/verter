@@ -86,7 +86,10 @@ impl UpsertBatchTxn {
         let UpsertBatchTxn { prepared, batch } = self;
         // ONE input-order wait. `wait_batch` returns `state[i]` for the
         // i-th submitted request regardless of completion order.
-        let states = host.scheduler.wait_batch(&batch);
+        let states = {
+            verter_workspace::probe_scope!(UPSERT_WAIT);
+            host.scheduler.wait_batch(&batch)
+        };
         debug_assert_eq!(
             states.len(),
             prepared.len(),
@@ -279,6 +282,7 @@ impl VerterHost {
         if requests.is_empty() {
             return Vec::new();
         }
+        verter_workspace::probe_scope!(UPSERT_MANY);
         // 2–5: build the transaction (resolve + uniqueness-check canonicals
         //      first, capture context once, prepare each request, ONE
         //      `submit_batch_atomic`).
@@ -385,7 +389,10 @@ impl VerterHost {
         // accounts once itself — do NOT call `account_batch_submission` on
         // top of it. The returned `BatchHandle`'s handles are in input
         // order, index-aligned with `prepared`.
-        let batch = self.scheduler.submit_batch_atomic(scheduler_requests);
+        let batch = {
+            verter_workspace::probe_scope!(UPSERT_SUBMIT);
+            self.scheduler.submit_batch_atomic(scheduler_requests)
+        };
         UpsertBatchTxn { prepared, batch }
     }
 
@@ -495,6 +502,7 @@ impl VerterHost {
     ) -> Result<HostUpdateResult, HostError> {
         use crate::host_executor::HostSourceData;
         use verter_scheduler::job::RequestResult;
+        verter_workspace::probe_scope!(UPSERT_POST_COMMIT);
 
         let PreparedUpsertCommit {
             canonical_id,
@@ -568,24 +576,6 @@ impl VerterHost {
             .collect();
         alias_set.insert(canonicalize_id(&req.input_id).into_owned());
         alias_set.insert(canonical_id.clone());
-
-        let new_deps: BTreeSet<String> = parse
-            .external_requests
-            .iter()
-            .map(|r| r.resolved_canonical_id.clone())
-            .chain(
-                parse
-                    .script_analysis
-                    .imports
-                    .iter()
-                    .filter(|imp| imp.source.starts_with('.'))
-                    .map(|imp| {
-                        let resolved = crate::id::resolve_external(&canonical_id, &imp.source);
-                        self.resolve_eval_dependency_canonical(&resolved)
-                            .unwrap_or(resolved)
-                    }),
-            )
-            .collect();
 
         // ── Fast path: quintuple-unchanged source ──
         //
@@ -675,6 +665,28 @@ impl VerterHost {
                 parse_duration_ms,
             });
         }
+
+        // Resolve the complete dependency batch only for a genuine content
+        // transition. The byte-identical fast path above is a strict no-op and
+        // must not reopen resolution. Every companion decision below goes
+        // through the Engine before any durable per-domain state mutates.
+        let new_deps: BTreeSet<String> = parse
+            .external_requests
+            .iter()
+            .map(|r| r.resolved_canonical_id.clone())
+            .chain(
+                parse
+                    .script_analysis
+                    .imports
+                    .iter()
+                    .filter(|imp| imp.source.starts_with('.'))
+                    .map(|imp| {
+                        let resolved = crate::id::resolve_external(&canonical_id, &imp.source);
+                        self.normalized_analysis_canonical(&resolved).into_owned()
+                    }),
+            )
+            .collect();
+
         // ── Per-domain invalidation per D48 invalidation matrix ──
         // A source-content-change (whole_hash_changed or semantic_changed)
         // is the per-canonical "Source content change for owner" trigger:
@@ -795,20 +807,12 @@ impl VerterHost {
                 derived.clear_raw_template_analysis();
                 drained_derived = true;
             }
-            // import_routes is the sub-mirror of IndexedReady.import_routes.
-            // It is recomputed by downstream resolver passes after this
-            // upsert; clear here so stale entries do not leak into the next
-            // resolver run. R3/R26/R28: drop the parallel
-            // per-specifier known-miss generation table so subsequent
-            // bundler resolutions admit fresh tags — and the positive
-            // generation stamp table for the same reason.
+            // `import_routes` is the caller-supplied authoritative route
+            // table. The owner's content just changed, so the caller's
+            // statement about it is stale until the caller re-pushes;
+            // clear here so a superseded push does not leak into the next
+            // resolver run.
             derived.import_routes.clear();
-            derived
-                .import_routes_known_miss_recorded_at_generation
-                .clear();
-            derived
-                .import_routes_positive_recorded_at_generation
-                .clear();
             derived.evicted = false;
             if drained_derived {
                 crate::host_manage::push_cache_drained_at_upsert(

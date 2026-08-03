@@ -120,7 +120,7 @@ describe("parity inventory", () => {
     );
     expect(inventory.literalRegistrationCount).toBe(derivedLiteralCount);
     expect(discovered).toHaveLength(42);
-    expect(derivedLiteralCount).toBe(258);
+    expect(derivedLiteralCount).toBe(259);
   });
 
   it("attests all 73 unique matrix IDs and every authored anchor", () => {
@@ -143,7 +143,7 @@ describe("parity inventory", () => {
       suiteRoot,
       matrixCasesFile: resolve(libRoot, "matrixCases.ts"),
     });
-    expect(inventory.literalRegistrationCount).toBe(258);
+    expect(inventory.literalRegistrationCount).toBe(259);
     expect(inventory.matrixCaseCount).toBe(73);
     expect(inventory.matrixCaseCount).toBe(VUE_MATRIX_CASES.length + SVELTE_MATRIX_CASES.length);
     for (const ids of Object.values(inventory.testIdsByFixture)) {

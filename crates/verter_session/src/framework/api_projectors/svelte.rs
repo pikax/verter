@@ -29,11 +29,70 @@ use verter_type_expr::locators::AuthoredBodyLocator;
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 use crate::framework::api_projector::{ComponentApiProjector, ComponentApiProjectorCtx};
+use crate::framework::script_facts::ScriptFactEvidence;
 use crate::types::{PublicApiMode, TscResponse};
 
 /// The Svelte component-API projector.
 #[derive(Debug, Default)]
 pub struct SvelteComponentApiProjector;
+
+#[derive(Clone, Copy)]
+enum ProjectorScriptFactState<'a> {
+    Exact(&'a verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts),
+    ExactSyntax(&'a verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts),
+    SyntaxIncomplete,
+    Unavailable,
+    NotApplicable,
+    NotRequested,
+}
+
+impl<'a> ProjectorScriptFactState<'a> {
+    fn from_evidence(
+        evidence: Option<
+            &'a ScriptFactEvidence<
+                verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+            >,
+        >,
+    ) -> Self {
+        match evidence {
+            Some(ScriptFactEvidence::Exact(exact)) => Self::Exact(exact.facts()),
+            Some(ScriptFactEvidence::Partial(partial)) => match partial.exact_syntax() {
+                Some(syntax) => Self::ExactSyntax(syntax),
+                None => Self::SyntaxIncomplete,
+            },
+            Some(ScriptFactEvidence::Unavailable(_)) => Self::Unavailable,
+            Some(ScriptFactEvidence::NotApplicable(_)) => Self::NotApplicable,
+            None => Self::NotRequested,
+        }
+    }
+
+    fn exact_syntax(
+        self,
+    ) -> Option<&'a verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts>
+    {
+        match self {
+            Self::Exact(facts) => Some(facts.syntax()),
+            Self::ExactSyntax(syntax) => Some(syntax),
+            Self::SyntaxIncomplete
+            | Self::Unavailable
+            | Self::NotApplicable
+            | Self::NotRequested => None,
+        }
+    }
+
+    fn exact_facts(
+        self,
+    ) -> Option<&'a verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts> {
+        match self {
+            Self::Exact(facts) => Some(facts),
+            Self::ExactSyntax(_)
+            | Self::SyntaxIncomplete
+            | Self::Unavailable
+            | Self::NotApplicable
+            | Self::NotRequested => None,
+        }
+    }
+}
 
 impl ComponentApiProjector for SvelteComponentApiProjector {
     fn render_api(
@@ -144,17 +203,19 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         let resolver_ctx = resolver_ctx
             .as_ref()
             .map(|ctx| ctx as &dyn crate::resolver_core::ResolverContext);
-        let script_facts = resolver_ctx
-            .and_then(|ctx| host.resolve_svelte_script_facts_with_ctx(ctx, resolved_canonical));
+        let script_fact_evidence = resolver_ctx
+            .map(|ctx| host.resolve_svelte_script_facts_with_ctx(ctx, resolved_canonical));
+        let script_fact_state =
+            ProjectorScriptFactState::from_evidence(script_fact_evidence.as_ref());
         let resolved_exports =
             resolver_ctx
-                .zip(script_facts.as_deref())
-                .and_then(|(ctx, facts)| {
-                    resolve_public_exports_text(host, ctx, resolved_canonical, facts)
+                .zip(script_fact_state.exact_syntax())
+                .and_then(|(ctx, syntax)| {
+                    resolve_public_exports_text(host, ctx, resolved_canonical, syntax)
                 });
         let resolved_module_exports = resolver_ctx
-            .zip(script_facts.as_deref())
-            .map(|(ctx, facts)| resolve_public_module_exports(ctx, resolved_canonical, facts))
+            .zip(script_fact_state.exact_syntax())
+            .map(|(ctx, syntax)| resolve_public_module_exports(ctx, resolved_canonical, syntax))
             .unwrap_or_default();
 
         // Collect PRESERVED type references with their exact lexical owner
@@ -171,20 +232,27 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         for (_, ty) in &export_members {
             collect_fact_refs(ty, component_owner, &mut referenced);
         }
-        if let Some(facts) = script_facts.as_ref() {
-            if let Some(owner) = facts
+        if let Some(syntax) = script_fact_state.exact_syntax() {
+            if let Some(owner) = syntax
                 .props_type
                 .as_ref()
                 .map(|payload| locator_owner(&payload.locator))
             {
-                collect_owned_refs(owner, &facts.props_type_references, &mut referenced);
+                collect_owned_refs(owner, &syntax.props_type_references, &mut referenced);
             }
+        }
+        if let Some(facts) = script_fact_state.exact_facts() {
             if let Some(owner) = facts
+                .resolution()
                 .dispatcher_events
                 .as_ref()
                 .map(|payload| locator_owner(&payload.locator))
             {
-                collect_owned_refs(owner, &facts.dispatcher_event_references, &mut referenced);
+                collect_owned_refs(
+                    owner,
+                    &facts.resolution().dispatcher_event_references,
+                    &mut referenced,
+                );
             }
         }
         if let Some(exports) = resolved_exports.as_ref() {
@@ -216,17 +284,22 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         let shallow_props_text = props_type
             .map(render_shim_fact)
             .unwrap_or_else(|| "{}".to_string());
-        let captured_props_text = script_facts.as_ref().and_then(|facts| {
-            let owner = locator_owner(&facts.props_type.as_ref()?.locator);
+        let captured_props_text = script_fact_state.exact_syntax().and_then(|syntax| {
+            let owner = locator_owner(&syntax.props_type.as_ref()?.locator);
             captured_display_without_local_refs(
-                facts.props_type_display.as_deref(),
-                &facts.props_type_references,
+                syntax.props_type_display.as_deref(),
+                &syntax.props_type_references,
                 shallow,
                 owner,
             )
         });
         let resolved_props = resolver_ctx.and_then(|ctx| {
-            resolve_public_props_text(host, ctx, resolved_canonical, script_facts.as_deref())
+            resolve_public_props_text(
+                host,
+                ctx,
+                resolved_canonical,
+                script_fact_state.exact_syntax(),
+            )
         });
         let resolved_props_text = resolved_props.as_ref().map(|props| props.text.clone());
         // The resolved contract is the public surface authority when available:
@@ -242,13 +315,13 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             .map(str::to_string)
             .or(resolved_props_text)
             .unwrap_or_else(|| render_component_props(props_type, &props_text));
-        let dispatcher_text = script_facts
-            .as_ref()
+        let dispatcher_text = script_fact_state
+            .exact_facts()
             .and_then(|facts| {
-                let owner = locator_owner(&facts.dispatcher_events.as_ref()?.locator);
+                let owner = locator_owner(&facts.resolution().dispatcher_events.as_ref()?.locator);
                 captured_display_without_local_refs(
-                    facts.dispatcher_events_display.as_deref(),
-                    &facts.dispatcher_event_references,
+                    facts.resolution().dispatcher_events_display.as_deref(),
+                    &facts.resolution().dispatcher_event_references,
                     shallow,
                     owner,
                 )
@@ -283,7 +356,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
                 }
                 _ => (&[], 0),
             };
-        let bindings_text = render_native_bindings(script_facts.as_deref());
+        let bindings_text = render_native_bindings(script_fact_state);
 
         // 3. Build an authored-name public value. `Component<Props, Exports,
         //    Bindings>` is Svelte 5's framework-native import contract. Visible
@@ -524,7 +597,9 @@ fn resolve_public_props_text(
     host: &crate::VerterHost,
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner: &str,
-    script_facts: Option<&verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>,
+    script_syntax: Option<
+        &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
+    >,
 ) -> Option<ResolvedPublicProps> {
     use crate::typeinfo::framework_surface::{ResolvedOutcome, SvelteSurfaceSource};
 
@@ -599,9 +674,9 @@ fn resolve_public_props_text(
     // Legacy props have no type-declaration origin; their parser-owned binding
     // spans are the direct authored name-token authority.
     if uses_legacy {
-        for prop in script_facts
+        for prop in script_syntax
             .into_iter()
-            .flat_map(|facts| facts.legacy_props.iter())
+            .flat_map(|syntax| syntax.legacy_props.iter())
         {
             local_name_starts
                 .entry(prop.name.as_str())
@@ -688,7 +763,7 @@ fn resolve_public_exports_text(
     host: &crate::VerterHost,
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner: &str,
-    facts: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    syntax: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
 ) -> Option<ResolvedPublicExports> {
     use crate::typeinfo::framework_surface::SvelteSurfaceSource;
 
@@ -704,7 +779,7 @@ fn resolve_public_exports_text(
         .members
         .iter()
         .map(|member| {
-            let export = facts
+            let export = syntax
                 .instance_exports
                 .iter()
                 .find(|export| export.exported_name == member.name)?;
@@ -732,9 +807,9 @@ fn resolve_public_exports_text(
 fn resolve_public_module_exports(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner: &str,
-    facts: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    syntax: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
 ) -> Vec<ResolvedPublicModuleExport> {
-    let mut exports = facts
+    let mut exports = syntax
         .module_exports
         .iter()
         .map(|export| {
@@ -898,15 +973,19 @@ fn render_native_component_props(props: &str, dispatcher: Option<&str>) -> Strin
 /// Runes components admit only explicitly `$bindable()` props. Legacy
 /// `export let` props are all bindable. An empty set is the native sentinel
 /// `""`, never the permissive default `string`.
-fn render_native_bindings(
-    facts: Option<&verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>,
-) -> String {
+fn render_native_bindings(facts: ProjectorScriptFactState<'_>) -> String {
+    let syntax = match facts {
+        ProjectorScriptFactState::Exact(facts) => facts.syntax(),
+        ProjectorScriptFactState::ExactSyntax(syntax) => syntax,
+        ProjectorScriptFactState::SyntaxIncomplete
+        | ProjectorScriptFactState::Unavailable
+        | ProjectorScriptFactState::NotApplicable
+        | ProjectorScriptFactState::NotRequested => return "string".to_string(),
+    };
     let mut names = BTreeSet::new();
-    if let Some(facts) = facts {
-        names.extend(facts.bindable_members.iter().map(String::as_str));
-        if names.is_empty() {
-            names.extend(facts.legacy_props.iter().map(|prop| prop.name.as_str()));
-        }
+    names.extend(syntax.bindable_members.iter().map(String::as_str));
+    if names.is_empty() {
+        names.extend(syntax.legacy_props.iter().map(|prop| prop.name.as_str()));
     }
     if names.is_empty() {
         return "\"\"".to_string();
@@ -1173,5 +1252,79 @@ mod tests {
         assert!(rendered.contains("onselect: (id: number) => void"));
         assert!(!rendered.contains("any"));
         assert!(!rendered.contains("__Verter"));
+    }
+
+    #[test]
+    fn incomplete_script_facts_never_project_exact_empty_bindings() {
+        use verter_language::FileLanguage;
+
+        fn evidence_for(
+            canonical: &str,
+            source: &str,
+            language: FileLanguage,
+        ) -> ScriptFactEvidence<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>
+        {
+            let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+            let _ = host
+                .upsert(crate::UpsertRequest {
+                    canonical_id: None,
+                    input_id: canonical.to_string(),
+                    source: Arc::from(source),
+                    file_language: language,
+                    aliases: Vec::new(),
+                })
+                .expect("upsert script-fact fixture");
+            host.resolve_svelte_script_facts(canonical)
+        }
+
+        let exact_empty = evidence_for(
+            "/ExactEmpty.svelte",
+            "<script>const ordinary = 1;</script>",
+            FileLanguage::svelte(),
+        );
+        let partial = evidence_for(
+            "/Partial.svelte",
+            "<script lang=\"ts\">import type { Snippet } from 'svelte';\n\
+             let { value = $bindable() }: { value: Snippet } = $props();</script>",
+            FileLanguage::svelte(),
+        );
+        let unavailable = evidence_for(
+            "/Unavailable.svelte",
+            "<script>let { first } = $props(); let { second } = $props();</script>",
+            FileLanguage::svelte(),
+        );
+        let not_applicable = evidence_for(
+            "/NotApplicable.vue",
+            "<script setup>const ordinary = 1;</script>",
+            FileLanguage::vue(),
+        );
+
+        assert_eq!(
+            render_native_bindings(ProjectorScriptFactState::from_evidence(Some(&exact_empty))),
+            "\"\"",
+            "exact-empty evidence authoritatively projects no bindings"
+        );
+        assert_eq!(
+            render_native_bindings(ProjectorScriptFactState::from_evidence(Some(&partial))),
+            "\"value\"",
+            "resolution-partial evidence retains its producer-proven exact syntax bindings"
+        );
+        assert_eq!(
+            render_native_bindings(ProjectorScriptFactState::from_evidence(Some(&unavailable))),
+            "string",
+            "unavailable evidence preserves the permissive binding default"
+        );
+        assert_eq!(
+            render_native_bindings(ProjectorScriptFactState::from_evidence(Some(
+                &not_applicable
+            ))),
+            "string",
+            "not-applicable evidence cannot masquerade as exact-empty"
+        );
+        assert_eq!(
+            render_native_bindings(ProjectorScriptFactState::from_evidence(None)),
+            "string",
+            "a missing request context carries no exactness authority"
+        );
     }
 }

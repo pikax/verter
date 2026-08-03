@@ -10,8 +10,8 @@
 //! The per-rejection attribution helper
 //! (`attribute_prepared_decl_bundle_rejection` in
 //! `crates/verter_session/src/host_manage/prepared_decl.rs`)
-//! discriminates `ImportRoute` mismatch vs absent by calling
-//! `view.derived_hash_for(canonical, ImportRoute)` and observing
+//! discriminates `Route` mismatch vs absent by calling
+//! `view.derived_hash_for(canonical, Route)` and observing
 //! `Some(_)` vs `None`.
 //!
 //! Before this fix, the `StoreView` impl on `RequestStoreView` did not
@@ -63,7 +63,7 @@ defineProps<ButtonProps>()
 }
 
 /// Mirror property — when the base view has snapshotted an
-/// `ImportRoute` derived hash for a canonical, the
+/// `Route` derived hash for a canonical, the
 /// `RequestStoreView` wrapper MUST return the same `Some(hash)`.
 ///
 /// Discriminating: pre-fix, `RequestStoreView::derived_hash_for`
@@ -81,19 +81,19 @@ fn request_store_view_mirrors_base_derived_hash_for_known_entry() {
     // The base view's `derived_hashes` is populated by
     // `HostStoreView::build` from the project store. We assert the
     // entry is present (the fixture imports nothing exotic, but the
-    // host always populates the `ImportRoute` derived hash for a
+    // host always populates the `Route` derived hash for a
     // shallowly-indexed file with import declarations — Button.vue's
     // `defineProps<ButtonProps>` produces no imports, so we exercise
     // the path via the overlay-only branch in the second test below;
     // here we exercise the read-through behaviour even when the base
     // returns None — the wrapper MUST observe the base's answer).
-    let base_hash = base.derived_hash_for(&canonical, DerivedFactKind::ImportRoute);
+    let base_hash = base.derived_hash_for(&canonical, DerivedFactKind::Route);
 
     // Construct an empty overlay so the fallthrough goes to the base.
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let req = RequestStoreView::new(&base, overlay);
 
-    let req_hash = req.derived_hash_for(&canonical, DerivedFactKind::ImportRoute);
+    let req_hash = req.derived_hash_for(&canonical, DerivedFactKind::Route);
 
     assert_eq!(
         req_hash, base_hash,
@@ -105,7 +105,7 @@ fn request_store_view_mirrors_base_derived_hash_for_known_entry() {
 }
 
 /// Overlay-shadowing property — when the overlay records an
-/// `ImportRoute` derived hash mid-request, the wrapper MUST return
+/// `Route` derived hash mid-request, the wrapper MUST return
 /// the overlay's hash even if the base view has no snapshot.
 ///
 /// Discriminating: pre-fix the wrapper returned `None` for an
@@ -116,7 +116,7 @@ fn request_store_view_returns_overlay_derived_hash_when_base_absent() {
     let (host, _canonical) = small_host_with_one_component();
     let base = host.resolver_store_view_read().into_owned_view();
 
-    // Build an overlay and stage a synthetic `ImportRoute` entry
+    // Build an overlay and stage a synthetic `Route` entry
     // for an UNTRACKED canonical so the base view returns None for
     // it. This isolates the overlay-shadowing arm.
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
@@ -124,20 +124,20 @@ fn request_store_view_returns_overlay_derived_hash_when_base_absent() {
     let synthetic_hash: [u8; 16] = [0xab; 16];
     overlay.insert_derived_hash_for_tests(
         unrelated_canonical,
-        DerivedFactKind::ImportRoute,
+        DerivedFactKind::Route,
         synthetic_hash,
     );
 
     // Pre-fix sanity: the base view does not know this canonical.
     assert_eq!(
-        base.derived_hash_for(unrelated_canonical, DerivedFactKind::ImportRoute),
+        base.derived_hash_for(unrelated_canonical, DerivedFactKind::Route),
         None,
         "base view must not have a snapshot for an unloaded canonical \
          — pre-fix this confirms the discriminator's setup"
     );
 
     let req = RequestStoreView::new(&base, Arc::clone(&overlay));
-    let req_hash = req.derived_hash_for(unrelated_canonical, DerivedFactKind::ImportRoute);
+    let req_hash = req.derived_hash_for(unrelated_canonical, DerivedFactKind::Route);
 
     assert_eq!(
         req_hash,

@@ -80,19 +80,16 @@ impl<'a> FrameworkAdapterCtx<'a> {
         carrier_for_arc::<T>(&artifact, &leg.token)
     }
 
-    /// The adapter's resolved framework script facts of type `T` for
-    /// `canonical`, or `None`.
+    /// The adapter's resolved framework script-fact evidence of type `T` for
+    /// `canonical`.
     ///
     /// Drives the resolved-validation half of the script-fact seam on demand:
-    /// it consults the registration's active providers, and returns `None` when
-    /// the adapter registers no provider that produces a `T` payload. (No
-    /// production provider registers in this program — Vue's macro analysis
-    /// stays in the shallow pass — so the Vue ctx always answers `None`; a
-    /// later framework vertical's provider drives the resolved path.)
+    /// it consults the registration's active providers while preserving exact,
+    /// partial, unavailable, and not-applicable outcomes.
     pub fn script_facts_for<T: FrameworkScriptFactPayload>(
         &self,
         canonical: &str,
-    ) -> Option<Arc<T>> {
+    ) -> crate::framework::script_facts::ScriptFactEvidence<T> {
         crate::framework::script_facts::resolve_script_facts::<T>(
             self.host,
             self.registration,
@@ -166,14 +163,15 @@ mod tests {
     }
 
     #[test]
-    fn script_facts_for_returns_none_without_a_provider() {
+    fn script_facts_for_returns_not_applicable_without_a_provider() {
         let host = VerterHost::new_standalone(crate::HostConfig::default());
         let registration = carrier_less_registration();
         let ctx = FrameworkAdapterCtx::new(&registration, &host);
         // No provider registered ⇒ no resolved facts (the honest answer, not a
         // fabricated empty payload).
-        assert!(ctx
-            .script_facts_for::<FixturePayload>("/whatever.vue")
-            .is_none());
+        assert!(matches!(
+            ctx.script_facts_for::<FixturePayload>("/whatever.vue"),
+            crate::framework::script_facts::ScriptFactEvidence::NotApplicable(_)
+        ));
     }
 }

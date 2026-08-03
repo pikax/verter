@@ -1,10 +1,8 @@
 //! Tests for [`crate::resolver_store::HostStoreView`] — the
 //! session-overlay-aware fact validator: `validates` arms,
-//! untracked-file optimistic accept, and the `hash_import_route_targets`
-//! lazy-promotion invariant.
+//! untracked-file optimistic accept, and the route-surface digest.
 
-use crate::resolver_store::{hash_import_route_targets, HostStoreView};
-use crate::types::DependencyResolution;
+use crate::resolver_store::HostStoreView;
 use rustc_hash::FxHashMap;
 
 use crate::resolver_core::StoreView;
@@ -115,70 +113,6 @@ fn primary_validates_accepts_untracked_file_whole_hash() {
             hash: [42u8; 16],
         }),
         "untracked files are accepted by primary validation in the multi-candidate substrate"
-    );
-}
-
-#[test]
-fn import_route_hash_ignores_lazy_promotion_to_same_effective_target() {
-    let lazy = FxHashMap::from_iter([(
-        "./types".to_string(),
-        DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: None,
-            possible_canonical_ids: vec![
-                "/src/types.d.ts".to_string(),
-                "/src/types.ts".to_string(),
-            ],
-        },
-    )]);
-    let promoted = FxHashMap::from_iter([(
-        "./types".to_string(),
-        DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: Some("/src/types.d.ts".to_string()),
-            possible_canonical_ids: vec![
-                "/src/types.d.ts".to_string(),
-                "/src/types.ts".to_string(),
-            ],
-        },
-    )]);
-
-    assert_eq!(
-        hash_import_route_targets(&lazy),
-        hash_import_route_targets(&promoted),
-        "lazy promotion to the same effective canonical target should not invalidate ImportRoute facts",
-    );
-}
-
-#[test]
-fn import_route_hash_changes_when_effective_target_changes() {
-    let before = FxHashMap::from_iter([(
-        "./types".to_string(),
-        DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: None,
-            possible_canonical_ids: vec![
-                "/src/types.d.ts".to_string(),
-                "/src/types.ts".to_string(),
-            ],
-        },
-    )]);
-    let after = FxHashMap::from_iter([(
-        "./types".to_string(),
-        DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: Some("/src/types.ts".to_string()),
-            possible_canonical_ids: vec![
-                "/src/types.d.ts".to_string(),
-                "/src/types.ts".to_string(),
-            ],
-        },
-    )]);
-
-    assert_ne!(
-        hash_import_route_targets(&before),
-        hash_import_route_targets(&after),
-        "changing the effective canonical target must still invalidate ImportRoute facts",
     );
 }
 
@@ -346,17 +280,17 @@ mod file_source_env_validation {
 // ── `hash_route_surface` — purity pin + per-state memoization ──
 
 mod route_surface_hash {
-    use super::FxHashMap;
     use crate::resolver_core::shallow_file_state::{
         ExportTarget, ImportTarget, ShallowFileState, WildcardReexport,
     };
-    use rustc_hash::FxHashSet;
+    use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::Arc;
     use verter_semantic::analysis::Hash16;
 
     /// A routing surface exercising every dimension `hash_route_surface`
-    /// digests: local exports, a named reexport (baked canonical +
-    /// type-only flag), a wildcard edge, and an import target.
+    /// digests: local exports, a named reexport (authored specifier,
+    /// original name, type-only flag), a wildcard edge, and an import
+    /// target. All of it PARSE domain — no resolved canonical.
     pub(super) fn routed_state(whole_hash: Hash16) -> ShallowFileState {
         let exports = FxHashMap::from_iter([
             (
@@ -371,14 +305,12 @@ mod route_surface_hash {
                 ExportTarget::Reexport {
                     source_specifier: "./dep".to_string(),
                     original_name: "Orig".to_string(),
-                    canonical_id: "/src/dep.ts".to_string(),
                     is_type: true,
                 },
             ),
         ]);
         let wildcard_reexports = vec![WildcardReexport {
             source_specifier: "./barrel".to_string(),
-            canonical_id: "/src/barrel.ts".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         }];
         let import_locals = FxHashSet::from_iter(["Dep".to_string()]);
@@ -388,7 +320,6 @@ mod route_surface_hash {
                 source_specifier: "./dep".to_string(),
                 imported_name: "Dep".to_string(),
                 is_namespace: false,
-                canonical_id: "/src/dep.ts".to_string(),
             },
         )]);
         ShallowFileState::routing_tables_only_for_test(
@@ -416,24 +347,39 @@ mod route_surface_hash {
             "identical routing surfaces must hash identically",
         );
 
-        // Negative: a reexport RETARGET moves the hash — the surface is
-        // digested WITH routing targets, never just export names. The
-        // mutation happens strictly BEFORE the state's first hash (the
-        // construction-time mutation window).
-        let mut retargeted = routed_state([7u8; 16]);
-        retargeted.exports.insert(
+        // Negative: an authored-SPECIFIER move moves the hash — the
+        // surface is digested WITH its routing shape, never just export
+        // names. The mutation happens strictly BEFORE the state's first
+        // hash (the construction-time mutation window).
+        let mut respecified = routed_state([7u8; 16]);
+        respecified.exports.insert(
             "Renamed".to_string(),
             ExportTarget::Reexport {
-                source_specifier: "./dep".to_string(),
+                source_specifier: "./other".to_string(),
                 original_name: "Orig".to_string(),
-                canonical_id: "/src/dep.d.ts".to_string(),
                 is_type: true,
             },
         );
         assert_ne!(
             crate::resolver_store::hash_route_surface(&state),
-            crate::resolver_store::hash_route_surface(&retargeted),
-            "a dependency retarget must move the route-surface hash",
+            crate::resolver_store::hash_route_surface(&respecified),
+            "an authored reexport-specifier move must move the route-surface hash",
+        );
+
+        // Negative: the type-only flag participates too.
+        let mut value_only = routed_state([7u8; 16]);
+        value_only.exports.insert(
+            "Renamed".to_string(),
+            ExportTarget::Reexport {
+                source_specifier: "./dep".to_string(),
+                original_name: "Orig".to_string(),
+                is_type: false,
+            },
+        );
+        assert_ne!(
+            crate::resolver_store::hash_route_surface(&state),
+            crate::resolver_store::hash_route_surface(&value_only),
+            "the type-only flag must move the route-surface hash",
         );
 
         // Negative: the owner content hash participates.
@@ -506,85 +452,4 @@ mod route_surface_hash_memo {
             "a mutated clone must hash its own surface, not the donor's cached digest",
         );
     }
-}
-
-// ---------------------------------------------------------------------------
-// Import-route target digest formula pin
-// ---------------------------------------------------------------------------
-
-/// Pins the exact `hash_import_route_targets` digest formula: per sorted
-/// specifier, a `0u8` tag, the specifier, then the effective resolution as
-/// an `Option<str>`-shaped hash (`Some(resolved | best-candidate)` /
-/// known-miss `None`), split-hashed into the 16-byte pair. Guards the
-/// allocation-free digest path against any formula drift — a digest change
-/// here silently invalidates every recorded `ImportRoute` fact.
-#[test]
-fn import_route_target_digest_formula_is_pinned() {
-    use std::hash::{Hash, Hasher};
-
-    let mut resolutions: FxHashMap<String, crate::types::DependencyResolution> =
-        FxHashMap::default();
-    resolutions.insert(
-        "./exact".to_string(),
-        crate::types::DependencyResolution {
-            specifier: "./exact".to_string(),
-            resolved_canonical_id: Some("/w/exact.ts".to_string()),
-            possible_canonical_ids: vec![],
-        },
-    );
-    resolutions.insert(
-        "./candidates".to_string(),
-        crate::types::DependencyResolution {
-            specifier: "./candidates".to_string(),
-            resolved_canonical_id: None,
-            possible_canonical_ids: vec!["/w/c.js".to_string(), "/w/c.d.ts".to_string()],
-        },
-    );
-    resolutions.insert(
-        "./known-miss".to_string(),
-        crate::types::DependencyResolution {
-            specifier: "./known-miss".to_string(),
-            resolved_canonical_id: None,
-            possible_canonical_ids: vec![],
-        },
-    );
-
-    // Reference digest: the historical owned-`Option<String>` formula,
-    // written out longhand. `Option<String>` and `Option<&str>` hash
-    // byte-identically, so the production digest must match EXACTLY.
-    let mut entries: Vec<_> = resolutions.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-    let feed = |hasher: &mut rustc_hash::FxHasher| {
-        for (specifier, resolution) in &entries {
-            0u8.hash(hasher);
-            specifier.hash(hasher);
-            resolution
-                .resolved_canonical_id
-                .clone()
-                .or_else(|| resolution.effective_target().map(str::to_string))
-                .hash(hasher);
-        }
-    };
-    let mut left = rustc_hash::FxHasher::default();
-    0u8.hash(&mut left);
-    feed(&mut left);
-    let mut right = rustc_hash::FxHasher::default();
-    1u8.hash(&mut right);
-    feed(&mut right);
-    let mut expected = [0u8; 16];
-    expected[..8].copy_from_slice(&left.finish().to_le_bytes());
-    expected[8..].copy_from_slice(&right.finish().to_le_bytes());
-
-    assert_eq!(
-        crate::resolver_store::hash_import_route_targets(&resolutions),
-        expected,
-        "route-target digest formula drifted — every ImportRoute fact would misvalidate"
-    );
-
-    // The digest DISCRIMINATES: dropping the known-miss entry changes it.
-    resolutions.remove("./known-miss");
-    assert_ne!(
-        crate::resolver_store::hash_import_route_targets(&resolutions),
-        expected
-    );
 }

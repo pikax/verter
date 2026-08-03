@@ -24,7 +24,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use rustc_hash::FxHashMap;
 use verter_semantic::analysis::{AnalysisScope, Hash16};
 
 use crate::component_meta_caches::{
@@ -111,49 +110,27 @@ pub struct IndexedReady {
     pub whole_hash: Hash16,
     /// Canonical imports / exports + shallow symbol inventory.
     pub shallow_state: Arc<crate::resolver_core::shallow_file_state::ShallowFileState>,
-    /// Resolved import-edge table for this file.
-    pub import_routes: Arc<FxHashMap<String, crate::types::DependencyResolution>>,
-    /// Optional hash-summary of the import-route table. Used by fact-based
-    /// cache validation so route-surface changes invalidate only the files
-    /// whose imports actually shifted.
-    pub import_route_hash: Option<Hash16>,
-    /// Optional hash-summary of the file's route surface (the
-    /// declaration-side data `hash_route_surface` digests). Symmetric
-    /// to [`import_route_hash`]; populated when
-    /// [`ShallowFileState::has_resolvable_surface`] returns `true`.
-    /// Used by `current_derived_fact_hash` to
-    /// answer cached-route fact queries without rehashing per call.
-    /// Invalidation lifecycle == `IndexedReady`'s content-hash
-    /// lifecycle: when the canonical's whole_hash changes, a fresh
-    /// `IndexedReady` is built and `route_hash` is recomputed.
-    pub route_hash: Option<Hash16>,
-    /// Workspace `content_generation` captured at edge-canonicalization
-    /// time — the generation at which this artifact's cross-file edge
-    /// `canonical_id`s (wildcard reexports, named reexports, and plain
-    /// import targets, baked into `shallow_state` and `import_routes`)
-    /// were resolved. Those edges depend on the dependency file set, NOT
-    /// this file's own content, so a content-pinned `IndexedReady` whose
-    /// owner content is unchanged can still hold stale edges after a
-    /// dependency appears or retargets (e.g. a `.js` edge whose `.d.ts`
-    /// companion later appears). Route-surface consumers validate it
-    /// through the shared edge-currency oracle
-    /// (`route_surface_is_edge_current`): a cross-file-edge-bearing
-    /// surface is edge-current only while
-    /// `edge_generation == ws().content_generation()`.
-    /// A VALUE field (read-side validation) — never a cache key (R6).
-    pub edge_generation: u64,
-    /// [`ProjectTypeStore::current_project_generation`] captured when this
-    /// artifact's route surface was built. Route-resolution mutations
-    /// (`configure_projects` / `set_exact_resolutions` /
-    /// `configure_resolver`) bump `project_generation` WITHOUT bumping
-    /// `content_generation`, so a content-current artifact whose
-    /// cross-file edges were resolved under the old project graph is
-    /// route-stale: the read gate (`indexed_surface_is_current`) demands
-    /// a current stamp for any surface with cross-file edges and routes a
-    /// stale one through the edge-refresh materialise (the
-    /// content-addressed payload is reused; only the route surface
-    /// rebuilds). A VALUE field — never a cache key (R6).
-    pub project_generation: u64,
+    /// The workspace `content_generation` this artifact was BUILT at —
+    /// a CONTENT-domain stamp with exactly one consumer,
+    /// [`crate::VerterHost::artifact_only_candidate_is_fresh`].
+    ///
+    /// An artifact-only canonical (no scheduler `DerivedRawState`, so no
+    /// authoritative current content hash to pin a strict store read
+    /// against) is served through the permissive `get_any` lookup. This
+    /// stamp is what lets that lookup reject a candidate the canonical's
+    /// own content has moved past: the workspace records per-canonical
+    /// content transitions at its own mutation chokepoints, and a
+    /// candidate is servable only while its build generation is
+    /// at-or-after the canonical's last recorded transition.
+    ///
+    /// It is a per-canonical CONTENT comparison and NOTHING else. It is
+    /// never an equality test against the live global generation, never
+    /// a route/edge/resolution currency oracle, and never a cache key
+    /// (R6). Resolution currency lives entirely on the resolve domain —
+    /// the owner's import-route resolution witness validated against a
+    /// store view's captured immutable resolution world — because this
+    /// artifact retains no resolved target for a stamp to guard.
+    pub built_at_content_generation: u64,
     /// The owner's live `parse_env_hash` (the R21 parse dimension)
     /// captured at materialise time — the parse environment this
     /// artifact's `framework_parse` / `shallow_state` / `decl_bodies` were
@@ -215,24 +192,23 @@ pub struct IndexedReady {
 }
 
 impl IndexedReady {
-    /// Whether this artifact's surface carries any cross-file edges —
-    /// resolved import routes, import targets, plain/wildcard reexports.
-    /// A surface WITHOUT cross-file edges is insensitive to
-    /// route-resolution mutations: nothing on it can retarget, so neither
-    /// the `project_generation` stamp nor the `edge_generation` stamp
-    /// gates its reuse.
+    /// The `Route` derived-fact digest for this artifact's routing
+    /// surface, or `None` when the surface carries nothing routable.
     ///
-    /// THE complete edge authority: composes the shallow-inventory
-    /// component (`has_shallow_cross_file_edges`) with the
-    /// `import_routes` table, whose entries (the external `src=` class,
-    /// caller-pushed route snapshots) bake dependency-set-derived targets
-    /// the shallow inventory never sees. Every edge-currency consumer
-    /// (`route_surface_is_edge_current`, `indexed_surface_is_current`,
-    /// `base_snapshot_equivalent`'s stamp gates) consults THIS predicate —
-    /// never the component alone.
+    /// THE single derivation every `Route` producer and validator
+    /// shares. The digest is memoised on the `ShallowFileState` itself
+    /// (`RouteSurfaceHashMemo`, computed once per state), so this is a
+    /// `OnceLock` read after the first call — the artifact stores no
+    /// duplicate copy that could drift from the state it summarises.
+    ///
+    /// Pure PARSE domain: authored specifiers, exported/original names,
+    /// type-only-ness, local owners, and the owner's `whole_hash`. No
+    /// resolved canonical enters it.
     #[must_use]
-    pub fn has_cross_file_edges(&self) -> bool {
-        !self.import_routes.is_empty() || self.shallow_state.has_shallow_cross_file_edges()
+    pub fn route_surface_hash(&self) -> Option<Hash16> {
+        self.shallow_state
+            .has_resolvable_surface()
+            .then(|| crate::resolver_store::hash_route_surface(&self.shallow_state))
     }
 
     /// Test-only constructor for fact-emission-style fixtures: a minimal
@@ -255,11 +231,7 @@ impl IndexedReady {
         Self {
             whole_hash,
             shallow_state,
-            import_routes: Arc::new(FxHashMap::default()),
-            import_route_hash: None,
-            route_hash: None,
-            edge_generation: 0,
-            project_generation: 0,
+            built_at_content_generation: 0,
             parse_env_hash: [0u8; 16],
             raw_source,
             eval_source,
@@ -283,7 +255,6 @@ impl IndexedReady {
     /// construction path never ships in release production builds.
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test(whole_hash: Hash16) -> Self {
-        use rustc_hash::FxHashMap;
         let route_inventory = Arc::new(
             verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
         );
@@ -295,11 +266,7 @@ impl IndexedReady {
         Self {
             whole_hash,
             shallow_state: Arc::new(shallow),
-            import_routes: Arc::new(FxHashMap::default()),
-            import_route_hash: None,
-            route_hash: None,
-            edge_generation: 0,
-            project_generation: 0,
+            built_at_content_generation: 0,
             parse_env_hash: [0u8; 16],
             raw_source: Arc::from(""),
             eval_source: Arc::from(""),
@@ -653,10 +620,10 @@ impl CompileCacheDb {
 /// changes preserve it. The unified `bump_project_generation_and_evict`
 /// cascade clears all three domain DBs together.
 ///
-/// `DerivedRawState::import_routes` is a sub-mirror of
-/// [`IndexedReady`]`.import_routes`: same content, different invalidation
-/// trigger from the IndexedReady source — see the per-type docstring on
-/// [`crate::types::DerivedRawState`] for the sub-mirror lifecycle rationale.
+/// `DerivedRawState::import_routes` is the CALLER-SUPPLIED authoritative
+/// route table (`set_import_dependencies` — the bundler telling the host
+/// how ITS resolver resolves). It mirrors no artifact: the parse-domain
+/// `IndexedReady` retains no resolved target.
 #[derive(Debug, Default)]
 pub struct DerivedRawCacheDb {
     /// Backing map: `DashMap<String, DerivedRawState>`. Public accessors
@@ -988,8 +955,8 @@ pub struct ProjectTypeStore {
     /// instead, so the two cache families are disjoint by construction.
     compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent,
     /// Source-content-domain DB for the per-canonical compile cache (D48).
-    /// Holds [`crate::types::DerivedRawState`] entries (sub-mirror of
-    /// `IndexedReady.import_routes` plus source-derived analyses); the
+    /// Holds [`crate::types::DerivedRawState`] entries (the
+    /// caller-supplied route table plus source-derived analyses); the
     /// §3.4.2 invalidation matrix governs eviction triggers.
     derived_raw_cache_db: DerivedRawCacheDb,
     /// Dependency-closure-domain DB for the per-canonical compile cache
@@ -1544,10 +1511,21 @@ impl ProjectTypeStore {
     /// LSP affected-files reporting + diagnostics, but is **never**
     /// wired to cache invalidation. Any cached `FileArtifacts` entry
     /// whose `(canonical_id, content_hash)` pair is not present in
-    /// `live_publish_set` is dropped. The publish set is the union of
-    /// every `(canonical_id, content_hash)` reachable from any open
-    /// editor / live VFS state — callers compute it from their VFS
-    /// snapshot and pass it in.
+    /// `live_publish_set` is RETIRED from the store's current root. The
+    /// publish set is the union of every `(canonical_id, content_hash)`
+    /// reachable from any open editor / live VFS state — callers compute
+    /// it from their VFS snapshot and pass it in.
+    ///
+    /// **`live_publish_set` is NOT a reachability oracle for physical
+    /// memory.** It names the CURRENT world's live content and knows
+    /// nothing about the immutable roots a `HostStoreView` / session /
+    /// request has already captured. Deciding to free bytes from it
+    /// alone would revoke a lease those holders were promised. So this
+    /// sweep only retires, then REQUESTS a reclamation pass; the store
+    /// applies the complete reachability rule (invisible from the
+    /// current root AND from every live captured root) using state only
+    /// it owns. `ProjectTypeStore` may request GC, never decide
+    /// reachability.
     ///
     /// Per D40 + D119: when `memory_pressure: true`, an additional
     /// LRU floor sweep runs after reachability and drops entries down
@@ -1620,6 +1598,10 @@ impl ProjectTypeStore {
             self.indexed
                 .evict_lru_promoted(policy.min_floor, policy.promote_threshold);
         }
+        // GC REQUEST — carries no reachability judgement. Every
+        // retirement above is logical; the store decides which retired
+        // versions no root can still reach and frees exactly those.
+        let _reclaimed = self.indexed.reclaim_retired_versions();
     }
     /// D48 matrix row 1 — Source content change for owner.
     ///
@@ -1991,11 +1973,7 @@ mod tests {
             Arc::new(IndexedReady {
                 whole_hash: hash_v1,
                 shallow_state: shallow,
-                import_routes: Arc::new(FxHashMap::default()),
-                import_route_hash: None,
-                route_hash: None,
-                edge_generation: 0,
-                project_generation: 0,
+                built_at_content_generation: 0,
                 parse_env_hash: [0u8; 16],
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
@@ -2043,11 +2021,7 @@ mod tests {
                         Arc::clone(&route_inventory),
                     ),
                 ),
-                import_routes: Arc::new(FxHashMap::default()),
-                import_route_hash: None,
-                route_hash: None,
-                edge_generation: 0,
-                project_generation: 0,
+                built_at_content_generation: 0,
                 parse_env_hash: [0u8; 16],
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
@@ -2117,7 +2091,7 @@ mod tests {
             Arc::new(crate::owner_import_surface::OwnerImportSurface {
                 owner_canonical: Arc::from("/w/o.vue"),
                 owner_whole_hash: hash,
-                bindings: Arc::new(FxHashMap::default()),
+                bindings: Arc::new(rustc_hash::FxHashMap::default()),
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
                 validated_at_generation: 0,
             }),

@@ -8,9 +8,8 @@
 //! [`HostStoreView`]; that view is an immutable snapshot of the
 //! workspace's per-canonical facts at request-entry time.
 //!
-//! `HostStoreView::from_host` does 5-7 full workspace sweeps and
-//! allocates ~5 hashmaps + an artifact `Vec` per call. The per-request hoist
-//! the build to once-per-request, then threads a borrow through the
+//! `HostStoreView::from_host` captures immutable store roots in O(1). The
+//! per-request wrapper keeps one fixed view and threads a borrow through the
 //! pipeline. But `ensure_loaded` and `ensure_indexed_ready_serve` deliberately
 //! do not bump `store_view_epoch` on first-time additive loads — so a
 //! request-entry view built BEFORE dependency discovery does not track
@@ -213,14 +212,12 @@ struct OverlayBundleMemoEntry {
 #[derive(Default)]
 struct RouteDerivedHashes {
     route: Option<Hash16>,
-    import_route: Option<Hash16>,
 }
 
 impl RouteDerivedHashes {
     fn get(&self, kind: DerivedFactKind) -> Option<Hash16> {
         match kind {
             DerivedFactKind::Route => self.route,
-            DerivedFactKind::ImportRoute => self.import_route,
             // `DirectSource` is handled by the whole-hash arm in
             // `validates`; no overlay-derived hash is recorded for it.
             DerivedFactKind::DirectSource => None,
@@ -382,21 +379,18 @@ impl CanonicalCompletionOverlay {
     /// The base [`Self::complete_canonical`] / `_inner` path resolves
     /// the canonical's `whole_hash` from the scheduler then loads
     /// `FileArtifacts` from the indexed authority to populate
-    /// `file_facts` + derived hashes. A canonical the scheduler does
+    /// `file_facts` + the authored route-surface hash. A canonical the scheduler does
     /// not track and the indexed authority cannot answer for at
     /// completion time has NO artifact to read, so the
     /// indexed-authority fallback inside
-    /// [`Self::write_completion_entry`] returns `None` and the route /
-    /// import-route derived-hash entries never enter the overlay. The
-    /// next warm-read validation of such a bundle's stored
-    /// `ImportRoute` fact therefore falls through to the base view's
-    /// `derived_hashes` snapshot — which itself does not see entries
-    /// published after the snapshot was built — and rejects the
-    /// bundle as `untracked`, causing a fresh cold rebuild every
-    /// time.
+    /// [`Self::write_completion_entry`] returns `None` and the route
+    /// derived-hash entry never enters the overlay. The next warm-read
+    /// validation therefore falls through to the immutable base roots,
+    /// which cannot see an artifact published after their capture, and
+    /// rejects the bundle as untracked, causing a fresh cold rebuild.
     ///
-    /// This method writes the producer-known `(whole_hash, route_hash,
-    /// import_route_hash)` triple directly into the overlay. Each
+    /// This method writes the producer-known `(whole_hash, route_hash)`
+    /// pair directly into the overlay. Each
     /// flag-after-insert ordering matches
     /// [`Self::write_completion_entry`] (lock held across the map
     /// insert + `_nonempty` flag store + release).
@@ -413,7 +407,6 @@ impl CanonicalCompletionOverlay {
         canonical: &str,
         whole_hash: Hash16,
         route_hash: Option<Hash16>,
-        import_route_hash: Option<Hash16>,
     ) {
         // Mirror the flag-after-insert ordering of
         // `write_completion_entry`: hold the lock across the map
@@ -427,15 +420,10 @@ impl CanonicalCompletionOverlay {
             drop(whole);
         }
 
-        if route_hash.is_some() || import_route_hash.is_some() {
+        if let Some(route_hash) = route_hash {
             let mut derived = self.derived_hashes.write();
             let entry = derived.entry(canonical.to_owned()).or_default();
-            if let Some(h) = route_hash {
-                entry.route = Some(h);
-            }
-            if let Some(h) = import_route_hash {
-                entry.import_route = Some(h);
-            }
+            entry.route = Some(route_hash);
             self.derived_hashes_nonempty.store(true, Ordering::Release);
             drop(derived);
         }
@@ -567,8 +555,8 @@ impl CanonicalCompletionOverlay {
             drop(whole);
         }
 
-        // Per-canonical `IndexedReady` snapshot — populates `file_facts`
-        // and the `Route` / `ImportRoute` derived-hash entries. For a
+        // Per-canonical `IndexedReady` projection — populates `file_facts`
+        // and the authored `Route` derived-hash entry. For a
         // session-overlaid canonical the caller passes the overlay
         // artifacts directly; for the base-only path we look them up by
         // content hash here.
@@ -586,14 +574,9 @@ impl CanonicalCompletionOverlay {
             }
 
             let indexed = &file_artifacts.indexed;
-            // Edge-currency gate. A wildcard-bearing artifact bakes its
-            // `export *` edge `canonical_id`s from the dependency file set;
-            // once `content_generation` advances past its edge generation BOTH
-            // its route-surface hash and its baked import-route hash are stale.
-            // Suppress both derived hashes so an entry rooted on them fails
-            // warm validation and recomputes through the edge-gated readers
-            // (which re-materialise the surface) rather than validating against
-            // a stale hash recorded in the completion overlay.
+            // Parse-environment reuse gate. The route surface is authored
+            // parse state, so an artifact built under a different parse
+            // environment must not publish its hash into this overlay.
             let edge_current = host.indexed_surface_is_current(canonical, indexed);
             let route_hash = if indexed.shallow_state.has_resolvable_surface() && edge_current {
                 Some(crate::resolver_store::hash_route_surface(
@@ -602,25 +585,15 @@ impl CanonicalCompletionOverlay {
             } else {
                 None
             };
-            // For session-overlaid canonicals the import-route hash is
-            // covered by the overlay `IndexedReady`'s own
-            // `import_route_hash` (the authority `with_session_overlay`
-            // also reads). For the base-only path we read it from the
-            // host's generation-current map. Both produce the same
-            // value for non-overlaid canonicals; for overlaid
-            // canonicals the indexed authority is the overlay one. An
-            // edge-stale wildcard surface suppresses it (same rail as the
-            // route hash above) so the baked stale edge is never recorded.
-            let import_route_hash = if edge_current {
-                indexed
-                    .import_route_hash
-                    .or_else(|| host.generation_current_import_route_hash(canonical))
-            } else {
-                None
-            };
-            if route_hash.is_some() || import_route_hash.is_some() {
-                // Single write-lock acquisition for both derived-hash
-                // variants per canonical. Flag-set is performed under
+            // The owner's import-route dependency is NOT an overlay
+            // derived hash: it is the resolve-domain resolution witness,
+            // validated against the base view's captured immutable
+            // resolution world. The per-request completion overlay
+            // carries promoted parse/content state only, so it neither
+            // records nor shadows that rail.
+            if route_hash.is_some() {
+                // Single write-lock acquisition for the derived-hash entry.
+                // Flag-set is performed under
                 // the same lock so a reader observing `_nonempty == false`
                 // is guaranteed to also observe the map as still empty
                 // for the canonical (same race as the `whole_hashes` /
@@ -629,9 +602,6 @@ impl CanonicalCompletionOverlay {
                 let entry = derived.entry(canonical.to_owned()).or_default();
                 if let Some(h) = route_hash {
                     entry.route = Some(h);
-                }
-                if let Some(h) = import_route_hash {
-                    entry.import_route = Some(h);
                 }
                 self.derived_hashes_nonempty.store(true, Ordering::Release);
                 drop(derived);
@@ -713,7 +683,6 @@ impl CanonicalCompletionOverlay {
         let entry = derived.entry(canonical.to_owned()).or_default();
         match kind {
             DerivedFactKind::Route => entry.route = Some(hash),
-            DerivedFactKind::ImportRoute => entry.import_route = Some(hash),
             // `DirectSource` is handled by the whole-hash arm; the
             // overlay never records a derived hash for it (matches the
             // `RouteDerivedHashes::get` contract).
@@ -925,13 +894,13 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // `DerivedFactHash`: the overlay's `derived_hashes` (populated
         // by mid-request `complete_canonical`) is authoritative; if the
         // overlay has no entry for the pair, fall through to the base
-        // view's snapshotted derived hashes.
+        // view's immutable-root point lookup.
         //
         // Without this override, per-rejection attribution helpers
         // (`attribute_prepared_decl_bundle_rejection`) call this on a
-        // `RequestStoreView` and hit the default `None` arm — every
-        // real `ImportRoute` hash mismatch then reclassifies as
-        // `_absent` and the discriminating counter loses its meaning.
+        // `RequestStoreView` and hit the default `None` arm — every real
+        // route-hash mismatch then reclassifies as `_absent` and the
+        // discriminating counter loses its meaning.
         if let Some(overlay_hash) = self.overlay.lookup_derived_hash(canonical_id, kind) {
             return Some(overlay_hash);
         }
@@ -1004,6 +973,16 @@ impl<'a> StoreView for RequestStoreView<'a> {
         if !self.base_is_current {
             return false;
         }
+        // Resolution-currency facts validate against the base view's
+        // CAPTURED resolution world. The per-request completion overlay
+        // carries promoted parse/content state, never resolver
+        // observations, so it neither shadows nor re-roots this arm — and
+        // the overlay-keyed detour below would misroute a fact whose entry
+        // is an explicit project (no canonical id at all) into a blanket
+        // rejection.
+        if fact.resolution_fact().is_some() {
+            return self.base.validates_resolve_imports_domain(fact);
+        }
         // The base view's `ResolvedImportFactsDb` is content-addressed
         // by `(content_hash, known_miss_generation, env_hashes,
         // resolver_version)` and is an `Arc` shared between the base
@@ -1025,7 +1004,10 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // for any canonical the overlay tracks, so warm hits on
         // freshly-promoted dependencies validate correctly inside the
         // same request.
-        if let Some(overlay_hash) = self.overlay.lookup_whole_hash(fact.canonical_id.as_str()) {
+        let Some(canonical_id) = fact.canonical_id() else {
+            return false;
+        };
+        if let Some(overlay_hash) = self.overlay.lookup_whole_hash(canonical_id) {
             return self
                 .base
                 .validates_resolve_imports_domain_for_content_hash(fact, overlay_hash);
@@ -1052,7 +1034,6 @@ impl<'a> StoreView for RequestStoreView<'a> {
         canonical: &str,
         whole_hash: Hash16,
         route_hash: Option<Hash16>,
-        import_route_hash: Option<Hash16>,
     ) {
         // Route the call through the overlay's
         // `complete_route_canonical` writer — it writes
@@ -1065,6 +1046,6 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // (`no_concrete_verter_host_in_seal_scope` architecture
         // guard) keeps holding.
         self.overlay
-            .complete_route_canonical(canonical, whole_hash, route_hash, import_route_hash);
+            .complete_route_canonical(canonical, whole_hash, route_hash);
     }
 }

@@ -353,7 +353,7 @@ mod tests {
         let host = make_filesystem_test_host(&ws);
         let app_id = canonical_test_path(&src.join("App.vue"));
         let child_id = canonical_test_path(&src.join("Child.vue"));
-        let resolved = host.resolve_import_via_workspace(&app_id, "./Child.vue");
+        let resolved = host.resolve_import_transient(&app_id, "./Child.vue");
         // Positive: resolves to Child.vue
         assert_eq!(
             resolved.as_deref(),
@@ -361,7 +361,7 @@ mod tests {
             "filesystem host should resolve relative imports to correct target"
         );
         // Negative: does not resolve to non-existent file
-        let missing = host.resolve_import_via_workspace(&app_id, "./Missing.vue");
+        let missing = host.resolve_import_transient(&app_id, "./Missing.vue");
         assert!(
             missing.is_none(),
             "non-existent relative import should return None"

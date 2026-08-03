@@ -23,16 +23,19 @@ const mocks = vi.hoisted(() => {
     startShouldFail: true,
     startCalls: 0,
     stopCalls: 0,
+    createdClientOptions: [] as unknown[],
     /** Park `start()` so a test can dispose the extension mid-start. */
     holdStart: false,
     releaseStart: undefined as (() => void) | undefined,
   };
-  const configuration = {
-    get: (_key: string, fallback?: unknown) => fallback,
-    inspect: () => undefined,
-    update: async () => {},
+  const configurationValues: Record<string, unknown> = {};
+  return {
+    statusBarItems,
+    diagnosticCollections,
+    errorMessages,
+    state,
+    configurationValues,
   };
-  return { statusBarItems, diagnosticCollections, errorMessages, state, configuration };
 });
 
 vi.mock("vscode", () => {
@@ -89,7 +92,12 @@ vi.mock("vscode", () => {
     workspace: {
       workspaceFolders: undefined,
       textDocuments: [] as unknown[],
-      getConfiguration: () => mocks.configuration,
+      getConfiguration: (section: string) => ({
+        get: (key: string, fallback?: unknown) =>
+          mocks.configurationValues[`${section}.${key}`] ?? fallback,
+        inspect: () => undefined,
+        update: async () => {},
+      }),
       onDidOpenTextDocument: subscribe,
       onDidChangeTextDocument: subscribe,
       onDidCloseTextDocument: subscribe,
@@ -222,6 +230,9 @@ vi.mock("vscode", () => {
 
 vi.mock("vscode-languageclient/node", () => ({
   LanguageClient: class {
+    constructor(_id: string, _name: string, _serverOptions: unknown, clientOptions: unknown) {
+      mocks.state.createdClientOptions.push(clientOptions);
+    }
     protocol2CodeConverter = {};
     onNotification() {
       return { dispose: () => {} };
@@ -293,6 +304,10 @@ describe("language server start attempt lifetime", () => {
     mocks.errorMessages.length = 0;
     mocks.state.startShouldFail = true;
     mocks.state.startCalls = 0;
+    mocks.state.createdClientOptions.length = 0;
+    for (const key of Object.keys(mocks.configurationValues)) {
+      delete mocks.configurationValues[key];
+    }
   });
 
   afterEach(() => {
@@ -341,6 +356,42 @@ describe("language server start attempt lifetime", () => {
 
     expect(vi.getTimerCount()).toBe(0);
     expect(liveStatusBarItems()).toBe(0);
+  });
+
+  // @ai-generated - Verifies that the real extension restart path re-reads init-only settings.
+  it("rebuilds initialization options from current settings when restarting", async () => {
+    mocks.state.startShouldFail = false;
+    const context = makeContext();
+    const server = await activateVueLanguageServer(context, log);
+
+    type ClientOptions = {
+      initializationOptions: {
+        analysis: { enabled: boolean };
+        hover: { nativeSemantics: boolean; provenance: boolean };
+      };
+    };
+    const initial = mocks.state.createdClientOptions[0] as ClientOptions;
+    expect(initial.initializationOptions.analysis.enabled).toBe(false);
+    expect(initial.initializationOptions.hover).toEqual({
+      nativeSemantics: false,
+      provenance: false,
+    });
+
+    mocks.configurationValues["verter.analysis.enabled"] = true;
+    mocks.configurationValues["verter.hover.nativeSemantics"] = true;
+    mocks.configurationValues["verter.hover.provenance"] = true;
+    await server.restart(false);
+
+    expect(mocks.state.createdClientOptions).toHaveLength(2);
+    const restarted = mocks.state.createdClientOptions[1] as ClientOptions;
+    expect(restarted).not.toBe(initial);
+    expect(restarted.initializationOptions.analysis.enabled).toBe(true);
+    expect(restarted.initializationOptions.hover).toEqual({
+      nativeSemantics: true,
+      provenance: true,
+    });
+    expect(initial.initializationOptions.analysis.enabled).toBe(false);
+    expect(initial.initializationOptions.hover.nativeSemantics).toBe(false);
   });
 });
 

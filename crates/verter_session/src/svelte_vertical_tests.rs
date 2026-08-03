@@ -349,13 +349,21 @@ fn userland_snippet_lookalike_is_not_classified_snippet_typed() {
     );
 
     // Drive the resolved-validation half via the host's script-facts seam: the
-    // Svelte provider rejects the userland candidate, so no resolved snippet
-    // facts are produced.
-    let facts = host.resolve_svelte_script_facts("/Userland.svelte");
+    // Svelte provider proves that the userland candidate contributes no
+    // resolved snippet facts.
+    let facts = host
+        .resolve_svelte_script_facts("/Userland.svelte")
+        .expect_exact("the userland look-alike is an exact negative");
+    let members = &facts.resolution().validated_snippet_members;
     assert!(
-        facts.as_ref().is_none_or(|f| f.snippet_imports.is_empty()),
+        facts.resolution().snippet_imports.is_empty(),
         "a userland `Snippet` look-alike must NOT be classified snippet-typed, got {:?}",
-        facts.map(|f| f.snippet_imports.clone())
+        facts.resolution().snippet_imports
+    );
+    assert!(
+        members.is_empty(),
+        "a userland `Snippet` look-alike must NOT produce a validated member, got {:?}",
+        members
     );
 
     let (meta, _, _) = host
@@ -413,20 +421,54 @@ fn real_svelte_snippet_is_classified_snippet_typed() {
     // Note: snippet validation depends on the host resolving `svelte` to its
     // `node_modules` package AND classifying that canonical as package-backed
     // (the typed `ResolvedPackage` identity). When the hermetic resolver reaches
-    // the package, the exact import identity is retained; when it cannot, an
-    // unresolved import fact may remain. No prop member name is captured.
-    if let Some(facts) = facts {
-        assert!(
-            facts.snippet_imports.is_empty()
-                || facts.snippet_imports.iter().all(|fact| match fact {
+    // the package, `row` is validated; when it cannot, `validated_snippet_members`
+    // is empty — the userland-look-alike negative above is the load-bearing
+    // discriminator either way. Assert the validated set is EITHER exactly
+    // `["row"]` (resolved) OR empty (unresolved) — NEVER a different member, and
+    // NEVER a userland member.
+    match facts {
+        crate::framework::script_facts::ScriptFactEvidence::Exact(exact) => {
+            let imports = &exact.facts().resolution().snippet_imports;
+            assert!(
+                imports.is_empty()
+                    || imports.iter().all(|fact| matches!(
+                        fact,
+                        verter_type_expr::facts::SvelteSnippetImportFact::Resolved {
+                            symbol, ..
+                        } if symbol.symbol.as_ref() == "Snippet"
+                    )),
+                "only the resolved `Snippet` identity may be retained, got {imports:?}"
+            );
+            let members = &exact.facts().resolution().validated_snippet_members;
+            assert!(
+                members.is_empty() || members.as_ref() == ["row".to_string()].as_slice(),
+                "the only exact snippet member is `row` (or none when the import resolved \
+                 conclusively elsewhere), got {members:?}"
+            );
+        }
+        crate::framework::script_facts::ScriptFactEvidence::Partial(partial) => {
+            let observations = partial.conservative_svelte_observations();
+            observations.resolved_snippet_imports().visit(|fact| {
+                assert!(matches!(
+                    fact,
                     verter_type_expr::facts::SvelteSnippetImportFact::Resolved {
                         symbol, ..
-                    } => symbol.symbol.as_ref() == "Snippet",
-                    verter_type_expr::facts::SvelteSnippetImportFact::Unresolved { .. } => true,
-                }),
-            "only the named `Snippet` import identity may be retained, got {:?}",
-            facts.snippet_imports
-        );
+                    } if symbol.symbol.as_ref() == "Snippet"
+                ));
+            });
+            observations.validated_snippet_members().visit(|member| {
+                assert_eq!(
+                    member, "row",
+                    "a partial payload may retain only the positive `row` observation"
+                );
+            });
+        }
+        crate::framework::script_facts::ScriptFactEvidence::Unavailable(_) => {
+            panic!("the Svelte provider unexpectedly returned unavailable facts")
+        }
+        crate::framework::script_facts::ScriptFactEvidence::NotApplicable(_) => {
+            panic!("the Svelte provider unexpectedly returned not-applicable facts")
+        }
     }
 }
 
@@ -720,6 +762,33 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
 }
 
 #[test]
+fn svelte_public_api_recovered_script_never_claims_exact_empty_bindings() {
+    let host = host();
+    upsert_svelte(
+        &host,
+        "/RecoveredBindings.svelte",
+        "<script lang=\"ts\">\n\
+         let { title }: { title: string } = $props();\n\
+         return;\n\
+         </script>\n",
+    );
+
+    let api = host
+        .get_public_api("/RecoveredBindings.svelte")
+        .expect("Svelte public API projection")
+        .expect("the recovered component still projects its conservative API");
+    let code = api.ts_labeled_code().as_ref();
+    assert!(
+        code.contains(",\n  string\n>;"),
+        "partial script facts must keep Svelte's permissive binding generic:\n{code}"
+    );
+    assert!(
+        !code.contains(",\n  \"\"\n>;"),
+        "only exact-empty evidence may claim that the component has no bindable props:\n{code}"
+    );
+}
+
+#[test]
 fn svelte_runes_state_export_projects_the_native_component_exports_generic() {
     // Official Svelte 5 returns explicitly exported runes state from the
     // callable `Component`, so `ReturnType<typeof Component>` exposes the
@@ -923,14 +992,14 @@ void title; void count; void onselect; void itemRow; void dispatch;
     upsert_svelte(&host, "/workspace/StructuredContract.svelte", source);
     let facts = host
         .resolve_svelte_script_facts("/workspace/StructuredContract.svelte")
-        .expect("Svelte facts");
+        .expect_exact("Svelte facts");
     assert!(
         matches!(
-            facts.snippet_imports.as_ref(),
+            facts.resolution().snippet_imports.as_ref(),
             [verter_type_expr::facts::SvelteSnippetImportFact::Resolved { .. }]
         ),
         "real package import must retain a resolved Snippet seed: {:?}",
-        facts.snippet_imports
+        facts.resolution().snippet_imports
     );
     let (meta, _, _) = host
         .get_component_meta_output("/workspace/StructuredContract.svelte")
@@ -1150,9 +1219,9 @@ void missing;
 
     let facts = host
         .resolve_svelte_script_facts("/workspace/Missing.svelte")
-        .expect("Svelte facts");
+        .expect_exact("Svelte facts");
     assert!(
-        facts.snippet_imports.is_empty(),
+        facts.resolution().snippet_imports.is_empty(),
         "fixture must exercise the empty expected-identity inventory"
     );
 
@@ -1554,8 +1623,9 @@ fn stored_macro_payload_locator_anchors_absolutize_to_the_producing_canonical() 
     let facts = crate::framework::script_facts::resolve_script_facts::<
         verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
     >(&host, registration, "/Widget.svelte")
-    .expect("the runes component resolves script facts");
+    .expect_exact("the runes component resolves script facts");
     let props_ref = facts
+        .syntax()
         .props_type
         .as_ref()
         .expect("the annotation payload ref");
@@ -1822,10 +1892,10 @@ fn svelte_inline_import_type_snippet_prop_resolves_typed_role() {
     // binding exists for the inline form).
     let facts = host
         .resolve_svelte_script_facts("/workspace/InlineImportType.svelte")
-        .expect("Svelte facts for the inline import()-type shape");
+        .expect_exact("Svelte facts for the inline import()-type shape");
     assert!(
         matches!(
-            facts.snippet_imports.as_ref(),
+            facts.resolution().snippet_imports.as_ref(),
             [verter_type_expr::facts::SvelteSnippetImportFact::Resolved {
                 local_binding: None,
                 ..
@@ -1833,7 +1903,7 @@ fn svelte_inline_import_type_snippet_prop_resolves_typed_role() {
         ),
         "the inline import()-type reference must package-validate into ONE \
          binding-less Resolved seed, got: {:?}",
-        facts.snippet_imports
+        facts.resolution().snippet_imports
     );
 
     // The consumer half: meta output rows carry the typed role — snippet

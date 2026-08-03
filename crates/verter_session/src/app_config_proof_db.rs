@@ -71,7 +71,7 @@ fn fact_references_canonical(fact: &FactVersionRef, canonical_id: &str) -> bool 
         } => c.as_str() == canonical_id,
         FactVersionRef::Parse(parse_fact) => parse_fact.canonical_id.as_str() == canonical_id,
         FactVersionRef::ResolveImports(resolve_fact) => {
-            resolve_fact.canonical_id.as_str() == canonical_id
+            resolve_fact.canonical_id() == Some(canonical_id)
         }
         FactVersionRef::RouteSurface(route_fact) => {
             route_fact.canonical_id.as_str() == canonical_id

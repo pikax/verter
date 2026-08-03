@@ -155,11 +155,14 @@ impl CarrierCompanion {
         script_kind: ScriptKind,
         version: u64,
     ) -> Self {
-        let prepared = crate::carrier_provider_projection::prepare_carrier_provider_imports(
-            None,
-            canonical_id,
-            generated,
-            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        let prepared = crate::carrier_provider_projection::expect_admitted(
+            crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                None,
+                canonical_id,
+                generated,
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            ),
+            "the test preparer has no workspace resolution inputs",
         );
         let mut companion = Self::carrier_ide(provider_uri, prepared, map_json, script_kind);
         companion.version = version;

@@ -135,6 +135,7 @@ impl<'a> BatchAuditAggregator<'a> {
             let summary = SlowRecordSummary {
                 request_id: record.request_id,
                 canonical_id: record.canonical_id.clone(),
+                target_identity: record.target_identity.clone(),
                 kind: record.kind.clone(),
                 duration_ms: record.timings.total_ms,
             };
@@ -213,6 +214,9 @@ mod tests {
         let mut rec = RequestAuditRecord {
             request_id,
             canonical_id: format!("/req-{request_id}.vue"),
+            target_identity: Some(crate::RequestTargetIdentity::RegisteredCanonical(format!(
+                "/req-{request_id}.vue"
+            ))),
             kind: kind.clone(),
             parent_request_id: None,
             from_cache,

@@ -10,7 +10,7 @@
 //! pointer-identity sharing on a token-stable hit and a fresh snapshot
 //! on a token change. All FAIL against the pre-change tree, where
 //! `HostStoreView` had no Arc-shared snapshot and `from_host` rebuilt
-//! the full workspace sweep on every call (no token-keyed cache, no
+//! the base snapshot on every call (no token-keyed cache, no
 //! pointer identity to assert, no `validation_token` to compare).
 
 use std::sync::Arc;
@@ -512,7 +512,7 @@ fn from_host_reuses_cached_arc_when_token_stable() {
     assert_eq!(
         ptr1, ptr2,
         "token-stable resolver_store_view MUST reuse the cached Arc snapshot \
-         (pointer identity), not rebuild the workspace sweep"
+         (pointer identity), not rebuild the root-backed snapshot"
     );
     assert_eq!(
         view1.validation_token_for_tests(),
@@ -800,18 +800,18 @@ fn cold_compute_artifact_publication_does_not_self_supersede_publish() {
     );
 }
 
-// ── Singleflight: concurrent token-miss callers share ONE cold sweep ──
+// ── Singleflight: concurrent token-miss callers share ONE cold build ──
 
 #[test]
 fn cold_store_view_build_is_singleflighted_across_concurrent_callers() {
     // PERF SOUNDNESS: on a token miss the manager must NOT let
-    // N concurrent callers each run `build_coherent` (N full-workspace
-    // sweeps). Exactly one caller sweeps; the rest WAIT on the condvar and
+    // N concurrent callers each run `build_coherent`. Exactly one caller
+    // captures roots; the rest WAIT on the condvar and
     // clone the winner's `Arc<StoreViewSnapshot>`.
     //
     // Discrimination: spin N threads that all request the base view after
     // a fresh token (the cache is cold). With singleflight only ONE thread
-    // sweeps; the rest WAIT on the condvar and clone the winner's Arc.
+    // builds; the rest WAIT on the condvar and clone the winner's Arc.
     //
     // The sweep count is measured PER-THREAD (each spawned thread reports
     // its `COHERENT_BUILD_SWEEPS_THIS_THREAD`, summed by the test) rather
@@ -1136,47 +1136,39 @@ fn compat_token_validity_fingerprint_matches_external_supersession_fingerprint()
     );
 }
 
-// ── A positive import-route cache write advances the token ──
+// ── A new dependency-edge registration advances the token ──
 
 #[test]
-fn token_advances_on_positive_import_route_cache_write() {
-    // SOUNDNESS: `cache_positive_import_route_result`
-    // mutates `DerivedRawState.import_routes`, which the base store view
-    // snapshots BY VALUE (the `ImportRoute` derived-hash domain, via
-    // `generation_current_import_route_hash`'s `DerivedRawState`
-    // fallback). If this write moved NO token dimension a
-    // `StoreViewManager`-cached base view built before the write would be
-    // served unchanged and warm validation would compare against the
-    // STALE `ImportRoute` hash forever. The write advances the
-    // dedicated `load_generation` dimension, so the full reuse token
-    // changes (rebuild on the next request) WITHOUT counting as an
-    // external supersession (a cold compute's own route resolution must
-    // not self-fence its own result promotion).
+fn token_advances_on_new_dependency_edge_registration() {
+    // SOUNDNESS: registering a resolved dependency EDGE mutates
+    // `DependencyState.dependencies`, the reverse-dependency bookkeeping
+    // a `StoreViewManager`-cached base view was built without. The write
+    // advances the dedicated `load_generation` dimension, so the full
+    // reuse token changes (rebuild on the next request) WITHOUT counting
+    // as an external supersession (a cold compute's own route resolution
+    // must not self-fence its own result promotion).
+    //
+    // The host memoises NO resolution any more, so there is no route-map
+    // value for the token to track — the workspace's own bounded
+    // owner-edge candidate slot is the one memo and it validates
+    // per-reader against a captured resolution world.
     let (host, canonical) = host_with_one_file();
     let before = host.current_validation_token();
     let before_load = before.load_generation;
     let before_epoch = before.store_view_epoch;
 
-    // Drive the exact positive-route point producer (the single writer of
-    // `DerivedRawState.import_routes` outside the snapshot writer + the two
-    // lifecycle resets).
-    host.cache_positive_import_route_result_for_tests(
-        &canonical,
-        "./dep",
-        "/proj/dep.ts",
-        host.ws().content_generation(),
-    );
+    // Drive the exact dependency-edge producer.
+    host.record_resolved_dependency_edge_for_tests(&canonical, "/proj/dep.ts");
 
     let after = host.current_validation_token();
     assert_ne!(
         before_load, after.load_generation,
-        "a positive import-route cache write MUST advance the load_generation \
-         token dimension (it mutates DerivedRawState.import_routes, snapshotted \
-         by value as the ImportRoute derived-hash domain)"
+        "a NEW dependency-edge registration MUST advance the load_generation \
+         token dimension"
     );
     assert_ne!(
         before, after,
-        "the full reuse token MUST change after a positive import-route cache write \
+        "the full reuse token MUST change after a new dependency-edge registration \
          (so a manager-cached base view is invalidated and never serves a stale \
          ImportRoute hash)"
     );
@@ -1205,7 +1197,7 @@ fn idempotent_positive_route_readmit_does_not_advance_token_or_rebuild_snapshot(
     // sweep) and forks singleflight lanes.
     //
     // DISCRIMINATION: an unconditional `bump_load_generation()` in
-    // `cache_positive_import_route_result` would make the SECOND
+    // `record_resolved_dependency_edge` would make the SECOND
     // (no-op) admission advance `load_generation` → the full token
     // changes → the manager-cached base snapshot is INVALIDATED and the
     // next `resolver_store_view()` rebuilds a fresh Arc. With the no-op
@@ -1220,12 +1212,7 @@ fn idempotent_positive_route_readmit_does_not_advance_token_or_rebuild_snapshot(
     // dependency edge) — it legitimately advances the token. Warm the
     // manager cache against the post-first-admission token and pin the
     // served Arc's identity.
-    host.cache_positive_import_route_result_for_tests(
-        &canonical,
-        "./dep",
-        "/proj/dep.ts",
-        host.ws().content_generation(),
-    );
+    host.record_resolved_dependency_edge_for_tests(&canonical, "/proj/dep.ts");
     let warm = host.resolver_store_view_read().into_owned_view();
     let warm_ptr = warm.snapshot_ptr_for_tests();
     let cached_before = host
@@ -1234,26 +1221,21 @@ fn idempotent_positive_route_readmit_does_not_advance_token_or_rebuild_snapshot(
         .expect("manager must have a warm base view after the first request");
     let before = host.current_validation_token();
 
-    // SECOND admission: byte-identical `(owner, specifier, resolved)` — a
-    // pure re-admit of the already-stored route + already-present
-    // dependency edge. This is the no-op the fix must not bump on.
-    host.cache_positive_import_route_result_for_tests(
-        &canonical,
-        "./dep",
-        "/proj/dep.ts",
-        host.ws().content_generation(),
-    );
+    // SECOND registration: the SAME `(owner, resolved)` edge — a pure
+    // re-registration of an already-present dependency edge. This is the
+    // no-op the fix must not bump on.
+    host.record_resolved_dependency_edge_for_tests(&canonical, "/proj/dep.ts");
 
     let after = host.current_validation_token();
     assert_eq!(
         before, after,
-        "an idempotent positive-route re-admission (same owner/specifier/resolved, \
-         dependency edge already present) MUST NOT advance ANY token dimension — \
+        "an idempotent dependency-edge re-registration (edge already present) \
+         MUST NOT advance ANY token dimension — \
          over-bumping invalidates the manager snapshot and forks singleflight lanes"
     );
     assert_eq!(
         before.load_generation, after.load_generation,
-        "the no-op re-admit specifically must NOT bump load_generation"
+        "the no-op re-registration specifically must NOT bump load_generation"
     );
 
     // The manager-cached token is unchanged (the no-op did not invalidate
@@ -1261,48 +1243,38 @@ fn idempotent_positive_route_readmit_does_not_advance_token_or_rebuild_snapshot(
     assert_eq!(
         Some(cached_before),
         host.store_view_manager().cached_token(),
-        "a no-op positive-route re-admit MUST NOT invalidate the manager-cached base \
-         view token"
+        "a no-op dependency-edge re-registration MUST NOT invalidate the \
+         manager-cached base view token"
     );
     let after_view = host.resolver_store_view_read().into_owned_view();
     assert!(
         std::ptr::eq(warm_ptr, after_view.snapshot_ptr_for_tests()),
-        "a no-op positive-route re-admit MUST NOT force a base-snapshot rebuild — the \
-         manager hands back the SAME Arc because the token did not move"
+        "a no-op dependency-edge re-registration MUST NOT force a base-snapshot \
+         rebuild — the manager hands back the SAME Arc because the token did not move"
     );
 }
 
 #[test]
-fn distinct_positive_route_readmit_does_advance_token() {
-    // Positive counterpart to the no-op guard: re-admitting the SAME
-    // specifier resolved to a DIFFERENT canonical IS a genuine transition
-    // (the snapshotted `ImportRoute` derived hash changes), so it MUST
-    // advance the token. Proves the compare-before-insert gates on an
-    // actual value change, not blanket suppression.
+fn distinct_dependency_edge_registration_does_advance_token() {
+    // Positive counterpart to the no-op guard: registering a DIFFERENT
+    // resolved canonical IS a genuine transition (a new reverse-dependency
+    // edge), so it MUST advance the token. Proves the
+    // compare-before-insert gates on an actual value change, not blanket
+    // suppression.
     let (host, canonical) = host_with_one_file();
-    host.cache_positive_import_route_result_for_tests(
-        &canonical,
-        "./dep",
-        "/proj/dep.ts",
-        host.ws().content_generation(),
-    );
+    host.record_resolved_dependency_edge_for_tests(&canonical, "/proj/dep.ts");
     let _warm = host.resolver_store_view_read().into_owned_view();
 
     let before = host.current_validation_token();
-    // Same specifier, DIFFERENT resolved canonical → route map value
-    // changes → genuine transition.
-    host.cache_positive_import_route_result_for_tests(
-        &canonical,
-        "./dep",
-        "/proj/other.ts",
-        host.ws().content_generation(),
-    );
+    // A DIFFERENT resolved canonical → a new dependency edge → genuine
+    // transition.
+    host.record_resolved_dependency_edge_for_tests(&canonical, "/proj/other.ts");
     let after = host.current_validation_token();
 
     assert_ne!(
         before.load_generation, after.load_generation,
-        "re-resolving the same specifier to a DIFFERENT canonical IS a genuine \
-         route transition and MUST advance load_generation"
+        "registering a DIFFERENT resolved canonical IS a genuine dependency-edge \
+         transition and MUST advance load_generation"
     );
     // And it is own-work (additive), not an external supersession.
     assert!(
@@ -1320,27 +1292,23 @@ fn token_does_not_advance_on_unrelated_import_route_read() {
     // load_generation bump is gated on an actual WRITE, not emitted on the
     // read path that snapshots the routes.
     let (host, canonical) = host_with_one_file();
-    // Seed a positive route once (the write that legitimately advances the
-    // token), then capture `before` AFTER it so the read is isolated.
-    host.cache_positive_import_route_result_for_tests(
-        &canonical,
-        "./dep",
-        "/proj/dep.ts",
-        host.ws().content_generation(),
-    );
+    // Seed a dependency edge once (the write that legitimately advances
+    // the token), then capture `before` AFTER it so the read is isolated.
+    host.record_resolved_dependency_edge_for_tests(&canonical, "/proj/dep.ts");
 
     let before = host.current_validation_token();
     // Pure reads of the import-route surface: snapshot the base view
-    // (captures the ImportRoute derived hash) and re-read the token. No
-    // route map is mutated.
+    // (captures the immutable resolution world) and build the owner's
+    // import-route witness. No route map is mutated.
     let _view = host.resolver_store_view_read().into_owned_view();
-    let _hash = host.generation_current_import_route_hash(&canonical);
+    let _witness = host.owner_import_route_witness_for_tests(&canonical);
     let _view2 = host.resolver_store_view_read().into_owned_view();
     let after = host.current_validation_token();
     assert_eq!(
         before, after,
-        "reading the import-route surface (snapshot / generation_current_import_route_hash) \
-         MUST NOT advance the token — only a positive-route WRITE does"
+        "reading the import-route surface (store-view snapshot / witness \
+         construction) MUST NOT advance the token — only a positive-route \
+         WRITE does"
     );
 }
 
@@ -1534,8 +1502,8 @@ fn woken_waiter_recaptures_live_token_and_warm_hits_instead_of_resweeping() {
 fn mid_build_env_change_without_epoch_forces_retry_not_torn_view() {
     // SOUNDNESS: `build` reads the token-relevant
     // env-hash / project-identity / project-generation dimensions. If it
-    // read env LATE (after the per-canonical snapshot maps were already
-    // populated), a mid-build env mutation that advances `resolve_env_hash`
+    // read env LATE (after the immutable roots were already captured), a
+    // mid-build env mutation that advances `resolve_env_hash`
     // WITHOUT bumping `store_view_epoch` would leave the view's reconstructed
     // token reflecting the NEW env while the snapshot maps were captured
     // under the OLD env, and the post-build coherence check (comparing a
@@ -2103,8 +2071,8 @@ fn final_fallback_under_churn_does_not_run_parallel_unclaimed_sweeps() {
     // `resolver_store_view_read` after a forced cold miss. Each thread ENROLLS
     // in the concurrent-sweep gauge so the global peak counts ONLY these
     // threads' concurrency (an unrelated parallel store-view test's sweeper
-    // threads never enroll, so they cannot perturb it). With per-sweep overlap
-    // held open, the PEAK number of concurrent full-workspace sweeps is
+    // threads never enroll, so they cannot perturb it). With per-build overlap
+    // held open, the PEAK number of concurrent coherent builds is
     // measured. Post-fix every build runs under the singleflight claim
     // (`building`), which admits exactly ONE sweeper at a time → peak == 1.
     // Pre-fix the exhausted no-claim waiters each run an UNCLAIMED
@@ -2186,8 +2154,8 @@ fn final_fallback_under_churn_does_not_run_parallel_unclaimed_sweeps() {
 
     assert!(
         peak <= 1,
-        "REGRESSION (final-fallback unclaimed sweep): the peak number of CONCURRENT \
-         full-workspace sweeps was {peak} (> 1) under sustained churn — exhausted \
+        "REGRESSION (final-fallback unclaimed build): the peak number of CONCURRENT \
+         coherent builds was {peak} (> 1) under sustained churn — exhausted \
          no-claim waiters each ran an UNCLAIMED build_coherent in parallel instead of \
          rejoining the singleflight lane. With the claim-or-rejoin fallback exactly \
          one sweep runs at a time (peak == 1)."
@@ -2322,8 +2290,8 @@ fn manager_cached_view_misses_after_edge_stale_wildcard_file_set_change() {
         ptr1,
         view2.snapshot_ptr_for_tests(),
         "the manager MUST rebuild the snapshot after the wildcard target \
-         appears — the build-time edge-currency gate must re-run so the \
-         barrel's stale Route/ImportRoute derived hashes are suppressed"
+         appears — the base view must capture the advanced source and \
+         resolution roots"
     );
     assert!(
         token1.externally_superseded_by(&token2),
@@ -2429,13 +2397,10 @@ fn schema_mismatch_sweep_advances_artifact_generation_token() {
 fn reentrant_base_view_on_the_claim_holding_thread_refuses_to_park() {
     // SOUNDNESS: `CLAUDE.md`'s completion-fence rule — "Waiters on
     // in-flight work block cooperatively, never busy-spin; SAME-PATH
-    // RECURSION NEVER SELF-AWAITS". The coherent store-view build runs
-    // OUTSIDE the manager lock and legitimately re-indexes edge-stale
-    // owners (`HostStoreView::build`'s `ImportRoute` arm →
-    // `ensure_indexed_ready_serve` → `build_snapshot_from_analysis_snap`),
-    // so an analysis-side helper reached from that re-index CAN re-enter
-    // `StoreViewManager::base_view` on the very thread that holds the
-    // singleflight claim. That thread observes its OWN claim; the `built`
+    // RECURSION NEVER SELF-AWAITS". The O(1) production build enumerates no
+    // owners and reopens no routing, but the manager must still fail closed if
+    // any future claim-holding path re-enters `StoreViewManager::base_view` on
+    // the same thread. That thread observes its OWN claim; the `built`
     // condvar it would park on can only ever be signalled by its own
     // `BuildClaimGuard::drop`. Parking is therefore a wait-for cycle of
     // length ONE: a permanent deadlock at zero CPU that takes the host's

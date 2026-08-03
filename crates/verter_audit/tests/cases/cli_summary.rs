@@ -34,7 +34,9 @@ use serde_json::Value;
 
 use verter_audit::payloads::tags::{CompileTargetTag, LspMethodTag};
 use verter_audit::payloads::workspace::WorkspaceOp;
-use verter_audit::record::{RequestAuditRecord, RequestKind, RequestKindPayload};
+use verter_audit::record::{
+    RequestAuditRecord, RequestKind, RequestKindPayload, RequestTargetIdentity,
+};
 use verter_audit::store::{CacheLayerBreakdown, CacheLayerHitMiss};
 use verter_audit::{
     BundlerBatchPayload, CompilePayload, ComponentMetaPayload, LspRequestPayload, McpToolPayload,
@@ -97,6 +99,9 @@ fn make_record(
     let mut record = RequestAuditRecord {
         request_id,
         canonical_id: format!("/req-{request_id}.vue"),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            format!("/req-{request_id}.vue"),
+        )),
         kind,
         parent_request_id: None,
         from_cache,
@@ -135,6 +140,22 @@ fn write_corpus(dir: &Path, records: &[RequestAuditRecord]) {
         let json = serde_json::to_string(record).expect("serialise record");
         fs::write(&path, json).expect("write record file");
     }
+}
+
+/// Write one record after removing the additive target identity, reproducing
+/// the exact wire shape emitted before `target_identity` existed.
+fn write_legacy_record(dir: &Path, record: &RequestAuditRecord) {
+    let path = dir.join(format!("{}.json", record.request_id));
+    let mut value = serde_json::to_value(record).expect("serialise record");
+    value
+        .as_object_mut()
+        .expect("record serialises as an object")
+        .remove("target_identity");
+    fs::write(
+        &path,
+        serde_json::to_string(&value).expect("serialise legacy record"),
+    )
+    .expect("write legacy record file");
 }
 
 /// Run `verter-audit-inspect <args>` and return (exit_code,
@@ -249,6 +270,83 @@ fn summary_text_includes_total_count_and_slowest_top_entry() {
     assert!(
         stdout.contains("1. request_id=5"),
         "slowest top entry must be request_id=5 (the fixture's slowest); stdout=\n{stdout}"
+    );
+}
+
+// @ai-generated - Verifies tagged request-before-open completion targets survive every CLI view.
+#[test]
+fn request_before_open_targets_remain_distinct_in_record_and_summary_output() {
+    let dir = fresh_temp_dir("unregistered_targets");
+    let uri_a = "file:///workspace/A.vue";
+    let uri_b = "file:///workspace/B.vue";
+    let completion_kind = || RequestKind::Lsp {
+        method: LspMethodTag::Completion,
+    };
+    let mut record_a = make_record(71, completion_kind(), 20.0, false, 0, 0, 0, 0);
+    record_a.canonical_id.clear();
+    record_a.target_identity = Some(RequestTargetIdentity::UnregisteredUri(uri_a.to_string()));
+    let mut record_b = make_record(72, completion_kind(), 10.0, false, 0, 0, 0, 0);
+    record_b.canonical_id.clear();
+    record_b.target_identity = Some(RequestTargetIdentity::UnregisteredUri(uri_b.to_string()));
+    write_corpus(&dir, &[record_a, record_b]);
+
+    for (request_id, uri) in [("71", uri_a), ("72", uri_b)] {
+        let (code, stdout, stderr) =
+            run_cli(&["record", request_id, "--dir", dir.to_str().unwrap()]);
+        assert_eq!(code, 0, "record exit 0; stderr={stderr}");
+        assert!(
+            stdout.contains(&format!("target:             {uri}")),
+            "record text must render the tagged unregistered URI; stdout=\n{stdout}"
+        );
+    }
+
+    let (code, stdout, stderr) = run_cli(&["summary", dir.to_str().unwrap()]);
+    assert_eq!(code, 0, "summary exit 0; stderr={stderr}");
+    assert!(
+        stdout.contains(&format!("target={uri_a}")) && stdout.contains(&format!("target={uri_b}")),
+        "summary text must preserve both distinct unregistered URIs; stdout=\n{stdout}"
+    );
+
+    let (code, stdout, stderr) = run_cli(&["summary", dir.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 0, "summary --json exit 0; stderr={stderr}");
+    let value: Value = serde_json::from_str(&stdout).expect("summary --json parseable");
+    let targets: Vec<&str> = value["slowest_5"]
+        .as_array()
+        .expect("slowest_5 array")
+        .iter()
+        .map(|slow| {
+            slow["target_identity"]["value"]
+                .as_str()
+                .expect("slow summary must carry tagged target identity")
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        vec![uri_a, uri_b],
+        "slow-record payload must retain distinct request-before-open identities"
+    );
+}
+
+// @ai-generated - Verifies pre-tag records retain a readable CLI fallback.
+#[test]
+fn legacy_record_without_target_identity_falls_back_to_canonical_id() {
+    let dir = fresh_temp_dir("legacy_target_fallback");
+    let mut legacy = make_record(73, RequestKind::ComponentMeta, 12.0, false, 0, 0, 0, 0);
+    legacy.canonical_id = "/workspace/Legacy.vue".to_string();
+    write_legacy_record(&dir, &legacy);
+
+    let (code, stdout, stderr) = run_cli(&["record", "73", "--dir", dir.to_str().unwrap()]);
+    assert_eq!(code, 0, "record exit 0; stderr={stderr}");
+    assert!(
+        stdout.contains("target:             /workspace/Legacy.vue"),
+        "record text must use canonical_id only as the absent-tag legacy fallback; stdout=\n{stdout}"
+    );
+
+    let (code, stdout, stderr) = run_cli(&["summary", dir.to_str().unwrap()]);
+    assert_eq!(code, 0, "summary exit 0; stderr={stderr}");
+    assert!(
+        stdout.contains("target=/workspace/Legacy.vue"),
+        "summary text must preserve the legacy canonical target; stdout=\n{stdout}"
     );
 }
 

@@ -696,11 +696,13 @@ impl VerterLanguageServer {
                     for comp in &template.components {
                         if let Some(src) = &comp.import_source {
                             // Resolve the import source to an absolute path via VFS
-                            let resolved = self
+                            let transient_resolution = self
                                 .documents
                                 .host()
-                                .resolve_import_via_workspace(&normalized_id, src)
-                                .unwrap_or_else(|| {
+                                .resolve_import_transient(&normalized_id, src);
+                            let resolved = match transient_resolution {
+                                Some(resolved) => resolved,
+                                None => {
                                     if src.starts_with('.') {
                                         let importer_dir = normalized_id
                                             .rfind('/')
@@ -710,7 +712,8 @@ impl VerterLanguageServer {
                                     } else {
                                         src.to_string()
                                     }
-                                });
+                                }
+                            };
                             tracing::info!(
                                 "  [{}] component '{}' import='{}' → resolved='{}'",
                                 normalized_id.rsplit('/').next().unwrap_or("?"),

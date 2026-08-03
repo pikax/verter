@@ -10,9 +10,9 @@
 //! cache key from real per-canonical env hashes
 //! (`VerterHost::host_view_env_hashes_for`), constructs one
 //! [`crate::resolved_import_facts::ResolvedImportClauseEntry`] per
-//! binding (positive AND negative), and admits the bundle through
-//! [`crate::resolved_import_facts::ResolvedImportFactsDb::insert_if_absent`]
-//! (first-writer-wins).
+//! binding (positive AND negative), and admits the bundle plus the
+//! owner's import-route witness through
+//! [`crate::resolved_import_facts::ResolvedImportFactsDb::admit`].
 //!
 //! # SymbolSpace classification (v8 AMENDMENT-S)
 //!
@@ -48,6 +48,12 @@
 //! `(canonical, content_hash, parse_env_hash, resolve_env_hash,
 //! resolver_version)`. `lib_env_hash` is INTENTIONALLY ABSENT — a
 //! TS lib change MUST NOT invalidate base import-target resolution.
+//! Resolution currency is not a key dimension either: it lives on the
+//! VALUE side, as the owner's import-route resolution witness recorded
+//! in the candidate's `ReadSetSignature`. A specifier that becomes
+//! resolvable (or retargets) advances exactly the resolver observations
+//! the witness recorded, so the retained bundle stops validating and the
+//! fresh one enters the bounded slot beside it.
 //! Arch-guard
 //! `crates/verter_session/tests/cases/g_misc1/lib_env_hash_excluded_from_resolved_import_facts.rs`
 //! pins this absence.
@@ -58,12 +64,13 @@ use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::facts::registry::{
     Fact, FactKey, InternedName, InternedSpecifier, SymbolSpace,
 };
+use verter_workspace::FactVersionRef;
 
 use crate::hash::hash_16;
 use crate::host_executor::HostSourceData;
 use crate::resolved_import_facts::{
-    compute_known_miss_generation_tag, ResolvedImportClauseEntry, ResolvedImportFacts,
-    ResolvedImportFactsKey, ResolvedSpecifier, RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+    ResolvedImportClauseEntry, ResolvedImportFacts, ResolvedImportFactsKey, ResolvedSpecifier,
+    RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
 };
 use crate::VerterHost;
 
@@ -85,18 +92,21 @@ impl VerterHost {
     /// `script_analysis.imports`, classifies each binding into a
     /// `SymbolSpace`, composes the cache key from the
     /// per-canonical env hashes, and admits one bundle of
-    /// per-binding [`ResolvedImportClauseEntry`] values through
-    /// [`crate::resolved_import_facts::ResolvedImportFactsDb::insert_if_absent`].
+    /// per-binding [`ResolvedImportClauseEntry`] values, together with
+    /// the owner's import-route witness, through
+    /// [`crate::resolved_import_facts::ResolvedImportFactsDb::admit`].
     ///
-    /// First-writer-wins admission: an identical key MUST be a
-    /// deterministic recomputation. The second writer's bundle is
-    /// silently discarded and the producer DOES NOT bump
-    /// admission counters for the duplicate.
+    /// A recomputation under an already-retained `(key, witness)` pair
+    /// is skipped: it is deterministic, so re-admitting would push a
+    /// duplicate candidate and age a genuinely distinct resolution
+    /// state out of the bounded slot. The producer does NOT bump
+    /// admission counters for a skipped or refused admission.
     ///
-    /// Returns `true` when this call won the admission race,
-    /// `false` when an existing entry was already present (or when
-    /// the producer could not extract enough state to build a
-    /// payload, e.g. when the canonical has not been parsed yet).
+    /// Returns `true` when this call admitted a candidate, `false` when
+    /// an equivalent candidate was already retained, when strict
+    /// admission refused the witness, or when the producer could not
+    /// extract enough state to build a payload (e.g. the canonical has
+    /// not been parsed yet).
     pub(crate) fn admit_resolved_import_facts_for_owner(
         &self,
         canonical: &str,
@@ -131,38 +141,24 @@ impl VerterHost {
         //    fact-validated import-facts substrate. `content_hash`
         //    is the scheduler-cached `parse.whole_hash` captured
         //    above.
-        //
-        //    `known_miss_generation`
-        //    is a stable tag over the owner's
-        //    `DerivedRawState::import_routes_known_miss_recorded_at_generation`
-        //    sidecar. `set_import_dependencies` updates the sidecar
-        //    BEFORE calling this producer, so a re-resolution that
-        //    converts a previously-missing specifier into a positive
-        //    target (after the target file is created and the
-        //    workspace `content_generation` advances) admits under a
-        //    NEW key value — the stale negative bundle is naturally
-        //    superseded instead of being pinned by first-writer-wins
-        //    against the prior key. Empty known-miss map →
-        //    `[0u8; 16]`, so an owner with no known-misses produces
-        //    the same key value at producer time and at lookup time.
         let env = self.host_view_env_hashes_for(canonical);
-        let known_miss_generation = {
-            let entry = self.derived_raw_cache().get(canonical);
-            match entry {
-                Some(e) => compute_known_miss_generation_tag(
-                    &e.import_routes_known_miss_recorded_at_generation,
-                ),
-                None => [0u8; 16],
-            }
-        };
         let key = ResolvedImportFactsKey {
             canonical: Arc::from(canonical),
             content_hash,
             parse_env_hash: env.parse_env_hash,
             resolve_env_hash: env.resolve_env_hash,
             resolver_version: RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
-            known_miss_generation,
         };
+
+        // 2b. The witness — see `resolved_import_facts_witness`. An
+        //     unrootable owner (a refused resolution, or an overflowing
+        //     observation set) admits nothing: the bundle's values are
+        //     resolved canonicals, so a candidate no read could
+        //     invalidate would stale-serve the pre-retarget resolution.
+        let Some(facts) = self.resolved_import_facts_witness(canonical, content_hash) else {
+            return false;
+        };
+        let db = self.project_type_store().resolved_import_facts();
 
         // 3. Build the per-binding entries. One entry per
         //    `(binding, space)` pair: `import { X, type Y } from "S"`
@@ -174,8 +170,7 @@ impl VerterHost {
         //    pipeline. An empty `imports` vector means the source
         //    truly has no import declarations or failed to parse;
         //    either case is "no admission required".
-        let db = self.project_type_store().resolved_import_facts();
-        let (_payload, admission_counts) = db.get_or_compute(key, || {
+        let (payload, admission_counts) = {
             let bindings = collect_analyzed_bindings(&imports);
 
             let mut import_clauses = Vec::with_capacity(bindings.len());
@@ -274,24 +269,46 @@ impl VerterHost {
                 }
             }
 
-            // 4. Return the cold payload to the DB owner. The DB invokes this
-            // closure only for a vacant key and performs the sole production
-            // write itself.
+            // 4. The cold payload.
             let payload = Arc::new(ResolvedImportFacts {
                 import_clauses,
                 reexport_bindings: Vec::new(),
                 specifier_resolutions,
             });
             (payload, (positive_bumps, negative_bumps, namespace_bumps))
-        });
-        let admitted = admission_counts.is_some();
+        };
 
-        // 5. Bump provenance counters only on admission win. A
-        //    duplicate (admitted=false) must NOT bump because the
-        //    canonical recomputed and the existing entry already
-        //    owns those admissions.
+        // 5. Strict admission onto the bounded multi-candidate slot.
+        //
+        //    Resolution currency lives on the VALUE side now: each
+        //    candidate carries the observations that produced its
+        //    resolved canonicals, so a retargeted recomputation is a
+        //    genuinely distinct candidate whose predecessor simply
+        //    stops validating on the read side. No producer-side hard
+        //    removal is needed — and none is wanted, because a hard
+        //    removal would also drop a sibling candidate that is still
+        //    valid for another view.
+        //
+        //    A recomputation that reproduces BOTH the retained payload
+        //    and its witness is pure churn: re-admitting it would age a
+        //    genuinely distinct concurrent candidate out of the bounded
+        //    slot, so it is skipped and counted as no admission.
+        //
+        //    A refused admission (empty or over-cap signature) leaves
+        //    the store untouched and reports no admission, so the
+        //    provenance counters below never claim unretained work.
+        if db.holds_candidate_with_signature(&key, &facts)
+            && db
+                .retained_bundle(&key)
+                .is_some_and(|retained| retained == payload)
+        {
+            return false;
+        }
+        let admitted = db.admit(key, payload, facts);
+
         #[cfg(any(test, feature = "test-support"))]
-        if let Some((positive_bumps, negative_bumps, namespace_bumps)) = admission_counts {
+        if admitted {
+            let (positive_bumps, negative_bumps, namespace_bumps) = admission_counts;
             for _ in 0..positive_bumps {
                 db.record_positive_admission();
             }
@@ -308,6 +325,52 @@ impl VerterHost {
         let _ = admission_counts;
 
         admitted
+    }
+}
+
+impl VerterHost {
+    /// The witness every [`ResolvedImportFacts`] candidate is admitted
+    /// under: the owner's own content identity PLUS the owner's
+    /// import-route resolution witness.
+    ///
+    /// A bundle describes ONE owner's import clauses, so its content
+    /// root is that owner's bytes — but its VALUES are resolved
+    /// canonicals, so the bytes alone are not a validity oracle. A
+    /// dependency appearing (or a higher-priority candidate appearing
+    /// beside an already-resolving one) retargets a clause while the
+    /// owner's bytes stay put; the resolution witness observes exactly
+    /// the `PathProbe` / `Realpath` / `ExactResolution` facts that the
+    /// appearance advances, so the bundle stops validating on the read
+    /// side. Resolution currency is therefore carried as observed facts
+    /// and is deliberately not a key dimension.
+    ///
+    /// `None` means the owner's import routes could not be rooted (a
+    /// refused resolution, or a signature that overflows the bound).
+    /// The producer must not admit a candidate it cannot invalidate.
+    pub(crate) fn resolved_import_facts_witness(
+        &self,
+        canonical: &str,
+        content_hash: crate::types::Hash16,
+    ) -> Option<Vec<FactVersionRef>> {
+        let mut witness = vec![FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: content_hash,
+        }];
+        witness.extend(self.owner_import_route_witness(canonical)?);
+        Some(witness)
+    }
+
+    /// Test-support mirror of [`Self::resolved_import_facts_witness`]
+    /// so fixtures that seed the store directly admit under the same
+    /// witness the production producer would.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn resolved_import_facts_witness_for(
+        &self,
+        canonical: &str,
+        content_hash: crate::types::Hash16,
+    ) -> Option<Vec<FactVersionRef>> {
+        self.resolved_import_facts_witness(canonical, content_hash)
     }
 }
 

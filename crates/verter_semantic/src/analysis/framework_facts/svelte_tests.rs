@@ -2,6 +2,7 @@
 //! and its tests remain independently readable.
 
 use super::*;
+use crate::analysis::framework_facts::ExactFrameworkScriptCandidates;
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
@@ -242,6 +243,17 @@ fn records_snippet_import_without_javascript_jsdoc_member_scanning() {
 }
 
 #[test]
+fn records_snippet_candidate_from_javascript_jsdoc_props() {
+    let src = "import { Snippet } from 'svelte';\n/** @type {{ row: Snippet<[{ id: number }]> }} */\nlet { row } = $props();";
+    let c = capture(src);
+    assert_eq!(c.snippet_candidates.len(), 1);
+    let candidate = &c.snippet_candidates[0];
+    assert_eq!(candidate.member_name, "row");
+    assert_eq!(candidate.local_binding, "Snippet");
+    assert_eq!(candidate.import_source, "svelte");
+}
+
+#[test]
 fn inline_and_instantiation_payloads_are_captured_not_dropped() {
     // An inline object-literal generic argument is a REAL authored payload —
     // captured as a payload ref (position + structural hash). The former
@@ -303,6 +315,259 @@ fn captures_bindable_members() {
     let c = capture("let { value = $bindable(), label } = $props();");
     let props = c.props.expect("props candidate");
     assert_eq!(props.bindable_members, vec!["value".to_string()]);
+}
+
+#[test]
+fn svelte_props_span_inventory_distinguishes_shorthand_dual_role() {
+    let source = "let { title } = $props();";
+    let candidates = capture(source);
+    assert_eq!(
+        candidates.props_calls.len(),
+        1,
+        "one `$props()` call must produce one inventory record"
+    );
+
+    let call = &candidates.props_calls[0];
+    assert!(!call.has_rest, "a closed shorthand has no rest element");
+    assert_eq!(call.public_keys.len(), 1);
+    assert_eq!(call.local_bindings.len(), 1);
+    let key = &call.public_keys[0];
+    let binding = &call.local_bindings[0];
+    assert_eq!(key.name, "title");
+    assert_eq!(binding.name, "title");
+    assert_eq!(
+        key.span, binding.span,
+        "a shorthand token is both the public key and the local binding"
+    );
+    assert_eq!(
+        &source[key.span.start as usize..key.span.end as usize],
+        "title"
+    );
+}
+
+#[test]
+fn svelte_props_span_inventory_distinguishes_alias_key_from_binding() {
+    let source = "import { title } from './constants';\nlet { title: localTitle } = $props();";
+    let candidates = capture(source);
+    let call = &candidates.props_calls[0];
+    let key = &call.public_keys[0];
+    let binding = &call.local_bindings[0];
+
+    assert_eq!(key.name, "title");
+    assert_eq!(binding.name, "localTitle");
+    assert_ne!(
+        key.span, binding.span,
+        "the public key and aliased local binding must be distinct"
+    );
+    assert!(
+        key.span.end <= binding.span.start,
+        "the public key must retain its lower authored offset"
+    );
+    assert_eq!(
+        &source[key.span.start as usize..key.span.end as usize],
+        "title"
+    );
+    assert_eq!(
+        &source[binding.span.start as usize..binding.span.end as usize],
+        "localTitle"
+    );
+}
+
+#[test]
+fn svelte_props_span_inventory_captures_numeric_key() {
+    let source = "let { 1: one } = $props();";
+    let candidates = capture(source);
+    let call = &candidates.props_calls[0];
+    let key = &call.public_keys[0];
+    let binding = &call.local_bindings[0];
+
+    assert_eq!(key.name, "1");
+    assert_eq!(binding.name, "one");
+    assert_ne!(
+        key.span, binding.span,
+        "the numeric public key and local binding must be distinct"
+    );
+    assert_eq!(&source[key.span.start as usize..key.span.end as usize], "1");
+    assert_eq!(
+        &source[binding.span.start as usize..binding.span.end as usize],
+        "one"
+    );
+}
+
+#[test]
+fn svelte_props_span_inventory_captures_bigint_key() {
+    let source = "let { 2n: two } = $props();";
+    let candidates = capture(source);
+    let call = &candidates.props_calls[0];
+    let key = &call.public_keys[0];
+    let binding = &call.local_bindings[0];
+
+    assert_eq!(key.name, "2");
+    assert_eq!(binding.name, "two");
+    assert_ne!(key.span, binding.span);
+    assert_eq!(
+        &source[key.span.start as usize..key.span.end as usize],
+        "2n"
+    );
+    assert_eq!(
+        &source[binding.span.start as usize..binding.span.end as usize],
+        "two"
+    );
+}
+
+#[test]
+fn svelte_props_span_inventory_captures_boolean_key() {
+    let source = "let { true: enabled } = $props();";
+    let candidates = capture(source);
+    let call = &candidates.props_calls[0];
+    let key = &call.public_keys[0];
+    let binding = &call.local_bindings[0];
+
+    assert_eq!(key.name, "true");
+    assert_eq!(binding.name, "enabled");
+    assert_ne!(key.span, binding.span);
+    assert_eq!(
+        &source[key.span.start as usize..key.span.end as usize],
+        "true"
+    );
+    assert_eq!(
+        &source[binding.span.start as usize..binding.span.end as usize],
+        "enabled"
+    );
+}
+
+#[test]
+fn svelte_props_span_inventory_captures_null_key() {
+    let source = "let { null: empty } = $props();";
+    let candidates = capture(source);
+    let call = &candidates.props_calls[0];
+    let key = &call.public_keys[0];
+    let binding = &call.local_bindings[0];
+
+    assert_eq!(key.name, "null");
+    assert_eq!(binding.name, "empty");
+    assert_ne!(key.span, binding.span);
+    assert_eq!(
+        &source[key.span.start as usize..key.span.end as usize],
+        "null"
+    );
+    assert_eq!(
+        &source[binding.span.start as usize..binding.span.end as usize],
+        "empty"
+    );
+}
+
+#[test]
+fn svelte_props_span_inventory_marks_whole_object_binding_open() {
+    let candidates = capture("let props = $props();");
+    let call = &candidates.props_calls[0];
+
+    assert!(call.has_rest, "a whole-object binding has an open key set");
+    assert!(
+        call.public_keys.is_empty(),
+        "a whole-object binding enumerates no public keys"
+    );
+    assert_eq!(
+        call.local_bindings
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect::<Vec<_>>(),
+        ["props"]
+    );
+}
+
+#[test]
+fn svelte_props_span_inventory_marks_rest_open_but_not_public() {
+    let source = "let { title, ...rest } = $props();";
+    let candidates = capture(source);
+    let call = &candidates.props_calls[0];
+
+    assert!(call.has_rest, "a top-level rest makes the key set open");
+    assert_eq!(
+        call.public_keys
+            .iter()
+            .map(|key| key.name.as_str())
+            .collect::<Vec<_>>(),
+        ["title"],
+        "`rest` is not a public prop key"
+    );
+    assert_eq!(
+        call.local_bindings
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect::<Vec<_>>(),
+        ["title", "rest"],
+        "`rest` remains a local binding"
+    );
+}
+
+#[test]
+fn svelte_props_span_inventory_excludes_default_expression_identifiers() {
+    let source = "let { title = title } = $props();";
+    let candidates = capture(source);
+    let call = &candidates.props_calls[0];
+    let default_start = source.rfind("title").expect("default identifier") as u32;
+    let default_span = Span::new(default_start, default_start + "title".len() as u32);
+
+    assert_eq!(call.public_keys.len(), 1);
+    assert_eq!(call.local_bindings.len(), 1);
+    assert_ne!(call.public_keys[0].span, default_span);
+    assert_ne!(call.local_bindings[0].span, default_span);
+    assert!(
+        !call.public_keys.iter().any(|key| key.span == default_span)
+            && !call
+                .local_bindings
+                .iter()
+                .any(|binding| binding.span == default_span),
+        "an identifier in the default expression is neither key nor binding"
+    );
+}
+
+#[test]
+fn svelte_props_span_inventory_is_empty_without_a_call() {
+    let candidates = capture("import { title } from './constants';\nlet local = title;");
+    assert!(
+        candidates.props_calls.is_empty(),
+        "a file with no `$props()` call has no prop-key inventory"
+    );
+}
+
+#[test]
+fn svelte_props_span_inventory_keeps_nested_keys_non_public() {
+    let source =
+        "let { settings: { theme: localTheme, locale }, items: [first, ...remaining] } = $props();";
+    let candidates = capture(source);
+    let call = &candidates.props_calls[0];
+
+    assert_eq!(
+        call.public_keys
+            .iter()
+            .map(|key| key.name.as_str())
+            .collect::<Vec<_>>(),
+        ["settings", "items"],
+        "only the outer destructuring keys are component public props"
+    );
+    assert_eq!(
+        call.local_bindings
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect::<Vec<_>>(),
+        ["localTheme", "locale", "first", "remaining"],
+        "renamed and nested leaves remain local bindings"
+    );
+    let nested_key_start = source.find("theme").expect("nested key") as u32;
+    let nested_key_span = Span::new(nested_key_start, nested_key_start + "theme".len() as u32);
+    assert!(
+        !call
+            .public_keys
+            .iter()
+            .any(|key| key.span == nested_key_span)
+            && !call
+                .local_bindings
+                .iter()
+                .any(|binding| binding.span == nested_key_span),
+        "an aliased nested property key is neither a component key nor a local binding"
+    );
 }
 
 #[test]
@@ -399,6 +664,19 @@ fn records_snippet_import_without_generic_props_member_scanning() {
     assert_eq!(c.snippet_imports.len(), 1);
     assert_eq!(c.snippet_imports[0].imported_name, "Snippet");
     assert_eq!(c.snippet_imports[0].import_source, "svelte");
+}
+
+#[test]
+fn records_snippet_candidate_from_generic_props_argument() {
+    let src = "import type { Snippet } from 'svelte';\nlet p = $props<{ row: Snippet }>();";
+    let c = capture(src);
+    assert_eq!(
+        c.snippet_candidates.len(),
+        1,
+        "generic-arg snippet candidate"
+    );
+    assert_eq!(c.snippet_candidates[0].member_name, "row");
+    assert_eq!(c.snippet_candidates[0].import_source, "svelte");
 }
 
 #[test]
@@ -919,6 +1197,53 @@ fn untracked_global_dispatcher_is_not_captured() {
 }
 
 #[test]
+fn validation_produces_exact_empty_props_inventory_without_a_props_call() {
+    use super::super::{NegativeEvidence, ScriptFactValidation};
+
+    fn authoritative_absence<E>(evidence: &E) -> bool
+    where
+        E: NegativeEvidence<Observation = SveltePropsCall>,
+    {
+        evidence.observations().is_empty()
+    }
+
+    let provider = SvelteScriptProvider;
+    let candidates = capture("const ordinary = 1;");
+    let envelope = FrameworkScriptCandidates {
+        adapter_id: FrameworkAdapterId::svelte(),
+        provider_version: SvelteScriptProvider::VERSION,
+        stable_hash: stable_candidate_hash(&candidates),
+        payload: Arc::new(candidates),
+    };
+
+    let ScriptFactValidation::Exact(payload) = provider.validate(ResolvedValidationCx {
+        candidates: &envelope,
+        resolved_import_targets: &[],
+        capability_on: &|_| true,
+    }) else {
+        panic!("a clean props-less script must validate as exact, not incomplete");
+    };
+    let facts = payload
+        .as_any()
+        .downcast_ref::<SvelteScriptFacts>()
+        .expect("exact Svelte facts");
+
+    assert!(
+        authoritative_absence(facts.syntax().props_calls()),
+        "the exact-empty props-call inventory authoritatively proves absence"
+    );
+}
+
+fn exact_validation_payload(
+    outcome: super::super::ScriptFactValidation,
+) -> Arc<dyn FrameworkScriptFactPayload> {
+    let super::super::ScriptFactValidation::Exact(payload) = outcome else {
+        panic!("expected exact script-fact validation");
+    };
+    payload
+}
+
+#[test]
 fn validate_rejects_userland_snippet_lookalike() {
     // Resolved-validation: a Snippet candidate whose import resolves to a
     // userland file (NOT the svelte package) is rejected — discriminating: a
@@ -952,9 +1277,14 @@ fn validate_rejects_userland_snippet_lookalike() {
         resolved_import_targets: &targets,
         capability_on: &|_| true,
     };
+    let payload = exact_validation_payload(provider.validate(cx));
+    let facts = payload
+        .as_any()
+        .downcast_ref::<SvelteScriptFacts>()
+        .expect("exact Svelte facts");
     assert!(
-        provider.validate(cx).is_none(),
-        "a userland Snippet look-alike must NOT validate as snippet-typed"
+        facts.resolution().validated_snippet_members.is_empty(),
+        "a userland Snippet look-alike produces exact absence, not unavailable facts"
     );
 }
 
@@ -968,6 +1298,11 @@ fn validate_accepts_real_svelte_snippet_import() {
                 local_binding: "Snippet".to_string(),
             },
             import_source: "svelte".to_string(),
+        }],
+        snippet_candidates: vec![SvelteSnippetMemberCandidate {
+            local_binding: "Snippet".to_string(),
+            import_source: "svelte".to_string(),
+            member_name: "row".to_string(),
         }],
         ..Default::default()
     };
@@ -989,20 +1324,24 @@ fn validate_accepts_real_svelte_snippet_import() {
         resolved_import_targets: &targets,
         capability_on: &|_| true,
     };
-    let facts = provider
-        .validate(cx)
-        .expect("real svelte snippet validates");
+    let facts = exact_validation_payload(provider.validate(cx));
     let facts = facts
         .as_any()
         .downcast_ref::<SvelteScriptFacts>()
         .expect("svelte facts");
-    let [SvelteSnippetImportFact::Resolved { symbol, .. }] = facts.snippet_imports.as_ref() else {
+    let [SvelteSnippetImportFact::Resolved { symbol, .. }] =
+        facts.resolution().snippet_imports.as_ref()
+    else {
         panic!("real svelte import must retain resolved symbol identity");
     };
     assert_eq!(symbol.symbol.as_ref(), "Snippet");
     assert_eq!(
         symbol.canonical_id.as_ref(),
         "/project/node_modules/svelte/src/index.d.ts"
+    );
+    assert_eq!(
+        facts.resolution().validated_snippet_members.as_ref(),
+        &["row".to_string()][..]
     );
 }
 
@@ -1031,16 +1370,14 @@ fn validate_emits_dispatcher_only_when_resolved_to_svelte_package() {
         resolved_canonical: Some("/project/node_modules/svelte/index.d.ts".to_string()),
         package: Some(super::super::ResolvedPackage::named("svelte")),
     }];
-    let real = provider
-        .validate(ResolvedValidationCx {
-            candidates: &real_env,
-            resolved_import_targets: &real_targets,
-            capability_on: &|_| true,
-        })
-        .expect("real svelte dispatcher validates");
+    let real = exact_validation_payload(provider.validate(ResolvedValidationCx {
+        candidates: &real_env,
+        resolved_import_targets: &real_targets,
+        capability_on: &|_| true,
+    }));
     let real = real.as_any().downcast_ref::<SvelteScriptFacts>().unwrap();
     assert_eq!(
-        real.dispatcher_events,
+        real.resolution().dispatcher_events,
         Some(payload_ref(0, MacroPayloadPosition::TypeArgument, 0x2A)),
         "a svelte-resolved dispatcher contributes EMITS (the payload ref passes through verbatim)"
     );
@@ -1053,21 +1390,25 @@ fn validate_emits_dispatcher_only_when_resolved_to_svelte_package() {
         resolved_canonical: Some("/src/fake-svelte.ts".to_string()),
         package: None,
     }];
-    let fake = provider.validate(ResolvedValidationCx {
+    let fake = exact_validation_payload(provider.validate(ResolvedValidationCx {
         candidates: &fake_env,
         resolved_import_targets: &fake_targets,
         capability_on: &|_| true,
-    });
+    }));
+    let fake = fake
+        .as_any()
+        .downcast_ref::<SvelteScriptFacts>()
+        .expect("exact Svelte facts");
     assert!(
-        fake.is_none(),
-        "a userland createEventDispatcher look-alike must NOT contribute EMITS"
+        fake.resolution().dispatcher_events.is_none(),
+        "a userland createEventDispatcher look-alike produces exact no-EMITS evidence"
     );
 }
 
 #[test]
 fn validate_passes_through_parse_domain_inventory() {
-    // props_type / bindable / legacy / instance exports pass through verbatim
-    // (no package provenance needed for those).
+    // props_type / bindable / call geometry / legacy / instance exports pass
+    // through verbatim (no package provenance needed for those).
     let provider = SvelteScriptProvider;
     let candidates = SvelteScriptCandidates {
         props: Some(SveltePropsCandidate {
@@ -1075,6 +1416,18 @@ fn validate_passes_through_parse_domain_inventory() {
             bindable_members: vec!["value".to_string()],
             ..Default::default()
         }),
+        props_calls: vec![SveltePropsCall {
+            call_span: Span::new(20, 28),
+            public_keys: vec![SveltePropsPublicKey {
+                name: "value".to_string(),
+                span: Span::new(10, 15),
+            }],
+            local_bindings: vec![SveltePropsLocalBinding {
+                name: "localValue".to_string(),
+                span: Span::new(17, 27),
+            }],
+            has_rest: false,
+        }],
         instance_exports: vec![instance_export("focus", "focus", Span::new(10, 15))],
         ..Default::default()
     };
@@ -1084,22 +1437,27 @@ fn validate_passes_through_parse_domain_inventory() {
         stable_hash: [0u8; 16],
         payload: Arc::new(candidates),
     };
-    let facts = provider
-        .validate(ResolvedValidationCx {
-            candidates: &envelope,
-            resolved_import_targets: &[],
-            capability_on: &|_| true,
-        })
-        .expect("props/exports inventory validates");
+    let facts = exact_validation_payload(provider.validate(ResolvedValidationCx {
+        candidates: &envelope,
+        resolved_import_targets: &[],
+        capability_on: &|_| true,
+    }));
     let facts = facts.as_any().downcast_ref::<SvelteScriptFacts>().unwrap();
     assert_eq!(
-        facts.props_type,
+        facts.syntax().props_type,
         Some(payload_ref(0, MacroPayloadPosition::TypeAnnotation, 0x11)),
         "the props payload ref passes through verbatim"
     );
-    assert_eq!(facts.bindable_members.as_ref(), &["value".to_string()][..]);
     assert_eq!(
-        facts.instance_exports.as_ref(),
+        facts.syntax().bindable_members.as_ref(),
+        &["value".to_string()][..]
+    );
+    assert_eq!(facts.syntax().props_calls().iter().count(), 1);
+    let props_call = facts.syntax().props_calls().iter().next().unwrap();
+    assert_eq!(props_call.public_keys[0].name, "value");
+    assert_eq!(props_call.local_bindings[0].name, "localValue");
+    assert_eq!(
+        facts.syntax().instance_exports.as_ref(),
         &[instance_export("focus", "focus", Span::new(10, 15))][..]
     );
 }
@@ -1122,31 +1480,38 @@ fn resolved_facts_persist_same_name_module_and_instance_exports_exactly() {
         stable_hash: stable_candidate_hash(&candidates),
         payload: Arc::new(candidates),
     };
-    let resolved = provider
-        .validate(ResolvedValidationCx {
-            candidates: &envelope,
-            resolved_import_targets: &[],
-            capability_on: &|_| true,
-        })
-        .expect("export-only candidates produce resolved facts");
+    let resolved = exact_validation_payload(provider.validate(ResolvedValidationCx {
+        candidates: &envelope,
+        resolved_import_targets: &[],
+        capability_on: &|_| true,
+    }));
     let resolved = resolved
         .as_any()
         .downcast_ref::<SvelteScriptFacts>()
         .expect("Svelte facts");
 
-    assert_eq!(resolved.instance_exports[0].exported_name, "shared");
-    assert_eq!(resolved.module_exports[0].exported_name, "shared");
-    assert_eq!(resolved.module_exports[0].local_name, "module_shared");
-    assert_eq!(resolved.module_exports[0].owner, TopLevelOwnerId::module(0));
     assert_eq!(
-        resolved.module_exports[0].binding_key,
+        resolved.syntax().instance_exports[0].exported_name,
+        "shared"
+    );
+    assert_eq!(resolved.syntax().module_exports[0].exported_name, "shared");
+    assert_eq!(
+        resolved.syntax().module_exports[0].local_name,
+        "module_shared"
+    );
+    assert_eq!(
+        resolved.syntax().module_exports[0].owner,
+        TopLevelOwnerId::module(0)
+    );
+    assert_eq!(
+        resolved.syntax().module_exports[0].binding_key,
         DeclBindingKey::new(TopLevelOwnerId::module(0), "module_shared")
     );
 
     let persisted = resolved.to_persisted_fact();
     assert_eq!(
         persisted.module_exports.as_ref(),
-        resolved.module_exports.as_ref()
+        resolved.syntax().module_exports.as_ref()
     );
     let json = serde_json::to_string(&persisted).expect("serialize Svelte facts");
     let round_trip: verter_type_expr::facts::SvelteScriptFactsFact =
@@ -1178,13 +1543,11 @@ fn module_export_role_only_change_moves_hash_and_serde_identity() {
             payload: Arc::new(candidates),
         };
         let provider = SvelteScriptProvider;
-        let resolved = provider
-            .validate(ResolvedValidationCx {
-                candidates: &envelope,
-                resolved_import_targets: &[],
-                capability_on: &|_| true,
-            })
-            .expect("module export produces facts");
+        let resolved = exact_validation_payload(provider.validate(ResolvedValidationCx {
+            candidates: &envelope,
+            resolved_import_targets: &[],
+            capability_on: &|_| true,
+        }));
         resolved
             .as_any()
             .downcast_ref::<SvelteScriptFacts>()
@@ -1229,6 +1592,23 @@ fn full_candidates() -> SvelteScriptCandidates {
             },
             import_source: "svelte".to_string(),
         }],
+        props_calls: vec![SveltePropsCall {
+            call_span: Span::new(10, 30),
+            public_keys: vec![SveltePropsPublicKey {
+                name: "value".to_string(),
+                span: Span::new(11, 16),
+            }],
+            local_bindings: vec![SveltePropsLocalBinding {
+                name: "localValue".to_string(),
+                span: Span::new(18, 28),
+            }],
+            has_rest: false,
+        }],
+        snippet_candidates: vec![SvelteSnippetMemberCandidate {
+            local_binding: "Snippet".to_string(),
+            import_source: "svelte".to_string(),
+            member_name: "row".to_string(),
+        }],
         instance_exports: vec![instance_export("focus", "focus", Span::new(31, 36))],
         module_exports: vec![module_export("meta", "meta", Span::new(37, 41))],
         legacy_props: vec![SvelteLegacyProp {
@@ -1247,8 +1627,7 @@ fn full_candidates() -> SvelteScriptCandidates {
 fn stable_candidate_hash_discriminates_every_input() {
     // Cache-identity discrimination: EVERY semantic hash input, perturbed
     // independently, must change the stable candidate hash — an input silently
-    // dropped from the hash fails its arm. (VERSION 4 keys are intentionally
-    // distinct from legacy VERSION 3 keys — no legacy-byte compatibility.)
+    // dropped from the hash fails its arm.
     let base_hash = stable_candidate_hash(&full_candidates());
 
     // (1) props payload CONTENT (the structural payload hash).
@@ -1294,7 +1673,34 @@ fn stable_candidate_hash_discriminates_every_input() {
         "bindable members must fold into the hash"
     );
 
-    // (5) prop defaults (an edited default VALUE).
+    // (5) props-call public keys.
+    let mut c = full_candidates();
+    c.props_calls[0].public_keys[0].name = "other".to_string();
+    assert_ne!(
+        stable_candidate_hash(&c),
+        base_hash,
+        "public prop keys must fold into the hash"
+    );
+
+    // (6) props-call local bindings.
+    let mut c = full_candidates();
+    c.props_calls[0].local_bindings[0].name = "otherLocal".to_string();
+    assert_ne!(
+        stable_candidate_hash(&c),
+        base_hash,
+        "local prop bindings must fold into the hash"
+    );
+
+    // (7) props-call openness.
+    let mut c = full_candidates();
+    c.props_calls[0].has_rest = true;
+    assert_ne!(
+        stable_candidate_hash(&c),
+        base_hash,
+        "top-level rest openness must fold into the hash"
+    );
+
+    // (8) prop defaults (an edited default VALUE).
     let mut c = full_candidates();
     c.props.as_mut().unwrap().prop_defaults[0].value = "'lg'".to_string();
     assert_ne!(
@@ -1303,7 +1709,7 @@ fn stable_candidate_hash_discriminates_every_input() {
         "prop defaults must fold into the hash"
     );
 
-    // (6) snippet import identity.
+    // (9) snippet import identity.
     let mut c = full_candidates();
     c.snippet_imports[0].binding = SvelteSnippetCandidateBinding::Statement {
         local_binding: "Renderable".to_string(),
@@ -1314,7 +1720,16 @@ fn stable_candidate_hash_discriminates_every_input() {
         "snippet imports must fold into the hash"
     );
 
-    // (7) legacy-prop metadata (optionality flip).
+    // (10) snippet member projection.
+    let mut c = full_candidates();
+    c.snippet_candidates[0].member_name = "other".to_string();
+    assert_ne!(
+        stable_candidate_hash(&c),
+        base_hash,
+        "snippet member projections must fold into the hash"
+    );
+
+    // (10) legacy-prop metadata (optionality flip).
     let mut c = full_candidates();
     c.legacy_props[0].has_default = false;
     assert_ne!(
@@ -1323,7 +1738,7 @@ fn stable_candidate_hash_discriminates_every_input() {
         "legacy-prop metadata must fold into the hash"
     );
 
-    // (8) instance exports.
+    // (11) instance exports.
     let mut c = full_candidates();
     c.instance_exports = vec![instance_export("blur", "focus", Span::new(31, 36))];
     assert_ne!(
@@ -1332,7 +1747,7 @@ fn stable_candidate_hash_discriminates_every_input() {
         "instance exports must fold into the hash"
     );
 
-    // (9) module exports.
+    // (12) module exports.
     let mut c = full_candidates();
     c.module_exports = vec![module_export("config", "config", Span::new(37, 43))];
     assert_ne!(
@@ -1341,7 +1756,7 @@ fn stable_candidate_hash_discriminates_every_input() {
         "module exports must fold into the hash"
     );
 
-    // (10) dispatcher payload CONTENT (the structural payload hash).
+    // (13) dispatcher payload CONTENT (the structural payload hash).
     let mut c = full_candidates();
     c.dispatcher_events.as_mut().unwrap().payload_hash = [0x99; 16];
     assert_ne!(
@@ -1350,7 +1765,7 @@ fn stable_candidate_hash_discriminates_every_input() {
         "the dispatcher payload hash must fold into the hash"
     );
 
-    // (11) dispatcher payload POSITION (the locator's macro ordinal).
+    // (14) dispatcher payload POSITION (the locator's macro ordinal).
     let mut c = full_candidates();
     c.dispatcher_events = Some(payload_ref(9, MacroPayloadPosition::TypeArgument, 0x22));
     assert_ne!(
@@ -1359,7 +1774,7 @@ fn stable_candidate_hash_discriminates_every_input() {
         "the dispatcher payload locator must fold into the hash"
     );
 
-    // (12) dispatcher import source.
+    // (15) dispatcher import source.
     let mut c = full_candidates();
     c.dispatcher_import_source = Some("./fake-svelte".to_string());
     assert_ne!(
@@ -1368,7 +1783,7 @@ fn stable_candidate_hash_discriminates_every_input() {
         "the dispatcher import source must fold into the hash"
     );
 
-    // (13) props presence.
+    // (16) props presence.
     let mut c = full_candidates();
     c.props = None;
     assert_ne!(
@@ -1383,6 +1798,9 @@ fn stable_candidate_hash_discriminates_every_input() {
     let mut c = full_candidates();
     c.props.as_mut().unwrap().call_span = Span::new(999, 1024);
     c.props.as_mut().unwrap().prop_defaults[0].span = Span::new(500, 504);
+    c.props_calls[0].call_span = Span::new(999, 1024);
+    c.props_calls[0].public_keys[0].span = Span::new(505, 510);
+    c.props_calls[0].local_bindings[0].span = Span::new(511, 521);
     c.instance_exports[0].source_span = Span::new(700, 706);
     c.module_exports[0].source_span = Span::new(800, 806);
     assert_eq!(
@@ -1394,7 +1812,7 @@ fn stable_candidate_hash_discriminates_every_input() {
 
 #[test]
 fn stable_candidate_hash_golden_is_deterministic() {
-    // Deterministic golden for the VERSION 11 candidate hash: two independent
+    // Deterministic golden for the VERSION 12 candidate hash: two independent
     // constructions hash identically, and the bytes are pinned so a silently
     // dropped / reordered hash input fails loudly. An INTENTIONAL hash-shape
     // change must bump `SvelteScriptProvider::VERSION` and re-pin.
@@ -1404,10 +1822,10 @@ fn stable_candidate_hash_golden_is_deterministic() {
     assert_eq!(
         a,
         [
-            0x57, 0x1e, 0x55, 0x2f, 0x22, 0xfd, 0x63, 0x1d, 0xc7, 0x3a, 0xae, 0x3c, 0xaa, 0x5e,
-            0x44, 0xfa
+            0x7a, 0x19, 0x74, 0xa5, 0xb2, 0x6e, 0xb8, 0x98, 0x70, 0x31, 0xf5, 0x32, 0xe8, 0x4a,
+            0x65, 0xdd
         ],
-        "the VERSION 11 golden candidate hash"
+        "the VERSION 12 golden candidate hash"
     );
 }
 
@@ -1419,6 +1837,9 @@ fn svelte_carriers_are_no_type_expr() {
     use static_assertions::assert_impl_all;
     use verter_no_typeexpr::NoTypeExpr;
     assert_impl_all!(SveltePropsCandidate: NoTypeExpr);
+    assert_impl_all!(SveltePropsCall: NoTypeExpr);
+    assert_impl_all!(SveltePropsPublicKey: NoTypeExpr);
+    assert_impl_all!(SveltePropsLocalBinding: NoTypeExpr);
     assert_impl_all!(SvelteSnippetImportCandidate: NoTypeExpr);
     assert_impl_all!(SvelteLegacyProp: NoTypeExpr);
     assert_impl_all!(SvelteScriptCandidates: NoTypeExpr);
@@ -1613,7 +2034,7 @@ fn deref_accessor_absent_positions_are_typed_misses() {
 
 /// Capture through the PROVIDER entry (the envelope carries the provider's
 /// `stable_hash`), as the session's candidate-store path does.
-fn provider_capture(src: &str) -> FrameworkScriptCandidates {
+fn provider_capture(src: &str) -> ExactFrameworkScriptCandidates {
     let alloc = Allocator::default();
     let program = Parser::new(&alloc, src, SourceType::ts()).parse().program;
     let owners = crate::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
@@ -1624,19 +2045,18 @@ fn provider_capture(src: &str) -> FrameworkScriptCandidates {
         ),
     )
     .expect("instance test owner table");
-    SvelteScriptProvider
-        .capture(ScriptCandidateCx {
-            source: src,
-            program: &program,
-            top_level_owners: &owners,
-            module_script_region: None,
-            framework_mode_hint: None,
-        })
-        .expect("candidates captured")
+    ExactFrameworkScriptCandidates::new(SvelteScriptProvider.capture(ScriptCandidateCx {
+        source: src,
+        program: &program,
+        top_level_owners: &owners,
+        module_script_region: None,
+        framework_mode_hint: None,
+    }))
 }
 
-fn envelope_payload(envelope: &FrameworkScriptCandidates) -> &SvelteScriptCandidates {
+fn envelope_payload(envelope: &ExactFrameworkScriptCandidates) -> &SvelteScriptCandidates {
     envelope
+        .candidates()
         .payload
         .downcast_ref::<SvelteScriptCandidates>()
         .expect("the svelte provider owns the payload")
@@ -1649,7 +2069,7 @@ import { createEventDispatcher } from 'svelte';\n\
 const dispatch = createEventDispatcher<{ save: string }>();\n\
 let { name }: { name: string } = $props();\n";
     let captured = provider_capture(src);
-    let captured_hash = captured.stable_hash;
+    let captured_hash = captured.candidates().stable_hash;
     let captured_payload_hash = envelope_payload(&captured)
         .props
         .as_ref()
@@ -1689,12 +2109,13 @@ let { name }: { name: string } = $props();\n";
     // (payload and hash never disagree), and it MOVED (the hash folds the
     // payload refs, anchors included).
     assert_eq!(
-        filled.stable_hash,
+        filled.candidates().stable_hash,
         stable_candidate_hash(payload),
         "the rebuilt stable_hash matches its own payload"
     );
     assert_ne!(
-        filled.stable_hash, captured_hash,
+        filled.candidates().stable_hash,
+        captured_hash,
         "filling the anchor changes the folded candidate hash"
     );
     // The payload_hash axis fingerprints the authored TYPE, not the anchor —
@@ -1728,7 +2149,8 @@ fn absolutize_candidates_never_rewrites_a_filled_anchor() {
         "a filled anchor is never rewritten"
     );
     assert_eq!(
-        refilled.stable_hash, filled.stable_hash,
+        refilled.candidates().stable_hash,
+        filled.candidates().stable_hash,
         "the no-op pass keeps the envelope hash"
     );
 }
@@ -1740,7 +2162,7 @@ fn absolutize_candidates_keeps_the_sentinel_for_an_empty_canonical() {
     // intact rather than stamping another empty anchor.
     let src = "let { name }: { name: string } = $props();\n";
     let captured = provider_capture(src);
-    let captured_hash = captured.stable_hash;
+    let captured_hash = captured.candidates().stable_hash;
     let kept = SvelteScriptProvider.absolutize_candidates(captured, "");
     assert!(
         envelope_payload(&kept)
@@ -1755,7 +2177,11 @@ fn absolutize_candidates_keeps_the_sentinel_for_an_empty_canonical() {
             }),
         "the empty-canonical pass keeps the sentinel anchor"
     );
-    assert_eq!(kept.stable_hash, captured_hash, "and the original hash");
+    assert_eq!(
+        kept.candidates().stable_hash,
+        captured_hash,
+        "and the original hash"
+    );
 }
 
 // @ai-generated - The binding-less inline `import("…").Snippet` type reference

@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use crate::fact_signature_helpers::ReadSetSignature;
-use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+use crate::resolver_core::FactVersionRef;
 
 /// Refusal classification for a non-cacheable admission. Re-exported
 /// from the audit leaf crate ([`verter_audit::NonAdmissionReason`]) so
@@ -56,7 +56,14 @@ pub(crate) fn non_admission_propagation(
         | NonAdmissionReason::Cancelled
         | NonAdmissionReason::UnresolvedProvenance
         | NonAdmissionReason::ComputeFailed
-        | NonAdmissionReason::PartialResult => NonCacheablePropagation::Transitive,
+        | NonAdmissionReason::PartialResult
+        | NonAdmissionReason::ResolutionInaccessiblePath
+        | NonAdmissionReason::ResolutionUnknownPath
+        | NonAdmissionReason::ResolutionWorldChanged
+        | NonAdmissionReason::ResolutionViewSuperseded
+        | NonAdmissionReason::ResolutionUntrackedBackend
+        | NonAdmissionReason::ResolutionIncompleteProvenance
+        | NonAdmissionReason::ResolutionRetryExhausted => NonCacheablePropagation::Transitive,
     }
 }
 
@@ -132,56 +139,7 @@ pub(crate) fn refuse_result_cache_admission_if_partial(value_is_partial: bool) -
 /// (`signature_admission_from_ok_finalise_is_cacheable`,
 /// `signature_admission_from_overflow_finalise_is_non_cacheable`), so the
 /// allow only covers the not-yet-wired production constructor.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub(crate) enum SignatureAdmission {
-    /// The tracer finalised within the size cap; the value is cacheable
-    /// and validated against this signature on every warm hit.
-    Cacheable(ReadSetSignature),
-    /// The tracer could not be admitted; the value is returned to the
-    /// winning flight alone with the carried reason.
-    NonCacheable(NonAdmissionReason),
-}
-
-#[allow(dead_code)]
-impl SignatureAdmission {
-    /// Lift a finalised tracer result into the admission vocabulary.
-    pub(crate) fn from_finalise(finalise: FactReadSetFinalise) -> Self {
-        match finalise {
-            FactReadSetFinalise::Ok(facts) => {
-                SignatureAdmission::Cacheable(ReadSetSignature::new(facts))
-            }
-            FactReadSetFinalise::NonCacheable(_) => {
-                SignatureAdmission::NonCacheable(NonAdmissionReason::UnresolvedProvenance)
-            }
-            FactReadSetFinalise::Overflow => {
-                SignatureAdmission::NonCacheable(NonAdmissionReason::SignatureOverflow)
-            }
-        }
-    }
-
-    /// The cacheable signature, if this admission is cacheable.
-    pub(crate) fn cacheable(&self) -> Option<&ReadSetSignature> {
-        match self {
-            SignatureAdmission::Cacheable(sig) => Some(sig),
-            SignatureAdmission::NonCacheable(_) => None,
-        }
-    }
-
-    /// Consume the admission, returning the cacheable signature when
-    /// admission was granted. Producers that need to project the
-    /// signature into a `Option<ReadSetSignature>` (e.g. test fixtures
-    /// asserting fact-rail content, or `get_or_compute` callsites that
-    /// store the rail under a different field shape) take this owned
-    /// projection rather than re-cloning through the borrowed
-    /// [`Self::cacheable`].
-    pub(crate) fn into_cacheable(self) -> Option<ReadSetSignature> {
-        match self {
-            SignatureAdmission::Cacheable(sig) => Some(sig),
-            SignatureAdmission::NonCacheable(_) => None,
-        }
-    }
-}
+pub(crate) use verter_workspace::SignatureAdmission;
 
 /// Node-facing cold-compute outcome.
 ///

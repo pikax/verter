@@ -191,6 +191,7 @@ fn dispatch_ready_job_to_executor(
     source_loader: &dyn SourceLoader,
     inbox_sender: &crossbeam_channel::Sender<Submission>,
     dag: Arc<Mutex<SchedulerDag>>,
+    source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     cancellation: &CancellationToken,
 ) {
     let _cancellation_guard =
@@ -288,6 +289,7 @@ fn dispatch_ready_job_to_executor(
                 source_loader,
                 inbox_sender,
                 dag,
+                source_root,
             );
         }
         // `Parse` is NEVER admitted as a runnable DAG node: it is a label for
@@ -319,6 +321,7 @@ fn dispatch_ready_job_to_executor(
                 source_loader,
                 inbox_sender,
                 dag,
+                source_root,
             );
         }
         (WorkKind::Artifact, WorkNodeIdentity::Artifact { profile_hash, .. }) => {
@@ -334,6 +337,7 @@ fn dispatch_ready_job_to_executor(
                 source_loader,
                 inbox_sender,
                 dag,
+                source_root,
             );
         }
         // The DAG's admission paths only produce the `(kind, identity)`
@@ -363,6 +367,7 @@ fn run_file_stage(
     source_loader: &dyn SourceLoader,
     inbox_sender: &crossbeam_channel::Sender<Submission>,
     dag: Arc<Mutex<SchedulerDag>>,
+    source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
 ) {
     let node = file_node.unwrap_or_else(|| {
         unreachable!(
@@ -381,6 +386,7 @@ fn run_file_stage(
         source_loader,
         inbox_sender,
         dag,
+        source_root,
     );
 }
 
@@ -987,7 +993,26 @@ pub(crate) enum DispatchOutcome {
 /// processes submissions and dispatches work to CPU/IO pools.
 pub struct Scheduler {
     /// Per-file nodes (concurrent access via DashMap).
+    ///
+    /// EXECUTION state: each [`FileNode`] holds only its CURRENT
+    /// snapshots, so a generation bump makes the prior source
+    /// immediately unreachable and nothing here can answer "what did
+    /// this file look like when my request started?". The immutable,
+    /// leased answer to that question is `source_root`.
     pub(crate) nodes: DashMap<String, Arc<FileNode>>,
+    /// The scheduler's epoch-indexed MVCC SOURCE authority.
+    ///
+    /// Every lifecycle transition that changes what
+    /// [`Self::try_get_source`] logically answers publishes a version
+    /// through [`crate::source_root::SchedulerSourceDirectory::publish_transition`],
+    /// atomically with the transition itself. A consumer captures an
+    /// O(1) [`crate::source_root::SchedulerSourceRoot`] and reads the
+    /// world AS OF that capture — the directory is never reachable
+    /// through the root.
+    ///
+    /// Lock rank: `dag` (outer) > source-root publication > `nodes`
+    /// shard (inner).
+    pub(crate) source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     /// Edge manager (reverse-dep index + forward-dep snapshots).
     pub(crate) edges: EdgeManager,
     /// Single driver-owned readiness authority — admission, dedup,
@@ -1273,6 +1298,7 @@ impl Scheduler {
     ) -> Arc<Self> {
         let scheduler = Arc::new(Self {
             nodes: DashMap::new(),
+            source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
             dag: Arc::new(Mutex::new(SchedulerDag::with_budget(
                 config.resolved_dag_budget(),
@@ -1363,6 +1389,7 @@ impl Scheduler {
     ) -> Arc<Self> {
         Arc::new(Self {
             nodes: DashMap::new(),
+            source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
             dag: Arc::new(Mutex::new(SchedulerDag::with_budget(
                 config.resolved_dag_budget(),
@@ -1999,8 +2026,34 @@ impl Scheduler {
     // ── Sync Fast-Path Reads ──
 
     /// Get current source snapshot if generation-coherent.
+    ///
+    /// This reads the LIVE node — the answer changes the moment another
+    /// thread bumps the generation. A consumer that needs a stable world
+    /// captures a [`crate::source_root::SchedulerSourceRoot`] instead
+    /// and reads it as-of.
     pub fn try_get_source(&self, id: &str) -> Option<Arc<SourceSnapshot>> {
         self.nodes.get(id)?.current_source()
+    }
+
+    /// Capture an immutable, LEASED root of the scheduler's source
+    /// world.
+    ///
+    /// O(1) in the number of tracked files: one mutex acquisition, one
+    /// scalar read, one counter bump — never a `nodes` walk. The root
+    /// both NAMES the epoch and KEEPS every version visible at it
+    /// reachable until the root drops, so a holder can still resolve its
+    /// own world after the live nodes have moved on.
+    #[must_use]
+    pub fn capture_source_root(&self) -> Arc<crate::source_root::SchedulerSourceRoot> {
+        self.source_root.capture_root()
+    }
+
+    /// The scheduler's MVCC source directory — the publication and
+    /// reclamation authority behind
+    /// [`Self::capture_source_root`].
+    #[must_use]
+    pub fn source_directory(&self) -> &Arc<crate::source_root::SchedulerSourceDirectory> {
+        &self.source_root
     }
 
     /// Get current analysis snapshot if generation-coherent.
@@ -2057,13 +2110,24 @@ impl Scheduler {
         // 3. Remove all nodes, recording generation floors so re-added
         //    files start above any prior incarnation's generation.
         let ids: Vec<String> = self.nodes.iter().map(|e| e.key().clone()).collect();
-        for id in &ids {
-            if let Some((_, node)) = self.nodes.remove(id) {
-                let gen = node.generation();
-                self.generation_floors.insert(id.clone(), gen);
-                let canonical: Arc<str> = Arc::from(id.as_str());
-                self.dag.lock().signal_file_shutdown(&canonical);
+        // ONE epoch covers every removed member: a batch transition
+        // publishes a single root advance, not one per file. The DAG
+        // signalling runs after the publication hold is released.
+        let removed: Vec<(String, u64)> = self.source_root.publish_transition(|publication| {
+            let mut removed = Vec::with_capacity(ids.len());
+            for id in &ids {
+                if let Some((_, node)) = self.nodes.remove(id) {
+                    let canonical: Arc<str> = Arc::from(id.as_str());
+                    publication.absent(&canonical, node.incarnation_id(), node.generation());
+                    removed.push((id.clone(), node.generation()));
+                }
             }
+            removed
+        });
+        for (id, gen) in removed {
+            self.generation_floors.insert(id.clone(), gen);
+            let canonical: Arc<str> = Arc::from(id.as_str());
+            self.dag.lock().signal_file_shutdown(&canonical);
         }
 
         // 4. Clear state except generation_floors (preserved across resets
@@ -2723,7 +2787,16 @@ impl Scheduler {
         };
         let canonical: Arc<str> = Arc::from(id);
         let mut dag = self.dag.lock();
-        let new_gen = node.bump_generation();
+        // The bump and the source-root publication run under ONE
+        // publication hold, so a concurrent `capture_source_root` sees
+        // the pre-bump node with the pre-bump root or the post-bump node
+        // with the post-bump root — never a torn pair. The publication
+        // lock is INNER to the DAG lock already held here.
+        let new_gen = self.source_root.publish_transition(|publication| {
+            let new_gen = node.bump_generation();
+            publication.absent(&canonical, node.incarnation_id(), new_gen);
+            new_gen
+        });
         // Stale per-(owner, generation) Artifact blocker entries
         // for superseded generations are dropped inside
         // `supersede_old_file_generations` (it now also scrubs
@@ -2852,7 +2925,20 @@ impl Scheduler {
         // by a superseded matrix path is also scrubbed in one pass.
         self.auto_ingested_recent.remove(&canonical_arc);
 
-        if let Some((_, node)) = self.nodes.remove(id) {
+        // Drop the node and publish the resulting `Absent` source
+        // version under ONE publication hold, so no captured root can
+        // observe the file gone from `nodes` while the root still
+        // answers `Present` (or the reverse). The DAG signalling below
+        // stays OUTSIDE the hold — the publication lock is inner to the
+        // DAG lock and must never be held across it.
+        let removed = self.source_root.publish_transition(|publication| {
+            let removed = self.nodes.remove(id);
+            if let Some((_, node)) = removed.as_ref() {
+                publication.absent(&canonical_arc, node.incarnation_id(), node.generation());
+            }
+            removed
+        });
+        if let Some((_, node)) = removed {
             let gen = node.generation();
             // Record floor so a re-added node starts above this generation.
             self.generation_floors.insert(id.to_string(), gen);
@@ -2908,7 +2994,12 @@ impl Scheduler {
         };
         let canonical: Arc<str> = Arc::from(id);
         let mut dag = self.dag.lock();
-        let new_gen = node.bump_generation();
+        // Bump + publish atomically; see [`Self::invalidate`].
+        let new_gen = self.source_root.publish_transition(|publication| {
+            let new_gen = node.bump_generation();
+            publication.absent(&canonical, node.incarnation_id(), new_gen);
+            new_gen
+        });
         node.pending_source.store(Arc::new(None));
         dag.supersede_old_file_generations(&canonical, new_gen);
         // Drop the DAG lock before the inbox send + sender_drop
@@ -3514,7 +3605,15 @@ impl Scheduler {
                     fresh.bump_generation();
                 }
                 let fresh_gen = fresh.generation();
-                self.nodes.insert(file_id.clone(), Arc::clone(&fresh));
+                // Publishing the replacement node and its `Absent`
+                // source version under ONE publication hold keeps a
+                // captured root from ever seeing the fresh incarnation
+                // published while the root still answers with the old
+                // one's committed source.
+                self.source_root.publish_transition(|publication| {
+                    self.nodes.insert(file_id.clone(), Arc::clone(&fresh));
+                    publication.absent(&canonical, fresh.incarnation_id(), fresh_gen);
+                });
                 // Retire the old generation's DAG identities and signal
                 // its waiters `Superseded`.
                 dag.supersede_old_file_generations(&canonical, fresh_gen);
@@ -3529,7 +3628,15 @@ impl Scheduler {
         // identity — the dispatch-time defensive `debug_assert!` would
         // then trip on a not-yet-terminalized stale identity.
         let generation = if source.is_some() {
-            let gen = node.bump_generation();
+            // Bump + publish atomically; see [`Self::invalidate`]. The
+            // new generation has no committed snapshot yet, so the
+            // file's published source state is `Absent` until the Source
+            // stage commits one.
+            let gen = self.source_root.publish_transition(|publication| {
+                let gen = node.bump_generation();
+                publication.absent(&canonical, node.incarnation_id(), gen);
+                gen
+            });
             // Store source in the overlay for SourceLoader access.
             if let Some(ref src) = source {
                 self.overlay.set(file_id.clone(), Arc::clone(src));
@@ -4937,6 +5044,7 @@ impl Scheduler {
             let source_loader_for_cache = Arc::clone(&self.source_loader);
             let inbox_for_cache = inbox_sender.clone();
             let dag_for_cache = Arc::clone(&self.dag);
+            let source_root_for_cache = Arc::clone(&self.source_root);
             // Snapshot the identity for the submit-failure release path before
             // `job` moves into the pool closure below.
             let cache_identity = job.identity.clone();
@@ -4951,6 +5059,7 @@ impl Scheduler {
                     source_loader_for_cache.as_ref(),
                     &inbox_for_cache,
                     dag_for_cache,
+                    source_root_for_cache,
                     &cancellation,
                 );
             });
@@ -5050,6 +5159,7 @@ impl Scheduler {
         });
 
         let dag_handle = Arc::clone(&self.dag);
+        let source_root_handle = Arc::clone(&self.source_root);
         let failed_blocker_deps = job.failed_blocker_deps.clone();
         // Capture the identity for the active-path push on the
         // worker side. A worker that re-enters `wait_or_drive`
@@ -5154,6 +5264,7 @@ impl Scheduler {
                         source_loader.as_ref(),
                         &inbox_sender,
                         Arc::clone(&dag_handle),
+                        Arc::clone(&source_root_handle),
                         &cancellation,
                     );
                 }));
@@ -5209,6 +5320,7 @@ impl Scheduler {
                             source_loader.as_ref(),
                             &inbox_sender,
                             Arc::clone(&dag_handle),
+                            Arc::clone(&source_root_handle),
                             &cancellation,
                         );
                     });
@@ -5264,6 +5376,7 @@ impl Scheduler {
                             source_loader.as_ref(),
                             &inbox_sender,
                             Arc::clone(&dag_handle),
+                            Arc::clone(&source_root_handle),
                             &cancellation,
                         );
                     });
@@ -5637,6 +5750,7 @@ impl Scheduler {
                     self.source_loader.as_ref(),
                     &self.inbox.sender,
                     self.dag.clone(),
+                    self.source_root.clone(),
                     &cancellation,
                 );
             });
@@ -5708,6 +5822,7 @@ impl Scheduler {
                 self.source_loader.as_ref(),
                 &self.inbox.sender,
                 self.dag.clone(),
+                self.source_root.clone(),
                 &cancellation,
             );
         });
@@ -5993,6 +6108,7 @@ impl Scheduler {
         source_loader: &dyn SourceLoader,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
         dag: Arc<Mutex<SchedulerDag>>,
+        source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     ) {
         // Typed dependency-failure short-circuit BEFORE task-kind
         // dispatch. The marker survives both the fan-out path (a
@@ -6047,6 +6163,7 @@ impl Scheduler {
                     source_loader,
                     inbox_sender,
                     dag,
+                    source_root,
                 );
             }
             TaskKind::Analysis => {
@@ -6098,6 +6215,7 @@ impl Scheduler {
         source_loader: &dyn SourceLoader,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
         dag: Arc<Mutex<SchedulerDag>>,
+        source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     ) {
         use crate::job::SchedulerError;
 
@@ -6165,9 +6283,30 @@ impl Scheduler {
             }
         };
 
-        if node.generation() == generation {
+        // Commit the snapshot and publish the resulting `Present`
+        // source version under ONE publication hold. The
+        // generation-coherence check moves inside the hold too: a
+        // concurrent `invalidate` publishes its `Absent` version under
+        // the same lock, so the two can no longer interleave into a
+        // root history that ends `Present` at a superseded generation.
+        //
+        // The `pending_source` clear, the DAG signal and the inbox send
+        // stay OUTSIDE the hold — the publication lock is inner to the
+        // DAG lock and must never be held across it.
+        let committed = source_root.publish_transition(|publication| {
+            if node.generation() != generation {
+                return false;
+            }
             node.source.store(Arc::new(Some(Arc::clone(&snapshot))));
-
+            publication.present(
+                &canonical,
+                node.incarnation_id(),
+                generation,
+                snapshot.whole_hash,
+            );
+            true
+        });
+        if committed {
             let pending = node.pending_source.load();
             if let Some((gen, _)) = pending.as_ref() {
                 if *gen == generation {

@@ -182,12 +182,12 @@ impl VerterLanguageServer {
             self.publish_full_diagnostics(uri).await;
             return;
         }
-        let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), uri);
+        let target_identity = crate::audit_harness::target_identity_for_uri(&self.documents, uri);
         let uri_for_body = uri.clone();
         let _ = crate::audit_harness::run_with_audit::<usize, _, _>(
             &host,
             verter_audit::payloads::tags::LspMethodTag::Diagnostics,
-            canonical_id,
+            target_identity,
             None,
             async move {
                 self.publish_full_diagnostics(&uri_for_body).await;
@@ -596,12 +596,15 @@ impl VerterLanguageServer {
         };
 
         let reader = LspProjectResolverReader::new(&self.documents);
-        let resolved_dependencies = collect_resolved_provider_dependencies_from_analyzed_refs(
+        let Some(resolved_dependencies) = collect_resolved_provider_dependencies_from_analyzed_refs(
             &snapshot.resolver,
+            snapshot.resolution_view.as_ref(),
             &reader,
             canonical_id,
             &ingress.module_references,
-        );
+        ) else {
+            return;
+        };
 
         self.documents.host.set_import_dependencies(
             canonical_id,
@@ -716,16 +719,13 @@ impl VerterLanguageServer {
             })
             .map(|dependency| dependency.source_id.clone())
             .collect::<Vec<_>>();
-        self.sync_non_carrier_provider_graph(
-            &snapshot.resolver,
-            non_carrier_provider_graph_targets,
-        )
-        .await;
+        self.sync_non_carrier_provider_graph(snapshot, non_carrier_provider_graph_targets)
+            .await;
     }
 
     pub(super) async fn sync_non_carrier_provider_graph(
         &self,
-        resolver: &crate::project_resolver::NativeProjectResolver,
+        snapshot: &PublishedResolverSnapshot,
         initial_ids: Vec<String>,
     ) {
         let Some(sync) = &self.project_sync else {
@@ -768,10 +768,7 @@ impl VerterLanguageServer {
                 .unwrap_or_default();
 
             let Some(prepared) = prepare_non_carrier_provider_sync(
-                Some(&PublishedResolverSnapshot {
-                    resolver: resolver.clone(),
-                    ownership_ready: true,
-                }),
+                Some(snapshot),
                 &reader,
                 &canonical_id,
                 &source,
@@ -1979,6 +1976,10 @@ impl VerterLanguageServer {
         let published = ws.load_published()?;
         Some(PublishedResolverSnapshot {
             resolver: published.snapshot.resolver.clone(),
+            resolution_view: Some(super::PublishedResolutionView {
+                workspace: Arc::clone(ws),
+                published: Arc::clone(&published),
+            }),
             ownership_ready: published.ownership_ready,
         })
     }

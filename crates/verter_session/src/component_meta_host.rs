@@ -656,6 +656,9 @@ fn cheap_component_meta_record(
     crate::component_meta_audit::RequestAuditRecord {
         request_id: 0,
         canonical_id: canonical_id.to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+            canonical_id,
+        )),
         kind: verter_audit::RequestKind::ComponentMeta,
         parent_request_id: verter_scheduler::request_context::current_request_id()
             .map(|id| id.to_string()),

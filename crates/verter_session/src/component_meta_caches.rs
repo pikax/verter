@@ -83,7 +83,7 @@ use verter_type_expr::TypeExpr;
 use crate::cache_runtime::admission::{CacheAdmission, CacheEntry, NonAdmissionReason};
 use crate::cache_runtime::node::{lookup, ArtifactNode, ComputeCtx, QueryFlightKey};
 use crate::cache_runtime::singleflight::InflightTable;
-use crate::fact_signature_helpers::ReadSetSignature;
+use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt as _};
 use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{FactVersionRef, ResolvedTypeDeclaration, ResolverContext};

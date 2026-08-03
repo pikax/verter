@@ -100,22 +100,14 @@ pub(crate) fn make_host_with_workspace_files_footprint(files: &[(&str, &str)]) -
     for (path, source) in files {
         workspace.inject_file((*path).to_string(), Arc::from(*source));
     }
-    let host = Arc::new(VerterHost::new(
+    Arc::new(VerterHost::new(
         HostConfig {
             audit_enabled: true,
             footprint_capture: true,
             ..HostConfig::default()
         },
         workspace,
-    ));
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
-    host
+    ))
 }
 
 pub(crate) fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {

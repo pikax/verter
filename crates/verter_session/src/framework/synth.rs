@@ -117,7 +117,12 @@ impl ComponentDefaultSynth for SvelteComponentDefaultSynth {
         let candidates = cx
             .script_candidates
             .for_adapter(&verter_language::FrameworkAdapterId::svelte())
-            .and_then(|entry| entry.payload.downcast_ref::<SvelteScriptCandidates>())
+            .and_then(|entry| {
+                entry
+                    .candidates()
+                    .payload
+                    .downcast_ref::<SvelteScriptCandidates>()
+            })
             .unwrap_or(&empty);
         Some(
             crate::resolver_core::svelte_default_synth::synthesise_svelte_default_value_symbol(

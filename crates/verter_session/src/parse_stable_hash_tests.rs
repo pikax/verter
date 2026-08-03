@@ -22,16 +22,8 @@ use super::compute_parse_stable_hash;
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::decl_lowering::{DeclLoweringService, SnapshotKey};
 use crate::project_type_store::IndexedReady;
-use crate::resolver_core::shallow_file_state::{ShallowFileState, ShallowImportResolver};
+use crate::resolver_core::shallow_file_state::ShallowFileState;
 use crate::types::MetaProvenance;
-
-/// A no-op import resolver — these fixtures declare no cross-file edges.
-struct NoopResolver;
-impl ShallowImportResolver for NoopResolver {
-    fn resolve_canonical(&self, _specifier: &str) -> Option<String> {
-        None
-    }
-}
 
 /// Build the canonical `IndexedReady` for `source` through the REAL
 /// header walk, so the shallow inventory carries real member/type-param
@@ -65,12 +57,8 @@ fn indexed_for(source: &str) -> Arc<IndexedReady> {
         Arc::new(MetaProvenance::default()),
         None,
     );
-    let shallow = ShallowFileState::from_route_inventory_with_resolver(
-        [7u8; 16],
-        route_inventory,
-        Arc::new(memo),
-        &NoopResolver,
-    );
+    let shallow =
+        ShallowFileState::from_route_inventory([7u8; 16], route_inventory, Arc::new(memo));
     Arc::new(IndexedReady::new_for_test_with_state(
         [7u8; 16],
         Arc::new(shallow),

@@ -628,13 +628,13 @@ impl CrossDeclLens for OwnedShallowLens<'_> {
     }
 }
 
-/// The route-fact producer's hash-free classification lens: the FULL
-/// three-field import target (specifier + imported name + resolved canonical)
-/// plus header TYPE-symbol membership, derived once from the finished
-/// `ShallowFileState` beside the fingerprint [`ShallowLens`]. A SECOND view of
-/// the same shallow tables — NOT a fingerprint-lens widening: this lens never
-/// feeds a hash, so carrying the resolve-domain canonical here leaves the R12
-/// parse-domain fingerprint grammar untouched.
+/// The route-fact producer's hash-free classification lens: the AUTHORED
+/// import target (specifier + imported name) plus header TYPE-symbol
+/// membership, derived once from the finished `ShallowFileState` beside the
+/// fingerprint [`ShallowLens`]. A SECOND view of the same shallow tables —
+/// NOT a fingerprint-lens widening: this lens never feeds a hash. Both views
+/// are pure parse domain; no resolved canonical is retained anywhere on the
+/// artifact.
 #[derive(Debug)]
 pub(crate) struct RouteLens {
     canonical_id: Arc<str>,
@@ -656,24 +656,19 @@ impl RouteLens {
                 .keys()
                 .cloned()
                 .collect(),
-            import_targets:
-                shallow
-                    .owner_import_targets
-                    .iter()
-                    .map(|(local, target)| {
-                        (
-                            local.clone(),
-                            verter_semantic::facts::ImportRouteTarget {
-                                source_specifier: Arc::from(target.source_specifier.as_str()),
-                                imported_name: Arc::from(target.imported_name.as_str()),
-                                canonical_id:
-                                    crate::resolver_core::shallow_file_state::external_canonical(
-                                        target,
-                                    ),
-                            },
-                        )
-                    })
-                    .collect(),
+            import_targets: shallow
+                .owner_import_targets
+                .iter()
+                .map(|(local, target)| {
+                    (
+                        local.clone(),
+                        verter_semantic::facts::ImportRouteTarget {
+                            source_specifier: Arc::from(target.source_specifier.as_str()),
+                            imported_name: Arc::from(target.imported_name.as_str()),
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -866,7 +861,6 @@ fn emit_export_targets(registry: &mut FactRegistry, view: &FactEmissionView<'_>)
             ExportTarget::Reexport {
                 source_specifier,
                 original_name,
-                canonical_id: _,
                 is_type,
             } => {
                 // R12: parse-domain `SyntacticReexportRef` records

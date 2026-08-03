@@ -776,7 +776,9 @@ async fn handle_completion_attempt(
             };
 
             // Try 1: Use resolve_import_specifier (handles relative, alias, index files)
-            if let Some(resolved) = server.resolve_import_specifier(canonical_id, import_source) {
+            if let Some(resolved) =
+                server.resolve_import_specifier_transient(canonical_id, import_source)
+            {
                 if let Some(a) = try_follow_reexport(&resolved, component_name) {
                     return Some(a);
                 }
@@ -810,7 +812,7 @@ async fn handle_completion_attempt(
 
             // Try 3: VFS resolution (path aliases, tsconfig paths, disk probing)
             if let Some(resolved_path) =
-                server.resolve_import_specifier(canonical_id, import_source)
+                server.resolve_import_specifier_transient(canonical_id, import_source)
             {
                 if let Some(a) = try_follow_reexport(&resolved_path, component_name) {
                     return Some(a);

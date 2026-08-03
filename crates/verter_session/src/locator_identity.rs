@@ -97,15 +97,7 @@ pub fn assert_r6_key_dimension<T: R6KeyDimension>() {}
 /// and the `FileSourceEnv` arm carries this dimension. Ordering is the
 /// derived byte order of the private inner hash — opaque, stable, and
 /// exposes no constructor surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseEnvHash(HashValue);
-impl ParseEnvHash {
-    /// Wrap the LIVE parse-env-hash dimension (never a file content/whole hash).
-    #[must_use]
-    pub(crate) const fn from_env_hash(hash: HashValue) -> Self {
-        Self(hash)
-    }
-}
+pub use verter_workspace::ParseEnvHash;
 impl sealed::Sealed for ParseEnvHash {}
 impl R6KeyDimension for ParseEnvHash {}
 

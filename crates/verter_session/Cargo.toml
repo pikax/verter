@@ -12,6 +12,11 @@ publish = false
 [features]
 default = []
 session_metrics = []
+# Measurement-only: forwards `verter_workspace/currency_probe` and enables the
+# `probe_scope!` timers on this crate's currency chokepoints. Absent from
+# `default`; requested ONLY by the `verter_bench` measurement harness, never by
+# a production edge (`verter_napi`, `verter_lsp`, `verter_wasm`, `verter_tsc`).
+currency_probe = ["verter_workspace/currency_probe"]
 # Opt-in test-support seam for items the SEPARATE integration-test binary
 # (`tests/cases/**`) must see but a normal `cargo build` / `pnpm run build:lsp`
 # / `pnpm dev-extension` (debug or release) must NOT compile. The integration
@@ -55,16 +60,16 @@ oracle-gen = ["dep:verter_type_runtime", "dep:tokio", "dep:blake3", "dep:tempfil
 # the upstream nuxt-ui submodule) must gate themselves behind
 # `#[cfg(feature = "external-corpus")]`.
 external-corpus = []
-# Opt-in: enables the trybuild compile-fail SEAL fixtures
+# Opt-in: enables the full trybuild compile-fail SEAL fixture suite
 # (`tests/cases/g_compile/compile_fail.rs` — workspace-accessor visibility,
 # the NoTypeExpr / NoStoredSpan marker seals, the sealed carrier/recursive-self
 # proof traits, etc). trybuild spawns a full `cargo build` of a fixture crate
-# linking `verter_session` (~100s), so each fixture is `#[ignore]`d unless this
-# feature is on. Run LOCALLY with `cargo nextest run -p verter_session
-# --features compile-fail` (or `cargo test`). It is NOT wired into the default
-# gate (`node scripts/gate.mjs`) or any CI workflow — the seals it asserts are
-# also enforced structurally by the normal build, so a broken seal fails the
-# ordinary compile.
+# linking `verter_session` (~100s), so most fixtures are `#[ignore]`d unless
+# this feature is on. The combined hot-materialize/script-fact evidence rail is
+# always on in the default canonical gate because those fixtures are primary
+# structural enforcement. Run the remaining suite LOCALLY with
+# `cargo nextest run -p verter_session --features compile-fail` (or
+# `cargo test`).
 compile-fail = []
 scanners-replacement-red = []
 # Phase 11b diagnosis benchmark: enables the corpus-driven

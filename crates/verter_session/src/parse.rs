@@ -444,7 +444,7 @@ pub(crate) fn capture_synth_script_candidates(
         .map(|candidates| {
             match active_providers
                 .iter()
-                .find(|provider| provider.adapter_id() == candidates.adapter_id)
+                .find(|provider| provider.adapter_id() == candidates.candidates().adapter_id)
             {
                 Some(provider) => provider.absolutize_candidates(candidates, canonical_id),
                 None => candidates,

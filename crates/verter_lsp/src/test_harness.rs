@@ -540,7 +540,7 @@ impl TestSessionBuilder {
             &[root_uri.clone()],
             &vite_opts,
         );
-        // Sync resolver to host's VFS so resolve_import_via_workspace works
+        // Sync resolver to host's VFS so resolve_import_transient works
         host.configure_projects(
             build_result
                 .registry
@@ -1626,40 +1626,56 @@ fn language_id_for(path: &str) -> String {
 macro_rules! real_provider_test {
     ($name:ident, fixture = $fixture:expr, async fn $fn_name:ident ($session:ident) $body:block) => {
         paste::paste! {
-            #[tokio::test(flavor = "multi_thread")]
-            async fn [<$name _tsserver>]() {
-                let Some(session) = $crate::test_harness::TestSessionBuilder::new(
-                    $crate::test_harness::TestProviderKind::Tsserver,
-                )
-                .fixture($fixture)
-                .build()
-                .await
-                else {
-                    return;
-                };
-                async fn $fn_name($session: &$crate::test_harness::RealProviderTestSession)
-                    $body
-                $fn_name(&session).await;
-                session.emit_body_receipt(stringify!([<$name _tsserver>]));
-                session.shutdown().await;
+            #[test]
+            fn [<$name _tsserver>]() {
+                $crate::run_on_serve_thread(|| {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("real-provider test runtime must build")
+                        .block_on(async {
+                            let Some(session) = $crate::test_harness::TestSessionBuilder::new(
+                                $crate::test_harness::TestProviderKind::Tsserver,
+                            )
+                            .fixture($fixture)
+                            .build()
+                            .await
+                            else {
+                                return;
+                            };
+                            async fn $fn_name($session: &$crate::test_harness::RealProviderTestSession)
+                                $body
+                            $fn_name(&session).await;
+                            session.emit_body_receipt(stringify!([<$name _tsserver>]));
+                            session.shutdown().await;
+                        });
+                });
             }
 
-            #[tokio::test(flavor = "multi_thread")]
-            async fn [<$name _tsgo>]() {
-                let Some(session) = $crate::test_harness::TestSessionBuilder::new(
-                    $crate::test_harness::TestProviderKind::Tsgo,
-                )
-                .fixture($fixture)
-                .build()
-                .await
-                else {
-                    return;
-                };
-                async fn $fn_name($session: &$crate::test_harness::RealProviderTestSession)
-                    $body
-                $fn_name(&session).await;
-                session.emit_body_receipt(stringify!([<$name _tsgo>]));
-                session.shutdown().await;
+            #[test]
+            fn [<$name _tsgo>]() {
+                $crate::run_on_serve_thread(|| {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("real-provider test runtime must build")
+                        .block_on(async {
+                            let Some(session) = $crate::test_harness::TestSessionBuilder::new(
+                                $crate::test_harness::TestProviderKind::Tsgo,
+                            )
+                            .fixture($fixture)
+                            .build()
+                            .await
+                            else {
+                                return;
+                            };
+                            async fn $fn_name($session: &$crate::test_harness::RealProviderTestSession)
+                                $body
+                            $fn_name(&session).await;
+                            session.emit_body_receipt(stringify!([<$name _tsgo>]));
+                            session.shutdown().await;
+                        });
+                });
             }
         }
     };

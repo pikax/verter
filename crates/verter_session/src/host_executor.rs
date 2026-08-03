@@ -292,11 +292,21 @@ impl StageExecutor for HostStageExecutor {
         };
         let parse = &host_data.parse;
         let workspace = self.workspace.read().clone();
-        let normalize_dep = |dep_id: String| {
-            crate::host_manage::resolve_eval_dependency_canonical_with(&dep_id, |candidate| {
-                workspace.file_exists(candidate)
-            })
-            .unwrap_or(dep_id)
+        let resolve_dep = |specifier: &str, kind| match workspace
+            .resolve_import_outcome(
+                canonical_id,
+                specifier,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind,
+                },
+            )
+            .into_publication()
+        {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
+                .into_result()
+                .map(|resolution| resolution.source_id),
+            verter_workspace::ResolutionPublication::Refused(_) => None,
         };
 
         let mut forward_deps = Vec::new();
@@ -304,14 +314,24 @@ impl StageExecutor for HostStageExecutor {
 
         // Forward deps from external src blocks (e.g. <script src="./setup.ts">).
         for req in &parse.external_requests {
-            forward_deps.push(req.resolved_canonical_id.clone());
+            let Some(resolved) = resolve_dep(
+                &req.specifier,
+                verter_workspace::ResolveRequestKind::SfcSrcAttr,
+            ) else {
+                return ExtractedDeps::default();
+            };
+            forward_deps.push(resolved);
         }
 
         // Forward deps from relative imports.
         for imp in &parse.script_analysis.imports {
             if imp.source.starts_with('.') || imp.source.starts_with("../") {
-                let resolved = crate::id::resolve_external(canonical_id, &imp.source);
-                forward_deps.push(normalize_dep(resolved));
+                let Some(resolved) =
+                    resolve_dep(&imp.source, verter_workspace::ResolveRequestKind::EsmImport)
+                else {
+                    return ExtractedDeps::default();
+                };
+                forward_deps.push(resolved);
             }
         }
 
@@ -320,8 +340,13 @@ impl StageExecutor for HostStageExecutor {
         // because the Artifact stage needs resolved type shapes for codegen.
         for dep in &parse.script_analysis.macro_type_deps {
             if dep.import_source.starts_with('.') || dep.import_source.starts_with("../") {
-                let resolved = crate::id::resolve_external(canonical_id, &dep.import_source);
-                blocker_ids.push(normalize_dep(resolved));
+                let Some(resolved) = resolve_dep(
+                    &dep.import_source,
+                    verter_workspace::ResolveRequestKind::TypeImport,
+                ) else {
+                    return ExtractedDeps::default();
+                };
+                blocker_ids.push(resolved);
             }
             // Bare specifier deps (e.g. "motion") are resolved via the workspace
             // resolver, not here. They'll be handled when exact resolutions are set.

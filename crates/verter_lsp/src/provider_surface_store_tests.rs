@@ -11,11 +11,14 @@ const CANONICAL: &str = "/src/Child.vue";
 /// The projected provider surface for `generated`, produced by the projection
 /// owner exactly as production produces it.
 fn prepared(generated: &str) -> crate::carrier_provider_projection::PreparedCarrierProviderContent {
-    crate::carrier_provider_projection::prepare_carrier_provider_imports(
-        None,
-        CANONICAL,
-        generated,
-        tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+    crate::carrier_provider_projection::expect_admitted(
+        crate::carrier_provider_projection::prepare_carrier_provider_imports(
+            None,
+            CANONICAL,
+            generated,
+            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        ),
+        "no workspace resolution is needed",
     )
 }
 

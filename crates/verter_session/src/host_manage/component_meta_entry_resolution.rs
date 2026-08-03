@@ -659,15 +659,8 @@ impl VerterHost {
                         let (footprint, files) = if ctx.footprint_capture {
                             if let Some(acc) = ctx.audit_accumulator.as_ref() {
                                 let state = acc.drain();
-                                let direct_imports: rustc_hash::FxHashSet<String> = self
-                                    .shallow_file_state(ctx.canonical_id.as_ref())
-                                    .map(|sfs| {
-                                        sfs.import_targets
-                                            .values()
-                                            .map(|t| t.canonical_id.clone())
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
+                                let direct_imports =
+                                    self.direct_import_canonicals(ctx.canonical_id.as_ref());
                                 let files = crate::component_meta_audit::build_file_audit_vec(
                                     &state,
                                     ctx.canonical_id.as_ref(),
@@ -727,6 +720,7 @@ impl VerterHost {
             let synthesized = crate::component_meta_audit::RequestAuditRecord {
                 request_id,
                 canonical_id: canonical.to_string(),
+                target_identity: Some(verter_audit::RequestTargetIdentity::registered(canonical)),
                 kind: crate::component_meta_audit::RequestKind::ComponentMeta,
                 parent_request_id,
                 timings: crate::component_meta_audit::RequestTimingAudit::default(),

@@ -1261,8 +1261,8 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
     let dispatch = ctx.dispatch();
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let macro_base = match dispatch.lower_locator(props_type.locator.clone()) {
         QueryResult::Value(node) => node,
         other => panic!("the exact-owner macro locator materializes, got {other:?}"),
@@ -1595,8 +1595,8 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -1717,8 +1717,8 @@ fn event_names_resolves_declref_and_instantiationref_event_unions() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -1809,8 +1809,8 @@ fn positional_params_expands_declref_and_instantiationref_rest_tuples() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -1913,8 +1913,8 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2014,8 +2014,8 @@ fn slot_param_and_return_resolves_aliased_and_nullable_slot_arms() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2127,8 +2127,8 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2246,8 +2246,8 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
         .expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2305,8 +2305,8 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
         .expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2457,8 +2457,8 @@ fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() 
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2514,8 +2514,8 @@ fn positional_params_partial_rest_demand_fails_whole_read() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
         .expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2566,8 +2566,8 @@ fn demand_validated_structural_node_partial_yields_none() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
         .expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2625,8 +2625,8 @@ fn event_names_direct_self_reference_terminates_complete() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2693,8 +2693,8 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -3034,8 +3034,8 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(props_locator) =
         &props_type.locator
     else {
@@ -3139,8 +3139,8 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(props_locator) =
         &props_type.locator
     else {
@@ -3306,8 +3306,8 @@ fn validated_snippet_params_partial_arg_fails_closed_not_bindingless() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -3474,8 +3474,8 @@ fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
-        .expect("svelte facts");
-    let props_type = facts.props_type.as_ref().expect("props type");
+        .expect_exact("svelte facts");
+    let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();

@@ -1774,10 +1774,30 @@ fn test_analyzed_module_reference(
     }
 }
 
-#[derive(Default)]
 struct TestResolverReader {
     files: HashSet<String>,
     texts: HashMap<String, Arc<str>>,
+    workspace: verter_workspace::MemoryWorkspace,
+}
+
+impl Default for TestResolverReader {
+    fn default() -> Self {
+        let workspace =
+            verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default());
+        verter_workspace::WorkspaceAccess::configure_resolver(
+            &workspace,
+            vec![crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.json".to_string()),
+            )],
+        );
+        Self {
+            files: HashSet::new(),
+            texts: HashMap::new(),
+            workspace,
+        }
+    }
 }
 
 impl TestResolverReader {
@@ -1788,7 +1808,10 @@ impl TestResolverReader {
             reader.files.insert(normalized.clone());
             reader
                 .texts
-                .insert(normalized, Arc::<str>::from("// test file"));
+                .insert(normalized.clone(), Arc::<str>::from("// test file"));
+            reader
+                .workspace
+                .inject_file(normalized, Arc::<str>::from("// test file"));
         }
         reader
     }
@@ -1806,6 +1829,34 @@ impl verter_workspace::WorkspaceRead for TestResolverReader {
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         let normalized = canonical_id.replace('\\', "/");
         self.file_exists(&normalized).then_some(normalized)
+    }
+
+    fn resolve_import(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> Option<verter_workspace::ResolveResult> {
+        verter_workspace::WorkspaceRead::resolve_import(
+            &self.workspace,
+            importer_id,
+            specifier,
+            ctx,
+        )
+    }
+
+    fn resolve_import_outcome(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> verter_workspace::ResolutionOutcome {
+        verter_workspace::WorkspaceRead::resolve_import_outcome(
+            &self.workspace,
+            importer_id,
+            specifier,
+            ctx,
+        )
     }
 
     fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
@@ -1851,6 +1902,54 @@ impl verter_workspace::WorkspaceAccess for TestResolverReader {
     }
     fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
     fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
+}
+
+struct ReturnOnlyResolverReader;
+
+impl verter_workspace::WorkspaceRead for ReturnOnlyResolverReader {
+    fn read_file(&self, _canonical_id: &str) -> Option<Arc<str>> {
+        None
+    }
+
+    fn file_exists(&self, canonical_id: &str) -> bool {
+        canonical_id == "/workspace/src/dep.ts"
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        self.file_exists(canonical_id)
+            .then(|| canonical_id.to_string())
+    }
+
+    fn resolve_import(
+        &self,
+        _importer_id: &str,
+        specifier: &str,
+        _ctx: verter_workspace::ResolutionContext,
+    ) -> Option<verter_workspace::ResolveResult> {
+        (specifier == "./dep").then(|| verter_workspace::ResolveResult {
+            source_id: "/workspace/src/dep.ts".to_string(),
+            provider_id: "/workspace/src/dep.ts".to_string(),
+            provider_specifier: "./dep".to_string(),
+            provider_target: verter_workspace::ProviderTarget::SourceFile,
+            resolution_kind: verter_workspace::ResolutionKind::Relative,
+            owner_tsconfig_path: Some("/workspace/tsconfig.json".to_string()),
+        })
+    }
+
+    fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn dependency_snapshot(
+        &self,
+        _canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        None
+    }
 }
 
 async fn make_definition_test_server(
@@ -1903,6 +2002,47 @@ async fn make_definition_test_server_with_kind_and_deadlines(
     Arc<MockTypeProvider>,
     String,
 ) {
+    let mut host_config = HostConfig::default();
+    host_config.lsp_method_timeouts.request_deadlines = request_deadlines;
+    make_definition_test_server_with_config(files, kind, host_config, true).await
+}
+
+/// Build the production default-profile definition server: the projection host
+/// runs BUILD and optional semantic analysis stays off. Carrier `did_open`
+/// still compiles the normal IDE + TEMPLATE_DATA projection.
+async fn make_default_profile_definition_test_server(
+    files: &[(&str, &str, &str)],
+) -> (
+    tempfile::TempDir,
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tokio::task::JoinHandle<()>,
+    Arc<MockTypeProvider>,
+    String,
+) {
+    make_definition_test_server_with_config(
+        files,
+        crate::TypeProviderKind::Tsserver,
+        HostConfig {
+            analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+            ..HostConfig::default()
+        },
+        false,
+    )
+    .await
+}
+
+async fn make_definition_test_server_with_config(
+    files: &[(&str, &str, &str)],
+    kind: crate::TypeProviderKind,
+    host_config: HostConfig,
+    enable_semantic_analysis: bool,
+) -> (
+    tempfile::TempDir,
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tokio::task::JoinHandle<()>,
+    Arc<MockTypeProvider>,
+    String,
+) {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
@@ -1937,8 +2077,6 @@ async fn make_definition_test_server_with_kind_and_deadlines(
     let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
     );
-    let mut host_config = HostConfig::default();
-    host_config.lsp_method_timeouts.request_deadlines = request_deadlines;
     let host = Arc::new(VerterHost::new(host_config, vfs_workspace));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
@@ -1958,13 +2096,16 @@ async fn make_definition_test_server_with_kind_and_deadlines(
             },
         )
     });
-    // Definition-server fixtures also back the native component/directive/slot
-    // hover contract matrix. Keep that optional lane explicit in tests now that
-    // the production initialization default is disabled.
-    service
-        .inner()
-        .hover_native_semantics_enabled
-        .store(true, std::sync::atomic::Ordering::Release);
+    if enable_semantic_analysis {
+        // Definition-server fixtures also back the native
+        // component/directive/slot hover contract matrix. Keep that optional
+        // lane explicit in tests now that the production initialization default
+        // is disabled.
+        service
+            .inner()
+            .hover_native_semantics_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
     let drain_handle = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -1972,13 +2113,15 @@ async fn make_definition_test_server_with_kind_and_deadlines(
 
     let workspace_id = crate::test_utils::canonical_test_path(&workspace);
     let server = service.inner();
-    server.documents.set_semantic_analysis_enabled(true);
+    if enable_semantic_analysis {
+        server.documents.set_semantic_analysis_enabled(true);
+    }
     let ide_project = crate::project_resolver::IdeProjectConfig::new(
         workspace_id.clone(),
         workspace_id.clone(),
         Some(format!("{workspace_id}/tsconfig.json")),
     );
-    // Sync resolver to host's VFS so resolve_import_via_workspace works
+    // Sync resolver to host's VFS so resolve_import_transient works
     host.configure_projects(vec![ide_project]);
     install_test_resolver_for_root(
         server,
@@ -1997,7 +2140,7 @@ async fn make_definition_test_server_with_kind_and_deadlines(
             version: 1,
             text: (*source).to_string(),
         });
-        if matches!(*language_id, "vue" | "svelte") {
+        if enable_semantic_analysis && matches!(*language_id, "vue" | "svelte") {
             scheduled_semantic += 1;
             server.documents.schedule_semantic_analysis(&uri);
         }
@@ -2207,6 +2350,50 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
     );
 }
 
+/// A result-only adapter has no immutable-world witness. Its useful transient
+/// target must therefore never become a provider buffer or an exact host route.
+#[test]
+fn provider_sync_refuses_return_only_resolution_products() {
+    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let source = "import { value } from './dep';\n";
+    let expr = "'./dep'";
+    let start = source.find(expr).expect("fixture import");
+
+    let prepared = prepare_non_carrier_provider_sync(
+        Some(&PublishedResolverSnapshot {
+            resolver,
+            resolution_view: None,
+            ownership_ready: true,
+        }),
+        &ReturnOnlyResolverReader,
+        "/workspace/src/App.ts",
+        source,
+        &[test_module_reference(
+            expr,
+            Some("./dep"),
+            &[],
+            verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+            start,
+            start + expr.len(),
+        )],
+    );
+
+    assert!(
+        prepared.is_none(),
+        "ResolutionUntrackedBackend must stop the whole resolution-derived provider product"
+    );
+
+    // Mutation recipe: project the adapter outcome through the transient result
+    // path in either rewrite or dependency collection. Preparation becomes Some
+    // and the downstream sync/route sinks can publish the unwitnessed target.
+}
+
 #[test]
 fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
     let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
@@ -2230,6 +2417,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
     let prepared = prepare_non_carrier_provider_sync(
         Some(&PublishedResolverSnapshot {
             resolver,
+            resolution_view: None,
             ownership_ready: true,
         }),
         &reader,
@@ -2324,6 +2512,7 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
 
     let resolved = collect_resolved_provider_dependencies_from_analyzed_refs(
         &resolver,
+        None,
         &reader,
         "/workspace/src/TempImporter.vue",
         &[
@@ -2344,7 +2533,8 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
                 child_start + child_expr.len(),
             ),
         ],
-    );
+    )
+    .expect("memory-backed resolution is publishable");
 
     let resolved_sources = resolved
         .iter()
@@ -4441,7 +4631,7 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
         },
     ];
 
-    let ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
+    let ids = collect_imported_carrier_priority_ids_from_imports_with_transient_fallback(
         &imports,
         Some("/workspace/src/TemplateSlotCases.vue"),
         |parent, specifier| {
@@ -4465,7 +4655,84 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
 }
 
 #[test]
+fn refused_later_carrier_resolution_discards_the_entire_priority_batch() {
+    let imports = vec![
+        verter_semantic::analysis::AnalyzedImport {
+            source: "./First.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            is_type_only: false,
+            bindings: Vec::new(),
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: Some("/workspace/src/First.vue".to_string()),
+        },
+        verter_semantic::analysis::AnalyzedImport {
+            source: "./Second.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            is_type_only: false,
+            bindings: Vec::new(),
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: None,
+        },
+    ];
+
+    let publication = collect_imported_carrier_priority_ids_from_imports_for_publication(
+        &imports,
+        Some("/workspace/src/App.vue"),
+        |_parent, _specifier| {
+            verter_workspace::ResolutionPublication::refused(
+                verter_audit::NonAdmissionReason::ResolutionUntrackedBackend,
+            )
+        },
+    );
+
+    assert!(
+        publication.is_err(),
+        "a later refusal must discard the earlier admitted carrier instead of publishing a partial batch"
+    );
+}
+
+#[test]
 fn did_open_resolves_carrier_working_set_from_upsert_import_facts() {
+    use verter_workspace::{WorkspaceAccess, WorkspaceRead};
+
+    let workspace =
+        verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default());
+    workspace.set_project_graph(verter_workspace::ProjectGraph::from_configs(vec![
+        verter_workspace::VfsProjectConfig {
+            root: "/workspace".to_string(),
+            rank: verter_workspace::ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: Vec::new(),
+            extensions: vec![".ts".to_string(), ".vue".to_string(), ".svelte".to_string()],
+            workspace_root: "/workspace".to_string(),
+            workspace_aliases: Vec::new(),
+            compiler_options: Default::default(),
+            references: Vec::new(),
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/workspace"),
+            ),
+        },
+    ]));
+    WorkspaceAccess::set_exact_resolutions(
+        &workspace,
+        "/workspace/src/App.vue",
+        vec![
+            ("./Child.vue", "/workspace/src/Child.vue"),
+            ("./Panel.svelte", "/workspace/src/Panel.svelte"),
+            ("./plain", "/workspace/src/plain.ts"),
+        ]
+        .into_iter()
+        .map(
+            |(specifier, resolved_canonical_id)| verter_workspace::ExactResolution {
+                specifier: specifier.to_string(),
+                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                kind: verter_workspace::ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some(resolved_canonical_id.to_string()),
+                possible_canonical_ids: vec![resolved_canonical_id.to_string()],
+            },
+        )
+        .collect(),
+    );
     let imports = vec![
         verter_session::ScriptImportInfo {
             source: "./Child.vue".to_string(),
@@ -4484,16 +4751,24 @@ fn did_open_resolves_carrier_working_set_from_upsert_import_facts() {
         },
     ];
 
-    let ids = collect_imported_carrier_priority_ids_from_specifiers(
+    let ids = collect_imported_carrier_priority_ids_from_specifiers_for_publication(
         &imports,
         Some("/workspace/src/App.vue"),
-        |_parent, specifier| match specifier {
-            "./Child.vue" => Some("/workspace/src/Child.vue".to_string()),
-            "./Panel.svelte" => Some("/workspace/src/Panel.svelte".to_string()),
-            "./plain" => Some("/workspace/src/plain.ts".to_string()),
-            _ => None,
+        |parent, specifier| {
+            WorkspaceRead::resolve_import_outcome(
+                &workspace,
+                parent,
+                specifier,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::EsmImport,
+                },
+            )
+            .into_publication()
+            .map_result(|resolution| resolution.source_id)
         },
     );
+    let ids = ids.expect("fixture resolutions should be admitted");
 
     assert_eq!(
         ids,
@@ -4521,6 +4796,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
     let targets = collect_priority_carrier_public_api_targets_from_module_references(
         Some(&PublishedResolverSnapshot {
             resolver,
+            resolution_view: None,
             ownership_ready: true,
         }),
         &reader,
@@ -4543,7 +4819,8 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
                 27,
             ),
         ],
-    );
+    )
+    .expect("memory-backed resolution is publishable");
 
     assert_eq!(
         targets,
@@ -4567,6 +4844,7 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
     let targets = collect_priority_carrier_public_api_targets_from_module_references(
         Some(&PublishedResolverSnapshot {
             resolver,
+            resolution_view: None,
             ownership_ready: true,
         }),
         &reader,
@@ -4579,7 +4857,8 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
             0,
             15,
         )],
-    );
+    )
+    .expect("unknown dynamic references perform no resolution");
 
     assert!(
         targets.is_empty(),
@@ -4990,7 +5269,7 @@ async fn resolve_component_document_for_usage_follows_barrel_reexports() {
 
     let parent_canonical_id = uri_to_canonical_id(&app_uri);
     let barrel_canonical_id = server
-        .resolve_import_specifier(&parent_canonical_id, "./components")
+        .resolve_import_specifier_transient(&parent_canonical_id, "./components")
         .expect("barrel import should resolve to a concrete module");
 
     assert!(
@@ -8323,22 +8602,23 @@ async fn contract_kebab_prop_rename_classifies_cross_file_usage() {
 }
 
 #[tokio::test]
-async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_template() {
-    // EXECUTED rename (not classification): renaming the kebab `:my-prop`
-    // usage must produce a merged edit covering BOTH the parent template usage
-    // AND the child's camel `myProp` defineProps declaration — the
-    // child-declaration leg Verter synthesizes must key on the DECLARED name
-    // (the carrier API spells it verbatim), never the kebab usage alias.
+async fn contract_kebab_prop_rename_refuses_when_a_second_parent_is_unproven() {
+    // EXECUTED rename (not classification): a SECOND parent also passes
+    // `:my-prop`, while the provider answer below names only the initiating
+    // parent. The old declaration+initiating-parent gate shipped that partial
+    // WorkspaceEdit; the public-prop admission must now refuse before asking the
+    // provider because no available authority proves every parent was found.
     let child_source = "<script setup lang=\"ts\">\ndefineProps<{ myProp: string }>()\n</script>\n";
     let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst v = 'x'\n</script>\n<template>\n  <MyComp :my-prop=\"v\" />\n</template>\n";
+    let second_parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst other = 'y'\n</script>\n<template>\n  <MyComp :my-prop=\"other\" />\n</template>\n";
     let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
         ("src/MyComp.vue", "vue", child_source),
         ("src/App.vue", "vue", parent_source),
+        ("src/SecondParent.vue", "vue", second_parent_source),
     ])
     .await;
 
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
-    let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
     let server = service.inner();
     let position = find_document_position(server, &app_uri, ":my-prop=", 1);
 
@@ -8372,7 +8652,33 @@ async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_tem
         }],
     );
 
-    let edit = super::nav_features_navigation::handle_rename(
+    let rename_queries_before = provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                crate::type_provider::mock::MockCall::GetRenameLocations { .. }
+            )
+        })
+        .count();
+    let prepared = super::rename_prepare::handle_prepare_rename(
+        server,
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: app_uri.clone(),
+            },
+            position,
+        },
+    )
+    .await
+    .expect("prepare request succeeds");
+    assert!(
+        prepared.is_none(),
+        "prepare must not offer a public component-prop rename"
+    );
+
+    let result = super::nav_features_navigation::handle_rename(
         server,
         RenameParams {
             text_document_position: TextDocumentPositionParams {
@@ -8385,43 +8691,32 @@ async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_tem
             work_done_progress_params: Default::default(),
         },
     )
-    .await
-    .expect("rename request should succeed")
-    .expect("a confirmed kebab rename must return the merged edit, not fail closed");
-
-    let triples = workspace_edit_triples(&edit);
-    let expected_usage = range_for_authored_snippet(server, &app_uri, "my-prop");
-    let expected_decl = range_for_authored_snippet(server, &child_uri, "myProp");
-    let app_path = crate::documents::uri_to_canonical_id(&app_uri);
-    let child_path = crate::documents::uri_to_canonical_id(&child_uri);
-    assert!(
-        triples.iter().any(|(uri, range, new_text)| {
-            verter_span::path::fs_paths_equal(
-                &crate::documents::uri_to_canonical_id(uri),
-                &app_path,
-            ) && *range == expected_usage
-                && new_text == "myPropRenamed"
-        }),
-        "the parent template usage leg must be edited range-exact: {triples:?}"
+    .await;
+    let error = result.expect_err(
+        "a public component-prop rename with an unproven sibling parent must return no edit",
+    );
+    assert_eq!(
+        error.code,
+        tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803)
     );
     assert!(
-        triples.iter().any(|(uri, range, new_text)| {
-            verter_span::path::fs_paths_equal(
-                &crate::documents::uri_to_canonical_id(uri),
-                &child_path,
-            ) && *range == expected_decl
-                && new_text == "myPropRenamed"
-        }),
-        "the child script declaration leg must be edited range-exact \
-         (synthesized from the DECLARED name, not the kebab alias): {triples:?}"
+        error.message.contains("complete cross-file usage proof"),
+        "the refusal must explain why no WorkspaceEdit is safe, got {:?}",
+        error.message
     );
-    // The mis-ranged provider leg (a PREFIX of the authored kebab name) must
-    // be pruned — only the exact synthesized usage edit survives.
-    assert!(
-        triples
-            .iter()
-            .all(|(_, range, _)| *range == expected_usage || *range == expected_decl),
-        "no mis-ranged provider leg may survive the synthesis: {triples:?}"
+    let rename_queries_after = provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                crate::type_provider::mock::MockCall::GetRenameLocations { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        rename_queries_after, rename_queries_before,
+        "public-prop admission must refuse before provider rename is called"
     );
 
     drain_handle.abort();
@@ -16289,6 +16584,7 @@ defineProps<{ msg: string }>()
                 Some(tsconfig.clone()),
             ),
         ]),
+        resolution_view: None,
         ownership_ready: true,
     };
 
@@ -16430,6 +16726,7 @@ defineProps<{ msg: string }>()
                 Some(tsconfig.clone()),
             ),
         ]),
+        resolution_view: None,
         ownership_ready: true,
     };
 
@@ -16549,6 +16846,7 @@ defineProps<{ msg: string }>()
                 Some(tsconfig.clone()),
             ),
         ]),
+        resolution_view: None,
         ownership_ready: true,
     };
 
@@ -19800,14 +20098,14 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
     // Type deps (types.ts) are resolved via VFS workspace read fallback during
     // compilation but may not be explicitly loaded into the scheduler.
     assert!(
-        host.resolve_import_via_workspace(&app_id, "@/types")
-            .is_some(),
+        host.resolve_import_transient(&app_id, "@/types").is_some(),
         "macro type dep @/types should resolve via VFS"
     );
 
     // Verify the resolver can resolve these specifiers
     let snapshot = PublishedResolverSnapshot {
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![project]),
+        resolution_view: None,
         ownership_ready: true,
     };
     // The drain carries a `CarrierPublishCtx` with the published vfs (the single
@@ -19821,11 +20119,10 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
         ownership_ready: true,
     };
     let ws = documents.host().workspace_read();
-    let external_resolved = snapshot.resolver.resolve_with_reader(
-        ws.as_ref(),
-        &crate::project_resolver::ResolveRequest {
-            importer_id: app_id.clone(),
-            specifier: "@/partials/panel.html".to_string(),
+    let external_resolved = ws.resolve_import(
+        &app_id,
+        "@/partials/panel.html",
+        crate::project_resolver::ResolutionContext {
             kind: crate::project_resolver::ResolveRequestKind::SfcSrcAttr,
             phase: crate::project_resolver::ResolvePhase::CodegenBlocker,
         },
@@ -19933,6 +20230,7 @@ defineProps<{ msg: string }>()
                 Some(tsconfig.clone()),
             ),
         ]),
+        resolution_view: None,
         ownership_ready: true,
     };
     // The tsgo drain always carries a `CarrierPublishCtx` with the published vfs (the
@@ -22463,14 +22761,22 @@ import Child from '@/components/Child.vue'
 
     // Phase 1: before VFS snapshot is built — aliased import should NOT resolve
     let analysis = host.get_analysis(&app_id).expect("analysis for App.vue");
-    let ids_before = collect_imported_carrier_priority_ids_from_imports_with_fallback(
+    let ids_before = collect_imported_carrier_priority_ids_from_imports_for_publication(
         &analysis.imports,
         Some(&app_id),
         |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
     );
+    // The bootstrap root carries no configured project, which is a COMPLETE
+    // context observation (the stable `unowned` context), not a provenance
+    // gap — so the request is admitted. What it admits is a witnessed MISS:
+    // the `@/*` alias has no mapping until the registry publishes one, and an
+    // admitted miss publishes no carrier id.
+    let ids_before = ids_before
+        .expect("a complete bootstrap root admits the unowned alias request instead of refusing");
     assert!(
         ids_before.is_empty(),
-        "aliased imports should NOT resolve when project_registry is None, got: {ids_before:?}"
+        "the `@/*` alias must not resolve before the project registry is published, got: \
+         {ids_before:?}"
     );
 
     // Phase 2: Build and populate project registry with tsconfig alias
@@ -22495,11 +22801,12 @@ import Child from '@/components/Child.vue'
     let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
 
     // Now aliased import should resolve
-    let ids_after = collect_imported_carrier_priority_ids_from_imports_with_fallback(
+    let ids_after = collect_imported_carrier_priority_ids_from_imports_for_publication(
         &analysis.imports,
         Some(&app_id),
         |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
     );
+    let ids_after = ids_after.expect("published project registry should admit alias resolution");
     assert!(
         !ids_after.is_empty(),
         "aliased imports should resolve after project_registry is populated"
@@ -24575,7 +24882,7 @@ async fn reconcile_does_not_reissue_close_for_an_in_flight_tombstone() {
 fn carrier_dependency_ids_resolves_carriers_and_filters_non_carriers() {
     // P2 #4: `carrier_dependency_ids` resolves each script import through the
     // engine's workspace resolver (analysis-time `resolved_canonical_id`, with the
-    // `resolve_import_specifier_standalone` → `host.resolve_import_via_workspace`
+    // `resolve_import_specifier_standalone` → `host.resolve_for_persistent_state`
     // fallback rail) and returns ONLY the carrier→carrier edges — a non-carrier
     // (`.ts`) dependency is dropped (handled by the other passes), per the
     // documented contract. (The fallback rail itself is a timing safety net for the
@@ -24593,6 +24900,13 @@ fn carrier_dependency_ids_resolves_carriers_and_filters_non_carriers() {
         verter_workspace::MemoryOptions::default(),
     ));
     let host = VerterHost::new(HostConfig::default(), ws);
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/src".to_string(),
+            "/src".to_string(),
+            Some("/src/tsconfig.json".to_string()),
+        ),
+    ]);
     host.upsert(UpsertRequest {
         canonical_id: None,
         input_id: "/src/A.vue".to_string(),
@@ -24624,6 +24938,7 @@ fn carrier_dependency_ids_resolves_carriers_and_filters_non_carriers() {
     );
 
     let deps = carrier_dependency_ids(&host, "/src/A.vue");
+    let deps = deps.expect("exact fixture resolutions should be admitted");
 
     // POSITIVE: the carrier dependency `./B.vue` is resolved and returned.
     assert!(
@@ -29726,6 +30041,138 @@ async fn svelte_real_pipeline_class_definition_reaches_style_rule() {
     drop(service);
 }
 
+/// Default-profile Vue CSS definition uses template data emitted by the normal
+/// IDE projection compile even though optional semantic analysis is disabled.
+#[tokio::test]
+async fn vue_default_profile_class_definition_reaches_style_rule() {
+    let source = "<template>\n  <div class=\"chip-live\">chip</div>\n</template>\n\n<style>\n.chip-live {\n  color: red;\n}\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_default_profile_definition_test_server(&[("src/CssIntel.vue", "vue", source)]).await;
+
+    let uri = workspace_uri(&workspace_id, "src/CssIntel.vue");
+    let server = service.inner();
+    assert!(
+        !server.documents.semantic_analysis_enabled(),
+        "the production default must leave optional semantic analysis off"
+    );
+    assert_eq!(
+        server.documents.host().config().effective_scope(),
+        verter_semantic::analysis::AnalysisScope::BUILD,
+        "the projection host must use the production BUILD scope"
+    );
+
+    let analysis = server
+        .documents
+        .get_analysis(&uri)
+        .expect("BUILD projection analysis must serve");
+    let template = analysis
+        .template
+        .as_deref()
+        .expect("the IDE projection's TEMPLATE_DATA target must publish Vue template facts");
+    assert!(
+        template
+            .elements
+            .iter()
+            .any(|element| element.static_classes().any(|class| class == "chip-live")),
+        "the compiled template data must carry the authored class"
+    );
+    assert!(
+        analysis.markup_class_tokens.is_empty(),
+        "Vue currently has no parse-domain markup class-token producer"
+    );
+    assert!(
+        analysis.styles.iter().any(|style| {
+            style
+                .css
+                .as_ref()
+                .is_some_and(|css| css.classes.iter().any(|class| class.name == "chip-live"))
+        }),
+        "the declaring style rule must still be present"
+    );
+
+    let position = find_document_position(server, &uri, "class=\"chip-live\"", 8);
+    let response = server
+        .goto_definition(goto_definition_params(&uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("Vue class token should navigate to its style rule");
+    let locations = definition_locations(response);
+    assert_eq!(
+        locations[0].range.start.line,
+        line_for_snippet(source, ".chip-live {"),
+        "definition lands on the .chip-live rule line"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Default-profile Svelte CSS definition uses parse-domain markup class tokens
+/// and therefore remains available without optional semantic analysis.
+#[tokio::test]
+async fn svelte_default_profile_class_definition_reaches_style_rule() {
+    let source = "<script lang=\"ts\">\n  let on = true;\n</script>\n\n<div class=\"chip-live\" class:on>chip</div>\n\n<style>\n  .chip-live {\n    color: red;\n  }\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_default_profile_definition_test_server(&[("src/CssIntel.svelte", "svelte", source)])
+            .await;
+
+    let uri = workspace_uri(&workspace_id, "src/CssIntel.svelte");
+    let server = service.inner();
+    assert!(
+        !server.documents.semantic_analysis_enabled(),
+        "the production default must leave optional semantic analysis off"
+    );
+    assert_eq!(
+        server.documents.host().config().effective_scope(),
+        verter_semantic::analysis::AnalysisScope::BUILD,
+        "the projection host must use the production BUILD scope"
+    );
+
+    let analysis = server
+        .documents
+        .get_analysis(&uri)
+        .expect("BUILD projection analysis must serve");
+    assert!(
+        analysis
+            .template
+            .as_ref()
+            .is_none_or(|template| template.elements.is_empty()),
+        "Svelte class navigation must not rely on a template element inventory"
+    );
+    assert!(
+        analysis
+            .markup_class_tokens
+            .iter()
+            .any(|token| token.name == "chip-live"),
+        "Svelte parse-domain markup tokens must survive the served snapshot"
+    );
+    assert!(
+        analysis.styles.iter().any(|style| {
+            style
+                .css
+                .as_ref()
+                .is_some_and(|css| css.classes.iter().any(|class| class.name == "chip-live"))
+        }),
+        "the declaring style rule must be present"
+    );
+
+    let position = find_document_position(server, &uri, "class=\"chip-live\"", 8);
+    let response = server
+        .goto_definition(goto_definition_params(&uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("Svelte class token must navigate to its style rule");
+    let locations = definition_locations(response);
+    assert_eq!(
+        locations[0].range.start.line,
+        line_for_snippet(source, ".chip-live {"),
+        "definition lands on the .chip-live rule line"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 // ===========================================================================
 // Always-on production request deadline.
 //
@@ -32219,6 +32666,7 @@ async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
                 Some(tsconfig.clone()),
             ),
         ]),
+        resolution_view: None,
         ownership_ready: true,
     };
     let owner_vfs = configured_owner_vfs(&workspace_id, &tsconfig);

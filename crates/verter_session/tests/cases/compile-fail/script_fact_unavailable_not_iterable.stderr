@@ -1,0 +1,8 @@
+error[E0277]: `UnavailableScriptFacts` is not an iterator
+ --> tests/cases/compile-fail/script_fact_unavailable_not_iterable.rs:5:22
+  |
+5 |         for _fact in unavailable {}
+  |                      ^^^^^^^^^^^ `UnavailableScriptFacts` is not an iterator
+  |
+  = help: the trait `Iterator` is not implemented for `UnavailableScriptFacts`
+  = note: required for `UnavailableScriptFacts` to implement `IntoIterator`

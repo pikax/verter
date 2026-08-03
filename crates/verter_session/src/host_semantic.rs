@@ -281,6 +281,7 @@ impl VerterHost {
     ///   propagation; the new content for a reloaded canonical
     ///   produces fresh facts).
     pub fn register_facts_for_new_content(&self, canonical_id: &str) {
+        verter_workspace::probe_scope!(REGISTER_FACTS);
         self.semantic_db().invalidate(canonical_id);
     }
 

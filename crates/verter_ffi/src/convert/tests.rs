@@ -3095,3 +3095,194 @@ fn binding_return_wrapper_role_crosses_the_ffi_boundary_with_exactness_intact() 
         "an undemanded binding must omit BOTH keys, never emit nulls"
     );
 }
+
+// ── OffsetIndex: batch offset conversion ─────────────────────────
+//
+// The index replaces a per-span O(offset) prefix rescan with one indexed
+// pass. It is an arithmetic identity: for EVERY byte offset the index must
+// return exactly what a prefix rescan returns, so the tests below compare
+// against independent local references rather than against the production
+// scalar helpers (which carry their own ASCII fast path and would mask a
+// shared error).
+
+/// Prefix-rescan reference for the UTF-16 axis. Deliberately naive.
+fn reference_utf16(source: &str, byte_offset: u32) -> u32 {
+    let mut clamped = (byte_offset as usize).min(source.len());
+    while clamped > 0 && !source.is_char_boundary(clamped) {
+        clamped -= 1;
+    }
+    source[..clamped].encode_utf16().count() as u32
+}
+
+/// Prefix-rescan reference for the UTF-32 axis.
+fn reference_utf32(source: &str, byte_offset: u32) -> u32 {
+    let mut clamped = (byte_offset as usize).min(source.len());
+    while clamped > 0 && !source.is_char_boundary(clamped) {
+        clamped -= 1;
+    }
+    source[..clamped].chars().count() as u32
+}
+
+/// Sources exercising every UTF-8 width, surrogate pairs, combining marks,
+/// and a ZWJ emoji sequence.
+fn offset_index_fixtures() -> Vec<&'static str> {
+    vec![
+        "",
+        "hello world",
+        "é",
+        "😀",
+        "aé",
+        "a😀b",
+        // 1-byte, 2-byte, 3-byte, 4-byte in one string.
+        "a é 日 😀 z",
+        // Combining acute: 'e' + U+0301 — two scalars, two UTF-16 units,
+        // three bytes, and NOT the same as the precomposed 'é'.
+        "e\u{0301}xyz",
+        "cafe\u{0301} au lait",
+        // ZWJ family sequence: several astral scalars joined by U+200D.
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+        // Astral char at the very start and the very end.
+        "\u{1F600}middle\u{1F601}",
+        // Long mostly-ASCII body with one late multi-byte char, the shape
+        // the per-span rescan was quadratic on.
+        "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\u{1F600}",
+    ]
+}
+
+#[test]
+fn offset_index_matches_prefix_rescan_for_every_byte_offset() {
+    for source in offset_index_fixtures() {
+        let index = OffsetIndex::new(source);
+        // Walk past the end to cover clamping, and hit every interior byte
+        // including continuation bytes.
+        for byte_offset in 0..=(source.len() as u32 + 4) {
+            assert_eq!(
+                index.to_utf16(byte_offset),
+                reference_utf16(source, byte_offset),
+                "utf16 mismatch at byte offset {byte_offset} of {source:?}"
+            );
+            assert_eq!(
+                index.to_utf32(byte_offset),
+                reference_utf32(source, byte_offset),
+                "utf32 mismatch at byte offset {byte_offset} of {source:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scalar_conversions_match_prefix_rescan_for_every_byte_offset() {
+    // The ASCII fast path on the scalar helpers is the same identity claim.
+    for source in offset_index_fixtures() {
+        for byte_offset in 0..=(source.len() as u32 + 4) {
+            assert_eq!(
+                byte_offset_to_utf16(source, byte_offset),
+                reference_utf16(source, byte_offset),
+                "scalar utf16 mismatch at byte offset {byte_offset} of {source:?}"
+            );
+            assert_eq!(
+                convert_offset(source, byte_offset, OffsetEncoding::Utf32),
+                reference_utf32(source, byte_offset),
+                "scalar utf32 mismatch at byte offset {byte_offset} of {source:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn offset_index_astral_and_combining_hand_computed() {
+    // "a😀é" — 'a' 1 byte / 1 unit, '😀' 4 bytes / 2 units (surrogate pair),
+    // 'é' (precomposed U+00E9) 2 bytes / 1 unit. 7 bytes, 4 UTF-16 units,
+    // 3 scalars.
+    let source = "a\u{1F600}\u{00E9}";
+    assert_eq!(source.len(), 7);
+    let index = OffsetIndex::new(source);
+    assert_eq!(index.to_utf16(0), 0);
+    assert_eq!(index.to_utf16(1), 1);
+    // Offsets 2..=4 land inside the emoji and clamp back to its start.
+    assert_eq!(index.to_utf16(2), 1);
+    assert_eq!(index.to_utf16(3), 1);
+    assert_eq!(index.to_utf16(4), 1);
+    assert_eq!(index.to_utf16(5), 3, "after the surrogate pair");
+    assert_eq!(index.to_utf16(6), 3, "continuation byte of é clamps back");
+    assert_eq!(index.to_utf16(7), 4);
+    assert_eq!(index.to_utf32(5), 2, "two scalars precede é");
+    assert_eq!(index.to_utf32(7), 3);
+
+    // Combining mark: 'e' + U+0301. Three bytes, two UTF-16 units, two
+    // scalars — the combining mark is NOT folded into the base character.
+    let combining = "e\u{0301}";
+    assert_eq!(combining.len(), 3);
+    let index = OffsetIndex::new(combining);
+    assert_eq!(index.to_utf16(1), 1, "after the base 'e'");
+    assert_eq!(index.to_utf16(2), 1, "inside the combining mark, clamps");
+    assert_eq!(index.to_utf16(3), 2, "base plus combining mark");
+    assert_eq!(index.to_utf32(3), 2);
+}
+
+#[test]
+fn offset_index_pure_ascii_is_clamped_identity() {
+    let source = "hello world";
+    let index = OffsetIndex::new(source);
+    for byte_offset in 0..=(source.len() as u32) {
+        assert_eq!(index.to_utf16(byte_offset), byte_offset);
+        assert_eq!(index.to_utf32(byte_offset), byte_offset);
+    }
+    assert_eq!(index.to_utf16(999), source.len() as u32);
+    assert_eq!(index.to_utf32(999), source.len() as u32);
+}
+
+#[test]
+fn offset_index_convert_honours_utf8_passthrough() {
+    let source = "a\u{1F600}b";
+    let index = OffsetIndex::new(source);
+    // UTF-8 is a pass-through, NOT a clamp: the raw byte offset survives.
+    assert_eq!(index.convert(3, OffsetEncoding::Utf8), 3);
+    assert_eq!(index.convert(999, OffsetEncoding::Utf8), 999);
+    assert_eq!(index.convert(5, OffsetEncoding::Utf16), 3);
+    assert_eq!(index.convert(5, OffsetEncoding::Utf32), 2);
+}
+
+#[test]
+fn lint_diagnostics_to_utf16_converts_every_span_in_source_order_agnostic_batches() {
+    // Two astral characters and spans supplied OUT of ascending order: one
+    // shared index must convert each span independently of visit order.
+    let source = "\u{1F600}abc\u{1F601}def";
+    let spans = [(9u32, 13u32), (0, 4), (4, 5), (13, 16)];
+    let input: Vec<_> = spans
+        .iter()
+        .map(|(start, end)| verter_diagnostics::LintDiagnostic {
+            rule: "r".to_string(),
+            category: "c".to_string(),
+            severity: verter_diagnostics::Severity::Error,
+            message: "m".to_string(),
+            span: verter_span::Span::new(*start, *end),
+            tags: vec![],
+            span_kind: verter_diagnostics::DiagnosticSpanKind::ElementOpenTag,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        })
+        .collect();
+
+    let out = lint_diagnostics_to_utf16(input, Some(source));
+    assert_eq!(out.len(), 4);
+    for (diagnostic, (start, end)) in out.iter().zip(spans.iter()) {
+        assert_eq!(
+            diagnostic.span.start,
+            reference_utf16(source, *start),
+            "start of span ({start}, {end})"
+        );
+        assert_eq!(
+            diagnostic.span.end,
+            reference_utf16(source, *end),
+            "end of span ({start}, {end})"
+        );
+    }
+    // Concretely, for the first (out-of-order, mid-character) span (9, 13):
+    // byte 9 is inside the second emoji (bytes 7..11) and clamps back to 7,
+    // which is 2 + 3 = 5 UTF-16 units in. Byte 13 sits at 'f' in the trailing
+    // "def", which is 2 + 3 + 2 + 2 = 9 units in.
+    assert_eq!(out[0].span.start, 5);
+    assert_eq!(out[0].span.end, 9);
+}

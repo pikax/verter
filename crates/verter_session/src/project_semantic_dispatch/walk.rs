@@ -2943,16 +2943,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 if import_target.is_namespace {
                     return value;
                 }
-                let dep_canonical = if import_target.canonical_id.is_empty() {
-                    let Some(canonical) = self.dispatch.ctx.resolve_type_dependency_canonical(
-                        value_root.scope.canonical_id.as_ref(),
-                        &import_target.source_specifier,
-                    ) else {
-                        return value;
-                    };
-                    canonical
-                } else {
-                    import_target.canonical_id.clone()
+                let Some(dep_canonical) = self.dispatch.ctx.resolve_type_dependency_canonical(
+                    value_root.scope.canonical_id.as_ref(),
+                    &import_target.source_specifier,
+                ) else {
+                    return value;
                 };
                 let exported = import_target.imported_name.clone();
                 let Some(serve) = self

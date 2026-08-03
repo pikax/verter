@@ -83,6 +83,9 @@ fn filtered_kind_registration_is_noop_and_invisible_to_sampler() {
     let bogus_record = RequestAuditRecord {
         request_id,
         canonical_id: "/filtered.vue".to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            "/filtered.vue".to_string(),
+        )),
         kind: RequestKind::ComponentMeta,
         parent_request_id: None,
         from_cache: false,

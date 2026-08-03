@@ -2,6 +2,74 @@
 
 use super::*;
 
+pub(super) fn collect_snippet_candidate_members(
+    ty: &TSType<'_>,
+    snippet_imports: &[(String, String)],
+    out: &mut SvelteScriptCandidates,
+) {
+    let TSType::TSTypeLiteral(literal) = ty else {
+        return;
+    };
+    for member in &literal.members {
+        let TSSignature::TSPropertySignature(sig) = member else {
+            continue;
+        };
+        let Some(member_name) = property_key_name(&sig.key) else {
+            continue;
+        };
+        let Some(annotation) = &sig.type_annotation else {
+            continue;
+        };
+        if let TSType::TSTypeReference(reference) = &annotation.type_annotation {
+            if let TSTypeName::IdentifierReference(local) = &reference.type_name {
+                let type_name = local.name.as_str();
+                if let Some((_, source)) =
+                    snippet_imports.iter().find(|(name, _)| name == type_name)
+                {
+                    out.snippet_candidates.push(SvelteSnippetMemberCandidate {
+                        local_binding: type_name.to_string(),
+                        import_source: source.clone(),
+                        member_name,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// JSDoc-lowered sibling of [`collect_snippet_candidate_members`]. The JSDoc
+/// payload is already ordinary typed IR, so snippet candidate capture remains
+/// syntax-only and uses the same imported-binding provenance pair.
+pub(super) fn collect_snippet_candidate_members_from_lowered(
+    ty: &TypeExpr,
+    snippet_imports: &[(String, String)],
+    out: &mut SvelteScriptCandidates,
+) {
+    use verter_type_expr::ObjectMember;
+
+    let TypeExpr::Object(object) = ty else {
+        return;
+    };
+    for member in object.properties.iter() {
+        let ObjectMember::Property(property) = member else {
+            continue;
+        };
+        let TypeExpr::Ref { name, .. } = &property.ty else {
+            continue;
+        };
+        let Some((_, source)) = snippet_imports
+            .iter()
+            .find(|(binding, _)| binding == name.as_ref())
+        else {
+            continue;
+        };
+        out.snippet_candidates.push(SvelteSnippetMemberCandidate {
+            local_binding: name.as_ref().to_string(),
+            import_source: source.clone(),
+            member_name: property.name.clone(),
+        });
+    }
+}
 /// The content-free anchor of a svelte macro payload: the component's
 /// `default` value symbol under the analyzer's local-file convention (the
 /// empty producing canonical = the component's own file). Mirrors the Vue
@@ -147,12 +215,19 @@ pub(super) fn binding_name(pattern: &BindingPattern<'_>) -> Option<String> {
     }
 }
 
-/// The static name of a property/binding key, when it is a plain identifier or
-/// string literal.
-pub(super) fn property_key_name<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
+/// The static name of a property/binding key.
+///
+/// OXC represents keyword-spelled boolean and null binding keys as static
+/// identifiers today; the literal arms keep the complete static-key contract
+/// explicit if that representation changes.
+pub(super) fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
     match key {
-        PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
-        PropertyKey::StringLiteral(s) => Some(s.value.as_str()),
+        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+        PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+        PropertyKey::BigIntLiteral(n) => Some(n.value.to_string()),
+        PropertyKey::BooleanLiteral(b) => Some(b.value.to_string()),
+        PropertyKey::NullLiteral(_) => Some("null".to_string()),
         _ => None,
     }
 }
@@ -188,13 +263,27 @@ pub(super) fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8;
             d.value.hash(&mut hasher);
         }
     }
+    candidates.props_calls.len().hash(&mut hasher);
+    for call in &candidates.props_calls {
+        call.public_keys.len().hash(&mut hasher);
+        for key in &call.public_keys {
+            key.name.hash(&mut hasher);
+        }
+        call.local_bindings.len().hash(&mut hasher);
+        for binding in &call.local_bindings {
+            binding.name.hash(&mut hasher);
+        }
+        call.has_rest.hash(&mut hasher);
+    }
     for c in &candidates.snippet_imports {
         c.imported_name.hash(&mut hasher);
         // The binding FORM discriminates the slot (a statement binding and a
         // binding-less import()-type reference are distinct captured shapes),
         // and a statement's local binding stays part of the shape.
         match &c.binding {
-            crate::analysis::framework_facts::svelte::SvelteSnippetCandidateBinding::Statement { local_binding } => {
+            crate::analysis::framework_facts::svelte::SvelteSnippetCandidateBinding::Statement {
+                local_binding,
+            } => {
                 1u8.hash(&mut hasher);
                 local_binding.hash(&mut hasher);
             }
@@ -202,7 +291,11 @@ pub(super) fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8;
                 2u8.hash(&mut hasher);
             }
         }
+    }
+    for c in &candidates.snippet_candidates {
+        c.local_binding.hash(&mut hasher);
         c.import_source.hash(&mut hasher);
+        c.member_name.hash(&mut hasher);
     }
     for export in &candidates.instance_exports {
         export.exported_name.hash(&mut hasher);

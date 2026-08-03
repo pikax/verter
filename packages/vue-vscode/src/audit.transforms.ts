@@ -17,8 +17,13 @@
 export interface AuditRecordSummary {
   /** Decimal-stringified `u64` request id. */
   request_id: string;
-  /** Canonical file id; may be empty for kinds without a single file. */
+  /** Legacy canonical-id projection retained for older audit records. */
   canonical_id: string;
+  /** Additive tagged target identity; absent only on older audit records. */
+  target_identity?:
+    | { kind: "RegisteredCanonical"; value: string }
+    | { kind: "UnregisteredUri"; value: string }
+    | { kind: "NotApplicable" };
   /**
    * Either a bare variant name (`"ComponentMeta"`, `"TypeResolution"`,
    * `"SemanticAnalysis"`) or a single-key object whose key is the
@@ -96,6 +101,19 @@ function formatRecordDescription(kind: unknown): string | undefined {
   return undefined;
 }
 
+/** Render the tagged target identity, with a legacy fallback for old records. */
+function formatTargetDetail(record: AuditRecordSummary): string {
+  switch (record.target_identity?.kind) {
+    case "RegisteredCanonical":
+    case "UnregisteredUri":
+      return record.target_identity.value;
+    case "NotApplicable":
+      return "(no single target)";
+    default:
+      return record.canonical_id ? record.canonical_id : "(no canonical id)";
+  }
+}
+
 /**
  * Map an array of audit records (as returned by `$/verter/audit/getRecent`)
  * into QuickPick-shaped entries. Source order is preserved (the LSP
@@ -110,7 +128,7 @@ export function recordsToQuickPickItems(
 ): AuditQuickPickItem[] {
   return records.map((rec) => {
     const tag = formatRecordTagFromKind(rec.kind);
-    const detail = rec.canonical_id ? rec.canonical_id : "(no canonical id)";
+    const detail = formatTargetDetail(rec);
     const description = formatRecordDescription(rec.kind);
     return {
       label: `${rec.request_id} ${tag}`,
