@@ -9,10 +9,9 @@
 //! the SOLE props/emits/slots member authority, resolved through the active
 //! `ResolverContext` so overlay sessions read overlay content), with NO solver
 //! fallback, NO source reparse, and NO `eval_source` type-parameter
-//! collection. The flat `evaluated_types.props` / `evaluated_types.emits`
-//! fields that [`super::project_evaluated_types`] projected contribute ONLY
-//! exactness / execution-status / diagnostics METADATA — never a semantic
-//! source (the normalized rows own every published `SourcePosition`).
+//! collection. The flat `evaluated_types.props` field contributes only props
+//! exactness / execution-status / diagnostics metadata. Emits are complete
+//! occurrence rows and never join the flat evaluated emit table.
 //!
 //! `project_define_macro_shapes` runs AFTER `project_evaluated_types` (so
 //! the flat metadata fields exist to fold in) and BEFORE
@@ -28,7 +27,7 @@
 //!   `props` is empty and the published `define_props` shape is EMPTY — no
 //!   prop is yielded.
 //! - **Emits**: the normalized emit row's published payload SOURCE
-//!   ([`crate::typeinfo::framework_surface::results::ResolvedEmitField::payload_source`])
+//!   ([`crate::typeinfo::framework_surface::results::ResolvedEmitOccurrence::payload_source`])
 //!   is the payload AUTHORITY — the normalization already applied the
 //!   carrier-aware conditional path, the leading-event-name strip, and the
 //!   closed-tuple / member-path / callable-params source split.
@@ -100,9 +99,7 @@ pub(crate) fn project_define_macro_shapes(
                 }
             }
             AnalyzedMacroKind::DefineEmits => {
-                if let Some(result) =
-                    define_emits_shape(ctx, owner_canonical, macro_index, evaluated_types)
-                {
+                if let Some(result) = define_emits_shape(ctx, owner_canonical, macro_index) {
                     evaluated_types.define_emits.push(ExpandedMacroObjectShape {
                         macro_index,
                         result,
@@ -228,23 +225,18 @@ fn define_props_shape(
 /// payload AUTHORITY. The row carries the authored macro-payload position
 /// for a proven local authored property event, the closed payload tuple /
 /// leaf-union for a closed-expressible payload, the projected member-path
-/// or CALLABLE-PARAMS replay route for an inherited / merged / richer
+/// or exact callable-occurrence replay route for an inherited / merged / richer
 /// payload (Typed-IR-Only: never reparse `payload_type`), or the typed
 /// source-construction FAILURE (a realized emit's payload-tuple position is
 /// REQUIRED — an unrepresentable payload fails output materialization
 /// instead of rendering a fabricated `unknown` success).
 ///
-/// The flat `evaluated_types.emits` field — when one matched by name —
-/// contributes ONLY exactness / execution-status / diagnostics metadata,
-/// NEVER the payload source: preferring its member-residue `r#type` over
-/// the normalized row shadowed the faithful session-resolved payload (an
-/// imported `save: [id: number]` published the residue instead of its real
-/// closed tuple).
+/// No secondary evaluated/analyzer row participates: every occurrence owns
+/// its payload source and publication evidence.
 fn define_emits_shape(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
     macro_index: usize,
-    evaluated_types: &ExpandedComponentTypes,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
     // Unresolved emits macro → no shape (see `define_props_shape`). A resolved
     // emits surface with no events is `Some(empty)`.
@@ -265,24 +257,12 @@ fn define_emits_shape(
 
     let mut exactness = SolverExactness::ExactConcrete;
     let mut execution_status = ExecutionStatus::Completed;
-    let mut diagnostics = Vec::new();
+    let diagnostics = Vec::new();
     let mut properties = Vec::with_capacity(dtos.emit_fields().len());
 
     for emit in dtos.emit_fields() {
-        // Metadata-only merge from the flat evaluated field: exactness /
-        // execution status / diagnostics fold in, the payload source does
-        // NOT — the normalized row's `payload_source` is authoritative.
-        if let Some(field) = evaluated_types
-            .emits
-            .iter()
-            .find(|field| field.name == emit.analysis.name)
-        {
-            exactness = exactness.merge(field.exactness);
-            execution_status = merge_execution_status(execution_status, field.execution_status);
-            diagnostics.extend(field.diagnostics.clone());
-        }
         properties.push(ExpandedProperty {
-            name: emit.analysis.name.clone(),
+            name: emit.name.clone(),
             ty: emit.payload_source.clone(),
             optional: false,
             readonly: false,

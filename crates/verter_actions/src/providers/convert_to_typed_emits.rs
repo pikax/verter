@@ -1,4 +1,4 @@
-﻿//! Quick fix: convert a runtime `defineEmits(...)` to type-based `defineEmits<{...}>()`.
+//! Quick fix: convert a runtime `defineEmits(...)` to type-based `defineEmits<{...}>()`.
 //!
 //! Handles: `define-emits-declaration`
 //!
@@ -102,7 +102,6 @@ mod tests {
 
     fn make_emit(name: &str) -> AnalyzedEmitField {
         AnalyzedEmitField {
-            producer_identity: Default::default(),
             name: name.to_string(),
             span: Span::new(0, 0),
             payload_type: None,

@@ -21,8 +21,7 @@ use std::sync::Arc;
 
 use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
 use verter_semantic::analysis::types::{
-    AnalyzedDefaultValue, AnalyzedEmitField, AnalyzedExposeField, AnalyzedPropField,
-    AnalyzedSlotField,
+    AnalyzedDefaultValue, AnalyzedExposeField, AnalyzedPropField, AnalyzedSlotField,
 };
 use verter_type_expr::TypeExpr;
 
@@ -121,9 +120,8 @@ pub enum OriginHop {
 /// index signature (`defineEmits<{ [event: string]: [v: number] }>()`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmitsSurface {
-    /// Named emit fields, each paired with its session-resolved payload
-    /// source.
-    pub fields: Vec<ResolvedEmitField>,
+    /// Complete canonical emit occurrences in resolver order.
+    pub fields: Vec<ResolvedEmitOccurrence>,
     /// Index signatures on the emits type-argument surface.
     pub index_signatures: Vec<ExpandedIndexSignature>,
 }
@@ -144,9 +142,8 @@ pub struct EmitsSurface {
 /// from the post-event-name parameters in the node domain — label /
 /// optionality / rest / order preserved, with leaf and leaf-union element
 /// facts (`Closed(Tuple(..))`) — when every parameter is closed-expressible,
-/// and the projected CALLABLE-PARAMS replay route
-/// ([`ProjectedTypeFact::CallableParams`](verter_type_expr::facts::ProjectedTypeFact))
-/// when any parameter is richer (a named reference / composite / nested
+/// and the exact callable-occurrence replay route when any parameter is
+/// richer (a named reference / composite / nested
 /// object / array / callback / instantiated generic — the demand side
 /// replays the signature's raw parameters through the one shared dispatch).
 /// A realized emit's payload position is REQUIRED: with no stamped macro
@@ -155,12 +152,29 @@ pub struct EmitsSurface {
 /// materialization fails it instead of rendering a fabricated `unknown`
 /// success.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedEmitField {
-    /// The emit analysis row (name, display payload, JSDoc, authored payload
-    /// locator).
-    pub analysis: AnalyzedEmitField,
+pub struct ResolvedEmitOccurrence {
+    /// Resolver-minted opaque identity for this producer/name-arm occurrence.
+    pub id: verter_type_expr::facts::ResolvedEmitOccurrenceId,
+    /// Event-name literal arm.
+    pub name: String,
+    /// Exact authored producer span when available.
+    pub span: verter_span::Span,
+    /// Display-only payload type.
+    pub payload_type: Option<String>,
+    /// Exact authored payload locator when one faithfully denotes the
+    /// resolved payload.
+    pub payload: Option<verter_type_expr::locators::MacroPayloadLocator>,
+    /// Scope paired with [`Self::payload_type`].
+    pub payload_expr_scope: Option<verter_type_expr::TypeExprScope>,
+    /// Authored producer description.
+    pub description: Option<String>,
+    /// Authored producer JSDoc tags.
+    pub tags: Vec<verter_semantic::analysis::types::JsdocTag>,
     /// The payload's published source position.
     pub payload_source: verter_type_expr::facts::SourcePosition,
+    /// Atomic payload authority, exactness, degradation, provenance, and
+    /// authored evidence for this occurrence.
+    pub payload_publication: verter_type_expr::TypePublication,
     /// Producer-owned callable return publication. `Some` is reserved for
     /// callable event producers; property/event-map rows use the implicit
     /// `void` contract and carry `None`.
@@ -168,6 +182,32 @@ pub struct ResolvedEmitField {
     /// Scope used to raise [`Self::return_publication`]'s selected source.
     /// Kept separate from the synthesized payload's scope.
     pub return_publication_scope: Option<verter_type_expr::TypeExprScope>,
+}
+
+pub(crate) fn resolved_emit_payload_publication(
+    position: &verter_type_expr::facts::SourcePosition,
+    evidence: Option<verter_type_expr::AuthoredTypeEvidence>,
+) -> verter_type_expr::TypePublication {
+    use verter_type_expr::facts::SemanticTypeSource;
+    let exactness = match position.present() {
+        Some(
+            SemanticTypeSource::Closed(_)
+            | SemanticTypeSource::Projected(_)
+            | SemanticTypeSource::Synthesized(_),
+        ) => verter_type_expr::ResolutionExactness::ExactConcrete,
+        Some(SemanticTypeSource::Authored(_) | SemanticTypeSource::SyntheticSlotBinding(_)) => {
+            verter_type_expr::ResolutionExactness::ExactSymbolic
+        }
+        None => verter_type_expr::ResolutionExactness::Incomplete,
+    };
+    verter_type_expr::TypePublication::from_source_position(
+        position,
+        exactness,
+        verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        std::sync::Arc::from([]),
+        evidence,
+        &verter_type_expr::PublicationPolicy::exact_only(),
+    )
 }
 
 /// One session-resolved prop row: the prop analysis field plus the member
@@ -443,7 +483,7 @@ impl MacroSurfaceDtos {
     /// The resolved emit rows (analysis field + payload source), or an empty
     /// slice when no emits surface was resolved.
     #[must_use]
-    pub fn emit_fields(&self) -> &[ResolvedEmitField] {
+    pub fn emit_fields(&self) -> &[ResolvedEmitOccurrence] {
         self.emits
             .as_ref()
             .map_or(&[], |surface| surface.fields.as_slice())

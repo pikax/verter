@@ -206,6 +206,22 @@ pub struct TypeInfoIndexSignature {
     pub readonly: bool,
 }
 
+/// One entry in the resolver-owned ordered declaration surface.
+///
+/// Kind-specific collections on [`TypeInfoSurface`] are derived indexes only;
+/// event normalization consumes this stream so lexical interleaving survives.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypeInfoSurfaceEntry {
+    /// Named property or method member.
+    Member(TypeInfoSurfaceMember),
+    /// Root call signature.
+    CallSignature(TypeInfoSurfaceSignature),
+    /// Root construct signature.
+    ConstructSignature(TypeInfoSurfaceSignature),
+    /// Index signature.
+    IndexSignature(TypeInfoIndexSignature),
+}
+
 /// A span-rich, typeinfo-owned one-level surface.
 ///
 /// Built FROM a graph [`SurfaceView`] plus the graph's per-node scope. Holds
@@ -213,6 +229,8 @@ pub struct TypeInfoIndexSignature {
 /// names. `Clone` + `Send + Sync` (all fields are `Arc`-backed or `Copy`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeInfoSurface {
+    /// Canonical resolver-owned declaration stream.
+    pub entries: Arc<[TypeInfoSurfaceEntry]>,
     /// Named members in declaration order.
     pub members: Arc<[TypeInfoSurfaceMember]>,
     /// Call signatures in declaration order.
@@ -236,6 +254,7 @@ impl TypeInfoSurface {
     #[must_use]
     pub fn empty() -> Self {
         Self {
+            entries: Arc::from([]),
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -254,33 +273,60 @@ impl TypeInfoSurface {
     /// type is re-resolved.
     #[must_use]
     pub fn build(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
-        let members: Vec<TypeInfoSurfaceMember> = view
-            .members
+        let entries = view
+            .entries
             .iter()
-            .map(|member| build_member(graph, member))
+            .cloned()
+            .into_iter()
+            .map(|entry| match entry {
+                crate::semantic_query::SurfaceEntry::Member(member) => {
+                    TypeInfoSurfaceEntry::Member(build_member(graph, &member))
+                }
+                crate::semantic_query::SurfaceEntry::CallSignature(node) => {
+                    TypeInfoSurfaceEntry::CallSignature(build_signature(graph, node))
+                }
+                crate::semantic_query::SurfaceEntry::ConstructSignature(node) => {
+                    TypeInfoSurfaceEntry::ConstructSignature(build_signature(graph, node))
+                }
+                crate::semantic_query::SurfaceEntry::IndexSignature(signature) => {
+                    TypeInfoSurfaceEntry::IndexSignature(build_index_signature(graph, &signature))
+                }
+            })
             .collect();
-        let call_signatures: Vec<TypeInfoSurfaceSignature> = view
-            .call_signatures
-            .iter()
-            .map(|node| build_signature(graph, *node))
-            .collect();
-        let construct_signatures: Vec<TypeInfoSurfaceSignature> = view
-            .construct_signatures
-            .iter()
-            .map(|node| build_signature(graph, *node))
-            .collect();
-        let index_signatures: Vec<TypeInfoIndexSignature> = view
-            .index_signatures
-            .iter()
-            .map(|sig| build_index_signature(graph, sig))
-            .collect();
+        Self::from_ordered_entries(entries, view.keyspace, view.has_index_signature)
+    }
+
+    fn from_ordered_entries(
+        entries: Vec<TypeInfoSurfaceEntry>,
+        keyspace: Option<SemanticNodeId>,
+        has_index_signature: bool,
+    ) -> Self {
+        let mut members = Vec::new();
+        let mut call_signatures = Vec::new();
+        let mut construct_signatures = Vec::new();
+        let mut index_signatures = Vec::new();
+        for entry in &entries {
+            match entry {
+                TypeInfoSurfaceEntry::Member(member) => members.push(member.clone()),
+                TypeInfoSurfaceEntry::CallSignature(signature) => {
+                    call_signatures.push(signature.clone());
+                }
+                TypeInfoSurfaceEntry::ConstructSignature(signature) => {
+                    construct_signatures.push(signature.clone());
+                }
+                TypeInfoSurfaceEntry::IndexSignature(signature) => {
+                    index_signatures.push(signature.clone());
+                }
+            }
+        }
         Self {
+            entries: Arc::from(entries.into_boxed_slice()),
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(call_signatures.into_boxed_slice()),
             construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-            keyspace: view.keyspace,
-            has_index_signature: view.has_index_signature,
+            keyspace,
+            has_index_signature,
         }
     }
 
@@ -312,110 +358,118 @@ impl TypeInfoSurface {
         // Cache one source read per declaration file across members.
         let mut sources: HashMap<Arc<str>, Option<Arc<str>>> = HashMap::new();
 
-        let members: Vec<TypeInfoSurfaceMember> = self
-            .members
-            .iter()
-            .map(|member| {
-                let enriched = (|| {
-                    let file = member.origin.canonical_file.as_ref()?;
-                    // The member's name-token offset anchors the leading-JSDoc
-                    // search in its DECLARATION file.
-                    let name_span = member.name_span.as_ref()?;
-                    let source = sources
-                        .entry(Arc::clone(file))
-                        .or_insert_with(|| source_for(file.as_ref()))
-                        .clone()?;
-                    let spans = verter_semantic::analysis::jsdoc::jsdoc_block_spans_at_offset(
-                        source.as_ref(),
-                        name_span.span.start,
-                    )?;
-                    let description_span = spans
-                        .description
-                        .map(|span| CanonicalSpan::new(Arc::clone(file), span));
-                    let tag_spans: Vec<JsdocTagSpan> = spans
-                        .tags
-                        .into_iter()
-                        .map(|tag| JsdocTagSpan {
-                            name_span: CanonicalSpan::new(Arc::clone(file), tag.name),
-                            text_span: tag
-                                .text
-                                .map(|span| CanonicalSpan::new(Arc::clone(file), span)),
-                        })
-                        .collect();
-                    Some((description_span, tag_spans))
-                })();
-
-                match enriched {
-                    Some((description_span, tag_spans)) => TypeInfoSurfaceMember {
-                        jsdoc_description_span: description_span,
-                        jsdoc_tag_spans: Arc::from(tag_spans.into_boxed_slice()),
-                        ..member.clone()
-                    },
-                    None => member.clone(),
-                }
-            })
-            .collect();
-
         // Enrich each call / construct SIGNATURE with its leading-JSDoc spans,
         // anchored at the signature's own span in its declaration file — so a
         // call-signature emit (`(e: 'change', v: T): void`) carries the JSDoc
         // that documents the event, symmetric with a property-style member. An
         // inherited cross-file signature's JSDoc is read from the heritage
         // base's file (the signature's spans index into THAT file).
-        let mut enrich_signature = |sig: &TypeInfoSurfaceSignature| -> TypeInfoSurfaceSignature {
-            let enriched = (|| {
-                let anchor = sig.signature_span.as_ref()?;
-                let file = anchor.file.as_ref();
-                let source = sources
-                    .entry(Arc::clone(&anchor.file))
-                    .or_insert_with(|| source_for(file))
-                    .clone()?;
-                let spans = verter_semantic::analysis::jsdoc::jsdoc_block_spans_at_offset(
-                    source.as_ref(),
-                    anchor.span.start,
-                )?;
-                let description_span = spans
-                    .description
-                    .map(|span| CanonicalSpan::new(Arc::clone(&anchor.file), span));
-                let tag_spans: Vec<JsdocTagSpan> = spans
-                    .tags
-                    .into_iter()
-                    .map(|tag| JsdocTagSpan {
-                        name_span: CanonicalSpan::new(Arc::clone(&anchor.file), tag.name),
-                        text_span: tag
-                            .text
-                            .map(|span| CanonicalSpan::new(Arc::clone(&anchor.file), span)),
+        let mut entries = Vec::with_capacity(self.entries.len());
+        for entry in self.entries.iter() {
+            let enriched = match entry {
+                TypeInfoSurfaceEntry::Member(member) => {
+                    let enriched = (|| {
+                        let file = member.origin.canonical_file.as_ref()?;
+                        let name_span = member.name_span.as_ref()?;
+                        let source = sources
+                            .entry(Arc::clone(file))
+                            .or_insert_with(|| source_for(file.as_ref()))
+                            .clone()?;
+                        let spans = verter_semantic::analysis::jsdoc::jsdoc_block_spans_at_offset(
+                            source.as_ref(),
+                            name_span.span.start,
+                        )?;
+                        let description_span = spans
+                            .description
+                            .map(|span| CanonicalSpan::new(Arc::clone(file), span));
+                        let tag_spans: Vec<JsdocTagSpan> = spans
+                            .tags
+                            .into_iter()
+                            .map(|tag| JsdocTagSpan {
+                                name_span: CanonicalSpan::new(Arc::clone(file), tag.name),
+                                text_span: tag
+                                    .text
+                                    .map(|span| CanonicalSpan::new(Arc::clone(file), span)),
+                            })
+                            .collect();
+                        Some((description_span, tag_spans))
+                    })();
+                    TypeInfoSurfaceEntry::Member(match enriched {
+                        Some((description_span, tag_spans)) => TypeInfoSurfaceMember {
+                            jsdoc_description_span: description_span,
+                            jsdoc_tag_spans: Arc::from(tag_spans.into_boxed_slice()),
+                            ..member.clone()
+                        },
+                        None => member.clone(),
                     })
-                    .collect();
-                Some((description_span, tag_spans))
-            })();
-
-            match enriched {
-                Some((description_span, tag_spans)) => TypeInfoSurfaceSignature {
-                    jsdoc_description_span: description_span,
-                    jsdoc_tag_spans: Arc::from(tag_spans.into_boxed_slice()),
-                    ..sig.clone()
-                },
-                None => sig.clone(),
-            }
-        };
-        let call_signatures: Vec<TypeInfoSurfaceSignature> = self
-            .call_signatures
-            .iter()
-            .map(&mut enrich_signature)
-            .collect();
-        let construct_signatures: Vec<TypeInfoSurfaceSignature> = self
-            .construct_signatures
-            .iter()
-            .map(&mut enrich_signature)
-            .collect();
-
-        Self {
-            members: Arc::from(members.into_boxed_slice()),
-            call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-            construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-            ..self
+                }
+                TypeInfoSurfaceEntry::CallSignature(signature) => {
+                    TypeInfoSurfaceEntry::CallSignature(enrich_signature_jsdoc(
+                        signature,
+                        &mut sources,
+                        &source_for,
+                    ))
+                }
+                TypeInfoSurfaceEntry::ConstructSignature(signature) => {
+                    TypeInfoSurfaceEntry::ConstructSignature(enrich_signature_jsdoc(
+                        signature,
+                        &mut sources,
+                        &source_for,
+                    ))
+                }
+                TypeInfoSurfaceEntry::IndexSignature(signature) => {
+                    TypeInfoSurfaceEntry::IndexSignature(signature.clone())
+                }
+            };
+            entries.push(enriched);
         }
+
+        Self::from_ordered_entries(entries, self.keyspace, self.has_index_signature)
+    }
+}
+
+fn enrich_signature_jsdoc<F>(
+    sig: &TypeInfoSurfaceSignature,
+    sources: &mut std::collections::HashMap<Arc<str>, Option<Arc<str>>>,
+    source_for: &F,
+) -> TypeInfoSurfaceSignature
+where
+    F: Fn(&str) -> Option<Arc<str>>,
+{
+    let enriched = (|| {
+        let anchor = sig.signature_span.as_ref()?;
+        let file = anchor.file.as_ref();
+        let source = sources
+            .entry(Arc::clone(&anchor.file))
+            .or_insert_with(|| source_for(file))
+            .clone()?;
+        let spans = verter_semantic::analysis::jsdoc::jsdoc_block_spans_at_offset(
+            source.as_ref(),
+            anchor.span.start,
+        )?;
+        let description_span = spans
+            .description
+            .map(|span| CanonicalSpan::new(Arc::clone(&anchor.file), span));
+        let tag_spans: Vec<JsdocTagSpan> = spans
+            .tags
+            .into_iter()
+            .map(|tag| JsdocTagSpan {
+                name_span: CanonicalSpan::new(Arc::clone(&anchor.file), tag.name),
+                text_span: tag
+                    .text
+                    .map(|span| CanonicalSpan::new(Arc::clone(&anchor.file), span)),
+            })
+            .collect();
+        Some((description_span, tag_spans))
+    })();
+
+    match enriched {
+        Some((description_span, tag_spans)) => TypeInfoSurfaceSignature {
+            jsdoc_description_span: description_span,
+            jsdoc_tag_spans: Arc::from(tag_spans.into_boxed_slice()),
+            ..sig.clone()
+        },
+        None => sig.clone(),
     }
 }
 

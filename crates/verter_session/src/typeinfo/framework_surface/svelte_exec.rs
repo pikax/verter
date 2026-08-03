@@ -25,8 +25,8 @@ use verter_compiler::svelte::parser::template_ast::{
 };
 use verter_semantic::analysis::framework_facts::svelte::{SvelteLegacyProp, SvelteScriptFacts};
 use verter_semantic::analysis::types::{
-    AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
-    AnalyzedSlotFieldBinding, TypeResolutionSource,
+    AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding,
+    TypeResolutionSource,
 };
 use verter_type_expr::{
     PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypeExpr, TypePublication,
@@ -45,15 +45,15 @@ use crate::semantic_query::{
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::framework_surface::results::{
-    EmitsSurface, MacroSurfaceDtos, ModelBinding, ModelSurface, PropsSurface, ResolvedEmitField,
-    ResolvedMacroPayload, ResolvedOutcome,
+    resolved_emit_payload_publication, EmitsSurface, MacroSurfaceDtos, ModelBinding, ModelSurface,
+    PropsSurface, ResolvedEmitOccurrence, ResolvedMacroPayload, ResolvedOutcome,
 };
 use crate::typeinfo::framework_surface::vue_exec::{
     emits_from_typeinfo_surface, navigate_param_to_object_surface, props_from_typeinfo_surface,
     VueMacroSurface,
 };
 use crate::typeinfo::framework_surface::{SvelteSurfaceKey, SvelteSurfaceSource};
-use crate::typeinfo::surface::TypeInfoSurface;
+use crate::typeinfo::surface::{TypeInfoSurface, TypeInfoSurfaceEntry};
 use crate::typeinfo::types::TypeInfoQueryLevel;
 use crate::VerterHost;
 
@@ -752,10 +752,15 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                 |(_, base)| {
                     verter_type_expr::facts::SourcePosition::Present(
                         verter_type_expr::facts::SemanticTypeSource::Projected(
-                            verter_type_expr::facts::ProjectedTypeFact::CallableReturn {
+                            verter_type_expr::facts::ProjectedTypeFact::CallableOccurrence {
                                 base: base.clone(),
-                                path: Arc::from([member.name.as_ref().to_string()]),
-                                signature_ordinal: None,
+                                occurrence:
+                                    verter_type_expr::facts::CallableOccurrenceHandle::member(
+                                        member.value.0,
+                                        Arc::from([member.name.as_ref().to_string()]),
+                                    ),
+                                projection:
+                                    verter_type_expr::facts::CallableOccurrenceProjection::Return,
                             },
                         ),
                     )
@@ -872,6 +877,17 @@ fn retain_members(surface: &TypeInfoSurface, keep: &[String]) -> TypeInfoSurface
         .cloned()
         .collect();
     TypeInfoSurface {
+        entries: surface
+            .entries
+            .iter()
+            .filter(|entry| match entry {
+                crate::typeinfo::surface::TypeInfoSurfaceEntry::Member(member) => keep
+                    .iter()
+                    .any(|name| name.as_str() == member.name.as_ref()),
+                _ => true,
+            })
+            .cloned()
+            .collect(),
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::clone(&surface.call_signatures),
         construct_signatures: Arc::clone(&surface.construct_signatures),
@@ -1150,7 +1166,7 @@ fn resolve_callback_prop_events(
 
 /// Extract the callback-prop events from a resolved `$props` object surface: each
 /// public member named `on${E}` (NON-EMPTY `E`) whose value realises to a
-/// function-like type becomes a [`ResolvedEmitField`] named `E` whose payload is
+/// function-like type becomes a [`ResolvedEmitOccurrence`] named `E` whose payload is
 /// the callback's parameters as a labelled tuple (every parameter — NO strip).
 ///
 /// The value is function-like in two shapes:
@@ -1171,7 +1187,7 @@ fn callback_events_from_props_surface(
     surface: &TypeInfoSurface,
     return_base: &verter_type_expr::locators::AuthoredBodyLocator,
     owner: &str,
-) -> Vec<ResolvedEmitField> {
+) -> Vec<ResolvedEmitOccurrence> {
     let dispatch = ctx.dispatch();
     let host = ctx.host_for_fact_tracer_install();
     // Publication sink (DTO event payload tuples): the callable-arm decide and the
@@ -1182,8 +1198,14 @@ fn callback_events_from_props_surface(
     let context = crate::semantic_query::ProjectionReductionContext::published(
         crate::semantic_query::ProjectionMode::Navigate,
     );
-    let mut events: Vec<ResolvedEmitField> = Vec::new();
-    for member in surface.members.iter().filter(|m| m.visibility.is_public()) {
+    let mut events: Vec<ResolvedEmitOccurrence> = Vec::new();
+    for entry in surface.entries.iter() {
+        let TypeInfoSurfaceEntry::Member(member) = entry else {
+            continue;
+        };
+        if !member.visibility.is_public() {
+            continue;
+        }
         // Structural `on${E}` callback convention: `on` prefix + a NON-EMPTY
         // suffix. The suffix is the event name (NO strip applied to the payload).
         let Some(event_name) = member.name.as_ref().strip_prefix("on") else {
@@ -1229,15 +1251,36 @@ fn callback_events_from_props_surface(
         let payload_source = dispatch
             .closed_params_tuple_source(&raw_params)
             .map(verter_type_expr::facts::SourcePosition::Present)
+            .or_else(|| {
+                Some(verter_type_expr::facts::SourcePosition::Present(
+                    verter_type_expr::facts::SemanticTypeSource::Projected(
+                        verter_type_expr::facts::ProjectedTypeFact::CallableOccurrence {
+                            base: return_base.clone(),
+                            occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
+                                member.value.0,
+                                Arc::from([member.name.as_ref().to_string()]),
+                            ),
+                            projection:
+                                verter_type_expr::facts::CallableOccurrenceProjection::Parameters {
+                                    first_param: 0,
+                                },
+                        },
+                    ),
+                ))
+            })
             .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
                 verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
             ));
+        let payload_publication = resolved_emit_payload_publication(&payload_source, None);
         let return_position = verter_type_expr::facts::SourcePosition::Present(
             verter_type_expr::facts::SemanticTypeSource::Projected(
-                verter_type_expr::facts::ProjectedTypeFact::CallableReturn {
+                verter_type_expr::facts::ProjectedTypeFact::CallableOccurrence {
                     base: return_base.clone(),
-                    path: Arc::from([member.name.as_ref().to_string()]),
-                    signature_ordinal: None,
+                    occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
+                        member.value.0,
+                        Arc::from([member.name.as_ref().to_string()]),
+                    ),
+                    projection: verter_type_expr::facts::CallableOccurrenceProjection::Return,
                 },
             ),
         );
@@ -1251,18 +1294,27 @@ fn callback_events_from_props_surface(
         );
         let member_scope =
             crate::typeinfo::framework_surface::scope::member_value_expr_scope(host, member, owner);
-        events.push(ResolvedEmitField {
-            analysis: AnalyzedEmitField {
-                producer_identity: Default::default(),
-                name: event_name.to_string(),
-                span: verter_span::Span::default(),
-                payload_type,
-                payload: None,
-                payload_expr_scope: None,
-                description: None,
-                tags: Vec::new(),
-            },
+        events.push(ResolvedEmitOccurrence {
+            id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
+                verter_type_expr::facts::CallableOccurrenceHandle::member(
+                    member.value.0,
+                    Arc::from([member.name.as_ref().to_string()]),
+                ),
+                0,
+            ),
+            name: event_name.to_string(),
+            span: member
+                .name_span
+                .as_ref()
+                .map(|origin| origin.span)
+                .unwrap_or_default(),
+            payload_type,
+            payload: None,
+            payload_expr_scope: None,
+            description: None,
+            tags: Vec::new(),
             payload_source,
+            payload_publication,
             return_publication: Some(return_publication),
             return_publication_scope: Some(member_scope),
         });

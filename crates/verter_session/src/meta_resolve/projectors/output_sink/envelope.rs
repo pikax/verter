@@ -350,50 +350,44 @@ fn materialize_component_meta_output_types<'a>(
         )?);
     }
     for (index, event) in analysis.events.iter().enumerate() {
-        lanes.event_payloads.push(memo.materialize_output_lane_slot(
+        let payload = memo.materialize_publication_lane_slot(
             dispatch,
             cap,
             scope,
             Lane::EventPayload,
             index,
             None,
-            &event.payload,
-        )?);
+            &event.publication,
+        )?;
+        let return_publication = event
+            .return_publication
+            .as_ref()
+            .map(|publication| {
+                let effective = effective_output_scope(
+                    scope,
+                    event
+                        .return_publication_scope
+                        .as_ref()
+                        .map(verter_type_expr::TypeExprScope::as_str),
+                );
+                memo.materialize_publication_lane_slot(
+                    dispatch,
+                    cap,
+                    effective,
+                    Lane::EventReturn,
+                    index,
+                    None,
+                    publication,
+                )
+            })
+            .transpose()?;
         lanes
-            .event_publications
-            .push(memo.materialize_publication_lane_slot(
-                dispatch,
-                cap,
-                scope,
-                Lane::EventPayload,
-                index,
-                None,
-                &event.publication,
-            )?);
-        lanes.event_returns.push(
-            event
-                .return_publication
-                .as_ref()
-                .map(|publication| {
-                    let effective = effective_output_scope(
-                        scope,
-                        event
-                            .return_publication_scope
-                            .as_ref()
-                            .map(verter_type_expr::TypeExprScope::as_str),
-                    );
-                    memo.materialize_publication_lane_slot(
-                        dispatch,
-                        cap,
-                        effective,
-                        Lane::EventReturn,
-                        index,
-                        None,
-                        publication,
-                    )
-                })
-                .transpose()?,
-        );
+            .events
+            .push(crate::meta_resolve::MaterializedEventOccurrence {
+                event: event.clone(),
+                payload,
+                r#return: return_publication,
+            });
     }
     for (index, slot) in analysis.slots.iter().enumerate() {
         let mut bindings = Vec::with_capacity(slot.bindings.len());

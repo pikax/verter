@@ -1164,7 +1164,6 @@ fn lower_slot_return_payload_at_span(
 /// vocabulary cannot address a nested (slot, binding) position honestly, so
 /// typed binding demand is host-raised.
 pub(crate) fn stamp_macro_payload_locators(mac: &mut AnalyzedMacro, macro_index: u32) {
-    use crate::analysis::types::EmitProducerKind;
     use verter_type_expr::locators::{
         AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
     };
@@ -1200,30 +1199,7 @@ pub(crate) fn stamp_macro_payload_locators(mac: &mut AnalyzedMacro, macro_index:
             field.payload = field_locator(macro_index, field_index);
         }
     }
-    let mut property_ordinal = 0;
-    let mut runtime_ordinal = 0;
     for (field_index, field) in mac.emit_fields.iter_mut().enumerate() {
-        match field.producer_identity.kind {
-            EmitProducerKind::Property => {
-                field.producer_identity.ordinal = property_ordinal;
-                property_ordinal += 1;
-            }
-            // Callable ordinals are stamped while walking the raw signature
-            // surface, before non-event and union-name signatures are
-            // filtered. Reassigning them here would collapse that reserved
-            // coordinate space.
-            EmitProducerKind::CallSignature => {}
-            EmitProducerKind::Runtime => {
-                field.producer_identity.ordinal = runtime_ordinal;
-                runtime_ordinal += 1;
-            }
-            EmitProducerKind::Untracked => {
-                if field.payload_expr_scope.is_some() {
-                    field.payload = field_locator(macro_index, field_index);
-                }
-                continue;
-            }
-        }
         if field.payload_expr_scope.is_some() {
             field.payload = field_locator(macro_index, field_index);
         }
@@ -2060,7 +2036,7 @@ fn resolve_local_define_emits(
     } else if mac.type_references.len() == 1 {
         let type_ref = &mac.type_references[0];
         if let Some((declaration_registry, decl)) = registry.resolve(type_ref.as_str()) {
-            let mut call_signature_ordinal = 0;
+            let mut emit_state = ();
             if let Some(fields) = resolve_interface_decl_generic(
                 type_ref,
                 decl,
@@ -2068,7 +2044,7 @@ fn resolve_local_define_emits(
                 source,
                 comments,
                 &mut visited,
-                &mut call_signature_ordinal,
+                &mut emit_state,
                 &extract_emit_fields_from_members_at,
             ) {
                 mac.emit_fields = fields;
@@ -2268,27 +2244,6 @@ impl NamedField for AnalyzedEmitField {
 
     fn order_interface_fields(mut own_fields: Vec<Self>, heritage_fields: Vec<Self>) -> Vec<Self> {
         own_fields.extend(heritage_fields);
-        // Heritage is extracted first, so these ordinals match the resolved
-        // `Intersection([heritage..., own])` surface. Refill only callable
-        // positions in that order: property emit and slot shadowing semantics
-        // must not change as a side effect of callable identity alignment.
-        let callable_positions = own_fields
-            .iter()
-            .enumerate()
-            .filter_map(|(index, field)| {
-                (field.producer_identity.kind
-                    == crate::analysis::types::EmitProducerKind::CallSignature)
-                    .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let mut callables = callable_positions
-            .iter()
-            .map(|index| own_fields[*index].clone())
-            .collect::<Vec<_>>();
-        callables.sort_by_key(|field| field.producer_identity.ordinal);
-        for (index, field) in callable_positions.into_iter().zip(callables) {
-            own_fields[index] = field;
-        }
         own_fields
     }
 }
@@ -2505,14 +2460,14 @@ fn resolve_type_to_emit_fields(
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
 ) -> Option<Vec<AnalyzedEmitField>> {
-    let mut call_signature_ordinal = 0;
+    let mut emit_state = ();
     resolve_type_to_fields(
         ts_type,
         registry,
         source,
         comments,
         visited,
-        &mut call_signature_ordinal,
+        &mut emit_state,
         &extract_emit_fields_from_members_at,
     )
 }
@@ -3273,33 +3228,23 @@ fn extract_emit_fields_from_type(
     comments: &[Comment],
     source: &str,
 ) -> Vec<AnalyzedEmitField> {
-    let mut call_signature_ordinal = 0;
-    extract_emit_fields_from_type_at(ts_type, comments, source, &mut call_signature_ordinal)
+    extract_emit_fields_from_type_at(ts_type, comments, source)
 }
 
 fn extract_emit_fields_from_type_at(
     ts_type: &TSType<'_>,
     comments: &[Comment],
     source: &str,
-    call_signature_ordinal: &mut u32,
 ) -> Vec<AnalyzedEmitField> {
     match ts_type {
-        TSType::TSTypeLiteral(literal) => extract_emit_fields_from_members_at(
-            &literal.members,
-            source,
-            comments,
-            call_signature_ordinal,
-        ),
+        TSType::TSTypeLiteral(literal) => {
+            extract_emit_fields_from_members_at(&literal.members, source, comments, &mut ())
+        }
         TSType::TSTypeReference(_) => Vec::new(),
         TSType::TSIntersectionType(intersection) => {
             let mut fields = Vec::new();
             for ty in &intersection.types {
-                fields.extend(extract_emit_fields_from_type_at(
-                    ty,
-                    comments,
-                    source,
-                    call_signature_ordinal,
-                ));
+                fields.extend(extract_emit_fields_from_type_at(ty, comments, source));
             }
             fields
         }
@@ -3312,7 +3257,7 @@ fn extract_emit_fields_from_members_at(
     members: &[TSSignature<'_>],
     source: &str,
     comments: &[Comment],
-    call_signature_ordinal: &mut u32,
+    _state: &mut (),
 ) -> Vec<AnalyzedEmitField> {
     members
         .iter()
@@ -3342,7 +3287,6 @@ fn extract_emit_fields_from_members_at(
                     has_authored_payload.then(|| verter_type_expr::TypeExprScope::new(""));
                 let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
                 key_name.map(|name| AnalyzedEmitField {
-                    producer_identity: crate::analysis::types::EmitProducerIdentity::property(0),
                     name,
                     span: prop.key.span().into(),
                     payload_type,
@@ -3354,11 +3298,6 @@ fn extract_emit_fields_from_members_at(
             }
             // Call signature: `(e: 'change', id: number): void`
             TSSignature::TSCallSignatureDeclaration(call_sig) => {
-                let producer_identity =
-                    crate::analysis::types::EmitProducerIdentity::call_signature(
-                        *call_signature_ordinal,
-                    );
-                *call_signature_ordinal += 1;
                 let first_param = call_sig.params.items.first()?;
                 let type_ann = first_param.type_annotation.as_ref()?;
                 if let TSType::TSLiteralType(lit) = &type_ann.type_annotation {
@@ -3390,7 +3329,6 @@ fn extract_emit_fields_from_members_at(
                         let (description, tags) =
                             extract_jsdoc_for(comments, call_sig.span().start, source);
                         return Some(AnalyzedEmitField {
-                            producer_identity,
                             name: s.value.to_string(),
                             span: s.span.into(),
                             payload_type,
@@ -3422,7 +3360,6 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                         _ => None,
                     };
                     key_name.map(|name| AnalyzedEmitField {
-                        producer_identity: crate::analysis::types::EmitProducerIdentity::runtime(0),
                         name,
                         span: p.key.span().into(),
                         payload_type: None,
@@ -3442,7 +3379,6 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
             .filter_map(|elem| {
                 if let ArrayExpressionElement::StringLiteral(lit) = elem {
                     Some(AnalyzedEmitField {
-                        producer_identity: crate::analysis::types::EmitProducerIdentity::runtime(0),
                         name: lit.value.to_string(),
                         span: lit.span.into(),
                         payload_type: None,

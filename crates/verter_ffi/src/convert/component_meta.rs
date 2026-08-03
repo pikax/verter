@@ -96,16 +96,6 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
 
     require_lane_aligned("props", analysis.props.len(), lanes.props.len());
     require_lane_aligned(
-        "event-payloads",
-        analysis.events.len(),
-        lanes.event_payloads.len(),
-    );
-    require_lane_aligned(
-        "event-publications",
-        analysis.events.len(),
-        lanes.event_publications.len(),
-    );
-    require_lane_aligned(
         "slot-bindings",
         analysis.slots.len(),
         lanes.slot_bindings.len(),
@@ -192,17 +182,17 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
                 }
             })
             .collect(),
-        events: analysis
+        events: lanes
             .events
             .into_iter()
-            .zip(lanes.event_payloads)
-            .zip(lanes.event_publications)
-            .map(|((e, payload), publication_lane)| {
-                let (_, publication, terminal_display) =
-                    materialized_publication_to_ffi(publication_lane);
+            .map(|occurrence| {
+                let e = occurrence.event;
+                let (payload, publication, terminal_display) =
+                    materialized_publication_to_ffi(occurrence.payload);
                 FfiEventMeta {
                     name: e.name,
-                    payload,
+                    payload: payload
+                        .expect("materialized event occurrence must carry its required payload"),
                     publication,
                     terminal_display,
                     payload_expansion: e.payload_expansion.map(expansion_metadata_to_ffi),

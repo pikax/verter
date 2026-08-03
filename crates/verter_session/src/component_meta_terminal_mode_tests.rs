@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::semantic_query::{
     PathSegment, ProjectionMode, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
-    SemanticQueryKey, SurfaceMember, SurfaceView,
+    SemanticQueryKey, SurfaceMember,
 };
 use crate::types::HostConfig;
 use crate::VerterHost;
@@ -39,7 +39,7 @@ fn build_test_host() -> Arc<VerterHost> {
 /// `ProjectPath` projections.
 fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
     let graph = host.project_type_store().semantic_graph();
-    let leaf = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+    let leaf = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(Vec::new().into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -61,7 +61,7 @@ fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
             spans: Default::default(),
             declaration_origin: None,
         };
-        current = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        current = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
             members: Arc::from(vec![member].into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),

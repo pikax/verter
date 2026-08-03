@@ -215,8 +215,16 @@ pub(crate) fn component_meta_resolved_macros(
                     .iter()
                     .map(
                         |row| verter_semantic::analysis::component_meta::ResolvedEmitInput {
-                            field: row.analysis.clone(),
+                            id: row.id.clone(),
+                            name: row.name.clone(),
+                            span: row.span,
+                            payload_type: row.payload_type.clone(),
+                            payload: row.payload.clone(),
+                            payload_expr_scope: row.payload_expr_scope.clone(),
+                            description: row.description.clone(),
+                            tags: row.tags.clone(),
                             payload_source: row.payload_source.clone(),
+                            payload_publication: row.payload_publication.clone(),
                             return_publication: row.return_publication.clone(),
                             return_publication_scope: row.return_publication_scope.clone(),
                         },
@@ -300,8 +308,16 @@ pub(crate) fn component_meta_resolved_macros(
             );
             native.emits.extend(dtos.emit_fields().iter().map(|row| {
                 verter_semantic::analysis::component_meta::ResolvedEmitInput {
-                    field: row.analysis.clone(),
+                    id: row.id.clone(),
+                    name: row.name.clone(),
+                    span: row.span,
+                    payload_type: row.payload_type.clone(),
+                    payload: row.payload.clone(),
+                    payload_expr_scope: row.payload_expr_scope.clone(),
+                    description: row.description.clone(),
+                    tags: row.tags.clone(),
                     payload_source: row.payload_source.clone(),
+                    payload_publication: row.payload_publication.clone(),
                     return_publication: row.return_publication.clone(),
                     return_publication_scope: row.return_publication_scope.clone(),
                 }

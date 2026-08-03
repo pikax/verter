@@ -129,7 +129,8 @@ use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, HotTypeRef, IndexKey, IndexSignature,
     MacroOwnBodyStamp, MapperKey, MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod,
     PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId,
-    SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    SurfaceEntry, SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl,
+    ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -679,27 +680,27 @@ fn lower_node(
         TypeExpr::Object(obj) => {
             let declaration_origin = scope.canonical_file();
             let value_ctx = ctx.structural_provenance();
-            let mut members: Vec<SurfaceMember> = Vec::new();
-            let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
-            let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
-            let mut index_signatures: Vec<IndexSignature> = Vec::new();
+            let mut entries = Vec::with_capacity(obj.properties.len());
+            let mut has_index_signature = false;
             for member in &obj.properties {
                 match member {
-                    ObjectMember::Property(prop) => members.push(SurfaceMember {
-                        name: Arc::from(prop.name.as_str()),
-                        value: lower_node(graph, &prop.ty, scope, &value_ctx)?,
-                        optional: prop.optional,
-                        readonly: prop.readonly,
-                        is_method: false,
-                        visibility: prop.visibility,
-                        spans: prop.spans,
-                        declaration_origin: declaration_origin.clone(),
-                        declared_in_macro_type_arg: ctx.macro_own_body,
-                        merge_role: ctx.merge_role,
-                    }),
+                    ObjectMember::Property(prop) => {
+                        entries.push(SurfaceEntry::Member(SurfaceMember {
+                            name: Arc::from(prop.name.as_str()),
+                            value: lower_node(graph, &prop.ty, scope, &value_ctx)?,
+                            optional: prop.optional,
+                            readonly: prop.readonly,
+                            is_method: false,
+                            visibility: prop.visibility,
+                            spans: prop.spans,
+                            declaration_origin: declaration_origin.clone(),
+                            declared_in_macro_type_arg: ctx.macro_own_body,
+                            merge_role: ctx.merge_role,
+                        }))
+                    }
                     ObjectMember::Method(method) => {
                         let function_expr = TypeExpr::Function(Arc::new(method.function.clone()));
-                        members.push(SurfaceMember {
+                        entries.push(SurfaceEntry::Member(SurfaceMember {
                             name: Arc::from(method.name.as_str()),
                             value: lower_node(graph, &function_expr, scope, &value_ctx)?,
                             optional: method.optional,
@@ -710,34 +711,39 @@ fn lower_node(
                             declaration_origin: declaration_origin.clone(),
                             declared_in_macro_type_arg: ctx.macro_own_body,
                             merge_role: ctx.merge_role,
-                        });
+                        }));
                     }
                     ObjectMember::CallSignature(func) => {
                         let function_expr = TypeExpr::Function(Arc::new(func.clone()));
-                        call_signatures.push(lower_node(graph, &function_expr, scope, ctx)?);
+                        entries.push(SurfaceEntry::CallSignature(lower_node(
+                            graph,
+                            &function_expr,
+                            scope,
+                            ctx,
+                        )?));
                     }
                     ObjectMember::ConstructSignature(func) => {
                         let function_expr = TypeExpr::Function(Arc::new(func.clone()));
-                        construct_signatures.push(lower_node(graph, &function_expr, scope, ctx)?);
+                        entries.push(SurfaceEntry::ConstructSignature(lower_node(
+                            graph,
+                            &function_expr,
+                            scope,
+                            ctx,
+                        )?));
                     }
-                    ObjectMember::IndexSignature(sig) => index_signatures.push(IndexSignature {
-                        key_type: lower_node(graph, &sig.key_type, scope, ctx)?,
-                        value_type: lower_node(graph, &sig.value_type, scope, ctx)?,
-                        readonly: sig.readonly,
-                        spans: sig.spans,
-                        declaration_origin: declaration_origin.clone(),
-                    }),
+                    ObjectMember::IndexSignature(sig) => {
+                        has_index_signature = true;
+                        entries.push(SurfaceEntry::IndexSignature(IndexSignature {
+                            key_type: lower_node(graph, &sig.key_type, scope, ctx)?,
+                            value_type: lower_node(graph, &sig.value_type, scope, ctx)?,
+                            readonly: sig.readonly,
+                            spans: sig.spans,
+                            declaration_origin: declaration_origin.clone(),
+                        }));
+                    }
                 }
             }
-            let has_index_signature = !index_signatures.is_empty();
-            let view = SurfaceView {
-                members: Arc::from(members.into_boxed_slice()),
-                call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-                construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-                index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-                keyspace: None,
-                has_index_signature,
-            };
+            let view = SurfaceView::from_entries(entries, None, has_index_signature);
             Ok(graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone()))
         }
 

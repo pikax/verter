@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::semantic_query::{
-    DeclIdentity, QueryError, SemanticQueryApi, SemanticQueryOutput, SurfaceMember,
+    DeclIdentity, QueryError, SemanticQueryApi, SemanticQueryOutput, SurfaceEntry, SurfaceMember,
+    SurfaceView,
 };
 
 /// Per-walk maximum frame-stack depth observed by
@@ -410,6 +411,9 @@ impl<T> QueryBuildOutput<T> {
 /// shallow — each `value` is a `SemanticNodeId`, never an expanded body.
 #[derive(Debug, Clone, Default)]
 pub struct ShallowSurface {
+    /// Resolver-ordered stream. This is the only ordering authority; the
+    /// kind-specific vectors below are derived indexes.
+    pub entries: Vec<ShallowSurfaceEntry>,
     pub members: Vec<ShallowSurfaceMember>,
     /// Call signatures (`(args): ret`) carried verbatim from the contributing
     /// `SurfaceView`. Each id is a `Function`-shaped node.
@@ -421,6 +425,14 @@ pub struct ShallowSurface {
     /// Keyspace node when the surface is a mapped/keyspace carrier; `None`
     /// for an ordinary object surface.
     pub keyspace: Option<SemanticNodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShallowSurfaceEntry {
+    Member(ShallowSurfaceMember),
+    CallSignature(SemanticNodeId),
+    ConstructSignature(SemanticNodeId),
+    IndexSignature(crate::semantic_query::IndexSignature),
 }
 
 /// One member contribution while the walker is merging arms. Carries the
@@ -464,6 +476,37 @@ pub struct ShallowSurfaceMember {
 }
 
 impl ShallowSurface {
+    #[must_use]
+    pub fn from_entries(
+        entries: Vec<ShallowSurfaceEntry>,
+        keyspace: Option<SemanticNodeId>,
+    ) -> Self {
+        let mut members = Vec::new();
+        let mut call_signatures = Vec::new();
+        let mut construct_signatures = Vec::new();
+        let mut index_signatures = Vec::new();
+        for entry in &entries {
+            match entry {
+                ShallowSurfaceEntry::Member(member) => members.push(member.clone()),
+                ShallowSurfaceEntry::CallSignature(node) => call_signatures.push(*node),
+                ShallowSurfaceEntry::ConstructSignature(node) => {
+                    construct_signatures.push(*node);
+                }
+                ShallowSurfaceEntry::IndexSignature(signature) => {
+                    index_signatures.push(signature.clone());
+                }
+            }
+        }
+        Self {
+            entries,
+            members,
+            call_signatures,
+            construct_signatures,
+            index_signatures,
+            keyspace,
+        }
+    }
+
     /// Empty surface contribution — used when an arm cannot yield any
     /// members (open conditional, non-Object terminal, instantiation
     /// recursion).
@@ -483,31 +526,37 @@ impl ShallowSurface {
     /// Shallow projection no longer drops them.
     #[must_use]
     pub fn from_object(view: &SurfaceView) -> Self {
-        Self {
-            members: view
-                .members
-                .iter()
-                .map(|m| ShallowSurfaceMember {
-                    name: Arc::clone(&m.name),
-                    value: m.value,
-                    optional: m.optional,
-                    readonly: m.readonly,
-                    is_method: m.is_method,
-                    // Carry the source member's declared accessibility verbatim.
-                    visibility: m.visibility,
-                    declared_in_macro_type_arg: m.declared_in_macro_type_arg,
-                    merge_role: m.merge_role,
-                    // Carry the source member's OXC spans verbatim.
-                    spans: m.spans,
-                    // Carry the source member's declaration file verbatim.
-                    declaration_origin: m.declaration_origin.clone(),
-                })
-                .collect(),
-            call_signatures: view.call_signatures.to_vec(),
-            construct_signatures: view.construct_signatures.to_vec(),
-            index_signatures: view.index_signatures.to_vec(),
-            keyspace: view.keyspace,
-        }
+        let entries = view
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                SurfaceEntry::Member(m) => {
+                    ShallowSurfaceEntry::Member(ShallowSurfaceMember {
+                        name: Arc::clone(&m.name),
+                        value: m.value,
+                        optional: m.optional,
+                        readonly: m.readonly,
+                        is_method: m.is_method,
+                        // Carry the source member's declared accessibility verbatim.
+                        visibility: m.visibility,
+                        declared_in_macro_type_arg: m.declared_in_macro_type_arg,
+                        merge_role: m.merge_role,
+                        // Carry the source member's OXC spans verbatim.
+                        spans: m.spans,
+                        // Carry the source member's declaration file verbatim.
+                        declaration_origin: m.declaration_origin.clone(),
+                    })
+                }
+                SurfaceEntry::CallSignature(node) => ShallowSurfaceEntry::CallSignature(*node),
+                SurfaceEntry::ConstructSignature(node) => {
+                    ShallowSurfaceEntry::ConstructSignature(*node)
+                }
+                SurfaceEntry::IndexSignature(signature) => {
+                    ShallowSurfaceEntry::IndexSignature(signature.clone())
+                }
+            })
+            .collect();
+        Self::from_entries(entries, view.keyspace)
     }
 }
 
@@ -2757,12 +2806,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         if !changed {
             return node;
         }
+        let mut members = members.into_iter();
+        let entries = view
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                SurfaceEntry::Member(_) => SurfaceEntry::Member(
+                    members.next().expect("derived member index matches stream"),
+                ),
+                other => other.clone(),
+            })
+            .collect();
         self.graph().intern_preserving_scope(
             node,
-            SemanticNodeData::Object(SurfaceView {
-                members: Arc::from(members.into_boxed_slice()),
-                ..view
-            }),
+            SemanticNodeData::Object(SurfaceView::from_entries(
+                entries,
+                view.keyspace,
+                view.has_index_signature,
+            )),
         )
     }
 
@@ -4488,13 +4549,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .filter(|m| m.visibility.is_public())
             .filter(|m| key_set.contains(m.name.as_ref()))
             .collect();
-        ShallowSurface {
-            members,
-            call_signatures: Vec::new(),
-            construct_signatures: Vec::new(),
-            index_signatures: Vec::new(),
-            keyspace: None,
-        }
+        ShallowSurface::from_entries(
+            members
+                .into_iter()
+                .map(ShallowSurfaceEntry::Member)
+                .collect(),
+            None,
+        )
     }
 
     /// Record a SURFACE-COMPOSITION reference arm the shallow walk is about
@@ -5028,13 +5089,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 });
             }
         }
-        Some(ShallowSurface {
-            members,
-            call_signatures: Vec::new(),
-            construct_signatures: Vec::new(),
-            index_signatures: Vec::new(),
-            keyspace: None,
-        })
+        Some(ShallowSurface::from_entries(
+            members
+                .into_iter()
+                .map(ShallowSurfaceEntry::Member)
+                .collect(),
+            None,
+        ))
     }
 }
 
@@ -5223,11 +5284,11 @@ fn merge_declaration_surfaces(
     contributor_surfaces: &[ShallowSurface],
 ) -> ShallowSurface {
     let core = merge_declaration_surfaces_core(contributor_surfaces);
-    let members: Vec<ShallowSurfaceMember> = core
+    let members: indexmap::IndexMap<Arc<str>, ShallowSurfaceMember> = core
         .members
         .into_iter()
         .map(|merged| {
-            if merged.member.is_method && merged.values.len() > 1 {
+            let member = if merged.member.is_method && merged.values.len() > 1 {
                 let group = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
                     merged.values.into_boxed_slice(),
                 )));
@@ -5237,17 +5298,46 @@ fn merge_declaration_surfaces(
                 }
             } else {
                 merged.member
-            }
+            };
+            (Arc::clone(&member.name), member)
         })
         .collect();
-
-    ShallowSurface {
-        members,
-        call_signatures: core.call_signatures,
-        construct_signatures: core.construct_signatures,
-        index_signatures: core.index_signatures,
-        keyspace: core.keyspace,
+    let mut remaining_members = members;
+    let mut seen_calls = rustc_hash::FxHashSet::default();
+    let mut seen_constructs = rustc_hash::FxHashSet::default();
+    let mut seen_indexes = Vec::new();
+    let mut entries = Vec::new();
+    for entry in contributor_surfaces
+        .iter()
+        .flat_map(|surface| surface.entries.iter())
+    {
+        match entry {
+            ShallowSurfaceEntry::Member(member) => {
+                if let Some(member) = remaining_members.shift_remove(&member.name) {
+                    entries.push(ShallowSurfaceEntry::Member(member));
+                }
+            }
+            ShallowSurfaceEntry::CallSignature(node)
+                if core.call_signatures.contains(node) && seen_calls.insert(*node) =>
+            {
+                entries.push(ShallowSurfaceEntry::CallSignature(*node));
+            }
+            ShallowSurfaceEntry::ConstructSignature(node)
+                if core.construct_signatures.contains(node) && seen_constructs.insert(*node) =>
+            {
+                entries.push(ShallowSurfaceEntry::ConstructSignature(*node));
+            }
+            ShallowSurfaceEntry::IndexSignature(signature)
+                if core.index_signatures.contains(signature)
+                    && !seen_indexes.contains(signature) =>
+            {
+                seen_indexes.push(signature.clone());
+                entries.push(ShallowSurfaceEntry::IndexSignature(signature.clone()));
+            }
+            _ => {}
+        }
     }
+    ShallowSurface::from_entries(entries, core.keyspace)
 }
 
 fn merge_intersection_surfaces_with_graph(
@@ -5273,35 +5363,40 @@ fn merge_intersection_surfaces_with_graph(
             accum.absorb(member);
         }
     }
-    let members: Vec<ShallowSurfaceMember> = by_name
-        .into_values()
-        .map(|accum| accum.finish(graph))
+    let mut members: indexmap::IndexMap<Arc<str>, ShallowSurfaceMember> = by_name
+        .into_iter()
+        .map(|(name, accum)| (name, accum.finish(graph)))
         .collect();
 
-    // Carry the non-member surface facts through the intersection. Call /
-    // construct signatures concatenate across arms (TS `A & B` of two
-    // call-signature carriers exposes BOTH overload sets); index signatures
-    // concatenate; the keyspace is the first arm's keyspace (an ordinary
-    // object intersection carries none). De-dup to keep interned identity
-    // stable.
-    let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
-    let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
-    let mut index_signatures: Vec<crate::semantic_query::IndexSignature> = Vec::new();
+    // Scan the contributing canonical streams once. Merged members occupy
+    // their first encountered slot; signatures retain their first encountered
+    // slot and are deduplicated by exact identity.
+    let mut entries = Vec::new();
+    let mut seen_calls = rustc_hash::FxHashSet::default();
+    let mut seen_constructs = rustc_hash::FxHashSet::default();
+    let mut seen_indexes = Vec::new();
     let mut keyspace: Option<SemanticNodeId> = None;
     for surface in &live {
-        for sig in &surface.call_signatures {
-            if !call_signatures.contains(sig) {
-                call_signatures.push(*sig);
-            }
-        }
-        for sig in &surface.construct_signatures {
-            if !construct_signatures.contains(sig) {
-                construct_signatures.push(*sig);
-            }
-        }
-        for sig in &surface.index_signatures {
-            if !index_signatures.contains(sig) {
-                index_signatures.push(sig.clone());
+        for entry in &surface.entries {
+            match entry {
+                ShallowSurfaceEntry::Member(member) => {
+                    if let Some(member) = members.shift_remove(&member.name) {
+                        entries.push(ShallowSurfaceEntry::Member(member));
+                    }
+                }
+                ShallowSurfaceEntry::CallSignature(node) if seen_calls.insert(*node) => {
+                    entries.push(ShallowSurfaceEntry::CallSignature(*node));
+                }
+                ShallowSurfaceEntry::ConstructSignature(node) if seen_constructs.insert(*node) => {
+                    entries.push(ShallowSurfaceEntry::ConstructSignature(*node));
+                }
+                ShallowSurfaceEntry::IndexSignature(signature)
+                    if !seen_indexes.contains(signature) =>
+                {
+                    seen_indexes.push(signature.clone());
+                    entries.push(ShallowSurfaceEntry::IndexSignature(signature.clone()));
+                }
+                _ => {}
             }
         }
         if keyspace.is_none() {
@@ -5309,13 +5404,7 @@ fn merge_intersection_surfaces_with_graph(
         }
     }
 
-    Some(ShallowSurface {
-        members,
-        call_signatures,
-        construct_signatures,
-        index_signatures,
-        keyspace,
-    })
+    Some(ShallowSurface::from_entries(entries, keyspace))
 }
 
 /// Working aggregation for one merged member name during intersection surface
@@ -5664,13 +5753,13 @@ pub(super) fn merge_union_surfaces(
             declaration_origin: None,
         });
     }
-    Some(ShallowSurface {
-        members,
-        call_signatures: Vec::new(),
-        construct_signatures: Vec::new(),
-        index_signatures: Vec::new(),
-        keyspace: None,
-    })
+    Some(ShallowSurface::from_entries(
+        members
+            .into_iter()
+            .map(ShallowSurfaceEntry::Member)
+            .collect(),
+        None,
+    ))
 }
 
 /// One-pass per-name aggregation state shared by the two union-arm merge
@@ -5848,13 +5937,13 @@ pub(super) fn merge_union_surfaces_for_macro(
             declaration_origin: None,
         });
     }
-    Some(ShallowSurface {
-        members,
-        call_signatures: Vec::new(),
-        construct_signatures: Vec::new(),
-        index_signatures: Vec::new(),
-        keyspace: None,
-    })
+    Some(ShallowSurface::from_entries(
+        members
+            .into_iter()
+            .map(ShallowSurfaceEntry::Member)
+            .collect(),
+        None,
+    ))
 }
 
 fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
@@ -5868,49 +5957,46 @@ fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
     // no longer drops them (the load-bearing fix for the type-resolution
     // unification). `has_index_signature` is derived from the carried index
     // signatures so it stays consistent with them.
-    let members: Vec<SurfaceMember> = surface
-        .members
+    let entries = surface
+        .entries
         .iter()
-        .map(|m| SurfaceMember {
-            name: Arc::clone(&m.name),
-            value: m.value,
-            optional: m.optional,
-            readonly: m.readonly,
-            is_method: m.is_method,
-            // Carry the walker's preserved declared accessibility back onto the
-            // graph member (round-trip through ShallowSurface is lossless).
-            visibility: m.visibility,
-            declared_in_macro_type_arg: m.declared_in_macro_type_arg,
-            merge_role: m.merge_role,
-            // Carry the walker's preserved OXC spans back onto the graph member.
-            spans: m.spans,
-            // Carry the preserved declaration file back onto the graph member.
-            declaration_origin: m.declaration_origin.clone(),
+        .map(|entry| match entry {
+            ShallowSurfaceEntry::Member(m) => SurfaceEntry::Member(SurfaceMember {
+                name: Arc::clone(&m.name),
+                value: m.value,
+                optional: m.optional,
+                readonly: m.readonly,
+                is_method: m.is_method,
+                // Carry the walker's preserved declared accessibility back onto the
+                // graph member (round-trip through ShallowSurface is lossless).
+                visibility: m.visibility,
+                declared_in_macro_type_arg: m.declared_in_macro_type_arg,
+                merge_role: m.merge_role,
+                // Carry the walker's preserved OXC spans back onto the graph member.
+                spans: m.spans,
+                // Carry the preserved declaration file back onto the graph member.
+                declaration_origin: m.declaration_origin.clone(),
+            }),
+            ShallowSurfaceEntry::CallSignature(node) => SurfaceEntry::CallSignature(*node),
+            ShallowSurfaceEntry::ConstructSignature(node) => {
+                SurfaceEntry::ConstructSignature(*node)
+            }
+            ShallowSurfaceEntry::IndexSignature(signature) => {
+                SurfaceEntry::IndexSignature(signature.clone())
+            }
         })
         .collect();
-    SurfaceView {
-        members: Arc::from(members.into_boxed_slice()),
-        call_signatures: Arc::from(surface.call_signatures.clone().into_boxed_slice()),
-        construct_signatures: Arc::from(surface.construct_signatures.clone().into_boxed_slice()),
-        index_signatures: Arc::from(surface.index_signatures.clone().into_boxed_slice()),
-        keyspace: surface.keyspace,
-        has_index_signature: !surface.index_signatures.is_empty(),
-    }
+    SurfaceView::from_entries(
+        entries,
+        surface.keyspace,
+        !surface.index_signatures.is_empty(),
+    )
 }
 
 /// Empty `SurfaceView` used when the synthesiser has nothing to
 /// contribute (e.g., open conditional with no branch chosen).
 pub(crate) fn empty_surface_view() -> SurfaceView {
-    SurfaceView {
-        members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
-        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        index_signatures: Arc::from(
-            Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice(),
-        ),
-        keyspace: None,
-        has_index_signature: false,
-    }
+    SurfaceView::from_entries(Vec::new(), None, false)
 }
 
 /// Walk a key-space node tree and append every reachable string-literal
@@ -6035,13 +6121,7 @@ mod m1_merge_visibility_tests {
     }
 
     fn one_member_surface(m: ShallowSurfaceMember) -> ShallowSurface {
-        ShallowSurface {
-            members: vec![m],
-            call_signatures: Vec::new(),
-            construct_signatures: Vec::new(),
-            index_signatures: Vec::new(),
-            keyspace: None,
-        }
+        ShallowSurface::from_entries(vec![super::ShallowSurfaceEntry::Member(m)], None)
     }
 
     fn merged_member_visibility(surface: &ShallowSurface, name: &str) -> MemberVisibility {

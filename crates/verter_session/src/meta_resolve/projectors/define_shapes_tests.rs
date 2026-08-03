@@ -15,6 +15,22 @@ use verter_type_expr::facts::{
 use verter_type_expr::locators::AuthoredBodyLocator;
 use verter_type_expr::TypeExpr;
 
+fn materialized_event_types(
+    lanes: &crate::meta_resolve::MaterializedComponentMetaTypeLanes,
+) -> Vec<TypeExpr> {
+    lanes
+        .events
+        .iter()
+        .map(|occurrence| {
+            occurrence
+                .payload
+                .materialized_type()
+                .expect("event payload materializes")
+                .clone()
+        })
+        .collect()
+}
+
 fn project_with(canonical: &str, source: &str) -> std::sync::Arc<MetaProject> {
     let project = MetaProject::new(VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
@@ -24,16 +40,13 @@ fn project_with(canonical: &str, source: &str) -> std::sync::Arc<MetaProject> {
     project
 }
 
-/// Drive `define_emits_shape` with the evaluated-field match WITHHELD and
-/// return the published `save` property source POSITION.
-fn evaluated_miss_save_position(project: &MetaProject) -> verter_type_expr::facts::SourcePosition {
+/// Drive `define_emits_shape` and return the occurrence-owned `save` payload.
+fn save_payload_source(project: &MetaProject) -> verter_type_expr::facts::SourcePosition {
     let host = project.host();
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(host, &view, overlay);
-    let evaluated = ExpandedComponentTypes::default();
-    let shape = define_emits_shape(&ctx, "/App.vue", 0, &evaluated)
-        .expect("the emits macro surface resolves");
+    let shape = define_emits_shape(&ctx, "/App.vue", 0).expect("the emits macro surface resolves");
     shape
         .value
         .properties
@@ -78,7 +91,7 @@ defineEmits<{ save: [id: number] } & { save: [name: string] }>()
 </script>
 <template><div /></template>"#,
     );
-    let source = evaluated_miss_save_position(&project)
+    let source = save_payload_source(&project)
         .into_present()
         .expect("the fallback publishes a present source");
     assert!(
@@ -166,7 +179,7 @@ defineEmits<ImportedEmits>()
 <template><div /></template>"#,
         )
         .unwrap();
-    let source = evaluated_miss_save_position(&project)
+    let source = save_payload_source(&project)
         .into_present()
         .expect("the fallback publishes a present source");
     assert!(
@@ -216,7 +229,7 @@ defineEmits<ImportedEmits>()
 <template><div /></template>"#,
         )
         .unwrap();
-    let source = evaluated_miss_save_position(&project)
+    let source = save_payload_source(&project)
         .into_present()
         .expect("the fallback publishes a present source");
     assert!(
@@ -332,6 +345,14 @@ defineEmits<{ save: [id: number] }>()
     let mut tampered = analysis.clone();
     tampered.events[0].payload =
         verter_type_expr::facts::SourcePosition::Present(miss_projection_source.clone());
+    tampered.events[0].publication = verter_type_expr::TypePublication::from_source_position(
+        &tampered.events[0].payload,
+        verter_type_expr::ResolutionExactness::ExactConcrete,
+        verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        std::sync::Arc::from([]),
+        None,
+        &verter_type_expr::PublicationPolicy::exact_only(),
+    );
     let err = crate::meta_resolve::projectors::build_component_meta_output(
         host, "/App.vue", tampered, None,
     )
@@ -362,12 +383,20 @@ defineEmits<{ save: [id: number] }>()
     // renders the canonical typed `Unknown`.
     let mut absent = analysis;
     absent.events[0].payload = verter_type_expr::facts::SourcePosition::unannotated();
+    absent.events[0].publication = verter_type_expr::TypePublication::from_source_position(
+        &absent.events[0].payload,
+        verter_type_expr::ResolutionExactness::ExactConcrete,
+        verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        std::sync::Arc::from([]),
+        None,
+        &verter_type_expr::PublicationPolicy::exact_only(),
+    );
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host, "/App.vue", absent, None,
     )
     .expect("a schema-ABSENT payload position must keep materializing the output");
     let (_analysis, _resolution, types) = output.into_parts();
-    let payloads = types.into_lanes().event_payloads;
+    let payloads = materialized_event_types(&types.into_lanes());
     assert_eq!(
         payloads[0],
         TypeExpr::Unknown { raw: String::new() },
@@ -376,14 +405,12 @@ defineEmits<{ save: [id: number] }>()
     );
 }
 
-/// WITHHOLD the evaluated-field match (an EMPTY `ExpandedComponentTypes`)
-/// and drive `define_emits_shape` directly: the DIRECT-AUTHORED
-/// property-style event's fallback `ty` must be its authored
+/// Drive `define_emits_shape` directly: the DIRECT-AUTHORED property-style
+/// event's complete occurrence must carry its authored
 /// macro-payload source (`Authored(MacroPayload(..))`) — NEVER the
-/// degraded Unknown leaf. This pins the exact fallback arm the
-/// evaluated-field miss takes.
+/// degraded Unknown leaf.
 #[test]
-fn authored_emit_fallback_publishes_the_macro_payload_source_without_evaluated_match() {
+fn authored_emit_occurrence_publishes_macro_payload_source() {
     let project = project_with(
         "/App.vue",
         r#"<script setup lang="ts">
@@ -396,10 +423,8 @@ defineEmits<{ save: [id: number] }>()
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(host, &view, overlay);
 
-    // Deliberately WITHHELD: no evaluated emits field for `save`.
-    let evaluated = ExpandedComponentTypes::default();
-    let shape = define_emits_shape(&ctx, "/App.vue", 0, &evaluated)
-        .expect("the authored emits macro surface resolves");
+    let shape =
+        define_emits_shape(&ctx, "/App.vue", 0).expect("the authored emits macro surface resolves");
     let save = shape
         .value
         .properties
@@ -413,8 +438,7 @@ defineEmits<{ save: [id: number] }>()
                 AuthoredBodyLocator::MacroPayload(_)
             ))
         ),
-        "with the evaluated match withheld the fallback publishes the \
-         authored macro-payload source; got {:?}",
+        "the occurrence publishes its authored macro-payload source; got {:?}",
         save.ty
     );
     assert_ne!(
@@ -428,12 +452,11 @@ defineEmits<{ save: [id: number] }>()
     );
 }
 
-/// WITHHOLD the evaluated-field match for an IMPORTED / inherited
-/// property-style event: the fallback `ty` must be the graph-native
+/// An IMPORTED / inherited property-style occurrence must carry its graph-native
 /// complete closed TUPLE source — NEVER a fabricated authored locator
 /// and NEVER the degraded Unknown leaf.
 #[test]
-fn inherited_emit_fallback_publishes_the_graph_native_source_without_evaluated_match() {
+fn inherited_emit_occurrence_publishes_graph_native_source() {
     let project = project_with(
         "/emits.ts",
         "export interface ImportedEmits { save: [id: number] }\n",
@@ -453,10 +476,8 @@ defineEmits<ImportedEmits>()
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(host, &view, overlay);
 
-    // Deliberately WITHHELD: no evaluated emits field for `save`.
-    let evaluated = ExpandedComponentTypes::default();
-    let shape = define_emits_shape(&ctx, "/App.vue", 0, &evaluated)
-        .expect("the imported emits macro surface resolves");
+    let shape =
+        define_emits_shape(&ctx, "/App.vue", 0).expect("the imported emits macro surface resolves");
     let save = shape
         .value
         .properties
@@ -468,8 +489,7 @@ defineEmits<ImportedEmits>()
             save.ty.present(),
             Some(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(_)))
         ),
-        "with the evaluated match withheld the fallback publishes the \
-         graph-native closed tuple source; got {:?}",
+        "the occurrence publishes its graph-native closed tuple source; got {:?}",
         save.ty
     );
     assert!(
@@ -509,7 +529,7 @@ defineSlots<{ default(props: { item: string }): number }>()
 
     assert_eq!(analysis.events.len(), 1);
     assert_eq!(
-        lanes.event_publications[0].materialized_type(),
+        lanes.events[0].payload.materialized_type(),
         Some(&TypeExpr::Tuple {
             elements: vec![verter_type_expr::TupleElement {
                 ty: TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
@@ -522,10 +542,7 @@ defineSlots<{ default(props: { item: string }): number }>()
         })
     );
     assert!(
-        lanes.event_publications[0]
-            .terminal_display()
-            .text()
-            .is_some(),
+        lanes.events[0].payload.terminal_display().text().is_some(),
         "terminal display is carried separately"
     );
 

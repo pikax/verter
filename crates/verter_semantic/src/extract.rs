@@ -1,4 +1,4 @@
-﻿//! Extraction of semantic facts from analysis snapshots.
+//! Extraction of semantic facts from analysis snapshots.
 //!
 //! Converts `verter_semantic::analysis` types into `verter_semantic` fact types.
 //! This is the bridge between the raw analysis layer and the semantic DB.
@@ -549,7 +549,6 @@ mod tests {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             emit_fields: vec![
                 AnalyzedEmitField {
-                    producer_identity: Default::default(),
                     name: "update".to_string(),
                     span: Span::new(10, 20),
                     payload_type: Some("[value: string]".to_string()),
@@ -559,7 +558,6 @@ mod tests {
                     payload_expr_scope: None,
                 },
                 AnalyzedEmitField {
-                    producer_identity: Default::default(),
                     name: "close".to_string(),
                     span: Span::new(30, 40),
                     payload_type: None,
@@ -765,7 +763,6 @@ mod tests {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             emit_fields: vec![
                 AnalyzedEmitField {
-                    producer_identity: Default::default(),
                     name: "change".into(),
                     span: Span::new(10, 16),
                     payload_type: Some("[val: string]".into()),
@@ -775,7 +772,6 @@ mod tests {
                     payload_expr_scope: None,
                 },
                 AnalyzedEmitField {
-                    producer_identity: Default::default(),
                     name: "submit".into(),
                     span: Span::new(20, 26),
                     payload_type: None,

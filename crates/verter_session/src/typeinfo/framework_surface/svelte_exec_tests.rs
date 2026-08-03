@@ -1229,13 +1229,13 @@ fn callback_event_payload_named_ref_resolves_on_the_component_meta_surface() {
     let select = emits
         .fields
         .iter()
-        .find(|e| e.analysis.name == "select")
+        .find(|e| e.name == "select")
         .expect("the `onselect` callback prop surfaces as event `select`");
 
     // The `select` event carries the `(row: Row)` payload tuple (rendered at
     // the terminal sink).
     assert_eq!(
-        select.analysis.payload_type.as_deref(),
+        select.payload_type.as_deref(),
         Some("[row: Row]"),
         "the `select` event carries a payload tuple"
     );
@@ -1243,7 +1243,7 @@ fn callback_event_payload_named_ref_resolves_on_the_component_meta_surface() {
     // it has no authored macro-payload position, so the published locator and
     // scope are the honest paired `None`s (`payload_type` above is display).
     assert!(
-        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        select.payload.is_none() && select.payload_expr_scope.is_none(),
         "a synthesized callback payload publishes no authored locator/scope"
     );
 
@@ -1287,17 +1287,13 @@ fn optional_callback_prop_classifies_as_event_with_precise_payload() {
         panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
-    let names: Vec<&str> = emits
-        .fields
-        .iter()
-        .map(|e| e.analysis.name.as_str())
-        .collect();
+    let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
 
     // (a) the OPTIONAL callback prop IS event `select`.
     let select = emits
         .fields
         .iter()
-        .find(|e| e.analysis.name == "select")
+        .find(|e| e.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "an OPTIONAL `onselect?:` callback prop must classify as event \
@@ -1321,12 +1317,12 @@ fn optional_callback_prop_classifies_as_event_with_precise_payload() {
     // synthesized tuple has no authored position), and `Row` resolves through
     // the graph-surface demand.
     assert_eq!(
-        select.analysis.payload_type.as_deref(),
+        select.payload_type.as_deref(),
         Some("[row: Row]"),
         "the optional callback publishes the `[row: Row]` payload display"
     );
     assert!(
-        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        select.payload.is_none() && select.payload_expr_scope.is_none(),
         "a synthesized callback payload publishes no authored locator/scope"
     );
     assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
@@ -1360,12 +1356,12 @@ fn union_with_no_callable_arm_is_not_an_event() {
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
     assert!(
-        !emits.fields.iter().any(|e| e.analysis.name == "mode"),
+        !emits.fields.iter().any(|e| e.name == "mode"),
         "an `on`-prefixed union with no callable arm must NOT be an event, got {:?}",
         emits
             .fields
             .iter()
-            .map(|e| e.analysis.name.as_str())
+            .map(|e| e.name.as_str())
             .collect::<Vec<_>>()
     );
 }
@@ -1407,7 +1403,7 @@ fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
     let select = emits
         .fields
         .iter()
-        .find(|e| e.analysis.name == "select")
+        .find(|e| e.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "an OPTIONAL alias callback prop `onselect?: Handler` must classify as \
@@ -1416,7 +1412,7 @@ fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
                 emits
                     .fields
                     .iter()
-                    .map(|e| e.analysis.name.as_str())
+                    .map(|e| e.name.as_str())
                     .collect::<Vec<_>>()
             )
         });
@@ -1424,12 +1420,12 @@ fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
     // labelled tuple, the locator/scope stay the honest paired `None`s, and
     // `Row` resolves through the graph-surface demand.
     assert_eq!(
-        select.analysis.payload_type.as_deref(),
+        select.payload_type.as_deref(),
         Some("[row: Row]"),
         "the optional alias callback publishes the `[row: Row]` payload display"
     );
     assert!(
-        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        select.payload.is_none() && select.payload_expr_scope.is_none(),
         "a synthesized callback payload publishes no authored locator/scope"
     );
     assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
@@ -1477,11 +1473,7 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
         panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
-    let names: Vec<&str> = emits
-        .fields
-        .iter()
-        .map(|e| e.analysis.name.as_str())
-        .collect();
+    let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
 
     // (a) the EXPLICIT-union callable VALUE IS event `select` (this is the
     // branch the member-`?` tests do NOT cover — they raise to a bare
@@ -1489,7 +1481,7 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
     let select = emits
         .fields
         .iter()
-        .find(|e| e.analysis.name == "select")
+        .find(|e| e.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "an EXPLICIT-union callable prop VALUE `onselect: ((row: Row) => void) | \
@@ -1508,12 +1500,12 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
     // locator/scope stay the honest paired `None`s, and `Row` resolves
     // through the graph-surface demand (member `id`).
     assert_eq!(
-        select.analysis.payload_type.as_deref(),
+        select.payload_type.as_deref(),
         Some("[row: Row]"),
         "the explicit-union callback publishes the `[row: Row]` payload display"
     );
     assert!(
-        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        select.payload.is_none() && select.payload_expr_scope.is_none(),
         "a synthesized callback payload publishes no authored locator/scope"
     );
     assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
@@ -1554,13 +1546,13 @@ fn explicit_union_with_two_distinct_callable_arms_refuses() {
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
     assert!(
-        !emits.fields.iter().any(|e| e.analysis.name == "select"),
+        !emits.fields.iter().any(|e| e.name == "select"),
         "an explicit union with TWO distinct callable arms is ambiguous and must NOT be \
              mined as an event, got {:?}",
         emits
             .fields
             .iter()
-            .map(|e| e.analysis.name.as_str())
+            .map(|e| e.name.as_str())
             .collect::<Vec<_>>()
     );
 }
@@ -1607,17 +1599,13 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
         panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
-    let names: Vec<&str> = emits
-        .fields
-        .iter()
-        .map(|e| e.analysis.name.as_str())
-        .collect();
+    let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
 
     // (a) the carrier-wrapped nullish callable alias IS event `select`.
     let select = emits
         .fields
         .iter()
-        .find(|e| e.analysis.name == "select")
+        .find(|e| e.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "a carrier-wrapped nullish callback alias `onselect: Handler` (Handler = \
@@ -1636,12 +1624,12 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
     // locator/scope stay the honest paired `None`s, and `Row` resolves
     // through the graph-surface demand (member `id`).
     assert_eq!(
-        select.analysis.payload_type.as_deref(),
+        select.payload_type.as_deref(),
         Some("[row: Row]"),
         "the carrier-nullish callback publishes the `[row: Row]` payload display"
     );
     assert!(
-        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        select.payload.is_none() && select.payload_expr_scope.is_none(),
         "a synthesized callback payload publishes no authored locator/scope"
     );
     assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");

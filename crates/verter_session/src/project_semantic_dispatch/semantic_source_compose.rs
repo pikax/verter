@@ -19,7 +19,7 @@ use super::semantic_source::{absolutize_locator, SourceRaiseContext};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     HotTypeRef, IndexKey, IndexSignature, NodeScopeId, QueryError, QueryResult, SemanticNodeData,
-    SemanticNodeId, SurfaceMember, SurfaceView, TupleElement,
+    SemanticNodeId, SurfaceEntry, SurfaceMember, SurfaceView, TupleElement,
 };
 
 impl ProjectSemanticDispatch<'_> {
@@ -193,14 +193,7 @@ impl ProjectSemanticDispatch<'_> {
                     })
                     .collect();
                 self.graph().intern_node_with_scope(
-                    SemanticNodeData::Object(SurfaceView {
-                        members: Arc::from(members.into_boxed_slice()),
-                        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                        keyspace: None,
-                        has_index_signature: false,
-                    }),
+                    SemanticNodeData::Object(SurfaceView::from_members(members, None)),
                     scope.clone(),
                 )
             }
@@ -239,14 +232,7 @@ impl ProjectSemanticDispatch<'_> {
                     })
                     .collect();
                 HotTypeRef::new(self.graph().intern_node_with_scope(
-                    SemanticNodeData::Object(SurfaceView {
-                        members: Arc::from(members.into_boxed_slice()),
-                        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                        keyspace: None,
-                        has_index_signature: false,
-                    }),
+                    SemanticNodeData::Object(SurfaceView::from_members(members, None)),
                     scope,
                 ))
             }
@@ -287,31 +273,34 @@ impl ProjectSemanticDispatch<'_> {
         ctx: &SourceRaiseContext<'_>,
     ) -> HotTypeRef {
         let scope = self.raise_scope(ctx);
-        let mut members: Vec<SurfaceMember> = Vec::new();
-        let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
-        let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
-        let mut index_signatures: Vec<IndexSignature> = Vec::new();
+        let mut entries = Vec::with_capacity(object.members.len());
+        let mut call_ordinal = 0_u32;
+        let mut construct_ordinal = 0_u32;
+        let mut index_ordinal = 0_u32;
         for member in object.members.iter() {
             match member {
-                ObjectMemberFact::Property(property) => members.push(SurfaceMember {
-                    name: Arc::from(property.name.as_str()),
-                    value: self.raise_required_interior(
-                        ctx,
-                        &scope,
-                        crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
-                            property.name.as_str(),
-                        )),
-                        || self.raise_body_slot(&property.ty, ctx.scope_canonical_id),
-                    ),
-                    optional: property.optional,
-                    readonly: property.readonly,
-                    is_method: false,
-                    visibility: property.visibility,
-                    spans: verter_type_expr::MemberSpans::default(),
-                    declaration_origin: scope.canonical_file(),
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                }),
+                ObjectMemberFact::Property(property) => {
+                    entries.push(SurfaceEntry::Member(SurfaceMember {
+                        name: Arc::from(property.name.as_str()),
+                        value: self.raise_required_interior(
+                            ctx,
+                            &scope,
+                            crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
+                                property.name.as_str(),
+                            )),
+                            || self.raise_body_slot(&property.ty, ctx.scope_canonical_id),
+                        ),
+                        optional: property.optional,
+                        readonly: property.readonly,
+                        is_method: false,
+                        visibility: property.visibility,
+                        spans: verter_type_expr::MemberSpans::default(),
+                        declaration_origin: scope.canonical_file(),
+                        declared_in_macro_type_arg:
+                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    }))
+                }
                 ObjectMemberFact::Method(method) => {
                     let value = ctx.with_interior_step(
                         crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
@@ -319,7 +308,7 @@ impl ProjectSemanticDispatch<'_> {
                         )),
                         || self.compose_function_fact_node(&method.function, ctx, false),
                     );
-                    members.push(SurfaceMember {
+                    entries.push(SurfaceEntry::Member(SurfaceMember {
                         name: Arc::from(method.name.as_str()),
                         value: value.node(),
                         optional: method.optional,
@@ -331,31 +320,34 @@ impl ProjectSemanticDispatch<'_> {
                         declared_in_macro_type_arg:
                             crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                         merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                    });
+                    }));
                 }
                 ObjectMemberFact::CallSignature(signature) => {
-                    let ordinal = call_signatures.len() as u32;
-                    call_signatures.push(
+                    let ordinal = call_ordinal;
+                    call_ordinal += 1;
+                    entries.push(SurfaceEntry::CallSignature(
                         ctx.with_interior_step(
                             crate::meta_resolve::InteriorSourceStep::CallSignature { ordinal },
                             || self.compose_function_fact_node(signature, ctx, false),
                         )
                         .node(),
-                    );
+                    ));
                 }
                 ObjectMemberFact::ConstructSignature(signature) => {
-                    let ordinal = construct_signatures.len() as u32;
-                    construct_signatures.push(
+                    let ordinal = construct_ordinal;
+                    construct_ordinal += 1;
+                    entries.push(SurfaceEntry::ConstructSignature(
                         ctx.with_interior_step(
                             crate::meta_resolve::InteriorSourceStep::ConstructSignature { ordinal },
                             || self.compose_function_fact_node(signature, ctx, false),
                         )
                         .node(),
-                    );
+                    ));
                 }
                 ObjectMemberFact::IndexSignature(signature) => {
-                    let ordinal = index_signatures.len() as u32;
-                    index_signatures.push(IndexSignature {
+                    let ordinal = index_ordinal;
+                    index_ordinal += 1;
+                    entries.push(SurfaceEntry::IndexSignature(IndexSignature {
                         key_type: ctx.with_interior_step(
                             crate::meta_resolve::InteriorSourceStep::IndexSignatureKey { ordinal },
                             || self.raise_key_type_shape(&signature.key_type, ctx, &scope),
@@ -371,20 +363,17 @@ impl ProjectSemanticDispatch<'_> {
                         readonly: signature.readonly,
                         spans: verter_type_expr::IndexSignatureSpans::default(),
                         declaration_origin: scope.canonical_file(),
-                    });
+                    }));
                 }
             }
         }
-        let has_index_signature = !index_signatures.is_empty();
+        let has_index_signature = index_ordinal != 0;
         HotTypeRef::new(self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView {
-                members: Arc::from(members.into_boxed_slice()),
-                call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-                construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-                index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-                keyspace: None,
+            SemanticNodeData::Object(SurfaceView::from_entries(
+                entries,
+                None,
                 has_index_signature,
-            }),
+            )),
             scope,
         ))
     }
@@ -472,15 +461,27 @@ impl ProjectSemanticDispatch<'_> {
             })
             .collect();
         let has_index_signature = surface.has_index_signature || !index_signatures.is_empty();
+        let entries = members
+            .into_iter()
+            .map(SurfaceEntry::Member)
+            .chain(call_signatures.into_iter().map(SurfaceEntry::CallSignature))
+            .chain(
+                construct_signatures
+                    .into_iter()
+                    .map(SurfaceEntry::ConstructSignature),
+            )
+            .chain(
+                index_signatures
+                    .into_iter()
+                    .map(SurfaceEntry::IndexSignature),
+            )
+            .collect();
         HotTypeRef::new(self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView {
-                members: Arc::from(members.into_boxed_slice()),
-                call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-                construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-                index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-                keyspace: None,
+            SemanticNodeData::Object(SurfaceView::from_entries(
+                entries,
+                None,
                 has_index_signature,
-            }),
+            )),
             scope,
         ))
     }

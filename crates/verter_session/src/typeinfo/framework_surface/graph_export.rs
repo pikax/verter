@@ -642,7 +642,7 @@ fn encode_kind_members(
             .emit_fields()
             .iter()
             .map(|f| {
-                let name_id = arena.strings.intern(&f.analysis.name);
+                let name_id = arena.strings.intern(&f.name);
                 // An emit's typed payload is an on-demand LOCATOR
                 // (`AnalyzedEmitField.payload`) — zero-dispatch encoder, so
                 // the value takes the absent/opaque arm (see props above).

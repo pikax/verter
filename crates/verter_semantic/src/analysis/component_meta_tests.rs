@@ -209,11 +209,46 @@ fn resolved_emit_input(
             )
         })
         .unwrap_or_else(verter_type_expr::facts::SourcePosition::unannotated);
+    let payload_publication = publication_from_position(
+        &payload_source,
+        None,
+        authored_type_evidence(field.payload.as_ref(), field.payload_type.as_deref()),
+        ResolutionProvenance::FrameworkSurface,
+    );
     crate::analysis::component_meta::ResolvedEmitInput {
-        field,
+        id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
+            verter_type_expr::facts::CallableOccurrenceHandle::member(
+                0,
+                Arc::from([field.name.clone()]),
+            ),
+            0,
+        ),
+        name: field.name,
+        span: field.span,
+        payload_type: field.payload_type,
+        payload: field.payload,
+        payload_expr_scope: field.payload_expr_scope,
+        description: field.description,
+        tags: field.tags,
         payload_source,
+        payload_publication,
         return_publication: None,
         return_publication_scope: None,
+    }
+}
+
+fn resolved_emit_macro_input(
+    macro_index: usize,
+    fields: &[crate::analysis::types::AnalyzedEmitField],
+) -> crate::analysis::component_meta::ResolvedMacroInput {
+    crate::analysis::component_meta::ResolvedMacroInput {
+        macro_index,
+        props: Vec::new(),
+        emits: fields.iter().cloned().map(resolved_emit_input).collect(),
+        slots: Vec::new(),
+        slot_return_publications: Vec::new(),
+        exposed: Vec::new(),
+        default_keys: Vec::new(),
     }
 }
 
@@ -689,7 +724,6 @@ fn extracts_events_from_define_emits() {
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![
             crate::analysis::types::AnalyzedEmitField {
-                producer_identity: Default::default(),
                 name: "change".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[value: string]".to_string()),
@@ -699,7 +733,6 @@ fn extracts_events_from_define_emits() {
                 payload_expr_scope: lower_for_test(Some("[value: string]")).1,
             },
             crate::analysis::types::AnalyzedEmitField {
-                producer_identity: Default::default(),
                 name: "close".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: None,
@@ -712,7 +745,10 @@ fn extracts_events_from_define_emits() {
         ..make_define_props(vec![])
     }];
 
-    let result = extract_component_meta(empty_input(&macros));
+    let resolved_macros = vec![resolved_emit_macro_input(0, &macros[0].emit_fields)];
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
+    let result = extract_component_meta(input);
 
     assert_eq!(result.events.len(), 2, "should extract 2 events");
     assert_eq!(result.events[0].name, "change");
@@ -728,11 +764,10 @@ fn extracts_events_from_define_emits() {
 }
 
 #[test]
-fn define_emits_eval_supplements_local_tuple_property_events() {
+fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
-            producer_identity: Default::default(),
             name: "update:searchTerm".to_string(),
             span: verter_span::Span::default(),
             payload_type: Some("[value: string]".to_string()),
@@ -749,7 +784,6 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
         props: Vec::new(),
         emits: vec![
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
-                producer_identity: Default::default(),
                 name: "escapeKeyDown".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
@@ -759,7 +793,6 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                 payload_expr_scope: lower_for_test(Some("[event: KeyboardEvent]")).1,
             }),
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
-                producer_identity: Default::default(),
                 name: "closeAutoFocus".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[event: Event]".to_string()),
@@ -838,22 +871,10 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
         .map(|event| event.name.as_str())
         .collect();
 
-    assert!(
-        event_names.contains(&"escapeKeyDown")
-            && event_names.contains(&"closeAutoFocus")
-            && event_names.contains(&"update:searchTerm"),
-        "resolved inherited emits plus a local tuple-property event should survive analysis extraction: {:?}",
-        event_names
-    );
-    let local = result
-        .events
-        .iter()
-        .find(|event| event.name == "update:searchTerm")
-        .expect("local tuple-property event should be present");
     assert_eq!(
-        local.raw_signature.as_deref(),
-        Some("[value: string]"),
-        "local tuple-property events should preserve raw signature metadata"
+        event_names,
+        ["escapeKeyDown", "closeAutoFocus"],
+        "only canonical resolver occurrences define typed event membership"
     );
 }
 
@@ -869,7 +890,6 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
         props: Vec::new(),
         emits: vec![
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
-                producer_identity: Default::default(),
                 name: "escapeKeyDown".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
@@ -879,7 +899,6 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                 payload_expr_scope: lower_for_test(Some("[event: KeyboardEvent]")).1,
             }),
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
-                producer_identity: Default::default(),
                 name: "closeAutoFocus".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[]".to_string()),
@@ -2280,7 +2299,6 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
-            producer_identity: Default::default(),
             name: "update:modelValue".to_string(),
             span: verter_span::Span::default(),
             payload_type: Some(
@@ -2316,7 +2334,9 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
         bindings: Vec::new(),
     };
 
+    let resolved_macros = vec![resolved_emit_macro_input(0, &macros[0].emit_fields)];
     let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
     input.evaluated_types = Some(&evaluated);
 
     let result = extract_component_meta(input);
@@ -2343,7 +2363,6 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineEmits,
             emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
-                producer_identity: Default::default(),
                 name: "update:modelValue".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some(
@@ -2414,7 +2433,9 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
         bindings: Vec::new(),
     };
 
+    let resolved_macros = vec![resolved_emit_macro_input(1, &macros[1].emit_fields)];
     let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
     input.evaluated_types = Some(&evaluated);
 
     let result = extract_component_meta(input);
@@ -2435,7 +2456,6 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
-            producer_identity: Default::default(),
             name: "update:modelValue".to_string(),
             span: verter_span::Span::default(),
             payload_type: Some("[date: CalendarModelValue<R, M>]".to_string()),
@@ -2472,7 +2492,9 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
         bindings: Vec::new(),
     };
 
+    let resolved_macros = vec![resolved_emit_macro_input(0, &macros[0].emit_fields)];
     let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
     input.evaluated_types = Some(&evaluated);
 
     let result = extract_component_meta(input);
@@ -3236,7 +3258,6 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
         ))],
         emits: vec![
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
-                producer_identity: Default::default(),
                 name: "save".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[value: string]".to_string()),
@@ -3246,7 +3267,6 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
                 tags: Vec::new(),
             }),
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
-                producer_identity: Default::default(),
                 name: "save".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[index?: number]".to_string()),
@@ -4860,7 +4880,7 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
 }
 
 #[test]
-fn define_emits_call_signature_events_get_empty_diagnostics_not_global_clones() {
+fn define_emits_evaluator_call_signatures_do_not_create_event_occurrences() {
     // Setup: defineEmits with call-signature style (e.g. (e: 'change', value: string) => void)
     // with 2 diagnostics: one global (property_name=None), one for property "change"
     let macros = vec![AnalyzedMacro {
@@ -4947,39 +4967,9 @@ fn define_emits_call_signature_events_get_empty_diagnostics_not_global_clones() 
         crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded
     );
 
-    // --- call-signature event "change" should have empty diagnostics ---
-    let change_event = result
-        .events
-        .iter()
-        .find(|e| e.name == "change")
-        .expect("change event should be extracted from call signature");
-    let change_expansion = change_event
-        .payload_expansion
-        .as_ref()
-        .expect("change event should have payload_expansion metadata");
     assert!(
-        change_expansion.diagnostics.is_empty(),
-        "call-signature events must get empty diagnostics, not cloned macro-wide diagnostics; \
-         found {} diagnostics: {:?}",
-        change_expansion.diagnostics.len(),
-        change_expansion.diagnostics
-    );
-    // Negative: must not contain the global BudgetExceeded diagnostic
-    assert!(
-        !change_expansion
-            .diagnostics
-            .iter()
-            .any(|d| d.reason == crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded),
-        "call-signature event diagnostics must NOT contain the global BudgetExceeded diagnostic"
-    );
-    // Negative: must not contain the per-property "change" diagnostic either
-    // (call-signature events always get empty diagnostics)
-    assert!(
-        !change_expansion
-            .diagnostics
-            .iter()
-            .any(|d| d.property_name.as_deref() == Some("change")),
-        "call-signature event diagnostics must NOT contain per-property diagnostics"
+        result.events.is_empty(),
+        "evaluator call signatures are diagnostics only and cannot create typed event membership"
     );
 }
 

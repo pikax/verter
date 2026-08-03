@@ -783,7 +783,6 @@ mod unused_declaration_population {
 
     fn emit_field(name: &str, start: u32) -> AnalyzedEmitField {
         AnalyzedEmitField {
-            producer_identity: Default::default(),
             name: name.to_string(),
             span: verter_span::Span::new(start, start + name.len() as u32),
             payload_type: None,

@@ -218,13 +218,12 @@ carrier + shared nested union arm.
 
 CLOSED (amendment): steps 1–6 landed (the leaf-union closure), and the two
 residual REQUIRED-payload classes the leaf-union cut could not express landed
-after it — the projected CALLABLE-PARAMS replay route
-(`ProjectedTypeFact::CallableParams { base, signature_ordinal, first_param }`,
-raised by `raise_projected_callable_params` through the one shared dispatch)
-covers call-signature payload params richer than the closed element vocabulary
+after it — the exact callable-occurrence replay route
+(`ProjectedTypeFact::CallableOccurrence`, raised through the one shared
+dispatch) covers call-signature payload params richer than the closed element vocabulary
 (cross-file references, composites, nested objects, arrays/callbacks,
 instantiated generics), and `define_emits_shape` publishes the normalized
-`ResolvedEmitField.payload_source` as the SOLE emit payload authority (the
+`ResolvedEmitOccurrence.payload_source` as the SOLE emit payload authority (the
 flat evaluated field contributes exactness/status/diagnostics metadata only;
 the flat-lane REQUIRED-payload residue arm is deleted). Closure evidence and
 the executable rails live on `docs/arch/stage10-b6-p4b-debt-rows.md` DEBT ROW

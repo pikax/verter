@@ -73,7 +73,10 @@
 ///   module-augmentation contributors. Version `3` entries lack the owner
 ///   discriminator and must fail closed rather than alias module and instance
 ///   declarations with the same spelling.
-pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 4;
+/// - `5` — canonical resolved emit occurrences and occurrence-based callable
+///   replay. Version `4` entries can carry ordinal/parallel-lane associations
+///   and must fail closed.
+pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 5;
 
 /// Trait surface every participating Db implements. The implementation is a
 /// trivial getter — the reason it exists at all is so the architecture-guard

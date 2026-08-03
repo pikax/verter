@@ -14,6 +14,41 @@ fn published_type(
         .expect("publication must carry a materialized type")
 }
 
+fn materialized_event_types(
+    lanes: &crate::meta_resolve::MaterializedComponentMetaTypeLanes,
+) -> Vec<TypeExpr> {
+    lanes
+        .events
+        .iter()
+        .map(|occurrence| published_type(&occurrence.payload).clone())
+        .collect()
+}
+
+fn event_occurrence_publications(
+    lanes: &crate::meta_resolve::MaterializedComponentMetaTypeLanes,
+) -> Vec<crate::meta_resolve::MaterializedTypePublication> {
+    lanes
+        .events
+        .iter()
+        .map(|occurrence| occurrence.payload.clone())
+        .collect()
+}
+
+fn replace_event_payload(
+    event: &mut verter_semantic::analysis::component_meta::EventAnalysis,
+    payload: verter_type_expr::facts::SourcePosition,
+) {
+    event.payload = payload;
+    event.publication = verter_type_expr::TypePublication::from_source_position(
+        &event.payload,
+        verter_type_expr::ResolutionExactness::ExactConcrete,
+        verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        Arc::from([]),
+        None,
+        &verter_type_expr::PublicationPolicy::exact_only(),
+    );
+}
+
 fn prop_terminal_display(project: &MetaProject, owner: &str, prop_name: &str) -> Option<String> {
     let (analysis, _resolution, types) = project
         .host()
@@ -26685,7 +26720,7 @@ defineEmits<{ change: [value: number] }>()
         "fixture premise: the authored tuple payload must publish a typed source"
     );
 
-    let payloads = types.into_lanes().event_payloads;
+    let payloads = materialized_event_types(&types.into_lanes());
     assert_eq!(
         payloads.len(),
         1,
@@ -26732,7 +26767,7 @@ defineEmits(['ping'])
         analysis.events[0].payload
     );
 
-    let payloads = types.into_lanes().event_payloads;
+    let payloads = materialized_event_types(&types.into_lanes());
     assert_eq!(
         payloads.len(),
         1,
@@ -26784,7 +26819,7 @@ defineEmits<{ change: [value: number]; close: [] }>()
     )
     .expect("the untampered analysis must materialize");
     let (_a, _r, ok_types) = ok.into_parts();
-    assert_eq!(ok_types.into_lanes().event_payloads.len(), 2);
+    assert_eq!(materialized_event_types(&ok_types.into_lanes()).len(), 2);
 
     // A present-but-unraisable source: an authored macro-payload locator
     // addressing a macro ordinal that does not exist in the owner — the
@@ -26804,8 +26839,10 @@ defineEmits<{ change: [value: number]; close: [] }>()
         ),
     );
     let mut tampered = analysis;
-    tampered.events[1].payload =
-        verter_type_expr::facts::SourcePosition::Present(bad_source.clone());
+    replace_event_payload(
+        &mut tampered.events[1],
+        verter_type_expr::facts::SourcePosition::Present(bad_source.clone()),
+    );
 
     let err = crate::meta_resolve::projectors::build_component_meta_output(
         host, "/App.vue", tampered, None,
@@ -26910,7 +26947,7 @@ defineEmits<{ (event: 'change', value: number): boolean }>()
 /// distinct positional rows — a name-keyed output would collapse the two
 /// `dup` rows (len 3, not 4) and lose alignment.
 #[test]
-fn component_meta_output_event_payloads_align_positionally_with_duplicate_names() {
+fn component_meta_output_event_occurrences_preserve_duplicate_names() {
     let project = make_project();
     project
         .upsert_base(
@@ -26937,7 +26974,7 @@ defineEmits<{ first: [id: number]; dup: [a: string]; dup: [b: boolean]; last: []
     );
 
     let lanes = types.into_lanes();
-    let payloads = &lanes.event_payloads;
+    let payloads = &materialized_event_types(&lanes);
     assert_eq!(
         payloads.len(),
         4,
@@ -26969,16 +27006,16 @@ defineEmits<{ first: [id: number]; dup: [a: string]; dup: [b: boolean]; last: []
         payloads[3]
     );
     assert_eq!(
-        lanes.event_publications.len(),
+        event_occurrence_publications(&lanes).len(),
         4,
         "the A1 publication lane aligns 1:1 with duplicate event rows"
     );
     assert_eq!(
-        published_type(&lanes.event_publications[1]),
+        published_type(&event_occurrence_publications(&lanes)[1]),
         &labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))])
     );
     assert_eq!(
-        published_type(&lanes.event_publications[2]),
+        published_type(&event_occurrence_publications(&lanes)[2]),
         &labeled_tuple(&[("b", TypeExpr::Primitive(PrimitiveName::Boolean))])
     );
 }
@@ -27141,7 +27178,10 @@ const cond = true
     );
 
     // ── Lane 2: event payloads (DUPLICATE names preserved positionally). ──
-    assert_eq!(analysis.events.len(), lanes.event_payloads.len());
+    assert_eq!(
+        analysis.events.len(),
+        materialized_event_types(&lanes).len()
+    );
     let event_names: Vec<&str> = analysis.events.iter().map(|e| e.name.as_str()).collect();
     let dup_positions: Vec<usize> = event_names
         .iter()
@@ -27156,11 +27196,11 @@ const cond = true
     // Both authored `dup` overloads survive positionally with their distinct
     // payload sources.
     assert_eq!(
-        lanes.event_payloads[dup_positions[0]],
+        materialized_event_types(&lanes)[dup_positions[0]],
         labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))]),
     );
     assert_eq!(
-        lanes.event_payloads[dup_positions[1]],
+        materialized_event_types(&lanes)[dup_positions[1]],
         labeled_tuple(&[("b", TypeExpr::Primitive(PrimitiveName::Boolean))]),
         "the second duplicate row transports its own authored payload"
     );
@@ -27168,21 +27208,21 @@ const cond = true
     // positional swap moves it onto a `dup` row.
     let first_event = event_names.iter().position(|n| *n == "first").unwrap();
     assert_eq!(
-        lanes.event_payloads[first_event],
+        materialized_event_types(&lanes)[first_event],
         labeled_tuple(&[("id", TypeExpr::Primitive(PrimitiveName::Number))]),
         "the distinct event keeps its own positional payload"
     );
     assert_eq!(
         analysis.events.len(),
-        lanes.event_publications.len(),
+        event_occurrence_publications(&lanes).len(),
         "A1 event publications are positionally aligned"
     );
     assert_eq!(
-        published_type(&lanes.event_publications[dup_positions[0]]),
+        published_type(&event_occurrence_publications(&lanes)[dup_positions[0]]),
         &labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))])
     );
     assert_eq!(
-        published_type(&lanes.event_publications[dup_positions[1]]),
+        published_type(&event_occurrence_publications(&lanes)[dup_positions[1]]),
         &labeled_tuple(&[("b", TypeExpr::Primitive(PrimitiveName::Boolean))])
     );
 
@@ -27893,7 +27933,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
         &unknown,
         "props None-policy golden"
     );
-    assert_eq!(lanes.event_payloads, vec![unknown.clone()]);
+    assert_eq!(materialized_event_types(&lanes), vec![unknown.clone()]);
     assert_eq!(published_type(&lanes.slot_bindings[0][0]), &unknown);
     assert_eq!(lanes.models, vec![unknown.clone()]);
     assert_eq!(lanes.exposed, vec![unknown.clone()]);
@@ -29130,7 +29170,10 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
         lanes.props[0], lanes.props[1],
         "deduped slots share the value"
     );
-    assert_eq!(published_type(&lanes.props[0]), &lanes.event_payloads[0]);
+    assert_eq!(
+        published_type(&lanes.props[0]),
+        &materialized_event_types(&lanes)[0]
+    );
 }
 
 /// REQUEST-LOCAL MEMO WORK canary: for a LARGE source repeated across
@@ -29466,9 +29509,8 @@ fn output_registry_overlay_finalize_replaces_in_place_and_appends() {
 
 /// A CROSS-FILE call-signature emit (`defineEmits<Events>()` over an
 /// imported `Events { (e: 'save', value: Row): void }`) publishes the REAL
-/// payload tuple: the normalized row mints the projected CALLABLE-PARAMS
-/// replay route (the macro's stamped type-argument base + the signature's
-/// surface ordinal), output materialization replays it through the one
+/// payload tuple: the normalized row mints an exact callable-occurrence
+/// replay route, output materialization replays it through the one
 /// shared dispatch, and the published payload is `[value: Row]` — the
 /// shallow named reference a consumer re-resolves on demand. The result is
 /// a COMPLETE success (warm-admissible). The pre-fix behavior was the typed
@@ -29506,23 +29548,28 @@ defineEmits<Events>()
         .iter()
         .position(|event| event.name == "save")
         .expect("the save event publishes");
-    // The published source is the projected CALLABLE-PARAMS replay route —
+    // The published source is the projected callable-occurrence replay route —
     // never a fabricated closed fact and never a failure.
     assert!(
         matches!(
             analysis.events[save].payload.present(),
             Some(verter_type_expr::facts::SemanticTypeSource::Projected(
-                verter_type_expr::facts::ProjectedTypeFact::CallableParams { first_param: 1, .. }
+                verter_type_expr::facts::ProjectedTypeFact::CallableOccurrence {
+                    projection: verter_type_expr::facts::CallableOccurrenceProjection::Parameters {
+                        first_param: 1,
+                    },
+                    ..
+                }
             ))
         ),
-        "the cross-file call-signature payload publishes the CallableParams \
+        "the cross-file call-signature payload publishes the callable-occurrence \
          replay source, got {:?}",
         analysis.events[save].payload
     );
-    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+    let TypeExpr::Tuple { elements, .. } = &materialized_event_types(&lanes)[save] else {
         panic!(
             "the replayed payload tuple renders; got {:?}",
-            lanes.event_payloads[save]
+            materialized_event_types(&lanes)[save]
         );
     };
     assert_eq!(elements.len(), 1, "one post-event-name payload param");
@@ -29602,7 +29649,7 @@ fn imported_property_style_emit_payload_matches_the_local_control() {
             .iter()
             .position(|event| event.name == "save")
             .expect("the save event publishes");
-        lanes.event_payloads[save].clone()
+        materialized_event_types(&lanes)[save].clone()
     };
 
     // The IMPORTED property-style emit.
@@ -29658,7 +29705,7 @@ defineEmits<{ save: [id: number] }>()
     );
 }
 
-/// SESSION-OVERLAY parity for the CALLABLE-PARAMS replay: the same
+/// SESSION-OVERLAY parity for the callable-occurrence replay: the same
 /// cross-file call-signature emit resolved through a SESSION (overlay
 /// upserts + the fixed-view output path — the flow the native bindings
 /// drive) publishes the same real payload tuple as the base-host scalar.
@@ -29732,10 +29779,10 @@ defineEmits<Events>()
         .iter()
         .position(|event| event.name == "save")
         .expect("the save event publishes");
-    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+    let TypeExpr::Tuple { elements, .. } = &materialized_event_types(&lanes)[save] else {
         panic!(
             "the replayed payload tuple renders under the session view; got {:?}",
-            lanes.event_payloads[save]
+            materialized_event_types(&lanes)[save]
         );
     };
     assert_eq!(elements.len(), 1);
@@ -29749,7 +29796,7 @@ defineEmits<Events>()
 }
 
 /// A COMPOSITE call-signature emit param (`value: A | B`) publishes the real
-/// union payload through the CALLABLE-PARAMS replay: every arm is present in
+/// union payload through the callable-occurrence replay: every arm is present in
 /// the rendered tuple (order preserved), never a collapsed or fabricated
 /// value.
 #[test]
@@ -29784,10 +29831,10 @@ defineEmits<Events>()
         .iter()
         .position(|event| event.name == "save")
         .expect("the save event publishes");
-    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+    let TypeExpr::Tuple { elements, .. } = &materialized_event_types(&lanes)[save] else {
         panic!(
             "the replayed payload tuple renders; got {:?}",
-            lanes.event_payloads[save]
+            materialized_event_types(&lanes)[save]
         );
     };
     assert_eq!(elements.len(), 1);
@@ -29849,10 +29896,10 @@ defineEmits<Events>()
         .iter()
         .position(|event| event.name == "save")
         .expect("the save event publishes");
-    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+    let TypeExpr::Tuple { elements, .. } = &materialized_event_types(&lanes)[save] else {
         panic!(
             "the replayed payload tuple renders; got {:?}",
-            lanes.event_payloads[save]
+            materialized_event_types(&lanes)[save]
         );
     };
     assert_eq!(elements.len(), 1);
@@ -29925,7 +29972,7 @@ defineEmits<Events>()
 
 /// A RICH call-signature emit — an optional generic-instantiated param plus
 /// a rest array param — preserves labels, optionality, rest, ORDER, and the
-/// generic substitution through the CALLABLE-PARAMS replay.
+/// generic substitution through the callable-occurrence replay.
 #[test]
 fn rich_call_signature_emit_payload_preserves_labels_optionality_rest_and_substitutions() {
     let project = make_project();
@@ -29958,10 +30005,10 @@ defineEmits<Events>()
         .iter()
         .position(|event| event.name == "save")
         .expect("the save event publishes");
-    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+    let TypeExpr::Tuple { elements, .. } = &materialized_event_types(&lanes)[save] else {
         panic!(
             "the replayed payload tuple renders; got {:?}",
-            lanes.event_payloads[save]
+            materialized_event_types(&lanes)[save]
         );
     };
     assert_eq!(
@@ -30033,10 +30080,10 @@ fn call_signature_emit_with_unresolved_param_stays_a_complete_carrier() {
             .position(|event| event.name == "save")
             .expect("the save event publishes");
         let lanes = types.into_lanes();
-        let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+        let TypeExpr::Tuple { elements, .. } = &materialized_event_types(&lanes)[save] else {
             panic!(
                 "the callable payload must remain a tuple carrier; got {:?}",
-                lanes.event_payloads[save]
+                materialized_event_types(&lanes)[save]
             );
         };
         assert_eq!(elements.len(), 1);
@@ -30123,10 +30170,10 @@ defineEmits<{ (e: 'save', value: unknown): void }>()
         .iter()
         .position(|event| event.name == "save")
         .expect("the save event publishes");
-    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+    let TypeExpr::Tuple { elements, .. } = &materialized_event_types(&lanes)[save] else {
         panic!(
             "the authored payload tuple renders; got {:?}",
-            lanes.event_payloads[save]
+            materialized_event_types(&lanes)[save]
         );
     };
     assert_eq!(elements.len(), 1);
@@ -30188,7 +30235,7 @@ defineEmits(['save'])
         .position(|event| event.name == "save")
         .expect("the save event publishes");
     assert_eq!(
-        lanes.event_payloads[save],
+        materialized_event_types(&lanes)[save],
         TypeExpr::Unknown { raw: String::new() },
         "the unannotated position renders the centralized typed unknown"
     );
@@ -30232,10 +30279,10 @@ defineEmits<{ (e: 'save', value: Row): void }>()
         .iter()
         .position(|event| event.name == "save")
         .expect("the save event publishes");
-    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+    let TypeExpr::Tuple { elements, .. } = &materialized_event_types(&lanes)[save] else {
         panic!(
             "the authored payload tuple renders; got {:?}",
-            lanes.event_payloads[save]
+            materialized_event_types(&lanes)[save]
         );
     };
     assert_eq!(elements.len(), 1);
@@ -30247,15 +30294,12 @@ defineEmits<{ (e: 'save', value: Row): void }>()
     );
 }
 
-/// EXHAUSTIVE-arm coverage for the output lane-slot materializer, driven
-/// through the terminal envelope builder over a POPULATED production
-/// analysis: an `Absent` position renders the centralized typed `Unknown`
-/// and completes; a `Present` position materializes its source; a `Failed`
-/// position FAILS the output immediately with the typed
-/// `RequiredSourceUnavailable` error carrying the exact lane, index, and
-/// failed position.
+/// EXHAUSTIVE-arm coverage for one occurrence-owned event publication:
+/// `Absent` renders centralized `Unknown`, `Present` materializes its source,
+/// and `Failed` produces a typed unsupported public contract at that exact
+/// occurrence.
 #[test]
-fn output_lane_slot_decides_absent_present_and_failed_arms_exhaustively() {
+fn output_event_occurrence_decides_absent_present_and_failed_arms_exhaustively() {
     let project = make_project();
     project
         .upsert_base(
@@ -30281,51 +30325,67 @@ defineEmits<{ save: [id: number] }>()
     )
     .expect("a present source materializes");
     let (_analysis, _resolution, types) = output.into_parts();
-    let TypeExpr::Tuple { .. } = &types.into_lanes().event_payloads[0] else {
+    let TypeExpr::Tuple { .. } = &materialized_event_types(&types.into_lanes())[0] else {
         panic!("the present payload source materializes the authored tuple");
     };
 
     // ABSENT arm: a proven schema absence renders the centralized typed
     // `Unknown` and COMPLETES — absence is never a failure.
     let mut absent = analysis.clone();
-    absent.events[0].payload = verter_type_expr::facts::SourcePosition::unannotated();
+    replace_event_payload(
+        &mut absent.events[0],
+        verter_type_expr::facts::SourcePosition::unannotated(),
+    );
     let output = crate::meta_resolve::projectors::build_component_meta_output(
         host, "/App.vue", absent, None,
     )
     .expect("schema absence keeps materializing the output");
     let (_analysis, _resolution, types) = output.into_parts();
     assert_eq!(
-        types.into_lanes().event_payloads[0],
+        materialized_event_types(&types.into_lanes())[0],
         TypeExpr::Unknown { raw: String::new() },
         "the absent position renders the centralized typed Unknown"
     );
 
-    // FAILED arm: a typed source-construction failure FAILS the output with
-    // the exact lane, index, position, and failure class.
+    // FAILED arm: the complete occurrence remains in the output envelope and
+    // fails the public contract closed at its exact event-overload position.
     let mut failed = analysis;
-    failed.events[0].payload = verter_type_expr::facts::SourcePosition::Failed(
-        verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
-    );
-    let err = crate::meta_resolve::projectors::build_component_meta_output(
-        host, "/App.vue", failed, None,
-    )
-    .expect_err("a failed required position must FAIL the output");
-    assert_eq!(
-        err.lane,
-        crate::meta_resolve::ComponentMetaOutputLane::EventPayload
-    );
-    assert_eq!(err.index, 0);
-    assert_eq!(err.inner_index, None);
-    assert_eq!(
-        *err.position,
+    replace_event_payload(
+        &mut failed.events[0],
         verter_type_expr::facts::SourcePosition::Failed(
             verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
         ),
     );
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", failed, None,
+    )
+    .expect("a typed failed publication remains an occurrence-owned output row");
+    let (_analysis, _resolution, types, contract) = output.into_parts_with_contract();
+    let lanes = types.into_lanes();
+    assert!(matches!(
+        lanes.events[0].payload.publication(),
+        verter_type_expr::PublicationResult::Failed {
+            failure: verter_type_expr::TypedResolutionFailure::SourceConstruction(
+                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload
+            ),
+            provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        }
+    ));
+    assert!(lanes.events[0].payload.materialized_type().is_none());
+    let crate::framework::ComponentContractAvailability::Unsupported(unsupported) = contract else {
+        panic!("a failed event occurrence must fail the public contract closed");
+    };
     assert_eq!(
-        err.failure,
-        crate::meta_resolve::ComponentMetaOutputFailure::RequiredSourceUnavailable {
-            failure: verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+        unsupported.reason,
+        crate::framework::ComponentContractUnsupportedReason::PublicationFailed {
+            surface: crate::framework::ContractSurface::Event {
+                name: Arc::from("save"),
+                overload_index: 0,
+            },
+            failure: verter_type_expr::TypedResolutionFailure::SourceConstruction(
+                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+            ),
+            provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
         },
     );
 }
@@ -30726,10 +30786,10 @@ defineEmits<{ save: [id: number] } & BadEmits>()
         .position(|event| event.name == "save")
         .expect("save event publishes");
     let lanes = types.into_lanes();
-    let TypeExpr::Intersection(arms) = &lanes.event_payloads[index] else {
+    let TypeExpr::Intersection(arms) = &materialized_event_types(&lanes)[index] else {
         panic!(
             "the merged payload preserves both contributors; got {:?}",
-            lanes.event_payloads[index]
+            materialized_event_types(&lanes)[index]
         );
     };
     assert!(
@@ -30849,7 +30909,7 @@ defineEmits<BadEmits>()
         .expect("save event publishes");
     assert!(
         matches!(
-            &types.into_lanes().event_payloads[index],
+            &materialized_event_types(&types.into_lanes())[index],
             TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "MissingType" && type_arguments.is_empty()
         ),

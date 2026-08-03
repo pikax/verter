@@ -3128,7 +3128,6 @@ fn make_synth_typed_prop(name: &str, field_index: u32) -> AnalyzedPropField {
 
 fn make_synth_typed_emit(name: &str, field_index: u32) -> AnalyzedEmitField {
     AnalyzedEmitField {
-        producer_identity: Default::default(),
         name: name.to_string(),
         span: verter_span::Span::default(),
         payload_type: Some("garbage<<<unparseable".to_string()),

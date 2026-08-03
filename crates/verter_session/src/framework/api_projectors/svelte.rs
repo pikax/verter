@@ -668,8 +668,8 @@ fn resolve_public_dispatcher_text(
         .fields
         .iter()
         .map(|field| {
-            let name = render_property_name(&field.analysis.name);
-            let payload = field.analysis.payload_type.as_deref().unwrap_or("unknown");
+            let name = render_property_name(&field.name);
+            let payload = field.payload_type.as_deref().unwrap_or("unknown");
             format!("{name}: {payload}")
         })
         .collect::<Vec<_>>();

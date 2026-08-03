@@ -66,7 +66,7 @@ use crate::semantic_query::{
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
     QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-    SemanticQueryValueTag, SignatureRef, SurfaceView,
+    SemanticQueryValueTag, SignatureRef,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::PrimitiveName;

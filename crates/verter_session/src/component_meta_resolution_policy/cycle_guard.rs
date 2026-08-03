@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn node_structural_hash_terminates_on_cyclic_graph() {
         use crate::semantic_query::{
-            MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SurfaceMember, SurfaceView,
+            MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SurfaceMember,
         };
 
         let host = VerterHost::new_standalone(HostConfig::default());
@@ -683,7 +683,7 @@ mod tests {
             merge_role: MergeRoleStamp::NEUTRAL,
         };
         let object = graph.intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView {
+            SemanticNodeData::Object(crate::test_surface_view! {
                 members: Arc::from([member("a"), member("b")]),
                 call_signatures: Arc::from([]),
                 construct_signatures: Arc::from([]),

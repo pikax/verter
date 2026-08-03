@@ -12504,11 +12504,11 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     // The Vue property-style emit terminal: iterates the surface's PUBLIC
     // members (a node-domain visibility fact), mints each member value ONCE
     // via the registered `raise_member_value` sink, and builds the
-    // `ResolvedEmitField` rows (the analysis field + the published payload
+    // complete `ResolvedEmitOccurrence` rows (the analysis field + published payload
     // SOURCE — an authored locator or a node-domain closed/use-site fact
     // projection) — structurally identical to `props_from_typeinfo_surface`.
     // No decision on any materialized value; no `TypeExpr` param.
-    ("vue_exec/normalize.rs", "property_style_emit_fields"),
+    ("vue_exec/normalize.rs", "property_style_emit_field"),
     // The Svelte callback-event payload-tuple terminal (the Svelte-cap twin of
     // the Vue `materialize_payload_tuple`): mints each node-domain callback param
     // ONCE through the sealed Svelte output cap into a labelled `TupleElement`.

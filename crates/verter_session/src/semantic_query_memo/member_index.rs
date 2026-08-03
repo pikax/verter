@@ -127,7 +127,7 @@ mod tests {
     }
 
     fn object_view(members: Vec<SurfaceMember>) -> SurfaceView {
-        SurfaceView {
+        crate::test_surface_view! {
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),

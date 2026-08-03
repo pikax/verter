@@ -287,7 +287,6 @@ fn extract_options_emits(value: &Expression<'_>, source: &str) -> Vec<AnalyzedEm
             .filter_map(|elem| {
                 if let ArrayExpressionElement::StringLiteral(s) = elem {
                     Some(AnalyzedEmitField {
-                        producer_identity: Default::default(),
                         name: s.value.to_string(),
                         span: Span::from(s.span),
                         payload_type: None,
@@ -313,7 +312,6 @@ fn extract_options_emits(value: &Expression<'_>, source: &str) -> Vec<AnalyzedEm
                 let name = static_key_name(&p.key)?;
                 let payload_type = extract_validator_payload_type(&p.value, source);
                 Some(AnalyzedEmitField {
-                    producer_identity: Default::default(),
                     name,
                     span: key_span(&p.key),
                     payload_type,

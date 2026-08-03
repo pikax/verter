@@ -5285,14 +5285,9 @@ defineEmits<Events>()
         .iter()
         .flat_map(|d| d.emit_fields().iter())
         .collect();
-    let change = emits.iter().find(|e| e.analysis.name == "change");
+    let change = emits.iter().find(|e| e.name == "change");
     assert!(change.is_some(), "should have 'change' emit");
-    let payload = change
-        .unwrap()
-        .analysis
-        .payload_type
-        .as_deref()
-        .unwrap_or("");
+    let payload = change.unwrap().payload_type.as_deref().unwrap_or("");
     assert!(
         payload.starts_with('[') && payload.ends_with(']'),
         "call-signature payload should be wrapped in brackets, got: {payload}"

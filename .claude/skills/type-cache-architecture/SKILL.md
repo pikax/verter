@@ -1267,7 +1267,8 @@ The neutral lexical-owner cutover changes cached parse facts, declaration
 preparation, route results, semantic-query identity, and carrier script facts.
 The coordinated invalidation boundaries are:
 
-- `CACHE_CLUSTER_SCHEMA_VERSION = 4` rejects the former schema-3 cache cohort.
+- `CACHE_CLUSTER_SCHEMA_VERSION = 5` rejects the former schema-4 cache cohort
+  after the CREO migration; schema 4 was the exact-owner cutover from schema 3.
 - `CURRENT_PARSER_VERSION = 3` rejects ordinary/base artifacts whose parse
   facts and declaration inventories predate exact owners.
 - `LEGACY_PARSER_VERSION = 4` rejects carrier-script candidates that predate
@@ -1323,6 +1324,14 @@ composition table. Summary:
 | `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `SemanticQueryKey` slot identity (e.g. `Instantiate { base: ResolvedDeclSlotIdentity, args }`); the memo value version-roots on `ReadSetSignature.facts` + `self_root_canonicals`. |
 | `ShapeCacheDb` per-member slot | Generation/store-scoped graph-instance memo (NOT a durable content-free R6 query-identity key) | `ShapeCacheKey::surface_member_value_whole_with_context(scope, &SurfaceMember, context)` (`ShapeSubject::MemberValueNode`). Single-entry (not multi-candidate), not persistent, fact-validated + generation-gated. Warm reuse requires `validated_at_generation` + strict `ReadSetSignature` self-root validation over the exact `SurfaceMember.value` graph instance. |
 | `ComponentMetaResultDb` | Query-identity (multi-candidate) | `ComponentMetaResultKey { owner_canonical, options_fingerprint, project_identity, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash }` — content-free (owner whole-hash is the VALUE-side candidate discriminant, never a key field). Value-side owner whole-hash candidate + `ReadSetSignature.facts` + `validated_at_generation`. |
+
+CREO event rows are cached only as values derived from the stored canonical
+resolved surface stream. Resolved callable identities carry the exact
+resolver-minted graph subject; runtime identities carry the exact authored
+canonical/range plus semantic event subject. Neither is a durable
+query-identity key. Warm component-meta results preserve the same ordered
+complete occurrence rows and never rebuild identity from names, kind-local
+positions, ordinals, or analyzer output.
 
 The split `MaterializeMemoDb`/`MemberShapeCacheDb` shape stores are RETIRED in
 favour of `ShapeCacheDb`; the static guard

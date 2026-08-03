@@ -144,7 +144,7 @@ pub(super) fn published_member_source_upgrade_for_node(
 /// member-path replay route instead (see
 /// [`structural_member_value_source`]). The former REQUIRED-payload class
 /// is gone: emit payload sources are owned by the normalized
-/// `ResolvedEmitField.payload_source` rows (closed tuple / member-path /
+/// `ResolvedEmitOccurrence.payload_source` rows (closed tuple / member-path /
 /// callable-params replay), so the flat emit member rows classify as
 /// shallow members like every other surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -160,6 +160,16 @@ Concrete expectation:
 
 ### Vue Runtime Surface And Broad Runtime Classification
 
+Framework event projection uses Canonical Resolved Emit Occurrences (CREO).
+The resolver walks one ordered `SurfaceEntry` stream spanning members, call
+signatures, construct signatures, and index signatures, and derives kind
+indexes from it. Event-producing entries expand directly into complete
+`ResolvedEmitOccurrence` rows. Identity is the exact authored origin plus the
+instantiated semantic subject and event-name arm: identical diamonds dedup,
+different generic instantiations and distinct declarations remain distinct.
+Consumers must not reconstruct membership or order from kind arrays, names,
+analyzer rows, or positional counters.
+
 Vue runtime props/emits uses the canonical semantic-query graph, never a
 request-local aggregate cache. Its internal
 `ReductionDemand::VueRuntimeObjectSurface` is an internal demand/memo-slot
@@ -766,7 +776,7 @@ When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, a
 **Macro resolution is one shared path — `shared_resolve(type) + normalise`.** Every macro (`defineProps` / `defineEmits` / `defineOptions` / `defineSlots` / `withDefaults`) and every imported `.vue` component surface resolves through exactly TWO steps:
 
 1. **Resolve ONE type via the shared resolver** — the generic-parameter type (`define*<T>()`) OR the object-argument type (`define*({ ... })`). `withDefaults` resolves the props payload type plus the defaults-object type and merges. `.vue`-component imports resolve the imported component's synthesized `$props` / `$emit` / `$slots` / expose surface recursively through the same dispatch (the hardest case — apply EXTRA caution: it is exactly where rule violations cause the worst hangs). Resolution is ALWAYS the shared typed-IR five-mode dispatch — no macro-specific engine, no per-surface walker, no eager element resolver.
-2. **Normalise per kind (a thin transform, NOT a resolver)** — props: defaults / optionality / readonly / declaration provenance / `declared_in_macro_type_arg`; emits: the UNION of call-signature emits and property-style emits, de-duped by event name with call-signature precedence, deterministic order (signature order, then member order); a resolved concrete property payload must be tuple/function-shaped, while an incompatible concrete payload closes the macro as `MacroInvalidReason::InvalidEmitsShape` on both Runtime and TSC demands (`{}` remains a valid empty emits surface, and open/opaque payloads retain conservative projection); the call-signature payload strips the leading event-name parameter; slots: function-like members only, first-parameter object becomes bindings, return type preserved; options/expose: pass-through object surface.
+2. **Normalize from the stored stream (a thin transform, NOT a resolver)** — props: defaults / optionality / readonly / declaration provenance / `declared_in_macro_type_arg`; emits: walk the canonical `SurfaceEntry` stream once and expand each call-signature or property producer directly into a complete occurrence without a kind-array merge, name join, ordinal join, or post-hoc reorder; a resolved concrete property payload must be tuple/function-shaped, while an incompatible concrete payload closes the macro as `MacroInvalidReason::InvalidEmitsShape` on both Runtime and TSC demands (`{}` remains a valid empty emits surface, and open/opaque payloads retain conservative projection); the call-signature payload strips the leading event-name parameter; slots: function-like members only, first-parameter object becomes bindings, return type preserved; options/expose: pass-through object surface.
 
 A macro/import that resolves its surface through anything other than the shared resolver, or flattens a full surface eagerly before the consumer demands it, is a rule violation — collapse it into `shared_resolve(type) + normalise`.
 

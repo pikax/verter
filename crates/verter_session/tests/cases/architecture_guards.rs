@@ -35,6 +35,90 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
     workspace_root().join(rel)
 }
 
+#[test]
+fn creo_is_the_only_emit_occurrence_identity_path() {
+    // Static defense-in-depth behind the behavioral cross-kind heritage and
+    // runtime-origin identity tests: the CREO cutover deletes every
+    // analyzer/ordinal/parallel-lane identity seam from production.
+    use walkdir::WalkDir;
+
+    let crates = workspace_root().join("crates");
+    let forbidden = [
+        "EmitProducerKind",
+        "EmitProducerIdentity",
+        "producer_identity",
+        "merged_emit_fields",
+        "ProjectedTypeFact::CallableParams",
+        "ProjectedTypeFact::CallableReturn",
+        "pub event_payloads:",
+        "pub event_publications:",
+        "pub event_returns:",
+        "ordered_surface_entries",
+        "((macro_index as u64) << 32)",
+    ];
+    let mut violations = Vec::new();
+    for entry in WalkDir::new(crates).into_iter().filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|ext| ext.to_str()) != Some("rs")
+            || !path
+                .components()
+                .any(|component| component.as_os_str() == "src")
+        {
+            continue;
+        }
+        let src = fs::read_to_string(path).unwrap_or_else(|error| {
+            panic!("read {}: {error}", path.display());
+        });
+        for needle in forbidden {
+            if src.contains(needle) {
+                violations.push(format!("{}: {needle}", path.display()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "retired emit identity path reintroduced:\n{}",
+        violations.join("\n")
+    );
+
+    let query = read_workspace_file("crates/verter_session/src/semantic_query.rs");
+    let results =
+        read_workspace_file("crates/verter_session/src/typeinfo/framework_surface/results.rs");
+    let output = read_workspace_file("crates/verter_session/src/meta_resolve/output.rs");
+    assert!(query.contains("pub enum SurfaceEntry"));
+    assert!(results.contains("pub struct ResolvedEmitOccurrence"));
+    assert!(results.contains("pub payload_publication: verter_type_expr::TypePublication"));
+    assert!(output.contains("pub struct MaterializedEventOccurrence"));
+
+    let normalize = read_workspace_file(
+        "crates/verter_session/src/typeinfo/framework_surface/vue_exec/normalize.rs",
+    );
+    let emit_projection = normalize
+        .split("pub(crate) fn emits_from_typeinfo_surface")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(in crate::typeinfo").next())
+        .expect("Vue emit projection function");
+    assert!(emit_projection.contains("macro_surface.surface.entries.iter()"));
+    assert!(
+        !emit_projection.contains(".call_signatures")
+            && !emit_projection.contains(".members")
+            && !emit_projection.contains(".position("),
+        "Vue emit projection must walk only the canonical stored stream"
+    );
+
+    let semantic = read_workspace_file("crates/verter_semantic/src/analysis/component_meta.rs");
+    let event_extraction = semantic
+        .split("fn extract_events_from_macro")
+        .nth(1)
+        .and_then(|tail| tail.split("fn extract_slots_from_macro").next())
+        .expect("event extraction function");
+    assert!(
+        !event_extraction.contains(".find(") && !event_extraction.contains("evaluated"),
+        "event extraction must project complete occurrences without a name/evaluator join"
+    );
+}
+
 /// Relative paths (forward-slash, workspace-rooted) of GENERATED DATA
 /// modules under `crates/*/src/**`. These files are rendered by a
 /// generator script (each carries an "auto-generated" / "GENERATED ...

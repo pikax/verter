@@ -217,21 +217,11 @@ impl ProjectSemanticDispatch<'_> {
                 ProjectedTypeFact::MemberPath { base, path } => {
                     self.raise_projected_member_path(base, path, &ctx)
                 }
-                ProjectedTypeFact::CallableParams {
+                ProjectedTypeFact::CallableOccurrence {
                     base,
-                    signature_ordinal,
-                    first_param,
-                } => self.raise_projected_callable_params(
-                    base,
-                    *signature_ordinal,
-                    *first_param,
-                    &ctx,
-                ),
-                ProjectedTypeFact::CallableReturn {
-                    base,
-                    path,
-                    signature_ordinal,
-                } => self.raise_projected_callable_return(base, path, *signature_ordinal, &ctx),
+                    occurrence,
+                    projection,
+                } => self.raise_projected_callable_occurrence(base, occurrence, *projection, &ctx),
                 ProjectedTypeFact::IndexPosition {
                     base,
                     signature_ordinal,
@@ -607,16 +597,16 @@ impl ProjectSemanticDispatch<'_> {
 
     /// Replay a callable member route and select its combined return node using
     /// the same callable-arm policy as framework slot normalization.
-    fn raise_projected_callable_return(
+    fn raise_projected_callable_occurrence(
         &self,
         base: &AuthoredBodyLocator,
-        path: &Arc<[String]>,
-        signature_ordinal: Option<u32>,
+        occurrence: &verter_type_expr::facts::CallableOccurrenceHandle,
+        projection: verter_type_expr::facts::CallableOccurrenceProjection,
         ctx: &SourceRaiseContext<'_>,
     ) -> Option<HotTypeRef> {
         let context =
             ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate);
-        let callable = if let Some(signature_ordinal) = signature_ordinal {
+        let callable = if occurrence.is_root() {
             let locator = absolutize_locator(base, ctx.scope_canonical_id);
             let AuthoredBodyLocator::MacroPayload(payload) = &locator else {
                 return None;
@@ -625,13 +615,25 @@ impl ProjectSemanticDispatch<'_> {
             surface
                 .surface
                 .call_signatures
-                .get(signature_ordinal as usize)?
+                .iter()
+                .find(|signature| occurrence.matches_subject(signature.node.0))?
                 .node
         } else {
-            self.raise_projected_member_path(base, path, ctx)?.node()
+            let callable = self
+                .raise_projected_member_path(base, &Arc::from(occurrence.path()), ctx)?
+                .node();
+            if !occurrence.matches_subject(callable.0) {
+                return None;
+            }
+            callable
         };
+        if let verter_type_expr::facts::CallableOccurrenceProjection::Parameters { first_param } =
+            projection
+        {
+            return self.raise_projected_callable_params(callable, first_param, ctx);
+        }
         let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, callable);
-        let return_node = if signature_ordinal.is_some() {
+        let return_node = if occurrence.is_root() {
             view.signature(context)?.return_type()?
         } else {
             let realized_root = view.realized_callable_root(context)?;
@@ -652,32 +654,16 @@ impl ProjectSemanticDispatch<'_> {
         Some(hot)
     }
 
-    /// Raise a projected CALLABLE-PARAMS fact
-    /// ([`ProjectedTypeFact::CallableParams`]) by replaying the publication
-    /// surface's own producing route: the BASE macro type argument re-projects
-    /// to the SAME one-level macro surface the normalization read
-    /// (`resolve_vue_macro_surface_with_ctx` — the one existing surface entry,
-    /// so projection context, provenance, and heritage substitution are
-    /// IDENTICAL by construction, and its `ProjectPath` queries hit the shared
-    /// memo), the call signature at `signature_ordinal` is selected in the
-    /// NODE domain (the surface's declaration-order sequence, the exact
-    /// pre-expansion order the producer stamped), the callable realizes
-    /// through the SAME shared [`CallableNodeView`] policy the emit
-    /// normalization used (`published(Navigate)`), and a TRANSIENT tuple node
-    /// is synthesized from the realized signature's RAW parameters from
-    /// `first_param` on — label / optionality / rest / ORDER preserved, each
-    /// element carrying the parameter's own (possibly substituted) value
-    /// node, so nesting, composites, imported references, and generic
-    /// substitutions ride through shallow-by-default. Every step routes
-    /// through the one shared dispatch (`macro_type_arg_hot_ref`,
-    /// `ProjectPath`, `ResolveDecl`/`Instantiate` via the structural-fact
-    /// demand primitive) — never a second resolver, never an output-local
-    /// walker.
+    /// Raise the parameter projection of an exact callable occurrence.
+    /// Occurrence selection has already replayed the authored base and matched
+    /// the resolver-minted instantiated subject. This step synthesizes the
+    /// transient payload tuple from `first_param` onward while preserving
+    /// labels, optionality, rest, order, nesting, and substitutions.
     ///
     /// FAIL-CLOSED, never a fabricated tuple: a non-macro / non-type-argument
-    /// base, an unresolvable surface, an out-of-bounds `signature_ordinal`, a
-    /// non-callable ordinal, or a `first_param` past the parameter list is an
-    /// honest `None` (bounds drift never synthesizes an empty tuple); a
+    /// base, an unresolvable occurrence, or a `first_param` past the parameter
+    /// list is an honest `None` (bounds drift never synthesizes an empty
+    /// tuple); a
     /// payload parameter whose root stays an UNRESOLVED residual reference
     /// carrier (`BareRef` / `ImportType` the shared demand primitive could
     /// not resolve) or resolves to an unknown-materializing failure carrier
@@ -689,33 +675,13 @@ impl ProjectSemanticDispatch<'_> {
     /// [`CallableNodeView`]: crate::meta_resolve::callable_view::CallableNodeView
     fn raise_projected_callable_params(
         &self,
-        base: &AuthoredBodyLocator,
-        signature_ordinal: u32,
+        callable: SemanticNodeId,
         first_param: u32,
         ctx: &SourceRaiseContext<'_>,
     ) -> Option<HotTypeRef> {
-        let locator = absolutize_locator(base, ctx.scope_canonical_id);
-        // The only producer-minted base position is the macro TYPE-ARGUMENT
-        // (the emit normalization replays off the macro's stamped type
-        // argument); any other base has no surface-projection route here.
-        let AuthoredBodyLocator::MacroPayload(payload) = &locator else {
-            return None;
-        };
-        let surface = self.replay_vue_macro_type_argument_surface(payload)?;
-        // Deterministic NODE-domain signature selection: the ordinal indexes
-        // the surface's declaration-order call-signature sequence (the exact
-        // pre-expansion sequence the producer stamped). Bounds drift is an
-        // honest miss.
-        let sig = surface
-            .surface
-            .call_signatures
-            .get(signature_ordinal as usize)?;
-        // SAME callable-realization policy as the emit normalization
-        // (`emits_from_typeinfo_surface`): `published(Navigate)` realizes an
-        // aliased / generic callable to its `Function` node.
         let realize_context =
             ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate);
-        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, sig.node);
+        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, callable);
         let signature = view.signature(realize_context)?;
         let params = signature.raw_params();
         // `first_param` past the parameter list is bounds drift — fail

@@ -3006,55 +3006,18 @@ pub enum ProjectedTypeFact {
         /// The ordered member-name path off the base.
         path: Arc<[String]>,
     },
-    /// A projected CALLABLE-PARAMS route: the content-free replay address
-    /// for a realized call-signature payload tuple the publication surface
-    /// synthesized from the signature's parameters — parameters richer than
-    /// the closed leaf / leaf-union element vocabulary (cross-file
-    /// references, composites, nested objects, arrays, callbacks,
-    /// instantiated generics), which no closed fact and no single
-    /// contributor locator can faithfully express. `base` is the authored
-    /// body whose projected surface carries the call signature (for a macro
-    /// payload: the macro's STAMPED type-argument locator);
-    /// `signature_ordinal` indexes the projected surface's call-signature
-    /// sequence (declaration order, BEFORE any event-name expansion /
-    /// deduplication); `first_param` is the index of the first PAYLOAD
-    /// parameter (a Vue emit signature strips the leading event-name
-    /// parameter, so its rows stamp `1`). Raising it replays the base's
-    /// surface projection, selects the signature at the ordinal in the node
-    /// domain, and synthesizes a TRANSIENT tuple from the signature's raw
-    /// parameters — labels / optionality / rest / order / nesting /
-    /// generic substitutions preserved — through the one shared dispatch;
-    /// never a second resolver, never a stored `TypeExpr` or graph node id.
-    /// Bounds drift, a missing surface, a non-callable ordinal, a
-    /// `first_param` past the parameter list, or an unresolvable payload
-    /// parameter FAILS the raise honestly — never an empty-tuple or
-    /// fabricated-element synthesis.
-    CallableParams {
-        /// The authored base body whose projected surface carries the call
-        /// signature.
+    /// A projected callable occurrence route. `occurrence` is minted by the
+    /// resolver from the exact instantiated semantic subject, so replay never
+    /// depends on a kind-local ordinal. `projection` selects either the
+    /// payload parameters or return of that same occurrence.
+    CallableOccurrence {
+        /// The authored base body whose fixed-view surface contains the
+        /// occurrence.
         base: AuthoredBodyLocator,
-        /// The call signature's ordinal in the projected surface's
-        /// call-signature sequence (declaration order, pre-expansion).
-        signature_ordinal: u32,
-        /// The first PAYLOAD parameter index (parameters before it are
-        /// address/name parameters, not payload).
-        first_param: u32,
-    },
-    /// A projected CALLABLE-RETURN route: replay `base`, then either select the
-    /// declaration-order call signature at `signature_ordinal` or project the
-    /// ordered member `path` to a callable published as a slot/snippet. The
-    /// shared callable view returns that signature's return node or combines
-    /// the member callable's arms. This preserves structured returns without
-    /// storing a graph node or reverse-materialized `TypeExpr`.
-    CallableReturn {
-        /// The authored body whose surface carries the callable member.
-        base: AuthoredBodyLocator,
-        /// The ordered member-name path to the callable.
-        path: Arc<[String]>,
-        /// Declaration-order call-signature ordinal for a root callable
-        /// surface. `None` selects the member callable addressed by `path`.
-        #[serde(default)]
-        signature_ordinal: Option<u32>,
+        /// Resolver-minted exact occurrence handle.
+        occurrence: CallableOccurrenceHandle,
+        /// Semantic position selected from the exact occurrence.
+        projection: CallableOccurrenceProjection,
     },
     /// A projected INDEX-POSITION route: the content-free replay address for
     /// an index signature's KEY or VALUE type position on the publication
@@ -3089,6 +3052,152 @@ pub enum ProjectedTypeFact {
 /// The addressed type position of a projected index signature — the KEY
 /// (`[key: K]`) or the VALUE (`: V`) slot of
 /// [`ProjectedTypeFact::IndexPosition`].
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct CallableOccurrenceHandle {
+    semantic_subject: u64,
+    path: Arc<[String]>,
+}
+
+impl CallableOccurrenceHandle {
+    /// Mint a root call-signature occurrence.
+    #[must_use]
+    pub fn root(semantic_subject: u64) -> Self {
+        Self {
+            semantic_subject,
+            path: Arc::from([]),
+        }
+    }
+
+    /// Mint a callable member occurrence.
+    #[must_use]
+    pub fn member(semantic_subject: u64, path: Arc<[String]>) -> Self {
+        Self {
+            semantic_subject,
+            path,
+        }
+    }
+
+    /// Test whether a replayed semantic subject is this exact occurrence.
+    #[must_use]
+    pub fn matches_subject(&self, semantic_subject: u64) -> bool {
+        self.semantic_subject == semantic_subject
+    }
+
+    /// Borrow the authored member path, empty for a root signature.
+    #[must_use]
+    pub fn path(&self) -> &[String] {
+        &self.path
+    }
+
+    /// Whether this occurrence addresses a root call signature.
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.path.is_empty()
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+enum ResolvedEmitProducer {
+    Callable(CallableOccurrenceHandle),
+    Runtime {
+        canonical_id: Arc<str>,
+        start: u32,
+        end: u32,
+        semantic_subject: Arc<str>,
+    },
+}
+
+/// Opaque identity for one canonical emit producer/name-arm occurrence.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct ResolvedEmitOccurrenceId {
+    producer: ResolvedEmitProducer,
+    name_arm: u32,
+}
+
+impl ResolvedEmitOccurrenceId {
+    /// Mint one event-name arm from an exact resolved producer.
+    #[must_use]
+    pub fn new(producer: CallableOccurrenceHandle, name_arm: u32) -> Self {
+        Self {
+            producer: ResolvedEmitProducer::Callable(producer),
+            name_arm,
+        }
+    }
+
+    /// Mint one runtime occurrence from its exact authored origin and semantic
+    /// event subject. Runtime identity never depends on row or macro ordinals.
+    #[must_use]
+    pub fn runtime(
+        canonical_id: impl Into<Arc<str>>,
+        start: u32,
+        end: u32,
+        semantic_subject: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            producer: ResolvedEmitProducer::Runtime {
+                canonical_id: canonical_id.into(),
+                start,
+                end,
+                semantic_subject: semantic_subject.into(),
+            },
+            name_arm: 0,
+        }
+    }
+}
+
+/// One semantic position projected from an exact callable occurrence.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum CallableOccurrenceProjection {
+    /// Payload parameters beginning at the given semantic parameter index.
+    Parameters {
+        /// Parameters before this index are address/name parameters.
+        first_param: u32,
+    },
+    /// Callable return position.
+    Return,
+}
+
 #[derive(
     Debug,
     Clone,
@@ -3671,27 +3780,16 @@ impl ProjectedTypeFact {
                         path: Arc::clone(path),
                     })
             }
-            ProjectedTypeFact::CallableParams {
+            ProjectedTypeFact::CallableOccurrence {
                 base,
-                signature_ordinal,
-                first_param,
+                occurrence,
+                projection,
             } => base
                 .absolutize(canonical_id)
-                .map(|base| ProjectedTypeFact::CallableParams {
+                .map(|base| ProjectedTypeFact::CallableOccurrence {
                     base,
-                    signature_ordinal: *signature_ordinal,
-                    first_param: *first_param,
-                }),
-            ProjectedTypeFact::CallableReturn {
-                base,
-                path,
-                signature_ordinal,
-            } => base
-                .absolutize(canonical_id)
-                .map(|base| ProjectedTypeFact::CallableReturn {
-                    base,
-                    path: Arc::clone(path),
-                    signature_ordinal: *signature_ordinal,
+                    occurrence: occurrence.clone(),
+                    projection: *projection,
                 }),
             ProjectedTypeFact::IndexPosition {
                 base,
@@ -3831,10 +3929,9 @@ impl SemanticTypeSource {
                 // anchor decides (an empty producer-local anchor resolves
                 // under the raise scope).
                 ProjectedTypeFact::MemberPath { base, .. } => authored_locator_scope_relative(base),
-                // The ordinal addressing is scope-free; the base locator's
+                // Occurrence identity is scope-free; the base locator's
                 // anchor decides, exactly as for the member-path route.
-                ProjectedTypeFact::CallableParams { base, .. }
-                | ProjectedTypeFact::CallableReturn { base, .. }
+                ProjectedTypeFact::CallableOccurrence { base, .. }
                 | ProjectedTypeFact::IndexPosition { base, .. } => {
                     authored_locator_scope_relative(base)
                 }
@@ -3955,5 +4052,22 @@ fn synthesized_shape_scope_relative(shape: &ResolvedLocalShape) -> bool {
         // canonical scope when anchored; an empty anchor is the
         // producer-local convention (resolved under the raise scope).
         ResolvedLocalShape::Ref(symbol) => anchor_scope_relative(&symbol.anchor),
+    }
+}
+
+#[cfg(test)]
+mod resolved_emit_identity_tests {
+    use super::ResolvedEmitOccurrenceId;
+
+    #[test]
+    fn runtime_emit_identity_is_authored_origin_plus_semantic_subject() {
+        let first = ResolvedEmitOccurrenceId::runtime("/App.vue", 40, 44, "save");
+        let same = ResolvedEmitOccurrenceId::runtime("/App.vue", 40, 44, "save");
+        let moved = ResolvedEmitOccurrenceId::runtime("/App.vue", 80, 84, "save");
+        let renamed = ResolvedEmitOccurrenceId::runtime("/App.vue", 40, 44, "cancel");
+
+        assert_eq!(first, same);
+        assert_ne!(first, moved);
+        assert_ne!(first, renamed);
     }
 }

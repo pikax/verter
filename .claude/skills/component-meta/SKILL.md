@@ -92,9 +92,9 @@ reason, and producer-owned typed diagnostics. Never replace a failed output
 with absence, supported-empty, `unknown`, or a string diagnostic.
 
 `framework::public_contract` is the sole projector. It consumes component-meta
-analysis plus its positionally aligned materialized lanes under the same fixed
-store view as declaration rendering. Framework adapters render declaration
-carriers only and must not build their own contract path.
+analysis plus occurrence-owned materialized rows under the same fixed store
+view as declaration rendering. Framework adapters render declaration carriers
+only and must not build their own contract path.
 
 Props preserve optional/default facts. Events preserve source-ordered duplicate
 rows as structured overloads, including parameter labels and optional/rest
@@ -308,7 +308,7 @@ The NAPI/WASM/LSP wire boundary consumes the session-owned, fully-materialized
   element (`TabsRootEmits<string | number>` → `[payload: string | number]`)
   publishes the closed tuple source
   (`Closed(Tuple([payload: FactOrLocator::LeafUnion([...])]))`) carried on the
-  session-owned `ResolvedEmitField.payload_source` (`EmitsSurface.fields`) —
+  session-owned `ResolvedEmitOccurrence.payload_source` (`EmitsSurface.fields`) —
   it materializes to `TypeExpr::Tuple([payload: Union(...)])` at the sealed
   output boundary, never the degraded `Unknown`.
 - Entries: base `get_component_meta_output` (warm+cold), audited
@@ -444,18 +444,18 @@ diagnostics, provenance, and authored evidence), aligned with the slot row.
 output sink only materializes the publication selected by the producer. It must
 never reconstruct slot-return authority from display text or a bare source.
 Structured callable returns use the content-free
-`ProjectedTypeFact::CallableReturn { base, path, signature_ordinal }` replay
-route.
+`ProjectedTypeFact::CallableOccurrence` replay route, addressed by the exact
+resolver-minted instantiated callable subject.
 
-**Callable-event return publication is producer-owned.** A normalized Vue
-call-signature event or Svelte callback-prop event carries its return as a
-separate `TypePublication` aligned with the payload row. Vue addresses the
-root callable by declaration-order signature ordinal; Svelte addresses the
-callback member by path. The terminal output sink materializes the lane once,
-and only property/event-map rows default the public call return to `void`.
-Analyzer/normalized Vue rows align by `EmitProducerIdentity` (producer kind plus
-kind-local declaration ordinal), never by same-name occurrence; this remains
-stable when normalized call signatures precede authored property rows.
+**Resolved emit occurrences are canonical.** The resolver emits one ordered
+`ResolvedEmitOccurrence` stream across properties and callable signatures.
+Each row carries its opaque exact-origin/instantiated-subject identity, event
+name arm, payload publication, and optional callable return publication.
+Downstream stages preserve that complete row; they do not reconcile analyzer
+rows, names, kind-local positions, or parallel payload/return lanes. The
+terminal output sink materializes one nested `{ event, payload, return }` row,
+and only property/event-map occurrences default the public call return to
+`void`.
 
 **Traversal rule:** only follow the import graph reachable from the requested type's declaration graph. Unrelated imports in the same file are out of scope.
 

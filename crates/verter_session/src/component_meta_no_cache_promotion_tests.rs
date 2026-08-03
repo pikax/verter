@@ -27,7 +27,7 @@ use crate::request_context::{
 use crate::semantic_query::{
     PartialReasonSet, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
     ResultCompleteness, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-    SurfaceMember, SurfaceView,
+    SurfaceMember,
 };
 use crate::types::HostConfig;
 use crate::VerterHost;
@@ -47,7 +47,7 @@ fn build_constrained_host() -> Arc<VerterHost> {
 /// walker can attempt to traverse: `deep_0 → deep_1 → deep_2`.
 fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
     let graph = host.project_type_store().semantic_graph();
-    let mut leaf = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+    let mut leaf = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(Vec::new().into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -70,7 +70,7 @@ fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
             spans: Default::default(),
             declaration_origin: None,
         };
-        leaf = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        leaf = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
             members: Arc::from(vec![member].into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -84,7 +84,7 @@ fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
 
 fn intern_single_member_object(host: &VerterHost, name: &'static str) -> SemanticNodeId {
     let graph = host.project_type_store().semantic_graph();
-    let leaf = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+    let leaf = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(Vec::new().into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -104,7 +104,7 @@ fn intern_single_member_object(host: &VerterHost, name: &'static str) -> Semanti
         spans: Default::default(),
         declaration_origin: None,
     };
-    graph.intern_node(SemanticNodeData::Object(SurfaceView {
+    graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(vec![member].into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -1251,7 +1251,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         ..HostConfig::default()
     }));
     let graph = host.project_type_store().semantic_graph();
-    let value_node = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+    let value_node = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(Vec::new().into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),

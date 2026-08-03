@@ -118,7 +118,7 @@ fn finalize_published_prop_source(
             source,
             SemanticTypeSource::Projected(
                 verter_type_expr::facts::ProjectedTypeFact::MemberPath { .. }
-                    | verter_type_expr::facts::ProjectedTypeFact::CallableParams { .. }
+                    | verter_type_expr::facts::ProjectedTypeFact::CallableOccurrence { .. }
                     | verter_type_expr::facts::ProjectedTypeFact::IndexPosition { .. }
             )
         )

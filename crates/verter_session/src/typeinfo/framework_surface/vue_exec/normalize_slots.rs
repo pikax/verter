@@ -177,14 +177,23 @@ pub(crate) fn slot_return_publications_from_typeinfo_surface(
     slots
         .iter()
         .map(|slot| {
-            let position = base.map_or_else(
+            let member = macro_surface
+                .surface
+                .members
+                .iter()
+                .find(|member| member.name.as_ref() == slot.name);
+            let position = base.zip(member).map_or_else(
                 || SourcePosition::Failed(SemanticSourceFailure::UnrepresentableRequiredPayload),
-                |base| {
+                |(base, member)| {
                     SourcePosition::Present(SemanticTypeSource::Projected(
-                        ProjectedTypeFact::CallableReturn {
+                        ProjectedTypeFact::CallableOccurrence {
                             base: AuthoredBodyLocator::MacroPayload(base.clone()),
-                            path: Arc::from([slot.name.clone()]),
-                            signature_ordinal: None,
+                            occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
+                                member.value.0,
+                                Arc::from([slot.name.clone()]),
+                            ),
+                            projection:
+                                verter_type_expr::facts::CallableOccurrenceProjection::Return,
                         },
                     ))
                 },

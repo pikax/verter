@@ -12,9 +12,9 @@
 //! - Conversion to transport-facing DTOs happens via `verter_protocol` and its adapter layers
 
 use crate::analysis::types::{
-    AnalysisFlags, AnalyzedBinding, AnalyzedEmitField, AnalyzedExposeField, AnalyzedImport,
-    AnalyzedMacro, AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField,
-    ImportBindingKind, JsdocTag, StoreUsage, VueApiCallSite,
+    AnalysisFlags, AnalyzedBinding, AnalyzedExposeField, AnalyzedImport, AnalyzedMacro,
+    AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, ImportBindingKind,
+    JsdocTag, StoreUsage, VueApiCallSite,
 };
 use verter_type_expr::facts::{SemanticTypeSource, SourcePosition};
 use verter_type_expr::locators::{AuthoredBodyLocator, MacroPayloadLocator};
@@ -183,10 +183,26 @@ pub struct ResolvedPropInput {
 /// extraction publishes (the flat evaluated lanes contribute metadata only).
 #[derive(Debug, Clone)]
 pub struct ResolvedEmitInput {
-    /// The emit analysis field.
-    pub field: AnalyzedEmitField,
+    /// Resolver-minted opaque producer/name-arm identity.
+    pub id: verter_type_expr::facts::ResolvedEmitOccurrenceId,
+    /// Event-name literal arm.
+    pub name: String,
+    /// Exact authored producer span when available.
+    pub span: verter_span::Span,
+    /// Display-only payload type.
+    pub payload_type: Option<String>,
+    /// Exact authored payload locator when available.
+    pub payload: Option<verter_type_expr::locators::MacroPayloadLocator>,
+    /// Scope paired with [`Self::payload_type`].
+    pub payload_expr_scope: Option<TypeExprScope>,
+    /// Authored producer description.
+    pub description: Option<String>,
+    /// Authored producer JSDoc tags.
+    pub tags: Vec<crate::analysis::types::JsdocTag>,
     /// The payload's published source position.
     pub payload_source: SourcePosition,
+    /// Atomic payload publication owned by this occurrence.
+    pub payload_publication: TypePublication,
     /// Producer-owned callable return publication. Property/event-map rows use
     /// the implicit `void` return and carry `None`.
     pub return_publication: Option<TypePublication>,
@@ -1477,8 +1493,9 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
                 );
             }
             AnalyzedMacroKind::DefineEmits => {
-                let emit_fields = merged_emit_fields(mac, resolved_macro.as_ref());
-                extract_events_from_macro(macro_index, &emit_fields, evaluated_types, &mut events);
+                let emit_fields =
+                    canonical_emit_occurrences(mac, resolved_macro.as_ref(), input.file_path);
+                extract_events_from_macro(&emit_fields, &mut events);
             }
             AnalyzedMacroKind::DefineSlots => {
                 let slot_fields = merged_slot_fields(mac, resolved_macro.as_ref());
@@ -1536,7 +1553,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             evaluated_types,
             &mut props,
         );
-        extract_events_from_macro(macro_index, &resolved.emits, evaluated_types, &mut events);
+        extract_events_from_macro(&resolved.emits, &mut events);
         extract_slots_from_macro(
             macro_index,
             &resolved.slots,
@@ -1913,16 +1930,6 @@ fn define_props_property_expansion_metadata(
     })
 }
 
-fn expanded_define_emits_shape(
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
-    macro_index: usize,
-) -> Option<&crate::analysis::type_expand::ExpandedMacroObjectShape> {
-    evaluated?
-        .define_emits
-        .iter()
-        .find(|entry| entry.macro_index == macro_index)
-}
-
 fn expanded_define_slots_shape(
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
@@ -1931,27 +1938,6 @@ fn expanded_define_slots_shape(
         .define_slots
         .iter()
         .find(|entry| entry.macro_index == macro_index)
-}
-
-fn macro_object_property_expansion_metadata(
-    entry: &crate::analysis::type_expand::ExpandedMacroObjectShape,
-    property_name: &str,
-) -> crate::analysis::type_expand::ExpansionMetadata {
-    // Only include diagnostics specific to this property.
-    // Macro-wide diagnostics (property_name == None) are in `macro_expansion_diagnostics`.
-    let diagnostics = entry
-        .result
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.property_name.as_deref() == Some(property_name))
-        .cloned()
-        .collect();
-
-    crate::analysis::type_expand::ExpansionMetadata {
-        exactness: entry.result.exactness,
-        execution_status: entry.result.execution_status,
-        diagnostics,
-    }
 }
 
 /// Resolve prop type via priority chain:
@@ -2068,8 +2054,8 @@ fn resolve_prop_type(
 
 // ── Events ─────────────────────────────────────────────────────────────────
 
-fn event_raw_signature_from_evaluated_and_source(
-    evaluated_raw_type: Option<&str>,
+fn event_raw_signature(
+    fallback_raw_type: Option<&str>,
     source_payload: Option<&str>,
 ) -> Option<String> {
     if let Some(source_payload) = source_payload
@@ -2078,7 +2064,7 @@ fn event_raw_signature_from_evaluated_and_source(
     {
         return Some(source_payload.to_string());
     }
-    evaluated_raw_type
+    fallback_raw_type
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(preserve_or_wrap_event_payload)
@@ -2093,146 +2079,18 @@ fn preserve_or_wrap_event_payload(raw_type: &str) -> String {
     }
 }
 
-fn extract_events_from_macro(
-    macro_index: usize,
-    emit_fields: &[ResolvedEmitInput],
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
-    out: &mut Vec<EventAnalysis>,
-) {
-    let expanded_events = expanded_define_emit_events(evaluated, macro_index);
-    let emit_name_counts = emit_fields.iter().fold(
-        rustc_hash::FxHashMap::<&str, usize>::default(),
-        |mut counts, row| {
-            *counts.entry(row.field.name.as_str()).or_default() += 1;
-            counts
-        },
-    );
-    if !expanded_events.is_empty() {
-        let mut expanded_remaining = expanded_events.clone();
-
-        if emit_fields.is_empty() {
-            for event in expanded_events {
-                let evaluated_field = evaluated.and_then(|eval| {
-                    eval.emits
-                        .iter()
-                        .find(|candidate| candidate.name == event.name)
-                });
-                out.push(EventAnalysis {
-                    name: event.name,
-                    payload: event.payload.clone(),
-                    publication: publication_from_position(
-                        &event.payload,
-                        event.payload_expansion.as_ref(),
-                        None,
-                        ResolutionProvenance::FrameworkSurface,
-                    ),
-                    return_publication: None,
-                    return_publication_scope: None,
-                    payload_expansion: event.payload_expansion,
-                    raw_signature: event_raw_signature_from_evaluated_and_source(
-                        evaluated_field
-                            .and_then(|candidate| candidate.authored_evidence.as_ref())
-                            .map(AuthoredTypeEvidence::text),
-                        None,
-                    ),
-                    description: None,
-                    tags: Vec::new(),
-                });
-            }
-            return;
-        }
-
-        for row in emit_fields {
-            let field = &row.field;
-            // The `define_emits` SHAPE lane row (built from the normalized
-            // payload source) is the payload authority when present; the
-            // row's own session-resolved `payload_source` covers the rest.
-            // The flat evaluated lane contributes ONLY expansion metadata —
-            // never the payload source.
-            let (payload, payload_expansion) = expanded_remaining
-                .iter()
-                .position(|event| {
-                    emit_name_counts
-                        .get(field.name.as_str())
-                        .is_some_and(|count| *count == 1)
-                        && event.name == field.name
-                })
-                .map(|index| expanded_remaining.remove(index))
-                .map(|event| (event.payload, event.payload_expansion))
-                .unwrap_or_else(|| {
-                    let metadata = evaluated.and_then(|eval| {
-                        eval.emits
-                            .iter()
-                            .find(|f| f.name == field.name)
-                            .map(field_expansion_metadata)
-                    });
-                    (row.payload_source.clone(), metadata)
-                });
-
-            out.push(EventAnalysis {
-                name: field.name.clone(),
-                payload: payload.clone(),
-                publication: publication_from_position(
-                    &payload,
-                    payload_expansion.as_ref(),
-                    authored_type_evidence(field.payload.as_ref(), field.payload_type.as_deref()),
-                    ResolutionProvenance::FrameworkSurface,
-                ),
-                return_publication: row.return_publication.clone(),
-                return_publication_scope: row.return_publication_scope.clone(),
-                payload_expansion,
-                raw_signature: event_raw_signature_from_evaluated_and_source(
-                    evaluated.and_then(|eval| {
-                        eval.emits
-                            .iter()
-                            .find(|candidate| candidate.name == field.name)
-                            .and_then(|candidate| candidate.authored_evidence.as_ref())
-                            .map(AuthoredTypeEvidence::text)
-                    }),
-                    field.payload_type.as_deref(),
-                ),
-                description: field.description.clone(),
-                tags: field.tags.clone(),
-            });
-        }
-        return;
-    }
-
+fn extract_events_from_macro(emit_fields: &[ResolvedEmitInput], out: &mut Vec<EventAnalysis>) {
     for row in emit_fields {
-        let field = &row.field;
-        // The row's session-resolved payload source is the authority; the
-        // flat evaluated lane contributes ONLY expansion metadata.
-        let payload_expansion = evaluated.and_then(|eval| {
-            eval.emits
-                .iter()
-                .find(|f| f.name == field.name)
-                .map(field_expansion_metadata)
-        });
-
         out.push(EventAnalysis {
-            name: field.name.clone(),
+            name: row.name.clone(),
             payload: row.payload_source.clone(),
-            publication: publication_from_position(
-                &row.payload_source,
-                payload_expansion.as_ref(),
-                authored_type_evidence(field.payload.as_ref(), field.payload_type.as_deref()),
-                ResolutionProvenance::FrameworkSurface,
-            ),
+            publication: row.payload_publication.clone(),
             return_publication: row.return_publication.clone(),
             return_publication_scope: row.return_publication_scope.clone(),
-            payload_expansion,
-            raw_signature: event_raw_signature_from_evaluated_and_source(
-                evaluated.and_then(|eval| {
-                    eval.emits
-                        .iter()
-                        .find(|candidate| candidate.name == field.name)
-                        .and_then(|candidate| candidate.authored_evidence.as_ref())
-                        .map(AuthoredTypeEvidence::text)
-                }),
-                field.payload_type.as_deref(),
-            ),
-            description: field.description.clone(),
-            tags: field.tags.clone(),
+            payload_expansion: None,
+            raw_signature: event_raw_signature(None, row.payload_type.as_deref()),
+            description: row.description.clone(),
+            tags: row.tags.clone(),
         });
     }
 }
@@ -2335,86 +2193,10 @@ fn slot_return_publication_from_field(
 }
 
 #[derive(Clone)]
-struct ExpandedEventEntry {
-    name: String,
-    payload: SourcePosition,
-    payload_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
-}
-
-#[derive(Clone)]
 struct ExpandedSlotEntry {
     name: String,
     bindings: Vec<SlotBindingAnalysis>,
     is_required: bool,
-}
-
-fn expanded_define_emit_events(
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
-    macro_index: usize,
-) -> Vec<ExpandedEventEntry> {
-    use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact};
-
-    let Some(entry) = expanded_define_emits_shape(evaluated, macro_index) else {
-        return Vec::new();
-    };
-
-    let mut events = Vec::new();
-
-    for prop in &entry.result.value.properties {
-        events.push(ExpandedEventEntry {
-            name: prop.name.clone(),
-            payload: prop.ty.clone(),
-            payload_expansion: Some(macro_object_property_expansion_metadata(entry, &prop.name)),
-        });
-    }
-
-    for sig in &entry.result.value.call_signatures {
-        let Some(first) = sig.parameters.first() else {
-            continue;
-        };
-        // Call-signature events: the event NAME is derivable from a CLOSED
-        // string-literal first-parameter fact. The realized signature's
-        // payload-tuple position is REQUIRED: zero post-event-name params
-        // are the PRESENT empty closed tuple; params richer than the closed
-        // element vocabulary have no faithful lower-crate CLOSED source, so
-        // the position is the typed source-construction FAILURE — never a
-        // fabricated unknown success. (This arm covers a shape-carried
-        // call-signature fact only; the session-side normalized emit rows
-        // publish richer payloads through the projected callable-params
-        // replay route and reach `EventAnalysis.payload` via the property
-        // rows above.)
-        // Call-signature events have no per-field diagnostics. Macro-wide
-        // diagnostics are collected separately into `macro_expansion_diagnostics`.
-        let payload_expansion = Some(crate::analysis::type_expand::ExpansionMetadata {
-            exactness: entry.result.exactness,
-            execution_status: entry.result.execution_status,
-            diagnostics: vec![],
-        });
-
-        if let SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::StringLiteral(name))) =
-            &first.ty
-        {
-            let payload = if sig.parameters.len() == 1 {
-                SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(
-                    verter_type_expr::facts::TuplePayloadFact {
-                        readonly: false,
-                        elements: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-                    },
-                )))
-            } else {
-                SourcePosition::Failed(
-                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
-                )
-            };
-            events.push(ExpandedEventEntry {
-                name: name.clone(),
-                payload,
-                payload_expansion: payload_expansion.clone(),
-            });
-        }
-    }
-
-    events
 }
 
 fn expanded_define_slot_entries(
@@ -2757,7 +2539,7 @@ fn synthesize_model_prop_and_event(
             raw.to_string()
         }
     });
-    let raw_signature = event_raw_signature_from_evaluated_and_source(
+    let raw_signature = event_raw_signature(
         evaluated_event
             .and_then(|field| field.authored_evidence.as_ref())
             .map(AuthoredTypeEvidence::text),
@@ -3078,59 +2860,49 @@ fn merge_prop_field(target: &mut AnalyzedPropField, candidate: &AnalyzedPropFiel
     }
 }
 
-/// Merge the analyzer's parse-domain emit fields with the host-resolved
-/// rows into ONE per-macro row set, each carrying its payload SOURCE. An
-/// analyzer-only field's source is its authored payload position; a
-/// host-resolved row carries the normalized `payload_source` authority.
-/// Analyzer rows keep authored order. Normalized rows align by the producer's
-/// stable kind-local identity, never by same-name occurrence.
-fn merged_emit_fields(
+/// Return the canonical occurrence stream. Typed macros use only resolver
+/// occurrences; runtime macros enter once from their exact authored syntax
+/// entries even when the framework surface shell is present.
+fn canonical_emit_occurrences(
     mac: &AnalyzedMacro,
     resolved: Option<&ResolvedMacroInput>,
+    canonical_id: &str,
 ) -> Vec<ResolvedEmitInput> {
-    let mut rows: Vec<ResolvedEmitInput> = mac
-        .emit_fields
-        .iter()
-        .map(|field| ResolvedEmitInput {
-            payload_source: authored_payload_position(field.payload.as_ref()),
-            return_publication: None,
-            return_publication_scope: None,
-            field: field.clone(),
-        })
-        .collect();
-    if let Some(resolved) = resolved {
-        let mut matched = vec![false; rows.len()];
-        for emit in &resolved.emits {
-            let duplicate_name = rows
-                .iter()
-                .filter(|row| row.field.name == emit.field.name)
-                .count()
-                > 1;
-            if let Some((index, existing)) = rows.iter_mut().enumerate().find(|(index, row)| {
-                !matched[*index]
-                    && row.field.name == emit.field.name
-                    && row.field.producer_identity == emit.field.producer_identity
-            }) {
-                // The normalized-surface payload source is authoritative for
-                // the merged row (it already prefers the PROVEN authored
-                // position when one denotes the resolved member); the
-                // analyzer row keeps its local analysis metadata. Duplicate
-                // authored overloads retain their individual payload sources;
-                // the producer identity still attaches the callable return to
-                // the correct row.
-                if !duplicate_name {
-                    existing.payload_source = emit.payload_source.clone();
-                }
-                existing.return_publication = emit.return_publication.clone();
-                existing.return_publication_scope = emit.return_publication_scope.clone();
-                matched[index] = true;
-            } else {
-                rows.push(emit.clone());
-                matched.push(true);
-            }
-        }
+    if mac.is_type_based {
+        return resolved
+            .map(|resolved| resolved.emits.clone())
+            .unwrap_or_default();
     }
-    rows
+    mac.emit_fields
+        .iter()
+        .map(|field| {
+            let payload_source = authored_payload_position(field.payload.as_ref());
+            ResolvedEmitInput {
+                id: verter_type_expr::facts::ResolvedEmitOccurrenceId::runtime(
+                    canonical_id,
+                    field.span.start,
+                    field.span.end,
+                    field.name.as_str(),
+                ),
+                name: field.name.clone(),
+                span: field.span,
+                payload_type: field.payload_type.clone(),
+                payload: field.payload.clone(),
+                payload_expr_scope: field.payload_expr_scope.clone(),
+                description: field.description.clone(),
+                tags: field.tags.clone(),
+                payload_publication: publication_from_position(
+                    &payload_source,
+                    None,
+                    authored_type_evidence(field.payload.as_ref(), field.payload_type.as_deref()),
+                    ResolutionProvenance::FrameworkSurface,
+                ),
+                payload_source,
+                return_publication: None,
+                return_publication_scope: None,
+            }
+        })
+        .collect()
 }
 
 struct MergedSlotFields {

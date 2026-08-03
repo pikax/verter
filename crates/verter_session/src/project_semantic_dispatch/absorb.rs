@@ -40,7 +40,7 @@ use std::sync::Arc;
 use crate::project_semantic_dispatch::walk::QueryBuildOutput;
 use crate::semantic_query::{
     IndexKey, IndexSignature, PathSegment, PrimitiveKind, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
+    SemanticNodeData, SemanticNodeId, SurfaceView,
 };
 
 use super::ProjectSemanticDispatch;
@@ -141,14 +141,14 @@ impl ProjectSemanticDispatch<'_> {
                 declaration_origin: None,
             })
             .collect();
-        let surface = SurfaceView {
-            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: true,
-        };
+        let surface = SurfaceView::from_entries(
+            index_signatures
+                .into_iter()
+                .map(crate::semantic_query::SurfaceEntry::IndexSignature)
+                .collect(),
+            None,
+            true,
+        );
         self.graph().intern_node(SemanticNodeData::Object(surface))
     }
 

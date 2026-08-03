@@ -91,5 +91,9 @@ pub use virtual_file_pipeline::{
 mod host_resolve_tests;
 
 #[cfg(test)]
+#[path = "../host_resolve_creo_tests.rs"]
+mod host_resolve_creo_tests;
+
+#[cfg(test)]
 #[path = "../frontier_tests.rs"]
 mod frontier_tests;

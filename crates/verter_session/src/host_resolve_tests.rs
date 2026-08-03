@@ -185,8 +185,8 @@ defineProps<{ replacement: boolean }>()
     assert!(refreshed.events.is_empty() && refreshed.slots.is_empty());
 }
 
-// @ai-generated - Discriminates mixed duplicate emit producers whose normalized
-// call/property lane order differs from the analyzer's authored member order.
+// @ai-generated - Discriminates mixed duplicate emit occurrences in the
+// resolver's unified authored order.
 #[test]
 fn vue_public_projection_matches_mixed_duplicate_emit_returns_by_producer() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -242,10 +242,10 @@ defineEmits<{
     );
 }
 
-// @ai-generated - Discriminates callable producer identities when raw
-// signatures filtered from the analyzer still reserve normalized ordinals.
+// @ai-generated - Discriminates exact callable occurrences when a non-event
+// signature is skipped and a union event expands into adjacent name arms.
 #[test]
-fn vue_public_projection_reserves_skipped_callable_emit_ordinals() {
+fn vue_public_projection_preserves_skipped_and_union_callable_occurrences() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
@@ -280,23 +280,23 @@ defineEmits<{
     );
     assert_eq!(
         save.overloads[0].parameters[0].name.as_deref(),
-        Some("literalPayload"),
-        "the analyzer-authored literal row remains first"
+        Some("unionPayload"),
+        "the union occurrence remains first"
     );
     assert_eq!(
         save.overloads[0].return_type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
-        "the literal signature keeps its own return"
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "the union occurrence keeps its own return"
     );
     assert_eq!(
         save.overloads[1].parameters[0].name.as_deref(),
-        Some("unionPayload"),
-        "the analyzer-skipped union signature remains a distinct overload"
+        Some("literalPayload"),
+        "the literal occurrence remains a distinct overload"
     );
     assert_eq!(
         save.overloads[1].return_type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
-        "the union signature keeps its own return"
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the literal occurrence keeps its own return"
     );
 
     let cancel = contract
@@ -372,7 +372,7 @@ defineEmits<DerivedEmits>()
     assert_eq!(
         save.overloads[0].parameters[0].name.as_deref(),
         Some("basePayload"),
-        "the inherited signature occupies resolved-surface ordinal zero"
+        "the inherited occurrence leads the resolved surface"
     );
     assert_eq!(
         save.overloads[0].return_type,

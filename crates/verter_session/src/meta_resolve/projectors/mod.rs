@@ -194,7 +194,7 @@ fn merge_projected_fields_by_name(
 /// (exactness / execution status / diagnostics / raw display types for the
 /// `evaluate_types` payload) — NEVER a published-source authority: every
 /// published `SourcePosition` is owned by the NORMALIZED macro rows
-/// (`ResolvedPropField` / `ResolvedEmitField` / `ResolvedExposeField` and
+/// (`ResolvedPropField` / `ResolvedEmitOccurrence` / `ResolvedExposeField` and
 /// the `define_*` shape lanes built from them). The driver:
 ///
 /// 1. For each `defineProps<T>`, calls [`project_props`] and extends

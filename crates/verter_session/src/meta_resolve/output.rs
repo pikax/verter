@@ -216,7 +216,7 @@ impl MaterializedTypePublication {
 }
 
 impl MaterializedComponentMetaTypes {
-    /// Assemble all 13 lanes. Requires the terminal output sink's
+    /// Assemble all output lanes. Requires the terminal output sink's
     /// capability — only the sink materializes output lanes.
     pub(crate) fn from_lanes(
         _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
@@ -225,8 +225,7 @@ impl MaterializedComponentMetaTypes {
         Self { lanes }
     }
 
-    /// Destructive transfer of the 13 positional lanes, each order-aligned
-    /// 1:1 with the analysis vectors the envelope was materialized from.
+    /// Destructive transfer of the output lanes.
     pub fn into_lanes(self) -> MaterializedComponentMetaTypeLanes {
         self.lanes
     }
@@ -239,21 +238,14 @@ impl MaterializedComponentMetaTypes {
 
 /// The open positional lane bundle a wire converter reads after the
 /// DESTRUCTIVE transfer ([`MaterializedComponentMetaTypes::into_lanes`]).
-/// Every vector is order-aligned 1:1 with its analysis counterpart;
-/// nested lanes mirror the analysis' nested topology (per-slot bindings,
-/// per-branch fallthrough rows).
+/// Event occurrences remain atomic; other nested lanes mirror the analysis'
+/// nested topology (per-slot bindings, per-branch fallthrough rows).
 #[derive(Debug, Default)]
 pub struct MaterializedComponentMetaTypeLanes {
     /// `props[i].type` — aligned with `ComponentMetaAnalysis::props`.
     pub props: Vec<MaterializedTypePublication>,
-    /// `events[i].payload` — aligned with `ComponentMetaAnalysis::events`
-    /// (duplicate event names preserved positionally).
-    pub event_payloads: Vec<TypeExpr>,
-    /// A1 publications aligned with `event_payloads`.
-    pub event_publications: Vec<MaterializedTypePublication>,
-    /// Callable return publications aligned with `event_payloads`. `None`
-    /// denotes a property/event-map row whose public call return is `void`.
-    pub event_returns: Vec<Option<MaterializedTypePublication>>,
+    /// Complete `{ event, payload, return }` occurrence rows.
+    pub events: Vec<MaterializedEventOccurrence>,
     /// `slots[i].bindings[j].type` — outer aligned with
     /// `ComponentMetaAnalysis::slots`, inner with `slots[i].bindings`.
     pub slot_bindings: Vec<Vec<MaterializedTypePublication>>,
@@ -285,6 +277,18 @@ pub struct MaterializedComponentMetaTypeLanes {
     /// with the branch vector, inner with each branch's `events`; empty when
     /// the surface is `None`.
     pub fallthrough_event_payloads: Vec<Vec<TypeExpr>>,
+}
+
+/// One atomic materialized event occurrence.
+#[derive(Debug, Clone)]
+pub struct MaterializedEventOccurrence {
+    /// Complete occurrence-derived semantic event row.
+    pub event: verter_semantic::analysis::component_meta::EventAnalysis,
+    /// Materialized payload publication owned by this occurrence.
+    pub payload: MaterializedTypePublication,
+    /// Materialized callable return, or implicit `void` for property/runtime
+    /// occurrences.
+    pub r#return: Option<MaterializedTypePublication>,
 }
 
 /// Narrowed output-only resolution sidecar: only what a wire converter needs

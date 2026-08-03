@@ -820,7 +820,7 @@ pub(crate) fn surface_member_to_expanded_field(
                 // REQUIRED value-type position (runtime/unannotated positions
                 // are separately typed `Absent` at their producers). Emit
                 // PAYLOAD sources never land here — the normalized
-                // `ResolvedEmitField.payload_source` rows (closed tuple /
+                // `ResolvedEmitOccurrence.payload_source` rows (closed tuple /
                 // member-path / callable-params replay) own them.
                 None => match value_position {
                     MemberValuePosition::ShallowMember => {

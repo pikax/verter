@@ -320,12 +320,9 @@ fn project_supported(
     }
 
     let mut events: Vec<PublicEvent> = Vec::new();
-    for (event_index, (event, lane)) in analysis
-        .events
-        .iter()
-        .zip(&lanes.event_publications)
-        .enumerate()
-    {
+    for occurrence in &lanes.events {
+        let event = &occurrence.event;
+        let lane = &occurrence.payload;
         let existing = events
             .iter()
             .position(|candidate| candidate.name.as_ref() == event.name);
@@ -337,10 +334,7 @@ fn project_supported(
             overload_index,
         };
         let mut member_degradation = publication_degradation(lane, surface.clone())?;
-        let return_lane = lanes
-            .event_returns
-            .get(event_index)
-            .and_then(Option::as_ref);
+        let return_lane = occurrence.r#return.as_ref();
         if let Some(return_lane) = return_lane {
             member_degradation.extend(publication_degradation(return_lane, surface)?);
         }

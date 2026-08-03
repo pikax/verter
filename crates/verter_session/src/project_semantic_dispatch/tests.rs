@@ -488,7 +488,7 @@ fn project_member_reads_object_surface() {
     let graph = host.project_type_store().semantic_graph();
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let surface = SurfaceView {
+    let surface = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -579,7 +579,7 @@ fn project_member_rejects_non_public_members_from_external_surface() {
                 declaration_origin: None,
             }
         };
-    let surface = SurfaceView {
+    let surface = crate::test_surface_view! {
         members: Arc::from(
             vec![
                 mk_member("pub", string_id, verter_type_expr::MemberVisibility::Public),
@@ -759,7 +759,7 @@ fn key_of_object_yields_string_union() {
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let num_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let surface = SurfaceView {
+    let surface = crate::test_surface_view! {
         members: Arc::from(
             vec![
                 SurfaceMember {
@@ -824,7 +824,7 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let surface = SurfaceView {
+    let surface = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -909,7 +909,7 @@ fn indexed_access_canonicalises_to_project_path_before_admission() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let num_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let surface = SurfaceView {
+    let surface = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -1347,7 +1347,7 @@ fn surface_view_carries_surface_member_optional_readonly_is_method() {
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
-    let surface = SurfaceView {
+    let surface = crate::test_surface_view! {
         members: Arc::from(
             vec![
                 SurfaceMember {
@@ -1411,7 +1411,7 @@ fn surface_view_carries_call_signatures_and_construct_signatures() {
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let num_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
-    let surface = SurfaceView {
+    let surface = crate::test_surface_view! {
         members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
         call_signatures: Arc::from(vec![string_id].into_boxed_slice()),
         construct_signatures: Arc::from(vec![num_id].into_boxed_slice()),
@@ -1618,7 +1618,7 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let surface = SurfaceView {
+    let surface = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -2848,7 +2848,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     });
     let string_node = primitive(&graph, PrimitiveKind::String);
     let number_node = primitive(&graph, PrimitiveKind::Number);
-    let true_surface = SurfaceView {
+    let true_surface = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -2870,7 +2870,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
         keyspace: None,
         has_index_signature: false,
     };
-    let false_surface = SurfaceView {
+    let false_surface = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -2968,7 +2968,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
         element: string_node,
         readonly: false,
     });
-    let surface = SurfaceView {
+    let surface = crate::test_surface_view! {
         members: Arc::from(
             vec![
                 SurfaceMember {
@@ -3561,7 +3561,7 @@ fn simple_object(
             declaration_origin: None,
         })
         .collect();
-    graph.intern_node(SemanticNodeData::Object(SurfaceView {
+    graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -8104,7 +8104,7 @@ fn function_surface_publishes_as_object_with_call_signatures() {
     let sig_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let sig_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let ctor_sig = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-    let view = SurfaceView {
+    let view = crate::test_surface_view! {
         members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
         call_signatures: Arc::from(vec![sig_a, sig_b].into_boxed_slice()),
         construct_signatures: Arc::from(vec![ctor_sig].into_boxed_slice()),
@@ -10244,7 +10244,7 @@ fn index_signature_key_type_opens_domain_concrete_key_stays_closed() {
     };
 
     let object_with_index_key = |key_type: SemanticNodeId| {
-        graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -13413,7 +13413,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     // Use Primitive(String) for the value types — the test exercises
     // the path-walker prefix machinery, not literal-type matching.
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let variants_surface = SurfaceView {
+    let variants_surface = crate::test_surface_view! {
         members: Arc::from(
             vec![
                 SurfaceMember {
@@ -13452,7 +13452,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let variants_obj = graph.intern_node(SemanticNodeData::Object(variants_surface));
 
     // Build Table = { variants: TableVariants; }
-    let table_surface = SurfaceView {
+    let table_surface = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -13740,7 +13740,7 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+    let obj = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
         call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -14714,7 +14714,7 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
 
     // Construct a non-trivial base (Object surface with a member).
     let inner = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let base_view = SurfaceView {
+    let base_view = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -14961,7 +14961,7 @@ fn omit_builtin_decl_identity_uses_canonical_sentinel() {
 fn execute_pick_dispatches_through_instantiate_pick_builtin() {
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let base = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+    let base = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -15027,7 +15027,7 @@ fn execute_pick_dispatches_through_instantiate_pick_builtin() {
 fn execute_omit_dispatches_through_instantiate_omit_builtin() {
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let base = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+    let base = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -15277,7 +15277,7 @@ fn intern_object_with_members(
     graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
     members: Vec<SurfaceMember>,
 ) -> SemanticNodeId {
-    graph.intern_node(SemanticNodeData::Object(SurfaceView {
+    graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -19918,7 +19918,7 @@ fn keyof_over_merged_decl_with_conflicting_and_overload_keys_unions_keyspace() {
             spans: Default::default(),
             declaration_origin: None,
         });
-        graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -21541,13 +21541,13 @@ fn intern_file_scoped_object(
     has_index_signature: bool,
 ) -> SemanticNodeId {
     graph.intern_node_with_scope(
-        SemanticNodeData::Object(SurfaceView {
+        SemanticNodeData::Object(crate::test_surface_view! {
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
-            has_index_signature,
+            has_index_signature: has_index_signature,
         }),
         NodeScopeId::File {
             canonical_id: Arc::from("/w/fastpath_origin.ts"),
@@ -21846,7 +21846,8 @@ fn wide_surface_numeric_index_hop_resolves_member() {
 // ──────────────────────────────────────────────────────────────────────────
 
 use crate::project_semantic_dispatch::walk::{
-    merge_union_surfaces, merge_union_surfaces_for_macro, ShallowSurface, ShallowSurfaceMember,
+    merge_union_surfaces, merge_union_surfaces_for_macro, ShallowSurface, ShallowSurfaceEntry,
+    ShallowSurfaceMember,
 };
 
 fn shallow_member_full(
@@ -21871,13 +21872,13 @@ fn shallow_member_full(
 }
 
 fn shallow_surface(members: Vec<ShallowSurfaceMember>) -> ShallowSurface {
-    ShallowSurface {
-        members,
-        call_signatures: Vec::new(),
-        construct_signatures: Vec::new(),
-        index_signatures: Vec::new(),
-        keyspace: None,
-    }
+    ShallowSurface::from_entries(
+        members
+            .into_iter()
+            .map(ShallowSurfaceEntry::Member)
+            .collect(),
+        None,
+    )
 }
 
 fn assert_shallow_surface_eq(actual: &ShallowSurface, expected: &ShallowSurface, context: &str) {
@@ -21969,13 +21970,13 @@ fn oracle_merge_union_surfaces(
             declaration_origin: None,
         });
     }
-    Some(ShallowSurface {
-        members,
-        call_signatures: Vec::new(),
-        construct_signatures: Vec::new(),
-        index_signatures: Vec::new(),
-        keyspace: None,
-    })
+    Some(ShallowSurface::from_entries(
+        members
+            .into_iter()
+            .map(ShallowSurfaceEntry::Member)
+            .collect(),
+        None,
+    ))
 }
 
 /// Reference semantics for `merge_union_surfaces_for_macro` — the retired
@@ -22044,13 +22045,13 @@ fn oracle_merge_union_surfaces_for_macro(
             declaration_origin: None,
         });
     }
-    Some(ShallowSurface {
-        members,
-        call_signatures: Vec::new(),
-        construct_signatures: Vec::new(),
-        index_signatures: Vec::new(),
-        keyspace: None,
-    })
+    Some(ShallowSurface::from_entries(
+        members
+            .into_iter()
+            .map(ShallowSurfaceEntry::Member)
+            .collect(),
+        None,
+    ))
 }
 
 /// Build the permutation fixture arms. Three arms with overlapping,

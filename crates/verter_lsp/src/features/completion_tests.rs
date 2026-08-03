@@ -2659,7 +2659,6 @@ fn test_component_prop_completions_from_macros() {
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
                 emit_fields: vec![verter_semantic::analysis::AnalyzedEmitField {
-                    producer_identity: Default::default(),
                     name: "custom".to_string(),
                     span: verter_span::Span::new(0, 6),
                     payload_type: None,

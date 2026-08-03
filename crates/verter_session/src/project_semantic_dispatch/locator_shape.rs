@@ -76,7 +76,8 @@ use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, IndexKey, IndexSignature, MacroOwnBodyStamp, MapperKey,
     MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError,
     QueryResult, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    SurfaceEntry, SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl,
+    ValueRootKey,
 };
 
 /// The anchor declaration's prepared source, held so its
@@ -680,37 +681,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // -- Object surface: ROLE-FREE member stamps --
             TypeExpr::Object(obj) => {
                 let declaration_origin = scope.canonical_file();
-                let mut members: Vec<SurfaceMember> = Vec::new();
-                let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
-                let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
-                let mut index_signatures: Vec<IndexSignature> = Vec::new();
+                let mut entries = Vec::with_capacity(obj.properties.len());
                 for member in &obj.properties {
                     match member {
-                        ObjectMember::Property(prop) => members.push(SurfaceMember {
-                            name: Arc::from(prop.name.as_str()),
-                            value: self.lower_locator_shape_node(&prop.ty, ctx),
-                            optional: prop.optional,
-                            readonly: prop.readonly,
-                            is_method: false,
-                            visibility: prop.visibility,
-                            spans: prop.spans,
-                            declaration_origin: declaration_origin.clone(),
-                            // ROLE-FREE shape identity: the locator shape
-                            // never carries a caller-relative provenance or
-                            // merge role — those are projection-time stamps
-                            // applied to the fetched shape, never node
-                            // identity. NEUTRAL is the ONLY stamp this path
-                            // can construct: the non-neutral producers
-                            // require a `ProjectionReductionContext`
-                            // witness, and the sealed `LocatorShapeCtx`
-                            // neither contains nor converts to one.
-                            declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                            merge_role: MergeRoleStamp::NEUTRAL,
-                        }),
+                        ObjectMember::Property(prop) => {
+                            entries.push(SurfaceEntry::Member(SurfaceMember {
+                                name: Arc::from(prop.name.as_str()),
+                                value: self.lower_locator_shape_node(&prop.ty, ctx),
+                                optional: prop.optional,
+                                readonly: prop.readonly,
+                                is_method: false,
+                                visibility: prop.visibility,
+                                spans: prop.spans,
+                                declaration_origin: declaration_origin.clone(),
+                                // ROLE-FREE shape identity: the locator shape
+                                // never carries a caller-relative provenance or
+                                // merge role — those are projection-time stamps
+                                // applied to the fetched shape, never node
+                                // identity. NEUTRAL is the ONLY stamp this path
+                                // can construct: the non-neutral producers
+                                // require a `ProjectionReductionContext`
+                                // witness, and the sealed `LocatorShapeCtx`
+                                // neither contains nor converts to one.
+                                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                                merge_role: MergeRoleStamp::NEUTRAL,
+                            }))
+                        }
                         ObjectMember::Method(method) => {
                             let function_expr =
                                 TypeExpr::Function(Arc::new(method.function.clone()));
-                            members.push(SurfaceMember {
+                            entries.push(SurfaceEntry::Member(SurfaceMember {
                                 name: Arc::from(method.name.as_str()),
                                 value: self.lower_locator_shape_node(&function_expr, ctx),
                                 optional: method.optional,
@@ -721,38 +721,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 declaration_origin: declaration_origin.clone(),
                                 declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
                                 merge_role: MergeRoleStamp::NEUTRAL,
-                            });
+                            }));
                         }
                         ObjectMember::CallSignature(func) => {
                             let function_expr = TypeExpr::Function(Arc::new(func.clone()));
-                            call_signatures
-                                .push(self.lower_locator_shape_node(&function_expr, ctx));
+                            entries.push(SurfaceEntry::CallSignature(
+                                self.lower_locator_shape_node(&function_expr, ctx),
+                            ));
                         }
                         ObjectMember::ConstructSignature(func) => {
                             let function_expr = TypeExpr::Function(Arc::new(func.clone()));
-                            construct_signatures
-                                .push(self.lower_locator_shape_node(&function_expr, ctx));
+                            entries.push(SurfaceEntry::ConstructSignature(
+                                self.lower_locator_shape_node(&function_expr, ctx),
+                            ));
                         }
                         ObjectMember::IndexSignature(sig) => {
-                            index_signatures.push(IndexSignature {
+                            entries.push(SurfaceEntry::IndexSignature(IndexSignature {
                                 key_type: self.lower_locator_shape_node(&sig.key_type, ctx),
                                 value_type: self.lower_locator_shape_node(&sig.value_type, ctx),
                                 readonly: sig.readonly,
                                 spans: sig.spans,
                                 declaration_origin: declaration_origin.clone(),
-                            })
+                            }))
                         }
                     }
                 }
-                let has_index_signature = !index_signatures.is_empty();
-                let view = SurfaceView {
-                    members: Arc::from(members.into_boxed_slice()),
-                    call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-                    construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-                    index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-                    keyspace: None,
-                    has_index_signature,
-                };
+                let has_index_signature = entries
+                    .iter()
+                    .any(|entry| matches!(entry, SurfaceEntry::IndexSignature(_)));
+                let view = SurfaceView::from_entries(entries, None, has_index_signature);
                 graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
             }
         }

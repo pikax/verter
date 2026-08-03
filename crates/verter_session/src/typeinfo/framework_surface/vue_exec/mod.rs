@@ -51,12 +51,11 @@
 //!   [`VueMacroSurface::member_expr_scope`]), the `defineModel` synthesized
 //!   model prop from analyzer facts, and JSDoc sliced from the surface's JSDoc
 //!   SPANS.
-//! - **emits** — call-signature event extraction FIRST (the first parameter's
-//!   string-literal — or union of string literals — is the event name; the
-//!   payload is the call-signature function with the leading event-name
-//!   parameter STRIPPED), property-key members only as a fallback when no
-//!   call-signature emit was found, de-duplicated by event name
-//!   (first-writer-wins).
+//! - **emits** — one CREO walk over the ordered `surface.entries` stream, the
+//!   sole membership and ordering authority. Call-signature and property
+//!   entries publish occurrences in stream order, preserving mixed forms and
+//!   duplicate event names; a call signature's leading event-name parameter
+//!   is stripped from its payload.
 //! - **slots** — function-like members only (non-function members filtered);
 //!   the first-parameter object's properties become the slot bindings; the
 //!   function return type becomes the slot return.
