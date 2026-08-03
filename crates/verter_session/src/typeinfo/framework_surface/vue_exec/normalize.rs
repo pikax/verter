@@ -708,12 +708,16 @@ pub(crate) fn emits_from_typeinfo_surface(
     // projected callable-occurrence replay route addresses (mirrors the
     // property-style member-path base read; a parse-domain fact lookup
     // through the ACTIVE `ctx`, never a resolution).
-    let type_arg_base = ctx
+    let indexed = ctx
         .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
-        .map(|serve| serve.indexed)
+        .map(|serve| serve.indexed);
+    let analyzed_macro = indexed
         .as_ref()
-        .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index))
-        .and_then(|mac| mac.parsed_type_argument.clone());
+        .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index));
+    let analyzer_emit_fields = analyzed_macro
+        .map(|mac| mac.emit_fields.as_slice())
+        .unwrap_or(&[]);
+    let type_arg_base = analyzed_macro.and_then(|mac| mac.parsed_type_argument.clone());
 
     let mut emits: Vec<ResolvedEmitOccurrence> = Vec::new();
 
@@ -841,10 +845,41 @@ pub(crate) fn emits_from_typeinfo_surface(
             .map(|_| macro_surface.signature_expr_scope(sig));
         let return_publication_scope = Some(macro_surface.signature_expr_scope(sig));
         let payload_publication = resolved_emit_payload_publication(&payload_source, None);
-        // The event's JSDoc rides on the call signature itself, sliced from the
-        // signature's typeinfo JSDoc spans. A union of event-name literals on ONE
-        // signature shares that signature's JSDoc across each event.
-        let (description, tags) = signature_jsdoc_from_spans(host, sig);
+        // Surface JSDoc rides on the call signature itself. When that slice is
+        // absent, only the analyzer row proven identical by declaration file,
+        // declaration span, and payload tuple may complete it. A union of event
+        // names on one signature shares the resulting metadata across its arms.
+        let authored_field = sig
+            .signature_span
+            .as_ref()
+            .filter(|origin| origin.file.as_ref() == macro_surface.owner_canonical.as_ref())
+            .and_then(|origin| {
+                analyzer_emit_fields
+                    .iter()
+                    .find(|field| field.call_signature_span == Some(origin.span))
+            })
+            .filter(|field| {
+                let Some(locator) = field.payload.as_ref() else {
+                    return false;
+                };
+                authored_candidate_matches_call_signature_payload(
+                    ctx,
+                    &dispatch,
+                    macro_surface.owner_canonical.as_ref(),
+                    locator,
+                    &raw_params[1..],
+                )
+            });
+        let (surface_description, surface_tags) = signature_jsdoc_from_spans(host, sig);
+        let description = surface_description
+            .or_else(|| authored_field.and_then(|field| field.description.as_ref().cloned()));
+        let tags = if surface_tags.is_empty() {
+            authored_field
+                .map(|field| field.tags.clone())
+                .unwrap_or_default()
+        } else {
+            surface_tags
+        };
         for (name_arm, name) in names.into_iter().enumerate() {
             emits.push(ResolvedEmitOccurrence {
                 id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
@@ -1177,6 +1212,44 @@ fn inherited_emit_payload_source(
             slot,
         ))
     })
+}
+
+/// Exact node-domain payload-tuple proof for a local authored call-signature
+/// emit. The analyzer locator raises to the tuple synthesized from parameters
+/// after the event-name parameter; every tuple fact and element type must equal
+/// the realized resolver signature. No display text participates.
+fn authored_candidate_matches_call_signature_payload(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
+    locator: &verter_type_expr::locators::MacroPayloadLocator,
+    params: &[FunctionParam],
+) -> bool {
+    let Some(raised) = dispatch.raise_authored_locator_to_hot(
+        &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
+            .absolutized_against(owner_canonical),
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    ) else {
+        return false;
+    };
+    let Some(data) = node_data_for(dispatch.ctx, raised.node()) else {
+        return false;
+    };
+    let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() else {
+        return false;
+    };
+    !readonly
+        && elements.len() == params.len()
+        && elements.iter().zip(params).all(|(element, param)| {
+            element.label.as_deref() == param.name.as_deref()
+                && element.optional == param.optional
+                && element.rest == param.rest
+                && crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(
+                    ctx,
+                    element.value,
+                    param.ty,
+                ) == Some(true)
+        })
 }
 
 /// Raised-shape COVERAGE proof for a SINGLE local authored candidate (the

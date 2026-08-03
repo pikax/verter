@@ -553,6 +553,7 @@ mod tests {
                 AnalyzedEmitField {
                     name: "update".to_string(),
                     span: Span::new(10, 20),
+                    call_signature_span: None,
                     payload_type: Some("[value: string]".to_string()),
                     description: None,
                     tags: Vec::new(),
@@ -562,6 +563,7 @@ mod tests {
                 AnalyzedEmitField {
                     name: "close".to_string(),
                     span: Span::new(30, 40),
+                    call_signature_span: None,
                     payload_type: None,
                     description: None,
                     tags: Vec::new(),
@@ -775,6 +777,7 @@ mod tests {
                 AnalyzedEmitField {
                     name: "change".into(),
                     span: Span::new(10, 16),
+                    call_signature_span: None,
                     payload_type: Some("[val: string]".into()),
                     description: None,
                     tags: Vec::new(),
@@ -784,6 +787,7 @@ mod tests {
                 AnalyzedEmitField {
                     name: "submit".into(),
                     span: Span::new(20, 26),
+                    call_signature_span: None,
                     payload_type: None,
                     description: None,
                     tags: Vec::new(),

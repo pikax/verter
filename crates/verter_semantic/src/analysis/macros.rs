@@ -3299,6 +3299,7 @@ fn extract_emit_fields_from_members_at(
                 key_name.map(|name| AnalyzedEmitField {
                     name,
                     span: prop.key.span().into(),
+                    call_signature_span: None,
                     payload_type,
                     description,
                     tags,
@@ -3341,6 +3342,7 @@ fn extract_emit_fields_from_members_at(
                         return Some(AnalyzedEmitField {
                             name: s.value.to_string(),
                             span: s.span.into(),
+                            call_signature_span: Some(call_sig.span().into()),
                             payload_type,
                             description,
                             tags,
@@ -3372,6 +3374,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                     key_name.map(|name| AnalyzedEmitField {
                         name,
                         span: p.key.span().into(),
+                        call_signature_span: None,
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),
@@ -3391,6 +3394,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                     Some(AnalyzedEmitField {
                         name: lit.value.to_string(),
                         span: lit.span.into(),
+                        call_signature_span: None,
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),

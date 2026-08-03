@@ -430,6 +430,19 @@ fn emit_fields_type_based_call_signature() {
         fields
     );
     assert_eq!(fields[0].name, "change");
+    assert_eq!(
+        &code[fields[0].span.start as usize..fields[0].span.end as usize],
+        "'change'",
+        "the event-name span remains the payload locator identity"
+    );
+    let signature_span = fields[0]
+        .call_signature_span
+        .expect("a call-signature emit retains its declaration span");
+    assert_eq!(
+        &code[signature_span.start as usize..signature_span.end as usize],
+        "(e: 'change', id: number): void",
+        "the sidecar span shares declaration identity with the typeinfo signature"
+    );
 }
 
 #[test]

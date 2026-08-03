@@ -897,6 +897,7 @@ mod unused_declaration_population {
         AnalyzedEmitField {
             name: name.to_string(),
             span: verter_span::Span::new(start, start + name.len() as u32),
+            call_signature_span: None,
             payload_type: None,
             payload: None,
             payload_expr_scope: None,

@@ -3230,6 +3230,7 @@ fn make_synth_typed_emit(name: &str, field_index: u32) -> AnalyzedEmitField {
     AnalyzedEmitField {
         name: name.to_string(),
         span: verter_span::Span::default(),
+        call_signature_span: None,
         payload_type: Some("garbage<<<unparseable".to_string()),
         payload: Some(synth_payload(field_index)),
         payload_expr_scope: Some(TypeExprScope::new("test:fixture")),

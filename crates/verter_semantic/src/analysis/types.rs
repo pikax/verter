@@ -1165,6 +1165,11 @@ pub struct AnalyzedEmitField {
     pub name: String,
     /// SFC-absolute byte span of the event name in the declaration.
     pub span: Span,
+    /// SFC-absolute byte span of the owning call-signature declaration.
+    /// `None` for property-style and runtime emits. The event-name [`span`]
+    /// remains the locator-dereference identity for authored payload replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_signature_span: Option<Span>,
     /// Payload type text extracted from the type declaration.
     /// For property signatures: the value type (e.g., `"[id: number]"`).
     /// For call signatures: params after event name as tuple (e.g., `"[id: number]"`).

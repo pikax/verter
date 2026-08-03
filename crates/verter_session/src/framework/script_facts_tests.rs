@@ -51,8 +51,8 @@ fn candidate_store_is_content_addressed_hit_and_version_miss() {
 }
 
 #[test]
-fn carrier_parser_v3_candidate_is_rejected_by_v4_key() {
-    const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 3;
+fn carrier_parser_v4_candidate_is_rejected_by_v5_key() {
+    const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 4;
     assert_eq!(
         crate::file_artifact_store::LEGACY_PARSER_VERSION,
         PREVIOUS_CARRIER_PARSER_VERSION + 1
@@ -66,16 +66,16 @@ fn carrier_parser_v3_candidate_is_rejected_by_v4_key() {
     };
     store.insert(stale.clone(), fixture_candidates());
 
-    assert!(store.get(&stale).is_some(), "the planted v3 row exists");
+    assert!(store.get(&stale).is_some(), "the planted v4 row exists");
     assert!(
         store.get(&current).is_none(),
-        "the owner-exact v4 key rejects the v3 carrier candidate"
+        "the declaration-span-aware v5 key rejects the v4 carrier candidate"
     );
 
     store.insert(current.clone(), fixture_candidates());
     assert!(
         store.get(&current).is_some(),
-        "a v4 candidate roundtrips under the current key"
+        "a v5 candidate roundtrips under the current key"
     );
 }
 

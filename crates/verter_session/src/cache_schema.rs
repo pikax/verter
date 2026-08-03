@@ -79,7 +79,9 @@
 /// - `6` — exact prop callable roles and package-backed Svelte `Snippet`
 ///   symbol identities. Version `5` entries lack the role fact and must fail
 ///   closed instead of inferring from display text.
-pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 6;
+/// - `7` — call-signature emit declaration spans. Version `6` analyzer-bearing
+///   entries cannot prove an exact declaration-span JSDoc join.
+pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 7;
 
 /// Trait surface every participating Db implements. The implementation is a
 /// trivial getter — the reason it exists at all is so the architecture-guard

@@ -261,7 +261,11 @@ pub struct VueRuntimeCompileExtras {
 /// `LEGACY_PARSER_VERSION` 3 → 4 bump; the two must agree by value so the
 /// rehoused dispatch neither serves nor is spuriously evicted against the
 /// legacy key dimension.
-pub const VUE_CARRIER_PARSER_VERSION: u32 = 4;
+///
+/// Bumped 4 to 5: analyzed call-signature emit fields retain their declaration
+/// span for exact occurrence joins. This mirrors the session's
+/// `LEGACY_PARSER_VERSION` 4 to 5 bump.
+pub const VUE_CARRIER_PARSER_VERSION: u32 = 5;
 
 /// The Vue carrier compiler — the reference [`CarrierCompiler`].
 ///

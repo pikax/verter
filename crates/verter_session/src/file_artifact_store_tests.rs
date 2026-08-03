@@ -91,10 +91,10 @@ fn empty_store_returns_none() {
 }
 
 #[test]
-fn parser_v2_artifact_is_rejected_by_v3_base_key() {
+fn parser_v3_artifact_is_rejected_by_v4_base_key() {
     use super::CURRENT_PARSER_VERSION;
 
-    const PREVIOUS_PARSER_VERSION: u32 = 2;
+    const PREVIOUS_PARSER_VERSION: u32 = 3;
     assert_eq!(CURRENT_PARSER_VERSION, PREVIOUS_PARSER_VERSION + 1);
 
     let store = FileArtifactStore::new();

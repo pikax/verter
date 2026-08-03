@@ -2675,6 +2675,7 @@ fn test_component_prop_completions_from_macros() {
                 emit_fields: vec![verter_semantic::analysis::AnalyzedEmitField {
                     name: "custom".to_string(),
                     span: verter_span::Span::new(0, 6),
+                    call_signature_span: None,
                     payload_type: None,
                     description: None,
                     tags: vec![],

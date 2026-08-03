@@ -1263,16 +1263,18 @@ read-side fact validation could retain such an aggregate.
 
 ### Exact-owner version audit (2026-07-19)
 
-The neutral lexical-owner cutover changes cached parse facts, declaration
-preparation, route results, semantic-query identity, and carrier script facts.
-The coordinated invalidation boundaries are:
+The neutral lexical-owner cutover and later analyzer-carrier additions change
+cached parse facts, declaration preparation, route results, semantic-query
+identity, and carrier script facts. The coordinated invalidation boundaries
+are:
 
-- `CACHE_CLUSTER_SCHEMA_VERSION = 5` rejects the former schema-4 cache cohort
-  after the CREO migration; schema 4 was the exact-owner cutover from schema 3.
-- `CURRENT_PARSER_VERSION = 3` rejects ordinary/base artifacts whose parse
-  facts and declaration inventories predate exact owners.
-- `LEGACY_PARSER_VERSION = 4` rejects carrier-script candidates that predate
-  exact owners.
+- `CACHE_CLUSTER_SCHEMA_VERSION = 7` rejects the schema-6 analyzer-bearing
+  cache cohort, which lacks call-signature emit declaration spans. Schema 5
+  was the CREO migration; schema 4 was the exact-owner cutover.
+- `CURRENT_PARSER_VERSION = 4` rejects ordinary/base artifacts whose analyzed
+  emit fields lack the call-signature declaration span used by exact joins.
+- `LEGACY_PARSER_VERSION = 5` rejects carrier-script candidates with that same
+  pre-sidecar analysis shape.
 - `ROUTE_DB_RESOLVER_VERSION = 2` rejects route values that do not carry the
   defining declaration owner.
 - `SvelteScriptProvider::VERSION = 9` independently rejects Svelte candidate

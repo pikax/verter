@@ -732,6 +732,7 @@ fn extracts_events_from_define_emits() {
             crate::analysis::types::AnalyzedEmitField {
                 name: "change".to_string(),
                 span: verter_span::Span::default(),
+                call_signature_span: None,
                 payload_type: Some("[value: string]".to_string()),
                 description: None,
                 tags: Vec::new(),
@@ -741,6 +742,7 @@ fn extracts_events_from_define_emits() {
             crate::analysis::types::AnalyzedEmitField {
                 name: "close".to_string(),
                 span: verter_span::Span::default(),
+                call_signature_span: None,
                 payload_type: None,
                 description: None,
                 tags: Vec::new(),
@@ -777,6 +779,7 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
             name: "update:searchTerm".to_string(),
             span: verter_span::Span::default(),
+            call_signature_span: None,
             payload_type: Some("[value: string]".to_string()),
             description: Some("Local update event".to_string()),
             tags: Vec::new(),
@@ -793,6 +796,7 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
                 name: "escapeKeyDown".to_string(),
                 span: verter_span::Span::default(),
+                call_signature_span: None,
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
                 description: None,
                 tags: Vec::new(),
@@ -802,6 +806,7 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
                 name: "closeAutoFocus".to_string(),
                 span: verter_span::Span::default(),
+                call_signature_span: None,
                 payload_type: Some("[event: Event]".to_string()),
                 description: None,
                 tags: Vec::new(),
@@ -900,6 +905,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
                 name: "escapeKeyDown".to_string(),
                 span: verter_span::Span::default(),
+                call_signature_span: None,
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
                 description: None,
                 tags: Vec::new(),
@@ -909,6 +915,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
                 name: "closeAutoFocus".to_string(),
                 span: verter_span::Span::default(),
+                call_signature_span: None,
                 payload_type: Some("[]".to_string()),
                 description: None,
                 tags: Vec::new(),
@@ -2324,6 +2331,7 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
             name: "update:modelValue".to_string(),
             span: verter_span::Span::default(),
+            call_signature_span: None,
             payload_type: Some(
                 "[value: (T extends 'single' ? string : string[]) | undefined]".to_string(),
             ),
@@ -2389,6 +2397,7 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
             emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
                 name: "update:modelValue".to_string(),
                 span: verter_span::Span::default(),
+                call_signature_span: None,
                 payload_type: Some(
                     "[value: (T extends 'single' ? string : string[]) | undefined]".to_string(),
                 ),
@@ -2483,6 +2492,7 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
             name: "update:modelValue".to_string(),
             span: verter_span::Span::default(),
+            call_signature_span: None,
             payload_type: Some("[date: CalendarModelValue<R, M>]".to_string()),
             description: None,
             tags: Vec::new(),
@@ -3331,6 +3341,7 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
                 name: "save".to_string(),
                 span: verter_span::Span::default(),
+                call_signature_span: None,
                 payload_type: Some("[value: string]".to_string()),
                 payload: lower_for_test(Some("[value: string]")).0,
                 payload_expr_scope: lower_for_test(Some("[value: string]")).1,
@@ -3340,6 +3351,7 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
             resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
                 name: "save".to_string(),
                 span: verter_span::Span::default(),
+                call_signature_span: None,
                 payload_type: Some("[index?: number]".to_string()),
                 payload: Some(test_payload(1)),
                 payload_expr_scope: Some(verter_type_expr::TypeExprScope::new("test:fixture")),

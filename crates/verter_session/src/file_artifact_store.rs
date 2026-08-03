@@ -298,7 +298,11 @@ impl FileArtifactKey {
 /// Bumped 2 → 3: parse facts and declaration inventories now retain exact
 /// top-level lexical owners. An artifact produced under version 2 cannot
 /// distinguish same-name module and instance declarations.
-pub const CURRENT_PARSER_VERSION: u32 = 3;
+///
+/// Bumped 3 to 4: analyzed call-signature emit fields retain the declaration
+/// span used for exact occurrence joins. Version 3 artifacts carry only the
+/// event-name span and cannot prove the call-signature JSDoc join.
+pub const CURRENT_PARSER_VERSION: u32 = 4;
 
 /// Parser version stamped on the canonical-keyed legacy surface that
 /// builds [`FileArtifactKey`] inline (the env-hash-threading entry
@@ -317,7 +321,10 @@ pub const CURRENT_PARSER_VERSION: u32 = 3;
 /// Bumped 3 → 4: carrier script facts and declaration inventories retain exact
 /// top-level lexical owners. Version 3 candidates can alias same-name module
 /// and instance bindings and therefore cannot remain warm.
-pub const LEGACY_PARSER_VERSION: u32 = 4;
+///
+/// Bumped 4 to 5: carrier analysis retains the call-signature emit declaration
+/// span required by the exact occurrence JSDoc join.
+pub const LEGACY_PARSER_VERSION: u32 = 5;
 
 /// `parse_env_hash` sentinel marking a BASE artifact key
 /// ([`FileArtifactKey::base`]) — used by the canonical-keyed surface

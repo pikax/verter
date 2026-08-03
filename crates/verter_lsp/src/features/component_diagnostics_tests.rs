@@ -850,6 +850,7 @@ fn make_child_with_prop_emit_pair(props: &[&str], emits: &[&str]) -> FileAnalysi
         .map(|name| verter_semantic::analysis::AnalyzedEmitField {
             name: (*name).to_string(),
             span: verter_span::Span::new(0, 0),
+            call_signature_span: None,
             payload_type: None,
             description: None,
             tags: vec![],

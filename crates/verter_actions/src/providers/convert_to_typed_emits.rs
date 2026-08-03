@@ -104,6 +104,7 @@ mod tests {
         AnalyzedEmitField {
             name: name.to_string(),
             span: Span::new(0, 0),
+            call_signature_span: None,
             payload_type: None,
             description: None,
             tags: vec![],
