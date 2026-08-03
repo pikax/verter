@@ -84,11 +84,11 @@ fn red_raw_registered_carrier_parser_is_not_public() {
     t.compile_fail("tests/cases/compile-fail/scanners_replacement_raw_parser_public.rs");
 }
 
-/// The registered-carrier projector is a compiler-internal capability: an
-/// external crate can neither name its implementation module nor reach a
-/// facade re-export. This privacy rail complements the in-crate resolved-path
-/// guard, so function-pointer and closure indirection cannot cross the crate
-/// boundary unseen.
+/// The registered-carrier projector is a module-private capability: callers
+/// outside its defining module can neither name the implementation module nor
+/// reach a parent-module facade path. B2 owns exposing the real projector to
+/// exactly the store-leader module; until then only the compiler's `cfg(test)`
+/// wrapper crosses this boundary.
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),

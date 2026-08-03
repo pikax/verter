@@ -21,7 +21,7 @@
 pub mod carrier_compiler;
 pub mod ctx;
 pub mod generated_identifier;
-pub(crate) mod registered_carrier_projection;
+mod registered_carrier_projection;
 pub mod registry;
 pub mod vue_bridge;
 

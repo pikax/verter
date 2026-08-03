@@ -12,16 +12,16 @@ use super::carrier_compiler::{CarrierCompiler, ParseOptions};
 use super::vue_bridge::VueCarrierCompiler;
 use crate::svelte::SvelteCarrierCompiler;
 
-pub(crate) struct RegisteredCarrierProjection {
+struct RegisteredCarrierProjection {
     inventory: Arc<CarrierBlockInventory>,
     carrier_structure_hash: CarrierStructureHash,
 }
 
 impl RegisteredCarrierProjection {
-    pub(crate) fn inventory(&self) -> &Arc<CarrierBlockInventory> {
+    fn inventory(&self) -> &Arc<CarrierBlockInventory> {
         &self.inventory
     }
-    pub(crate) fn carrier_structure_hash(&self) -> CarrierStructureHash {
+    fn carrier_structure_hash(&self) -> CarrierStructureHash {
         self.carrier_structure_hash
     }
 }
@@ -87,8 +87,12 @@ fn project_registered_carrier(
 pub(super) fn project_registered_carrier_for_tests(
     compiler: &dyn CarrierCompiler,
     accepted: &AcceptedRegisteredCarrierSource,
-) -> RegisteredCarrierProjection {
-    project_registered_carrier(compiler, accepted)
+) -> (Arc<CarrierBlockInventory>, CarrierStructureHash) {
+    let projection = project_registered_carrier(compiler, accepted);
+    (
+        Arc::clone(projection.inventory()),
+        projection.carrier_structure_hash(),
+    )
 }
 
 struct Builder<'a> {
