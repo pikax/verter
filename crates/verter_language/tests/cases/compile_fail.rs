@@ -1,6 +1,7 @@
 #[test]
 fn registered_authority_capabilities_are_not_mintable_outside_their_authorities() {
     let t = trybuild::TestCases::new();
+    t.compile_fail("tests/compile-fail/registered_snapshot_id_outside_mint.rs");
     t.compile_fail("tests/compile-fail/registered_snapshot_id_bytes_api.rs");
     t.compile_fail("tests/compile-fail/registered_snapshot_outside_mint.rs");
     t.compile_fail("tests/compile-fail/authority_namespace_outside_mint.rs");
