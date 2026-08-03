@@ -103,7 +103,16 @@ export type RequestResponse = {
   [RequestType.GetVirtualFiles]: VirtualFilesResponse;
   [RequestType.GetAnalysis]: FileAnalysisSnapshot;
   [RequestType.GetProjectOverview]: ProjectOverview;
-  [RequestType.GetBindingTypes]: Record<string, string | null>;
+  /**
+   * Per-binding provider quick-info, display-only.
+   *
+   * `displaySignature` is the TypeProvider's quick-info display string VERBATIM
+   * (e.g. `const count: Ref<number>`). It is NOT a type: consumers render it
+   * as-is and MUST NOT split, trim to a right-hand side, or otherwise recover
+   * structure from it. `null` = unavailable or produced against a superseded
+   * provider surface (fail closed).
+   */
+  [RequestType.GetBindingTypes]: Record<string, { displaySignature: string } | null>;
   [RequestType.GetComponentParents]: ComponentParentsResponse;
   [RequestType.ApplyStyleOverrides]: { success: boolean };
   [RequestType.GetRouteTree]: RouteAnalysisSnapshot;

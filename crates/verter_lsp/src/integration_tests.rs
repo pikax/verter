@@ -3573,8 +3573,10 @@ const count = 42
         tsx_offset,
         Some(HoverInfo {
             contents: "const count: 42".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "const count: 42",
+            )),
+            ..Default::default()
         }),
     );
 
@@ -5480,8 +5482,8 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
         tsx_offset,
         Some(HoverInfo {
             contents: "() any".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature("() any")),
+            ..Default::default()
         }),
     );
 

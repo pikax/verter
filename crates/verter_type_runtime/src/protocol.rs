@@ -327,14 +327,278 @@ pub struct ResolvedTextEdit {
     pub new_text: String,
 }
 
+/// Witness that a [`DisplaySignature`] is being minted at a provider wire
+/// boundary.
+///
+/// Obtainable ONLY through a [`TypeProvider`] impl
+/// ([`crate::traits::TypeProvider::provider_wire_witness`]) — per-engine
+/// normalization INTO the neutral protocol is the producer's job, once, at the
+/// IPC boundary, and this token is what marks that boundary. The field is
+/// non-public (the `CarrierAccessToken { _private: () }` precedent), so an
+/// out-of-crate struct literal does not compile.
+pub struct DisplaySignatureWireWitness {
+    _private: (),
+}
+
+impl DisplaySignatureWireWitness {
+    pub(crate) fn mint() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// The provider's quick-info display string, VERBATIM (e.g.
+/// `const count: Ref<number>`) — a branded DISPLAY value, not a type.
+///
+/// The brand seals the display domain: consumers render it as-is and must not
+/// split, trim to a right-hand side, or otherwise recover structure from it,
+/// in Rust or in TypeScript. Structurally enforced (the primary rail is this
+/// type's ordinary compile):
+///
+/// - the inner `String` is private — no out-of-crate struct literal;
+/// - no `Deserialize` — the value cannot be conjured off a wire;
+/// - no `Deref`/`AsRef<str>`/`Into<String>`/`Display` — no implicit coercion
+///   into string-typed (or semantic) APIs;
+/// - construction requires a [`DisplaySignatureWireWitness`], obtainable only
+///   through a provider impl;
+/// - the sole reader is the deliberately-labelled [`Self::as_display_str`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct DisplaySignature(String);
+
+impl DisplaySignature {
+    /// Mint the branded display value from the provider's OWN wire response.
+    ///
+    /// The witness confines minting to provider impls — the only place an
+    /// engine's wire shape is known (authority order rule 1: normalization
+    /// into the neutral protocol happens once, at the IPC boundary).
+    pub fn from_provider_wire(
+        _witness: DisplaySignatureWireWitness,
+        value: impl Into<String>,
+    ) -> Self {
+        Self(value.into())
+    }
+
+    /// The display string, for RENDERING only.
+    ///
+    /// Deliberately labelled: a call site reading this into a semantic
+    /// decision (type resolution, cache keys, role classification) is a
+    /// Typed-IR-Only violation in plain sight.
+    pub fn as_display_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Derive a new branded value by rewriting the display text (display-domain
+    /// normalization only, e.g. replacing an implementation-only facade name
+    /// with the authored identifier). Requires an existing legitimately-minted
+    /// brand — this is not a construction route.
+    pub fn with_display_rewrite(&self, rewrite: impl Fn(&str) -> String) -> Self {
+        Self(rewrite(&self.0))
+    }
+}
+
+/// The provider's quick-info symbol kind — a closed, backend-neutral mirror of
+/// tsserver's `ScriptElementKind` vocabulary (cf. [`CompletionKind`]).
+///
+/// tsgo's LSP `textDocument/hover` carries NO kind field, and fabricating one
+/// (or sniffing it from display-string prefixes) is forbidden — on that engine
+/// the field stays `None` (accepted asymmetry). An unknown wire kind also
+/// parses to `None` (fail closed, never fabricated).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuickInfoKind {
+    Warning,
+    Keyword,
+    Script,
+    Module,
+    Class,
+    LocalClass,
+    Interface,
+    Type,
+    Enum,
+    EnumMember,
+    Var,
+    LocalVar,
+    Using,
+    AwaitUsing,
+    Function,
+    LocalFunction,
+    Method,
+    Getter,
+    Setter,
+    Property,
+    Accessor,
+    Constructor,
+    Call,
+    Index,
+    Construct,
+    Parameter,
+    TypeParameter,
+    PrimitiveType,
+    Label,
+    Alias,
+    Const,
+    Let,
+    Directory,
+    ExternalModuleName,
+    JsxAttribute,
+    String,
+    Link,
+    LinkName,
+    LinkText,
+}
+
+impl QuickInfoKind {
+    /// Parse a tsserver `ScriptElementKind` wire string. Unknown or empty
+    /// kinds are `None` — fail closed, never fabricated.
+    pub fn from_tsserver_wire(kind: &str) -> Option<Self> {
+        Some(match kind {
+            "warning" => Self::Warning,
+            "keyword" => Self::Keyword,
+            "script" => Self::Script,
+            "module" => Self::Module,
+            "class" => Self::Class,
+            "local class" => Self::LocalClass,
+            "interface" => Self::Interface,
+            "type" => Self::Type,
+            "enum" => Self::Enum,
+            "enum member" => Self::EnumMember,
+            "var" => Self::Var,
+            "local var" => Self::LocalVar,
+            "using" => Self::Using,
+            "await using" => Self::AwaitUsing,
+            "function" => Self::Function,
+            "local function" => Self::LocalFunction,
+            "method" => Self::Method,
+            "getter" => Self::Getter,
+            "setter" => Self::Setter,
+            "property" => Self::Property,
+            "accessor" => Self::Accessor,
+            "constructor" => Self::Constructor,
+            "call" => Self::Call,
+            "index" => Self::Index,
+            "construct" => Self::Construct,
+            "parameter" => Self::Parameter,
+            "type parameter" => Self::TypeParameter,
+            "primitive type" => Self::PrimitiveType,
+            "label" => Self::Label,
+            "alias" => Self::Alias,
+            "const" => Self::Const,
+            "let" => Self::Let,
+            "directory" => Self::Directory,
+            "external module name" => Self::ExternalModuleName,
+            "JSX attribute" => Self::JsxAttribute,
+            "string" => Self::String,
+            "link" => Self::Link,
+            "link name" => Self::LinkName,
+            "link text" => Self::LinkText,
+            _ => return None,
+        })
+    }
+
+    /// The exact tsserver wire spelling, for DISPLAY labels (`(kind) …`).
+    pub fn wire_label(&self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Keyword => "keyword",
+            Self::Script => "script",
+            Self::Module => "module",
+            Self::Class => "class",
+            Self::LocalClass => "local class",
+            Self::Interface => "interface",
+            Self::Type => "type",
+            Self::Enum => "enum",
+            Self::EnumMember => "enum member",
+            Self::Var => "var",
+            Self::LocalVar => "local var",
+            Self::Using => "using",
+            Self::AwaitUsing => "await using",
+            Self::Function => "function",
+            Self::LocalFunction => "local function",
+            Self::Method => "method",
+            Self::Getter => "getter",
+            Self::Setter => "setter",
+            Self::Property => "property",
+            Self::Accessor => "accessor",
+            Self::Constructor => "constructor",
+            Self::Call => "call",
+            Self::Index => "index",
+            Self::Construct => "construct",
+            Self::Parameter => "parameter",
+            Self::TypeParameter => "type parameter",
+            Self::PrimitiveType => "primitive type",
+            Self::Label => "label",
+            Self::Alias => "alias",
+            Self::Const => "const",
+            Self::Let => "let",
+            Self::Directory => "directory",
+            Self::ExternalModuleName => "external module name",
+            Self::JsxAttribute => "JSX attribute",
+            Self::String => "string",
+            Self::Link => "link",
+            Self::LinkName => "link name",
+            Self::LinkText => "link text",
+        }
+    }
+}
+
+/// Compose the `(kind) display` signature line, idempotently.
+///
+/// The shared boundary-formatter half both producers and the LSP hover/detail
+/// boundary render through: tsserver's `displayString` may already carry the
+/// exact `({kind}) ` prefix for certain symbol kinds (e.g. `(alias) const
+/// Foo`), and it is never double-applied. Display-domain composition only.
+pub fn kind_prefixed_display(kind: &str, display: &str) -> String {
+    if kind.is_empty() {
+        return display.to_string();
+    }
+    let prefix = format!("({kind}) ");
+    if display.starts_with(&prefix) {
+        display.to_string()
+    } else {
+        format!("{prefix}{display}")
+    }
+}
+
 /// Hover information from the type provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `contents` is the RENDERED blob (markdown on tsserver-family producers,
+/// normalized plaintext on tsgo) for whole-blob consumers; the structured
+/// fields are the semantic-display carriers. Recovering structure by parsing
+/// `contents` is forbidden — consumers read the structured fields, and
+/// markdown is rendered FROM them once, at the LSP hover boundary.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct HoverInfo {
-    /// Type signature or documentation text.
+    /// Rendered display text (type signature plus documentation).
     pub contents: String,
     /// Optional byte range in the generated file.
     pub range_start: Option<u32>,
     pub range_end: Option<u32>,
+    /// The engine's quick-info display string, verbatim, branded display-only.
+    /// `None` when the engine supplied no display data (never fabricated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_signature: Option<DisplaySignature>,
+    /// The engine's symbol kind. tsserver populates it from the `quickinfo`
+    /// wire; tsgo has no kind on LSP hover and leaves it `None` (accepted
+    /// asymmetry — never fabricated, never prefix-sniffed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<QuickInfoKind>,
+    /// The engine's documentation block, separated from the signature at the
+    /// producer. `None` when the engine supplied none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+}
+
+impl HoverInfo {
+    /// The `(kind) display` signature line — the SAME shared boundary
+    /// formatter the tsserver-family producers render `contents` through
+    /// ([`kind_prefixed_display`]). `None` when the hover carries no
+    /// structured signature (fail closed — never scraped from `contents`).
+    pub fn kind_labeled_signature(&self) -> Option<String> {
+        let display = self.display_signature.as_ref()?.as_display_str();
+        Some(match &self.kind {
+            Some(kind) => kind_prefixed_display(kind.wire_label(), display),
+            None => display.to_string(),
+        })
+    }
 }
 
 /// A diagnostic from the type provider.

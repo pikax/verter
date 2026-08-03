@@ -549,8 +549,12 @@ impl VerterLanguageServer {
 
     /// Handle `$/verter/getBindingTypes` request.
     ///
-    /// For each binding in the file's analysis, queries TSGO for its TypeScript type.
-    /// Returns a map of binding name → type string (or null if unavailable).
+    /// For each binding in the file's analysis, queries the TypeProvider for
+    /// its quick-info and projects the STRUCTURED display signature onto the
+    /// wire: binding name → `{ "displaySignature": string }` (or null when
+    /// unavailable / produced against a superseded surface — fail closed).
+    /// Display-only: the value is the provider's display string verbatim,
+    /// never parsed out of rendered hover markdown.
     pub async fn get_binding_types(&self, params: GetAnalysisParams) -> Result<serde_json::Value> {
         let uri = params.uri;
         tracing::debug!("$/verter/getBindingTypes: {uri}");
@@ -609,13 +613,19 @@ impl VerterLanguageServer {
                     result.insert(binding.name.clone(), serde_json::Value::Null);
                     continue;
                 }
-                // Extract the type from the hover contents
-                // Typical format: "```typescript\nconst x: number\n```" or "(property) x: string"
-                let type_str = extract_type_from_hover(&hover.contents, &binding.name);
+                // Project the provider's STRUCTURED display signature onto the
+                // wire. Missing signature ⇒ null — never a scrape of the
+                // rendered `contents` blob (that consumer class is deleted).
                 result.insert(
                     binding.name.clone(),
-                    type_str
-                        .map(serde_json::Value::String)
+                    hover
+                        .display_signature
+                        .as_ref()
+                        .map(|signature| {
+                            serde_json::json!({
+                                "displaySignature": signature.as_display_str(),
+                            })
+                        })
                         .unwrap_or(serde_json::Value::Null),
                 );
             } else {

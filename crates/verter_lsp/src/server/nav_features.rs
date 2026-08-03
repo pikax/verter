@@ -90,15 +90,13 @@ async fn enrich_v_bind_completion_details(
             if !server.provider_context_still_valid(uri, &ctx) {
                 break;
             }
-            // First informative line of the quickinfo (skip code fences).
-            if let Some(line) = info
-                .contents
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty() && !l.starts_with("```"))
-            {
+            // The provider's structured `(kind) display_signature` line,
+            // rendered through the SAME shared boundary formatter the
+            // producers use. Missing signature ⇒ no detail (fail closed —
+            // never scraped out of the rendered `contents` blob).
+            if let Some(line) = info.kind_labeled_signature() {
                 if let Some(item) = items.get_mut(idx) {
-                    item.detail = Some(line.to_string());
+                    item.detail = Some(line);
                 }
             }
         }

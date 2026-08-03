@@ -21,7 +21,8 @@ use crate::tsserver::ipc::{
     enrich_completion_with_entry_details, format_quickinfo_hover, merge_diagnostic_sets,
     parse_tsserver_code_action, parse_tsserver_combined_code_fix, parse_tsserver_completion,
     parse_tsserver_diagnostic, parse_tsserver_inlay_hint, parse_tsserver_location,
-    parse_tsserver_rename_span, stamp_tsserver_completion_offset,
+    parse_tsserver_rename_span, quickinfo_wire_pos_to_byte_offset,
+    stamp_tsserver_completion_offset,
 };
 use crate::type_provider::protocol::*;
 use crate::type_provider::traits::{ConfiguredOwnerAuthority, ProviderFuture, TypeProvider};
@@ -388,6 +389,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
         let file = Self::normalize_path(path);
         let contents_cache = Arc::clone(&self.contents);
+        let witness = self.provider_wire_witness();
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -429,10 +431,29 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
                     let contents = format_quickinfo_hover(kind, display, docs);
 
+                    // The quickinfo body's `start`/`end` map onto byte offsets
+                    // through the synced content snapshot; without one the
+                    // range fails closed to `None` (never fabricated).
+                    let (range_start, range_end) = {
+                        let cache = contents_cache.lock().await;
+                        match cache.get(&file) {
+                            Some(content) => (
+                                quickinfo_wire_pos_to_byte_offset(content, body.get("start")),
+                                quickinfo_wire_pos_to_byte_offset(content, body.get("end")),
+                            ),
+                            None => (None, None),
+                        }
+                    };
+
                     Ok(Some(HoverInfo {
                         contents,
-                        range_start: None,
-                        range_end: None,
+                        range_start,
+                        range_end,
+                        display_signature: Some(DisplaySignature::from_provider_wire(
+                            witness, display,
+                        )),
+                        kind: QuickInfoKind::from_tsserver_wire(kind),
+                        documentation: (!docs.is_empty()).then(|| docs.to_string()),
                     }))
                 }
                 // A refused project is not "no hover here". The extension host

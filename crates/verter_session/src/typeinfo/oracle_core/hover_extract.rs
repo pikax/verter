@@ -26,9 +26,10 @@
 //!    after it (modulo comments).
 //!
 //! Driver-shape note (`hover_driver_config_pinned`): the adopted LSP driver
-//! (`get_hover`, Q3) initializes tsgo with EMPTY client capabilities
-//! (`capabilities: {}`, `tsgo/ipc.rs`), which produce a
-//! BARE PLAINTEXT `type <probe_name> = <RHS>` hover with NO markdown fence (Q3).
+//! (`get_hover`, Q3) initializes tsgo via `build_client_capabilities()`
+//! (`tsgo/ipc.rs`), which advertises NO `textDocument.hover` member — hence no
+//! `contentFormat`, hence (per LSP 3.17) a BARE PLAINTEXT
+//! `type <probe_name> = <RHS>` hover with NO markdown fence (Q3).
 //! The plaintext shape (2) is therefore the live driver shape; the fenced shape
 //! (1) handles a markdown-caps driver. Both are the SAME probe header; the driver
 //! config is pinned into `probe_synthesis_version`, so a capability / content

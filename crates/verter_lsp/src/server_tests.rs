@@ -1575,9 +1575,12 @@ fn set_type_hover_at_vue_position(
         &ctx.tsx_path,
         tsx_offset,
         Some(HoverInfo {
+            // What a real provider returns: the structured display signature
+            // (the render source) plus the rendered blob for whole-blob
+            // consumers.
             contents: contents.to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(contents)),
+            ..Default::default()
         }),
     );
 }
@@ -9707,7 +9710,7 @@ import MyComp from './MyComp.vue'
         &provider,
         &app_uri,
         position,
-        "```typescript\n(alias) import MyComp\nimport MyComp\n```",
+        "(alias) import MyComp\nimport MyComp",
     );
 
     let text = hover_text(
@@ -10002,8 +10005,10 @@ async fn projectionless_carrier_heals_on_the_first_interactive_request() {
             tsx_offset,
             Some(HoverInfo {
                 contents: "(property) String.length: number".to_string(),
-                range_start: None,
-                range_end: None,
+                display_signature: Some(crate::type_provider::mock::test_display_signature(
+                    "(property) String.length: number",
+                )),
+                ..Default::default()
             }),
         );
 
@@ -10104,8 +10109,10 @@ async fn projectionless_svelte_carrier_heals_on_the_first_interactive_request() 
         tsx_offset,
         Some(HoverInfo {
             contents: "(property) String.length: number".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "(property) String.length: number",
+            )),
+            ..Default::default()
         }),
     );
 
@@ -11464,7 +11471,7 @@ import MyComp from './MyComp.vue'
         &provider,
         &app_uri,
         position,
-        "```typescript\n(alias) import MyComp\nimport MyComp\n```",
+        "(alias) import MyComp\nimport MyComp",
     );
 
     let text = hover_text(
@@ -11554,7 +11561,7 @@ import { Overlay } from './components'
         &provider,
         &app_uri,
         position,
-        "```typescript\n(const) const Overlay: __OmitNew<DefineComponent<{}, {}>>\n```",
+        "(const) const Overlay: __OmitNew<DefineComponent<{}, {}>>",
     );
 
     let text = hover_text(
@@ -11620,7 +11627,7 @@ function handleCustom(payload: string) {
         &provider,
         &app_uri,
         position,
-        "```typescript\n(property) onCustom: (payload: string) => void\n```",
+        "(property) onCustom: (payload: string) => void",
     );
 
     let text = hover_text(
@@ -13177,12 +13184,22 @@ function handleCustom(payload: string) {
         character: 29,
     };
 
-    set_type_hover_at_vue_position(
+    // Structured seeding: the provider's display signature is the PLAIN
+    // quick-info line; the rendered blob keeps the fence (what a real
+    // tsserver-family producer returns).
+    set_structured_hover_at_vue_position(
         server,
         &provider,
         &app_uri,
         position,
-        "```typescript\n(property) onAlert?: (payload: string) => void\n```",
+        crate::type_provider::protocol::HoverInfo {
+            contents: "```typescript\n(property) onAlert?: (payload: string) => void\n```"
+                .to_string(),
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "(property) onAlert?: (payload: string) => void",
+            )),
+            ..Default::default()
+        },
     );
 
     let text = hover_text(
@@ -21297,8 +21314,10 @@ async fn plain_script_features_answer_on_every_provider_route() {
             provider_offset,
             Some(HoverInfo {
                 contents: "const utilValue: number".to_string(),
-                range_start: None,
-                range_end: None,
+                display_signature: Some(crate::type_provider::mock::test_display_signature(
+                    "const utilValue: number",
+                )),
+                ..Default::default()
             }),
         );
         let hover = super::nav_features::handle_hover(server, hover_params(&uri, position))
@@ -27574,6 +27593,255 @@ async fn hover_fails_closed_when_surface_retired_mid_request() {
     );
 }
 
+// =========================================================================
+// $/verter/getBindingTypes — structured provider display_signature
+// (P1-01 / P1-02 / P1-04) + the co-migrated v-bind completion detail (S2)
+// =========================================================================
+
+/// Seed a FULL structured provider hover at a Vue position. The P1 fixtures
+/// control every structured field independently of the rendered `contents`
+/// blob — that independence is exactly what P1-02 asserts.
+fn set_structured_hover_at_vue_position(
+    server: &VerterLanguageServer,
+    provider: &MockTypeProvider,
+    uri: &Uri,
+    position: Position,
+    info: crate::type_provider::protocol::HoverInfo,
+) {
+    let ctx = synced_type_provider_context_surface_only(server, uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("vue position should map to tsx");
+    provider.set_hover(&ctx.tsx_path, tsx_offset, Some(info));
+}
+
+/// P1-01 (mock): `getBindingTypes` derives its per-binding value SOLELY from
+/// the provider's structured `display_signature` — never from the rendered
+/// `contents` blob. The seeded `contents` is deliberately garbage that names
+/// the binding with a WRONG type; a scrape would surface it, the structured
+/// read cannot.
+#[tokio::test(flavor = "multi_thread")]
+async fn binding_types_read_provider_display_signature_directly() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let decl_pos = find_document_position(server, &uri, "const msg", 6);
+    set_structured_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        decl_pos,
+        crate::type_provider::protocol::HoverInfo {
+            // A scrape of this blob would yield `WRONG_SCRAPED_TYPE` for `msg`.
+            contents: "```typescript\nmsg: WRONG_SCRAPED_TYPE\n```".to_string(),
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "const msg: \"hello\"",
+            )),
+            ..Default::default()
+        },
+    );
+
+    let value = server
+        .get_binding_types(crate::server::protocol_types::GetAnalysisParams {
+            uri: uri.as_str().to_string(),
+        })
+        .await
+        .expect("getBindingTypes request should succeed");
+
+    assert_eq!(
+        value.get("msg"),
+        Some(&serde_json::json!({ "displaySignature": "const msg: \"hello\"" })),
+        "the wire value must be the provider's display signature verbatim, got: {value}"
+    );
+    // Forbidden result: nothing derived from the rendered blob may surface.
+    assert!(
+        !value.to_string().contains("WRONG_SCRAPED_TYPE"),
+        "no consumer may recover the value from `contents`, got: {value}"
+    );
+}
+
+/// P1-02 (mock): perturbing `HoverInfo.contents` — the NEUTRAL protocol's
+/// rendered blob — changes NOTHING in the `getBindingTypes` response.
+///
+/// SCOPE (ruling Q2, recorded verbatim): this guarantee is scoped to the
+/// neutral protocol's rendered blob. Perturbing the tsgo ENGINE's own hover
+/// TEXT does change `display_signature` on that engine — the engine text is
+/// the producer's input, and that is irreducible without a second provider
+/// round trip, which is forbidden (F-03). Engine-text changes are therefore
+/// OUT of P1-02's claim; protocol-blob changes are IN.
+#[tokio::test(flavor = "multi_thread")]
+async fn binding_types_ignore_perturbed_hover_markdown() {
+    // Three perturbations of the rendered blob against ONE fixed structured
+    // signature: empty; non-markdown garbage; a well-formed fence naming a
+    // DIFFERENT binding with a different type. Byte-equal responses required.
+    let perturbations = [
+        "",
+        "@@@ not markdown @@@",
+        "```typescript\nother: PERTURBED_OTHER_TYPE\n```",
+    ];
+
+    let mut responses: Vec<String> = Vec::new();
+    for contents in perturbations {
+        let (service, provider, uri) = make_request_surface_carrier().await;
+        let server = service.inner();
+
+        let decl_pos = find_document_position(server, &uri, "const msg", 6);
+        set_structured_hover_at_vue_position(
+            server,
+            &provider,
+            &uri,
+            decl_pos,
+            crate::type_provider::protocol::HoverInfo {
+                contents: contents.to_string(),
+                display_signature: Some(crate::type_provider::mock::test_display_signature(
+                    "const msg: string",
+                )),
+                ..Default::default()
+            },
+        );
+
+        let value = server
+            .get_binding_types(crate::server::protocol_types::GetAnalysisParams {
+                uri: uri.as_str().to_string(),
+            })
+            .await
+            .expect("getBindingTypes request should succeed");
+        assert_eq!(
+            value.get("msg"),
+            Some(&serde_json::json!({ "displaySignature": "const msg: string" })),
+            "perturbation {contents:?} must not affect the wire value, got: {value}"
+        );
+        responses.push(serde_json::to_string(&value).expect("response serializes"));
+    }
+
+    // BYTE-EQUAL across all three perturbations — not merely non-null.
+    assert_eq!(
+        responses[0], responses[1],
+        "empty vs garbage contents must serialize byte-equal"
+    );
+    assert_eq!(
+        responses[1], responses[2],
+        "garbage vs wrong-binding-fence contents must serialize byte-equal"
+    );
+}
+
+/// P1-04 (mock): a provider hover arriving AFTER its captured surface is
+/// superseded still yields `null` — the post-await, pre-use
+/// `provider_context_still_valid` gate stays exactly where it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn binding_types_drop_hover_from_superseded_surface() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let decl_pos = find_document_position(server, &uri, "const msg", 6);
+    set_structured_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        decl_pos,
+        crate::type_provider::protocol::HoverInfo {
+            contents: "```typescript\nconst msg: \"hello\"\n```".to_string(),
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "const msg: \"hello\"",
+            )),
+            ..Default::default()
+        },
+    );
+
+    // Mid-request seam: a concurrent re-sync lands a NEW surface generation
+    // with drifted content between the handler's capture and its use of the
+    // provider response.
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    "/workspace/src/App.vue".to_string(),
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let value = server
+        .get_binding_types(crate::server::protocol_types::GetAnalysisParams {
+            uri: uri.as_str().to_string(),
+        })
+        .await
+        .expect("getBindingTypes request should succeed");
+
+    assert_eq!(
+        value.get("msg"),
+        Some(&serde_json::Value::Null),
+        "a hover produced against a superseded surface must fail closed to null, got: {value}"
+    );
+}
+
+/// S2 co-migration (mock): the v-bind completion `detail` renders through the
+/// SAME shared boundary formatter — `(kind) display_signature` where the
+/// structured kind exists. A bare-signature read would silently drop the
+/// `(kind) ` prefix the pre-migration first-non-fence-line scrape carried.
+#[tokio::test]
+async fn v_bind_completion_detail_carries_kind_prefixed_signature() {
+    let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst width = ref(10)\n</script>\n<template><div>x</div></template>\n<style scoped>\n.x { width: v-bind(); }\n</style>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", source)]).await;
+
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+
+    let decl_pos = find_document_position(server, &uri, "const width", 6);
+    set_structured_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        decl_pos,
+        crate::type_provider::protocol::HoverInfo {
+            contents: "```typescript\n(const) const width: Ref<number>\n```".to_string(),
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "const width: Ref<number>",
+            )),
+            kind: Some(crate::type_provider::protocol::QuickInfoKind::Const),
+            ..Default::default()
+        },
+    );
+
+    let pos = find_document_position(server, &uri, "v-bind()", 7);
+    let response = server
+        .completion(completion_params(&uri, pos, None))
+        .await
+        .expect("completion request should succeed")
+        .expect("v-bind completion must offer setup bindings");
+
+    let items = match response {
+        CompletionResponse::List(list) => list.items,
+        CompletionResponse::Array(items) => items,
+    };
+    let width = items
+        .iter()
+        .find(|i| i.label == "width")
+        .expect("setup binding offered by bare name");
+    assert_eq!(
+        width.detail.as_deref(),
+        Some("(const) const width: Ref<number>"),
+        "detail must render (kind) + display_signature through the shared boundary formatter"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 /// BOOTSTRAP-DRAIN reproduction: the editor opens a carrier during bootstrap so
 /// the file is queued (never interactively synced); the background drain then
 /// direct-opens its IDE surface (tsgo). The drain MUST record the `CarrierIde`
@@ -27635,13 +27903,7 @@ async fn bootstrap_drained_carrier_records_surface_and_serves_provider_hover() {
     // End-to-end: hover captures the drain-recorded surface and serves the
     // provider contribution (no silent drop before the next did_change).
     let position = find_document_position(server, &uri, "{{ msg", 3);
-    set_type_hover_at_vue_position(
-        server,
-        &provider,
-        &uri,
-        position,
-        "```typescript\nconst msg: string\n```",
-    );
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "const msg: string");
     let text = hover_text(
         server
             .hover(hover_params(&uri, position))
@@ -27970,8 +28232,10 @@ async fn virtual_file_query_fails_closed_when_virtual_buffer_is_stale() {
         stale_offset,
         Some(crate::type_provider::protocol::HoverInfo {
             contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "VIRTUAL_HOVER_SENTINEL",
+            )),
+            ..Default::default()
         }),
     );
 
@@ -28021,8 +28285,10 @@ async fn virtual_file_query_drops_provider_result_when_surface_advances_mid_requ
         offset,
         Some(crate::type_provider::protocol::HoverInfo {
             contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "VIRTUAL_HOVER_SENTINEL",
+            )),
+            ..Default::default()
         }),
     );
 
@@ -28085,8 +28351,10 @@ async fn virtual_file_query_serves_provider_result_from_stable_matched_surface()
         offset,
         Some(crate::type_provider::protocol::HoverInfo {
             contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "VIRTUAL_HOVER_SENTINEL",
+            )),
+            ..Default::default()
         }),
     );
 
@@ -28357,13 +28625,7 @@ async fn tsserver_published_carrier_surface_is_captured_and_serves_hover() {
 
     // And it SERVES end-to-end (hover through the captured surface).
     let position = find_document_position(server, &uri, "{{ msg", 3);
-    set_type_hover_at_vue_position(
-        server,
-        &provider,
-        &uri,
-        position,
-        "```typescript\nconst msg: string\n```",
-    );
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "const msg: string");
     let text = hover_text(
         server
             .hover(hover_params(&uri, position))
@@ -28553,13 +28815,7 @@ async fn hover_serves_provider_result_from_stable_captured_surface() {
     let server = service.inner();
 
     let position = find_document_position(server, &uri, "{{ msg", 3);
-    set_type_hover_at_vue_position(
-        server,
-        &provider,
-        &uri,
-        position,
-        "```typescript\nconst msg: string\n```",
-    );
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "const msg: string");
 
     let text = hover_text(
         server
@@ -28827,8 +29083,10 @@ async fn contract_svelte_transition_family_names_hover_typed_without_shim_leak()
             tsx_offset,
             Some(HoverInfo {
                 contents: "function fade(config: FadeParams): TransitionConfig".to_string(),
-                range_start: None,
-                range_end: None,
+                display_signature: Some(crate::type_provider::mock::test_display_signature(
+                    "function fade(config: FadeParams): TransitionConfig",
+                )),
+                ..Default::default()
             }),
         );
         let text = hover_text(

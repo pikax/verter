@@ -51,6 +51,30 @@ macro_rules! ready {
     };
 }
 
+/// The structured display signature mirrors onto the baseline DTO as a plain
+/// string (the baseline records what the provider returned; the brand itself
+/// never crosses into a `Deserialize` surface).
+#[test]
+fn normalized_hover_mirrors_display_signature_as_plain_string() {
+    use verter_type_runtime::protocol::DisplaySignature;
+    use verter_type_runtime::TypeProvider as _;
+
+    let hover = HoverInfo {
+        contents: "```typescript\nconst x: string\n```".to_string(),
+        display_signature: Some(DisplaySignature::from_provider_wire(
+            MockProvider::default().provider_wire_witness(),
+            "const x: string",
+        )),
+        ..Default::default()
+    };
+    let normalized: crate::protocol::NormalizedHover = (&hover).into();
+    assert_eq!(
+        normalized.display_signature.as_deref(),
+        Some("const x: string"),
+        "the mirror carries the signature as a plain string"
+    );
+}
+
 impl TypeProvider for MockProvider {
     fn provider_id(&self) -> &'static str {
         "tsgo"
@@ -194,8 +218,7 @@ async fn query_at_version_below_overlay_is_refused_as_stale() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -237,8 +260,7 @@ async fn sync_artifacts_applies_update_file_then_probe_is_fresh() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -312,8 +334,7 @@ async fn sync_provider_failure_does_not_advance_overlay_then_probe_is_stale() {
         // gate, not the failing provider.
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -370,8 +391,7 @@ async fn empty_sync_does_not_mark_authored_uri_fresh() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -419,8 +439,7 @@ async fn sibling_only_sync_does_not_mark_authored_uri_fresh() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -488,8 +507,7 @@ async fn named_twin_absent_from_synced_files_is_not_marked_fresh() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -542,8 +560,7 @@ async fn entry_probe_refused_when_only_twin_synced_at_new_version() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -612,8 +629,7 @@ async fn entry_probe_allowed_when_entry_itself_synced_at_new_version() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -1229,8 +1245,7 @@ async fn query_feeds_byte_offset_to_provider_not_utf16() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const greeting: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -1273,8 +1288,7 @@ async fn probe_by_file_uri_matches_open_by_generated_path() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -1315,8 +1329,7 @@ async fn requires_source_map_probe_refused_when_map_absent_else_runs() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });
@@ -1406,8 +1419,7 @@ async fn open_records_source_map_so_edit0_requires_source_map_succeeds() {
     let mock = Arc::new(MockProvider {
         hover: Some(HoverInfo {
             contents: "const x: string".to_string(),
-            range_start: None,
-            range_end: None,
+            ..Default::default()
         }),
         ..Default::default()
     });

@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/display_signature_not_a_str.rs:10:15
+   |
+10 |     takes_str(signature);
+   |     --------- ^^^^^^^^^ expected `&str`, found `&DisplaySignature`
+   |     |
+   |     arguments to this function are incorrect
+   |
+   = note: expected reference `&str`
+              found reference `&DisplaySignature`
+note: function defined here
+  --> tests/cases/compile-fail/display_signature_not_a_str.rs:5:4
+   |
+ 5 | fn takes_str(_: &str) {}
+   |    ^^^^^^^^^ -------

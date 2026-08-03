@@ -4452,6 +4452,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "trybuild",
  "verter_language",
  "verter_span",
  "verter_tsgo_api",

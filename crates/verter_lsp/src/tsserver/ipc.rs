@@ -10,6 +10,7 @@ pub use verter_type_runtime::tsserver::{
     enrich_completion_with_entry_details, format_quickinfo_hover, merge_diagnostic_sets,
     parse_tsserver_code_action, parse_tsserver_combined_code_fix, parse_tsserver_completion,
     parse_tsserver_diagnostic, parse_tsserver_inlay_hint, parse_tsserver_location,
-    parse_tsserver_rename_span, stamp_tsserver_completion_offset, tsserver_pos_to_byte_offset,
-    AssembledSignatureLabel, TsserverTypeProvider, CHILD_PROCESS_ENV_DENYLIST,
+    parse_tsserver_rename_span, quickinfo_wire_pos_to_byte_offset,
+    stamp_tsserver_completion_offset, tsserver_pos_to_byte_offset, AssembledSignatureLabel,
+    TsserverTypeProvider, CHILD_PROCESS_ENV_DENYLIST,
 };

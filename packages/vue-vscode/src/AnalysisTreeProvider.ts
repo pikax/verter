@@ -18,6 +18,12 @@ import { RequestType, type PatchClient } from "@verter/language-shared";
 import type { FileAnalysisSnapshot, ProjectOverview } from "@verter/language-shared";
 import { basename } from "path";
 import { utf16OffsetToPosition } from "./utils";
+import {
+  bindingLeafDescription,
+  bindingLeafTooltip,
+  bindingTooltipLine,
+  type BindingTypeEntry,
+} from "./bindingTypeDisplay";
 import { isCarrierComponentImport, isFrameworkCarrierLanguageId } from "./frameworkWiring";
 import { computeSsrReadiness } from "./ssrReadiness";
 
@@ -350,7 +356,7 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
     analysis: FileAnalysisSnapshot,
     sourceUri: string,
     sourceText?: string,
-    bindingTypes?: Record<string, string | null>,
+    bindingTypes?: Record<string, BindingTypeEntry>,
   ): CategoryItem[] {
     const categories: CategoryItem[] = [];
 
@@ -384,7 +390,7 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
       });
     }
 
-    // Type Information (from TSGO) — shown prominently when available
+    // Type Information (from the TypeProvider) — shown prominently when available
     const hasBindingTypes = bindingTypes != null && Object.keys(bindingTypes).length > 0;
     if (hasBindingTypes) {
       const entries = Object.entries(bindingTypes!).filter(([, v]) => v != null);
@@ -392,11 +398,13 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
         categories.push({
           type: "category",
           label: "Type Information (via tsgo)",
-          children: entries.map(([name, type]) => ({
+          children: entries.map(([name, entry]) => ({
             type: "leaf" as const,
             label: name,
-            description: type ?? "",
-            tooltip: `${name}: ${type}`,
+            // The display signature renders VERBATIM (it already names the
+            // binding — no `${name}: ` duplication, no re-splitting).
+            description: bindingLeafDescription(entry),
+            tooltip: bindingLeafTooltip(name, entry),
             icon: new ThemeIcon("symbol-type-parameter"),
             sourceUri,
           })),
@@ -411,8 +419,7 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
         label: hasBindingTypes ? "Bindings (static)" : "Bindings",
         children: analysis.bindings.map((b) => {
           const reactivity = b.reactivityKind !== "None" ? b.reactivityKind.toLowerCase() : "";
-          const tsgoType = bindingTypes?.[b.name] ?? null;
-          const descParts = [b.kind.toLowerCase(), reactivity, tsgoType].filter(Boolean);
+          const descParts = [b.kind.toLowerCase(), reactivity].filter(Boolean);
           return {
             type: "leaf" as const,
             label: b.name,
@@ -423,7 +430,7 @@ export class AnalysisTreeProvider implements TreeDataProvider<AnalysisItem>, Dis
               `Reactive: ${b.isReactive}`,
               `Reactivity: ${b.reactivityKind}`,
               b.typeAnnotation ? `Type annotation: ${b.typeAnnotation}` : "",
-              tsgoType ? `TSGO type: ${tsgoType}` : "",
+              bindingTooltipLine(bindingTypes?.[b.name]),
             ]
               .filter(Boolean)
               .join("\n"),

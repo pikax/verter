@@ -13,6 +13,17 @@ mod inner {
     use crate::type_provider::protocol::*;
     use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 
+    /// Test-side mint for the branded provider display signature.
+    ///
+    /// Routes through [`MockTypeProvider`] — a genuine [`TypeProvider`] impl —
+    /// because the witness that authorizes minting a [`DisplaySignature`] is
+    /// obtainable only through a provider impl. Test fixtures use this instead
+    /// of forging the brand (which does not compile: the inner field is
+    /// private and the type is neither `Deserialize` nor coercible).
+    pub fn test_display_signature(value: &str) -> DisplaySignature {
+        DisplaySignature::from_provider_wire(MockTypeProvider::new().provider_wire_witness(), value)
+    }
+
     /// Return `Err` when failure injection is enabled, otherwise `Ok(())`.
     fn fail_or_ok(fail: bool, op: &str) -> Result<(), TypeProviderError> {
         if fail {

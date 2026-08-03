@@ -20,6 +20,12 @@ import type {
   TemplatePropUsage,
 } from "@verter/language-shared";
 import { basename, dirname, resolve } from "path";
+import {
+  bindingSignature,
+  propSignatureDescription,
+  signatureTooltipLine,
+  type BindingTypeEntry,
+} from "./bindingTypeDisplay";
 import { isCarrierComponentImport, isFrameworkCarrierLanguageId } from "./frameworkWiring";
 
 // ── Node types for the component tree ──────────────────────────
@@ -64,7 +70,7 @@ export class ComponentTreeProvider implements TreeDataProvider<ComponentTreeItem
     this._onDidChangeTreeData.event;
 
   private cachedAnalysis: FileAnalysisSnapshot | null = null;
-  private cachedBindingTypes: Record<string, string | null> = {};
+  private cachedBindingTypes: Record<string, BindingTypeEntry> = {};
   private cachedParents: ComponentParentInfo[] = [];
   private cachedSourceUri: string | undefined;
   private subscriptions: Disposable[] = [];
@@ -249,23 +255,23 @@ export class ComponentTreeProvider implements TreeDataProvider<ComponentTreeItem
     const constness =
       prop.constness === "Const" ? "const" : prop.constness === "Dynamic" ? "dynamic" : "";
 
-    // Resolve type from referenced bindings if available
-    const resolvedTypes: string[] = [];
+    // Resolve the display signature from referenced bindings if available —
+    // rendered verbatim through the shared display helpers (never re-split).
+    const resolvedSignatures: string[] = [];
     for (const bindingName of prop.referencedBindings ?? []) {
-      const t = this.cachedBindingTypes[bindingName];
-      if (t) resolvedTypes.push(t);
+      const signature = bindingSignature(this.cachedBindingTypes[bindingName]);
+      if (signature) resolvedSignatures.push(signature);
     }
-    const typeStr = resolvedTypes.length > 0 ? resolvedTypes[0] : null;
+    const signature = resolvedSignatures.length > 0 ? resolvedSignatures[0] : null;
 
-    const descParts = [typeStr, constness].filter(Boolean);
     const item = new TreeItem(`prop: ${prop.name}`, TreeItemCollapsibleState.None);
-    item.description = descParts.length > 0 ? `(${descParts.join(", ")})` : "";
+    item.description = propSignatureDescription(signature, constness);
     item.iconPath = new ThemeIcon("symbol-property");
     item.tooltip = [
       `Prop: ${prop.name}`,
       `Bound: ${prop.isBound}`,
       `Constness: ${prop.constness}`,
-      typeStr ? `Type: ${typeStr}` : "",
+      signatureTooltipLine(signature),
       prop.referencedBindings?.length ? `Bindings: ${prop.referencedBindings.join(", ")}` : "",
       prop.fromSpread ? "From v-bind spread" : "",
     ]
