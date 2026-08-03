@@ -5,7 +5,12 @@
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
 
-use crate::documents::carrier_structure::{parse_opening_tag, CarrierBlockView};
+use verter_session::carrier_publication_store::RegisteredFileStructure;
+
+use crate::documents::carrier_structure::{
+    markup_open_tag_at, parse_opening_tag, project_markup_open_tags, CarrierBlockView,
+    MarkupOpenTagFact,
+};
 use crate::documents::line_index::LineIndex;
 use crate::features::cursor_context::{
     classify_cursor_context_for_language, CarrierTemplateLanguage, CursorContext, ExpressionKind,
@@ -47,13 +52,24 @@ pub fn completions_at_position(
     workspace_components: Option<&[WorkspaceComponent]>,
     doc_uri: Option<&str>,
     ssr_context: bool,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<CompletionResult> {
     let offset = line_index.position_to_offset(position)?;
     let carrier_language = doc_uri.and_then(CarrierTemplateLanguage::from_uri);
 
     // Classify cursor using AST-based context detection
-    let context =
-        classify_cursor_context_for_language(offset, source, blocks, analysis, carrier_language);
+    let context = classify_cursor_context_for_language(
+        offset,
+        source,
+        blocks,
+        analysis,
+        carrier_language,
+        structure,
+    );
+
+    // Parser-owned markup open-tag facts — the sole tag-geometry source for
+    // component/slot owner recovery below.
+    let markup_facts = structure.map(project_markup_open_tags);
 
     match context {
         CursorContext::RootLevel => {
@@ -151,7 +167,7 @@ pub fn completions_at_position(
                 }
                 TemplateCursorContext::ClosingTagName { .. } => None,
                 TemplateCursorContext::AttributeName {
-                    tag_name: _,
+                    ref tag_name,
                     is_component,
                     ref existing_attrs,
                 } => {
@@ -160,7 +176,8 @@ pub fn completions_at_position(
                         let comp_offset = offset as usize;
                         if let Some(items) = component_prop_completions(
                             comp_offset,
-                            source,
+                            markup_facts.as_deref(),
+                            tag_name,
                             analysis,
                             resolve_component,
                             existing_attrs,
@@ -194,11 +211,11 @@ pub fn completions_at_position(
                     is_component,
                 } => slot_name_completions(
                     offset as usize,
-                    source,
                     analysis,
                     resolve_component,
                     tag_name,
                     is_component,
+                    structure,
                 )
                 .map(|items| CompletionResult {
                     items,
@@ -207,10 +224,10 @@ pub fn completions_at_position(
                 TemplateCursorContext::SvelteSnippetName { ref tag_name } => {
                     svelte_snippet_slot_completions(
                         offset as usize,
-                        source,
                         analysis,
                         resolve_component,
                         tag_name,
+                        structure,
                     )
                     .map(|items| CompletionResult {
                         items,
@@ -1373,7 +1390,8 @@ fn event_modifier_completions_for(event_name: &str) -> CompletionResult {
 #[allow(clippy::type_complexity)]
 fn component_prop_completions(
     offset: usize,
-    source: &str,
+    markup_facts: Option<&[MarkupOpenTagFact]>,
+    context_tag_name: &str,
     analysis: &FileAnalysisSnapshot,
     resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
     existing_attrs: &[String],
@@ -1382,7 +1400,8 @@ fn component_prop_completions(
     let template = analysis.template.as_deref()?;
 
     // Find which component's opening tag contains the cursor
-    let component_name = find_component_at_cursor(offset, source, template)?;
+    let component_name =
+        find_component_at_cursor(offset, markup_facts, context_tag_name, template)?;
 
     // Prefer the analyzed component usage. During an incomplete opening tag the
     // template parser may not retain that usage yet, so fall back to the script
@@ -1563,7 +1582,7 @@ fn component_prop_completions(
 /// recorded on it.
 fn slot_owner_component<'a>(
     offset: usize,
-    source: &str,
+    markup_facts: Option<&[MarkupOpenTagFact]>,
     template: &'a verter_semantic::analysis::template::TemplateAnalysisSnapshot,
     tag_name: &str,
     is_component: bool,
@@ -1597,95 +1616,57 @@ fn slot_owner_component<'a>(
             }
         }
     }
-    // Incomplete-parse fallback: scan backwards from the slot tag for the
-    // nearest enclosing component open tag (skipping closing tags and the
-    // slot's own `<template` tag).
-    let bytes = source.as_bytes();
-    let mut i = offset.min(source.len());
-    let mut saw_slot_tag = false;
-    while i > 0 {
-        i -= 1;
-        if bytes[i] != b'<' {
-            continue;
-        }
-        let tag_start = i + 1;
-        if tag_start < source.len() && bytes[tag_start] == b'/' {
-            continue; // closing tag
-        }
-        let mut tag_end = tag_start;
-        while tag_end < source.len()
-            && (bytes[tag_end].is_ascii_alphanumeric()
-                || bytes[tag_end] == b'-'
-                || bytes[tag_end] == b'_')
-        {
-            tag_end += 1;
-        }
-        let name = &source[tag_start..tag_end];
-        if !saw_slot_tag {
-            // The first open tag before the cursor is the slot's own
-            // `<template`/`<MyComp` tag — step over it to find the owner.
-            saw_slot_tag = true;
-            if name != "template" {
-                return template.components.iter().find(|component| {
-                    component.name == name
-                        || to_kebab_case(&component.name) == name
-                        || component.name == to_pascal_case(name)
-                });
-            }
-            continue;
-        }
+    // Incomplete-parse recovery: the registered markup arena (re-parsed on
+    // every document change) still owns the slot tag's opening span. Walk its
+    // parent chain — stepping over non-component ancestors — for the nearest
+    // element whose name matches a recorded component usage. Raw source is
+    // never scanned for tag delimiters.
+    let facts = markup_facts?;
+    let own = markup_open_tag_at(facts, offset as u32)?;
+    let own_fact = &facts[own];
+    if own_fact.name.as_deref() != Some("template") {
+        let name = own_fact.name.as_deref()?;
         return template.components.iter().find(|component| {
             component.name == name
                 || to_kebab_case(&component.name) == name
                 || component.name == to_pascal_case(name)
         });
     }
+    let mut ancestor = own_fact.parent;
+    while let Some(index) = ancestor {
+        let fact = &facts[index];
+        ancestor = fact.parent;
+        let Some(name) = fact.name.as_deref() else {
+            continue;
+        };
+        let matched = template.components.iter().find(|component| {
+            component.name == name
+                || to_kebab_case(&component.name) == name
+                || component.name == to_pascal_case(name)
+        });
+        if matched.is_some() {
+            return matched;
+        }
+    }
     None
 }
 
-/// The tag OWNING the slot attribute being typed, recovered from source while
-/// the parse has not retained the usage: the component tag itself for
-/// `<MyComp #|>`, or the nearest enclosing component open tag for
-/// `<template #|>`. Non-component tags (lowercase elements like `<span>`) are
-/// never slot owners and are skipped; closing tags are stepped over.
+/// The tag OWNING the slot attribute being typed, recovered from the
+/// registered markup arena while the semantic parse has not retained the
+/// usage: the component tag itself for `<MyComp #|>`, or the nearest enclosing
+/// component element for `<template #|>`. Non-component ancestors (lowercase
+/// elements like `<span>`) are never slot owners and are stepped over. Raw
+/// source is never scanned for tag delimiters — decoy `<Tag` literals inside
+/// attribute strings cannot fabricate an owner.
 fn slot_owner_tag_name(
     offset: usize,
-    source: &str,
+    markup_facts: Option<&[MarkupOpenTagFact]>,
     is_component: bool,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<String> {
-    let bytes = source.as_bytes();
-    let mut i = offset.min(source.len());
-    let mut skip_slot_tag = !is_component;
-    while i > 0 {
-        i -= 1;
-        if bytes[i] != b'<' {
-            continue;
-        }
-        let tag_start = i + 1;
-        if tag_start < source.len() && bytes[tag_start] == b'/' {
-            continue; // closing tag
-        }
-        let mut tag_end = tag_start;
-        while tag_end < source.len()
-            && (bytes[tag_end].is_ascii_alphanumeric()
-                || bytes[tag_end] == b'-'
-                || bytes[tag_end] == b'_')
-        {
-            tag_end += 1;
-        }
-        let name = source.get(tag_start..tag_end)?;
-        if name.is_empty() {
-            return None;
-        }
-        if skip_slot_tag && name == "template" {
-            // The first open tag before the cursor is the slot's own
-            // `<template` tag — step over it to find the owner.
-            skip_slot_tag = false;
-            continue;
-        }
-        let is_component_tag = name
-            .bytes()
+    let facts = markup_facts?;
+    let is_component_tag = |name: &str| {
+        name.bytes()
             .next()
             .is_some_and(|byte| byte.is_ascii_uppercase())
             || analysis.imports.iter().any(|import| {
@@ -1693,8 +1674,22 @@ fn slot_owner_tag_name(
                     .bindings
                     .iter()
                     .any(|binding| binding.name == name || to_kebab_case(&binding.name) == name)
-            });
-        if is_component_tag {
+            })
+    };
+    let own = markup_open_tag_at(facts, offset as u32)?;
+    let own_fact = &facts[own];
+    if is_component {
+        let name = own_fact.name.as_deref()?;
+        return is_component_tag(name).then(|| name.to_string());
+    }
+    let mut ancestor = own_fact.parent;
+    while let Some(index) = ancestor {
+        let fact = &facts[index];
+        ancestor = fact.parent;
+        let Some(name) = fact.name.as_deref() else {
+            continue;
+        };
+        if is_component_tag(name) {
             return Some(name.to_string());
         }
     }
@@ -1709,23 +1704,30 @@ fn slot_owner_tag_name(
 #[allow(clippy::type_complexity)]
 fn slot_name_completions(
     offset: usize,
-    source: &str,
     analysis: &FileAnalysisSnapshot,
     resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
     tag_name: &str,
     is_component: bool,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<Vec<CompletionItem>> {
+    let markup_facts = structure.map(project_markup_open_tags);
     let template = analysis.template.as_deref();
     let component = template.and_then(|template| {
-        slot_owner_component(offset, source, template, tag_name, is_component)
+        slot_owner_component(
+            offset,
+            markup_facts.as_deref(),
+            template,
+            tag_name,
+            is_component,
+        )
     });
     // While the slot tag is still being typed the error-tolerant parse may
     // drop the component usage entirely; recover the owner through the script
-    // import whose local binding matches the scanned tag (the same recovery
-    // component prop completion uses for incomplete tags).
+    // import whose local binding matches the arena-recovered tag (the same
+    // recovery component prop completion uses for incomplete tags).
     let owner_tag = component
         .map(|usage| usage.name.clone())
-        .or_else(|| slot_owner_tag_name(offset, source, is_component, analysis))?;
+        .or_else(|| slot_owner_tag_name(offset, markup_facts.as_deref(), is_component, analysis))?;
     let (import_source, resolved_name) = if let Some(usage) = component {
         (usage.import_source.as_deref()?, usage.name.as_str())
     } else {
@@ -1875,10 +1877,10 @@ fn slot_name_completions(
 #[allow(clippy::type_complexity)]
 fn svelte_snippet_slot_completions(
     offset: usize,
-    source: &str,
     analysis: &FileAnalysisSnapshot,
     resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
     tag_name: &str,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<Vec<CompletionItem>> {
     let template = analysis.template.as_deref()?;
     let component = template.components.iter().find(|component| {
@@ -1886,9 +1888,10 @@ fn svelte_snippet_slot_completions(
             || to_kebab_case(&component.name) == tag_name
             || component.name == to_pascal_case(tag_name)
     });
+    let markup_facts = structure.map(project_markup_open_tags);
     let component = match component {
         Some(component) => component,
-        None => slot_owner_component(offset, source, template, tag_name, true)?,
+        None => slot_owner_component(offset, markup_facts.as_deref(), template, tag_name, true)?,
     };
     let import_source = component.import_source.as_deref()?;
     let resolve_fn = resolve_component?;
@@ -1977,60 +1980,32 @@ fn svelte_render_callee_completions(
     Some(items)
 }
 
-/// Find the component name at the cursor position by scanning the template source.
-///
-/// Scans backward from the cursor to find the most recent `<` that starts a component tag,
-/// then verifies the cursor is still inside the opening tag (before `>` or `/>`).
+/// Find the component whose OPENING tag owns the cursor. The registered
+/// markup arena is the primary authority: the innermost parser-identified
+/// opening span containing the offset supplies the tag anchor and name. When
+/// the parser has not retained the mid-typed tag (an unterminated opening at
+/// the edit point), the CLASSIFIER-supplied context tag name is the recovery
+/// — this function never scans raw source for `<`, so a decoy tag inside an
+/// attribute string cannot fabricate a component.
 fn find_component_at_cursor(
     offset: usize,
-    source: &str,
+    markup_facts: Option<&[MarkupOpenTagFact]>,
+    context_tag_name: &str,
     template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<String> {
-    let bytes = source.as_bytes();
-
-    // Scan backward from cursor to find the nearest `<` that opens a tag
-    let mut i = offset;
-    while i > 0 {
-        i -= 1;
-        if bytes[i] == b'<' {
-            break;
-        }
-        // If we hit `>` before `<`, cursor is outside any opening tag
-        if bytes[i] == b'>' {
+    let arena_name = markup_facts.and_then(|facts| {
+        let fact = &facts[markup_open_tag_at(facts, offset as u32)?];
+        // Only an attribute-position cursor (past the tag name) owns props.
+        if offset as u32 <= fact.name_end {
             return None;
         }
-    }
-
-    if i >= offset || bytes[i] != b'<' {
-        return None;
-    }
-
-    // Skip past `<` and optional `/` (closing tags don't have props)
-    let tag_start = i + 1;
-    if tag_start < source.len() && bytes[tag_start] == b'/' {
-        return None; // Closing tag
-    }
-
-    // Extract the tag name
-    let mut tag_end = tag_start;
-    while tag_end < source.len()
-        && (bytes[tag_end].is_ascii_alphanumeric()
-            || bytes[tag_end] == b'-'
-            || bytes[tag_end] == b'_')
-    {
-        tag_end += 1;
-    }
-
-    if tag_end == tag_start {
-        return None;
-    }
-
-    let tag_name = &source[tag_start..tag_end];
-
-    // Verify cursor is after the tag name (in attribute position)
-    if offset <= tag_end {
-        return None; // Cursor is on the tag name itself, not in attribute position
-    }
+        fact.name.clone()
+    });
+    let tag_name = match arena_name.as_deref() {
+        Some(name) => name,
+        None if !context_tag_name.is_empty() => context_tag_name,
+        None => return None,
+    };
 
     // Check if this tag name is a component (starts with uppercase or matches a known component)
     let is_component = tag_name

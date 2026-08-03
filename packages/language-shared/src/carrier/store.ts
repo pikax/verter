@@ -46,6 +46,8 @@ export interface ReadyFile {
     schema_version: number;
     artifact_token: string;
     script_content_ranges: readonly (readonly [number, number])[];
+    /** Parser-identified markup opening-tag spans (additive; absent in older stamps). */
+    markup_opening_ranges?: readonly (readonly [number, number])[];
   };
 }
 

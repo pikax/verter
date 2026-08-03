@@ -1,5 +1,7 @@
 use super::*;
-use crate::documents::carrier_structure::test_carrier_blocks;
+use crate::documents::carrier_structure::{
+    project_carrier_blocks, test_carrier_blocks, test_structure,
+};
 use verter_semantic::analysis::template::*;
 use verter_session::FileAnalysisSnapshot;
 use verter_span::Span;
@@ -185,6 +187,7 @@ fn script_only_vue_does_not_enable_svelte_root_markup() {
         &blocks,
         None,
         Some(CarrierTemplateLanguage::Vue),
+        None,
     );
     assert!(
         matches!(ctx, CursorContext::RootLevel),
@@ -204,6 +207,7 @@ fn svelte_template_element_does_not_disable_root_markup() {
         &blocks,
         None,
         Some(CarrierTemplateLanguage::Svelte),
+        None,
     );
     assert!(
         matches!(
@@ -234,6 +238,7 @@ fn paired_svelte_template_element_opening_and_content_use_template_semantics() {
         &blocks,
         Some(&analysis),
         Some(CarrierTemplateLanguage::Svelte),
+        None,
     );
     assert!(
         matches!(
@@ -253,6 +258,7 @@ fn paired_svelte_template_element_opening_and_content_use_template_semantics() {
         &blocks,
         Some(&analysis),
         Some(CarrierTemplateLanguage::Svelte),
+        None,
     );
     assert!(
         matches!(
@@ -1227,7 +1233,8 @@ fn test_svelte_snippet_name_context() {
     // `{#snippet |` inside a component — completing the slot name the child
     // accepts.
     let source = "<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>";
-    let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
 
     let mut template = empty_template();
     template
@@ -1242,6 +1249,7 @@ fn test_svelte_snippet_name_context() {
         &blocks,
         Some(&analysis),
         Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
     );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SvelteSnippetName { tag_name }) => {
@@ -1268,6 +1276,7 @@ fn test_svelte_render_callee_context() {
         &blocks,
         Some(&analysis),
         Some(CarrierTemplateLanguage::Svelte),
+        None,
     );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SvelteRenderCallee) => {}
@@ -1278,7 +1287,8 @@ fn test_svelte_render_callee_context() {
 #[test]
 fn svelte_braced_attribute_value_uses_current_source_when_semantics_are_absent() {
     let source = "<IdeSurfaceChild onPick={on} />";
-    let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
     let cursor = (source.find("{on}").expect("attribute expression") + "{on".len()) as u32;
 
     let ctx = classify_cursor_context_for_language(
@@ -1287,6 +1297,7 @@ fn svelte_braced_attribute_value_uses_current_source_when_semantics_are_absent()
         &blocks,
         None,
         Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
     );
     assert!(
         matches!(
@@ -1300,7 +1311,8 @@ fn svelte_braced_attribute_value_uses_current_source_when_semantics_are_absent()
 }
 
 fn assert_svelte_source_prop_expression(source: &str, marker: &str, expected_prop: &str) {
-    let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
     let cursor = (source.find(marker).expect("cursor marker") + marker.len()) as u32;
     let ctx = classify_cursor_context_for_language(
         cursor,
@@ -1308,6 +1320,7 @@ fn assert_svelte_source_prop_expression(source: &str, marker: &str, expected_pro
         &blocks,
         None,
         Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
     );
     assert!(
         matches!(
@@ -1503,4 +1516,71 @@ fn cursor_in_uncovered_region_of_root_element_terminates_in_process() {
         ),
         "a parentless element never reached the fallback and must classify as text content, got {context:?}"
     );
+}
+
+// =============================================================================
+// Parser-fact geometry (scanner replacement) — discriminating fixtures where a
+// raw source scan and registered-inventory facts diverge.
+// =============================================================================
+
+#[test]
+fn svelte_braced_attribute_survives_decoy_close_tag_literal_in_value() {
+    // A `"</style>"` STRING LITERAL inside the braced value. A raw backward
+    // `rfind("</style>")` boundary scan cuts the candidate window inside the
+    // attribute value and loses the real open tag; the registered inventory's
+    // opening span still owns the cursor.
+    assert_svelte_source_prop_expression(
+        r#"<Child title={"</style>" + user.na} />"#,
+        "user.",
+        "title",
+    );
+}
+
+#[test]
+fn svelte_braced_attribute_requires_parser_facts_not_a_source_scan() {
+    // Without registered parser facts the classifier must NOT rediscover tag
+    // geometry from raw source (fail closed): no Expression classification.
+    let source = "<Child value={count} />";
+    let blocks = test_carrier_blocks(source);
+    let cursor = (source.find("{count").expect("expression") + "{count".len()) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Svelte),
+        None,
+    );
+    assert!(
+        !matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::Expression { .. })
+        ),
+        "no parser facts must mean no raw-scan geometry recovery: {ctx:?}"
+    );
+}
+
+#[test]
+fn svelte_snippet_owner_recovers_from_markup_facts_without_semantic_usage() {
+    // `{#snippet |` inside a component whose USAGE the semantic snapshot has
+    // not retained: the owner comes from the registered markup arena parent
+    // chain, never from a backward source scan.
+    let source = "<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>";
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = (source.find("{#snippet ").expect("snippet head") + "{#snippet ".len()) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
+    );
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::SvelteSnippetName { tag_name }) => {
+            assert_eq!(tag_name, "IdeSurfaceChild");
+        }
+        other => panic!("expected SvelteSnippetName, got: {other:?}"),
+    }
 }

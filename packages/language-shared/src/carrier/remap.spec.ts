@@ -291,6 +291,8 @@ describe("remap over the CarrierStoreReader INTERFACE (in-memory, no Node fs)", 
       schemaVersion: 1,
       artifactToken: "a".repeat(43),
       scriptContentRanges: [[8, 23]],
+      // Additive field: absent in older stamps parses as empty (fail closed).
+      markupOpeningRanges: [],
     });
     expect(carrierSourceStructure(ctx.reader, "d:/ws/src/U.vue.tsx")).toBeNull();
   });

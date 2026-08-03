@@ -1,8 +1,11 @@
 use oxc_span::GetSpan;
 use verter_session::FileAnalysisSnapshot;
 
+use verter_session::carrier_publication_store::RegisteredFileStructure;
+
 use crate::documents::carrier_structure::{
-    classify_cursor, CarrierBlockView, CarrierCursorContext,
+    classify_cursor, markup_element_at, markup_open_tag_at, project_markup_open_tags,
+    CarrierBlockView, CarrierCursorContext, MarkupOpenTagFact,
 };
 
 // =============================================================================
@@ -178,7 +181,7 @@ pub fn classify_cursor_context(
     blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
 ) -> CursorContext {
-    classify_cursor_context_for_language(offset, source, blocks, analysis, None)
+    classify_cursor_context_for_language(offset, source, blocks, analysis, None, None)
 }
 
 pub fn classify_cursor_context_for_language(
@@ -187,6 +190,7 @@ pub fn classify_cursor_context_for_language(
     blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     language: Option<CarrierTemplateLanguage>,
+    structure: Option<&RegisteredFileStructure>,
 ) -> CursorContext {
     // Svelte has no Vue-style `<template>` or custom SFC blocks: all paired
     // root elements/components are ordinary template markup. Only script/style
@@ -203,7 +207,9 @@ pub fn classify_cursor_context_for_language(
     // Step 1: registered carrier block context.
     match classify_cursor(offset, blocks) {
         CarrierCursorContext::RootLevel => {
-            return classify_root_or_template_context(offset, source, blocks, analysis, language);
+            return classify_root_or_template_context(
+                offset, source, blocks, analysis, language, structure,
+            );
         }
         CarrierCursorContext::OpeningTag { block } => {
             // D5: an unterminated nested `<template #…` (slot outlet being
@@ -248,7 +254,9 @@ pub fn classify_cursor_context_for_language(
     }) {
         Some(b) => b,
         None => {
-            return classify_root_or_template_context(offset, source, blocks, analysis, language);
+            return classify_root_or_template_context(
+                offset, source, blocks, analysis, language, structure,
+            );
         }
     };
 
@@ -285,6 +293,7 @@ fn classify_root_or_template_context(
     blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     language: Option<CarrierTemplateLanguage>,
+    structure: Option<&RegisteredFileStructure>,
 ) -> CursorContext {
     let has_explicit_template_block = blocks.iter().any(|block| block.tag_name == "template");
     let inside_explicit_template = blocks.iter().any(|block| {
@@ -315,6 +324,7 @@ fn classify_root_or_template_context(
         }
     }
     if language == Some(CarrierTemplateLanguage::Svelte) {
+        let markup_facts = structure.map(project_markup_open_tags);
         let line_start = source[..offset as usize]
             .rfind('\n')
             .map(|idx| idx + 1)
@@ -340,7 +350,11 @@ fn classify_root_or_template_context(
                         .min_by_key(|component| component.span.end - component.span.start)
                         .map(|component| component.name.clone())
                 })
-                .or_else(|| nearest_open_component_tag(source, offset))
+                .or_else(|| {
+                    markup_facts
+                        .as_deref()
+                        .and_then(|facts| nearest_component_ancestor(facts, offset))
+                })
                 .unwrap_or_default();
             return CursorContext::Template(TemplateCursorContext::SvelteSnippetName { tag_name });
         }
@@ -353,14 +367,18 @@ fn classify_root_or_template_context(
             return CursorContext::Template(TemplateCursorContext::SvelteRenderCallee);
         }
         // Edit-time syntax is newer than the optional semantic snapshot. A
-        // freshly typed `prop={expr}` must therefore be classified from the
-        // current document bytes before consulting analysis that may still
-        // describe the preceding shorthand attribute. This bounded lexer is
-        // deliberately Svelte-specific and recognizes only braced expressions
-        // inside the currently open tag; block/interpolation braces in element
-        // content never enter this path.
-        if let Some(ctx) = svelte_braced_attribute_expression_from_source(offset, source) {
-            return CursorContext::Template(ctx);
+        // freshly typed `prop={expr}` must therefore be classified before
+        // consulting analysis that may still describe the preceding shorthand
+        // attribute. The registered inventory (re-parsed on every document
+        // change) supplies the ONLY tag geometry: the parser-identified
+        // opening span that owns the cursor. The residual lexer below merely
+        // classifies the unfinished token INSIDE that span — no delimiter is
+        // searched in raw source, so decoy `<` / `</tag>` literals inside
+        // strings, regexes, or comments can never displace the anchor.
+        if let Some(facts) = markup_facts.as_deref() {
+            if let Some(ctx) = svelte_braced_attribute_expression(offset, source, facts) {
+                return CursorContext::Template(ctx);
+            }
         }
     }
     let semantic_position_is_owned = match language {
@@ -395,50 +413,26 @@ fn classify_root_or_template_context(
     }
 }
 
-/// Recognize a Svelte `{...}` attribute expression in the current source.
+/// Recognize a Svelte `{...}` attribute expression at the cursor.
 ///
 /// Semantic analysis is asynchronous, so the template snapshot can lag one or
-/// more editor revisions. The source remains authoritative for the small piece
-/// of syntax needed to route an interactive completion. The scan is bounded to
-/// recent source and tracks quotes plus nested braces, which keeps
-/// static quoted values and object/template expressions from being confused
-/// with tag boundaries.
-fn svelte_braced_attribute_expression_from_source(
+/// more editor revisions; the registered inventory (re-parsed on every change)
+/// does not. The parser-identified opening span that owns the cursor is the
+/// SOLE tag anchor — there is no raw-source delimiter discovery. The residual
+/// lexer classifies the unfinished token inside that span, tracking quotes and
+/// nested braces so static quoted values and object/template expressions are
+/// never confused with tag boundaries.
+fn svelte_braced_attribute_expression(
     offset: u32,
     source: &str,
+    facts: &[MarkupOpenTagFact],
 ) -> Option<TemplateCursorContext> {
     let cursor = offset as usize;
     if cursor > source.len() || !source.is_char_boundary(cursor) {
         return None;
     }
-
-    // Search candidates from oldest to newest. The first candidate whose tag
-    // remains open and owns an unmatched attribute brace is the structural tag
-    // start. A nearest-`<` search is incorrect because comparisons, regexes,
-    // strings, and comments inside the expression may all contain `<`.
-    const MAX_SOURCE_LOOKBACK: usize = 64 * 1024;
-    let before_cursor = source.get(..cursor)?;
-    let raw_boundary = ["</script>", "</style>"]
-        .into_iter()
-        .filter_map(|delimiter| {
-            before_cursor
-                .rfind(delimiter)
-                .map(|at| at + delimiter.len())
-        })
-        .max()
-        .unwrap_or(0);
-    let mut scan_start = raw_boundary.max(cursor.saturating_sub(MAX_SOURCE_LOOKBACK));
-    while scan_start < cursor && !source.is_char_boundary(scan_start) {
-        scan_start += 1;
-    }
-    for (relative, _) in source.get(scan_start..cursor)?.match_indices('<') {
-        if let Some(context) =
-            svelte_braced_attribute_from_tag_candidate(scan_start + relative, cursor, source)
-        {
-            return Some(context);
-        }
-    }
-    None
+    let fact = &facts[markup_open_tag_at(facts, offset)?];
+    svelte_braced_attribute_from_tag_candidate(fact.opening_start as usize, cursor, source)
 }
 
 fn svelte_braced_attribute_from_tag_candidate(
@@ -597,39 +591,26 @@ fn svelte_braced_attribute_from_tag_candidate(
     })
 }
 
-/// Backwards source scan for the nearest enclosing component open tag before
-/// `offset` (skipping closing tags) — the incomplete-parse recovery for the
-/// `{#snippet |` owner when analysis has not retained the component usage.
-fn nearest_open_component_tag(source: &str, offset: u32) -> Option<String> {
-    let bytes = source.as_bytes();
-    let mut i = (offset as usize).min(source.len());
-    while i > 0 {
-        i -= 1;
-        if bytes[i] != b'<' {
-            continue;
+/// Nearest enclosing component (uppercase-named) element from the registered
+/// markup arena — the incomplete-parse recovery for the `{#snippet |` owner
+/// when analysis has not retained the component usage. The walk is the arena
+/// parent chain from the innermost node containing `offset`; raw source is
+/// never scanned for tag delimiters.
+fn nearest_component_ancestor(facts: &[MarkupOpenTagFact], offset: u32) -> Option<String> {
+    let mut index = markup_element_at(facts, offset)?;
+    loop {
+        let fact = &facts[index];
+        if let Some(name) = fact.name.as_deref() {
+            if name
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_uppercase())
+            {
+                return Some(name.to_string());
+            }
         }
-        let tag_start = i + 1;
-        if tag_start < source.len() && bytes[tag_start] == b'/' {
-            continue;
-        }
-        let mut tag_end = tag_start;
-        while tag_end < source.len()
-            && (bytes[tag_end].is_ascii_alphanumeric()
-                || bytes[tag_end] == b'-'
-                || bytes[tag_end] == b'_')
-        {
-            tag_end += 1;
-        }
-        let name = source.get(tag_start..tag_end)?;
-        if name
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_uppercase())
-        {
-            return Some(name.to_string());
-        }
+        index = fact.parent?;
     }
-    None
 }
 
 /// D5 slot-name context from source: the cursor sits after a `#partial` or

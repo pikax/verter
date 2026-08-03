@@ -2077,6 +2077,20 @@ impl NapiVerterHost {
     ///
     /// - `canonical_or_alias` — the file to lint.
     /// - `config` — optional JSON string with lint config. Pass `None` for defaults.
+    /// Ordered SFC block facts projected from the registered carrier
+    /// inventory — the sole geometry source for block-structure lint rules
+    /// and block-anchored code-action edits. Empty when the file has no
+    /// registered structure (fail closed).
+    fn registered_block_facts(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Vec<verter_diagnostics::SfcBlockFact> {
+        self.inner
+            .registered_file_structure_snapshot(canonical_or_alias)
+            .map(|(structure, _)| verter_diagnostics::project_block_facts(structure.inventory()))
+            .unwrap_or_default()
+    }
+
     #[napi]
     pub fn lint(
         &self,
@@ -2097,11 +2111,13 @@ impl NapiVerterHost {
             Some(snapshot) => {
                 let linter = Linter::new(lint_config);
                 let script = build_script_snapshot(&snapshot);
+                let blocks = self.registered_block_facts(&canonical_or_alias);
                 linter
                     .lint(
                         Some(&script),
                         snapshot.template.as_deref(),
                         &snapshot.styles,
+                        &blocks,
                     )
                     .into_diagnostics()
             }
@@ -2156,11 +2172,13 @@ impl NapiVerterHost {
                 let byte_offset = utf16_to_byte_offset(source, offset);
                 let script = build_script_snapshot(&snapshot);
                 let linter = Linter::default();
+                let blocks = self.registered_block_facts(&canonical_or_alias);
                 let diag_set = linter.lint_with_source(
                     Some(&script),
                     snapshot.template.as_deref(),
                     &snapshot.styles,
                     Some(source),
+                    &blocks,
                 );
 
                 let engine = ActionEngine::default();
@@ -2171,6 +2189,7 @@ impl NapiVerterHost {
                     template: snapshot.template.as_deref(),
                     script: Some(&script),
                     styles: &snapshot.styles,
+                    blocks: &blocks,
                 };
 
                 let mut actions = Vec::new();

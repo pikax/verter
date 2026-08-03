@@ -116,6 +116,7 @@ mod tests {
             script,
             styles: &[],
             source: None,
+            blocks: &[],
         };
         visitor.visit_file(&file, &mut ctx);
         ctx.into_diagnostics()
@@ -239,6 +240,7 @@ mod tests {
             script: None,
             styles: &[],
             source: None,
+            blocks: &[],
         };
         visitor.visit_file(&file, &mut ctx);
         let diags = ctx.into_diagnostics();

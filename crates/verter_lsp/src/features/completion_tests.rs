@@ -1,5 +1,7 @@
 use super::*;
-use crate::documents::carrier_structure::test_carrier_blocks;
+use crate::documents::carrier_structure::{
+    project_carrier_blocks, test_carrier_blocks, test_structure,
+};
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
 
@@ -66,6 +68,7 @@ fn test_template_completions_include_bindings() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -113,6 +116,7 @@ fn test_script_completions_include_imports() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -157,6 +161,7 @@ fn test_filters_internal_symbols() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some());
     assert!(result.unwrap().items.is_empty());
@@ -184,6 +189,7 @@ fn test_style_returns_css_completions() {
         None,
         None,
         false,
+        None,
     );
     // Style blocks now delegate to CSS completions
     if let Some(cr) = result {
@@ -234,6 +240,7 @@ fn test_template_excludes_type_only_imports() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some());
     // Type-only imports should not appear in template completions
@@ -276,6 +283,7 @@ fn test_class_completions_in_static_class() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some());
     let cr = result.unwrap();
@@ -329,6 +337,7 @@ fn test_no_class_completions_outside_class_attr() {
         None,
         None,
         false,
+        None,
     );
     // Should NOT be class completions (id attribute), so is_incomplete should be false
     if let Some(cr) = result {
@@ -365,6 +374,7 @@ fn test_class_completions_no_style_block() {
         None,
         None,
         false,
+        None,
     );
     // No styles = no CSS classes to offer. Should still return a result but with empty items.
     if let Some(cr) = result {
@@ -512,6 +522,7 @@ fn test_class_completions_in_dynamic_class() {
         None,
         None,
         false,
+        None,
     );
     assert!(
         result.is_some(),
@@ -578,6 +589,7 @@ fn test_no_class_completions_outside_dynamic_string() {
         None,
         None,
         false,
+        None,
     );
     // Should NOT offer CSS class completions when cursor is not inside a string
     if let Some(cr) = result {
@@ -616,6 +628,7 @@ fn test_event_modifier_completions_click() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(result.is_some(), "should return completions after @click.");
@@ -662,6 +675,7 @@ fn test_event_modifier_completions_keyup() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(result.is_some(), "should return completions after @keyup.");
@@ -703,6 +717,7 @@ fn test_event_modifier_completions_mouse() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(result.is_some());
@@ -740,6 +755,7 @@ fn test_no_event_modifier_in_text() {
         None,
         None,
         false,
+        None,
     );
 
     // Should not return event modifier completions for regular text
@@ -771,6 +787,7 @@ fn test_event_modifier_completions_chained() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(
@@ -997,6 +1014,7 @@ fn test_root_completions_empty_file() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some(), "should provide completions at root level");
     let items = result.unwrap().items;
@@ -1041,6 +1059,7 @@ fn test_root_completions_with_existing_blocks() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -1082,6 +1101,7 @@ fn svelte_root_whitespace_never_emits_vue_sfc_scaffolds() {
         None,
         Some("file:///workspace/App.svelte"),
         false,
+        None,
     )
     .map(|result| {
         result
@@ -1118,6 +1138,7 @@ fn test_attribute_completions_script() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -1152,6 +1173,7 @@ fn test_attribute_completions_script_existing_attrs_filtered() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -1190,6 +1212,7 @@ fn test_attribute_completions_style() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -1225,6 +1248,7 @@ fn test_no_completions_on_closing_tag() {
         None,
         None,
         false,
+        None,
     );
     assert!(
         result.is_none(),
@@ -1289,6 +1313,7 @@ fn test_tag_name_no_script_bindings() {
         None,
         None,
         false,
+        None,
     );
 
     // Should return completions (tag names) but NOT include `count`
@@ -1322,6 +1347,7 @@ fn test_tag_name_includes_html_elements() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(result.is_some(), "should return completions for tag names");
@@ -1381,6 +1407,7 @@ fn test_tag_name_includes_components() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(result.is_some(), "should return completions for tag names");
@@ -1649,6 +1676,7 @@ fn test_tag_name_includes_vue_builtins() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(result.is_some());
@@ -1716,6 +1744,7 @@ fn test_attr_name_no_script_bindings() {
         None,
         None,
         false,
+        None,
     );
 
     if let Some(cr) = result {
@@ -1748,6 +1777,7 @@ fn test_attr_name_includes_directives() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(
@@ -1814,6 +1844,7 @@ fn test_text_content_no_bindings() {
         None,
         None,
         false,
+        None,
     );
 
     // Text content should return None (no completions)
@@ -1861,6 +1892,7 @@ fn test_mustache_shows_bindings() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(result.is_some(), "should return completions in mustache");
@@ -1948,6 +1980,7 @@ fn test_attr_value_shows_bindings() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(result.is_some(), "should return completions in attr value");
@@ -1981,6 +2014,7 @@ fn test_vmodel_modifier_completions() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(result.is_some(), "should return completions after v-model.");
@@ -2033,6 +2067,7 @@ const msg = ref('hello')
         None,
         None,
         false,
+        None,
     );
 
     // Positive: should return None (delegate to TypeProvider)
@@ -2069,6 +2104,7 @@ const msg = ref('hello')
         None,
         None,
         false,
+        None,
     );
 
     // Positive: should return None (delegate to TypeProvider)
@@ -2105,6 +2141,7 @@ const msg = ref('hello')
         None,
         None,
         false,
+        None,
     );
 
     // Positive: should return completions (not suppressed)
@@ -2165,6 +2202,7 @@ fn test_script_completions_have_sort_text() {
         None,
         None,
         false,
+        None,
     );
     assert!(result.is_some());
     let items = result.unwrap().items;
@@ -2722,6 +2760,7 @@ fn test_component_prop_completions_from_macros() {
         None,
         None,
         false,
+        None,
     );
 
     assert!(result.is_some(), "should return component prop completions");
@@ -2834,6 +2873,7 @@ fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
         None,
         Some("file:///workspace/App.svelte"),
         false,
+        None,
     )
     .expect("resolved child props")
     .items;
@@ -3006,7 +3046,8 @@ fn d5_slot_completions(
     parent_analysis: &FileAnalysisSnapshot,
     child: Option<&FileAnalysisSnapshot>,
 ) -> Option<Vec<CompletionItem>> {
-    let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
     let line_index = LineIndex::new_utf16(source);
     let pos = line_index.offset_to_position(cursor_offset as u32).unwrap();
     let child = child.cloned();
@@ -3022,6 +3063,7 @@ fn d5_slot_completions(
         None,
         None,
         false,
+        Some(&structure),
     )
     .map(|result| result.items)
 }
@@ -3182,7 +3224,8 @@ fn test_svelte_snippet_slot_name_completions_from_child_snippet_props() {
         ..Default::default()
     };
 
-    let blocks = test_carrier_blocks(source);
+    let structure = crate::documents::carrier_structure::test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
     let line_index = LineIndex::new_utf16(source);
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
@@ -3197,6 +3240,7 @@ fn test_svelte_snippet_slot_name_completions_from_child_snippet_props() {
         None,
         Some("file:///ws/src/Parent.svelte"),
         false,
+        Some(&structure),
     );
     let items = result
         .expect("snippet-slot completion must produce items")
@@ -3293,6 +3337,7 @@ fn test_svelte_render_callee_completions_in_scope_snippets() {
         None,
         Some("file:///ws/src/List.svelte"),
         false,
+        None,
     );
     let items = result
         .expect("render-callee completion must produce items")
@@ -3371,7 +3416,8 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
         ..Default::default()
     };
 
-    let blocks = test_carrier_blocks(source);
+    let structure = crate::documents::carrier_structure::test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
     let line_index = LineIndex::new_utf16(source);
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
@@ -3386,6 +3432,7 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
         None,
         Some("file:///ws/src/Parent.svelte"),
         false,
+        Some(&structure),
     );
     let items = result
         .expect("snippet-slot completion must produce items")
@@ -3401,4 +3448,84 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
             "display text must not mint a snippet role, got: {labels:?}"
         );
     }
+}
+
+// =============================================================================
+// D5 slot-owner geometry (scanner replacement) — discriminating fixtures where
+// a raw backward tag scan and registered-inventory facts diverge.
+// =============================================================================
+
+#[test]
+fn slot_owner_resolves_through_non_component_ancestors_from_markup_facts() {
+    // `<MyComp><div><template #|` — the owner walk must step over the
+    // non-component `<div>` ancestor via the markup arena parent chain. A raw
+    // backward scan stops at `<div` and loses the owner.
+    let source = "<template>\n  <MyComp>\n    <div>\n      <template #\n    </div>\n  </MyComp>\n</template>\n<script setup>\nimport MyComp from './MyComp.vue'\n</script>";
+    let cursor = source.find("<template #").unwrap() + "<template #".len();
+    let mut parent = FileAnalysisSnapshot::default();
+    let mut template = TemplateAnalysisSnapshot::default();
+    template
+        .components
+        .push(d5_component("MyComp", "./MyComp.vue", vec![]));
+    parent.template = Some(template.into());
+    let child = d5_child_with_slots(vec![d5_slot_field("header", vec![("title", "string")])]);
+    let items = d5_slot_completions(source, cursor, &parent, Some(&child));
+    let labels: Vec<String> = items
+        .iter()
+        .flatten()
+        .map(|item| item.label.clone())
+        .collect();
+    assert!(
+        labels.iter().any(|label| label == "header"),
+        "owner must resolve through the arena parent chain, got: {labels:?}"
+    );
+}
+
+#[test]
+fn slot_owner_ignores_decoy_component_tag_inside_attribute_value() {
+    // `<div title="<FakeComp>">` — the decoy `<FakeComp` inside a STRING
+    // attribute value is not markup. A raw backward byte scan finds it and
+    // fabricates an owner; inventory facts know the enclosing chain has no
+    // component, so the completion must return no slot items.
+    let source = "<template>\n  <div title=\"<FakeComp>\">\n    <template #\n  </div>\n</template>\n<script setup>\nimport FakeComp from './FakeComp.vue'\n</script>";
+    let cursor = source.find("<template #").unwrap() + "<template #".len();
+    let mut parent = FileAnalysisSnapshot::default();
+    let mut template = TemplateAnalysisSnapshot::default();
+    template
+        .components
+        .push(d5_component("FakeComp", "./FakeComp.vue", vec![]));
+    parent.template = Some(template.into());
+    let child = d5_child_with_slots(vec![d5_slot_field("header", vec![("title", "string")])]);
+    let items = d5_slot_completions(source, cursor, &parent, Some(&child));
+    let labels: Vec<String> = items
+        .iter()
+        .flatten()
+        .map(|item| item.label.clone())
+        .collect();
+    assert!(
+        !labels.iter().any(|label| label == "header"),
+        "a decoy tag inside an attribute string must not fabricate a slot owner, got: {labels:?}"
+    );
+}
+
+#[test]
+fn component_at_cursor_ignores_decoy_tag_inside_attribute_string() {
+    // `title="<Fake"` contains a decoy component tag inside a STRING attribute
+    // value. A raw backward `<` scan anchors on the decoy and fabricates the
+    // `Fake` component; the registered opening span owns the cursor and yields
+    // the real `Widget` tag.
+    let source = "<template><Widget title=\"<Fake\" ></Widget></template>";
+    let cursor = source.find("\" >").unwrap() + 2;
+    let mut template = TemplateAnalysisSnapshot::default();
+    template
+        .components
+        .push(d5_component("Fake", "./Fake.vue", vec![]));
+    let structure = test_structure(source, false);
+    let facts = crate::documents::carrier_structure::project_markup_open_tags(&structure);
+    let result = find_component_at_cursor(cursor, Some(&facts), "Widget", &template);
+    assert_ne!(
+        result,
+        Some("Fake".to_string()),
+        "a decoy tag inside an attribute string must not fabricate a component"
+    );
 }

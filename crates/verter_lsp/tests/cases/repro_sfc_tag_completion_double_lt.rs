@@ -58,6 +58,7 @@ fn root_items_at(source: &str, cursor_offset: usize) -> Vec<CompletionItem> {
         None,        // workspace_components
         None,        // doc_uri
         false,       // ssr_context
+        None,
     );
     result
         .expect("root-level position must yield completions")

@@ -175,6 +175,7 @@ mod tests {
             script: Some(&script),
             styles: &[],
             source: None,
+            blocks: &[],
         };
         let diags = run(&file);
         assert_eq!(diags.len(), 1, "should report one diagnostic: {:?}", diags);
@@ -215,6 +216,7 @@ mod tests {
             script: Some(&script),
             styles: &[],
             source: None,
+            blocks: &[],
         };
         let diags = run(&file);
         assert!(
@@ -251,6 +253,7 @@ mod tests {
             script: Some(&script),
             styles: &[],
             source: None,
+            blocks: &[],
         };
         let diags = run(&file);
         assert!(
@@ -272,6 +275,7 @@ mod tests {
             script: Some(&script),
             styles: &[],
             source: None,
+            blocks: &[],
         };
         let diags = run(&file);
         assert!(
@@ -338,6 +342,7 @@ mod tests {
             script: Some(&script),
             styles: &[],
             source: None,
+            blocks: &[],
         };
         let diags = run(&file);
         assert_eq!(

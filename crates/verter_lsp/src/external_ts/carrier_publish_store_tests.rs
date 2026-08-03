@@ -161,6 +161,7 @@ fn structure_stamp_is_published_beside_an_unchanged_standard_map() {
         schema_version: 1,
         artifact_token: Arc::from("a".repeat(43)),
         script_content_ranges: vec![[8, 23]],
+        markup_opening_ranges: vec![[30, 41]],
     });
     let batch = PublishBatch::from_snapshot(
         user_tree.path().to_string_lossy().to_string(),
@@ -180,6 +181,7 @@ fn structure_stamp_is_published_beside_an_unchanged_standard_map() {
     assert_eq!(structure.schema_version, 1);
     assert_eq!(structure.artifact_token, "a".repeat(43));
     assert_eq!(structure.script_content_ranges, vec![[8, 23]]);
+    assert_eq!(structure.markup_opening_ranges, vec![[30, 41]]);
     let published_map = std::fs::read_to_string(
         store
             .workspace_dir()

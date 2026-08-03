@@ -96,6 +96,16 @@ fn published_structure_carries_content_free_script_inventory_stamp() {
             source.find("</script>").unwrap() as u32
         ]]
     );
+    // Markup opening-tag spans come from the arena (the template's <div/>),
+    // giving the plugin parser-supplied spans for its bounded cursor lex.
+    let div_open = source.find("<div/>").unwrap() as u32;
+    assert!(
+        stamp
+            .markup_opening_ranges
+            .contains(&[div_open, div_open + "<div/>".len() as u32]),
+        "markup opening spans must include the template element: {:?}",
+        stamp.markup_opening_ranges
+    );
 }
 
 /// Admit a carrier state through a FRESH coordinator (owner-loss barrier at 0). The

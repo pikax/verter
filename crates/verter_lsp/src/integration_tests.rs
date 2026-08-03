@@ -199,6 +199,7 @@ const message = 'hello'
         None,
         None,
         false,
+        None,
     );
 
     assert!(items.is_some(), "Should get completion items in template");
@@ -241,6 +242,7 @@ const count = ref(0)
         None,
         None,
         false,
+        None,
     );
 
     // Script completions should include imports and bindings

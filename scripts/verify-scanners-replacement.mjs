@@ -174,11 +174,38 @@ export function verifyLedger(root = DEFAULT_ROOT) {
       JSON.stringify(sortedObject(byDisposition)),
     "ledger by_disposition is stale",
   );
+  // RETRACTED self-attestation: the former `independently_discovered_candidates
+  // === rows.length` / `classified_ledger_rows === rows.length` checks asserted
+  // the ledger's own row count as the discovered count — a receipt of nothing
+  // (CLAUDE.md "Verification Must Prove Execution"). The B-52/B-91 evidence is
+  // the EXTERNAL input-bound discovery receipt; this verifier checks only the
+  // RECORD's shape (fresh run + retraction + honest reopened status).
+  const freshRun = ledger.discovery?.fresh_run;
   invariant(
-    ledger.set_equality.independently_discovered_candidates === rows.length,
-    "candidate total drift",
+    typeof freshRun?.receipt === "string" && freshRun.receipt.includes("DISCOVERY-RECEIPT.md"),
+    "discovery record must name its input-bound receipt",
   );
-  invariant(ledger.set_equality.classified_ledger_rows === rows.length, "classified total drift");
+  invariant(
+    /^[0-9a-f]{40}$/.test(freshRun?.fixed_tip ?? ""),
+    "discovery record must pin the fixed tip it ran against",
+  );
+  for (const input of ["git_ls_files", "cargo_metadata", "pnpm_workspace_graph"]) {
+    invariant(
+      typeof freshRun?.inputs?.[input]?.sha256 === "string" &&
+        freshRun.inputs[input].sha256.length > 0,
+      `discovery record must carry an input hash for ${input}`,
+    );
+  }
+  invariant(
+    typeof ledger.discovery?.retraction === "string" &&
+      ledger.discovery.retraction.includes("RETRACTED"),
+    "the retraction of the prior self-attested closure must stay recorded",
+  );
+  invariant(
+    typeof ledger.set_equality.b52_b91_status === "string" &&
+      ledger.set_equality.b52_b91_status.includes("REOPENED"),
+    "B-52/B-91 must remain explicitly reopened while any named residual is open",
+  );
   invariant(ledger.set_equality.unclassified_runtime_rows === 0, "unclassified runtime row");
   invariant(ledger.set_equality.deferred_runtime_rows === 0, "deferred runtime row");
   invariant(ledger.consumer_matrix.length === productionRows, "consumer matrix is not total");

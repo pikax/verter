@@ -154,6 +154,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedEmits.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1, "should produce one fix");
@@ -186,6 +187,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedEmits.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
@@ -217,6 +219,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedEmits.fixes_for_diagnostic(&diag, &ctx);
         assert!(actions.is_empty(), "should not offer fix for empty emits");
@@ -241,6 +244,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedEmits.fixes_for_diagnostic(&diag, &ctx);
         assert!(actions.is_empty(), "should not fix when spans do not match");
@@ -265,6 +269,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedEmits.fixes_for_diagnostic(&diag, &ctx);
         assert!(actions.is_empty(), "should not handle unrelated rules");

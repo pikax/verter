@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::provider::ActionContext;
 use verter_diagnostics::{DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity};
 use verter_semantic::analysis::template::*;
@@ -127,6 +127,7 @@ fn simple_text_and_interpolation_extracts_to_computed() {
 
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -134,6 +135,7 @@ fn simple_text_and_interpolation_extracts_to_computed() {
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
@@ -262,6 +264,7 @@ fn vfor_scoped_var_extracts_to_function() {
     let script = make_script_with_bindings(vec![]);
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -269,6 +272,7 @@ fn vfor_scoped_var_extracts_to_function() {
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
@@ -373,6 +377,7 @@ fn reactive_binding_no_dot_value() {
 
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -380,6 +385,7 @@ fn reactive_binding_no_dot_value() {
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
@@ -462,6 +468,7 @@ fn maybe_ref_binding_uses_unref() {
 
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -469,6 +476,7 @@ fn maybe_ref_binding_uses_unref() {
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
@@ -524,6 +532,7 @@ fn pure_text_extracts_to_computed() {
     let script = make_script_with_bindings(vec![]);
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -531,6 +540,7 @@ fn pure_text_extracts_to_computed() {
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
@@ -573,6 +583,7 @@ fn ignores_unrelated_rule() {
         template: None,
         script: None,
         styles: &[],
+        blocks: &[],
     };
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
     assert!(
@@ -610,6 +621,7 @@ fn actions_at_cursor_in_content() {
 
     let script = make_script_with_bindings(vec![]);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -617,6 +629,7 @@ fn actions_at_cursor_in_content() {
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.actions_at(cursor, &ctx);
@@ -730,6 +743,7 @@ fn no_duplicate_computed_import() {
 
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -737,6 +751,7 @@ fn no_duplicate_computed_import() {
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
@@ -812,6 +827,7 @@ fn complex_expression_preserved() {
 
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -819,6 +835,7 @@ fn complex_expression_preserved() {
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
@@ -903,6 +920,7 @@ fn vslot_scoped_var_extracts_to_function() {
     let script = make_script_with_bindings(vec![]);
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -910,6 +928,7 @@ fn vslot_scoped_var_extracts_to_function() {
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
@@ -961,6 +980,7 @@ fn no_script_setup_no_action() {
 
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -968,6 +988,7 @@ fn no_script_setup_no_action() {
         template: Some(&template),
         script: None,
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
@@ -1125,6 +1146,7 @@ fn prop_test_action(
 
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -1132,6 +1154,7 @@ fn prop_test_action(
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     ExtractBareText.fixes_for_diagnostic(&diag, &ctx)
@@ -1565,6 +1588,7 @@ fn bare_define_props_with_vfor_function_mode() {
 
     let diag = make_diag(tag_span_end, content_end);
     let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
     let ctx = ActionContext {
         source,
         file_id: "test.vue",
@@ -1572,6 +1596,7 @@ fn bare_define_props_with_vfor_function_mode() {
         template: Some(&template),
         script: Some(&script),
         styles: &[],
+        blocks: &blocks,
     };
 
     let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
@@ -1838,17 +1863,113 @@ fn extract_identifiers_skips_keywords() {
 }
 
 #[test]
-fn find_script_end_basic() {
+fn script_end_insert_pos_trims_whitespace_inside_content_span() {
     let source = "<script setup>\nconst x = 1\n</script>";
-    let pos = find_script_end_insert_pos(source);
-    assert!(pos.is_some());
-    let pos = pos.unwrap() as usize;
-    assert!(pos <= source.find("</script").unwrap());
+    let block = script_block_fact(source);
+    let pos = script_end_insert_pos(source, &block).expect("anchor") as usize;
+    assert_eq!(
+        pos,
+        source.find("const x = 1").unwrap() + "const x = 1".len()
+    );
 }
 
 #[test]
-fn find_script_end_no_script() {
-    let source = "<template><div /></template>";
-    let pos = find_script_end_insert_pos(source);
-    assert!(pos.is_none());
+fn no_script_block_fact_yields_no_action() {
+    // Without a script section in the inventory facts the provider fails
+    // closed — no raw-source `<script` search recovers one.
+    assert!(selected_script_block(&[]).is_none());
+}
+
+// ── Scanner replacement: script-anchor geometry comes from parser facts ──
+
+#[test]
+fn script_insertion_lands_before_the_real_close_tag_not_a_decoy_literal() {
+    // The script body contains the STRING LITERAL '</scripting>' whose prefix
+    // matches a raw "</script" search. The computed insertion anchor must be
+    // the parser-owned script content end, never the decoy occurrence inside
+    // the string.
+    let source = concat!(
+        "<script setup lang=\"ts\">\n",
+        "import { ref } from 'vue'\n",
+        "const count = ref(0)\n",
+        "const tag = '</scripting>'\n",
+        "</script>\n",
+        "<template>\n",
+        "<p>Count: {{ count }}</p>\n",
+        "</template>",
+    );
+    let tag_span_end = (source.find("<p>").unwrap() + "<p>".len()) as u32;
+    let content_end = source.find("</p>").unwrap() as u32;
+    let text_start = source.find("Count: ").unwrap() as u32;
+    let interp_start = source.find("{{ count }}").unwrap() as u32;
+    let expr_start = source.find(" count }}").unwrap() as u32 + 1;
+
+    let text_children = vec![
+        TemplateTextSegment::Text {
+            span: Span::new(text_start, interp_start),
+            is_entity: false,
+        },
+        TemplateTextSegment::Interpolation {
+            span: Span::new(interp_start, interp_start + "{{ count }}".len() as u32),
+            expression_span: Span::new(expr_start, expr_start + "count".len() as u32),
+        },
+    ];
+    let template = TemplateAnalysisSnapshot {
+        elements: vec![make_element("p", tag_span_end, content_end, text_children)],
+        ..Default::default()
+    };
+    let script = make_script_with_bindings(vec![make_binding("count", ReactivityKind::Ref)]);
+
+    let diag = make_diag(tag_span_end, content_end);
+    let set = DiagnosticSet::new();
+    let blocks = script_block_facts(source);
+    let ctx = ActionContext {
+        source,
+        file_id: "test.vue",
+        diagnostics: &set,
+        template: Some(&template),
+        script: Some(&script),
+        styles: &[],
+        blocks: &blocks,
+    };
+
+    let actions = ExtractBareText.fixes_for_diagnostic(&diag, &ctx);
+    assert_eq!(actions.len(), 1, "should produce one action");
+    let script_edit = actions[0]
+        .edits
+        .iter()
+        .find(|edit| edit.replacement.contains("computed("))
+        .expect("computed insertion edit");
+    // The last non-whitespace byte before the REAL `</script>` is the closing
+    // quote of the decoy string literal.
+    let expected_insert = (source.find("'</scripting>'").unwrap() + "'</scripting>'".len()) as u32;
+    assert_eq!(
+        script_edit.span.start, expected_insert,
+        "insertion must anchor at the parser-owned script content end, not the decoy"
+    );
+}
+
+/// Test-fixture script facts: geometry a registered inventory would supply
+/// for these well-formed fixtures (offsets computed from the fixture text,
+/// as every expected-offset assertion in this file already does).
+fn script_block_facts(source: &str) -> Vec<verter_diagnostics::SfcBlockFact> {
+    let Some(open) = source.find("<script") else {
+        return vec![];
+    };
+    let Some(gt) = source[open..].find('>') else {
+        return vec![];
+    };
+    let open_end = open + gt + 1;
+    let close = source.rfind("</script").unwrap_or(source.len());
+    vec![verter_diagnostics::SfcBlockFact {
+        role: verter_diagnostics::SfcBlockRole::Script,
+        attribute_insertion_anchor: 0,
+        opening_span: Span::new(open as u32, open_end as u32),
+        content_span: Span::new(open_end as u32, close as u32),
+        attributes: vec![],
+    }]
+}
+
+fn script_block_fact(source: &str) -> verter_diagnostics::SfcBlockFact {
+    script_block_facts(source).remove(0)
 }

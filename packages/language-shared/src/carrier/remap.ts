@@ -44,6 +44,9 @@ export interface CarrierSourceStructureStamp {
   schemaVersion: 1;
   artifactToken: string;
   scriptContentRanges: readonly (readonly [number, number])[];
+  /** Parser-identified markup opening-tag spans (empty for stamps written
+   * before the field existed — consumers then fail closed). */
+  markupOpeningRanges: readonly (readonly [number, number])[];
 }
 
 /** Content-free inventory facts stamped into the exact published source map. */
@@ -61,25 +64,36 @@ export function carrierSourceStructure(
   ) {
     return null;
   }
-  if (!Array.isArray(value.script_content_ranges)) return null;
-  const ranges: [number, number][] = [];
-  for (const range of value.script_content_ranges) {
-    if (
-      !Array.isArray(range) ||
-      range.length !== 2 ||
-      !Number.isSafeInteger(range[0]) ||
-      !Number.isSafeInteger(range[1]) ||
-      range[0] < 0 ||
-      range[0] > range[1]
-    ) {
-      return null;
+  const parseRanges = (raw: unknown): [number, number][] | null => {
+    if (!Array.isArray(raw)) return null;
+    const ranges: [number, number][] = [];
+    for (const range of raw) {
+      if (
+        !Array.isArray(range) ||
+        range.length !== 2 ||
+        !Number.isSafeInteger(range[0]) ||
+        !Number.isSafeInteger(range[1]) ||
+        range[0] < 0 ||
+        range[0] > range[1]
+      ) {
+        return null;
+      }
+      ranges.push([range[0], range[1]]);
     }
-    ranges.push([range[0], range[1]]);
-  }
+    return ranges;
+  };
+  const ranges = parseRanges(value.script_content_ranges);
+  if (ranges === null) return null;
+  // Additive field: absent in older stamps (never a hard reject); malformed
+  // payloads reject the whole stamp exactly like the script ranges.
+  const markupOpeningRanges =
+    value.markup_opening_ranges === undefined ? [] : parseRanges(value.markup_opening_ranges);
+  if (markupOpeningRanges === null) return null;
   return {
     schemaVersion: 1,
     artifactToken: value.artifact_token,
     scriptContentRanges: ranges,
+    markupOpeningRanges,
   };
 }
 

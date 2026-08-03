@@ -165,6 +165,11 @@ pub struct SnapshotStructureStamp {
     pub schema_version: u32,
     pub artifact_token: Arc<str>,
     pub script_content_ranges: Vec<[u32; 2]>,
+    /// Parser-identified markup opening-tag spans (elements plus recovered/
+    /// unknown nodes retaining an opening span), in arena order. The plugin's
+    /// bounded cursor-attribute classification lexes ONLY inside one of these
+    /// parser-supplied spans — it never rediscovers `<` from raw source.
+    pub markup_opening_ranges: Vec<[u32; 2]>,
 }
 
 /// One file in a published snapshot.

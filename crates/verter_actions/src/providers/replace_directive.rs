@@ -136,6 +136,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = ReplaceDirective.fixes_for_diagnostic(&diag, &ctx);
@@ -169,6 +170,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = ReplaceDirective.fixes_for_diagnostic(&diag, &ctx);
@@ -202,6 +204,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = ReplaceDirective.fixes_for_diagnostic(&diag, &ctx);
@@ -239,6 +242,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let actions = ReplaceDirective.fixes_for_diagnostic(&diag, &ctx);
         assert!(

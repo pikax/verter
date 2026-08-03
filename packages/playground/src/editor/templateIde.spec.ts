@@ -255,3 +255,60 @@ describe("templateIde auto close", () => {
     expect(computeAutoCloseTagText(source, structureFor(source), offset)).toBeNull();
   });
 });
+
+describe("templateIde scanner-free geometry", () => {
+  it("keeps offering tag completions after a '{{' decoy inside an attribute value", () => {
+    // The `{{` inside the STRING attribute value is not an interpolation
+    // opener. An unbounded lastIndexOf("{{") back-scan claims the cursor is
+    // inside an interpolation and suppresses tag completions.
+    const source = '<template><div data-x="{{"><s</div></template>';
+    const offset = source.indexOf("<s</div>") + 2;
+
+    const items = collectTemplateCompletions({
+      source,
+      structure: structureFor(source),
+      offset,
+      activeFilename: "App.vue",
+      openFilenames: ["App.vue"],
+      analysis: null,
+    });
+
+    expect(items.some((item) => item.label === "span")).toBe(true);
+  });
+
+  it("does not offer attribute completions inside plain text with a less-than", () => {
+    // `1 < 2` is TEXT content. A raw `<` window scan fabricates an open-tag
+    // anchor from the comparison and offers attribute completions.
+    const source = "<template><div>1 < 2 </div></template>";
+    const offset = source.indexOf("2 ") + 2;
+
+    const items = collectTemplateCompletions({
+      source,
+      structure: structureFor(source),
+      offset,
+      activeFilename: "App.vue",
+      openFilenames: ["App.vue"],
+      analysis: null,
+    });
+
+    expect(items).toEqual([]);
+  });
+
+  it("does not offer closing-tag completions inside an attribute value '</' decoy", () => {
+    // The `</` inside the STRING attribute value is not a closing tag. The
+    // structure knows the cursor is inside the div's OPENING tag.
+    const source = '<template><section><div title="</"></div></section></template>';
+    const offset = source.indexOf('"</"') + 3;
+
+    const items = collectTemplateCompletions({
+      source,
+      structure: structureFor(source),
+      offset,
+      activeFilename: "App.vue",
+      openFilenames: ["App.vue"],
+      analysis: null,
+    });
+
+    expect(items.some((item) => item.label === "section")).toBe(false);
+  });
+});

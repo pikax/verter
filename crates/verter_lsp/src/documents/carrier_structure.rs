@@ -72,6 +72,135 @@ impl CarrierBlockView {
     }
 }
 
+/// One markup open-tag fact projected from the registered inventory's markup
+/// arena: the parser-identified opening span (+ authored name) of an
+/// element-like node — `Element`, `Recovered`, or `Unknown` — plus the nearest
+/// element-like ancestor for typed parent walks. Geometry is copied from the
+/// arena; no carrier delimiter is searched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkupOpenTagFact {
+    /// Authored tag name, when the parser retained one.
+    pub name: Option<String>,
+    /// Parser-identified opening-tag span (`<tag …>` inclusive of delimiters).
+    pub opening_start: u32,
+    pub opening_end: u32,
+    /// End of the tag-name token inside the opening span.
+    pub name_end: u32,
+    /// Full node span (opening + content + closing).
+    pub full_start: u32,
+    pub full_end: u32,
+    /// Nearest element-like ancestor, as an index into the projected vec.
+    pub parent: Option<usize>,
+}
+
+/// Project every element-like markup node (element / recovered / unknown with
+/// a retained opening span) into [`MarkupOpenTagFact`]s, preserving arena
+/// parent relations collapsed to the nearest element-like ancestor.
+pub fn project_markup_open_tags(structure: &RegisteredFileStructure) -> Vec<MarkupOpenTagFact> {
+    let inventory = structure.inventory();
+    let nodes = inventory.markup().nodes();
+    let mut arena_to_fact: Vec<Option<usize>> = vec![None; nodes.len()];
+    let mut facts = Vec::new();
+    for (arena_index, node) in nodes.iter().enumerate() {
+        let projected = match node.kind() {
+            MarkupNodeKind::Element(element) => {
+                let full = element.full_span;
+                Some((
+                    inventory
+                        .slice(element.authored_name)
+                        .ok()
+                        .map(str::to_string),
+                    element.opening_span.start,
+                    element.opening_span.end,
+                    element.opening_name_span.end,
+                    full.start,
+                    full.end,
+                ))
+            }
+            MarkupNodeKind::Recovered {
+                opening_span,
+                opening_name_span,
+                full_span,
+                ..
+            }
+            | MarkupNodeKind::Unknown {
+                opening_span,
+                opening_name_span,
+                full_span,
+                ..
+            } => opening_span.map(|opening| {
+                (
+                    opening_name_span.and_then(|span| {
+                        inventory
+                            .source_spaces()
+                            .first()
+                            .and_then(|space| {
+                                space.bytes().get(span.start as usize..span.end as usize)
+                            })
+                            .map(str::to_string)
+                    }),
+                    opening.start,
+                    opening.end,
+                    opening_name_span.map_or(opening.start, |span| span.end),
+                    full_span.start,
+                    full_span.end,
+                )
+            }),
+            _ => None,
+        };
+        let Some((name, opening_start, opening_end, name_end, full_start, full_end)) = projected
+        else {
+            continue;
+        };
+        let parent = {
+            let mut ancestor = node.parent;
+            loop {
+                match ancestor {
+                    Some(id) => match arena_to_fact.get(id.get() as usize).copied().flatten() {
+                        Some(fact_index) => break Some(fact_index),
+                        None => {
+                            ancestor = nodes.get(id.get() as usize).and_then(|node| node.parent)
+                        }
+                    },
+                    None => break None,
+                }
+            }
+        };
+        arena_to_fact[arena_index] = Some(facts.len());
+        facts.push(MarkupOpenTagFact {
+            name,
+            opening_start,
+            opening_end,
+            name_end,
+            full_start,
+            full_end,
+            parent,
+        });
+    }
+    facts
+}
+
+/// Innermost fact whose parser-identified OPENING span contains `offset`.
+pub fn markup_open_tag_at(facts: &[MarkupOpenTagFact], offset: u32) -> Option<usize> {
+    facts
+        .iter()
+        .enumerate()
+        .filter(|(_, fact)| offset >= fact.opening_start && offset < fact.opening_end)
+        .max_by_key(|(_, fact)| fact.opening_start)
+        .map(|(index, _)| index)
+}
+
+/// Innermost fact whose FULL node span contains `offset` (for ancestor walks
+/// from content positions).
+pub fn markup_element_at(facts: &[MarkupOpenTagFact], offset: u32) -> Option<usize> {
+    facts
+        .iter()
+        .enumerate()
+        .filter(|(_, fact)| offset >= fact.full_start && offset < fact.full_end)
+        .min_by_key(|(_, fact)| fact.full_end - fact.full_start)
+        .map(|(index, _)| index)
+}
+
 #[derive(Debug, Clone)]
 pub struct OpeningTagContext {
     pub tag_name: String,

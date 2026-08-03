@@ -1,9 +1,32 @@
-/** Bounded framework-tag attribute-name classification (maximum 256 UTF-8 bytes). */
+/**
+ * Bounded framework-tag attribute-name classification.
+ *
+ * The tag anchor is a PARSER-IDENTIFIED opening span supplied by the caller
+ * (the store-published structure stamp's `markup_opening_ranges`) — this
+ * helper never rediscovers `<` from raw source. Inside that span it lexes at
+ * most 256 UTF-8 bytes of lookback to classify the unfinished token: a
+ * boolean answer, no delimiter discovery, no persistent geometry.
+ */
 export function isFrameworkAttributeNamePosition(
   source: string | undefined,
   position: number,
+  openingRanges: readonly (readonly [number, number])[] | undefined,
 ): boolean {
   if (source === undefined || position <= 0 || position > source.length) return false;
+  if (openingRanges === undefined) return false;
+
+  // The innermost parser-identified opening span owning the position.
+  let tagStart = -1;
+  for (const [start, end] of openingRanges) {
+    if (position > start && position <= end && start > tagStart) {
+      tagStart = start;
+    }
+  }
+  if (tagStart < 0) return false;
+
+  // Bounded lookback: at most 256 UTF-8 bytes before the position. If the
+  // parser-identified tag start is farther back than the bound allows, the
+  // classification fails closed rather than lexing an unbounded window.
   let floor = position;
   let byteCount = 0;
   while (floor > 0) {
@@ -23,10 +46,8 @@ export function isFrameworkAttributeNamePosition(
     byteCount += width;
     floor -= units;
   }
-  const prefix = source.slice(floor, position);
-  const localTagStart = prefix.lastIndexOf("<");
-  if (localTagStart < 0 || prefix.lastIndexOf(">") > localTagStart) return false;
-  const tagStart = floor + localTagStart;
+  if (tagStart < floor) return false;
+
   const first = source.charCodeAt(tagStart + 1);
   if (first === 47 || first === 33 || first === 63) return false;
 
@@ -42,6 +63,9 @@ export function isFrameworkAttributeNamePosition(
     if (code === 34 || code === 39) quote = code;
     else if (code === 123) braceDepth += 1;
     else if (code === 125 && braceDepth > 0) braceDepth -= 1;
+    // A `>` outside quotes/braces closes the opening tag before the
+    // position: not an attribute-name position.
+    else if (code === 62 && braceDepth === 0) return false;
   }
   return quote === 0 && braceDepth === 0;
 }

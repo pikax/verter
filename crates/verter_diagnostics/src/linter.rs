@@ -1,5 +1,6 @@
 //! Linter engine: runs rules against analysis data.
 
+use crate::block_facts::SfcBlockFact;
 use crate::comment_directives::parse_comment_directives;
 use crate::config::LintConfig;
 use crate::context::LintContext;
@@ -33,7 +34,8 @@ impl Linter {
 
     /// Lint a file given its analysis data.
     ///
-    /// Accepts optional script, template, and style analysis snapshots,
+    /// Accepts optional script, template, and style analysis snapshots, the
+    /// ordered block facts projected from the registered carrier inventory,
     /// plus an optional source string for rules that need byte-level access.
     /// Returns a [`DiagnosticSet`] that can be enriched before consumption.
     pub fn lint(
@@ -41,8 +43,9 @@ impl Linter {
         script: Option<&ScriptAnalysisSnapshot>,
         template: Option<&TemplateAnalysisSnapshot>,
         styles: &[StyleBlockAnalysis],
+        blocks: &[SfcBlockFact],
     ) -> DiagnosticSet {
-        self.lint_inner(script, template, styles, None, None)
+        self.lint_inner(script, template, styles, None, blocks, None)
     }
 
     /// Lint a file with the full SFC source available.
@@ -55,8 +58,9 @@ impl Linter {
         template: Option<&TemplateAnalysisSnapshot>,
         styles: &[StyleBlockAnalysis],
         source: Option<&str>,
+        blocks: &[SfcBlockFact],
     ) -> DiagnosticSet {
-        self.lint_inner(script, template, styles, source, None)
+        self.lint_inner(script, template, styles, source, blocks, None)
     }
 
     /// Lint a file with cross-file analysis data.
@@ -68,9 +72,10 @@ impl Linter {
         script: Option<&ScriptAnalysisSnapshot>,
         template: Option<&TemplateAnalysisSnapshot>,
         styles: &[StyleBlockAnalysis],
+        blocks: &[SfcBlockFact],
         cross_file: Option<&CrossFileSnapshot>,
     ) -> DiagnosticSet {
-        self.lint_inner(script, template, styles, None, cross_file)
+        self.lint_inner(script, template, styles, None, blocks, cross_file)
     }
 
     /// Full lint pipeline.
@@ -81,6 +86,7 @@ impl Linter {
         template: Option<&TemplateAnalysisSnapshot>,
         styles: &[StyleBlockAnalysis],
         source: Option<&str>,
+        blocks: &[SfcBlockFact],
         cross_file: Option<&CrossFileSnapshot>,
     ) -> DiagnosticSet {
         let rules = self.registry.rules();
@@ -107,6 +113,7 @@ impl Linter {
             script,
             styles,
             source,
+            blocks,
         };
         visitor.visit_file(&file_ctx, &mut ctx);
 
@@ -142,7 +149,7 @@ mod tests {
     #[test]
     fn linter_with_no_data_returns_empty() {
         let linter = Linter::new(LintConfig::default());
-        let set = linter.lint(None, None, &[]);
+        let set = linter.lint(None, None, &[], &[]);
         assert!(set.is_empty());
     }
 
@@ -153,14 +160,14 @@ mod tests {
         config.rules.insert("valid-template-root".to_string(), None);
         let linter = Linter::new(config);
         let template = TemplateAnalysisSnapshot::default();
-        let set = linter.lint(None, Some(&template), &[]);
+        let set = linter.lint(None, Some(&template), &[], &[]);
         assert!(set.is_empty());
     }
 
     #[test]
     fn linter_returns_diagnostic_set_with_enrichment_api() {
         let linter = Linter::new(LintConfig::default());
-        let mut set = linter.lint(None, None, &[]);
+        let mut set = linter.lint(None, None, &[], &[]);
         assert_eq!(set.len(), 0);
         // DiagnosticSet supports enrichment: add + enhance
         set.add(crate::diagnostic::LintDiagnostic {

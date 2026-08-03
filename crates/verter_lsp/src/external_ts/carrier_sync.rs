@@ -975,11 +975,31 @@ fn published_structure_stamp(
                 _ => None,
             })
             .collect();
+    let markup_opening_ranges = structure
+        .inventory()
+        .markup()
+        .nodes()
+        .iter()
+        .filter_map(|node| {
+            use verter_language::parse_artifact::carrier_inventory::MarkupNodeKind;
+            match node.kind() {
+                MarkupNodeKind::Element(element) => {
+                    Some([element.opening_span.start, element.opening_span.end])
+                }
+                MarkupNodeKind::Recovered { opening_span, .. }
+                | MarkupNodeKind::Unknown { opening_span, .. } => {
+                    opening_span.map(|span| [span.start, span.end])
+                }
+                _ => None,
+            }
+        })
+        .collect();
     let token = structure.public_artifact_token();
     Some(verter_session::external_ts::SnapshotStructureStamp {
         schema_version: 1,
         artifact_token: Arc::from(token.as_str()),
         script_content_ranges,
+        markup_opening_ranges,
     })
 }
 

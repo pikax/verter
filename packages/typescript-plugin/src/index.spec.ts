@@ -26,8 +26,12 @@ describe("bounded framework attribute context", () => {
   it("does not inspect a tag opener beyond 256 UTF-8 bytes", () => {
     const within = `<div ${"a".repeat(249)} x`;
     const beyond = `<div ${"é".repeat(126)} x`;
-    expect(isFrameworkAttributeNamePosition(within, within.length)).toBe(true);
-    expect(isFrameworkAttributeNamePosition(beyond, beyond.length)).toBe(false);
+    expect(isFrameworkAttributeNamePosition(within, within.length, [[0, within.length]])).toBe(
+      true,
+    );
+    expect(isFrameworkAttributeNamePosition(beyond, beyond.length, [[0, beyond.length]])).toBe(
+      false,
+    );
   });
 });
 
@@ -3887,6 +3891,14 @@ describe("editor-owned source diagnostic routing", () => {
     const manifest = mappableManifest();
     manifest.projects["/ws/tsconfig.json"].ready_files["/ws/src/A.vue.tsx"].blob_rel =
       "blobs/A.vue.tsx";
+    // The parser-supplied opening span of `<MyComp />` — the sole tag anchor
+    // the bounded attribute-name classification may lex inside.
+    manifest.projects["/ws/tsconfig.json"].ready_files["/ws/src/A.vue.tsx"].structure = {
+      schema_version: 1,
+      artifact_token: "a".repeat(43),
+      script_content_ranges: [],
+      markup_opening_ranges: [[0, sourceText.indexOf("\n")]],
+    };
     const dir = track(
       writeStore(manifest, {
         ...mappableBlobs(),

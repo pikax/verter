@@ -1722,6 +1722,16 @@ fn compute_verter_diagnostics_for_with_views(
                 Some((view.lint_explicitly_configured, &view.linter))
             });
 
+            // Ordered SFC block facts from the registered inventory — the
+            // sole geometry source for block-structure lint rules.
+            let block_facts = doc
+                .feature_snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    verter_diagnostics::project_block_facts(snapshot.structure().inventory())
+                })
+                .unwrap_or_default();
+
             let lint_explicitly_configured;
             if let Some((explicit, linter)) = views_lint {
                 lint_explicitly_configured = explicit;
@@ -1730,6 +1740,7 @@ fn compute_verter_diagnostics_for_with_views(
                     &analysis,
                     &doc.source,
                     &doc.line_index,
+                    &block_facts,
                 ));
             } else {
                 // No published snapshot or file not owned — use default linter.
@@ -1740,6 +1751,7 @@ fn compute_verter_diagnostics_for_with_views(
                     &analysis,
                     &doc.source,
                     &doc.line_index,
+                    &block_facts,
                 ));
             }
 

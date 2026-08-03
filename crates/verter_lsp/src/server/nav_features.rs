@@ -698,12 +698,16 @@ async fn handle_completion_attempt(
         line_index: crate::documents::line_index::LineIndex,
         analysis: Option<verter_session::FileAnalysisSnapshot>,
         blocks: Vec<crate::documents::carrier_structure::CarrierBlockView>,
+        structure: Option<verter_session::carrier_publication_store::RegisteredFileStructure>,
         canonical_id: String,
     }
     let native_snapshot = (|| {
         let doc = server.documents.get(uri)?;
-        let blocks = if doc.feature_snapshot.is_some() {
-            project_carrier_blocks_for_document(&doc)
+        let (blocks, structure) = if let Some(snapshot) = doc.feature_snapshot.as_ref() {
+            (
+                project_carrier_blocks_for_document(&doc),
+                Some(snapshot.structure().clone()),
+            )
         } else {
             server
                 .documents
@@ -711,7 +715,10 @@ async fn handle_completion_attempt(
                 .registered_file_structure_snapshot(&doc.canonical_id)
                 .filter(|(structure, _)| structure.source().bytes() == doc.source.as_ref())
                 .map(|(structure, _)| {
-                    crate::documents::carrier_structure::project_carrier_blocks(&structure)
+                    (
+                        crate::documents::carrier_structure::project_carrier_blocks(&structure),
+                        Some(structure),
+                    )
                 })
                 .unwrap_or_default()
         };
@@ -720,6 +727,7 @@ async fn handle_completion_attempt(
             line_index: doc.line_index.as_ref().clone(),
             analysis: server.documents.get_analysis(uri),
             blocks,
+            structure,
             canonical_id: crate::documents::uri_to_canonical_id(uri),
         })
     })();
@@ -857,6 +865,7 @@ async fn handle_completion_attempt(
             },
             Some(uri.as_str()),
             completion_ssr_context,
+            native.structure.as_ref(),
         )
     });
 
@@ -928,6 +937,7 @@ async fn handle_completion_attempt(
             &native.blocks,
             native.analysis.as_ref(),
             CarrierTemplateLanguage::from_uri(uri.as_str()),
+            native.structure.as_ref(),
         );
         let source_ctx = match &context {
             CursorContext::Template(TemplateCursorContext::AttributeName { .. }) => {

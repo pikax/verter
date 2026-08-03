@@ -83,6 +83,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let actions = ToggleNegation.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
@@ -116,6 +117,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         assert!(ToggleNegation.fixes_for_diagnostic(&diag, &ctx).is_empty());
     }

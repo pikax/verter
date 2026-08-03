@@ -2832,7 +2832,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         }
         if (
           !scriptOwned &&
-          isFrameworkAttributeNamePosition(routed.runtime.readSource(fileName), position)
+          isFrameworkAttributeNamePosition(
+            routed.runtime.readSource(fileName),
+            position,
+            sourceStructure?.markupOpeningRanges,
+          )
         ) {
           companionResult = {
             ...companionResult,

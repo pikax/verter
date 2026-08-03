@@ -1,4 +1,9 @@
-import type { FileAnalysis, OrderedSfcStructure, StructureBlock } from "../core/types";
+import type {
+  FileAnalysis,
+  OrderedSfcStructure,
+  StructureBlock,
+  StructureRange,
+} from "../core/types";
 import { collectCompletions } from "./analysisHelpers";
 
 const HTML_TAGS = [
@@ -162,66 +167,143 @@ export function isOffsetInTemplateBlock(
   );
 }
 
-export function isInsideInterpolation(source: string, offset: number): boolean {
-  const open = source.lastIndexOf("{{", offset);
-  const close = source.lastIndexOf("}}", offset);
-  return open > close;
+/** Bounded current-token lookback (mirrors the plugin's 256-byte contract). */
+const MAX_CURRENT_TOKEN_LOOKBACK = 256;
+
+function utf8OffsetOf(source: string, offset: number): number {
+  return new TextEncoder().encode(source.slice(0, offset)).length;
 }
 
-function getOpenTagStart(source: string, offset: number): number | null {
-  const searchOffset = Math.max(0, offset - 1);
-  const floor = Math.max(0, offset - 256);
-  const window = source.slice(floor, searchOffset + 1);
-  const ltLocal = window.lastIndexOf("<");
-  const gtLocal = window.lastIndexOf(">");
-  const lt = ltLocal < 0 ? -1 : floor + ltLocal;
-  const gt = gtLocal < 0 ? -1 : floor + gtLocal;
-  if (lt === -1 || lt < gt) return null;
+function isTagNameChar(char: string): boolean {
+  return /[\w.-]/.test(char);
+}
 
-  const marker = source[lt + 1];
-  if (marker === "/" || marker === "!" || marker === "?") return null;
-  return lt;
+/**
+ * Innermost stamped markup node whose OPENING span contains the offset —
+ * element, recovered, or unknown nodes retaining an opening range. The
+ * structure projection is the sole tag-geometry authority; raw source is
+ * never scanned for `<`.
+ */
+function enclosingOpeningSyntax(
+  structure: OrderedSfcStructure | null,
+  source: string,
+  offset: number,
+): { openingStart: number; nameEnd: number | null; name: string | null } | null {
+  if (structure === null) return null;
+  const utf8Offset = utf8OffsetOf(source, offset);
+  let best: { openingStart: number; nameEnd: number | null; name: string | null } | null = null;
+  for (const node of structure.markupNodes) {
+    const syntax = node.syntax as {
+      kind: string;
+      openingRange?: StructureRange;
+      authoredName?: { spelling: string; range: StructureRange };
+    };
+    if (!["element", "recovered", "unknown"].includes(syntax.kind)) continue;
+    const opening = syntax.openingRange;
+    if (!opening) continue;
+    if (!(utf8Offset > opening.start && utf8Offset < opening.end)) continue;
+    if (best === null || opening.start > best.openingStart) {
+      best = {
+        openingStart: opening.start,
+        nameEnd: syntax.authoredName?.range.end ?? null,
+        name: syntax.authoredName?.spelling ?? null,
+      };
+    }
+  }
+  return best;
+}
+
+/**
+ * Whether the offset sits inside an interpolation. Structure-first: a stamped
+ * interpolation node containing the offset. Edit-time recovery for a
+ * just-typed `{{` (not yet stamped): a bounded current-token lookback — the
+ * candidate opener must NOT sit inside a stamped element opening span (a `{{`
+ * inside an attribute value string is not an interpolation opener).
+ */
+export function isInsideInterpolation(
+  structure: OrderedSfcStructure | null,
+  source: string,
+  offset: number,
+): boolean {
+  if (structure !== null) {
+    const utf8Offset = utf8OffsetOf(source, offset);
+    for (const node of structure.markupNodes) {
+      const syntax = node.syntax as { kind: string; fullRange?: StructureRange };
+      if (syntax.kind !== "interpolation" || !syntax.fullRange) continue;
+      if (utf8Offset > syntax.fullRange.start && utf8Offset < syntax.fullRange.end) return true;
+    }
+  }
+  const floor = Math.max(0, offset - MAX_CURRENT_TOKEN_LOOKBACK);
+  const window = source.slice(floor, offset);
+  const open = window.lastIndexOf("{{");
+  const close = window.lastIndexOf("}}");
+  if (open < 0 || open < close) return false;
+  // The recovered opener is only an interpolation when it is markup content —
+  // never inside a stamped element opening tag (attribute value territory).
+  return enclosingOpeningSyntax(structure, source, floor + open) === null;
+}
+
+/**
+ * Start of the current open-tag NAME token: the cursor's token characters
+ * walked back (bounded), immediately preceded by `<`. A pure current-token
+ * lex — no window delimiter search.
+ */
+function openTagTokenStart(source: string, offset: number): number | null {
+  let start = offset;
+  let budget = MAX_CURRENT_TOKEN_LOOKBACK;
+  while (start > 0 && budget > 0 && isTagNameChar(source[start - 1])) {
+    start -= 1;
+    budget -= 1;
+  }
+  if (budget === 0) return null;
+  if (start > 0 && source[start - 1] === "<") return start;
+  return null;
 }
 
 function isTagNameContext(source: string, offset: number): boolean {
-  const openTagStart = getOpenTagStart(source, offset);
-  if (openTagStart == null) return false;
-
-  const between = source.slice(openTagStart + 1, offset);
-  return !/\s/.test(between);
+  return openTagTokenStart(source, offset) !== null;
 }
 
-function isTagAttributeContext(source: string, offset: number): boolean {
-  const openTagStart = getOpenTagStart(source, offset);
-  if (openTagStart == null) return false;
-  const between = source.slice(openTagStart + 1, offset);
-  if (between.length === 0) return false;
-  return /\s/.test(between);
+/**
+ * Attribute-name position: strictly inside a STAMPED opening tag, past the
+ * tag-name token. The structure projection supplies the opening span; a `<`
+ * appearing in text or attribute strings can never fabricate one.
+ */
+function isTagAttributeContext(
+  structure: OrderedSfcStructure | null,
+  source: string,
+  offset: number,
+): boolean {
+  const syntax = enclosingOpeningSyntax(structure, source, offset);
+  if (syntax === null || syntax.nameEnd === null) return false;
+  return utf8OffsetOf(source, offset) > syntax.nameEnd;
+}
+
+/** `</name|` current-token check: token chars back, immediately preceded by `</`. */
+function closingTagTokenStart(source: string, offset: number): number | null {
+  let start = offset;
+  let budget = MAX_CURRENT_TOKEN_LOOKBACK;
+  while (start > 0 && budget > 0 && isTagNameChar(source[start - 1])) {
+    start -= 1;
+    budget -= 1;
+  }
+  if (budget === 0) return null;
+  if (start > 1 && source[start - 1] === "/" && source[start - 2] === "<") return start;
+  return null;
 }
 
 function isClosingTagNameContext(source: string, offset: number): boolean {
-  const searchOffset = Math.max(0, offset - 1);
-  const lt = source.lastIndexOf("<", searchOffset);
-  const gt = source.lastIndexOf(">", searchOffset);
-  if (lt === -1 || lt < gt) return false;
-
-  if (source.slice(lt, lt + 2) !== "</") return false;
-  const between = source.slice(lt + 2, offset);
-  return !/\s/.test(between);
+  return closingTagTokenStart(source, offset) !== null;
 }
 
 function currentTagPrefix(source: string, offset: number): string {
-  const openTagStart = getOpenTagStart(source, offset);
-  if (openTagStart == null) return "";
-  const raw = source.slice(openTagStart + 1, offset);
-  return raw.trim();
+  const start = openTagTokenStart(source, offset);
+  return start === null ? "" : source.slice(start, offset);
 }
 
 function currentClosingTagPrefix(source: string, offset: number): string {
-  const searchOffset = Math.max(0, offset - 1);
-  const lt = source.lastIndexOf("<", searchOffset);
-  if (lt === -1) return "";
-  return source.slice(lt + 2, offset).trim();
+  const start = closingTagTokenStart(source, offset);
+  return start === null ? "" : source.slice(start, offset);
 }
 
 export function toPascalCase(input: string): string {
@@ -416,26 +498,54 @@ function currentMarkupElement(
   return best?.name ?? null;
 }
 
+/**
+ * The name of the opening tag whose `>` was JUST typed at `gtIndex` — the one
+ * genuine edit-time recovery in this module (the structure cannot have
+ * stamped a tag whose `>` landed this keystroke). A bounded, quote-aware
+ * backward lex over the current tag only: quoted attribute values are
+ * skipped as units, an unquoted `>` aborts, and the walk gives up past the
+ * 256-char budget. Nothing outside the just-typed tag is ever inspected.
+ */
+function justTypedOpenTagName(source: string, gtIndex: number): string | null {
+  if (gtIndex > 0 && source[gtIndex - 1] === "/") return null; // self-closing
+  let budget = MAX_CURRENT_TOKEN_LOOKBACK;
+  let index = gtIndex - 1;
+  while (index >= 0 && budget > 0) {
+    const char = source[index];
+    if (char === '"' || char === "'") {
+      const openQuote = source.lastIndexOf(char, index - 1);
+      if (openQuote < 0 || gtIndex - openQuote > MAX_CURRENT_TOKEN_LOOKBACK) return null;
+      budget -= index - openQuote;
+      index = openQuote - 1;
+      continue;
+    }
+    if (char === ">") return null;
+    if (char === "<") {
+      if (source[index + 1] === "/") return null; // closing tag
+      const match = /^<([A-Za-z][\w.-]*)\b/.exec(source.slice(index, gtIndex + 1));
+      return match ? match[1] : null;
+    }
+    index -= 1;
+    budget -= 1;
+  }
+  return null;
+}
+
 export function computeAutoCloseTagText(
   source: string,
   structure: OrderedSfcStructure | null,
   offset: number,
 ): string | null {
   if (offset <= 0 || source[offset - 1] !== ">") return null;
-  if (!isOffsetInTemplateBlock(structure, offset) || isInsideInterpolation(source, offset)) {
+  if (
+    !isOffsetInTemplateBlock(structure, offset) ||
+    isInsideInterpolation(structure, source, offset)
+  ) {
     return null;
   }
 
-  const openTagStart = getOpenTagStart(source, offset - 1);
-  if (openTagStart == null) return null;
-
-  const openTagText = source.slice(openTagStart, offset);
-  if (openTagText.startsWith("</") || openTagText.endsWith("/>")) return null;
-
-  const match = /^<([A-Za-z][\w.-]*)\b/.exec(openTagText);
-  if (!match) return null;
-
-  const tagName = match[1];
+  const tagName = justTypedOpenTagName(source, offset - 1);
+  if (tagName === null) return null;
   if (VOID_HTML_TAGS.has(tagName.toLowerCase())) return null;
 
   const after = source.slice(offset).trimStart();
@@ -450,6 +560,9 @@ function collectClosingTagCompletions(
   offset: number,
 ): TemplateCompletion[] {
   if (!isClosingTagNameContext(source, offset)) return [];
+  // A `</` DECOY inside a stamped opening tag (an attribute value string) is
+  // not a closing tag — the structure knows the cursor is tag-internal.
+  if (enclosingOpeningSyntax(structure, source, offset) !== null) return [];
 
   const expectedTag = currentMarkupElement(structure, source, offset);
   if (!expectedTag) return [];
@@ -474,7 +587,7 @@ export function collectTemplateInterpolationCompletions(
   const { source, offset, analysis } = params;
   if (
     !isOffsetInTemplateBlock(params.structure, offset) ||
-    !isInsideInterpolation(source, offset)
+    !isInsideInterpolation(params.structure, source, offset)
   ) {
     return [];
   }
@@ -514,7 +627,10 @@ export function collectTemplateInterpolationCompletions(
 export function collectTemplateCompletions(params: TemplateCompletionParams): TemplateCompletion[] {
   const { source, offset, activeFilename, openFilenames, analysis } = params;
 
-  if (!isOffsetInTemplateBlock(params.structure, offset) || isInsideInterpolation(source, offset)) {
+  if (
+    !isOffsetInTemplateBlock(params.structure, offset) ||
+    isInsideInterpolation(params.structure, source, offset)
+  ) {
     return [];
   }
 
@@ -556,7 +672,7 @@ export function collectTemplateCompletions(params: TemplateCompletionParams): Te
     return out;
   }
 
-  if (isTagAttributeContext(source, offset)) {
+  if (isTagAttributeContext(params.structure, source, offset)) {
     return TEMPLATE_ATTR_COMPLETIONS.map((item) => ({
       label: item.label,
       insertText: item.insertText,

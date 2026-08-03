@@ -856,11 +856,45 @@ fn scanners_replacement_capability_ledger_is_total() {
     );
     assert_eq!(ledger["set_equality"]["unclassified_runtime_rows"], 0);
     assert_eq!(ledger["set_equality"]["deferred_runtime_rows"], 0);
-    assert_eq!(
-        ledger["set_equality"]["independently_discovered_candidates"],
-        rows.len()
+    // RETRACTED self-attestation: `independently_discovered_candidates ==
+    // rows.len()` asserted the ledger's own row count as the discovered count
+    // — a receipt of nothing. The B-52/B-91 evidence is the EXTERNAL
+    // input-bound discovery receipt this record must reference; this suite
+    // checks only the RECORD's shape (fresh run + retraction + honest
+    // reopened status), never a self-derived equality.
+    let fresh_run = &ledger["discovery"]["fresh_run"];
+    assert!(
+        fresh_run["receipt"]
+            .as_str()
+            .is_some_and(|receipt| receipt.contains("DISCOVERY-RECEIPT.md")),
+        "the discovery record must name its input-bound receipt"
     );
-    assert_eq!(ledger["set_equality"]["classified_ledger_rows"], rows.len());
+    assert!(
+        fresh_run["fixed_tip"]
+            .as_str()
+            .is_some_and(|tip| tip.len() == 40 && tip.chars().all(|c| c.is_ascii_hexdigit())),
+        "the discovery record must pin the fixed tip it ran against"
+    );
+    for input in ["git_ls_files", "cargo_metadata", "pnpm_workspace_graph"] {
+        assert!(
+            fresh_run["inputs"][input]["sha256"]
+                .as_str()
+                .is_some_and(|hash| !hash.is_empty()),
+            "the discovery record must carry an input hash for {input}"
+        );
+    }
+    assert!(
+        ledger["discovery"]["retraction"]
+            .as_str()
+            .is_some_and(|text| text.contains("RETRACTED")),
+        "the retraction of the prior self-attested closure must stay recorded"
+    );
+    assert!(
+        ledger["set_equality"]["b52_b91_status"]
+            .as_str()
+            .is_some_and(|status| status.contains("REOPENED")),
+        "B-52/B-91 must remain explicitly reopened while any named residual is open"
+    );
     assert_eq!(
         ledger["consumer_matrix"].as_array().map(Vec::len),
         Some(

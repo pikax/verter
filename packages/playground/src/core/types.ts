@@ -240,9 +240,20 @@ export class File {
   /** Whether this file contains TypeScript */
   get isTS(): boolean {
     if (this.filename.endsWith(".ts") || this.filename.endsWith(".tsx")) return true;
-    // A framework carrier (e.g. .vue / .svelte) is TS when its <script> opts in.
+    // A framework carrier (e.g. .vue / .svelte) is TS when its STAMPED
+    // structure projection records a TypeScript script dialect. The dialect is
+    // never re-derived from raw source, so a decoy `<script lang="ts">`
+    // literal inside the code cannot flip the classification; without a
+    // stamped structure the carrier is not (yet) TypeScript — fail closed.
     if (isCarrierFilename(this.filename)) {
-      return /<script[^>]*\blang\s*=\s*["'](ts|tsx)["']/.test(this.code);
+      return (
+        this.structure?.blocks.some(
+          (block) =>
+            block.kind === "section" &&
+            block.section.role.kind === "script" &&
+            (block.section.role.dialect === "TypeScript" || block.section.role.dialect === "Tsx"),
+        ) ?? false
+      );
     }
     return false;
   }

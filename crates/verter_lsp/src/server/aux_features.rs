@@ -444,6 +444,15 @@ pub(super) async fn handle_code_action(
             if let Some(ref analysis) = analysis {
                 let canonical_id = uri_to_canonical_id(uri);
                 let linter = server.linter_for_file(&canonical_id);
+                // Ordered SFC block facts from the registered inventory — the
+                // sole geometry source for block-anchored provider edits.
+                let block_facts = doc
+                    .feature_snapshot
+                    .as_ref()
+                    .map(|snapshot| {
+                        verter_diagnostics::project_block_facts(snapshot.structure().inventory())
+                    })
+                    .unwrap_or_default();
                 if wants_quickfix {
                     all_actions.extend(crate::features::diagnostics_bridge::action_engine_fixes(
                         &server.action_engine,
@@ -453,6 +462,7 @@ pub(super) async fn handle_code_action(
                         &linter,
                         &params.context.diagnostics,
                         uri,
+                        &block_facts,
                     ));
                 }
                 if wants_refactor {
@@ -466,6 +476,7 @@ pub(super) async fn handle_code_action(
                                 &linter,
                                 offset,
                                 uri,
+                                &block_facts,
                             ),
                         );
                     }

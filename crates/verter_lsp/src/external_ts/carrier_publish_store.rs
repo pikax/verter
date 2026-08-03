@@ -302,6 +302,10 @@ pub struct ReadyStructureStamp {
     pub schema_version: u32,
     pub artifact_token: String,
     pub script_content_ranges: Vec<[u32; 2]>,
+    /// Parser-identified markup opening-tag spans (additive; absent in stamps
+    /// written before the field existed).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub markup_opening_ranges: Vec<[u32; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -647,6 +651,7 @@ impl CarrierPublishStore {
                             schema_version: structure.schema_version,
                             artifact_token: structure.artifact_token.to_string(),
                             script_content_ranges: structure.script_content_ranges.clone(),
+                            markup_opening_ranges: structure.markup_opening_ranges.clone(),
                         }),
                 },
             ));

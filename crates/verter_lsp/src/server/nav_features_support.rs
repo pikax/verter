@@ -20,6 +20,10 @@ pub(super) fn is_style_v_bind_context(
         let analysis = server.documents.get_analysis(uri);
         let blocks = project_carrier_blocks_for_document(&doc);
         let offset = doc.line_index.position_to_offset(position)?;
+        let structure = doc
+            .feature_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.structure().clone());
         Some(matches!(
             classify_cursor_context_for_language(
                 offset,
@@ -27,6 +31,7 @@ pub(super) fn is_style_v_bind_context(
                 &blocks,
                 analysis.as_ref(),
                 CarrierTemplateLanguage::from_uri(uri.as_str()),
+                structure.as_ref(),
             ),
             CursorContext::Style(crate::features::cursor_context::StyleCursorContext::VBind)
         ))

@@ -4261,6 +4261,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "verter_language",
  "verter_semantic",
  "verter_span",
  "verter_type_expr",
