@@ -1,8 +1,8 @@
 {
     "schema": "verter.scanners-replacement-capability-ledger.v1",
-    "generated_from_head": "49eb6e07078c29cefc5a32954e4ba20614d76118",
+    "generated_from_head": "72d7608a9623b372dd9d4361e9102eebcc3c52f1",
     "authority": [
-        "scanners-replacement-verter Ã‚Â§6 B0/Ã‚Â§7/Ã‚Â§8.2-8.3",
+        "scanners-replacement-verter §6 B0/§7/§8.2-8.3",
         "T-B schema ratification v2"
     ],
     "verification": "scripts/verify-scanners-replacement.mjs is the campaign-gate execution-proof orchestrator for this cutover, run manually by the orchestrator at plan gates (not a CI job); durable enforcement stays the in-suite structural guards that run in normal CI workspace suites.",
@@ -289,8 +289,8 @@
             "capability_class": "nested_language_parser",
             "disposition": "allowed_nested",
             "acceptance_id": "B-31",
-            "test": "filesystem_scanner_registers_before_parse",
-            "architecture_guard": "scanner_does_not_emit_geometry"
+            "test": "scan_directory_ingests_svelte_carrier_not_just_vue",
+            "architecture_guard": "registered_structure_seals_local_refs_and_public_token_domains"
         },
         {
             "path": "crates/verter_parser/src/cursor/script_detector.rs",
@@ -300,13 +300,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (capability absent at 72d7608a9: file retired; reintroduction blocked by verifyScannerFreeBoundary + the compile-fail pin)",
             "processor_authority": null,
             "capability_class": "pre_registration_probe",
             "disposition": "delete",
             "acceptance_id": "B-18",
-            "test": "no_pre_registration_probe_without_real_caller",
-            "architecture_guard": "no_public_whole_file_detector"
+            "test": "whole_file_script_detector_is_not_public",
+            "architecture_guard": "verifyScannerFreeBoundary"
         },
         {
             "path": "crates/verter_semantic/src/analysis/types.rs",
@@ -316,13 +316,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (capability absent at 72d7608a9: feature ordinals removed; sealed ordered structure DTOs are the authority)",
             "processor_authority": null,
             "capability_class": "public_projection",
             "disposition": "delete",
             "acceptance_id": "B-28",
-            "test": "schema8_ordered_structure_roundtrip",
-            "architecture_guard": "generated_schema_freshness"
+            "test": "schema8_full_body_uses_tag_26_and_roundtrips_supported_contract",
+            "architecture_guard": "scanners_replacement_schema_declaration_deletion_is_rejected"
         },
         {
             "path": "crates/verter_session/src/compile.rs",
@@ -332,13 +332,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (capability absent at 72d7608a9: registered publication lane replaced source-only compile discovery)",
             "processor_authority": null,
             "capability_class": "carrier_parser",
             "disposition": "delete",
             "acceptance_id": "B-30",
-            "test": "registered_lanes_share_publication_arc",
-            "architecture_guard": "raw_carrier_parser_private_to_publication_store"
+            "test": "concurrent_publication_has_one_parser_start_and_one_terminal_arc",
+            "architecture_guard": "raw_registered_carrier_parser_is_not_public"
         },
         {
             "path": "crates/verter_session/src/host_manage/analysis_io.rs",
@@ -348,13 +348,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L281",
+            "candidate_evidence": "tracked_source@0f28184d76:L281 (carrier arm absent at 72d7608a9: scheduler-missed framework carriers fail closed; the registered artifact is reused)",
             "processor_authority": null,
             "capability_class": "carrier_parser",
             "disposition": "delete",
             "acceptance_id": "B-17",
-            "test": "registered_lanes_share_publication_arc",
-            "architecture_guard": "raw_carrier_parser_private_to_publication_store"
+            "test": "registered_projection_calls_parse_exactly_once_for_vue_and_svelte",
+            "architecture_guard": "raw_registered_carrier_parser_is_not_public"
         },
         {
             "path": "crates/verter_session/src/host_manage/eval_program.rs",
@@ -364,13 +364,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L162-L180",
+            "candidate_evidence": "tracked_source@0f28184d76:L162-L180 (capability absent at 72d7608a9: classification-gated; a no-artifact carrier fails closed and a non-carrier is never script-scanned)",
             "processor_authority": null,
             "capability_class": "manual_geometry",
             "disposition": "delete",
             "acceptance_id": "B-26",
-            "test": "registered_structure_parser_geometry_only",
-            "architecture_guard": "registered_consumers_accept_structure_capability"
+            "test": "build_eval_script_source_without_parse_artifact_fails_closed",
+            "architecture_guard": "build_eval_script_source_never_script_scans_a_non_carrier_file"
         },
         {
             "path": "crates/verter_session/src/host_manage/prepared_decl.rs",
@@ -380,13 +380,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L1810",
+            "candidate_evidence": "tracked_source@0f28184d76:L1810 (registered indexed artifact reused at 72d7608a9)",
             "processor_authority": null,
             "capability_class": "carrier_parser",
             "disposition": "delete",
             "acceptance_id": "B-17",
-            "test": "registered_lanes_share_publication_arc",
-            "architecture_guard": "raw_carrier_parser_private_to_publication_store"
+            "test": "registered_projection_calls_parse_exactly_once_for_vue_and_svelte",
+            "architecture_guard": "raw_registered_carrier_parser_is_not_public"
         },
         {
             "path": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
@@ -396,13 +396,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L2983,L3471",
+            "candidate_evidence": "tracked_source@0f28184d76:L2983,L3471 (fail-closed at 72d7608a9: typed ExternalBlockContentDeferred(B-23); DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
             "processor_authority": null,
             "capability_class": "carrier_parser",
             "disposition": "migrate",
             "acceptance_id": "B-23",
-            "test": "registered_lanes_share_publication_arc",
-            "architecture_guard": "raw_carrier_parser_private_to_publication_store"
+            "test": "external_src_compile_is_typed_and_fail_closed; torn_lane_template_and_script_overrides_refuse_typed_b23",
+            "architecture_guard": "raw_registered_carrier_parser_is_not_public"
         },
         {
             "path": "crates/verter_session/src/host_resolve/vue_script_extract.rs",
@@ -412,13 +412,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (capability absent at 72d7608a9: script spans come from the parsed registered artifact)",
             "processor_authority": null,
             "capability_class": "manual_geometry",
             "disposition": "delete",
             "acceptance_id": "B-26",
-            "test": "registered_structure_parser_geometry_only",
-            "architecture_guard": "registered_consumers_accept_structure_capability"
+            "test": "build_eval_script_source_without_parse_artifact_fails_closed",
+            "architecture_guard": "build_eval_script_source_never_script_scans_a_non_carrier_file"
         },
         {
             "path": "crates/verter_session/src/host_resolve/vue_script_extract.rs",
@@ -428,13 +428,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (capability absent at 72d7608a9: replaced by script_content_spans_from_parsed over the registered artifact)",
             "processor_authority": null,
             "capability_class": "manual_geometry",
             "disposition": "delete",
             "acceptance_id": "B-26",
-            "test": "registered_structure_parser_geometry_only",
-            "architecture_guard": "registered_consumers_accept_structure_capability"
+            "test": "build_eval_script_source_without_parse_artifact_fails_closed",
+            "architecture_guard": "build_eval_script_source_never_script_scans_a_non_carrier_file"
         },
         {
             "path": "crates/verter_session/src/host_upsert.rs",
@@ -444,13 +444,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L1207",
+            "candidate_evidence": "tracked_source@0f28184d76:L1207 (OPEN at 72d7608a9 — surface DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate); interim contract: docs/arch/scanners-replacement-preprocessor-interim.md)",
             "processor_authority": null,
             "capability_class": "synthetic_carrier",
             "disposition": "delete",
             "acceptance_id": "B-83",
-            "test": "scanners_replacement_b_83",
-            "architecture_guard": "scanners_replacement_candidate_set_equality"
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
         },
         {
             "path": "crates/verter_session/src/parse.rs",
@@ -460,13 +460,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L285,L2280",
+            "candidate_evidence": "tracked_source@0f28184d76:L285,L2280 (fail-closed at 72d7608a9: external-src style analysis is typed-deferred B-23; DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
             "processor_authority": null,
             "capability_class": "carrier_parser",
             "disposition": "migrate",
             "acceptance_id": "B-23",
-            "test": "registered_lanes_share_publication_arc",
-            "architecture_guard": "raw_carrier_parser_private_to_publication_store"
+            "test": "external_src_compile_is_typed_and_fail_closed; torn_lane_template_and_script_overrides_refuse_typed_b23",
+            "architecture_guard": "raw_registered_carrier_parser_is_not_public"
         },
         {
             "path": "crates/verter_session/src/types.rs",
@@ -476,13 +476,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L3018",
+            "candidate_evidence": "tracked_source@0f28184d76:L3018 (OPEN at 72d7608a9 — storage DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate) with the callback surface; the block_splice synthetic-source half is deleted)",
             "processor_authority": null,
             "capability_class": "synthetic_carrier",
             "disposition": "delete",
             "acceptance_id": "B-44",
-            "test": "scanners_replacement_b_44",
-            "architecture_guard": "scanners_replacement_candidate_set_equality"
+            "test": "torn_lane_style_override_lives_without_carrier_reparse",
+            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
         },
         {
             "path": "crates/verter_wasm/src/lib.rs",
@@ -492,13 +492,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — WASM arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
             "processor_authority": null,
             "capability_class": "synthetic_carrier",
             "disposition": "delete",
             "acceptance_id": "B-83",
-            "test": "schema8_ordered_structure_roundtrip",
-            "architecture_guard": "generated_schema_freshness"
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
         },
         {
             "path": "extensions/typescript-plugin/index.js",
@@ -508,7 +508,7 @@
             "shipped_artifact": "legacy VSIX extension/node_modules/@verter/typescript-plugin/index.js",
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "unpacked_artifact",
+            "candidate_evidence": "unpacked_artifact (capability absent at 72d7608a9: files deleted; the allowlist-shape guard enforces absence)",
             "processor_authority": null,
             "capability_class": "shipped_bundle",
             "disposition": "delete",
@@ -524,13 +524,13 @@
             "shipped_artifact": "legacy VSIX",
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "extension_manifest",
+            "candidate_evidence": "extension_manifest (capability absent at 72d7608a9: retired tree deleted physically and from tracking; the allowlist-shape guard enforces absence)",
             "processor_authority": null,
             "capability_class": "shipped_bundle",
             "disposition": "delete",
             "acceptance_id": "B-70",
-            "test": "scanners_replacement_b_70",
-            "architecture_guard": "single_extension_packaging_source"
+            "test": "scanners_replacement_b_70_has_single_extension_authority",
+            "architecture_guard": "verifyNoLegacyExtensionAuthority"
         },
         {
             "path": "package.json",
@@ -540,13 +540,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "ci_release_copy",
+            "candidate_evidence": "ci_release_copy (capability absent at 72d7608a9: legacy copy script removed; the package.json reference scan enforces absence)",
             "processor_authority": null,
             "capability_class": "shipped_bundle",
             "disposition": "delete",
             "acceptance_id": "B-70",
-            "test": "scanners_replacement_b_70",
-            "architecture_guard": "single_extension_packaging_source"
+            "test": "scanners_replacement_b_70_has_single_extension_authority",
+            "architecture_guard": "verifyNoLegacyExtensionAuthority"
         },
         {
             "path": "packages/native/index.js",
@@ -556,13 +556,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "generated_manifest",
+            "candidate_evidence": "generated_manifest (OPEN at 72d7608a9 — NAPI arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
             "processor_authority": null,
             "capability_class": "synthetic_carrier",
             "disposition": "delete",
             "acceptance_id": "B-83",
-            "test": "schema8_ordered_structure_roundtrip",
-            "architecture_guard": "generated_schema_freshness"
+            "test": "compiler.spec.ts::overrides style content without re-upsert",
+            "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
             "path": "packages/native/index.ts",
@@ -572,13 +572,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — NAPI arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
             "processor_authority": null,
             "capability_class": "synthetic_carrier",
             "disposition": "delete",
             "acceptance_id": "B-83",
-            "test": "schema8_ordered_structure_roundtrip",
-            "architecture_guard": "generated_schema_freshness"
+            "test": "compiler.spec.ts::overrides style content without re-upsert",
+            "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
             "path": "packages/playground/src/core/compiler.ts",
@@ -588,13 +588,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (capability absent at 72d7608a9: the stamped WASM structure projection replaced the carrier scan)",
             "processor_authority": null,
             "capability_class": "root_scanner",
             "disposition": "delete",
             "acceptance_id": "B-32",
-            "test": "product_consumes_stamped_structure",
-            "architecture_guard": "product_structure_projection_only"
+            "test": "templateIde.spec.ts::templateIde scanner-free geometry",
+            "architecture_guard": "types.spec.ts::returns false for a carrier before any structure is stamped (fail closed)"
         },
         {
             "path": "packages/playground/src/core/types.ts",
@@ -652,13 +652,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (bounded at 72d7608a9: 256-byte cursor-local lex anchored on stamped markup opening spans)",
             "processor_authority": null,
             "capability_class": "manual_geometry",
             "disposition": "delete",
             "acceptance_id": "B-19",
-            "test": "typescript_plugin_attribute_position_bounded_to_256_bytes",
-            "architecture_guard": "cursor_syntax_capability_boundary"
+            "test": "index.spec.ts::does not inspect a tag opener beyond 256 UTF-8 bytes",
+            "architecture_guard": "cursorGeometry.spec.ts::fails closed without a parser-identified opening span"
         },
         {
             "path": "packages/unplugin/src/core/preprocessor.ts",
@@ -668,13 +668,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — preprocessor callback lane, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
             "processor_authority": null,
             "capability_class": "trusted_processor",
             "disposition": "delete",
             "acceptance_id": "B-94",
-            "test": "product_consumes_stamped_structure",
-            "architecture_guard": "product_structure_projection_only"
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
             "path": "packages/unplugin/src/core/scanner.ts",
@@ -689,8 +689,8 @@
             "capability_class": "nested_language_parser",
             "disposition": "allowed_nested",
             "acceptance_id": "B-31",
-            "test": "filesystem_scanner_registers_before_parse",
-            "architecture_guard": "scanner_does_not_emit_geometry"
+            "test": "scanner.spec.ts::finds .vue files in root and subdirectories",
+            "architecture_guard": "scanner.spec.ts::awaits Workspace.readDir/readFile and returns files with string contents"
         },
         {
             "path": "packages/unplugin/src/core/types.ts",
@@ -700,13 +700,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — callback-surface type, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
             "processor_authority": null,
             "capability_class": "trusted_processor",
             "disposition": "delete",
             "acceptance_id": "B-83",
-            "test": "product_consumes_stamped_structure",
-            "architecture_guard": "product_structure_projection_only"
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
             "path": "packages/unplugin/src/core/types.ts",
@@ -716,13 +716,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — callback-surface option, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
             "processor_authority": null,
             "capability_class": "trusted_processor",
             "disposition": "delete",
             "acceptance_id": "B-83",
-            "test": "product_consumes_stamped_structure",
-            "architecture_guard": "product_structure_projection_only"
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
             "path": "packages/unplugin/src/index.ts",
@@ -732,13 +732,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (capability absent at 72d7608a9: structure-only projection; no post-upsert reparse)",
             "processor_authority": null,
             "capability_class": "carrier_parser",
             "disposition": "delete",
             "acceptance_id": "B-32",
-            "test": "product_consumes_stamped_structure",
-            "architecture_guard": "product_structure_projection_only"
+            "test": "compiler.spec.ts::caching: unchanged re-upsert reports no change",
+            "architecture_guard": "registered_projection_calls_parse_exactly_once_for_vue_and_svelte"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -754,7 +754,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt"
+            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -770,7 +770,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt"
+            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -786,7 +786,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt"
+            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -802,7 +802,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt"
+            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -818,7 +818,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt"
+            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
         },
         {
             "path": "packages/wasm/src/index.ts",
@@ -828,13 +828,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — WASM JS arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
             "processor_authority": null,
             "capability_class": "synthetic_carrier",
             "disposition": "delete",
             "acceptance_id": "B-83",
-            "test": "schema8_ordered_structure_roundtrip",
-            "architecture_guard": "generated_schema_freshness"
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
         },
         {
             "path": "packages/wasm/src/index.ts",
@@ -844,13 +844,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source",
+            "candidate_evidence": "tracked_source (allowed standalone lane at 72d7608a9: StandaloneCompiler/StandaloneSourceBytes is the only public raw-source boundary)",
             "processor_authority": null,
             "capability_class": "standalone_compile",
             "disposition": "allowed_standalone",
             "acceptance_id": "B-84",
-            "test": "wasm_raw_compile_is_standalone_only",
-            "architecture_guard": "standalone_compiler_typestate"
+            "test": "rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile",
+            "architecture_guard": "raw_registered_carrier_parser_is_not_public"
         }
     ],
     "consumer_matrix": [
@@ -994,7 +994,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "PLANNED (follow-up sub-unit): arena comment-span discriminator; see FL2-B DISCOVERY-RECEIPT.md residual set",
+            "test": "navigation_survives_decoy_comment_open_inside_attribute_string",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1007,7 +1007,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "filesystem_scanner_registers_before_parse",
+            "test": "scan_directory_ingests_svelte_carrier_not_just_vue",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1020,7 +1020,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "no_pre_registration_probe_without_real_caller",
+            "test": "whole_file_script_detector_is_not_public",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1033,7 +1033,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "schema8_ordered_structure_roundtrip",
+            "test": "schema8_full_body_uses_tag_26_and_roundtrips_supported_contract",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1046,7 +1046,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "registered_lanes_share_publication_arc",
+            "test": "concurrent_publication_has_one_parser_start_and_one_terminal_arc",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1059,7 +1059,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "registered_lanes_share_publication_arc",
+            "test": "registered_projection_calls_parse_exactly_once_for_vue_and_svelte",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1072,7 +1072,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "registered_structure_parser_geometry_only",
+            "test": "build_eval_script_source_without_parse_artifact_fails_closed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1085,7 +1085,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "registered_lanes_share_publication_arc",
+            "test": "registered_projection_calls_parse_exactly_once_for_vue_and_svelte",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1098,7 +1098,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "registered_lanes_share_publication_arc",
+            "test": "external_src_compile_is_typed_and_fail_closed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1111,7 +1111,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "registered_structure_parser_geometry_only",
+            "test": "build_eval_script_source_without_parse_artifact_fails_closed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1124,7 +1124,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "registered_structure_parser_geometry_only",
+            "test": "build_eval_script_source_without_parse_artifact_fails_closed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1137,7 +1137,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "scanners_replacement_b_83",
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1150,7 +1150,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "registered_lanes_share_publication_arc",
+            "test": "external_src_compile_is_typed_and_fail_closed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1163,7 +1163,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "scanners_replacement_b_44",
+            "test": "torn_lane_style_override_lives_without_carrier_reparse",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1176,7 +1176,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "schema8_ordered_structure_roundtrip",
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1202,7 +1202,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "scanners_replacement_b_70",
+            "test": "scanners_replacement_b_70_has_single_extension_authority",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1215,7 +1215,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "scanners_replacement_b_70",
+            "test": "scanners_replacement_b_70_has_single_extension_authority",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1228,7 +1228,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "schema8_ordered_structure_roundtrip",
+            "test": "compiler.spec.ts::overrides style content without re-upsert",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1241,7 +1241,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "schema8_ordered_structure_roundtrip",
+            "test": "compiler.spec.ts::overrides style content without re-upsert",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1254,7 +1254,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "product_consumes_stamped_structure",
+            "test": "templateIde.spec.ts::templateIde scanner-free geometry",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1306,7 +1306,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "typescript_plugin_attribute_position_bounded_to_256_bytes",
+            "test": "index.spec.ts::does not inspect a tag opener beyond 256 UTF-8 bytes",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1319,7 +1319,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "product_consumes_stamped_structure",
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1332,7 +1332,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "filesystem_scanner_registers_before_parse",
+            "test": "scanner.spec.ts::finds .vue files in root and subdirectories",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1345,7 +1345,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "product_consumes_stamped_structure",
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1358,7 +1358,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "product_consumes_stamped_structure",
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1371,7 +1371,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "product_consumes_stamped_structure",
+            "test": "compiler.spec.ts::caching: unchanged re-upsert reports no change",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1449,7 +1449,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "schema8_ordered_structure_roundtrip",
+            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1462,7 +1462,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "wasm_raw_compile_is_standalone_only",
+            "test": "rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile",
             "audit_assertion": "registered counters unchanged"
         }
     ]
