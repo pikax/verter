@@ -66,6 +66,12 @@ describe("ComponentMetaChecker session requirement", () => {
       acceptedSurfaceCompleteness: "exact",
       rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
       fallthroughSurface: { kind: "none", reason: "noTemplate" },
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "a".repeat(43),
+        blocks: [],
+        markupNodes: [],
+      },
     }));
 
     const checker = new ComponentMetaChecker(
@@ -209,6 +215,12 @@ describe("ComponentMetaChecker session requirement", () => {
       acceptedSurfaceCompleteness: "exact",
       rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
       fallthroughSurface: { kind: "none", reason: "noTemplate" },
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "a".repeat(43),
+        blocks: [],
+        markupNodes: [],
+      },
     };
     const getComponentMeta = vi.fn(() => fullMeta);
 
@@ -295,6 +307,12 @@ describe("ComponentMetaChecker session requirement", () => {
       acceptedSurfaceCompleteness: "exact",
       rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
       fallthroughSurface: { kind: "none", reason: "noTemplate" },
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "a".repeat(43),
+        blocks: [],
+        markupNodes: [],
+      },
     };
     const checker = new ComponentMetaChecker({ upsert: vi.fn() }, "C:\\project", {}, {
       closed: false,

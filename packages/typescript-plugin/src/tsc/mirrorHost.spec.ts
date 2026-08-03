@@ -106,265 +106,273 @@ describe("isInsideDir (segment-aware containment, not startsWith)", () => {
   });
 });
 
-describe("runBatchTypecheck — single project (noEmit diagnostics-only)", () => {
-  it("records a projection failure per source and continues later siblings", () => {
-    const fx = track(
-      createSingleProjectFixture([
-        {
-          rel: "src/Ordinal.vue",
-          content: `<script setup lang="ts">\nconst value = 1\n</script>`,
-        },
-        {
-          rel: "src/Later.vue",
-          content: `<script setup lang="ts">\nconst value = 2\n</script>`,
-        },
-      ]),
-    );
-    const native = host();
-    const projectionError: CarrierPublicApiProjectionError = {
-      code: "tsc-generation",
-      detailCode: "invalid-authored-member-ordinal",
-      subject: { kind: "macro", syntaxIndex: 9 },
-      declarationShapeReason: null,
-      memberOrdinal: 3,
-      outcomeKind: null,
-      outcomeReason: null,
-      outcomeDiagnostic: null,
-    };
-    const failingHost: CarrierCodegenHost = {
-      upsert: native.upsert.bind(native),
-      ensureIdeCompiled: native.ensureIdeCompiled.bind(native),
-      getIde: native.getIde.bind(native),
-      getPublicApi: (canonicalId, mode) =>
-        canonicalId === "Ordinal.vue"
-          ? { value: null, error: projectionError }
-          : native.getPublicApi(canonicalId, mode),
-      close: native.close.bind(native),
-    };
-
-    try {
-      const ordinal = path.join(fx.root, "src/Ordinal.vue").replace(/\\/g, "/");
-      const later = path.join(fx.root, "src/Later.vue").replace(/\\/g, "/");
-      const result = runBatchTypecheck({
-        tsconfigPath: fx.tsconfigPath,
-        carrierSources: [
-          ideCarrier(fx.root, "src/Ordinal.vue", "vue"),
-          ideCarrier(fx.root, "src/Later.vue", "vue"),
-        ],
-        host: failingHost,
-      });
-
-      expect(result.sourceOutcomes.get(ordinal)).toEqual({
-        kind: "projectionFailure",
-        error: projectionError,
-      });
-      expect(result.materializedCarriers.has(ordinal)).toBe(false);
-      expect(result.sourceOutcomes.get(later)).toMatchObject({ kind: "materialized" });
-      expect(result.materializedCarriers.has(later)).toBe(true);
-    } finally {
-      failingHost.close?.();
-    }
-  });
-
-  it("preserves all unavailable-outcome arms on the thrown error", () => {
-    const cases: CarrierPublicApiProjectionError[] = [
-      {
+// Every test here executes a REAL noEmit TypeScript program build. The root
+// workspace test command runs every package in parallel, so the default
+// 5-second unit-test timeout is not a valid bound under CI contention; keep a
+// finite integration bound that still fails a wedged build.
+describe(
+  "runBatchTypecheck — single project (noEmit diagnostics-only)",
+  { timeout: 20_000 },
+  () => {
+    it("records a projection failure per source and continues later siblings", () => {
+      const fx = track(
+        createSingleProjectFixture([
+          {
+            rel: "src/Ordinal.vue",
+            content: `<script setup lang="ts">\nconst value = 1\n</script>`,
+          },
+          {
+            rel: "src/Later.vue",
+            content: `<script setup lang="ts">\nconst value = 2\n</script>`,
+          },
+        ]),
+      );
+      const native = host();
+      const projectionError: CarrierPublicApiProjectionError = {
         code: "tsc-generation",
-        detailCode: "unavailable-outcome",
-        subject: { kind: "macro", syntaxIndex: 0 },
+        detailCode: "invalid-authored-member-ordinal",
+        subject: { kind: "macro", syntaxIndex: 9 },
         declarationShapeReason: null,
-        memberOrdinal: null,
-        outcomeKind: "partial",
-        outcomeReason: "incomplete-traversal",
-        outcomeDiagnostic: "partial detail",
-      },
-      {
-        code: "tsc-generation",
-        detailCode: "unavailable-outcome",
-        subject: { kind: "macro", syntaxIndex: 1 },
-        declarationShapeReason: null,
-        memberOrdinal: null,
-        outcomeKind: "unresolved",
-        outcomeReason: "ambiguous-reference",
-        outcomeDiagnostic: "unresolved detail",
-      },
-      {
-        code: "tsc-generation",
-        detailCode: "unavailable-outcome",
-        subject: { kind: "macro", syntaxIndex: 2 },
-        declarationShapeReason: null,
-        memberOrdinal: null,
-        outcomeKind: "unsupported",
-        outcomeReason: "semantic-construct",
-        outcomeDiagnostic: "unsupported detail",
-      },
-      {
-        code: "tsc-generation",
-        detailCode: "unavailable-outcome",
-        subject: { kind: "macro", syntaxIndex: 3 },
-        declarationShapeReason: null,
-        memberOrdinal: null,
-        outcomeKind: "invalid",
-        outcomeReason: "non-object-root",
-        outcomeDiagnostic: "invalid detail",
-      },
-      {
-        code: "tsc-generation",
-        detailCode: "unavailable-outcome",
-        subject: {
-          kind: "scriptSetupAttrs",
-          sourceRange: { start: 31, end: 37 },
-        },
-        declarationShapeReason: null,
-        memberOrdinal: null,
-        outcomeKind: "invalid",
-        outcomeReason: "malformed-or-recovered-type-syntax",
+        memberOrdinal: 3,
+        outcomeKind: null,
+        outcomeReason: null,
         outcomeDiagnostic: null,
-      },
-    ];
+      };
+      const failingHost: CarrierCodegenHost = {
+        upsert: native.upsert.bind(native),
+        ensureIdeCompiled: native.ensureIdeCompiled.bind(native),
+        getIde: native.getIde.bind(native),
+        getPublicApi: (canonicalId, mode) =>
+          canonicalId === "Ordinal.vue"
+            ? { value: null, error: projectionError }
+            : native.getPublicApi(canonicalId, mode),
+        close: native.close.bind(native),
+      };
 
-    for (const error of cases) {
-      expect(new CarrierPublicApiProjectionFailure(error)).toMatchObject(error);
-    }
-  });
+      try {
+        const ordinal = path.join(fx.root, "src/Ordinal.vue").replace(/\\/g, "/");
+        const later = path.join(fx.root, "src/Later.vue").replace(/\\/g, "/");
+        const result = runBatchTypecheck({
+          tsconfigPath: fx.tsconfigPath,
+          carrierSources: [
+            ideCarrier(fx.root, "src/Ordinal.vue", "vue"),
+            ideCarrier(fx.root, "src/Later.vue", "vue"),
+          ],
+          host: failingHost,
+        });
 
-  it("reports a carrier type error mapped back to the .vue source position", () => {
-    const fx = track(
-      createSingleProjectFixture([
+        expect(result.sourceOutcomes.get(ordinal)).toEqual({
+          kind: "projectionFailure",
+          error: projectionError,
+        });
+        expect(result.materializedCarriers.has(ordinal)).toBe(false);
+        expect(result.sourceOutcomes.get(later)).toMatchObject({ kind: "materialized" });
+        expect(result.materializedCarriers.has(later)).toBe(true);
+      } finally {
+        failingHost.close?.();
+      }
+    });
+
+    it("preserves all unavailable-outcome arms on the thrown error", () => {
+      const cases: CarrierPublicApiProjectionError[] = [
         {
-          rel: "src/Bad.vue",
-          content: `<script setup lang="ts">
+          code: "tsc-generation",
+          detailCode: "unavailable-outcome",
+          subject: { kind: "macro", syntaxIndex: 0 },
+          declarationShapeReason: null,
+          memberOrdinal: null,
+          outcomeKind: "partial",
+          outcomeReason: "incomplete-traversal",
+          outcomeDiagnostic: "partial detail",
+        },
+        {
+          code: "tsc-generation",
+          detailCode: "unavailable-outcome",
+          subject: { kind: "macro", syntaxIndex: 1 },
+          declarationShapeReason: null,
+          memberOrdinal: null,
+          outcomeKind: "unresolved",
+          outcomeReason: "ambiguous-reference",
+          outcomeDiagnostic: "unresolved detail",
+        },
+        {
+          code: "tsc-generation",
+          detailCode: "unavailable-outcome",
+          subject: { kind: "macro", syntaxIndex: 2 },
+          declarationShapeReason: null,
+          memberOrdinal: null,
+          outcomeKind: "unsupported",
+          outcomeReason: "semantic-construct",
+          outcomeDiagnostic: "unsupported detail",
+        },
+        {
+          code: "tsc-generation",
+          detailCode: "unavailable-outcome",
+          subject: { kind: "macro", syntaxIndex: 3 },
+          declarationShapeReason: null,
+          memberOrdinal: null,
+          outcomeKind: "invalid",
+          outcomeReason: "non-object-root",
+          outcomeDiagnostic: "invalid detail",
+        },
+        {
+          code: "tsc-generation",
+          detailCode: "unavailable-outcome",
+          subject: {
+            kind: "scriptSetupAttrs",
+            sourceRange: { start: 31, end: 37 },
+          },
+          declarationShapeReason: null,
+          memberOrdinal: null,
+          outcomeKind: "invalid",
+          outcomeReason: "malformed-or-recovered-type-syntax",
+          outcomeDiagnostic: null,
+        },
+      ];
+
+      for (const error of cases) {
+        expect(new CarrierPublicApiProjectionFailure(error)).toMatchObject(error);
+      }
+    });
+
+    it("reports a carrier type error mapped back to the .vue source position", () => {
+      const fx = track(
+        createSingleProjectFixture([
+          {
+            rel: "src/Bad.vue",
+            content: `<script setup lang="ts">
 const count: number = "not a number"
 </script>
 <template><div>{{ count }}</div></template>`,
-        },
-      ]),
-    );
+          },
+        ]),
+      );
 
-    const result = runBatchTypecheck({
-      tsconfigPath: fx.tsconfigPath,
-      carrierSources: [ideCarrier(fx.root, "src/Bad.vue", "vue")],
-      host: host(),
+      const result = runBatchTypecheck({
+        tsconfigPath: fx.tsconfigPath,
+        carrierSources: [ideCarrier(fx.root, "src/Bad.vue", "vue")],
+        host: host(),
+      });
+
+      expect(result.buildMode).toBe(false);
+      // The assignment type error (TS2322) must surface, mapped back to the .vue.
+      const ts2322 = result.diagnostics.filter((d) => d.code === 2322);
+      expect(ts2322.length).toBeGreaterThan(0);
+      const mapped = ts2322.find((d) => d.mappedFromCarrier);
+      expect(mapped).toBeDefined();
+      expect(mapped!.fileName).toBe(path.join(fx.root, "src/Bad.vue").replace(/\\/g, "/"));
+      // The error sits on source line 2 (the `const count` line) — offset must land
+      // inside the source, not in generated helper preamble.
+      const src = fs.readFileSync(path.join(fx.root, "src/Bad.vue"), "utf8");
+      expect(mapped!.start).toBeGreaterThan(0);
+      expect(mapped!.start).toBeLessThan(src.length);
+      // The mapped offset falls on the second line.
+      const lineOfOffset = src.slice(0, mapped!.start).split("\n").length;
+      expect(lineOfOffset).toBe(2);
     });
 
-    expect(result.buildMode).toBe(false);
-    // The assignment type error (TS2322) must surface, mapped back to the .vue.
-    const ts2322 = result.diagnostics.filter((d) => d.code === 2322);
-    expect(ts2322.length).toBeGreaterThan(0);
-    const mapped = ts2322.find((d) => d.mappedFromCarrier);
-    expect(mapped).toBeDefined();
-    expect(mapped!.fileName).toBe(path.join(fx.root, "src/Bad.vue").replace(/\\/g, "/"));
-    // The error sits on source line 2 (the `const count` line) — offset must land
-    // inside the source, not in generated helper preamble.
-    const src = fs.readFileSync(path.join(fx.root, "src/Bad.vue"), "utf8");
-    expect(mapped!.start).toBeGreaterThan(0);
-    expect(mapped!.start).toBeLessThan(src.length);
-    // The mapped offset falls on the second line.
-    const lineOfOffset = src.slice(0, mapped!.start).split("\n").length;
-    expect(lineOfOffset).toBe(2);
-  });
-
-  it("reports NO type error for a well-typed carrier", () => {
-    const fx = track(
-      createSingleProjectFixture([
-        {
-          rel: "src/Good.vue",
-          content: `<script setup lang="ts">
+    it("reports NO type error for a well-typed carrier", () => {
+      const fx = track(
+        createSingleProjectFixture([
+          {
+            rel: "src/Good.vue",
+            content: `<script setup lang="ts">
 const count: number = 42
 </script>
 <template><div>{{ count }}</div></template>`,
-        },
-      ]),
-    );
+          },
+        ]),
+      );
 
-    const result = runBatchTypecheck({
-      tsconfigPath: fx.tsconfigPath,
-      carrierSources: [ideCarrier(fx.root, "src/Good.vue", "vue")],
-      host: host(),
+      const result = runBatchTypecheck({
+        tsconfigPath: fx.tsconfigPath,
+        carrierSources: [ideCarrier(fx.root, "src/Good.vue", "vue")],
+        host: host(),
+      });
+
+      // No 2322 assignment error for the well-typed component.
+      expect(result.diagnostics.filter((d) => d.code === 2322)).toHaveLength(0);
     });
 
-    // No 2322 assignment error for the well-typed component.
-    expect(result.diagnostics.filter((d) => d.code === 2322)).toHaveLength(0);
-  });
-
-  it("EXCLUDES a NoProject/Ambiguous source from the batch (no carrier materialised)", () => {
-    const fx = track(
-      createSingleProjectFixture([
-        {
-          rel: "src/Owned.vue",
-          content: `<script setup lang="ts">
+    it("EXCLUDES a NoProject/Ambiguous source from the batch (no carrier materialised)", () => {
+      const fx = track(
+        createSingleProjectFixture([
+          {
+            rel: "src/Owned.vue",
+            content: `<script setup lang="ts">
 const x: number = 1
 </script>
 <template><div>{{ x }}</div></template>`,
-        },
-        {
-          rel: "src/Orphan.vue",
-          content: `<script setup lang="ts">
+          },
+          {
+            rel: "src/Orphan.vue",
+            content: `<script setup lang="ts">
 const y: number = "wrong"
 </script>
 <template><div>{{ y }}</div></template>`,
-        },
-      ]),
-    );
+          },
+        ]),
+      );
 
-    const orphanPath = path.join(fx.root, "src/Orphan.vue");
-    const result = runBatchTypecheck({
-      tsconfigPath: fx.tsconfigPath,
-      carrierSources: [
-        ideCarrier(fx.root, "src/Owned.vue", "vue"),
-        {
-          sourcePath: orphanPath,
-          source: fs.readFileSync(orphanPath, "utf8"),
-          framework: "vue",
-          ownership: "NoProject", // excluded
-          role: "ide",
-        },
-      ],
-      host: host(),
+      const orphanPath = path.join(fx.root, "src/Orphan.vue");
+      const result = runBatchTypecheck({
+        tsconfigPath: fx.tsconfigPath,
+        carrierSources: [
+          ideCarrier(fx.root, "src/Owned.vue", "vue"),
+          {
+            sourcePath: orphanPath,
+            source: fs.readFileSync(orphanPath, "utf8"),
+            framework: "vue",
+            ownership: "NoProject", // excluded
+            role: "ide",
+          },
+        ],
+        host: host(),
+      });
+
+      // The orphan's carrier is never materialised.
+      expect(result.materializedCarriers.has(orphanPath.replace(/\\/g, "/"))).toBe(false);
+      // No diagnostic maps back to the excluded orphan.
+      expect(result.diagnostics.some((d) => d.fileName === orphanPath.replace(/\\/g, "/"))).toBe(
+        false,
+      );
     });
 
-    // The orphan's carrier is never materialised.
-    expect(result.materializedCarriers.has(orphanPath.replace(/\\/g, "/"))).toBe(false);
-    // No diagnostic maps back to the excluded orphan.
-    expect(result.diagnostics.some((d) => d.fileName === orphanPath.replace(/\\/g, "/"))).toBe(
-      false,
-    );
-  });
-
-  it("suppresses generated-only spans (every emitted diagnostic maps to a real source point)", () => {
-    const fx = track(
-      createSingleProjectFixture([
-        {
-          rel: "src/Bad.vue",
-          content: `<script setup lang="ts">
+    it("suppresses generated-only spans (every emitted diagnostic maps to a real source point)", () => {
+      const fx = track(
+        createSingleProjectFixture([
+          {
+            rel: "src/Bad.vue",
+            content: `<script setup lang="ts">
 const count: number = "not a number"
 </script>
 <template><div>{{ count }}</div></template>`,
-        },
-      ]),
-    );
+          },
+        ]),
+      );
 
-    const result = runBatchTypecheck({
-      tsconfigPath: fx.tsconfigPath,
-      carrierSources: [ideCarrier(fx.root, "src/Bad.vue", "vue")],
-      host: host(),
-    });
+      const result = runBatchTypecheck({
+        tsconfigPath: fx.tsconfigPath,
+        carrierSources: [ideCarrier(fx.root, "src/Bad.vue", "vue")],
+        host: host(),
+      });
 
-    // Every carrier-mapped diagnostic has a concrete source span (no generated-only
-    // leak): a mapped diagnostic with a defined start must point into the source.
-    for (const d of result.diagnostics) {
-      if (d.mappedFromCarrier && d.start !== undefined) {
-        const src = fs.readFileSync(d.fileName!, "utf8");
-        expect(d.start).toBeLessThanOrEqual(src.length);
+      // Every carrier-mapped diagnostic has a concrete source span (no generated-only
+      // leak): a mapped diagnostic with a defined start must point into the source.
+      for (const d of result.diagnostics) {
+        if (d.mappedFromCarrier && d.start !== undefined) {
+          const src = fs.readFileSync(d.fileName!, "utf8");
+          expect(d.start).toBeLessThanOrEqual(src.length);
+        }
       }
-    }
-  });
-});
+    });
+  },
+);
 
 // ── The CRITICAL zero-working-tree-writes guard ──────────────────────────────
 // The mirror-host batch materialises every carrier + emit ONLY under the mirror
 // root; the user's checkout is read-only as far as the batch is concerned.
-describe("tsc_batch_writes_no_working_tree_files (CRITICAL)", () => {
+describe("tsc_batch_writes_no_working_tree_files (CRITICAL)", { timeout: 20_000 }, () => {
   it("materializes carriers + emit ONLY under the mirror root; the user tree is byte-unchanged", () => {
     const fx = track(
       createSingleProjectFixture([

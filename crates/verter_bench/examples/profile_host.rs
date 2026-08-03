@@ -129,6 +129,18 @@ fn script_from_host(analysis: &FileAnalysisSnapshot) -> ScriptAnalysisSnapshot {
     }
 }
 
+/// Ordered SFC block facts projected from the registered carrier inventory,
+/// mirroring the production NAPI/MCP lint callers. Empty when the file has no
+/// registered structure (fail closed).
+fn registered_block_facts(
+    host: &VerterHost,
+    canonical_or_alias: &str,
+) -> Vec<verter_diagnostics::SfcBlockFact> {
+    host.registered_file_structure_snapshot(canonical_or_alias)
+        .map(|(structure, _)| verter_diagnostics::project_block_facts(structure.inventory()))
+        .unwrap_or_default()
+}
+
 #[cfg_attr(feature = "hotpath", hotpath::main(limit = 50))]
 fn main() {
     let Some(root) = find_test_repos_root() else {
@@ -278,11 +290,13 @@ fn main() {
         for file in &upserted_files {
             if let Some(analysis) = host.get_analysis(&file.canonical_id) {
                 let script = script_from_host(&analysis);
+                let blocks = registered_block_facts(&host, &file.canonical_id);
                 let _set = linter.lint_with_source(
                     Some(&script),
                     analysis.template.as_deref(),
                     &analysis.styles,
                     Some(&file.content),
+                    &blocks,
                 );
                 total_linted += 1;
             }

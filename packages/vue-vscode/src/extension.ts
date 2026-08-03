@@ -17,10 +17,6 @@ import {
   McpHttpServerDefinition,
   type Disposable,
   type TextDocument,
-  Diagnostic as VDiagnostic,
-  Range as VRange,
-  Position as VPosition,
-  DiagnosticSeverity,
   ConfigurationTarget,
   ThemeColor,
   extensions,
@@ -65,6 +61,7 @@ import { PropConstnessDecorationProvider } from "./PropConstnessDecorationProvid
 import { SourceMapWebviewPanel } from "./SourceMapWebviewPanel";
 import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
 import { CssService } from "./css/cssService";
+import { createCssDiagnosticsUpdater } from "./css/cssDiagnosticsPublisher";
 import { createRestartSupervisor, restartLanguageServer } from "./restart";
 import {
   checkClaudeCodeAndNotify,
@@ -1512,42 +1509,7 @@ async function startVueLanguageServer(
       cssDiagTimers.clear();
     },
   });
-  const updateCssDiagnostics = async (document: TextDocument) => {
-    if (!isFrameworkCarrierLanguageId(document.languageId)) return;
-    try {
-      const uri = document.uri.toString();
-      const source = document.getText();
-      const results = await getCssService().doValidation(uri, source, document.version);
-      if (results === null) {
-        // Structure stale/unavailable (or transport failed): NOT a successful
-        // validation — keep the last-known diagnostics, publish nothing
-        // (TE-C-11 fail-closed).
-        return;
-      }
-      const allDiags: VDiagnostic[] = [];
-      for (const { diagnostics } of results) {
-        for (const d of diagnostics) {
-          allDiags.push(
-            new VDiagnostic(
-              new VRange(
-                new VPosition(d.range.start.line, d.range.start.character),
-                new VPosition(d.range.end.line, d.range.end.character),
-              ),
-              d.message,
-              d.severity === 1
-                ? DiagnosticSeverity.Error
-                : d.severity === 2
-                  ? DiagnosticSeverity.Warning
-                  : DiagnosticSeverity.Information,
-            ),
-          );
-        }
-      }
-      cssDiagnostics.set(document.uri, allDiags);
-    } catch {
-      // Silently fail — CSS diagnostics are best-effort
-    }
-  };
+  const updateCssDiagnostics = createCssDiagnosticsUpdater(getCssService, cssDiagnostics);
   const debouncedCssDiag = (document: TextDocument) => {
     const key = document.uri.toString();
     const existing = cssDiagTimers.get(key);

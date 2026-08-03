@@ -151,7 +151,11 @@ describe("binary candidate ordering", () => {
   });
 });
 
-describe("startMcpServerProcess", () => {
+// Every test here spawns a real node child whose readiness/exit bounds
+// (`readyTimeoutMs`) are the discriminators; the suite timeout sits above
+// them so a loaded parallel test run cannot fire the 5s framework default
+// while a healthy child is still starting.
+describe("startMcpServerProcess", { timeout: 30_000 }, () => {
   const fakeServer = (script: string) => ({
     command: process.execPath,
     args: ["-e", script],

@@ -68,6 +68,12 @@ function nativeMetaPayload(filePath: string, propName: string) {
     acceptedSurfaceCompleteness: "exact",
     rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
     fallthroughSurface: { kind: "none", reason: "noTemplate" },
+    orderedSfcStructure: {
+      schemaVersion: 1,
+      artifactToken: "a".repeat(43),
+      blocks: [],
+      markupNodes: [],
+    },
   };
 }
 

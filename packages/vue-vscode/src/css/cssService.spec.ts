@@ -305,8 +305,8 @@ describe("CssService doValidation availability fail-closed (TE-C-11)", () => {
     const requests: Array<{ type: unknown; params: unknown }> = [];
     const svc = service((params) => available(params, inline, { dialect: "sass" }), requests);
 
-    // Gate revision 1's transpile so its post-await writes run AFTER
-    // revision 2 has fully validated and cached.
+    // Gate revision A's transpile so its post-await writes run AFTER
+    // revision B has fully validated and cached.
     let startedResolve!: () => void;
     const started = new Promise<void>((resolve) => {
       startedResolve = resolve;
@@ -321,7 +321,7 @@ describe("CssService doValidation availability fail-closed (TE-C-11)", () => {
     transpileGate.block = undefined;
     transpileGate.started = undefined;
 
-    // Commit revision 2 and complete ITS validation (ungated transpile).
+    // Commit revision B and complete ITS validation (ungated transpile).
     liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 2 });
     const second = await svc.doValidation(URI, inline, 2);
     expect(second).not.toBeNull();
@@ -330,13 +330,17 @@ describe("CssService doValidation availability fail-closed (TE-C-11)", () => {
     ).length;
     const diagnosticSetsAfterV2 = diagnosticSets().length;
 
-    // Release revision 1's stale in-flight invocation.
+    // Release revision A's stale in-flight invocation.
     release();
-    await pendingV1;
+    const staleResult = await pendingV1;
+
+    // The stale invocation's RETURN is a typed miss (B-29): `null`, never a
+    // publishable "available" result the extension could set as diagnostics.
+    expect(staleResult).toBeNull();
 
     // The stale invocation publishes NO diagnostics…
     expect(diagnosticSets().length).toBe(diagnosticSetsAfterV2);
-    // …and does NOT overwrite revision 2's cache entry: a fresh revision-2
+    // …and does NOT overwrite revision B's cache entry: a fresh revision-B
     // demand is a cache hit (no additional structure request).
     const third = await svc.doValidation(URI, inline, 2);
     expect(third).not.toBeNull();
@@ -354,7 +358,7 @@ describe("CssService doValidation availability fail-closed (TE-C-11)", () => {
       // The preprocessor is MISSING for every transpile in this test.
       transpileGate.result = null;
 
-      // Gate revision 1's transpile so its post-await missing-preprocessor
+      // Gate revision A's transpile so its post-await missing-preprocessor
       // handling runs after the document has moved on.
       let startedResolve!: () => void;
       const started = new Promise<void>((resolve) => {
@@ -370,7 +374,7 @@ describe("CssService doValidation availability fail-closed (TE-C-11)", () => {
       transpileGate.block = undefined;
       transpileGate.started = undefined;
 
-      // Commit revision 2 while revision 1's transpile is in flight, THEN
+      // Commit revision B while revision A's transpile is in flight, THEN
       // release the stale invocation.
       liveDocuments().splice(0, liveDocuments().length, {
         uri: { toString: () => URI },

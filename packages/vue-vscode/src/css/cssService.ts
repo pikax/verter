@@ -63,7 +63,7 @@ function getServiceForLang(lang: StyleLang): CSSLanguageService | null {
 interface DocumentCache {
   version: number;
   openEpoch: string;
-  availability: DocumentStructureResponseV1["kind"] | "transportUnavailable";
+  availability: DocumentStructureResponseV1["kind"] | "transportUnavailable" | "staleInvocation";
   blocks: StyleBlockInfo[];
   source: string;
   /** Captured from the admitted `available` structure (R2-B-04): style
@@ -511,17 +511,38 @@ export class CssService {
       }
     }
 
+    // One post-await admission decision governs every remaining side effect
+    // AND the returned value: the transpile/override awaits above may have
+    // outlived the revision this invocation ran against.
+    const current = stillCurrent();
+
     // Update diagnostics atomically for this URI (clears stale entries) —
     // only from a current, admitted-available invocation. A non-available
     // structure knows NOTHING about the blocks, so it has nothing
     // authoritative to publish or clear.
-    if (admittedAvailable && stillCurrent()) {
+    if (admittedAvailable && current) {
       try {
         const vscodeUri = vscode.Uri.parse(uri);
         this.diagnostics.set(vscodeUri, missingDiags);
       } catch {
         // URI parsing may fail for non-file URIs; ignore
       }
+    }
+
+    // A STALE invocation returns a typed miss (B-29): its admitted structure
+    // belongs to a revision the document has left behind. Handing it back as
+    // "available" would let a caller validate old blocks against new text and
+    // publish the result (an empty validation would even CLEAR the newer
+    // revision's real diagnostics). Callers fail closed on non-available.
+    if (!current) {
+      return {
+        version,
+        openEpoch,
+        availability: "staleInvocation",
+        blocks: [],
+        source,
+        transpiled: new Map(),
+      };
     }
 
     const entry: DocumentCache = {
@@ -537,7 +558,7 @@ export class CssService {
     // non-available must be re-queried on the next demand — never sticky
     // for the whole (version, openEpoch) — and a stale invocation must not
     // overwrite the newer revision's entry.
-    if (admittedAvailable && stillCurrent()) {
+    if (admittedAvailable) {
       this.cache.set(uri, entry);
     }
     return entry;
