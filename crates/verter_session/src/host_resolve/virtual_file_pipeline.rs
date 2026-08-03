@@ -2371,9 +2371,9 @@ impl VerterHost {
     /// contract from one coherent projector invocation.
     ///
     /// Editor consumers use the sidecar instead of reparsing generated
-    /// declaration text. Adapters that do not expose a structured contract
-    /// retain their existing declaration-only behavior through `contract:
-    /// None`.
+    /// declaration text. When structured metadata is unavailable, the
+    /// declaration remains available with typed `Unsupported` contract
+    /// availability.
     pub fn get_public_api_projection(
         &self,
         canonical_id: &str,

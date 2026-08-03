@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ComponentMetaSession, evictComponentMetaSession, shutdownMetaRuntime } from "./project.js";
 import { createMetaRuntime, getMetaRuntime, resolvePath } from "./runtime/index.js";
 import type { NativeMetaProject, NativeMetaSession } from "./runtime/index.js";
+import type { NativeComponentMetaResult } from "./native-component-meta.js";
 
 function resolvedTypeRow(display: string) {
   return {
@@ -29,6 +30,31 @@ function nativeMetaPayload(filePath: string) {
         hasDefault: false,
       },
     ],
+    componentPublicContract: {
+      kind: "supported",
+      contract: {
+        adapterId: "vue",
+        exactness: "exact",
+        degradation: [],
+        provenance: "componentMetaOutput",
+        props: [
+          {
+            name: "label",
+            optional: false,
+            hasDefault: false,
+            type: {
+              type: { kind: "primitive", name: "string" },
+              ...resolvedTypeRow("string"),
+            },
+            exactness: "exact",
+            degradation: [],
+            provenance: "componentMetaOutput",
+          },
+        ],
+        events: [],
+        slots: [],
+      },
+    },
     events: [],
     slots: [],
     models: [],
@@ -55,7 +81,7 @@ function nativeMetaPayload(filePath: string) {
     acceptedSurfaceCompleteness: "exact",
     rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
     fallthroughSurface: { kind: "none", reason: "noTemplate" },
-  };
+  } satisfies NativeComponentMetaResult;
 }
 
 /** Mock native session with in-memory file tracking. */
@@ -413,6 +439,7 @@ describe("ComponentMetaSession public API", () => {
                   },
                 ],
               },
+              ...resolvedTypeRow("[item: Item]"),
               rawSignature: '(event: "select", item: Item) => void',
             },
           ],
@@ -428,6 +455,10 @@ describe("ComponentMetaSession public API", () => {
                   ...resolvedTypeRow("Item"),
                 },
               ],
+              returnType: "boolean",
+              returnValue: { kind: "primitive", name: "boolean" },
+              returnPublication: resolvedTypeRow("boolean").publication,
+              returnTerminalDisplay: resolvedTypeRow("boolean").terminalDisplay,
             },
           ],
           exposed: [
@@ -466,6 +497,104 @@ describe("ComponentMetaSession public API", () => {
               },
             },
           ],
+          componentPublicContract: {
+            kind: "supported",
+            contract: {
+              adapterId: "vue",
+              exactness: "exact",
+              degradation: [],
+              provenance: "componentMetaOutput",
+              props: [
+                {
+                  name: "label",
+                  optional: false,
+                  hasDefault: false,
+                  type: {
+                    type: { kind: "primitive", name: "string" },
+                    ...resolvedTypeRow("string"),
+                  },
+                  exactness: "exact",
+                  degradation: [],
+                  provenance: "componentMetaOutput",
+                },
+              ],
+              events: [
+                {
+                  name: "select",
+                  overloads: [
+                    {
+                      source: {
+                        type: {
+                          kind: "tuple",
+                          readonly: false,
+                          elements: [
+                            {
+                              label: "item",
+                              ty: { kind: "ref", name: "Item", typeArguments: [] },
+                              optional: false,
+                              rest: false,
+                            },
+                          ],
+                        },
+                        ...resolvedTypeRow("[item: Item]"),
+                      },
+                      parameters: [
+                        {
+                          name: "item",
+                          optional: false,
+                          rest: false,
+                          type: { kind: "ref", name: "Item", typeArguments: [] },
+                        },
+                      ],
+                      returnType: { kind: "primitive", name: "void" },
+                    },
+                  ],
+                  derivedHandler: {
+                    overloads: [
+                      {
+                        parameters: [
+                          {
+                            name: "item",
+                            optional: false,
+                            rest: false,
+                            type: { kind: "ref", name: "Item", typeArguments: [] },
+                          },
+                        ],
+                        returnType: { kind: "primitive", name: "void" },
+                      },
+                    ],
+                  },
+                  exactness: "exact",
+                  degradation: [],
+                  provenance: "componentMetaOutput",
+                },
+              ],
+              slots: [
+                {
+                  name: "default",
+                  optional: false,
+                  input: {
+                    bindings: [
+                      {
+                        name: "item",
+                        type: {
+                          type: { kind: "ref", name: "Item", typeArguments: [] },
+                          ...resolvedTypeRow("Item"),
+                        },
+                      },
+                    ],
+                  },
+                  returnType: {
+                    type: { kind: "primitive", name: "boolean" },
+                    ...resolvedTypeRow("boolean"),
+                  },
+                  exactness: "exact",
+                  degradation: [],
+                  provenance: "componentMetaOutput",
+                },
+              ],
+            },
+          },
         };
       },
       getEffectiveSource() {
