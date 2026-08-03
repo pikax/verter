@@ -32,9 +32,13 @@ closed eleven-field downstream compatibility row. Its cache-cluster value is 8
 and none of its fields may enter carrier identity, lane selection, cohort
 assembly, or adoption. This exclusion is a type-shape property, not a
 source-name scan: a unit test pins the cohort to eight `u32` words and its
-exact-equality mutation table changes every field independently. A downstream
-manifest field would enlarge that shape (or force an explicit
-mutation-table/assembler change), and `cargo metadata` pins the language and
-compiler identity-owner crates against gaining a dependency on the downstream
-protocol crate. Future lane and artifact-ID types inherit those carrier-owned
-inputs rather than introducing a consumer-protocol edge.
+exact-equality mutation table changes every field independently. Those value
+and layout checks are insensitive to an added zero-sized field, so an exhaustive
+destructuring test also names all eight fields without a rest pattern. Adding
+any field therefore fails to compile. The size/alignment assertion and
+exact-equality mutation table remain complementary value/layout pins, and
+`cargo metadata` pins the language and compiler identity-owner crates against
+gaining a dependency on the downstream protocol crate. Future lane,
+artifact-ID, and projection-bundle types inherit those carrier-owned inputs
+rather than introducing a consumer-protocol edge; B2 owns adding equivalent
+exhaustive shape pins when those types land.

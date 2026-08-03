@@ -199,6 +199,35 @@ mod tests {
     }
 
     #[test]
+    fn persisted_carrier_cohort_exhaustively_names_all_fields() {
+        let current = current_persisted_carrier_artifact_cohort();
+        let PersistedCarrierArtifactCohort {
+            vue_parser_version,
+            svelte_parser_version,
+            grammar_fingerprint_schema_version,
+            framework_artifact_schema_version,
+            carrier_source_space_schema_version,
+            carrier_source_map_schema_version,
+            session_current_parser_version,
+            carrier_cache_serialization_version,
+        } = current;
+
+        assert_eq!(
+            PersistedCarrierArtifactCohort {
+                vue_parser_version,
+                svelte_parser_version,
+                grammar_fingerprint_schema_version,
+                framework_artifact_schema_version,
+                carrier_source_space_schema_version,
+                carrier_source_map_schema_version,
+                session_current_parser_version,
+                carrier_cache_serialization_version,
+            },
+            current
+        );
+    }
+
+    #[test]
     fn carrier_identity_owner_crates_cannot_depend_on_consumer_protocol() {
         let output = Command::new(env!("CARGO"))
             .args(["metadata", "--format-version", "1", "--no-deps"])
