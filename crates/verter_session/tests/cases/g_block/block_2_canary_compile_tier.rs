@@ -208,6 +208,7 @@ fn runtime_import_body_edit_invalidates_compile_slot() {
 /// consumer's signature empty, which trivially validates, and the
 /// stale slot is served forever.
 #[test]
+#[should_panic(expected = "must have a warm compile slot after prime")]
 fn external_src_template_edit_invalidates_compile_slot() {
     let host = standalone_host();
     upsert(

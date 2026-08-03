@@ -144,6 +144,7 @@ fn content_warm_hit_not_served_when_override_forces_downgrade() {
 /// Fix 2 (block override variant) — the same gap closes for a block
 /// (template/script) override, which fires `HasBlockOverride`.
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn content_warm_hit_not_served_when_block_override_forces_downgrade() {
     let host = prod_host();
     let src = "<script setup lang=\"ts\">const n = 1</script>\

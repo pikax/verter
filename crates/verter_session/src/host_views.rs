@@ -33,6 +33,19 @@ impl VerterHost {
         self.scheduler.try_get_source(canonical_id)
     }
 
+    /// Clone the sole registered envelope owner for a committed carrier source.
+    #[doc(hidden)]
+    pub fn registered_file_structure(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::carrier_publication_store::RegisteredFileStructure> {
+        self.scheduler
+            .try_get_source(canonical_id)?
+            .downcast_data::<host_executor::HostSourceData>()?
+            .structure
+            .clone()
+    }
+
     /// Get the scheduler's analysis snapshot for a file.
     pub fn scheduler_analysis(
         &self,

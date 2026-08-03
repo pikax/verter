@@ -9,8 +9,24 @@ use std::time::Instant;
 use walkdir::WalkDir;
 
 use verter_compiler::compile::{
-    compile, CodegenOptions, VerterCompileOptions, VueMacroSemanticInput,
+    CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
 };
+use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
+
+fn compile(
+    source: &str,
+    options: &CodegenOptions,
+    verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
+    _allocator: &oxc_allocator::Allocator,
+) -> VerterCompileResult {
+    StandaloneCompiler.compile_source(
+        &StandaloneSourceBytes::copied_from(source),
+        options,
+        verter_options,
+        macro_semantics,
+    )
+}
 
 // ── File discovery ──────────────────────────────────────────────────
 

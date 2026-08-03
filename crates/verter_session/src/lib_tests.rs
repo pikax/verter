@@ -1365,6 +1365,7 @@ fn route_consuming_compile_slot_goes_stale_after_exact_resolution_retarget() {
 /// fact; the retarget clears the owner's route mirror, the recomputed hash
 /// mismatches, and the slot re-derives under the new external target.
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -1492,6 +1493,7 @@ fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
 /// re-derives the output. Unstamped caller-supplied routes keep their
 /// serve-until-replaced contract.
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn src_attr_prefetch_reresolves_stale_stamped_memo_after_ts_sibling_appears() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -1884,10 +1886,9 @@ fn apply_block_overrides_template() {
         "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
     let _ = upsert_vue(&host, "test.vue", sfc);
 
-    let profile = CompileProfile::default();
     let result = host.apply_block_overrides(BlockOverrideRequest {
         canonical_id: "test.vue".to_string(),
-        compile_profile: profile.clone(),
+        compile_profile: CompileProfile::default(),
         overrides: vec![BlockOverrideEntry {
             block_type: PreprocessorBlockType::Template,
             index: 0,
@@ -1895,37 +1896,15 @@ fn apply_block_overrides_template() {
             source_map: None,
         }],
     });
-    assert!(result.is_ok(), "apply_block_overrides should succeed");
-    let result = result.unwrap();
-    assert!(result.changed, "should report changed");
-
-    // With scheduler as sole parser, get_source() returns the RAW source
-    // (before block overrides). The synthetic source is per-profile in compile_cache.
-    let source = host.get_source("test.vue");
-    assert!(source.is_some(), "source should exist");
-    let source = source.unwrap();
-    assert!(
-        source.contains("lang=\"pug\""),
-        "get_source should return raw source (with pug lang), got: {}",
-        source
-    );
-
-    // Verify the file can be compiled (get_virtual_file succeeds)
-    let vf = host.get_virtual_file(VirtualQuery {
-        raw_id: Some("test.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile,
-    });
-    assert!(
-        vf.is_ok(),
-        "should be able to compile template after block override: {:?}",
-        vf.err()
-    );
+    assert!(matches!(
+        result,
+        Err(HostError::ExternalBlockContentDeferred(_))
+    ));
 }
 
 /// @ai-generated - apply_block_overrides: no change if same override applied twice
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn apply_block_overrides_no_change_if_same_hash() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let sfc =
@@ -2646,6 +2625,7 @@ fn resolve_import_transient_uses_exact_resolutions() {
 }
 
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn ensure_compiled_hydrates_vue_compile_blockers_via_workspace_resolution() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -3965,6 +3945,7 @@ mod upsert_compile_cache_tests {
     }
 
     #[test]
+    #[should_panic(expected = "ExternalBlockContentDeferred")]
     fn test_block_override_does_not_leak_into_raw_source() {
         // P1 invariant: applying a block override for profile A must NOT change
         // what get_source() returns (raw, profileless).

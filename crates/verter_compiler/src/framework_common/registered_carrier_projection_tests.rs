@@ -20,6 +20,7 @@ use super::carrier_compiler::{
     RuntimeCompileOptions, RuntimeCompileOutput, TemplateFacts,
 };
 use super::registered_carrier_projection::{
+    materialize_registered_carrier_for_tests,
     project_registered_carrier_for_tests as project_registered_carrier, RegisteredCarrierPayload,
 };
 use super::registered_projector_seal::{
@@ -204,6 +205,37 @@ fn project_with_compiler(
         carrier,
         inventory,
         carrier_structure_hash,
+    }
+}
+
+#[test]
+fn b2_materialization_preserves_exact_carrier_and_inventory_arcs() {
+    let registry = CarrierCompilerRegistry::built_in();
+    for (path, language, source) in [
+        (
+            "file:///workspace/Materialize.vue",
+            verter_language::FileLanguage::vue(),
+            "<script setup>const x = 1</script><template>{{ x }}</template>",
+        ),
+        (
+            "file:///workspace/Materialize.svelte",
+            verter_language::FileLanguage::svelte(),
+            "<script>let x = 1</script><p>{x}</p>",
+        ),
+    ] {
+        let (_, _, accepted) = accepted(path, language, source);
+        let resolved = accepted.source().resolved_file_language();
+        let compiler = registry
+            .compiler_for_carrier_language(
+                resolved.adapter_id().unwrap(),
+                resolved.carrier_language_id().unwrap(),
+            )
+            .unwrap();
+        let seal = mint_registered_projector_seal_for_tests();
+        assert_eq!(
+            materialize_registered_carrier_for_tests(compiler.as_ref(), &accepted, &seal),
+            (true, true)
+        );
     }
 }
 

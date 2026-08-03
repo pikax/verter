@@ -117,7 +117,7 @@ pub struct DecodedValueKey {
     pub recipe: EntityDecodeRecipe,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CarrierBlockInventory {
     source_spaces: Arc<[SourceSpaceDescriptor]>,
     normalized_names: Arc<NormalizedNameTable>,

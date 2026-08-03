@@ -26,10 +26,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
-use oxc_allocator::Allocator;
 use rayon::prelude::*;
 use tempfile::TempDir;
 use verter_compiler::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
+use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 use verter_session::{
     FileLanguage, HostConfig, PublicApiProjectionError, PublicApiProjectionSubject, UpsertRequest,
     VerterHost,
@@ -332,7 +332,6 @@ fn generate_all_tsx(
             let component_name = sanitize_component_name(raw_name);
 
             let filename = canonical_path_id(vue_path);
-            let alloc = Allocator::default();
             let options = CodegenOptions {
                 filename: Some(filename),
                 target: CompileTarget::TSX,
@@ -344,12 +343,11 @@ fn generate_all_tsx(
                 source_map: true,
                 ..Default::default()
             };
-            let result = verter_compiler::compile::compile(
-                &source,
+            let result = StandaloneCompiler.compile_source(
+                &StandaloneSourceBytes::copied_from(&source),
                 &options,
                 &verter_options,
                 macro_input,
-                &alloc,
             );
 
             let tsx_block = result.tsx.ok_or_else(|| {

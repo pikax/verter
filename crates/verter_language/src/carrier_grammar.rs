@@ -315,6 +315,30 @@ impl CarrierGrammarAuthority {
             .map_err(CarrierAcceptanceError::Source)?
     }
 
+    /// Revalidate an existing sealed acceptance against both live authorities
+    /// without minting a replacement capability.
+    pub fn validate_accepted_current(
+        &self,
+        source_authority: &RegisteredSourceAuthority,
+        accepted: &AcceptedRegisteredCarrierSource,
+    ) -> Result<(), CarrierAcceptanceError> {
+        source_authority
+            .with_validated_current(accepted.source(), || {
+                let registrations = self
+                    .registrations
+                    .lock()
+                    .map_err(|_| CarrierAcceptanceError::AuthorityUnavailable)?;
+                let live = registrations
+                    .get(accepted.source().resolved_file_language())
+                    .ok_or(CarrierAcceptanceError::NoRegisteredGrammar)?;
+                if live != accepted.grammar() {
+                    return Err(CarrierAcceptanceError::GrammarConfigMismatch);
+                }
+                Ok(())
+            })
+            .map_err(CarrierAcceptanceError::Source)?
+    }
+
     fn accept_validated_source(
         &self,
         source: &RegisteredSourceSnapshot,

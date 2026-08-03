@@ -525,13 +525,30 @@ impl VerterHost {
         );
         let file_language = self.language_classifier.classify(canonical);
         if file_language.is_vue() {
-            component_meta_trace_custom!("parse_vue_snapshot", format!("owner={canonical}"));
-            let (parse, parsed) = crate::parse::parse_vue_snapshot(
+            let Some(source_snapshot) = self.scheduler.try_get_source(canonical) else {
+                return (FileAnalysisSnapshot::default(), None);
+            };
+            if source_snapshot.source.as_ref() != source.as_ref() {
+                return (FileAnalysisSnapshot::default(), None);
+            }
+            let Some(host_data) =
+                source_snapshot.downcast_data::<crate::host_executor::HostSourceData>()
+            else {
+                return (FileAnalysisSnapshot::default(), None);
+            };
+            let Some(parsed) = host_data.framework_parse.clone() else {
+                return (FileAnalysisSnapshot::default(), None);
+            };
+            let Some(parse) = crate::parse::carrier_snapshot_from_artifact(
                 canonical,
                 source,
                 self.config.effective_scope(),
+                &file_language,
                 &self.provenance,
-            );
+                &parsed,
+            ) else {
+                return (FileAnalysisSnapshot::default(), None);
+            };
             component_meta_trace_custom!(
                 "parse_vue_snapshot_result",
                 format!(
@@ -550,7 +567,7 @@ impl VerterHost {
                 // This builder reads no scheduler node, so it can
                 // never attest a node generation; the computed
                 // template serves the caller but never persists.
-                source_generation: None,
+                source_generation: Some(source_snapshot.generation),
             };
             (
                 Self::build_snapshot_from_parse(parse),

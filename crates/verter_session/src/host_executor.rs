@@ -30,6 +30,9 @@ pub struct HostSourceData {
     /// (`parse_vue_snapshot` wraps the Vue parse into it). Reused during
     /// compilation to avoid re-parsing. `None` for plain scripts.
     pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
+    /// Sole registered envelope owner for carrier sources.
+    pub(crate) structure: Option<crate::carrier_publication_store::RegisteredFileStructure>,
+    pub(crate) revision_token: crate::carrier_publication_store::HostSourceRevisionToken,
     /// The file's language row (framework carrier vs. plain script).
     pub(crate) file_language: FileLanguage,
     /// Authoritative `SourceType` for downstream type-resolution cache keys,
@@ -138,6 +141,19 @@ pub struct HostStageExecutor {
     /// counters observe scheduler-stage parses (rayon workers have no
     /// capture-token TLS).
     pub provenance: Arc<crate::types::MetaProvenance>,
+    pub source_authority:
+        Arc<verter_language::registered_source_authority::RegisteredSourceAuthority>,
+    pub grammar_authority: Arc<verter_language::carrier_grammar::CarrierGrammarAuthority>,
+    pub publication_store: Arc<crate::carrier_publication_store::CarrierPublicationStore>,
+    pub host_instance: crate::carrier_publication_store::HostInstanceId,
+    pub registered_envelope_ingest: Arc<
+        parking_lot::Mutex<
+            rustc_hash::FxHashMap<
+                String,
+                crate::carrier_publication_store::RegisteredFileStructure,
+            >,
+        >,
+    >,
 }
 
 impl HostStageExecutor {
@@ -145,11 +161,30 @@ impl HostStageExecutor {
         config: HostConfig,
         workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
         provenance: Arc<crate::types::MetaProvenance>,
+        source_authority: Arc<
+            verter_language::registered_source_authority::RegisteredSourceAuthority,
+        >,
+        grammar_authority: Arc<verter_language::carrier_grammar::CarrierGrammarAuthority>,
+        publication_store: Arc<crate::carrier_publication_store::CarrierPublicationStore>,
+        host_instance: crate::carrier_publication_store::HostInstanceId,
+        registered_envelope_ingest: Arc<
+            parking_lot::Mutex<
+                rustc_hash::FxHashMap<
+                    String,
+                    crate::carrier_publication_store::RegisteredFileStructure,
+                >,
+            >,
+        >,
     ) -> Self {
         Self {
             config,
             workspace,
             provenance,
+            source_authority,
+            grammar_authority,
+            publication_store,
+            host_instance,
+            registered_envelope_ingest,
         }
     }
 }
@@ -202,14 +237,86 @@ impl StageExecutor for HostStageExecutor {
         let parse_start = Instant::now();
 
         let snapshot = if dispatchable_carrier {
-            let (parse_snapshot, framework_parse) = crate::parse::carrier_parse_snapshot(
+            use verter_language::carrier_grammar::CarrierGrammarConfig;
+            use verter_language::registered_source_authority::{
+                CanonicalFileId, FileIncarnation, SourceGeneration,
+            };
+            let ingested = self.registered_envelope_ingest.lock().remove(canonical_id);
+            let (framework_parse, structure, file_incarnation, source_generation) =
+                if let Some(structure) = ingested {
+                    let registered = structure.envelope().source();
+                    if registered.canonical().as_str() != canonical_id
+                        || registered.bytes() != content.as_ref()
+                        || registered.resolved_file_language() != &file_language
+                    {
+                        return Err(StageError::new(
+                            "registered envelope/source identity mismatch",
+                        ));
+                    }
+                    let file_incarnation = registered.file_incarnation();
+                    let source_generation = registered.generation();
+                    (
+                        Arc::clone(structure.artifact()),
+                        structure,
+                        file_incarnation,
+                        source_generation,
+                    )
+                } else {
+                    let registered = self
+                        .source_authority
+                        .register_source(
+                            CanonicalFileId::new(canonical_id),
+                            FileIncarnation::new(self.host_instance.get()),
+                            SourceGeneration::new(generation),
+                            file_language.clone(),
+                            Arc::clone(&content),
+                        )
+                        .map_err(|_| {
+                            StageError::new("registered source authority rejected source")
+                        })?;
+                    let grammar_config = if file_language.adapter_id().is_some_and(|id| id.is_vue())
+                    {
+                        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>())
+                            .expect("default Vue grammar")
+                    } else {
+                        CarrierGrammarConfig::Svelte
+                    };
+                    let accepted = self
+                        .grammar_authority
+                        .accept_registered_source(
+                            &self.source_authority,
+                            &registered,
+                            &grammar_config,
+                        )
+                        .map_err(|_| StageError::new("registered grammar rejected source"))?;
+                    let request = crate::carrier_publication_store::PublicationRequestContext::new(
+                        crate::carrier_publication_store::AuditRequestId::new(generation),
+                        crate::carrier_publication_store::PublicationSurface::ProjectionHost,
+                        verter_scheduler::cancellation::current_job_cancellation_token()
+                            .unwrap_or_default(),
+                        registered.snapshot_id().clone(),
+                    );
+                    let envelope = self
+                        .publication_store
+                        .publish_or_get(&accepted, request)
+                        .into_envelope()
+                        .ok_or_else(|| StageError::new("carrier publication did not admit"))?;
+                    (
+                        Arc::clone(envelope.artifact()),
+                        crate::carrier_publication_store::RegisteredFileStructure::new(envelope),
+                        registered.file_incarnation(),
+                        registered.generation(),
+                    )
+                };
+            let parse_snapshot = crate::parse::carrier_snapshot_from_artifact(
                 canonical_id,
                 &content,
                 self.config.effective_scope(),
                 &file_language,
                 &self.provenance,
+                &framework_parse,
             )
-            .expect("a registered carrier compiler produces a snapshot for its own carrier file");
+            .expect("published carrier artifact matches its registered language");
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type =
                 imported_eval_source_type(&file_language, Some(framework_parse.as_ref()));
@@ -221,6 +328,12 @@ impl StageExecutor for HostStageExecutor {
                 data: Arc::new(HostSourceData {
                     parse: parse_snapshot,
                     framework_parse: Some(framework_parse),
+                    structure: Some(structure),
+                    revision_token: crate::carrier_publication_store::HostSourceRevisionToken {
+                        host_instance: self.host_instance,
+                        file_incarnation,
+                        source_generation,
+                    },
                     file_language,
                     source_type,
                     parse_duration_ms,
@@ -243,6 +356,18 @@ impl StageExecutor for HostStageExecutor {
                 data: Arc::new(HostSourceData {
                     parse: parse_snapshot,
                     framework_parse: None,
+                    structure: None,
+                    revision_token: crate::carrier_publication_store::HostSourceRevisionToken {
+                        host_instance: self.host_instance,
+                        file_incarnation:
+                            verter_language::registered_source_authority::FileIncarnation::new(
+                                self.host_instance.get(),
+                            ),
+                        source_generation:
+                            verter_language::registered_source_authority::SourceGeneration::new(
+                                generation,
+                            ),
+                    },
                     file_language,
                     source_type,
                     parse_duration_ms,

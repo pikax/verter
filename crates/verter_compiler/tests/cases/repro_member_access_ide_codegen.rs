@@ -36,25 +36,24 @@
 
 use oxc_allocator::Allocator;
 use verter_compiler::compile::{
-    compile, CodegenOptions, CompileTarget, VerterCompileOptions, VueMacroSemanticInput,
+    CodegenOptions, CompileTarget, VerterCompileOptions, VueMacroSemanticInput,
 };
+use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 
 /// Compile an SFC to IDE (`CompileTarget::IDE`) TSX — the exact target the LSP
 /// uses (`CompileProfile { target: CompileTarget::IDE, .. }`).
 fn ide_tsx(source: &str) -> String {
-    let alloc = Allocator::new();
     let options = CodegenOptions {
         filename: Some("Index.vue".to_string()),
         target: CompileTarget::IDE,
         ..Default::default()
     };
     let verter_opts = VerterCompileOptions::default();
-    let result = compile(
-        source,
+    let result = StandaloneCompiler.compile_source(
+        &StandaloneSourceBytes::copied_from(source),
         &options,
         &verter_opts,
         &VueMacroSemanticInput::Unavailable,
-        &alloc,
     );
     result
         .tsx

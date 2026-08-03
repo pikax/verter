@@ -63,6 +63,11 @@ mod cache;
 pub mod cache_schema;
 pub mod carrier_artifact_cohort;
 #[cfg(test)]
+mod carrier_fixture_tests;
+pub mod carrier_publication_store;
+#[cfg(test)]
+mod carrier_publication_store_tests;
+#[cfg(test)]
 mod cold_artifact_dedup_tests;
 mod compile;
 pub use compile::assemble_vue_main_module;
@@ -445,6 +450,9 @@ use shared::Shared;
 pub struct VerterHost {
     pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,
+    pub(crate) registered_source_authority: carrier_publication_store::SourceAuthorityHandle,
+    pub(crate) carrier_grammar_authority: carrier_publication_store::GrammarAuthorityHandle,
+    pub(crate) carrier_publication_store: carrier_publication_store::PublicationStoreHandle,
     /// The single host-level language classification authority:
     /// composes the static `LanguageRegistry` with the project
     /// capability snapshot (empty until a capability producer lands).
@@ -494,12 +502,10 @@ pub struct VerterHost {
         Shared<rustc_hash::FxHashMap<String, rustc_hash::FxHashSet<String>>>,
     #[cfg(feature = "session_metrics")]
     pub(crate) metrics: HostMetrics,
-    /// Scheduler for async per-file staging.
-    ///
-    /// The scheduler coordinates Sourceâ†’Analysisâ†’Artifact progression
-    /// with generation tracking, priority queuing, and blocker management.
-    /// It is the sole parser â€” upsert() delegates to the scheduler.
+    /// Scheduler for async per-file staging and blocker management.
+    /// Upsert delegates coherent source transitions to it.
     pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
+    pub(crate) registered_envelope_ingest: carrier_publication_store::RegisteredEnvelopeIngest,
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
     pub(crate) provenance: Arc<MetaProvenance>,

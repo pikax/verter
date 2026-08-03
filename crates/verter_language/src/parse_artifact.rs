@@ -34,7 +34,12 @@ use std::sync::Arc;
 use verter_span::Span;
 
 use crate::ids::{FrameworkAdapterId, LanguageId};
-use crate::language::ScriptSourceType;
+use crate::language::{JsModuleKind, ScriptSourceType};
+use carrier_inventory::{
+    AttributeValue, CarrierAttribute, CarrierBlock, CarrierBlockInventory, ScriptRole,
+    ScriptSourceType as InventoryScriptSourceType, SectionRole,
+};
+use carrier_structure_hash::{compute_carrier_structure_hash, CarrierStructureHash};
 
 pub mod carrier_inventory;
 pub mod carrier_structure_hash;
@@ -136,19 +141,143 @@ pub struct LanguageDiagnostic {
 /// Typed framework-neutral metadata shared by every carrier parse.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FrameworkParseCommon {
-    /// Embedded script regions, in source order.
-    pub script_regions: Vec<ScriptRegion>,
-    /// Template regions, in source order.
-    pub template_regions: Vec<TemplateRegion>,
-    /// Style regions, in source order.
-    pub style_regions: Vec<StyleRegion>,
-    /// External-source references declared by carrier blocks.
-    pub external_links: Vec<ExternalLink>,
+    /// Sole framework-neutral geometry authority.
+    pub inventory: Arc<CarrierBlockInventory>,
     /// Neutral carrier-parse diagnostics. Adapters whose parse
     /// diagnostics already flow through a dedicated host channel (Vue's
     /// `ParseSnapshot` diagnostics) leave this empty rather than
     /// duplicate the same data on a second channel.
     pub diagnostics: Vec<LanguageDiagnostic>,
+}
+
+impl FrameworkParseCommon {
+    /// Compatibility projection derived only from the inventory.
+    pub fn script_regions(&self) -> Vec<ScriptRegion> {
+        self.script_regions_for_adapter(None)
+    }
+
+    fn script_regions_for_adapter(
+        &self,
+        adapter_id: Option<&FrameworkAdapterId>,
+    ) -> Vec<ScriptRegion> {
+        self.inventory
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                CarrierBlock::Section {
+                    role: SectionRole::Script { role, dialect },
+                    syntax,
+                    ..
+                } => Some(ScriptRegion {
+                    span: source_span(syntax.content_span),
+                    source_type: match dialect {
+                        InventoryScriptSourceType::TypeScript => ScriptSourceType::Ts,
+                        InventoryScriptSourceType::Tsx => ScriptSourceType::Tsx,
+                        InventoryScriptSourceType::Jsx => {
+                            ScriptSourceType::Jsx(if adapter_id.is_some_and(|id| id.is_vue()) {
+                                JsModuleKind::Module
+                            } else {
+                                JsModuleKind::Unambiguous
+                            })
+                        }
+                        InventoryScriptSourceType::JavaScript
+                        | InventoryScriptSourceType::Custom { .. }
+                        | InventoryScriptSourceType::Missing => {
+                            ScriptSourceType::Js(if adapter_id.is_some_and(|id| id.is_vue()) {
+                                JsModuleKind::Script
+                            } else {
+                                JsModuleKind::Unambiguous
+                            })
+                        }
+                    },
+                    kind: match role {
+                        ScriptRole::Module => ScriptRegionKind::Module,
+                        ScriptRole::Instance | ScriptRole::Setup => ScriptRegionKind::Instance,
+                    },
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Compatibility projection derived only from the inventory.
+    pub fn template_regions(&self) -> Vec<TemplateRegion> {
+        self.inventory
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                CarrierBlock::Section {
+                    role: SectionRole::TemplateHost,
+                    syntax,
+                    ..
+                } => Some(TemplateRegion {
+                    span: source_span(syntax.content_span),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Compatibility projection derived only from the inventory.
+    pub fn style_regions(&self) -> Vec<StyleRegion> {
+        self.inventory
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                CarrierBlock::Section {
+                    role: SectionRole::Style { .. },
+                    syntax,
+                    ..
+                } => Some(StyleRegion {
+                    span: source_span(syntax.content_span),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Compatibility projection derived only from inventory attributes.
+    pub fn external_links(&self) -> Vec<ExternalLink> {
+        self.inventory
+            .blocks()
+            .iter()
+            .filter_map(|block| {
+                let CarrierBlock::Section { role, syntax, .. } = block else {
+                    return None;
+                };
+                let kind = match role {
+                    SectionRole::Script { .. } => ExternalLinkKind::Script,
+                    SectionRole::TemplateHost => ExternalLinkKind::Template,
+                    SectionRole::Style { .. } => ExternalLinkKind::Style,
+                    SectionRole::Custom { .. } => return None,
+                };
+                let attribute = syntax
+                    .attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        CarrierAttribute::Named { name, value, .. }
+                            if self.inventory.normalized_name(name.normalized).ok()
+                                == Some("src") =>
+                        {
+                            Some(value)
+                        }
+                        _ => None,
+                    })?;
+                let AttributeValue::Static { raw, .. } = attribute else {
+                    return None;
+                };
+                Some(ExternalLink {
+                    kind,
+                    specifier: self.inventory.slice(*raw).ok()?.to_owned(),
+                    span: Some(source_span(raw.span)),
+                })
+            })
+            .collect()
+    }
+}
+
+const fn source_span(span: carrier_inventory::SourceSpan) -> Span {
+    Span::new(span.start, span.end)
 }
 
 /// The type-erased adapter-owned carrier parse payload.
@@ -183,11 +312,19 @@ pub struct FrameworkParseArtifact {
     pub parser_version: u32,
     /// Typed framework-neutral metadata.
     pub common: FrameworkParseCommon,
+    /// Integrity hash of the sole neutral inventory.
+    pub carrier_structure_hash: CarrierStructureHash,
     /// Private type-erased adapter parse payload.
     carrier: Arc<dyn CarrierParse>,
 }
 
 impl FrameworkParseArtifact {
+    /// Adapter-aware compatibility projection derived from the sole inventory.
+    pub fn script_regions(&self) -> Vec<ScriptRegion> {
+        self.common
+            .script_regions_for_adapter(Some(&self.adapter_id))
+    }
+
     /// Construct an artifact. Construction is open (producers live in
     /// adapter crates); only DOWNCAST of the erased carrier is
     /// token-gated.
@@ -198,12 +335,72 @@ impl FrameworkParseArtifact {
         common: FrameworkParseCommon,
         carrier: Arc<dyn CarrierParse>,
     ) -> Self {
+        let carrier_structure_hash = compute_carrier_structure_hash(&common.inventory);
         Self {
             adapter_id,
             language_id,
             parser_version,
             common,
+            carrier_structure_hash,
             carrier,
+        }
+    }
+
+    /// Construct from an already validated projector result without rebuilding
+    /// inventory geometry or its nominal hash.
+    #[doc(hidden)]
+    pub fn __from_registered_projection(
+        adapter_id: FrameworkAdapterId,
+        language_id: LanguageId,
+        parser_version: u32,
+        inventory: Arc<CarrierBlockInventory>,
+        carrier_structure_hash: CarrierStructureHash,
+        carrier: Arc<dyn CarrierParse>,
+    ) -> Self {
+        debug_assert_eq!(
+            compute_carrier_structure_hash(&inventory),
+            carrier_structure_hash
+        );
+        Self {
+            adapter_id,
+            language_id,
+            parser_version,
+            common: FrameworkParseCommon {
+                inventory,
+                diagnostics: Vec::new(),
+            },
+            carrier_structure_hash,
+            carrier,
+        }
+    }
+
+    /// Rebind a validated carrier artifact to the current authority snapshot.
+    /// Geometry and carrier payload are cloned exactly; only source authority
+    /// identity is rehomed.
+    #[doc(hidden)]
+    pub fn __rehome_registered(
+        &self,
+        source: &crate::registered_source_authority::RegisteredSourceSnapshot,
+    ) -> Self {
+        use carrier_inventory::{SourceSpaceDescriptor, SourceSpaceId};
+        let inventory = CarrierBlockInventory::new(
+            Arc::from([SourceSpaceDescriptor::registered(SourceSpaceId(0), source)]),
+            Arc::new(self.common.inventory.normalized_names().clone()),
+            Arc::from(self.common.inventory.blocks().to_vec()),
+            Arc::new(self.common.inventory.markup().clone()),
+        )
+        .expect("rehomed registered inventory remains valid");
+        let hash = compute_carrier_structure_hash(&inventory);
+        Self {
+            adapter_id: self.adapter_id.clone(),
+            language_id: self.language_id.clone(),
+            parser_version: self.parser_version,
+            common: FrameworkParseCommon {
+                inventory: Arc::new(inventory),
+                diagnostics: self.common.diagnostics.clone(),
+            },
+            carrier_structure_hash: hash,
+            carrier: Arc::clone(&self.carrier),
         }
     }
 }

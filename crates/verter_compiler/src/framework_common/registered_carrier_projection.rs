@@ -1,5 +1,3 @@
-#![allow(dead_code)] // B1 capability: intentionally has no production caller until B2.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -74,23 +72,52 @@ impl RegisteredCarrierPayload {
     }
 }
 
-struct RegisteredCarrierProjection {
+#[doc(hidden)]
+pub struct RegisteredCarrierProjection {
     carrier: RegisteredCarrierPayload,
     inventory: Arc<CarrierBlockInventory>,
     carrier_structure_hash: CarrierStructureHash,
 }
 
 impl RegisteredCarrierProjection {
+    #[cfg(test)]
     fn carrier(&self) -> &RegisteredCarrierPayload {
         &self.carrier
     }
 
+    #[cfg(test)]
     fn inventory(&self) -> &Arc<CarrierBlockInventory> {
         &self.inventory
     }
-    fn carrier_structure_hash(&self) -> CarrierStructureHash {
-        self.carrier_structure_hash
+
+    /// Consume the exact projector result into the registered artifact.
+    #[doc(hidden)]
+    pub fn into_framework_parse_artifact(self) -> verter_language::FrameworkParseArtifact {
+        let Self {
+            carrier,
+            inventory,
+            carrier_structure_hash,
+        } = self;
+        verter_language::FrameworkParseArtifact::__from_registered_projection(
+            carrier.inner.adapter_id.clone(),
+            carrier.inner.language_id.clone(),
+            carrier.inner.parser_version,
+            inventory,
+            carrier_structure_hash,
+            Arc::clone(&carrier.inner.carrier),
+        )
     }
+}
+
+/// Capability-sealed registered projection entry. Architecture guards restrict
+/// its sole non-test caller to the elected session store leader.
+#[doc(hidden)]
+pub fn __project_registered_carrier_for_store_leader(
+    compiler: &dyn CarrierCompiler,
+    accepted: &AcceptedRegisteredCarrierSource,
+) -> RegisteredCarrierProjection {
+    let seal = super::registered_projector_seal::mint_registered_projector_seal_for_store_leader();
+    project_registered_carrier(compiler, accepted, &seal)
 }
 
 fn project_registered_carrier(
@@ -198,6 +225,39 @@ pub(super) fn project_registered_carrier_for_tests(
         carrier_structure_hash,
     } = projection;
     (carrier, inventory, carrier_structure_hash, same_carrier_arc)
+}
+
+#[cfg(test)]
+pub(super) fn materialize_registered_carrier_for_tests(
+    compiler: &dyn CarrierCompiler,
+    accepted: &AcceptedRegisteredCarrierSource,
+    seal: &RegisteredProjectorSeal,
+) -> (bool, bool) {
+    let (projection, parsed_carrier) =
+        project_registered_carrier_with_witness(compiler, accepted, seal);
+    let inventory = Arc::clone(projection.inventory());
+    let artifact = projection.into_framework_parse_artifact();
+    let inventory_is_exact = Arc::ptr_eq(&inventory, &artifact.common.inventory);
+    let materialized_carrier: Arc<dyn CarrierParse> = if let Some(vue) = compiler
+        .__verter_as_any()
+        .downcast_ref::<VueCarrierCompiler>(
+    ) {
+        vue.carrier_arc(&artifact)
+            .expect("materialized Vue carrier")
+    } else if let Some(svelte) = compiler
+        .__verter_as_any()
+        .downcast_ref::<SvelteCarrierCompiler>()
+    {
+        svelte
+            .carrier_arc(&artifact)
+            .expect("materialized Svelte carrier")
+    } else {
+        panic!("test compiler lacks carrier witness")
+    };
+    (
+        Arc::ptr_eq(&parsed_carrier, &materialized_carrier),
+        inventory_is_exact,
+    )
 }
 
 struct Builder<'a> {
@@ -326,13 +386,10 @@ fn project_vue(
         let id = BlockId(blocks.len() as u32);
         match root {
             Root::Script(v) => {
-                let dialect = artifact
-                    .common
-                    .script_regions
-                    .iter()
-                    .find(|r| r.span.start == v.content.map(|s| s.start).unwrap_or(v.tag_open.end))
-                    .map(|r| ScriptSourceType::from(r.source_type))
-                    .unwrap_or(ScriptSourceType::Missing);
+                let dialect = ScriptSourceType::from(super::vue_bridge::vue_script_source_type(
+                    parsed,
+                    accepted.source().bytes(),
+                ));
                 let role = if v.is_setup {
                     ScriptRole::Setup
                 } else {
@@ -1004,13 +1061,9 @@ fn project_svelte(
                     v.tag_close,
                     &v.attributes,
                 );
-                let dialect = artifact
-                    .common
-                    .script_regions
-                    .iter()
-                    .find(|r| v.content.is_some_and(|s| s == r.span))
-                    .map(|r| ScriptSourceType::from(r.source_type))
-                    .unwrap_or(ScriptSourceType::Missing);
+                let dialect = ScriptSourceType::from(
+                    crate::svelte::carrier::svelte_script_source_type(Some(v)),
+                );
                 blocks.push(CarrierBlock::Section {
                     id,
                     role: SectionRole::Script {

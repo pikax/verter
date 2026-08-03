@@ -129,39 +129,15 @@ impl VerterHost {
         let imports = &script_analysis.imports;
         let macros = &script_analysis.macros;
         let bindings = &script_analysis.bindings;
-        let ext_map = if !src_blocks.is_empty() {
-            let mut map = rustc_hash::FxHashMap::default();
-            for req in external_requests {
-                let dep_source =
-                    self.resolve_dep_source(canonical, &req.resolved_canonical_id, &req.specifier);
-                if let Some(source) = dep_source {
-                    map.insert(req.resolved_canonical_id.clone(), source);
-                }
-            }
-            map
-        } else {
-            rustc_hash::FxHashMap::default()
-        };
-
-        for req in external_requests {
-            if !ext_map.contains_key(&req.resolved_canonical_id) {
-                return None;
-            }
+        if !src_blocks.is_empty() || !external_requests.is_empty() {
+            return None;
         }
-
-        let merged_source = if !src_blocks.is_empty() {
-            std::borrow::Cow::Owned(crate::compile::merge_external_sources(
-                source, src_blocks, &ext_map,
-            ))
-        } else {
-            std::borrow::Cow::Borrowed(source.as_ref())
-        };
 
         let raw = crate::parse::compile_template_data(
             file_language,
-            &merged_source,
+            source,
             framework_parse.as_deref(),
-            src_blocks.is_empty(),
+            true,
             &self.provenance,
         )?;
         let imports = crate::host_resolve::template_converter_inputs(imports, bindings);
@@ -202,10 +178,9 @@ impl VerterHost {
 
     /// Lazily compute template analysis for a VueSfc file that hasn't been compiled.
     ///
-    /// Uses `CompileTarget::META` (= SCRIPT + TEMPLATE_DATA) via the core
-    /// `compile_from_parsed()` — bypassing the host `compile_entry()` which fails
-    /// on unresolved macro type deps. External-src blocks are merged using the
-    /// same `merge_external_sources()` helper. The computed template is served
+    /// Uses the scheduler-owned registered artifact. Missing artifacts and
+    /// external-src inputs fail closed; this lane never parses or merges carrier
+    /// source. The computed template is served
     /// on the caller's snapshot unconditionally; whether it ALSO persists into
     /// the shared raw-template slot is decided by the slot's write authority
     /// ([`Self::persist_raw_template_analysis`] →
@@ -277,50 +252,16 @@ impl VerterHost {
         // its own (no caller ran one on this source). The Vue `<template src>`
         // inventory walks the typed Vue parse opened from the artifact; a
         // carrier with no src-block surface (Svelte) yields none.
-        let framework_parse = framework_parse.or_else(|| {
-            crate::parse::build_carrier_parse_artifact_from_source(
-                &file_language,
-                source.as_ref(),
-                &self.provenance,
-            )
-        });
+        let framework_parse = framework_parse;
         let (src_blocks, external_requests) = framework_parse
             .as_deref()
             .and_then(crate::typeinfo::adapters::vue::vue_parse)
             .map(|parsed| crate::parse::collect_vue_src_blocks(canonical, source.as_ref(), parsed))
             .unwrap_or_default();
 
-        // Resolve external src blocks (e.g., <template src="./tpl.html">)
-        let ext_map = if !src_blocks.is_empty() {
-            let mut map = rustc_hash::FxHashMap::default();
-            for req in &external_requests {
-                if let Some(dep_source) =
-                    self.resolve_dep_source(canonical, &req.resolved_canonical_id, &req.specifier)
-                {
-                    map.insert(req.resolved_canonical_id.clone(), dep_source);
-                }
-            }
-            map
-        } else {
-            rustc_hash::FxHashMap::default()
-        };
-
-        // Abort if any external src blocks are unresolved (same guard as compile_entry)
-        for req in &external_requests {
-            if !ext_map.contains_key(&req.resolved_canonical_id) {
-                return;
-            }
+        if !src_blocks.is_empty() || !external_requests.is_empty() {
+            return;
         }
-
-        let merged_source = if !src_blocks.is_empty() {
-            std::borrow::Cow::Owned(crate::compile::merge_external_sources(
-                &source,
-                &src_blocks,
-                &ext_map,
-            ))
-        } else {
-            std::borrow::Cow::Borrowed(source.as_ref())
-        };
 
         // Registry-dispatched template-data extraction: route through the file's
         // carrier compiler (Vue's bridge runs the META compile, Svelte walks the
@@ -328,9 +269,9 @@ impl VerterHost {
         // merged the source.
         let raw = crate::parse::compile_template_data(
             &file_language,
-            &merged_source,
+            &source,
             framework_parse.as_deref(),
-            src_blocks.is_empty(),
+            true,
             &self.provenance,
         );
 
@@ -527,6 +468,13 @@ impl VerterHost {
             use crate::host_executor::HostSourceData;
 
             let Some(source_snap) = self.scheduler.try_get_source(canonical) else {
+                if self
+                    .language_classifier
+                    .classify(canonical)
+                    .is_framework_carrier()
+                {
+                    return None;
+                }
                 // Scheduler-missed lane: ONE snapshot build whose parse
                 // products are threaded into the template-analysis
                 // computation — the lane performs exactly one SFC
@@ -755,6 +703,38 @@ impl VerterHost {
             // mutated (R17 invariant).
             let source =
                 overlay_source.expect("overlay_covers true implies overlay_source is Some");
+            let file_language = self.language_classifier.classify(canonical.as_str());
+            if file_language.is_framework_carrier() {
+                let structure = self.registered_overlay_structure(
+                    canonical.as_str(),
+                    Arc::clone(&source),
+                    &file_language,
+                    view,
+                )?;
+                let parsed = Arc::clone(structure.artifact());
+                let parse = crate::parse::carrier_snapshot_from_artifact(
+                    canonical.as_str(),
+                    &source,
+                    self.config.effective_scope(),
+                    &file_language,
+                    &self.provenance,
+                    &parsed,
+                )?;
+                let template_inputs = crate::types::VueTemplateInputs {
+                    source: Arc::clone(&source),
+                    whole_hash: parse.whole_hash,
+                    framework_parse: Some(parsed),
+                    store_published: false,
+                    source_generation: Some(structure.envelope().source().generation().get()),
+                };
+                return Some(self.finalize_analysis_snapshot(
+                    canonical.as_str(),
+                    Self::build_snapshot_from_parse(parse),
+                    self.template_analysis_required(),
+                    Some(template_inputs),
+                    analysis_started,
+                ));
+            }
             // Snapshot AND template inputs from the SAME overlay read:
             // the template derives from the overlay's own bytes, in
             // the overlay snapshot's conversion context — one coherent
@@ -1659,6 +1639,7 @@ impl VerterHost {
     /// Tries scheduler (native) or files map (WASM) first, falling back to
     /// VFS resolution + disk read. Used by template analysis and external src
     /// block resolution.
+    #[allow(dead_code)] // Residual B4 helper retained by the scope freeze.
     pub(crate) fn resolve_dep_source(
         &self,
         owner_canonical: &str,

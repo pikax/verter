@@ -224,13 +224,15 @@ impl DocumentRegistry {
             Err(
                 verter_session::HostError::InvalidQuery
                 | verter_session::HostError::MissingVirtualNode { .. }
-                | verter_session::HostError::RuntimeSurfaceRefused { .. },
+                | verter_session::HostError::RuntimeSurfaceRefused { .. }
+                | verter_session::HostError::GrammarMismatch(_),
             ) => true,
             Err(
                 verter_session::HostError::MissingSource { .. }
                 | verter_session::HostError::Scheduler(_)
                 | verter_session::HostError::Superseded
-                | verter_session::HostError::Shutdown,
+                | verter_session::HostError::Shutdown
+                | verter_session::HostError::ExternalBlockContentDeferred(_),
             ) => false,
         };
         let content = crate::provider_surface_store::ContentHash::of(attempted_source);

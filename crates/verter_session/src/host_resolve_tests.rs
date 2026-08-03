@@ -26,6 +26,20 @@ fn strict_host() -> VerterHost {
 fn profile() -> CompileProfile {
     CompileProfile::default()
 }
+
+fn parsed_vue_fixture(source: &str) -> Arc<verter_parser::parser::types::ParsedSfc> {
+    let provenance = crate::types::MetaProvenance::default();
+    let artifact = crate::carrier_fixture_tests::publish_carrier_fixture(
+        "file:///host-resolve-fixture.vue",
+        source,
+        &verter_language::FileLanguage::vue(),
+        &provenance,
+    )
+    .expect("registered Vue fixture");
+    crate::typeinfo::adapters::vue::vue_parse(&artifact)
+        .expect("Vue carrier")
+        .clone()
+}
 fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
     let _ = host
         .upsert(UpsertRequest {
@@ -566,35 +580,19 @@ fn find_diag<'a>(diagnostics: &'a crate::DiagnosticsSnapshot, code: &str) -> &'a
 fn assert_missing_src_compile_error(
     host: &VerterHost,
     canonical_id: &str,
-    source: &str,
-    specifier: &str,
-    expected_tag: &str,
+    _source: &str,
+    _specifier: &str,
+    _expected_tag: &str,
 ) {
-    let diagnostics = compile_main_error(host, canonical_id);
-    let missing = find_diag(&diagnostics, "HOST_MISSING_EXTERNAL_SOURCE");
-
-    assert_eq!(missing.severity, HostSeverity::Error);
-    assert!(
-        missing.message.contains(specifier),
-        "missing external source message should mention {specifier}: {}",
-        missing.message
-    );
-    assert!(
-        !missing.message.contains("HOST_MISSING_MACRO_TYPE_DEP"),
-        "message should not mention macro type deps: {}",
-        missing.message
-    );
-
-    let start = source.find(expected_tag).unwrap() as u32;
-    let end = source[start as usize..]
-        .find('>')
-        .map(|offset| start + offset as u32 + 1)
-        .unwrap();
-    assert_eq!(
-        missing.span,
-        Some(Span::new(start, end)),
-        "missing external source span should point at the owning tag"
-    );
+    let error = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical_id.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect_err("external block content must fail closed");
+    assert!(matches!(error, HostError::ExternalBlockContentDeferred(_)));
 
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -672,24 +670,15 @@ fn external_src_can_compile_via_owner_dependency_mapping() {
         }],
     );
 
-    let response = host
+    let error = host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
             canonical_id: Some("/src/Comp.vue".to_string()),
             node_kind: Some(VirtualNodeKind::Main),
             compile_profile: profile(),
         })
-        .expect("compile should succeed when the real external source is registered as a dep");
-
-    assert!(
-        !response.diagnostics.has_errors,
-        "resolved external src should not keep missing-source diagnostics"
-    );
-    assert!(
-        response.code.contains("render"),
-        "resolved compile should produce render code, got: {}",
-        response.code
-    );
+        .expect_err("typed external block content is deferred until B3");
+    assert!(matches!(error, HostError::ExternalBlockContentDeferred(_)));
 }
 
 #[test]
@@ -773,39 +762,25 @@ fn missing_template_src_retries_successfully_after_dependency_arrives() {
         "<template src=\"./resolved.html\"></template>\n<script setup>const n = 1</script>";
     upsert_vue(&host, "/src/Comp.vue", source);
 
-    let diagnostics = compile_main_error(&host, "/src/Comp.vue");
-    assert!(
-        diagnostics
-            .diagnostics
-            .iter()
-            .any(|diag| diag.code == "HOST_MISSING_EXTERNAL_SOURCE"),
-        "first compile should fail on the missing template source"
+    assert_missing_src_compile_error(
+        &host,
+        "/src/Comp.vue",
+        source,
+        "./resolved.html",
+        "<template",
     );
 
     upsert_non_sfc(&host, "/src/resolved.html", "<div>resolved</div>");
 
-    let response = host
+    let error = host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
             canonical_id: Some("/src/Comp.vue".to_string()),
             node_kind: Some(VirtualNodeKind::Main),
             compile_profile: profile(),
         })
-        .expect("compile should succeed once the external template source exists");
-
-    assert!(
-        !response.diagnostics.has_errors,
-        "resolved compile should not keep the old missing-source error"
-    );
-    assert!(
-        response.code.contains("render"),
-        "resolved compile should produce code, got: {}",
-        response.code
-    );
-    assert!(
-        !response.code.contains("missing external source"),
-        "resolved compile output must not contain the previous error text"
-    );
+        .expect_err("external content remains deferred after dependency registration");
+    assert!(matches!(error, HostError::ExternalBlockContentDeferred(_)));
 }
 
 #[test]
@@ -1937,6 +1912,7 @@ fn testing_public_api_ignores_define_expose_narrowing() {
 }
 
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn public_api_with_profile_uses_override_script_state() {
     let host = strict_host();
     let source = "<script setup lang=\"ts\">\ndefineProps<{ raw: string }>()\n</script>\n<template><div/></template>";
@@ -1982,6 +1958,7 @@ fn public_api_with_profile_uses_override_script_state() {
 /// `cached_tsc_extract` write in the Vue projector. The profile render then
 /// occupies the raw-derived cache slot before the raw projection control runs.
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn public_api_profile_override_does_not_populate_raw_extract_cache() {
     let host = strict_host();
     upsert_vue(
@@ -2040,6 +2017,7 @@ fn public_api_profile_override_does_not_populate_raw_extract_cache() {
 // ── TSC extract cache tests ──────────────────────────────────────────────
 
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn public_api_with_profile_uses_override_script_state_for_imported_macro_type_dep() {
     let host = strict_host();
     upsert_vue(
@@ -5013,7 +4991,7 @@ const SETUP_MARKER = 2;
 </script>
 <template><div /></template>"#;
 
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
+    let parsed = parsed_vue_fixture(source);
     let result = crate::host_resolve::extract_vue_script_content(source, Some(&parsed));
     assert!(result.is_some(), "should extract script content from SFC");
     let content = result.unwrap();
@@ -5051,7 +5029,7 @@ const SETUP = 2;
 </script>
 <template><div /></template>"#;
 
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
+    let parsed = parsed_vue_fixture(source);
     let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed));
     let without_cache = crate::host_resolve::extract_vue_script_content(source, None);
     assert_eq!(
@@ -5083,7 +5061,7 @@ const scopeId = 1
 .foo {}
 </style>"#;
 
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
+    let parsed = parsed_vue_fixture(source);
     let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
         .expect("cached extraction should succeed");
     let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
@@ -5121,7 +5099,7 @@ const AFTER_CLOSE = 1;
 </script>
 <template><div /></template>"#;
 
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
+    let parsed = parsed_vue_fixture(source);
     let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
         .expect("cached extraction should succeed");
     let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
@@ -6759,7 +6737,7 @@ const emit = defineEmits<A>()
 fn extract_vue_script_content_handles_adjacent_close_and_template() {
     let source = "<script lang=\"ts\">\nexport interface ItemProps { value?: string }\n</script><script setup lang=\"ts\">\nconst props = defineProps<ItemProps>()\n</script><template><div /></template>";
 
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
+    let parsed = parsed_vue_fixture(source);
     let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
         .expect("cached extraction should succeed");
     let without_cache = crate::host_resolve::extract_vue_script_content(source, None)

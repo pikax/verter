@@ -10587,11 +10587,8 @@ async fn concurrent_requests_on_a_broken_revision_compile_at_most_once() {
         .host()
         .provenance_snapshot()
         .compile_cold_runs;
-    // What ONE admitted repair of a revision whose compile fails costs in cold
-    // compiles. The repair drives `ensure_ide_compiled` once; a failing compile
-    // caches no surface, so the surface read behind it finds nothing and the
-    // repair returns without a second host round trip.
-    const COLD_RUNS_PER_ADMITTED_REPAIR: u64 = 1;
+    // B2 rejects missing external block content before compiler admission.
+    const COLD_RUNS_PER_ADMITTED_REPAIR: u64 = 0;
 
     // Hold all four callers after they capture the repair sequence and before
     // any can acquire the lane. This makes the concurrent cohort structural,
@@ -10629,11 +10626,7 @@ async fn concurrent_requests_on_a_broken_revision_compile_at_most_once() {
     assert_eq!(
         cold_after - cold_before,
         COLD_RUNS_PER_ADMITTED_REPAIR,
-        "one broken revision owes ONE repair across all concurrent requests — \
-         a higher cold-compile count means the waiters did not join the \
-         completed sequence under the lane lock and each recompiled the same broken \
-         bytes (four requests raced here, so an unbounded lane would show \
-         four repairs' worth)"
+        "external-content deferral must reject before any cold compile"
     );
     let hover_calls = provider
         .calls()
@@ -11017,19 +11010,17 @@ async fn a_later_rename_retries_a_failed_projectionless_revision() {
     let cold_after_first = cold_runs();
     assert_eq!(
         cold_after_first - cold_before_first,
-        1,
-        "rename is an interactive consistency boundary: the first rename on an \
-         unattempted revision must drive the repair. Zero here means rename no \
-         longer repairs the current file before capturing its surface"
+        0,
+        "B2 external-content deferral must reject before compiler admission"
     );
+    assert!(server.current_file_needs_inline_type_provider_sync(&uri));
     rename_once().await;
     assert_eq!(
         cold_runs() - cold_after_first,
-        1,
-        "a later request must retry the projection-less carrier even when its \
-         bytes are unchanged: cancellation is transient but advances no host \
-         generation, so a cross-request failure memo would decline forever"
+        0,
+        "a retryable B2 deferral must remain outside compiler admission"
     );
+    assert!(server.current_file_needs_inline_type_provider_sync(&uri));
 }
 
 /// W02 feature-set consistency (signature help): signature help is a
@@ -20042,7 +20033,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_sync() {
+async fn sync_pending_carrier_provider_file_defers_external_content_before_b3() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src/partials")).expect("create partials dir");
@@ -20087,13 +20078,12 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
             version: 1,
             text: "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>".to_string(),
         });
-    // With filesystem-backed host and configure_projects, the VFS resolver
-    // resolves @/ aliases during compilation. The external template should be
-    // loaded eagerly during did_open.
+    // B2 resolves the authored link but does not ingest external block bytes;
+    // B3 owns the typed content broker.
     assert!(
         host.get_source(&format!("{workspace_id}/src/partials/panel.html"))
-            .is_some(),
-        "external src files should be loaded via VFS resolution during compilation"
+            .is_none(),
+        "external src bytes must remain deferred before B3"
     );
     // Type deps (types.ts) are resolved via VFS workspace read fallback during
     // compilation but may not be explicitly loaded into the scheduler.
@@ -20154,34 +20144,22 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
         &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
-    assert_eq!(
-        synced,
-        SyncOutcome::FullyReconciled,
-        "pending Vue sync should fully reconcile with resolved deps (both kinds synced)"
-    );
+    assert_eq!(synced, SyncOutcome::FullyReconciled);
 
     let profile = documents.tsx_profile.read().clone();
     assert!(
-        host.get_ide(&app_id, &profile).is_some(),
-        "IDE output should be available after sync"
+        host.get_ide(&app_id, &profile).is_none(),
+        "external-content deferral must not publish an IDE success"
     );
 
     let calls = provider.file_sync_calls();
     assert!(
-        calls.iter().any(|call| matches!(
-            call,
-            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
-                if path.ends_with(".vue.verter.ts")
-        )),
-        "pending sync should push the provider-facing Vue API file"
-    );
-    assert!(
-        calls.iter().any(|call| matches!(
+        !calls.iter().any(|call| matches!(
             call,
             MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
                 if path.ends_with(".tsx")
         )),
-        "pending sync should push the hydrated TSX output"
+        "deferred external content must not push a TSX success"
     );
 }
 

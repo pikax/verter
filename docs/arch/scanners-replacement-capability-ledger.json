@@ -61,11 +61,11 @@
       "normalization_and_equality": "For every input, intersect its independently selected path surface with the same path/symbol classifier, fail if any mandated input contributes zero identities, union all normalized repository-relative (path,symbol) sets, and exact-compare the sorted union with classified ledger rows plus the empty explicit allowlist. Ledger rows are never read by discovery."
     },
     "gate_input_candidate_counts": {
-      "cargo_package_graph": 77,
+      "cargo_package_graph": 73,
       "ci_release_steps": 10,
       "extension_manifests": 9,
       "generated_binding_manifests": 3,
-      "git_tracked_production_sources": 115,
+      "git_tracked_production_sources": 111,
       "pnpm_package_graph": 36,
       "unpacked_shipping_artifacts": 1
     },
@@ -89,20 +89,20 @@
     "acceptance_id": "B-18"
   },
   "set_equality": {
-    "independently_discovered_candidates": 115,
-    "classified_ledger_rows": 115,
+    "independently_discovered_candidates": 111,
+    "classified_ledger_rows": 111,
     "explicitly_allowed_references": 0,
     "unclassified_runtime_rows": 0,
     "deferred_runtime_rows": 0,
     "proof": "sorted independently discovered (path,symbol) identities equal sorted ledger identities; discovery inputs are never the ledger"
   },
   "statistics": {
-    "rows_total": 115,
+    "rows_total": 111,
     "by_capability_class": {
-      "standalone_compile": 2,
+      "standalone_compile": 1,
       "public_projection": 12,
       "root_scanner": 50,
-      "carrier_parser": 9,
+      "carrier_parser": 6,
       "manual_geometry": 20,
       "nested_language_parser": 2,
       "pre_registration_probe": 1,
@@ -112,30 +112,14 @@
       "trusted_processor": 3
     },
     "by_disposition": {
-      "allowed_standalone": 2,
-      "migrate": 67,
+      "allowed_standalone": 1,
+      "migrate": 64,
       "delete": 33,
       "test_only": 11,
       "allowed_nested": 2
     }
   },
   "rows": [
-    {
-      "path": "crates/verter_compiler/src/compile/mod.rs",
-      "symbol": "compile",
-      "runtime_role": "production_runtime",
-      "provenance": "source",
-      "shipped_artifact": null,
-      "shipping_target": null,
-      "rust_target": null,
-      "candidate_evidence": "tracked_source",
-      "processor_authority": null,
-      "capability_class": "standalone_compile",
-      "disposition": "allowed_standalone",
-      "acceptance_id": "B-30",
-      "test": "registered_and_standalone_roots_are_disjoint",
-      "architecture_guard": "standalone_compiler_typestate"
-    },
     {
       "path": "crates/verter_ffi/src/convert/component_meta.rs",
       "symbol": "sfc_blocks projection",
@@ -183,22 +167,6 @@
       "acceptance_id": "B-10",
       "test": "scanners_replacement_b_10",
       "architecture_guard": "scanners_replacement_candidate_set_equality"
-    },
-    {
-      "path": "crates/verter_lsp/src/documents/analysis.rs",
-      "symbol": "semantic_host_raw_upsert",
-      "runtime_role": "production_runtime",
-      "provenance": "source",
-      "shipped_artifact": null,
-      "shipping_target": null,
-      "rust_target": null,
-      "candidate_evidence": "tracked_source@0f28184d76:L178",
-      "processor_authority": null,
-      "capability_class": "carrier_parser",
-      "disposition": "migrate",
-      "acceptance_id": "B-11",
-      "test": "registered_lanes_share_publication_arc",
-      "architecture_guard": "raw_carrier_parser_private_to_publication_store"
     },
     {
       "path": "crates/verter_lsp/src/documents/sfc_scanner.rs",
@@ -1113,22 +1081,6 @@
       "architecture_guard": "raw_carrier_parser_private_to_publication_store"
     },
     {
-      "path": "crates/verter_session/src/host_compile_audit.rs",
-      "symbol": "direct_audited_compile_sfc",
-      "runtime_role": "production_runtime",
-      "provenance": "source",
-      "shipped_artifact": null,
-      "shipping_target": null,
-      "rust_target": null,
-      "candidate_evidence": "tracked_source@0f28184d76:L249,L319,L345",
-      "processor_authority": null,
-      "capability_class": "carrier_parser",
-      "disposition": "migrate",
-      "acceptance_id": "B-25",
-      "test": "registered_lanes_share_publication_arc",
-      "architecture_guard": "raw_carrier_parser_private_to_publication_store"
-    },
-    {
       "path": "crates/verter_session/src/host_manage/analysis_io.rs",
       "symbol": "source_only_analysis_artifact_builder",
       "runtime_role": "production_runtime",
@@ -1159,22 +1111,6 @@
       "acceptance_id": "B-26",
       "test": "registered_structure_parser_geometry_only",
       "architecture_guard": "registered_consumers_accept_structure_capability"
-    },
-    {
-      "path": "crates/verter_session/src/host_manage/overlay_materialize.rs",
-      "symbol": "source_only_overlay_artifact_builder",
-      "runtime_role": "production_runtime",
-      "provenance": "source",
-      "shipped_artifact": null,
-      "shipping_target": null,
-      "rust_target": null,
-      "candidate_evidence": "tracked_source@0f28184d76:L517",
-      "processor_authority": null,
-      "capability_class": "carrier_parser",
-      "disposition": "migrate",
-      "acceptance_id": "B-17",
-      "test": "registered_lanes_share_publication_arc",
-      "architecture_guard": "raw_carrier_parser_private_to_publication_store"
     },
     {
       "path": "crates/verter_session/src/host_manage/prepared_decl.rs",
@@ -1963,19 +1899,6 @@
   ],
   "consumer_matrix": [
     {
-      "path": "crates/verter_compiler/src/compile/mod.rs",
-      "symbol": "compile",
-      "Vue": "required",
-      "Svelte": "required",
-      "cold": "required",
-      "warm": "required",
-      "pre_semantic": "required",
-      "edit": "required",
-      "close_reopen": "required",
-      "test": "registered_and_standalone_roots_are_disjoint",
-      "audit_assertion": "registered counters unchanged"
-    },
-    {
       "path": "crates/verter_ffi/src/convert/component_meta.rs",
       "symbol": "sfc_blocks projection",
       "Vue": "required",
@@ -2012,19 +1935,6 @@
       "edit": "required",
       "close_reopen": "required",
       "test": "scanners_replacement_b_10",
-      "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
-    },
-    {
-      "path": "crates/verter_lsp/src/documents/analysis.rs",
-      "symbol": "semantic_host_raw_upsert",
-      "Vue": "required",
-      "Svelte": "required",
-      "cold": "required",
-      "warm": "required",
-      "pre_semantic": "required",
-      "edit": "required",
-      "close_reopen": "required",
-      "test": "registered_lanes_share_publication_arc",
       "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
     },
     {
@@ -2626,19 +2536,6 @@
       "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
     },
     {
-      "path": "crates/verter_session/src/host_compile_audit.rs",
-      "symbol": "direct_audited_compile_sfc",
-      "Vue": "required",
-      "Svelte": "required",
-      "cold": "required",
-      "warm": "required",
-      "pre_semantic": "required",
-      "edit": "required",
-      "close_reopen": "required",
-      "test": "registered_lanes_share_publication_arc",
-      "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
-    },
-    {
       "path": "crates/verter_session/src/host_manage/analysis_io.rs",
       "symbol": "source_only_analysis_artifact_builder",
       "Vue": "required",
@@ -2662,19 +2559,6 @@
       "edit": "required",
       "close_reopen": "required",
       "test": "registered_structure_parser_geometry_only",
-      "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
-    },
-    {
-      "path": "crates/verter_session/src/host_manage/overlay_materialize.rs",
-      "symbol": "source_only_overlay_artifact_builder",
-      "Vue": "required",
-      "Svelte": "required",
-      "cold": "required",
-      "warm": "required",
-      "pre_semantic": "required",
-      "edit": "required",
-      "close_reopen": "required",
-      "test": "registered_lanes_share_publication_arc",
       "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
     },
     {

@@ -13,9 +13,8 @@ use rustc_hash::FxHashMap;
 // measure parse durations via the scheduler executor.
 
 use crate::cache::sorted_nodes;
-use crate::hash::{compile_profile_hash, content_override_hash, style_override_hash};
+use crate::hash::{compile_profile_hash, style_override_hash};
 use crate::id::{canonicalize_id, render_ids};
-use crate::parse::parse_vue_snapshot;
 use crate::types::*;
 use crate::upsert::compute_upsert_changes_from_parse;
 use crate::upsert::{build_upsert_result, UpsertResultData};
@@ -26,8 +25,8 @@ use verter_scheduler::stage::Priority;
 /// pure text helpers with no host/cache/scheduler access (all
 /// upsert/eviction-relevant logic stays in THIS file, the single file the
 /// `host_upsert_performs_no_reverse_dependent_eviction` guard scans).
+#[allow(dead_code)] // B4 owns physical retirement; B2 makes this unreachable.
 mod block_splice;
-use block_splice::build_synthetic_source;
 
 /// One per-request outcome from the shared upsert engine
 /// [`VerterHost::upsert_many_with_priority`]. `result` is the same
@@ -199,6 +198,38 @@ impl VerterHost {
             .host_upsert_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.upsert_with_priority(req, Priority::Interactive)
+    }
+
+    /// Ingest an already registered carrier envelope at the Source stage.
+    /// Canonical identity, exact bytes, and resolved language are validated
+    /// before the scheduler can observe the handoff.
+    #[doc(hidden)]
+    pub fn upsert_registered_envelope(
+        &self,
+        req: UpsertRequest,
+        structure: crate::carrier_publication_store::RegisteredFileStructure,
+    ) -> Result<HostUpdateResult, HostError> {
+        let canonical_id = Self::resolve_upsert_canonical(&req);
+        let registered = structure.envelope().source();
+        if registered.canonical().as_str() != canonical_id
+            || registered.bytes() != req.source.as_ref()
+            || registered.resolved_file_language() != &req.file_language
+        {
+            return Err(HostError::InvalidQuery);
+        }
+        let expected_artifact = Arc::clone(structure.artifact());
+        self.registered_envelope_ingest
+            .lock()
+            .insert(canonical_id.clone(), structure);
+        let result = self.upsert(req);
+        let mut pending = self.registered_envelope_ingest.lock();
+        if pending
+            .get(&canonical_id)
+            .is_some_and(|value| Arc::ptr_eq(value.artifact(), &expected_artifact))
+        {
+            pending.remove(&canonical_id);
+        }
+        result
     }
 
     /// Insert or update a file with caller-configured scheduler priority.
@@ -1209,8 +1240,6 @@ impl VerterHost {
         req: BlockOverrideRequest,
     ) -> Result<HostUpdateResult, HostError> {
         let canonical = self.resolve_alias_or_canonical(&req.canonical_id);
-        let profile_hash = compile_profile_hash(&req.compile_profile);
-
         // Separate overrides into template/script vs style buckets
         let mut template_override: Option<ContentOverride> = None;
         let mut script_override: Option<ContentOverride> = None;
@@ -1275,118 +1304,8 @@ impl VerterHost {
             }
         }
 
-        let override_hash =
-            content_override_hash(template_override.as_ref(), script_override.as_ref());
-
-        // Scheduler path: read raw source+meta from scheduler, store override in compile_cache
-        {
-            use crate::host_executor::HostSourceData;
-            let source_snap = self.scheduler.try_get_source(&canonical).ok_or_else(|| {
-                HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                }
-            })?;
-            let hd = source_snap
-                .downcast_data::<HostSourceData>()
-                .ok_or_else(|| HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                })?;
-
-            let previous_hash = self
-                .compile_cache()
-                .get(&canonical)
-                .and_then(|cc| {
-                    cc.content_overrides
-                        .get(&profile_hash)
-                        .map(|o| o.layer.hash)
-                })
-                .unwrap_or(0);
-
-            if override_hash == previous_hash {
-                let mut result = HostUpdateResult::no_change(canonical);
-                result.external_source_requests = hd.parse.external_requests.clone();
-                return Ok(result);
-            }
-
-            // Build synthetic source from raw scheduler source
-            let synthetic_source = build_synthetic_source(
-                &source_snap.source,
-                &hd.parse.meta,
-                template_override.as_ref(),
-                script_override.as_ref(),
-            );
-            let synthetic_arc: Arc<str> = Arc::from(synthetic_source.as_str());
-
-            let (new_snapshot, new_artifact) = parse_vue_snapshot(
-                &canonical,
-                &synthetic_source,
-                self.config.effective_scope(),
-                &self.provenance,
-            );
-
-            let layer = ContentOverrideLayer {
-                hash: override_hash,
-                template: template_override.clone(),
-                script: script_override.clone(),
-            };
-
-            // Store ContentOverrideWithParse in compile_cache
-            if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
-                cc.content_overrides.insert(
-                    profile_hash,
-                    ContentOverrideWithParse {
-                        layer: layer.clone(),
-                        parse: new_snapshot.clone(),
-                        framework_parse: Some(new_artifact),
-                        source: synthetic_arc,
-                    },
-                );
-                let session_node =
-                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
-                session_node.remove(&mut cc, profile_hash);
-            }
-
-            let meta = &new_snapshot.meta;
-            let mut changed_nodes = Vec::new();
-            if meta.has_template {
-                changed_nodes.push(VirtualNodeKind::Main);
-                changed_nodes.push(VirtualNodeKind::Template);
-            }
-            if meta.has_script {
-                changed_nodes.push(VirtualNodeKind::Script);
-            }
-            changed_nodes = sorted_nodes(changed_nodes);
-
-            let mut changed_virtual_ids = Vec::new();
-            let mut changed_lsp_ids = Vec::new();
-            for node in &changed_nodes {
-                let (b, l) = render_ids(&canonical, node, meta);
-                changed_virtual_ids.push(b);
-                changed_lsp_ids.push(l);
-            }
-
-            let result = HostUpdateResult {
-                canonical_id: canonical,
-                changed: true,
-                slice_changes: SliceChanges::default(),
-                changed_virtual_nodes: changed_nodes,
-                removed_virtual_nodes: Vec::new(),
-                changed_virtual_ids,
-                removed_virtual_ids: Vec::new(),
-                changed_lsp_ids,
-                removed_lsp_ids: Vec::new(),
-                diagnostics: DiagnosticsSnapshot::default(),
-                external_source_requests: hd.parse.external_requests.clone(),
-                import_specifiers: Vec::new(),
-                module_references: Vec::new(),
-                preprocessor_requests: Vec::new(),
-                export_signatures: Vec::new(),
-                parse_duration_ms: 0.0,
-            };
-            self.bump_store_view_epoch();
-            Ok(result)
-        }
-
-        // Legacy path (WASM)
+        Err(HostError::ExternalBlockContentDeferred(
+            crate::carrier_publication_store::ExternalBlockContentDeferred::B23,
+        ))
     }
 }

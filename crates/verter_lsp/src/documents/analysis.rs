@@ -150,6 +150,9 @@ impl DocumentRegistry {
         let source = Arc::clone(&document.source);
         let file_language = self.document_file_language(&document.language_id, &canonical_id);
         let is_framework_carrier = file_language.is_framework_carrier();
+        let registered_structure = is_framework_carrier
+            .then(|| self.host.registered_file_structure(&canonical_id))
+            .flatten();
         drop(document);
 
         let registry = Arc::clone(self);
@@ -174,15 +177,18 @@ impl DocumentRegistry {
             let work_source = Arc::clone(&source);
             let work_canonical = canonical_id.clone();
             let analysis = tokio::task::spawn_blocking(move || {
-                let _ = host
-                    .upsert(UpsertRequest {
-                        canonical_id: Some(work_canonical.clone()),
-                        input_id: work_canonical.clone(),
-                        source: work_source,
-                        file_language,
-                        aliases: Vec::new(),
-                    })
-                    .ok()?;
+                let request = UpsertRequest {
+                    canonical_id: Some(work_canonical.clone()),
+                    input_id: work_canonical.clone(),
+                    source: work_source,
+                    file_language,
+                    aliases: Vec::new(),
+                };
+                let _ = match registered_structure {
+                    Some(structure) => host.upsert_registered_envelope(request, structure),
+                    None => host.upsert(request),
+                }
+                .ok()?;
                 let mut analysis = host.get_analysis(&work_canonical)?;
                 if is_framework_carrier {
                     let mut semantic_props = host

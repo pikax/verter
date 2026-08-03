@@ -495,10 +495,7 @@ mod contract_tests {
 
     use super::*;
     use std::any::Any;
-    use verter_language::{
-        CarrierParse, FrameworkAdapterId, FrameworkParseCommon, LanguageId, ScriptRegion,
-        ScriptRegionKind, ScriptSourceType,
-    };
+    use verter_language::{CarrierParse, FrameworkAdapterId, FrameworkParseCommon, LanguageId};
     use verter_span::Span;
 
     /// A trivial carrier payload — the fixture's parse "result".
@@ -545,20 +542,74 @@ mod contract_tests {
         }
 
         fn parse(&self, source: &str, _opts: &ParseOptions) -> Arc<FrameworkParseArtifact> {
-            let script_regions = Self::script_span(source)
-                .map(|span| ScriptRegion {
-                    span,
-                    source_type: ScriptSourceType::Ts,
-                    kind: ScriptRegionKind::Module,
+            use verter_language::parse_artifact::carrier_inventory::{
+                BlockId, CarrierBlock, CarrierBlockInventory, InternedNameId, MarkupSyntaxArena,
+                NormalizedNameTable, ScriptRole, ScriptSourceType as InventoryScriptSourceType,
+                SectionRole, SourceSlice, SourceSpaceDescriptor, SourceSpaceId, SourceSpan,
+                SyntaxTermination, TaggedSyntax,
+            };
+            use verter_language::registered_source_authority::{
+                CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
+            };
+
+            let authority = RegisteredSourceAuthority::new().expect("fixture source authority");
+            let registered = authority
+                .register_source(
+                    CanonicalFileId::new("fixture://carrier"),
+                    FileIncarnation::new(1),
+                    SourceGeneration::new(1),
+                    verter_language::FileLanguage::vue(),
+                    Arc::from(source),
+                )
+                .expect("fixture source registration");
+            let source_space = SourceSpaceId(0);
+            let blocks: Arc<[CarrierBlock]> = Self::script_span(source)
+                .map(|span| {
+                    let content = SourceSpan::new(source_space, span.start, span.end);
+                    let empty = SourceSpan::new(source_space, 0, 0);
+                    CarrierBlock::Section {
+                        id: BlockId(0),
+                        role: SectionRole::Script {
+                            role: ScriptRole::Module,
+                            dialect: InventoryScriptSourceType::TypeScript,
+                        },
+                        syntax: TaggedSyntax {
+                            authored_name: SourceSlice::new(empty),
+                            normalized_name: InternedNameId(0),
+                            opening_span: SourceSpan::new(source_space, 0, span.start),
+                            opening_name_span: empty,
+                            attribute_insertion_anchor: empty,
+                            content_span: content,
+                            closing_span: Some(SourceSpan::new(
+                                source_space,
+                                span.end,
+                                source.len() as u32,
+                            )),
+                            closing_name_span: Some(empty),
+                            full_span: SourceSpan::new(source_space, 0, source.len() as u32),
+                            termination: SyntaxTermination::Closed,
+                            attributes: Arc::default(),
+                        },
+                    }
                 })
                 .into_iter()
-                .collect();
+                .collect::<Vec<_>>()
+                .into();
+            let inventory = CarrierBlockInventory::new(
+                Arc::from([SourceSpaceDescriptor::registered(source_space, &registered)]),
+                Arc::new(NormalizedNameTable {
+                    values: Arc::from([Arc::<str>::from("script")]),
+                }),
+                blocks,
+                Arc::new(MarkupSyntaxArena::default()),
+            )
+            .expect("fixture inventory");
             Arc::new(FrameworkParseArtifact::new(
                 self.adapter_id(),
                 LanguageId::new(Self::ADAPTER),
                 1,
                 FrameworkParseCommon {
-                    script_regions,
+                    inventory: Arc::new(inventory),
                     ..Default::default()
                 },
                 Arc::new(FixtureCarrier),
@@ -571,7 +622,7 @@ mod contract_tests {
                 .iter()
                 .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
                 .collect();
-            for region in &artifact.common.script_regions {
+            for region in artifact.script_regions() {
                 let (s, e) = (region.span.start as usize, region.span.end as usize);
                 if s <= e && e <= src.len() {
                     out[s..e].copy_from_slice(&src[s..e]);
@@ -639,7 +690,7 @@ mod contract_tests {
         );
 
         // The script region's bytes sit at their RAW offsets, unchanged.
-        let region = artifact.common.script_regions[0].span;
+        let region = artifact.script_regions()[0].span;
         let (s, e) = (region.start as usize, region.end as usize);
         assert_eq!(
             &eval[s..e],
@@ -666,7 +717,7 @@ mod contract_tests {
         let compiler = FixtureCompiler;
         let source = "no script here\njust markup";
         let artifact = compiler.parse(source, &ParseOptions::default());
-        assert!(artifact.common.script_regions.is_empty());
+        assert!(artifact.script_regions().is_empty());
         let eval = compiler.eval_source(source, &artifact);
         assert_eq!(eval.len(), source.len());
         for (&sb, eb) in source.as_bytes().iter().zip(eval.bytes()) {

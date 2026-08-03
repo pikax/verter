@@ -2921,6 +2921,10 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "last_const_prop_overrides",
             "phase-06b-report.md §F13: Phase-7 invalidation state-diff record (NOT a cache of resolution results). No equivalent in ProjectTypeStore.",
         ),
+        (
+            "registered_envelope_ingest",
+            "T-B R5 §2: one-shot validated cross-host envelope handoff into the scheduled Source stage. NOT a cache; entries are removed on intake.",
+        ),
         // F1, F2, F4, F5 — rehomed in Tier 1C-α (host-cache-rehoming.md
         // §3.4 + plan §3.4.1). The four fields (`compile_cache`,
         // `resolved_type_cache`, `eval_env_cache`, `semantic_db`) no
@@ -5634,6 +5638,8 @@ mod foundations_guards {
         // Frozen eight-field carrier-owned compatibility cohort consumed by
         // B2 persistence/adoption and exercised by its owning module tests.
         "pub mod carrier_artifact_cohort",
+        // T-B R5 §2 carrier-only publication identity/store and typed interim outcomes.
+        "pub mod carrier_publication_store",
         // Workspace-wide cache-cluster schema-version constant + the
         // `CacheSchemaVersioned` trait. Public so
         // `tests/cases/g_cache/cache_invariant_migration.rs` (the W0.5 fixture cohort)

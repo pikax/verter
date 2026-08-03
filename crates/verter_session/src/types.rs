@@ -2154,6 +2154,12 @@ pub enum HostError {
     /// The scheduler was shut down.
     #[error("scheduler shut down")]
     Shutdown,
+    /// The request's parse-affecting profile differs from registered grammar.
+    #[error("compile profile grammar differs from registered grammar")]
+    GrammarMismatch(crate::carrier_publication_store::GrammarMismatch),
+    /// Typed B2 fail-closed result for external block bytes.
+    #[error("external block content deferred until {0:?}")]
+    ExternalBlockContentDeferred(crate::carrier_publication_store::ExternalBlockContentDeferred),
 }
 
 #[derive(Debug, Clone)]
@@ -2227,6 +2233,7 @@ impl FileMeta {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Geometry fields remain until the B4 physical cleanup.
 pub(crate) struct SrcBlockInfo {
     pub(crate) tag_name: String,
     pub(crate) resolved_canonical_id: String,
@@ -2314,6 +2321,7 @@ pub(crate) struct StyleOverrideLayer {
 
 /// Preprocessed template/script content that replaces the original block
 /// content before compilation. Stored per compile-profile.
+#[allow(dead_code)] // B4 owns physical retirement after B3 typed content lands.
 #[derive(Debug, Clone)]
 pub(crate) struct ContentOverride {
     pub(crate) code: Arc<str>,
@@ -3295,7 +3303,7 @@ pub struct MetaProvenance {
     /// entry (`parse_eval_program`). Exactly 1 per cold canonical build.
     pub eval_program_parses: std::sync::atomic::AtomicU64,
     /// Carrier parses performed through the single counted carrier
-    /// chokepoint (`parse::parse_carrier_counted`) — every framework
+    /// store-leader projector boundary — every framework
     /// carrier (`.vue`, `.svelte`, …) increments this exactly once per
     /// `CarrierCompiler::parse`. The framework-neutral parse-once rail:
     /// a cold build of any carrier file bumps this once, so a duplicate
@@ -3303,7 +3311,7 @@ pub struct MetaProvenance {
     /// without naming a framework.
     pub carrier_parses: std::sync::atomic::AtomicU64,
     /// SFC structure parses (the Vue carrier compatibility rail) —
-    /// bumped by `parse::parse_carrier_counted` only when the dispatched
+    /// bumped by the elected store leader only when the dispatched
     /// carrier is Vue, covering the materialise lanes (base + overlay),
     /// the compile/template merged-source lanes, and the lazy
     /// `get_analysis` re-parse fallbacks, so a duplicate-SFC-parse

@@ -218,7 +218,7 @@ pub enum SourceValidationError {
 #[derive(Debug)]
 pub struct RegisteredSourceAuthority {
     namespace: SourceAuthorityNamespaceId,
-    current: Mutex<HashMap<CanonicalFileId, RegisteredSourceSnapshot>>,
+    current: Mutex<HashMap<(CanonicalFileId, FileIncarnation), RegisteredSourceSnapshot>>,
 }
 
 impl RegisteredSourceAuthority {
@@ -260,12 +260,12 @@ impl RegisteredSourceAuthority {
         self.current
             .lock()
             .map_err(|_| SourceRegistrationError::AuthorityUnavailable)?
-            .insert(canonical, snapshot.clone());
+            .insert((canonical, file_incarnation), snapshot.clone());
         Ok(snapshot)
     }
 
-    #[cfg(test)]
-    fn validate_current(
+    /// Validate that a sealed snapshot is still the exact current source.
+    pub fn validate_current(
         &self,
         snapshot: &RegisteredSourceSnapshot,
     ) -> Result<(), SourceValidationError> {
@@ -287,7 +287,10 @@ impl RegisteredSourceAuthority {
 
     fn validate_locked(
         &self,
-        current: &MutexGuard<'_, HashMap<CanonicalFileId, RegisteredSourceSnapshot>>,
+        current: &MutexGuard<
+            '_,
+            HashMap<(CanonicalFileId, FileIncarnation), RegisteredSourceSnapshot>,
+        >,
         snapshot: &RegisteredSourceSnapshot,
     ) -> Result<(), SourceValidationError> {
         if snapshot.id.authority != self.namespace {
@@ -305,12 +308,16 @@ impl RegisteredSourceAuthority {
             return Err(SourceValidationError::ByteLengthMismatch);
         }
 
-        let live = current
-            .get(&snapshot.canonical)
-            .ok_or(SourceValidationError::SourceNotCurrent)?;
-        if snapshot.id.file_incarnation != live.id.file_incarnation {
-            return Err(SourceValidationError::FileIncarnationMismatch);
-        }
+        let live = match current.get(&(snapshot.canonical.clone(), snapshot.id.file_incarnation)) {
+            Some(live) => live,
+            None if current
+                .keys()
+                .any(|(canonical, _)| canonical == &snapshot.canonical) =>
+            {
+                return Err(SourceValidationError::FileIncarnationMismatch);
+            }
+            None => return Err(SourceValidationError::SourceNotCurrent),
+        };
         if snapshot.id.generation != live.id.generation {
             return Err(SourceValidationError::SourceGenerationMismatch);
         }
@@ -821,7 +828,7 @@ mod tests {
             .current
             .lock()
             .expect("source registry")
-            .get_mut(snapshot.canonical())
+            .get_mut(&(snapshot.canonical().clone(), snapshot.file_incarnation()))
             .expect("current source")
             .byte_len = tampered.byte_len;
         assert_eq!(
@@ -837,7 +844,7 @@ mod tests {
             .current
             .lock()
             .expect("source registry")
-            .remove(snapshot.canonical());
+            .remove(&(snapshot.canonical().clone(), snapshot.file_incarnation()));
         assert_eq!(
             authority.validate_current(&snapshot),
             Err(SourceValidationError::SourceNotCurrent)
@@ -851,7 +858,7 @@ mod tests {
             .current
             .lock()
             .expect("source registry")
-            .get_mut(snapshot.canonical())
+            .get_mut(&(snapshot.canonical().clone(), snapshot.file_incarnation()))
             .expect("current source")
             .id
             .content_hash = WholeSourceHash([0xDA; 32]);
@@ -868,7 +875,7 @@ mod tests {
             .current
             .lock()
             .expect("source registry")
-            .get_mut(snapshot.canonical())
+            .get_mut(&(snapshot.canonical().clone(), snapshot.file_incarnation()))
             .expect("current source")
             .byte_len += 1;
         assert_eq!(
@@ -884,7 +891,7 @@ mod tests {
             .current
             .lock()
             .expect("source registry")
-            .get_mut(snapshot.canonical())
+            .get_mut(&(snapshot.canonical().clone(), snapshot.file_incarnation()))
             .expect("current source")
             .source = Arc::from("<template>jello</template>");
         assert_eq!(
@@ -909,5 +916,36 @@ mod tests {
             authority.validate_current(&snapshot),
             Err(SourceValidationError::SourceGenerationMismatch)
         );
+    }
+
+    #[test]
+    fn distinct_live_file_incarnations_are_validated_independently() {
+        let authority = RegisteredSourceAuthority::new().expect("source authority");
+        let canonical = CanonicalFileId::new("file:///workspace/App.vue");
+        let base = authority
+            .register_source(
+                canonical.clone(),
+                FileIncarnation::new(1),
+                SourceGeneration::new(1),
+                crate::FileLanguage::vue(),
+                Arc::from("<template>base</template>"),
+            )
+            .expect("base registration");
+        let overlay = authority
+            .register_source(
+                canonical,
+                FileIncarnation::new(2),
+                SourceGeneration::new(1),
+                crate::FileLanguage::vue(),
+                Arc::from("<template>overlay</template>"),
+            )
+            .expect("overlay registration");
+
+        authority
+            .validate_current(&base)
+            .expect("base remains live");
+        authority
+            .validate_current(&overlay)
+            .expect("overlay remains live");
     }
 }

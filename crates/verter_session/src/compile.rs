@@ -10,6 +10,7 @@ use verter_compiler::framework_common::RuntimeCompileOutput;
 use crate::id::render_ids;
 use crate::types::{CompileProfile, FileMeta, HmrStrategy, SrcBlockInfo, VirtualNodeKind};
 
+#[allow(dead_code)] // Residual B4 deletion target; unreachable from registered production parsing.
 pub(crate) fn merge_external_sources(
     source: &str,
     src_blocks: &[SrcBlockInfo],
@@ -611,9 +612,7 @@ mod tests {
     fn assemble_main_module_template_only_sfc() {
         use oxc_allocator::Allocator;
         use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-        use verter_compiler::framework_common::{
-            CarrierCompiler, ParseOptions, RuntimeCompileOptions,
-        };
+        use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
 
         // Drive the Vue CARRIER `compile_bundle` (the registry-routed producer)
         // so this end-to-end assembly test exercises the neutral bundle path.
@@ -623,12 +622,7 @@ mod tests {
         // Route the carrier parse through the counted chokepoint (the dedup
         // rail authority), not a raw `compiler.parse`.
         let provenance = crate::types::MetaProvenance::default();
-        let artifact = crate::parse::parse_carrier_counted(
-            &provenance,
-            &compiler,
-            source,
-            &ParseOptions::default(),
-        );
+        let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
         let result = compiler
             .compile_bundle(
                 source,
@@ -684,20 +678,13 @@ mod tests {
     fn assemble_main_module_inline_topology() {
         use oxc_allocator::Allocator;
         use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-        use verter_compiler::framework_common::{
-            CarrierCompiler, ParseOptions, RuntimeCompileOptions,
-        };
+        use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
 
         let source = "<script setup>\nimport { ref } from 'vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
         let alloc = Allocator::new();
         let compiler = VueCarrierCompiler::default();
         let provenance = crate::types::MetaProvenance::default();
-        let artifact = crate::parse::parse_carrier_counted(
-            &provenance,
-            &compiler,
-            source,
-            &ParseOptions::default(),
-        );
+        let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
         let result = compiler
             .compile_bundle(
                 source,
@@ -773,9 +760,7 @@ mod tests {
     fn assemble_passes_compiler_returned_bindings_verbatim() {
         use oxc_allocator::Allocator;
         use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-        use verter_compiler::framework_common::{
-            CarrierCompiler, ParseOptions, RuntimeCompileOptions,
-        };
+        use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
 
         // UnusedSetupImport must be elided by the COMPILER (not by any
         // assembly-level text filtering); `msg` is template-used and stays.
@@ -783,12 +768,7 @@ mod tests {
         let alloc = Allocator::new();
         let compiler = VueCarrierCompiler::default();
         let provenance = crate::types::MetaProvenance::default();
-        let artifact = crate::parse::parse_carrier_counted(
-            &provenance,
-            &compiler,
-            source,
-            &ParseOptions::default(),
-        );
+        let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
         let result = compiler
             .compile_bundle(
                 source,
@@ -825,12 +805,11 @@ mod tests {
     /// @ai-generated - Multi-root template must use Fragment wrapping
     #[test]
     fn compile_multi_root_template_uses_fragment() {
-        use oxc_allocator::Allocator;
         use verter_compiler::compile::CodegenOptions;
-        use verter_compiler::compile::{compile as compile_sfc, VerterCompileOptions};
+        use verter_compiler::compile::VerterCompileOptions;
+        use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 
         let source = "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div>aaaaa</template>";
-        let alloc = Allocator::new();
         let opts = CodegenOptions {
             inline: Some(false),
             ..CodegenOptions::default()
@@ -839,12 +818,11 @@ mod tests {
             force_js: true,
             ..Default::default()
         };
-        let result = compile_sfc(
-            source,
+        let result = StandaloneCompiler.compile_source(
+            &StandaloneSourceBytes::copied_from(source),
             &opts,
             &vopts,
             &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
-            &alloc,
         );
 
         let tpl = result.template.expect("should have template block");

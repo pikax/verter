@@ -1775,7 +1775,7 @@ impl VerterHost {
             // the scheduler — the canonical way to materialize a file. If
             // the scheduler still misses after `ensure_loaded`, return None
             // (file doesn't exist in the workspace).
-            let (raw_source, mut framework_parse, whole_hash) = {
+            let (raw_source, framework_parse, whole_hash) = {
                 let state = match self.effective_file_state(canonical_id, None) {
                     Some(state) => state,
                     None => {
@@ -1807,11 +1807,7 @@ impl VerterHost {
             // parser; everything downstream (eval source, snapshot, env,
             // analysis) reuses its framework-neutral artifact.
             if framework_parse.is_none() && file_language.is_framework_carrier() {
-                framework_parse = crate::parse::build_carrier_parse_artifact_from_source(
-                    &file_language,
-                    &raw_source,
-                    &self.provenance,
-                );
+                return None;
             }
             let framework_parse = framework_parse;
 

@@ -142,7 +142,7 @@ impl VerterHost {
             if !is_vue {
                 let mut spans: Vec<(u32, u32)> = artifact
                     .common
-                    .script_regions
+                    .script_regions()
                     .iter()
                     .map(|region| (region.span.start, region.span.end))
                     .filter(|(start, end)| end > start)

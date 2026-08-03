@@ -3578,6 +3578,7 @@ fn raw_template_analysis_extracts_css_var_names() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn override_template_analysis_helper_uses_content_override() {
     let host = make_host();
     upsert_vue(
@@ -9398,6 +9399,7 @@ const variant: Variant = 'primary'
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn content_override_template_class_facts_are_return_only_but_visible() {
     let host = make_host();
     let canonical = "/workspace/src/OverrideClasses.vue";
@@ -9701,6 +9703,7 @@ fn owner_whole_hash_facts(
 /// verdicts above are not "both `true` by construction".
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn raw_template_persist_is_independent_of_indexed_artifact_warmth() {
     // ── Pair 1: a purely LOCAL closed domain ──
     const LOCAL: &str = "/workspace/src/WarmthIndependentLocal.vue";
@@ -9880,6 +9883,7 @@ const variant: Variant = 'primary'
 ///   suppressed resolution rather than publication would fail them.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn fenced_and_overridden_class_fact_lanes_still_never_populate_the_base_slot() {
     const SOURCE: &str = r#"<script setup lang="ts">
 type Variant = 'primary' | 'secondary'

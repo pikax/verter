@@ -217,10 +217,7 @@ pub fn build_vue_parse_artifact(
         LanguageId::new("vue"),
         parser_version,
         FrameworkParseCommon {
-            script_regions,
-            template_regions,
-            style_regions,
-            external_links,
+            inventory: Arc::default(),
             diagnostics: Vec::new(),
         },
         Arc::new(VueParseCarrier::new(parsed)),
@@ -321,6 +318,44 @@ impl VueCarrierCompiler {
     }
 }
 
+/// Compile a Vue artifact already elected by a registered publication store.
+/// No raw-source parsing is reachable through this boundary.
+#[doc(hidden)]
+pub fn compile_registered_vue_artifact(
+    source: &str,
+    artifact: &FrameworkParseArtifact,
+    options: &CodegenOptions,
+    verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
+    allocator: &oxc_allocator::Allocator,
+) -> Result<crate::compile::VerterCompileResult, CompileUnsupported> {
+    let compiler = VueCarrierCompiler::default();
+    let Some(parsed) = compiler.parsed_sfc(artifact) else {
+        return Err(CompileUnsupported::NoIdeProjection {
+            adapter_id: artifact.adapter_id.clone(),
+        });
+    };
+    let exact_source = artifact
+        .common
+        .inventory
+        .source_spaces()
+        .first()
+        .is_some_and(|space| space.bytes().as_ref() == source);
+    if !exact_source {
+        return Err(CompileUnsupported::NoIdeProjection {
+            adapter_id: artifact.adapter_id.clone(),
+        });
+    }
+    Ok(compile_from_parsed(
+        source,
+        parsed,
+        options,
+        verter_options,
+        macro_semantics,
+        allocator,
+    ))
+}
+
 impl CarrierCompiler for VueCarrierCompiler {
     fn __verter_as_any(&self) -> &dyn Any {
         self
@@ -362,7 +397,7 @@ impl CarrierCompiler for VueCarrierCompiler {
             .iter()
             .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
             .collect();
-        for region in &artifact.common.script_regions {
+        for region in artifact.script_regions() {
             let start = region.span.start as usize;
             let end = region.span.end as usize;
             if start <= end && end <= src.len() {
@@ -637,8 +672,43 @@ mod tests {
     use super::*;
 
     fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
-        let parsed = Arc::new(parse_sfc(source, None, None));
-        build_vue_parse_artifact(source, parsed, 1)
+        use verter_language::carrier_grammar::{
+            CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
+            FrameworkAdapterSemanticVersion,
+        };
+        use verter_language::registered_source_authority::{
+            CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
+        };
+        let source_authority = RegisteredSourceAuthority::new().unwrap();
+        let grammar_authority = CarrierGrammarAuthority::new().unwrap();
+        let config = CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap();
+        grammar_authority
+            .register_carrier_grammar(
+                verter_language::FileLanguage::vue(),
+                FrameworkAdapterSemanticVersion::new(1).unwrap(),
+                CarrierParserGrammarVersion::new(1).unwrap(),
+                config.clone(),
+            )
+            .unwrap();
+        let snapshot = source_authority
+            .register_source(
+                CanonicalFileId::new("file:///fixture.vue"),
+                FileIncarnation::new(1),
+                SourceGeneration::new(1),
+                verter_language::FileLanguage::vue(),
+                Arc::from(source),
+            )
+            .unwrap();
+        let accepted = grammar_authority
+            .accept_registered_source(&source_authority, &snapshot, &config)
+            .unwrap();
+        Arc::new(
+            crate::framework_common::registered_carrier_projection::__project_registered_carrier_for_store_leader(
+                &VueCarrierCompiler::default(),
+                &accepted,
+            )
+            .into_framework_parse_artifact(),
+        )
     }
 
     #[test]
@@ -646,7 +716,7 @@ mod tests {
         let source =
             "<script>export default {}</script>\n<script setup lang=\"tsx\">const a = 1</script>";
         let artifact = artifact_for(source);
-        let regions = &artifact.common.script_regions;
+        let regions = artifact.script_regions();
         assert_eq!(regions.len(), 2);
         assert_eq!(regions[0].kind, ScriptRegionKind::Module);
         assert_eq!(regions[1].kind, ScriptRegionKind::Instance);
@@ -694,11 +764,10 @@ mod tests {
     fn template_style_regions_and_external_links_are_populated() {
         let source = "<template src=\"./tpl.html\"></template>\n<style src=\"./a.css\"></style>\n<style>.x{}</style>\n<script src=\"./impl.ts\"></script>";
         let artifact = artifact_for(source);
-        assert_eq!(artifact.common.template_regions.len(), 1);
-        assert_eq!(artifact.common.style_regions.len(), 2);
-        let links: Vec<(&ExternalLinkKind, &str)> = artifact
-            .common
-            .external_links
+        assert_eq!(artifact.common.template_regions().len(), 1);
+        assert_eq!(artifact.common.style_regions().len(), 2);
+        let external_links = artifact.common.external_links();
+        let links: Vec<(&ExternalLinkKind, &str)> = external_links
             .iter()
             .map(|l| (&l.kind, l.specifier.as_str()))
             .collect();
@@ -721,7 +790,7 @@ mod tests {
         // artifact must re-order by source position.
         let source = "<script setup lang=\"ts\">const a = 1</script>\n<script lang=\"ts\">export default {}</script>";
         let artifact = artifact_for(source);
-        let regions = &artifact.common.script_regions;
+        let regions = artifact.script_regions();
         assert_eq!(regions.len(), 2);
         assert_eq!(
             regions[0].kind,
@@ -740,7 +809,7 @@ mod tests {
         let artifact = artifact_for("<script>a</script>");
         assert!(artifact.adapter_id.is_vue());
         assert_eq!(artifact.language_id.as_str(), "vue");
-        assert_eq!(artifact.parser_version, 1);
+        assert_eq!(artifact.parser_version, VUE_CARRIER_PARSER_VERSION);
         assert!(artifact.common.diagnostics.is_empty());
     }
 
@@ -751,18 +820,18 @@ mod tests {
         let compiler = VueCarrierCompiler::default();
         assert!(compiler.adapter_id().is_vue());
         let source = "<script setup lang=\"ts\">const a = 1</script>\n<template><div /></template>";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         assert!(artifact.adapter_id.is_vue());
         assert_eq!(artifact.parser_version, VUE_CARRIER_PARSER_VERSION);
-        assert_eq!(artifact.common.script_regions.len(), 1);
-        assert_eq!(artifact.common.template_regions.len(), 1);
+        assert_eq!(artifact.script_regions().len(), 1);
+        assert_eq!(artifact.common.template_regions().len(), 1);
     }
 
     #[test]
     fn vue_compiler_eval_source_is_position_preserving_with_script_at_raw_offsets() {
         let compiler = VueCarrierCompiler::default();
         let source = "<template><div/></template>\n<script setup lang=\"ts\">const a = 1</script>";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let eval = compiler.eval_source(source, &artifact);
         // Length invariant.
         assert_eq!(
@@ -771,7 +840,7 @@ mod tests {
             "eval source must equal SFC length"
         );
         // The script region's bytes sit at their raw offsets.
-        let region = artifact.common.script_regions[0].span;
+        let region = artifact.script_regions()[0].span;
         let (s, e) = (region.start as usize, region.end as usize);
         assert_eq!(&eval[s..e], "const a = 1");
         // The `<template>` markup is blanked (no `<` survives outside script).
@@ -785,7 +854,7 @@ mod tests {
     fn vue_compiler_compile_ide_produces_tsx_for_a_typescript_sfc() {
         let compiler = VueCarrierCompiler::default();
         let source = "<script setup lang=\"ts\">const a: number = 1</script>\n<template><div>{{ a }}</div></template>";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let opts = IdeCompileOptions {
             filename: Some("App.vue".to_string()),
             ..Default::default()
@@ -827,7 +896,7 @@ mod tests {
     fn vue_compiler_template_data_extracts_component_usages() {
         let compiler = VueCarrierCompiler::default();
         let source = "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n<template><Child :foo=\"1\" /></template>";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let facts = compiler.template_data(source, &artifact);
         assert!(
             facts.data.components.iter().any(|c| c.tag_name == "Child"),
