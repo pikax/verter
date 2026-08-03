@@ -78,8 +78,25 @@ fn stage_area() -> std::path::PathBuf {
     .clone()
 }
 
-/// Name of the lease file each stage area carries. Its lock — not its contents —
+/// Prefix of the lease file naming a stage area. Its lock — not its contents —
 /// is the liveness signal; the recorded pid is for a human reading the directory.
+///
+/// The lease sits BESIDE the area it names, never inside it, because a lease
+/// inside cannot coexist with publishing by rename: Windows refuses to rename a
+/// directory while any handle anywhere in its subtree is open. That is not a
+/// share-mode question — `FILE_SHARE_DELETE` is refused identically, as is an
+/// unlocked handle and one nested several levels down — so no way of opening the
+/// file makes an inside lease renameable, and only moving it out does.
+///
+/// One lease spans an area's whole life: it is keyed to the id, which the
+/// construction-to-published rename does not change.
+const STAGE_LEASE_PREFIX: &str = "lease-";
+
+/// Lease name carried by areas that keep their lease INSIDE themselves.
+///
+/// Never written. Retained for the same reason [`STAGE_LEGACY`] is: such areas
+/// are already on disk, and a reaper that cannot read their lease cannot judge
+/// them — it would treat every one as owned forever and orphan it.
 const STAGE_LEASE: &str = ".verter-stage-lease";
 
 /// Prefix of a PUBLISHED stage area: locked, in use, and scanned by the reaper.
@@ -105,10 +122,20 @@ const STAGE_PENDING: &str = "pending-";
 /// visible lease, and a later reaper removes the LIVE area. Windows closes the
 /// window no better.
 ///
-/// So build under a prefix the reaper does not scan, take the lock there, and
-/// RENAME into the published name. Rename is atomic and carries the lock with
-/// the inode, so the area becomes visible and owned in the same instant. There
-/// is no interval in which a published area is unlocked.
+/// So the lease is taken FIRST, at a path outside every directory this function
+/// creates, and the area is then built under the pending prefix and RENAMED into
+/// the published name. The reaper scans pending areas too — the safety rail is
+/// the already-held lease that marks them owned, not invisibility — and the
+/// rename only publishes an id that lease already owns. The lease is keyed to
+/// the id rather than to a location, so it names the area across that rename
+/// without living in it:
+/// the published name is owned from before it exists, and there is no interval in
+/// which a published area is unlocked.
+///
+/// The lease must stay OUT of the renamed directory. A rename target holding any
+/// open handle is refused on Windows — see [`STAGE_LEASE_PREFIX`] — so a lease
+/// inside the area would make publication fail on one supported platform while
+/// the ordering above stayed correct on the other two.
 fn claim_stage_area(root: &std::path::Path, id: &str) -> std::path::PathBuf {
     // EVERY claim retains its own lease. A single-slot `OnceLock` silently
     // dropped the second claim's file — releasing its lock and leaving a live
@@ -116,9 +143,11 @@ fn claim_stage_area(root: &std::path::Path, id: &str) -> std::path::PathBuf {
     static LEASES: std::sync::Mutex<Vec<std::fs::File>> = std::sync::Mutex::new(Vec::new());
     let pending = root.join(format!("{STAGE_PENDING}{id}"));
     let published = root.join(format!("{STAGE_PUBLISHED}{id}"));
-    std::fs::create_dir_all(&pending)
-        .unwrap_or_else(|error| panic!("create stage area {}: {error}", pending.display()));
-    let lease_path = pending.join(STAGE_LEASE);
+    let lease_path = stage_lease_path(root, id);
+    // The lease is a sibling of the area, so the root has to exist before it can
+    // be created — creating the area no longer brings the root along with it.
+    std::fs::create_dir_all(root)
+        .unwrap_or_else(|error| panic!("create staging root {}: {error}", root.display()));
     let lease = std::fs::File::create(&lease_path)
         .unwrap_or_else(|error| panic!("create stage lease {}: {error}", lease_path.display()));
     lease
@@ -126,21 +155,39 @@ fn claim_stage_area(root: &std::path::Path, id: &str) -> std::path::PathBuf {
         .unwrap_or_else(|error| panic!("lock stage lease {}: {error}", lease_path.display()));
     use std::io::Write;
     let _ = (&lease).write_all(std::process::id().to_string().as_bytes());
-    std::fs::rename(&pending, &published)
-        .unwrap_or_else(|error| panic!("publish stage area {}: {error}", published.display()));
-    // Held for the process lifetime: statics are never dropped, which is exactly
-    // the lifetime these locks need.
+    // Retained BEFORE anything is visible, so the retention window strictly
+    // contains the visibility window. Held for the process lifetime: statics are
+    // never dropped, which is exactly the lifetime these locks need.
     LEASES
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .push(lease);
+    std::fs::create_dir_all(&pending)
+        .unwrap_or_else(|error| panic!("create stage area {}: {error}", pending.display()));
+    std::fs::rename(&pending, &published)
+        .unwrap_or_else(|error| panic!("publish stage area {}: {error}", published.display()));
     published
 }
 
-/// How long an ABANDONED pending area may sit before it is reclaimed.
+/// Where the lease naming area `id` under `root` lives.
+fn stage_lease_path(root: &std::path::Path, id: &str) -> std::path::PathBuf {
+    root.join(format!("{STAGE_LEASE_PREFIX}{id}"))
+}
+
+/// The sibling lease naming `area`, when its directory name carries an id.
+fn sibling_lease_for(area: &std::path::Path) -> Option<std::path::PathBuf> {
+    let root = area.parent()?;
+    let name = area.file_name()?.to_string_lossy();
+    let id = [STAGE_PUBLISHED, STAGE_PENDING, STAGE_LEGACY]
+        .into_iter()
+        .find_map(|prefix| name.strip_prefix(prefix))?;
+    Some(stage_lease_path(root, id))
+}
+
+/// How long ABANDONED construction debris may sit before it is reclaimed.
 ///
-/// Applies only to the construction prefix, which holds a lease file and nothing
-/// else and lives for microseconds. A published area is NEVER judged by age.
+/// Applies to the construction prefix, which lives for microseconds, and to a
+/// lease whose area is gone. A published area is NEVER judged by age.
 const STAGE_PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Reclaim stage areas whose owning process has exited.
@@ -165,14 +212,21 @@ fn reap_unowned_stage_areas(root: &std::path::Path, pending_cutoff: std::time::S
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        // A lease is a FILE beside the areas, judged by its own rule: nothing
+        // below may treat it as a directory to remove wholesale.
+        if name.starts_with(STAGE_LEASE_PREFIX) {
+            if lease_is_orphaned(&entry.path(), root, pending_cutoff) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            continue;
+        }
         let reclaimable = if name.starts_with(STAGE_PUBLISHED) {
             published_area_is_unowned(&entry.path())
         } else if name.starts_with(STAGE_PENDING) {
             // Ownership FIRST here too. A creator holds its pending lease while
             // it works, so age alone would delete a live tree out from under a
             // process that is merely slow — or one the clock jumped past.
-            published_area_is_unowned(&entry.path())
-                && pending_area_is_abandoned(&entry.path(), pending_cutoff)
+            published_area_is_unowned(&entry.path()) && aged_out(&entry.path(), pending_cutoff)
         } else if name.starts_with(STAGE_LEGACY) {
             // Areas from the implementation that named them `test-*`. They carry
             // a lease, so ownership still decides; without this arm they would be
@@ -182,41 +236,116 @@ fn reap_unowned_stage_areas(root: &std::path::Path, pending_cutoff: std::time::S
             false
         };
         if reclaimable {
-            let _ = std::fs::remove_dir_all(entry.path());
+            reclaim_stage_area(&entry.path());
         }
     }
+}
+
+/// Remove an unowned area and the lease that named it.
+///
+/// The AREA goes first. A lease removed ahead of its area leaves the area
+/// leaseless in between, and a leaseless area is kept forever by design — so a
+/// crash in that order converts reclaimable debris into a permanent orphan. The
+/// completed order leaves at worst a lease naming nothing, which
+/// [`lease_is_orphaned`] reclaims on the next pass.
+///
+/// The lease goes ONLY once the area is actually gone. `remove_dir_all` can
+/// fail routinely — a concurrent reaper racing the same tree, a read-only
+/// attribute, a still-open handle — and a surviving area whose lease was
+/// removed anyway is leaseless, so kept forever. Keeping the lease keeps the
+/// pair reclaimable on the next pass instead.
+fn reclaim_stage_area(area: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(area);
+    if area.exists() {
+        return;
+    }
+    if let Some(lease) = sibling_lease_for(area) {
+        let _ = std::fs::remove_file(lease);
+    }
+}
+
+/// Whether a lease file is debris.
+///
+/// Three conditions, every one required. The area it names must be GONE — a lease
+/// belonging to a live or merely idle area is not debris, and this is what keeps
+/// the sweep from racing the areas it sits beside. Its lock must be takeable, so
+/// a creator that has locked its lease but not yet created its area keeps it. And
+/// it must be old, which covers the sliver between creating the file and locking
+/// it: inside that window the lock IS takeable and the area does not exist yet,
+/// and unlinking there would leave the creator holding a lock on an unlinked file
+/// with nothing left to advertise its ownership.
+fn lease_is_orphaned(
+    lease: &std::path::Path,
+    root: &std::path::Path,
+    cutoff: std::time::SystemTime,
+) -> bool {
+    let Some(name) = lease.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    let Some(id) = name.strip_prefix(STAGE_LEASE_PREFIX) else {
+        return false;
+    };
+    let names_an_existing_area = [STAGE_PUBLISHED, STAGE_PENDING, STAGE_LEGACY]
+        .into_iter()
+        .any(|prefix| root.join(format!("{prefix}{id}")).exists());
+    !names_an_existing_area && lease_is_unheld(lease) == Some(true) && aged_out(lease, cutoff)
 }
 
 /// Whether a PUBLISHED area's owner has exited.
 ///
-/// Fails CLOSED everywhere. A published area always carries a locked lease at
-/// the instant it becomes visible, so an unreadable lease is an anomaly, not the
-/// ordinary case — and it is treated as owned FOREVER rather than reclaimed on a
-/// timer, because wrongly keeping an area costs disk while wrongly deleting one
-/// destroys a running test's workspace.
+/// Two places can hold an area's lease — beside it, and inside it — so both are
+/// consulted and ANY held lease means owned. Only the sibling is ever written;
+/// the inside location is read so that areas already carrying one there remain
+/// judgeable rather than orphaned.
+///
+/// Fails CLOSED everywhere. A published area always has a locked lease at the
+/// instant it becomes visible, so finding no readable lease at all is an anomaly,
+/// not the ordinary case — and it is treated as owned FOREVER rather than
+/// reclaimed on a timer, because wrongly keeping an area costs disk while wrongly
+/// deleting one destroys a running test's workspace.
 fn published_area_is_unowned(area: &std::path::Path) -> bool {
-    let Ok(lease) = std::fs::File::open(area.join(STAGE_LEASE)) else {
-        return false;
-    };
-    match lease.try_lock() {
-        // Acquired: the owner released it by exiting.
-        Ok(()) => {
-            let _ = lease.unlock();
-            true
+    let mut released = false;
+    for lease in sibling_lease_for(area)
+        .into_iter()
+        .chain(std::iter::once(area.join(STAGE_LEASE)))
+    {
+        match lease_is_unheld(&lease) {
+            // Absent, or unreadable: no signal here. An area with no signal
+            // anywhere leaves `released` false and so reads as owned.
+            None => continue,
+            // Acquired: whoever held this lease released it by exiting.
+            Some(true) => released = true,
+            // Still held, or unknowable. Leave the area alone.
+            Some(false) => return false,
         }
-        // Still held, or unknowable. Leave it.
-        Err(std::fs::TryLockError::WouldBlock) => false,
-        Err(std::fs::TryLockError::Error(_)) => false,
+    }
+    released
+}
+
+/// Whether a lease's lock is free — `None` when the file cannot be read at all.
+///
+/// An unreadable lease is reported as no signal rather than as free, so every
+/// caller composing this into a removal decision fails closed by default.
+fn lease_is_unheld(lease: &std::path::Path) -> Option<bool> {
+    let file = std::fs::File::open(lease).ok()?;
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            Some(true)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Some(false),
+        Err(std::fs::TryLockError::Error(_)) => Some(false),
     }
 }
 
-/// Whether a PENDING area is old enough to be debris.
+/// Whether a path's own mtime predates `cutoff`.
 ///
-/// Only consulted AFTER ownership says the creator is gone, so this never
-/// decides the fate of a live area — it distinguishes a crashed creator's
-/// leftovers from one that is merely between `create_dir_all` and `rename`.
-fn pending_area_is_abandoned(area: &std::path::Path, cutoff: std::time::SystemTime) -> bool {
-    std::fs::metadata(area)
+/// Only ever consulted AFTER ownership says the creator is gone, so age never
+/// decides the fate of live work — it separates a crashed creator's leftovers
+/// from one that is merely between `create_dir_all` and `rename`.
+fn aged_out(path: &std::path::Path, cutoff: std::time::SystemTime) -> bool {
+    std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .is_ok_and(|modified| modified < cutoff)
 }
@@ -860,6 +989,223 @@ mod tests {
         drop(pending_held);
     }
 
+    /// Ownership read from a SIBLING lease must decide an area's fate exactly as
+    /// an inside one does, reclaiming a lease along with the area it named, and a
+    /// lease naming no area must be swept — but only once it is old.
+    ///
+    /// The age condition is what keeps the sweep off a creator that has taken its
+    /// lease and not yet built its area, so it is driven in BOTH directions here:
+    /// a cutoff in the past must spare the orphan, and only a cutoff past its
+    /// mtime may take it.
+    #[test]
+    fn reaping_judges_sibling_leases_and_sweeps_only_an_aged_lease_naming_no_area() {
+        let temporary = tempfile::tempdir().expect("create sibling-lease scratch root");
+        let root = temporary.path().join("verter-fixture-stage");
+        std::fs::create_dir_all(&root).expect("create staging root");
+
+        // Owned: a sibling lease held for the duration of this test, exactly as a
+        // live test process holds its own.
+        let owned = root.join(format!("{STAGE_PUBLISHED}sibling-owned"));
+        std::fs::create_dir_all(owned.join("single-project")).expect("plant owned area");
+        let owned_lease = root.join(format!("{STAGE_LEASE_PREFIX}sibling-owned"));
+        let held = std::fs::File::create(&owned_lease).expect("create owned sibling lease");
+        held.lock().expect("hold owned sibling lease");
+
+        // Unowned: a sibling lease nobody holds, as an exited process leaves.
+        let unowned = root.join(format!("{STAGE_PUBLISHED}sibling-unowned"));
+        std::fs::create_dir_all(unowned.join("single-project")).expect("plant unowned area");
+        let unowned_lease = root.join(format!("{STAGE_LEASE_PREFIX}sibling-unowned"));
+        drop(std::fs::File::create(&unowned_lease).expect("create unowned sibling lease"));
+
+        // A lease naming NO area: what a creator leaves by dying between taking
+        // its lease and building its area.
+        let orphan = root.join(format!("{STAGE_LEASE_PREFIX}no-such-area"));
+        drop(std::fs::File::create(&orphan).expect("create orphan lease"));
+
+        // A lease naming no area whose lock is HELD: a creator inside the window
+        // between locking its lease and building its area. Heldness — not the
+        // missing area, not age — is what must spare it once it looks old.
+        let held_no_area = root.join(format!("{STAGE_LEASE_PREFIX}held-no-area"));
+        let held_no_area_lock =
+            std::fs::File::create(&held_no_area).expect("create held no-area lease");
+        held_no_area_lock.lock().expect("hold the no-area lease");
+
+        // An area owned through an INSIDE lease (the pre-sibling format) whose
+        // sibling lease is unheld and will look aged. The area arm spares the
+        // area (owned), so only the lease arm's existing-area check protects the
+        // sibling — in every directory-iteration order.
+        let inside_owned = root.join(format!("{STAGE_PUBLISHED}inside-owned"));
+        std::fs::create_dir_all(&inside_owned).expect("plant inside-owned area");
+        let inside_lease_lock =
+            std::fs::File::create(inside_owned.join(STAGE_LEASE)).expect("create inside lease");
+        inside_lease_lock.lock().expect("hold the inside lease");
+        let inside_owned_sibling = root.join(format!("{STAGE_LEASE_PREFIX}inside-owned"));
+        drop(std::fs::File::create(&inside_owned_sibling).expect("create unheld sibling"));
+
+        // Prove the plants read as intended BEFORE any reaping, or the outcomes
+        // below are not attributable to the rule under test.
+        assert!(
+            owned_lease.is_file() && unowned_lease.is_file() && orphan.is_file(),
+            "the three leases must be planted beside the areas, not inside them"
+        );
+        assert!(
+            !published_area_is_unowned(&owned),
+            "a HELD sibling lease must read as owned: {}",
+            owned.display()
+        );
+        assert!(
+            published_area_is_unowned(&unowned),
+            "an unheld sibling lease must read as reclaimable: {}",
+            unowned.display()
+        );
+
+        // A cutoff in the PAST: nothing is old. A published area is never judged
+        // by age, so the unowned one still goes — but the orphan lease must stay.
+        reap_unowned_stage_areas(&root, std::time::UNIX_EPOCH);
+        assert!(
+            orphan.is_file(),
+            "a lease younger than the cutoff must be spared — this is the window \
+             in which a creator has its lease but not yet its area: {}",
+            orphan.display()
+        );
+        assert!(
+            !unowned.exists(),
+            "an unowned published area is reclaimed on ownership, not age: {}",
+            unowned.display()
+        );
+        assert!(
+            !unowned_lease.exists(),
+            "reclaiming an area must take the lease that named it: {}",
+            unowned_lease.display()
+        );
+
+        // A cutoff in the FUTURE makes every lease look abandoned by age. Only
+        // ownership and a missing area may spare one.
+        let everything_looks_old =
+            std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        reap_unowned_stage_areas(&root, everything_looks_old);
+        assert!(
+            !orphan.exists(),
+            "an aged lease naming no area must be swept: {}",
+            orphan.display()
+        );
+        assert!(
+            owned.exists(),
+            "reaping must spare an area whose owner still holds its sibling lease: {}",
+            owned.display()
+        );
+        assert!(
+            owned_lease.is_file(),
+            "a held lease naming a live area must survive both passes: {}",
+            owned_lease.display()
+        );
+        assert!(
+            held_no_area.is_file(),
+            "an aged lease naming no area must be spared while its lock is HELD — \
+             heldness alone protects the lock-taken-area-not-yet-built window: {}",
+            held_no_area.display()
+        );
+        assert!(
+            inside_owned_sibling.is_file(),
+            "an aged unheld sibling lease naming a LIVE (inside-owned) area must \
+             never be swept by the lease arm — the existing-area check alone \
+             protects it, since the area arm spares the owned area: {}",
+            inside_owned_sibling.display()
+        );
+        assert!(
+            inside_owned.exists(),
+            "an area owned through its inside lease must survive: {}",
+            inside_owned.display()
+        );
+
+        drop(held);
+        drop(held_no_area_lock);
+        drop(inside_lease_lock);
+    }
+
+    /// A failed area removal must keep the sibling lease. A surviving area whose
+    /// lease was removed is leaseless, and a leaseless area is kept forever by
+    /// design — so dropping the lease after a FAILED `remove_dir_all` converts
+    /// retryable debris into a permanent orphan. Keeping it leaves the pair
+    /// reclaimable on the next pass, which the second reap below proves.
+    #[test]
+    fn a_failed_area_removal_keeps_the_lease_so_the_area_stays_reclaimable() {
+        let temporary = tempfile::tempdir().expect("create failed-reclaim scratch root");
+        let root = temporary.path().join("verter-fixture-stage");
+        std::fs::create_dir_all(&root).expect("create staging root");
+
+        // An unowned area with a removal blocker inside it, and the unheld
+        // sibling lease its dead owner left behind.
+        let area = root.join(format!("{STAGE_PUBLISHED}stuck-reclaim"));
+        let blocker_dir = area.join("blocker");
+        std::fs::create_dir_all(&blocker_dir).expect("plant blocker dir");
+        let pinned = blocker_dir.join("pinned.txt");
+        std::fs::write(&pinned, b"pinned").expect("plant pinned file");
+        // Windows blocker: a handle opened WITHOUT `FILE_SHARE_DELETE`. Rust's
+        // default open grants all three share flags, and `remove_dir_all` sets
+        // `IGNORE_READONLY_ATTRIBUTE`, so neither a plain handle nor a readonly
+        // attribute blocks removal — a no-share-delete handle is the one thing
+        // its POSIX-semantics deletion cannot override.
+        #[cfg(windows)]
+        let pin_handle = {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_SHARE_READ_WRITE_ONLY: u32 = 0x1 | 0x2;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ_WRITE_ONLY)
+                .open(&pinned)
+                .expect("pin the file with a no-share-delete handle")
+        };
+        // POSIX blocker: a read-only DIRECTORY refuses unlinking its children
+        // (open handles do not gate unlink there; the parent's mode does).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&blocker_dir, std::fs::Permissions::from_mode(0o555))
+                .expect("pin the blocker dir read-only");
+        }
+        let lease = root.join(format!("{STAGE_LEASE_PREFIX}stuck-reclaim"));
+        drop(std::fs::File::create(&lease).expect("create unheld sibling lease"));
+
+        reap_unowned_stage_areas(&root, std::time::UNIX_EPOCH);
+
+        assert!(
+            area.exists(),
+            "the removal blocker must have armed — a reap that fully removed the \
+             area proves nothing about the failed-removal path: {}",
+            area.display()
+        );
+        assert!(
+            lease.is_file(),
+            "a lease must survive a FAILED area removal, or the surviving area \
+             becomes leaseless and is kept forever: {}",
+            lease.display()
+        );
+        assert!(
+            published_area_is_unowned(&area),
+            "the surviving pair must still read as reclaimable, not orphaned: {}",
+            area.display()
+        );
+
+        // Clear the blockers: the next pass must heal the debris completely.
+        #[cfg(windows)]
+        drop(pin_handle);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&blocker_dir, std::fs::Permissions::from_mode(0o755))
+                .expect("unpin the blocker dir");
+        }
+
+        reap_unowned_stage_areas(&root, std::time::UNIX_EPOCH);
+        assert!(
+            !area.exists() && !lease.exists(),
+            "with the blocker cleared the pair must reclaim together: {} / {}",
+            area.display(),
+            lease.display()
+        );
+    }
+
     /// The published name must never exist unlocked: publication is a rename of
     /// an already-locked area, so no reaper can observe the window in which an
     /// area is visible but unowned.
@@ -890,6 +1236,73 @@ mod tests {
                 .join(format!("{STAGE_PENDING}publication-probe"))
                 .exists(),
             "the construction name must not survive publication"
+        );
+    }
+
+    /// Publication must SUCCEED while the area's lease is held, and the lease
+    /// must not live inside the directory publication renames.
+    ///
+    /// Those are one requirement seen from both ends. A rename target holding an
+    /// open handle anywhere in its subtree is refused on Windows — measured to be
+    /// independent of share mode, of whether the handle is locked, and of nesting
+    /// depth — so a lease inside the area makes every claim fail on every Windows
+    /// machine by construction while staying invisible on POSIX. Asserting only
+    /// that the publish happened would pass on POSIX for a layout that cannot
+    /// work; asserting only the layout would pass without proving publication.
+    #[test]
+    fn a_claimed_area_publishes_while_its_lease_is_held() {
+        let temporary = tempfile::tempdir().expect("create lease-layout scratch root");
+        let root = temporary.path().join("verter-fixture-stage");
+        // Deliberately NOT pre-created: the lease is a sibling of the area, so
+        // claiming has to bring the root along before it can take the lease.
+        assert!(!root.exists(), "the staging root must not pre-exist");
+
+        let published = claim_stage_area(&root, "held-lease-probe");
+
+        let sibling = root.join(format!("{STAGE_LEASE_PREFIX}held-lease-probe"));
+        assert!(
+            published.is_dir(),
+            "publication must have produced the area: {}",
+            published.display()
+        );
+        assert!(
+            !published.join(STAGE_LEASE).exists(),
+            "the renamed directory must contain no lease file — an open handle \
+             under a rename target is exactly what publication cannot survive: {}",
+            published.join(STAGE_LEASE).display()
+        );
+        assert!(
+            sibling.is_file(),
+            "the lease must exist beside the area, not inside it: {}",
+            sibling.display()
+        );
+        assert!(
+            !root
+                .join(format!("{STAGE_PENDING}held-lease-probe"))
+                .exists(),
+            "the construction name must not survive publication"
+        );
+
+        // Moving the lease must not cost the ownership signal it carries: the
+        // area is owned the instant it is visible, and stays owned under a reaper
+        // whose every age test says otherwise.
+        assert!(
+            !published_area_is_unowned(&published),
+            "the area must read as OWNED through its sibling lease: {}",
+            published.display()
+        );
+        let everything_looks_old =
+            std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        reap_unowned_stage_areas(&root, everything_looks_old);
+        assert!(
+            published.is_dir(),
+            "reaping must spare an area whose lease is held: {}",
+            published.display()
+        );
+        assert!(
+            sibling.is_file(),
+            "reaping must not sweep the lease of a live area: {}",
+            sibling.display()
         );
     }
 
@@ -930,13 +1343,34 @@ mod tests {
             "the two installs must be distinguishable"
         );
 
+        // Both sides of every comparison below go through the canonical-id
+        // normalizer. A resolved tsserver path is canonicalized, which on Windows
+        // carries the `\\?\` verbatim prefix, and `Path::starts_with` matches whole
+        // COMPONENTS — `\\?\C:` and `C:` are different components, so a resolution
+        // that landed exactly where this test wanted still read as a miss. The
+        // trailing `/` keeps the string comparison on a component boundary —
+        // which `Path::starts_with` gave for free — so `node_modules_backup`
+        // can never satisfy a `node_modules` prefix.
+        let under = |directory: &str| {
+            format!(
+                "{}/",
+                crate::test_utils::canonical_test_path(&temporary.path().join(directory))
+            )
+        };
+        let ambient_tree = under("node_modules");
+        let configured_tree = under("configured");
+        assert_ne!(
+            ambient_tree, configured_tree,
+            "the two trees must be distinguishable after normalization too"
+        );
+
         let with_root = crate::tsserver::find_tsserver(
             Some(&tsdk),
             Some(&staged_root.to_string_lossy().replace('\\', "/")),
         )
         .expect("a workspace-rooted resolution must find something");
         assert!(
-            with_root.starts_with(temporary.path().join("node_modules")),
+            crate::test_utils::canonical_test_path(&with_root).starts_with(&ambient_tree),
             "the ancestor walk must outrank the configured tsdk — otherwise this \
              test cannot discriminate, got: {}",
             with_root.display()
@@ -945,7 +1379,7 @@ mod tests {
         let harness = crate::test_harness::harness_tsserver_path(&tsdk)
             .expect("the harness seam must resolve the configured tsdk");
         assert!(
-            harness.starts_with(temporary.path().join("configured")),
+            crate::test_utils::canonical_test_path(&harness).starts_with(&configured_tree),
             "the harness must run the TypeScript it names, not one found above \
              the staged root, got: {}",
             harness.display()
