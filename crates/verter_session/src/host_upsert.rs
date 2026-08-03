@@ -21,13 +21,6 @@ use crate::upsert::{build_upsert_result, UpsertResultData};
 use crate::VerterHost;
 use verter_scheduler::stage::Priority;
 
-/// Synthetic-source SFC block splicing behind the override upsert paths —
-/// pure text helpers with no host/cache/scheduler access (all
-/// upsert/eviction-relevant logic stays in THIS file, the single file the
-/// `host_upsert_performs_no_reverse_dependent_eviction` guard scans).
-#[allow(dead_code)] // B4 owns physical retirement; B2 makes this unreachable.
-mod block_splice;
-
 /// One per-request outcome from the shared upsert engine
 /// [`VerterHost::upsert_many_with_priority`]. `result` is the same
 /// `Result<HostUpdateResult, HostError>` the single-file
@@ -1100,6 +1093,40 @@ impl VerterHost {
             let source = &source_snap.source;
             let meta = &hd.parse.meta;
 
+            // Inventory-owned geometry: the ORIGINAL content handed to
+            // source-map remapping is the SELECTED style block's
+            // `content_span`, read from the registered inventory. The
+            // parser already owns block geometry (raw-text termination,
+            // case-insensitive close tags), so a raw delimiter search over
+            // the source bytes is forbidden here — it diverges from the
+            // parser on exactly the inputs that matter (`</style`-prefixed
+            // literals inside a style body, `</STYLE>` closes). Override
+            // indices are style ordinals, so the projection filters the
+            // inventory to style sections in source order — the same
+            // ordinal domain the style analyses are built from.
+            let style_content_slices: Vec<&str> = hd
+                .structure
+                .as_ref()
+                .map(|structure| {
+                    use verter_language::parse_artifact::carrier_inventory::{
+                        CarrierBlock, SectionRole,
+                    };
+                    let inventory = structure.inventory();
+                    inventory
+                        .blocks()
+                        .iter()
+                        .filter_map(|block| match block {
+                            CarrierBlock::Section {
+                                role: SectionRole::Style { .. },
+                                syntax,
+                                ..
+                            } => Some(inventory.slice_span(syntax.content_span).unwrap_or("")),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
             // Re-analyze compiled CSS and remap spans
             let mut analyses_vec: Vec<Option<verter_semantic::analysis::StyleBlockAnalysis>> =
                 vec![None; raw_style_analyses.len()];
@@ -1123,17 +1150,10 @@ impl VerterHost {
                     if let (Some(sm_json), Some(ref mut css)) =
                         (&ov.source_map, &mut new_analysis.css)
                     {
-                        let content_start = content_offset as usize;
-                        let original_content = if content_start < source.len() {
-                            let rest = &source[content_start..];
-                            if let Some(end) = rest.find("</style") {
-                                &rest[..end]
-                            } else {
-                                rest
-                            }
-                        } else {
-                            ""
-                        };
+                        // Fail-closed: no inventory entry for this ordinal
+                        // ⇒ empty original content (the remap degrades to
+                        // identity), never a raw-source scan.
+                        let original_content = style_content_slices.get(idx).copied().unwrap_or("");
                         crate::source_map_remap::remap_css_analysis_spans(
                             css,
                             &ov.code,
@@ -1217,25 +1237,21 @@ impl VerterHost {
 
     /// Apply preprocessed block overrides for template, script, style, and custom blocks.
     ///
-    /// Unified API that replaces the single-purpose `apply_style_overrides`.
-    /// Template/script overrides build a synthetic SFC source with the block
-    /// content replaced, then invalidate the compile slot so the next
-    /// `get_virtual_file` recompiles from the synthetic source. Style overrides
-    /// delegate to the existing style override logic.
+    /// The interim contract of this surface (see
+    /// `docs/arch/scanners-replacement-preprocessor-interim.md`):
     ///
-    /// **A `lang` attribute is stripped only when it names a PREPROCESSOR
-    /// language** — one whose override content has already been compiled to
-    /// something the compiler reads, so a tag still claiming `coffee` would be
-    /// lying. A NATIVE script dialect (`ts`/`tsx`/`js`/`jsx`) is KEPT: the
-    /// override of a `<script lang="ts">` block is still TypeScript, and that
-    /// attribute is the only thing on the synthetic source that says so.
-    /// Stripping it changes both how the body is PARSED (`defineProps<T>()` and
-    /// every type annotation stop being syntax, so the macro is silently not
-    /// found) and how the generated companion is LABELLED (`.jsx`, which is
-    /// never typechecked). See `block_splice::build_synthetic_source`.
-    ///
-    /// This is a PUBLIC surface, reachable from the NAPI and WASM bindings'
-    /// `applyBlockOverrides`, so both behaviours are user-visible.
+    /// - **Template/script CONTENT overrides refuse with the typed
+    ///   [`HostError::ExternalBlockContentDeferred`] (acceptance `B-23`).**
+    ///   Recompiling from a spliced synthetic carrier source is
+    ///   unrepresentable; the typed refusal is the sole result until the
+    ///   typed block-content admission path lands.
+    /// - **Style overrides (and custom blocks routed through style
+    ///   analysis) stay LIVE**: they delegate to
+    ///   [`Self::apply_style_overrides`], which layers the compiled CSS into
+    ///   the per-profile compile slot WITHOUT reparsing the carrier.
+    /// - **The surface itself remains reachable** from the NAPI and WASM
+    ///   bindings' `applyBlockOverrides` (and the unplugin
+    ///   `BlockPreprocessor`), so both behaviours are user-visible.
     pub fn apply_block_overrides(
         &self,
         req: BlockOverrideRequest,

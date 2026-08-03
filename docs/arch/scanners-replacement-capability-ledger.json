@@ -89,22 +89,22 @@
                                    "acceptance_id":  "B-18"
                                },
     "set_equality":  {
-                         "independently_discovered_candidates":  38,
-                         "classified_ledger_rows":  38,
+                         "independently_discovered_candidates":  36,
+                         "classified_ledger_rows":  36,
                          "explicitly_allowed_references":  0,
                          "unclassified_runtime_rows":  0,
                          "deferred_runtime_rows":  0,
                          "proof":  "sorted independently discovered (path,symbol) identities equal sorted ledger identities; discovery inputs are never the ledger"
                      },
     "statistics":  {
-                       "rows_total":  38,
+                       "rows_total":  36,
                        "by_capability_class":  {
-                                                   "manual_geometry":  7,
+                                                   "manual_geometry":  6,
                                                    "nested_language_parser":  2,
                                                    "pre_registration_probe":  1,
                                                    "public_projection":  1,
                                                    "carrier_parser":  6,
-                                                   "synthetic_carrier":  7,
+                                                   "synthetic_carrier":  6,
                                                    "shipped_bundle":  8,
                                                    "root_scanner":  1,
                                                    "ordinal_identity":  1,
@@ -114,7 +114,7 @@
                        "by_disposition":  {
                                 "allowed_standalone":  1,
                                 "migrate":  7,
-                                "delete":  28,
+                                "delete":  26,
                                 "allowed_nested":  2
                                           }
                    },
@@ -309,38 +309,6 @@
                      "disposition":  "delete",
                      "acceptance_id":  "B-83",
                      "test":  "scanners_replacement_b_83",
-                     "architecture_guard":  "scanners_replacement_candidate_set_equality"
-                 },
-                 {
-                     "path":  "crates/verter_session/src/host_upsert.rs",
-                     "symbol":  "manual_style_close_search",
-                     "runtime_role":  "production_runtime",
-                     "provenance":  "source",
-                     "shipped_artifact":  null,
-                     "shipping_target":  null,
-                     "rust_target":  null,
-                     "candidate_evidence":  "tracked_source@0f28184d76:L1097",
-                     "processor_authority":  null,
-                     "capability_class":  "manual_geometry",
-                     "disposition":  "delete",
-                     "acceptance_id":  "B-26",
-                     "test":  "registered_structure_parser_geometry_only",
-                     "architecture_guard":  "registered_consumers_accept_structure_capability"
-                 },
-                 {
-                     "path":  "crates/verter_session/src/host_upsert/block_splice.rs",
-                     "symbol":  "build_synthetic_source",
-                     "runtime_role":  "production_runtime",
-                     "provenance":  "source",
-                     "shipped_artifact":  null,
-                     "shipping_target":  null,
-                     "rust_target":  null,
-                     "candidate_evidence":  "tracked_source",
-                     "processor_authority":  null,
-                     "capability_class":  "synthetic_carrier",
-                     "disposition":  "delete",
-                     "acceptance_id":  "B-44",
-                     "test":  "scanners_replacement_b_44",
                      "architecture_guard":  "scanners_replacement_candidate_set_equality"
                  },
                  {
@@ -883,32 +851,6 @@
                                 "edit":  "required",
                                 "close_reopen":  "required",
                                 "test":  "scanners_replacement_b_83",
-                                "audit_assertion":  "alternate producer/root-scan counter zero or typed admission event"
-                            },
-                            {
-                                "path":  "crates/verter_session/src/host_upsert.rs",
-                                "symbol":  "manual_style_close_search",
-                                "Vue":  "required",
-                                "Svelte":  "required",
-                                "cold":  "required",
-                                "warm":  "required",
-                                "pre_semantic":  "required",
-                                "edit":  "required",
-                                "close_reopen":  "required",
-                                "test":  "registered_structure_parser_geometry_only",
-                                "audit_assertion":  "alternate producer/root-scan counter zero or typed admission event"
-                            },
-                            {
-                                "path":  "crates/verter_session/src/host_upsert/block_splice.rs",
-                                "symbol":  "build_synthetic_source",
-                                "Vue":  "required",
-                                "Svelte":  "required",
-                                "cold":  "required",
-                                "warm":  "required",
-                                "pre_semantic":  "required",
-                                "edit":  "required",
-                                "close_reopen":  "required",
-                                "test":  "scanners_replacement_b_44",
                                 "audit_assertion":  "alternate producer/root-scan counter zero or typed admission event"
                             },
                             {
