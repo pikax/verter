@@ -421,9 +421,8 @@ fn ensure_compiled_warm_path_validates_compile_slot_fact_signature() {
 /// `src=` template-block edit.
 ///
 /// `Comp.vue` has `<template src="./tpl.html">`. The external file
-/// content is spliced verbatim into the compiled output by
-/// `merge_external_sources`, so editing `tpl.html` must invalidate
-/// the consumer compile slot.
+/// content participates in the compile output, so editing `tpl.html` must
+/// invalidate the consumer compile slot.
 ///
 /// If `external_requests` is not passed to the compile-tier producer,
 /// the SFC's `fact_dep_signature` is completely empty, which trivially

@@ -10,11 +10,7 @@
 //!   eval-program pipeline. It copies each script block's content to its
 //!   RAW SFC byte range and whitespace-blanks every non-script byte, so
 //!   every OXC-produced span is SFC-absolute by construction. Carrier
-//!   parse spans are used when they agree with the raw scan; otherwise it
-//!   falls through to the raw scanner.
-//! - The forgiving raw-byte scanner used as a fall-back when the parser
-//!   produced lossy spans (`script_content_spans_from_*` and the ASCII
-//!   tag/needle helpers).
+//!   parser-owned spans are the sole geometry source.
 //! - The `<script setup generic="…">` type-parameter reader
 //!   (`sfc_script_setup_type_params`) and the component-meta
 //!   `populate_ordered_sfc_structure` — Vue-semantic leaves that open the
@@ -95,30 +91,11 @@ pub(crate) fn sfc_script_setup_type_params(
 /// parser produces from this source is SFC-ABSOLUTE by construction — there is
 /// no compact-concatenation coordinate system to translate back from.
 ///
-/// Cached parse spans are used when they agree with a raw-source scan. If the
-/// parser produced lossy spans for forgiving SFC input, fall back to the raw
-/// scan so type resolution still sees the original script text.
 pub(crate) fn extract_vue_script_content(
     source: &str,
-    parsed_sfc: Option<&verter_compiler::parser::types::ParsedSfc>,
+    parsed_sfc: &verter_compiler::parser::types::ParsedSfc,
 ) -> Option<String> {
-    let scanned = script_content_spans_from_source(source);
-    let parsed = parsed_sfc.and_then(script_content_spans_from_parsed);
-
-    // Prefer the parser's spans when they AGREE with the raw scan (same
-    // semantics as the previous compact extractor, which compared the two
-    // concatenated strings). On disagreement / parser miss, the raw scan is
-    // authoritative so forgiving SFC input still yields script text.
-    let spans = match (parsed, scanned) {
-        (Some(parsed), Some(scanned)) if parsed == scanned => parsed,
-        (_, Some(scanned)) => scanned,
-        (Some(parsed), None) => parsed,
-        (None, None) => return None,
-    };
-    if spans.is_empty() {
-        return None;
-    }
-
+    let spans = script_content_spans_from_parsed(parsed_sfc)?;
     Some(build_position_preserving_script_source(source, &spans))
 }
 
@@ -135,163 +112,6 @@ fn script_content_spans_from_parsed(
         .collect();
     spans.sort_by_key(|(start, _)| *start);
     (!spans.is_empty()).then_some(spans)
-}
-
-/// Forgiving raw-byte scanner: collect the sorted `<script>` content byte
-/// ranges from SFC source when the parser produced lossy spans. Ranges are RAW
-/// SFC byte offsets `[start, end)`.
-fn script_content_spans_from_source(source: &str) -> Option<Vec<(u32, u32)>> {
-    const SCRIPT_OPEN: &[u8] = b"<script";
-    const SCRIPT_CLOSE: &[u8] = b"</script>";
-
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    let mut spans: Vec<(u32, u32)> = Vec::new();
-
-    while let Some(open_start) = find_ascii_tag(bytes, SCRIPT_OPEN, cursor) {
-        let Some(tag_end) = find_tag_end(bytes, open_start) else {
-            break;
-        };
-        if is_self_closing_tag(bytes, tag_end) {
-            cursor = tag_end.saturating_add(1);
-            continue;
-        }
-
-        let content_start = tag_end.saturating_add(1);
-        // Close tag must be found with JS-aware scanning: a comment or string
-        // containing `` `<style scoped>` `` / `"</script>"` must NOT truncate
-        // the script block (reka-ui RadioGroupItem, and the existing
-        // `</script>`-in-string case).
-        let Some(close_start) = find_script_close_outside_js_context(bytes, content_start) else {
-            cursor = content_start;
-            continue;
-        };
-
-        if close_start > content_start && source.is_char_boundary(content_start) {
-            spans.push((content_start as u32, close_start as u32));
-        }
-        cursor = close_start.saturating_add(SCRIPT_CLOSE.len());
-    }
-
-    spans.sort_by_key(|(start, _)| *start);
-    (!spans.is_empty()).then_some(spans)
-}
-
-/// Find the first `</script>` after `from` that is not inside a JS string,
-/// template literal, or line/block comment.
-///
-/// A naive scan that stops at the next SFC root tag (`<style` / `<template`)
-/// false-positives on comments like `` // `<style scoped>` keeps working ``,
-/// truncating the setup block and dropping every `defineProps` macro.
-fn find_script_close_outside_js_context(bytes: &[u8], from: usize) -> Option<usize> {
-    const CLOSE: &[u8] = b"</script>";
-    if from >= bytes.len() {
-        return None;
-    }
-
-    let mut i = from;
-    // 0 = code, 1 = line comment, 2 = block comment, 3 = ', 4 = ", 5 = `
-    let mut state: u8 = 0;
-
-    while i < bytes.len() {
-        let b = bytes[i];
-        match state {
-            0 => {
-                // Line comment
-                if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
-                    state = 1;
-                    i += 2;
-                    continue;
-                }
-                // Block comment
-                if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-                    state = 2;
-                    i += 2;
-                    continue;
-                }
-                // Quotes
-                if b == b'\'' {
-                    state = 3;
-                    i += 1;
-                    continue;
-                }
-                if b == b'"' {
-                    state = 4;
-                    i += 1;
-                    continue;
-                }
-                if b == b'`' {
-                    state = 5;
-                    i += 1;
-                    continue;
-                }
-                // Potential </script> (case-insensitive). The needle already
-                // ENDS in `>` — the match is a complete close tag, so no
-                // after-byte boundary check applies (an after-byte rule
-                // belongs to a `<script`-PREFIX needle; requiring one here
-                // silently dropped spans for the adjacent
-                // `</script><template>` spelling).
-                if b == b'<'
-                    && i + CLOSE.len() <= bytes.len()
-                    && bytes[i..i + CLOSE.len()].eq_ignore_ascii_case(CLOSE)
-                {
-                    return Some(i);
-                }
-                i += 1;
-            }
-            1 => {
-                // Line comment ends at newline
-                if b == b'\n' || b == b'\r' {
-                    state = 0;
-                }
-                i += 1;
-            }
-            2 => {
-                // Block comment ends at */
-                if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                    state = 0;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            3 => {
-                // Single-quoted string (no multi-line escape handling beyond \')
-                if b == b'\\' {
-                    i = (i + 2).min(bytes.len());
-                    continue;
-                }
-                if b == b'\'' {
-                    state = 0;
-                }
-                i += 1;
-            }
-            4 => {
-                if b == b'\\' {
-                    i = (i + 2).min(bytes.len());
-                    continue;
-                }
-                if b == b'"' {
-                    state = 0;
-                }
-                i += 1;
-            }
-            5 => {
-                // Template literal: ignore ${} nesting for close-tag search;
-                // only unescaped ` ends the template.
-                if b == b'\\' {
-                    i = (i + 2).min(bytes.len());
-                    continue;
-                }
-                if b == b'`' {
-                    state = 0;
-                }
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    None
 }
 
 /// Build a same-length, position-preserving script-only source.
@@ -361,69 +181,6 @@ pub(crate) fn build_position_preserving_script_source(
         // boundary is already a corrupt-span bug surfaced elsewhere.
         String::from_utf8_lossy(err.as_bytes()).into_owned()
     })
-}
-
-fn find_ascii_tag(bytes: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || bytes.len() < needle.len() || from >= bytes.len() {
-        return None;
-    }
-
-    let last_start = bytes.len() - needle.len();
-    let mut idx = from;
-    while idx <= last_start {
-        if bytes[idx..idx + needle.len()].eq_ignore_ascii_case(needle)
-            && matches!(
-                bytes.get(idx + needle.len()),
-                None | Some(b'>')
-                    | Some(b'/')
-                    | Some(b' ')
-                    | Some(b'\t')
-                    | Some(b'\n')
-                    | Some(b'\r')
-            )
-        {
-            return Some(idx);
-        }
-        idx += 1;
-    }
-    None
-}
-
-fn find_tag_end(bytes: &[u8], open_start: usize) -> Option<usize> {
-    let mut idx = open_start.saturating_add(1);
-    let mut quote = None;
-
-    while idx < bytes.len() {
-        let ch = bytes[idx];
-        match quote {
-            Some(active) if ch == active => quote = None,
-            Some(_) => {}
-            None if ch == b'\'' || ch == b'"' => quote = Some(ch),
-            None if ch == b'>' => return Some(idx),
-            None => {}
-        }
-        idx += 1;
-    }
-
-    None
-}
-
-fn is_self_closing_tag(bytes: &[u8], tag_end: usize) -> bool {
-    if tag_end == 0 {
-        return false;
-    }
-
-    let mut idx = tag_end;
-    while idx > 0 {
-        idx -= 1;
-        match bytes[idx] {
-            b' ' | b'\t' | b'\n' | b'\r' => continue,
-            b'/' => return true,
-            _ => return false,
-        }
-    }
-
-    false
 }
 
 /// Bind schema-8 metadata to the registered content-free structure.

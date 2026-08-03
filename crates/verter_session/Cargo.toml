@@ -71,7 +71,6 @@ external-corpus = []
 # `cargo nextest run -p verter_session --features compile-fail` (or
 # `cargo test`).
 compile-fail = []
-scanners-replacement-red = []
 # Phase 11b diagnosis benchmark: enables the corpus-driven
 # `repo_first_pass_diagnosis_corpus` integration test that the vitest
 # at `packages/benchmark/src/repo-first-pass.spec.ts` invokes via

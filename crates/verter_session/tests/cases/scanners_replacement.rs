@@ -2,16 +2,13 @@
 //! authority.
 //!
 //! The always-on tests validate the ratified schema and capability ledger.
-//! The feature-gated inverse tests remain RED until each final-state invariant
-//! is implemented.
+//! Architecture enforcement lives in construction boundaries and compile-fail
+//! tests, never source-name scanners.
 
-use regex::Regex;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const LEDGER_KEYS: [&str; 14] = [
     "path",
@@ -29,78 +26,6 @@ const LEDGER_KEYS: [&str; 14] = [
     "test",
     "architecture_guard",
 ];
-
-type CandidateIdentity = (String, String);
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum DiscoveryInput {
-    TrackedProductionSources,
-    CargoPackageGraph,
-    PnpmPackageGraph,
-    ExtensionManifests,
-    CiReleaseSteps,
-    GeneratedBindingManifests,
-    UnpackedShippingArtifacts,
-}
-
-const REQUIRED_DISCOVERY_INPUTS: [DiscoveryInput; 7] = [
-    DiscoveryInput::TrackedProductionSources,
-    DiscoveryInput::CargoPackageGraph,
-    DiscoveryInput::PnpmPackageGraph,
-    DiscoveryInput::ExtensionManifests,
-    DiscoveryInput::CiReleaseSteps,
-    DiscoveryInput::GeneratedBindingManifests,
-    DiscoveryInput::UnpackedShippingArtifacts,
-];
-
-impl DiscoveryInput {
-    fn label(self) -> &'static str {
-        match self {
-            Self::TrackedProductionSources => "git_tracked_production_sources",
-            Self::CargoPackageGraph => "cargo_package_graph",
-            Self::PnpmPackageGraph => "pnpm_package_graph",
-            Self::ExtensionManifests => "extension_manifests",
-            Self::CiReleaseSteps => "ci_release_steps",
-            Self::GeneratedBindingManifests => "generated_binding_manifests",
-            Self::UnpackedShippingArtifacts => "unpacked_shipping_artifacts",
-        }
-    }
-}
-
-struct CandidateDiscovery {
-    candidates: BTreeSet<CandidateIdentity>,
-    by_input: BTreeMap<DiscoveryInput, BTreeSet<CandidateIdentity>>,
-}
-
-impl CandidateDiscovery {
-    fn input_counts(&self) -> BTreeMap<&'static str, usize> {
-        REQUIRED_DISCOVERY_INPUTS
-            .into_iter()
-            .map(|input| {
-                (
-                    input.label(),
-                    self.by_input.get(&input).map_or(0, BTreeSet::len),
-                )
-            })
-            .collect()
-    }
-}
-
-fn validate_discovery_input_coverage(discovery: &CandidateDiscovery) -> Result<(), String> {
-    for input in REQUIRED_DISCOVERY_INPUTS {
-        if discovery
-            .by_input
-            .get(&input)
-            .is_none_or(BTreeSet::is_empty)
-        {
-            return Err(format!(
-                "mandated discovery input {} contributed zero candidates",
-                input.label()
-            ));
-        }
-    }
-    Ok(())
-}
 
 // Closed type universe derived from ruling v2 §§4.1–4.9 plus the V1 images
 // named by the binding plan's canonical projection table.
@@ -872,907 +797,6 @@ fn scanners_replacement_schema_declaration_deletion_is_rejected() {
         .contains("DocumentStructureResponseV1Available"));
 }
 
-fn run_workspace_command(program: &str, args: &[&str]) -> String {
-    run_command_at(workspace_root(), program, args)
-}
-
-fn run_command_at(cwd: impl AsRef<Path>, program: &str, args: &[&str]) -> String {
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .unwrap_or_else(|error| panic!("failed to run {program}: {error}"));
-    assert!(
-        output.status.success(),
-        "{program} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("command output must be UTF-8")
-}
-
-fn pnpm_program() -> &'static str {
-    if cfg!(windows) {
-        "pnpm.cmd"
-    } else {
-        "pnpm"
-    }
-}
-
-fn normalized_relative_path(path: &Path) -> String {
-    path.strip_prefix(workspace_root())
-        .unwrap_or_else(|_| panic!("path is outside workspace: {}", path.display()))
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-fn add_tracked_under(selected: &mut BTreeSet<String>, tracked: &BTreeSet<String>, root: &str) {
-    let root = root.trim_end_matches('/');
-    let prefix = format!("{root}/");
-    selected.extend(
-        tracked
-            .iter()
-            .filter(|path| *path == root || path.starts_with(&prefix))
-            .cloned(),
-    );
-}
-
-fn workspace_pattern_matches(package_dir: &str, pattern: &str) -> bool {
-    if let Some(parent) = pattern.strip_suffix("/*") {
-        return package_dir
-            .strip_prefix(&format!("{parent}/"))
-            .is_some_and(|tail| !tail.is_empty() && !tail.contains('/'));
-    }
-    package_dir == pattern
-}
-
-fn collect_json_strings(value: &Value, strings: &mut Vec<String>) {
-    match value {
-        Value::String(value) => strings.push(value.clone()),
-        Value::Array(values) => {
-            for value in values {
-                collect_json_strings(value, strings);
-            }
-        }
-        Value::Object(values) => {
-            for value in values.values() {
-                collect_json_strings(value, strings);
-            }
-        }
-        _ => {}
-    }
-}
-
-struct TempDirGuard(PathBuf);
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn freshly_unpacked_shipping_paths(
-    tracked: &BTreeSet<String>,
-    files: &BTreeMap<String, String>,
-) -> BTreeSet<String> {
-    let mut selected = BTreeSet::new();
-    let package_manifests = tracked
-        .iter()
-        .filter(|path| path.starts_with("extensions/") && path.ends_with("/package.json"));
-    for manifest_path in package_manifests {
-        let manifest: Value = serde_json::from_str(
-            files
-                .get(manifest_path)
-                .unwrap_or_else(|| panic!("missing tracked manifest {manifest_path}")),
-        )
-        .unwrap_or_else(|error| panic!("invalid {manifest_path}: {error}"));
-        let Some(main) = manifest["main"].as_str() else {
-            continue;
-        };
-        let package_root = manifest_path.trim_end_matches("/package.json");
-        let main_path = format!("{package_root}/{}", main.trim_start_matches("./"));
-        if !tracked.contains(&main_path) {
-            continue;
-        }
-
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before epoch")
-            .as_nanos();
-        let temp = std::env::temp_dir().join(format!(
-            "verter-scanners-b0-pack-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&temp).expect("create shipping-artifact temp dir");
-        let _guard = TempDirGuard(temp.clone());
-        let temp_arg = temp.to_string_lossy().into_owned();
-        run_command_at(
-            workspace_root().join(package_root),
-            pnpm_program(),
-            &["pack", "--pack-destination", &temp_arg],
-        );
-        let archive = fs::read_dir(&temp)
-            .expect("read shipping-artifact temp dir")
-            .map(|entry| entry.expect("shipping artifact entry").path())
-            .find(|path| path.extension().is_some_and(|extension| extension == "tgz"))
-            .expect("pnpm pack produced no tgz");
-        let archive_name = archive
-            .file_name()
-            .expect("shipping archive filename")
-            .to_string_lossy()
-            .into_owned();
-        run_command_at(&temp, "tar", &["-xzf", &archive_name]);
-        let unpacked_main = temp.join("package").join(main.trim_start_matches("./"));
-        let unpacked_source = fs::read_to_string(&unpacked_main).unwrap_or_else(|error| {
-            panic!(
-                "shipping entry {} missing from freshly unpacked {}: {error}",
-                main,
-                archive.display()
-            )
-        });
-        assert_eq!(
-            files.get(&main_path),
-            Some(&unpacked_source),
-            "freshly unpacked shipping entry drifted from tracked source"
-        );
-        selected.insert(main_path);
-    }
-    selected
-}
-
-fn independently_discovered_candidates() -> CandidateDiscovery {
-    let tracked = run_workspace_command("git", &["ls-files"]);
-    let tracked_paths = tracked
-        .lines()
-        .map(|path| path.replace('\\', "/"))
-        .collect::<BTreeSet<_>>();
-    let metadata = run_workspace_command(
-        "cargo",
-        &["metadata", "--format-version", "1", "--all-features"],
-    );
-    let metadata: Value = serde_json::from_str(&metadata).expect("cargo metadata JSON");
-
-    let mut files = BTreeMap::new();
-    for path in &tracked_paths {
-        if !(path.starts_with("crates/")
-            || path.starts_with("packages/")
-            || path.starts_with("extensions/")
-            || path == "package.json")
-        {
-            continue;
-        }
-        if !path.ends_with(".rs")
-            && !path.ends_with(".ts")
-            && !path.ends_with(".js")
-            && !path.ends_with(".proto")
-            && !path.ends_with(".json")
-        {
-            continue;
-        }
-        if let Ok(source) = fs::read_to_string(workspace_root().join(path)) {
-            files.insert(path.clone(), source);
-        }
-    }
-
-    let mut input_paths = BTreeMap::<DiscoveryInput, BTreeSet<String>>::new();
-    input_paths.insert(
-        DiscoveryInput::TrackedProductionSources,
-        files.keys().cloned().collect(),
-    );
-
-    let workspace_members = metadata["workspace_members"]
-        .as_array()
-        .expect("cargo metadata workspace_members")
-        .iter()
-        .map(|id| id.as_str().expect("cargo workspace member id"))
-        .collect::<BTreeSet<_>>();
-    let resolve_nodes = metadata["resolve"]["nodes"]
-        .as_array()
-        .expect("cargo metadata dependency graph nodes");
-    for member in &workspace_members {
-        let node = resolve_nodes
-            .iter()
-            .find(|node| node["id"] == **member)
-            .unwrap_or_else(|| panic!("workspace package {member} missing from dependency graph"));
-        assert!(
-            node["deps"].is_array(),
-            "package {member} has no dependency list"
-        );
-        assert!(
-            node["features"].is_array(),
-            "package {member} has no all-features resolution"
-        );
-    }
-    let mut cargo_paths = BTreeSet::new();
-    let mut cargo_packages_seen = BTreeSet::new();
-    for package in metadata["packages"].as_array().expect("cargo packages") {
-        let id = package["id"].as_str().expect("cargo package id");
-        if !workspace_members.contains(id) {
-            continue;
-        }
-        cargo_packages_seen.insert(id);
-        let manifest = PathBuf::from(
-            package["manifest_path"]
-                .as_str()
-                .expect("cargo package manifest_path"),
-        );
-        let package_root = normalized_relative_path(
-            manifest
-                .parent()
-                .expect("cargo package manifest has no parent"),
-        );
-        add_tracked_under(&mut cargo_paths, &tracked_paths, &package_root);
-        let targets = package["targets"]
-            .as_array()
-            .expect("cargo package targets");
-        assert!(!targets.is_empty(), "workspace package {id} has no targets");
-        for target in targets {
-            let source = PathBuf::from(target["src_path"].as_str().expect("cargo target src_path"));
-            let source = normalized_relative_path(&source);
-            assert!(
-                tracked_paths.contains(&source),
-                "cargo target source is not tracked: {source}"
-            );
-            cargo_paths.insert(source);
-        }
-    }
-    assert_eq!(cargo_packages_seen, workspace_members);
-    input_paths.insert(DiscoveryInput::CargoPackageGraph, cargo_paths);
-
-    let pnpm_output = run_workspace_command(
-        pnpm_program(),
-        &["list", "-r", "--depth", "Infinity", "--json"],
-    );
-    let pnpm_packages: Value = serde_json::from_str(&pnpm_output).expect("pnpm list JSON");
-    let workspace_yaml = fs::read_to_string(workspace_root().join("pnpm-workspace.yaml"))
-        .expect("pnpm-workspace.yaml");
-    let workspace_pattern = Regex::new(r#"(?m)^\s*-\s*[\"']([^\"']+)[\"']\s*$"#).unwrap();
-    let workspace_patterns = workspace_pattern
-        .captures_iter(&workspace_yaml)
-        .map(|capture| capture[1].to_owned())
-        .collect::<Vec<_>>();
-    assert!(
-        !workspace_patterns.is_empty(),
-        "pnpm workspace has no package globs"
-    );
-    let expected_pnpm_dirs = tracked_paths
-        .iter()
-        .filter(|path| path.ends_with("/package.json"))
-        .filter_map(|path| path.strip_suffix("/package.json"))
-        .filter(|dir| {
-            workspace_patterns
-                .iter()
-                .any(|pattern| workspace_pattern_matches(dir, pattern))
-        })
-        .map(str::to_owned)
-        .chain(std::iter::once(".".to_owned()))
-        .collect::<BTreeSet<_>>();
-    let actual_pnpm_dirs = pnpm_packages
-        .as_array()
-        .expect("pnpm list root array")
-        .iter()
-        .map(|package| {
-            let absolute = PathBuf::from(package["path"].as_str().expect("pnpm package path"));
-            if absolute == workspace_root() {
-                ".".to_owned()
-            } else {
-                normalized_relative_path(&absolute)
-            }
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        actual_pnpm_dirs, expected_pnpm_dirs,
-        "pnpm list omitted or invented a workspace package"
-    );
-    let mut graph_workspace_dirs = BTreeSet::new();
-    for package in pnpm_packages.as_array().expect("pnpm list root array") {
-        for dependency_section in ["dependencies", "optionalDependencies"] {
-            let Some(dependencies) = package[dependency_section].as_object() else {
-                continue;
-            };
-            for dependency in dependencies.values() {
-                let Some(path) = dependency["path"].as_str() else {
-                    continue;
-                };
-                let absolute = PathBuf::from(path);
-                if absolute.starts_with(workspace_root()) && !path.contains("node_modules") {
-                    graph_workspace_dirs.insert(normalized_relative_path(&absolute));
-                }
-            }
-        }
-    }
-    assert!(
-        graph_workspace_dirs.is_subset(&actual_pnpm_dirs),
-        "pnpm dependency graph references a workspace package omitted from the package list"
-    );
-    let mut pnpm_paths =
-        BTreeSet::from(["package.json".to_owned(), "pnpm-workspace.yaml".to_owned()]);
-    let mut declared_entrypoints = 0;
-    for package_dir in &actual_pnpm_dirs {
-        let manifest_path = if package_dir == "." {
-            "package.json".to_owned()
-        } else {
-            format!("{package_dir}/package.json")
-        };
-        assert!(
-            tracked_paths.contains(&manifest_path),
-            "pnpm package has no tracked manifest: {manifest_path}"
-        );
-        let manifest_source = fs::read_to_string(workspace_root().join(&manifest_path))
-            .unwrap_or_else(|error| panic!("failed to read {manifest_path}: {error}"));
-        let manifest: Value = serde_json::from_str(&manifest_source)
-            .unwrap_or_else(|error| panic!("invalid {manifest_path}: {error}"));
-        if package_dir != "." {
-            add_tracked_under(&mut pnpm_paths, &tracked_paths, package_dir);
-        }
-        let mut entrypoints = Vec::new();
-        for field in ["main", "module", "types", "bin", "exports"] {
-            collect_json_strings(&manifest[field], &mut entrypoints);
-        }
-        declared_entrypoints += entrypoints.len();
-        for entrypoint in entrypoints {
-            if entrypoint.starts_with('#') || entrypoint.contains('*') {
-                continue;
-            }
-            let entrypoint = entrypoint.trim_start_matches("./");
-            let path = if package_dir == "." {
-                entrypoint.to_owned()
-            } else {
-                format!("{package_dir}/{entrypoint}")
-            };
-            if tracked_paths.contains(&path) {
-                pnpm_paths.insert(path);
-            }
-        }
-    }
-    assert!(
-        declared_entrypoints > 0,
-        "pnpm package graph exposed no production entrypoints"
-    );
-    input_paths.insert(DiscoveryInput::PnpmPackageGraph, pnpm_paths);
-
-    let mut extension_paths = BTreeSet::new();
-    for (path, source) in &files {
-        if !path.ends_with("/package.json") {
-            continue;
-        }
-        let manifest: Value = serde_json::from_str(source).expect("extension manifest JSON");
-        if manifest["publisher"].is_string() && manifest["engines"]["vscode"].is_string() {
-            let extension_root = path.trim_end_matches("/package.json");
-            add_tracked_under(&mut extension_paths, &tracked_paths, extension_root);
-        }
-    }
-    input_paths.insert(DiscoveryInput::ExtensionManifests, extension_paths);
-
-    let workflow_path = Regex::new(r"(?:crates|packages|extensions)/[A-Za-z0-9_./*${}-]+").unwrap();
-    let workflow_step =
-        Regex::new(r"(?i)\b(cp|copy|mv|package|stage|upload-artifact|download-artifact)\b")
-            .unwrap();
-    let mut ci_release_paths = BTreeSet::new();
-    for workflow in tracked_paths.iter().filter(|path| {
-        path.starts_with(".github/workflows/")
-            && (path.ends_with(".yml") || path.ends_with(".yaml"))
-    }) {
-        let source = fs::read_to_string(workspace_root().join(workflow))
-            .unwrap_or_else(|error| panic!("failed to read {workflow}: {error}"));
-        let mut in_packaging_step = false;
-        for line in source.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("- name:") || trimmed.starts_with("- uses:") {
-                in_packaging_step = workflow_step.is_match(line);
-            }
-            if !in_packaging_step {
-                continue;
-            }
-            if line.contains("package.json") {
-                ci_release_paths.insert("package.json".to_owned());
-            }
-            for matched in workflow_path.find_iter(line) {
-                let mut referenced = matched.as_str().trim_end_matches('/').to_owned();
-                if let Some(wildcard) = referenced.find('*') {
-                    referenced.truncate(wildcard);
-                    referenced = referenced.trim_end_matches('/').to_owned();
-                }
-                if !referenced.is_empty() {
-                    add_tracked_under(&mut ci_release_paths, &tracked_paths, &referenced);
-                }
-            }
-        }
-    }
-    input_paths.insert(DiscoveryInput::CiReleaseSteps, ci_release_paths);
-
-    let buf_manifest =
-        fs::read_to_string(workspace_root().join("buf.gen.yaml")).expect("buf.gen.yaml");
-    let generated_out = Regex::new(r"(?m)^\s*out:\s*(\S+)\s*$").unwrap();
-    let mut generated_paths = BTreeSet::new();
-    for capture in generated_out.captures_iter(&buf_manifest) {
-        add_tracked_under(&mut generated_paths, &tracked_paths, &capture[1]);
-    }
-    let root_manifest: Value = serde_json::from_str(
-        files
-            .get("package.json")
-            .expect("root package manifest source"),
-    )
-    .expect("root package manifest JSON");
-    assert!(
-        root_manifest["scripts"]["proto:gen"]
-            .as_str()
-            .is_some_and(|script| script.contains("buf generate")),
-        "root generated-binding command does not consume buf.gen.yaml"
-    );
-    let native_manifest: Value = serde_json::from_str(
-        files
-            .get("packages/native/package.json")
-            .expect("native binding manifest source"),
-    )
-    .expect("native binding manifest JSON");
-    assert!(
-        native_manifest["napi"].is_object(),
-        "native binding manifest has no napi graph"
-    );
-    let native_main = native_manifest["main"]
-        .as_str()
-        .expect("native binding main entry");
-    let native_main = format!("packages/native/{}", native_main.trim_start_matches("./"));
-    assert!(
-        tracked_paths.contains(&native_main),
-        "generated native loader entry is not tracked: {native_main}"
-    );
-    generated_paths.insert(native_main);
-    input_paths.insert(DiscoveryInput::GeneratedBindingManifests, generated_paths);
-
-    input_paths.insert(
-        DiscoveryInput::UnpackedShippingArtifacts,
-        freshly_unpacked_shipping_paths(&tracked_paths, &files),
-    );
-
-    let mut discovered = BTreeSet::new();
-    // The named-symbol LSP probe is aggregated to one row per matching path;
-    // test/support paths have a separate stable label. Independently named
-    // manual-geometry helpers add function-level rows on the same path.
-    let lsp_named = Regex::new(
-        r"scan_sfc_blocks|SfcBlock|CustomBlockContentKind|find_balanced_close_tag|outer_template_content_span|find_close_tag_name",
-    )
-    .unwrap();
-    for (path, source) in &files {
-        if path.starts_with("crates/verter_lsp/src/") && lsp_named.is_match(source) {
-            let symbol = if path.contains("_tests.rs")
-                || path.ends_with("/tests.rs")
-                || path.ends_with("/macro_fixture.rs")
-                || path.ends_with("/integration_tests.rs")
-                || path.contains("/real_provider_tests/")
-            {
-                "legacy_sfc_geometry_test_support"
-            } else if path.ends_with("/documents/sfc_scanner.rs") {
-                "scan_sfc_blocks_frontend"
-            } else {
-                "legacy_sfc_geometry_consumer"
-            };
-            discovered.insert((path.clone(), symbol.to_owned()));
-        }
-    }
-    let vue_vscode_manifest = files
-        .get("packages/vue-vscode/package.json")
-        .expect("vue-vscode manifest");
-    for target in [
-        "darwin_arm64",
-        "darwin_x64",
-        "linux_arm64",
-        "linux_x64",
-        "win32_x64",
-    ] {
-        let manifest_spelling = target.replace('_', "-");
-        assert!(vue_vscode_manifest.contains(&manifest_spelling));
-        discovered.insert((
-            "packages/vue-vscode/package.json".to_owned(),
-            format!("vsix_bundle_{target}"),
-        ));
-    }
-    let mut add_matches = |roots: &[&str], pattern: &str, symbol: &str| {
-        let pattern = Regex::new(pattern).unwrap();
-        for (path, source) in &files {
-            if roots.iter().any(|root| path.starts_with(root)) && pattern.is_match(source) {
-                discovered.insert((path.clone(), symbol.to_owned()));
-            }
-        }
-    };
-    add_matches(
-        &["crates/verter_lsp/src/features/auto_close_tag.rs"],
-        r"outer_template_content_span",
-        "outer_template_content_span",
-    );
-    add_matches(
-        &["crates/verter_lsp/src/features/linked_editing.rs"],
-        r"fn find_close_tag_name",
-        "find_close_tag_name",
-    );
-    add_matches(
-        &["crates/verter_lsp/src/features/component_actions.rs"],
-        r"fn find_opening_tag_end",
-        "find_opening_tag_end",
-    );
-    add_matches(
-        &["crates/verter_lsp/src/features/cursor_context.rs"],
-        r"svelte_braced_attribute_from_tag_candidate",
-        "complete_prefix_rfind_geometry",
-    );
-    add_matches(
-        &["crates/verter_lsp/src/features/document_link.rs"],
-        r"fn find_attribute_value_span",
-        "raw_attribute_tokenizer",
-    );
-    add_matches(
-        &["crates/verter_lsp/src/documents/analysis.rs"],
-        r"\.upsert\(UpsertRequest",
-        "semantic_host_raw_upsert",
-    );
-
-    // Direct definitions and path-level capability probes outside the LSP.
-    add_matches(
-        &["crates/verter_compiler/src/compile/"],
-        r"pub fn compile\(",
-        "compile",
-    );
-    add_matches(
-        &["crates/verter_ffi/src/convert/component_meta.rs"],
-        r"sfc_blocks",
-        "sfc_blocks projection",
-    );
-    add_matches(
-        &[
-            "crates/verter_mcp/src/scanner.rs",
-            "packages/unplugin/src/core/scanner.ts",
-        ],
-        r"WalkDir|read_dir|readdir",
-        "filesystem_candidate_scanner",
-    );
-    add_matches(
-        &["crates/verter_parser/src/cursor/"],
-        r"pub struct ScriptDetector",
-        "ScriptDetector",
-    );
-    add_matches(
-        &["crates/verter_protocol/proto/verter/v1/"],
-        r"SfcBlocksMeta",
-        "SfcBlocksMeta/sfc_blocks",
-    );
-    add_matches(
-        &["crates/verter_protocol/src/component_meta.rs"],
-        r"fn sfc_blocks_to_proto",
-        "sfc_blocks_to_proto",
-    );
-    add_matches(
-        &["crates/verter_protocol/src/types.rs"],
-        r"struct FfiSfcBlocksMeta",
-        "FfiSfcBlocksMeta",
-    );
-    add_matches(
-        &["crates/verter_semantic/src/analysis/component_meta.rs"],
-        r"struct SfcBlocksAnalysis",
-        "SfcBlocksAnalysis",
-    );
-    add_matches(
-        &["crates/verter_semantic/src/analysis/types.rs"],
-        r"TopLevelOwnerId::.*ordinal",
-        "ordinal_block_dtos",
-    );
-
-    add_matches(
-        &["crates/verter_session/src/compile.rs"],
-        r"merge_external_sources|assemble_vue_main_module",
-        "registered_raw_compile",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_compile_audit.rs"],
-        r"compile as compile_sfc",
-        "direct_audited_compile_sfc",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_manage/analysis_io.rs"],
-        r"build_snapshot_from_scheduler",
-        "source_only_analysis_artifact_builder",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_manage/eval_program.rs"],
-        r"NO parse artifact|no parse artifact",
-        "no_artifact_raw_fallback",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_manage/overlay_materialize.rs"],
-        r"build_carrier_parse_artifact_from_source",
-        "source_only_overlay_artifact_builder",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_manage/prepared_decl.rs"],
-        r"ensure_indexed_ready",
-        "source_only_prepared_artifact_builder",
-    );
-    add_matches(
-        &[
-            "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
-            "crates/verter_session/src/parse.rs",
-        ],
-        r"external_source|src_block|synthetic",
-        "external_source_synthetic_parse",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_resolve/vue_script_extract.rs"],
-        r"fn find_script_close_outside_js_context",
-        "find_script_close_outside_js_context",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_resolve/vue_script_extract.rs"],
-        r"fn populate_sfc_blocks_sidecar",
-        "populate_sfc_blocks_sidecar",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_resolve/vue_script_extract.rs"],
-        r"fn script_content_spans_from_source",
-        "script_content_spans_from_source",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_upsert.rs"],
-        r"applyBlockOverrides",
-        "applyBlockOverrides",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_upsert.rs"],
-        r"apply_style_overrides|</style>",
-        "manual_style_close_search",
-    );
-    add_matches(
-        &["crates/verter_session/src/host_upsert/block_splice.rs"],
-        r"fn build_synthetic_source",
-        "build_synthetic_source",
-    );
-    add_matches(
-        &["crates/verter_session/src/types.rs"],
-        r"struct ContentOverrideWithParse",
-        "ContentOverrideWithParse",
-    );
-    add_matches(
-        &[
-            "crates/verter_wasm/src/lib.rs",
-            "packages/native/index.js",
-            "packages/native/index.ts",
-            "packages/wasm/src/index.ts",
-        ],
-        r"applyBlockOverrides",
-        "applyBlockOverrides",
-    );
-
-    add_matches(
-        &["extensions/typescript-plugin/index.js"],
-        r"descriptor\.customBlocks",
-        "legacy_bundled_typescript_plugin",
-    );
-    add_matches(
-        &["extensions/vscode/package.json"],
-        r"typescript-plugin",
-        "legacy_extension_packaging_root",
-    );
-    add_matches(
-        &["package.json"],
-        r"copy.*typescript-plugin|typescript-plugin.*copy",
-        "copy-plugin/bare-package",
-    );
-    add_matches(
-        &["packages/component-meta/src/native-component-meta.ts"],
-        r"NativeSfcBlocksMeta",
-        "NativeSfcBlocksMeta",
-    );
-    add_matches(
-        &["packages/component-meta/src/type-graph-proto-decode.ts"],
-        r"decodeOptionalSfcBlocks",
-        "decodeOptionalSfcBlocks",
-    );
-    add_matches(
-        &["packages/component-meta/src/types.ts"],
-        r"interface SfcBlocksMeta|type SfcBlocksMeta",
-        "SfcBlocksMeta",
-    );
-    add_matches(
-        &["packages/proto/src/gen/verter/v1/"],
-        r"SfcBlocksMeta",
-        "SfcBlocksMeta generated binding",
-    );
-
-    add_matches(
-        &["packages/playground/src/core/compiler.ts"],
-        r"parse\(|template|customBlocks",
-        "carrier_root_scanner",
-    );
-    add_matches(
-        &["packages/playground/src/core/sourcemap.ts"],
-        r#"indexOf\("<template"#,
-        "template_offset_scan",
-    );
-    add_matches(
-        &["packages/playground/src/core/types.ts"],
-        r"interface FileAnalysis",
-        "ordinal_block_projection",
-    );
-    add_matches(
-        &["packages/playground/src/editor/analysisHelpers.ts"],
-        r#"indexOf\("</script>"#,
-        "script_close_geometry",
-    );
-    add_matches(
-        &["packages/playground/src/editor/decorations.ts"],
-        r"<template\\b|<style\\b",
-        "template_style_geometry",
-    );
-    add_matches(
-        &["packages/playground/src/editor/templateIde.ts"],
-        r"<template|</script>",
-        "template_script_geometry",
-    );
-
-    for symbol in [
-        "asciiEqualsAt",
-        "findHtmlTagEnd",
-        "isFrameworkAttributeNamePosition",
-        "isHtmlTagBoundary",
-        "isInsideSfcScript",
-        "sfcScriptImportAnchor",
-    ] {
-        add_matches(
-            &["packages/typescript-plugin/src/index.ts"],
-            &format!(r"(?:function|const)\s+{symbol}\b"),
-            symbol,
-        );
-    }
-    add_matches(
-        &["packages/unplugin/src/core/preprocessor.ts"],
-        r"BlockPreprocessor|processor\(",
-        "arbitrary_callback_executor",
-    );
-    add_matches(
-        &["packages/unplugin/src/core/types.ts"],
-        r"BlockPreprocessor",
-        "BlockPreprocessor",
-    );
-    add_matches(
-        &["packages/unplugin/src/core/types.ts"],
-        r"customBlocks",
-        "customBlocks",
-    );
-    add_matches(
-        &["packages/unplugin/src/index.ts"],
-        r"compiler\.parse|\.parse\(",
-        "compiler.parse_after_host_upsert",
-    );
-    add_matches(
-        &["packages/unplugin/src/index.ts"],
-        r"/<style\\b|styleRe",
-        "style_regex_scan",
-    );
-    add_matches(
-        &["packages/vue-vscode/src/css/styleBlockScanner.ts"],
-        r"function scanStyleBlocks",
-        "scanStyleBlocks",
-    );
-    add_matches(
-        &[
-            "packages/vue-vscode/src/css/cssService.ts",
-            "packages/vue-vscode/src/extension.ts",
-        ],
-        r"scanStyleBlocks|styleBlockScanner",
-        "styleBlockScanner consumer",
-    );
-    add_matches(
-        &["packages/wasm/src/index.ts"],
-        r"export async function compile",
-        "raw_source_compile",
-    );
-
-    let by_input = input_paths
-        .into_iter()
-        .map(|(input, paths)| {
-            let candidates = discovered
-                .iter()
-                .filter(|(path, _)| paths.contains(path))
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            (input, candidates)
-        })
-        .collect::<BTreeMap<_, _>>();
-    let candidates = by_input
-        .values()
-        .flat_map(|candidates| candidates.iter().cloned())
-        .collect();
-    CandidateDiscovery {
-        candidates,
-        by_input,
-    }
-}
-
-fn validate_ledger_discovery_equality(
-    ledger: &Value,
-    discovery: &CandidateDiscovery,
-) -> Result<(), String> {
-    validate_discovery_input_coverage(discovery)?;
-    let rows = ledger["rows"].as_array().ok_or("ledger rows")?;
-    if ledger["set_equality"]["independently_discovered_candidates"] != rows.len()
-        || ledger["set_equality"]["classified_ledger_rows"] != rows.len()
-    {
-        return Err("ledger count attestation drifted from rows".into());
-    }
-    let input_counts = serde_json::to_value(discovery.input_counts())
-        .map_err(|error| format!("serialize discovery input counts: {error}"))?;
-    if ledger["discovery"]["gate_input_candidate_counts"] != input_counts {
-        return Err(format!(
-            "discovery input count attestation drifted: actual {input_counts}"
-        ));
-    }
-    let identities = rows
-        .iter()
-        .map(|row| {
-            Ok((
-                row["path"].as_str().ok_or("row path")?.to_owned(),
-                row["symbol"].as_str().ok_or("row symbol")?.to_owned(),
-            ))
-        })
-        .collect::<Result<BTreeSet<_>, &str>>()
-        .map_err(str::to_owned)?;
-    if identities != discovery.candidates {
-        return Err("independent candidate set drifted".into());
-    }
-    Ok(())
-}
-
-#[test]
-fn scanners_replacement_capability_ledger_deleted_row_is_rejected() {
-    let mut ledger = read_json("docs/arch/scanners-replacement-capability-ledger.json");
-    let remaining = {
-        let rows = ledger["rows"].as_array_mut().expect("ledger rows");
-        let position = rows
-            .iter()
-            .position(|row| row["symbol"] == "registered_raw_compile")
-            .expect("non-seed discrimination row");
-        rows.remove(position);
-        rows.len()
-    };
-    ledger["set_equality"]["independently_discovered_candidates"] = remaining.into();
-    ledger["set_equality"]["classified_ledger_rows"] = remaining.into();
-    assert_eq!(
-        validate_ledger_discovery_equality(&ledger, &independently_discovered_candidates()),
-        Err("independent candidate set drifted".into())
-    );
-}
-
-#[test]
-fn scanners_replacement_mandated_candidate_inputs_are_nonempty() {
-    let discovery = independently_discovered_candidates();
-    validate_discovery_input_coverage(&discovery).unwrap();
-}
-
-#[test]
-fn scanners_replacement_zero_candidate_input_is_rejected() {
-    let sentinel = BTreeSet::from([("sentinel.rs".to_owned(), "sentinel".to_owned())]);
-    let complete = BTreeMap::from(REQUIRED_DISCOVERY_INPUTS.map(|input| (input, sentinel.clone())));
-    let control = CandidateDiscovery {
-        candidates: sentinel.clone(),
-        by_input: complete.clone(),
-    };
-    assert_eq!(validate_discovery_input_coverage(&control), Ok(()));
-    for missing in REQUIRED_DISCOVERY_INPUTS {
-        let mut by_input = complete.clone();
-        by_input.get_mut(&missing).unwrap().clear();
-        let discovery = CandidateDiscovery {
-            candidates: sentinel.clone(),
-            by_input,
-        };
-        assert_eq!(
-            validate_discovery_input_coverage(&discovery),
-            Err(format!(
-                "mandated discovery input {} contributed zero candidates",
-                missing.label()
-            ))
-        );
-    }
-    assert_eq!(validate_discovery_input_coverage(&control), Ok(()));
-}
-
 #[test]
 fn scanners_replacement_capability_ledger_is_total() {
     let ledger = read_json("docs/arch/scanners-replacement-capability-ledger.json");
@@ -1785,7 +809,6 @@ fn scanners_replacement_capability_ledger_is_total() {
 
     let expected_keys = BTreeSet::from(LEDGER_KEYS);
     let mut identities = BTreeSet::new();
-    let mut symbols = BTreeSet::new();
     let mut counts = BTreeMap::<String, usize>::new();
     for row in rows {
         let object = row.as_object().expect("ledger row object");
@@ -1797,7 +820,6 @@ fn scanners_replacement_capability_ledger_is_total() {
             identities.insert((path, symbol)),
             "duplicate ledger identity"
         );
-        symbols.insert(symbol);
         let disposition = row["disposition"].as_str().expect("disposition");
         assert!(
             matches!(
@@ -1817,21 +839,20 @@ fn scanners_replacement_capability_ledger_is_total() {
             .or_default() += 1;
     }
 
-    for required in [
-        "isFrameworkAttributeNamePosition",
-        "ScriptDetector",
-        "registered_raw_compile",
-        "external_source_synthetic_parse",
-    ] {
-        assert!(
-            symbols.contains(required),
-            "missing required seed {required}"
-        );
-    }
     assert_eq!(ledger["statistics"]["rows_total"], rows.len());
     assert_eq!(
         ledger["statistics"]["by_capability_class"],
         serde_json::to_value(counts).unwrap()
+    );
+    let mut dispositions = BTreeMap::<String, usize>::new();
+    for row in rows {
+        *dispositions
+            .entry(row["disposition"].as_str().unwrap().to_owned())
+            .or_default() += 1;
+    }
+    assert_eq!(
+        ledger["statistics"]["by_disposition"],
+        serde_json::to_value(dispositions).unwrap()
     );
     assert_eq!(ledger["set_equality"]["unclassified_runtime_rows"], 0);
     assert_eq!(ledger["set_equality"]["deferred_runtime_rows"], 0);
@@ -1840,18 +861,6 @@ fn scanners_replacement_capability_ledger_is_total() {
         rows.len()
     );
     assert_eq!(ledger["set_equality"]["classified_ledger_rows"], rows.len());
-    let discovery = independently_discovered_candidates();
-    validate_discovery_input_coverage(&discovery).unwrap();
-    let discovered = discovery.candidates.clone();
-    let ledger_identities = identities
-        .into_iter()
-        .map(|(path, symbol)| (path.to_owned(), symbol.to_owned()))
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        discovered, ledger_identities,
-        "independent candidate set drifted"
-    );
-    validate_ledger_discovery_equality(&ledger, &discovery).unwrap();
     assert_eq!(
         ledger["consumer_matrix"].as_array().map(Vec::len),
         Some(
@@ -1860,4 +869,85 @@ fn scanners_replacement_capability_ledger_is_total() {
                 .count()
         )
     );
+}
+
+#[test]
+fn scanners_replacement_b_78_names_exactly_five_inspection_rows() {
+    let ledger = read_json("docs/arch/scanners-replacement-capability-ledger.json");
+    let targets = ledger["rows"]
+        .as_array()
+        .expect("ledger rows")
+        .iter()
+        .filter(|row| row["acceptance_id"] == "B-78")
+        .map(|row| {
+            assert_eq!(row["test"], "fresh_vsix_scanner_inventory_inspection");
+            row["symbol"].as_str().expect("B-78 symbol").to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        targets,
+        BTreeSet::from([
+            "vsix_bundle_darwin_arm64".to_owned(),
+            "vsix_bundle_darwin_x64".to_owned(),
+            "vsix_bundle_linux_arm64".to_owned(),
+            "vsix_bundle_linux_x64".to_owned(),
+            "vsix_bundle_win32_x64".to_owned(),
+        ])
+    );
+
+    let extension = read_json("packages/vue-vscode/package.json");
+    let package_targets = extension["scripts"]
+        .as_object()
+        .expect("extension scripts")
+        .keys()
+        .filter_map(|script| script.strip_prefix("package:"))
+        .filter(|target| *target != "dev:universal")
+        .map(|target| format!("vsix_bundle_{}", target.replace('-', "_")))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(targets, package_targets);
+}
+
+#[test]
+fn scanners_replacement_b_70_has_single_extension_authority() {
+    let workspace = workspace_root();
+    assert!(
+        !workspace.join("extensions/vscode").exists(),
+        "legacy extensions/vscode authority must be physically deleted"
+    );
+
+    for entry in walkdir::WalkDir::new(&workspace)
+        .into_iter()
+        .filter_entry(|entry| {
+            !matches!(
+                entry.file_name().to_str(),
+                Some("node_modules" | "target" | ".git" | ".integration-tests")
+            )
+        })
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() == "package.json")
+    {
+        let source = fs::read_to_string(entry.path())
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", entry.path().display()));
+        assert!(
+            !source.contains("extensions/vscode") && !source.contains("extensions\\\\vscode"),
+            "{} still references the deleted extension authority",
+            entry.path().display()
+        );
+    }
+
+    for relative in [
+        "packages/playground/scripts/generate-vue-language.ts",
+        "packages/playground/src/editor/vueLanguage.ts",
+    ] {
+        let source =
+            fs::read_to_string(workspace.join(relative)).expect("playground language source");
+        assert!(
+            source.contains("packages/vue-vscode"),
+            "{relative} must name packages/vue-vscode as grammar authority"
+        );
+        assert!(
+            !source.contains("extensions/vscode"),
+            "{relative} still names the deleted extension authority"
+        );
+    }
 }

@@ -2,11 +2,8 @@
 //!
 //! Owns [`SvelteParseCarrier`] — the concrete [`CarrierParse`] payload wrapping
 //! a [`ParsedSvelte`] — and [`build_svelte_parse_artifact`], the producer that
-//! lifts a parse into the framework-neutral [`FrameworkParseArtifact`] (typed
-//! script regions for BOTH the instance and module `<script>` blocks, plus the
-//! `<style>` regions). The instance script is the runes-or-legacy component
-//! body; the module script is `<script module>` (5.5) / legacy
-//! `<script context="module">`.
+//! wraps a parse for the registered projector. The projector is the sole owner
+//! of the framework-neutral inventory geometry.
 //!
 //! [`SvelteCarrierCompiler`] is the second [`CarrierCompiler`] (Vue is the
 //! reference). `parse` produces the neutral artifact, `eval_source` blanks
@@ -25,9 +22,8 @@ use std::time::Instant;
 use web_time::Instant;
 
 use verter_language::{
-    CarrierParse, ExternalLink, ExternalLinkKind, FrameworkAdapterId, FrameworkParseArtifact,
-    FrameworkParseCommon, JsModuleKind, LanguageId, ScriptRegion, ScriptRegionKind,
-    ScriptSourceType, StyleRegion,
+    CarrierParse, FrameworkAdapterId, FrameworkParseArtifact, FrameworkParseCommon, JsModuleKind,
+    LanguageId, ScriptSourceType,
 };
 use verter_span::Span;
 
@@ -99,65 +95,13 @@ pub const SVELTE_CARRIER_ARTIFACT_VERSION: verter_language::carrier_versions::Ca
         None => panic!("Svelte carrier parser version must be nonzero"),
     };
 
-/// Lift a parsed Svelte component into the framework-neutral parse artifact.
-///
-/// The neutral common surface carries:
-/// * one [`ScriptRegion`] per `<script>` block — `<script module>` →
-///   [`ScriptRegionKind::Module`], the instance `<script>` →
-///   [`ScriptRegionKind::Instance`] — each stamped with the block's resolved
-///   [`ScriptSourceType`]; regions are SOURCE-ordered;
-/// * one [`StyleRegion`] per component `<style>` block;
-/// * external `src` links for script/style blocks (Svelte rarely uses `src`,
-///   but the producer records them uniformly).
+/// Wrap a parsed Svelte component for the registered projector.
 #[must_use]
 pub fn build_svelte_parse_artifact(
-    source: &str,
+    _source: &str,
     parsed: Arc<ParsedSvelte>,
     parser_version: u32,
 ) -> Arc<FrameworkParseArtifact> {
-    let mut script_regions = Vec::new();
-    let mut external_links = Vec::new();
-
-    for script in [
-        parsed.instance_script.as_ref(),
-        parsed.module_script.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let source_type = svelte_script_source_type(Some(script));
-        let span = script
-            .content
-            .unwrap_or_else(|| Span::new(script.tag_open.end, script.tag_open.end));
-        script_regions.push(ScriptRegion {
-            span,
-            source_type,
-            kind: if script.is_module {
-                ScriptRegionKind::Module
-            } else {
-                ScriptRegionKind::Instance
-            },
-        });
-        if let Some((specifier, link_span)) = script_src(script, source) {
-            external_links.push(ExternalLink {
-                kind: ExternalLinkKind::Script,
-                specifier,
-                span: Some(link_span),
-            });
-        }
-    }
-    // Source-ordered (the parser already discovers them in source order, but a
-    // module script may precede the instance one).
-    script_regions.sort_by_key(|region| region.span.start);
-
-    let mut style_regions = Vec::new();
-    for style in &parsed.styles {
-        let span = style
-            .content
-            .unwrap_or_else(|| Span::new(style.tag_open.end, style.tag_open.end));
-        style_regions.push(StyleRegion { span });
-    }
-
     Arc::new(FrameworkParseArtifact::new(
         FrameworkAdapterId::svelte(),
         LanguageId::new("svelte"),
@@ -168,22 +112,6 @@ pub fn build_svelte_parse_artifact(
         },
         Arc::new(SvelteParseCarrier::new(parsed)),
     ))
-}
-
-/// Read a `src="..."` specifier off a script block's attributes.
-fn script_src(script: &SvelteScript, source: &str) -> Option<(String, Span)> {
-    use super::parser::{SvelteAttributeKind, SvelteAttributeValue};
-    script.attributes.iter().find_map(|attr| match &attr.kind {
-        SvelteAttributeKind::Plain {
-            name,
-            value: Some(SvelteAttributeValue::Text(span)),
-            ..
-        } if name.eq_ignore_ascii_case("src") => Some((
-            source[span.start as usize..span.end as usize].to_string(),
-            *span,
-        )),
-        _ => None,
-    })
 }
 
 /// The Svelte carrier compiler — the second [`CarrierCompiler`].
@@ -571,6 +499,7 @@ mod tests {
         assert_token_maps_to_source, assert_token_maps_to_source_line, build_lookup_table,
         parse_ide_output,
     };
+    use verter_language::ScriptRegionKind;
 
     fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
         use verter_language::carrier_grammar::{

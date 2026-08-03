@@ -408,7 +408,7 @@ fn clear_framework_parse(host: &VerterHost) {
 // in `component_meta_audit/structured_event.rs`.
 
 #[test]
-fn build_eval_script_source_without_parse_artifact_still_extracts_script_blocks() {
+fn build_eval_script_source_without_parse_artifact_fails_closed() {
     let source = r#"<script lang="ts">
 interface Props {
   label: string
@@ -421,16 +421,15 @@ defineProps<Props>()
 
     let extracted = VerterHost::build_eval_script_source("/App.vue", source, None);
     assert!(
-        extracted.contains("interface Props"),
-        "script content should be preserved without cached parse, got: {extracted}"
+        extracted
+            .bytes()
+            .all(|byte| matches!(byte, b' ' | b'\r' | b'\n')),
+        "a registered carrier without its parse artifact must not be rescanned: {extracted:?}"
     );
-    assert!(
-        extracted.contains("defineProps<Props>()"),
-        "script setup content should be preserved without cached parse, got: {extracted}"
-    );
-    assert!(
-        !extracted.contains("<template>"),
-        "template markup must not be passed into type evaluation, got: {extracted}"
+    assert_eq!(
+        extracted.len(),
+        source.len(),
+        "fail-closed blanking preserves offsets"
     );
 }
 
@@ -466,21 +465,19 @@ export type Real = string | { path: string }
         );
     }
 
-    // Control: the SAME text under a carrier canonical keeps the artifact-less
-    // forgiving extraction (the raw scan applies to a genuine `.vue`).
+    // Control: the SAME text under a carrier canonical enters the carrier
+    // extraction path, but without its parse artifact it fails closed rather
+    // than falling back to a raw script scan.
     let (eval, extracted) =
         VerterHost::build_eval_script_source_with_extraction("/Doc.vue", source, None);
     assert!(
         extracted,
-        "a carrier canonical keeps the artifact-less forgiving extraction"
+        "a carrier canonical still reports the fail-closed extraction path"
     );
     assert!(
-        eval.contains("const value = useReal()"),
-        "the carrier extraction keeps the script bytes, got: {eval}"
-    );
-    assert!(
-        !eval.contains("export type Real"),
-        "the carrier extraction blanks non-script bytes, got: {eval}"
+        eval.bytes()
+            .all(|byte| matches!(byte, b' ' | b'\r' | b'\n')),
+        "artifact-less carrier extraction must preserve offsets while blanking bytes, got: {eval}"
     );
 }
 

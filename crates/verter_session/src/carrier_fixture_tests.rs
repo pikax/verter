@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use std::sync::Arc;
 
 pub(crate) fn publish_carrier_fixture(

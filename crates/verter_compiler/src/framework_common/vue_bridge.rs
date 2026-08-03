@@ -2,10 +2,8 @@
 //!
 //! Owns [`VueParseCarrier`] — the concrete [`CarrierParse`] payload
 //! wrapping a parsed Vue SFC — and [`build_vue_parse_artifact`], the
-//! Vue producer that lifts a [`ParsedSfc`] into the framework-neutral
-//! [`FrameworkParseArtifact`] at parse time (typed script/template/
-//! style regions, external links, the resolved per-region
-//! [`ScriptSourceType`]).
+//! Vue producer that wraps a [`ParsedSfc`] for the registered projector. The
+//! projector is the sole owner of the neutral inventory geometry.
 //!
 //! Consumers outside the Vue adapter read the artifact's typed
 //! [`FrameworkParseCommon`] surface; the typed carrier is reachable
@@ -17,9 +15,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use verter_language::{
-    CarrierParse, ExternalLink, ExternalLinkKind, FrameworkAdapterId, FrameworkParseArtifact,
-    FrameworkParseCommon, JsModuleKind, LanguageId, ScriptRegion, ScriptRegionKind,
-    ScriptSourceType, StyleRegion, TemplateRegion,
+    CarrierParse, FrameworkAdapterId, FrameworkParseArtifact, FrameworkParseCommon, JsModuleKind,
+    LanguageId, ScriptSourceType,
 };
 use verter_span::Span;
 
@@ -123,95 +120,12 @@ pub fn vue_script_source_type(parsed: &ParsedSfc, source: &str) -> ScriptSourceT
     }
 }
 
-/// Lift a parsed Vue SFC into the framework-neutral parse artifact.
-///
-/// The ONE Vue carrier producer: every host slot that stores a Vue
-/// parse stores the artifact this function builds. The typed common
-/// surface carries:
-///
-/// * one [`ScriptRegion`] per script block (plain `<script>` →
-///   [`ScriptRegionKind::Module`], `<script setup>` →
-///   [`ScriptRegionKind::Instance`]), each stamped with the SFC's
-///   resolved [`ScriptSourceType`] (Vue requires every script block of
-///   one SFC to share a dialect, so the SFC-level resolution is the
-///   per-region truth);
-/// * template/style content regions in source order;
-/// * external `src` links for script/template/style blocks;
-/// * NO duplicated diagnostics — Vue's parse diagnostics flow through
-///   the host's existing `ParseSnapshot` channel; mirroring them here
-///   would create a second source for the same data.
+/// Wrap a parsed Vue SFC for the registered projector.
 pub fn build_vue_parse_artifact(
-    source: &str,
+    _source: &str,
     parsed: Arc<ParsedSfc>,
     parser_version: u32,
 ) -> Arc<FrameworkParseArtifact> {
-    let source_type = vue_script_source_type(&parsed, source);
-
-    let mut script_regions = Vec::new();
-    let mut external_links = Vec::new();
-
-    for script in [parsed.script(), parsed.script_setup()]
-        .into_iter()
-        .flatten()
-    {
-        let span = script
-            .content
-            .unwrap_or_else(|| Span::new(script.tag_open.end, script.tag_open.end));
-        script_regions.push(ScriptRegion {
-            span,
-            source_type,
-            kind: if script.is_setup {
-                ScriptRegionKind::Instance
-            } else {
-                ScriptRegionKind::Module
-            },
-        });
-        if let Some(src_span) = script.src {
-            external_links.push(ExternalLink {
-                kind: ExternalLinkKind::Script,
-                specifier: source[src_span.start as usize..src_span.end as usize].to_string(),
-                span: Some(src_span),
-            });
-        }
-    }
-    // `FrameworkParseCommon.script_regions` is SOURCE-ordered: a Vue file
-    // may place `<script setup>` before the plain `<script>`, while the
-    // parser accessors expose them in fixed plain-then-setup order.
-    script_regions.sort_by_key(|region| region.span.start);
-
-    let mut template_regions = Vec::new();
-    if let Some(template) = parsed.template_ast() {
-        let span = template
-            .root
-            .content
-            .as_ref()
-            .map(|content| Span::new(content.start, content.end))
-            .unwrap_or_else(|| Span::new(template.root.tag_open.end, template.root.tag_open.end));
-        template_regions.push(TemplateRegion { span });
-        if let Some((specifier, span)) = attr_value(&template.root.attributes, source, "src") {
-            external_links.push(ExternalLink {
-                kind: ExternalLinkKind::Template,
-                specifier,
-                span,
-            });
-        }
-    }
-
-    let mut style_regions = Vec::new();
-    for style in parsed.style_nodes() {
-        let span = style
-            .content
-            .unwrap_or_else(|| Span::new(style.tag_open.end, style.tag_open.end));
-        style_regions.push(StyleRegion { span });
-        if let Some((specifier, span)) = attr_value(&style.attributes, source, "src") {
-            external_links.push(ExternalLink {
-                kind: ExternalLinkKind::Style,
-                specifier,
-                span,
-            });
-        }
-    }
-
     Arc::new(FrameworkParseArtifact::new(
         FrameworkAdapterId::vue(),
         LanguageId::new("vue"),
@@ -670,6 +584,7 @@ pub fn vue_result_to_runtime_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_language::{ExternalLinkKind, ScriptRegionKind};
 
     fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
         use verter_language::carrier_grammar::{

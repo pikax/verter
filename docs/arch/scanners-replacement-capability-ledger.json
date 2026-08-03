@@ -112,11 +112,10 @@
                                                    "standalone_compile":  1
                                                },
                        "by_disposition":  {
-                                              "allowed_standalone":  1,
-                                              "migrate":  64,
-                                              "delete":  33,
-                                              "test_only":  11,
-                                              "allowed_nested":  2
+                                "allowed_standalone":  1,
+                                "migrate":  7,
+                                "delete":  28,
+                                "allowed_nested":  2
                                           }
                    },
     "rows":  [

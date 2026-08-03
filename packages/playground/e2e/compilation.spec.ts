@@ -2,7 +2,7 @@
  * @ai-generated - E2E tests for compilation output verification.
  */
 import { test, expect } from "@playwright/test";
-import { getPreviewFrame, filterCriticalErrors } from "./helpers";
+import { getPreviewFrame, filterCriticalErrors, getOutputCode } from "./helpers";
 
 test.describe("Compilation", () => {
   test.beforeEach(async ({ page }) => {
@@ -11,7 +11,7 @@ test.describe("Compilation", () => {
   });
 
   test("default template compiles to JS with __sfc__", async ({ page }) => {
-    // Use the Files tab which renders in a <pre> (no Monaco virtualization)
+    // Use the Files tab's authoritative virtual-script Monaco view.
     const filesTab = page.locator(".output-tabs button", { hasText: "Files" });
     await filesTab.click();
     await page.waitForTimeout(500);
@@ -20,7 +20,7 @@ test.describe("Compilation", () => {
     await scriptBtn.click();
     await page.waitForTimeout(500);
 
-    const code = await page.locator(".vfiles-code pre code").textContent();
+    const code = await getOutputCode(page);
     expect(code).toContain("__sfc__");
   });
 
@@ -33,18 +33,16 @@ test.describe("Compilation", () => {
     await templateBtn.click();
     await page.waitForTimeout(500);
 
-    const code = await page.locator(".vfiles-code pre code").textContent();
+    const code = await getOutputCode(page);
     expect(code).toContain("render");
   });
 
   test("CSS output contains scoped styles", async ({ page }) => {
-    const cssTab = page.getByRole("button", { name: "CSS", exact: true });
-    await cssTab.click();
-    await page.waitForTimeout(1000);
+    const filesTab = page.locator(".output-tabs button", { hasText: "Files" });
+    await filesTab.click();
+    await page.locator(".vfile-btn", { hasText: "style[0]" }).click();
 
-    // Default template has <style scoped>, so CSS should contain data-v attributes.
-    // Read from the code output view lines (CSS output is typically short).
-    const code = await page.locator(".code-output").textContent();
+    const code = await getOutputCode(page);
     // Scoped CSS should have data-v- attribute selector or the raw CSS
     expect(code).toMatch(/\.(app|button)|data-v-|font-family|text-align/);
   });

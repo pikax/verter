@@ -4992,7 +4992,7 @@ const SETUP_MARKER = 2;
 <template><div /></template>"#;
 
     let parsed = parsed_vue_fixture(source);
-    let result = crate::host_resolve::extract_vue_script_content(source, Some(&parsed));
+    let result = crate::host_resolve::extract_vue_script_content(source, &parsed);
     assert!(result.is_some(), "should extract script content from SFC");
     let content = result.unwrap();
     assert!(
@@ -5019,30 +5019,6 @@ const SETUP_MARKER = 2;
     );
 }
 
-#[test]
-fn extract_vue_script_content_without_parsed_sfc_matches_cached() {
-    let source = r#"<script lang="ts">
-const COMPANION = 1;
-</script>
-<script setup lang="ts">
-const SETUP = 2;
-</script>
-<template><div /></template>"#;
-
-    let parsed = parsed_vue_fixture(source);
-    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed));
-    let without_cache = crate::host_resolve::extract_vue_script_content(source, None);
-    assert_eq!(
-        with_cache, without_cache,
-        "cached and non-cached paths must produce identical output"
-    );
-    // Also verify the non-cached path produces correct output on its own
-    let content = without_cache.unwrap();
-    assert!(content.contains("COMPANION"), "should contain COMPANION");
-    assert!(content.contains("SETUP"), "should contain SETUP");
-    assert!(!content.contains("<template>"), "must not contain template");
-}
-
 /// A JS comment containing `` `<style scoped>` `` must not truncate the
 /// setup block. reka-ui RadioGroupItem has such a comment; truncating drops
 /// every `defineProps` and leaves RadioGroup without a `value` prop.
@@ -5062,36 +5038,32 @@ const scopeId = 1
 </style>"#;
 
     let parsed = parsed_vue_fixture(source);
-    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
-        .expect("cached extraction should succeed");
-    let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
-        .expect("non-cached extraction should succeed");
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, &parsed)
+        .expect("registered extraction should succeed");
 
-    for (label, content) in [("cached", &with_cache), ("raw-scan", &without_cache)] {
-        assert!(
-            content.contains("defineProps"),
-            "{label}: setup must include defineProps, got:\n{content}"
-        );
-        assert!(
-            content.contains("scopeId"),
-            "{label}: setup must include code after the style-looking comment, got:\n{content}"
-        );
-        assert!(
-            content.contains("ItemProps"),
-            "{label}: companion interface must be retained, got:\n{content}"
-        );
-        // The real style block content is blanked (not a script span).
-        assert!(
-            !content.contains(".foo"),
-            "{label}: must not include real <style> block body as script, got:\n{content}"
-        );
-    }
+    assert!(
+        with_cache.contains("defineProps"),
+        "registered setup must include defineProps, got:\n{with_cache}"
+    );
+    assert!(
+        with_cache.contains("scopeId"),
+        "registered setup must include code after the style-looking comment, got:\n{with_cache}"
+    );
+    assert!(
+        with_cache.contains("ItemProps"),
+        "registered companion interface must be retained, got:\n{with_cache}"
+    );
+    // The real style block content is blanked (not a script span).
+    assert!(
+        !with_cache.contains(".foo"),
+        "registered extraction must not include real <style> block body as script, got:\n{with_cache}"
+    );
 }
 
 #[test]
-fn extract_vue_script_content_handles_script_end_literal_in_string() {
+fn extract_vue_script_content_handles_escaped_script_end_literal_in_string() {
     let source = r#"<script lang="ts">
-const html = "</script><div>kept</div>";
+const html = "<\/script><div>kept</div>";
 const BEFORE_CLOSE = true;
 </script>
 <script setup lang="ts">
@@ -5100,18 +5072,11 @@ const AFTER_CLOSE = 1;
 <template><div /></template>"#;
 
     let parsed = parsed_vue_fixture(source);
-    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
-        .expect("cached extraction should succeed");
-    let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
-        .expect("non-cached extraction should succeed");
-
-    assert_eq!(
-        with_cache, without_cache,
-        "cached and non-cached extraction must agree for script-end literals",
-    );
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, &parsed)
+        .expect("registered extraction should succeed");
     assert!(
-        with_cache.contains(r#"const html = "</script><div>kept</div>";"#),
-        "script-end literal should be preserved, got: {with_cache}"
+        with_cache.contains(r#"const html = "<\/script><div>kept</div>";"#),
+        "escaped script-end literal should be preserved, got: {with_cache}"
     );
     assert!(
         with_cache.contains("const BEFORE_CLOSE = true;"),
@@ -6738,25 +6703,21 @@ fn extract_vue_script_content_handles_adjacent_close_and_template() {
     let source = "<script lang=\"ts\">\nexport interface ItemProps { value?: string }\n</script><script setup lang=\"ts\">\nconst props = defineProps<ItemProps>()\n</script><template><div /></template>";
 
     let parsed = parsed_vue_fixture(source);
-    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
-        .expect("cached extraction should succeed");
-    let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
-        .expect("non-cached extraction should succeed");
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, &parsed)
+        .expect("registered extraction should succeed");
 
-    for (label, content) in [("cached", &with_cache), ("raw-scan", &without_cache)] {
-        assert!(
-            content.contains("defineProps"),
-            "{label}: setup must include defineProps with adjacent close tags, got:\n{content}"
-        );
-        assert!(
-            content.contains("ItemProps"),
-            "{label}: companion interface must survive adjacent close tags, got:\n{content}"
-        );
-        assert!(
-            !content.contains("<template>"),
-            "{label}: template markup must not leak into script content, got:\n{content}"
-        );
-    }
+    assert!(
+        with_cache.contains("defineProps"),
+        "registered setup must include defineProps with adjacent close tags, got:\n{with_cache}"
+    );
+    assert!(
+        with_cache.contains("ItemProps"),
+        "registered companion interface must survive adjacent close tags, got:\n{with_cache}"
+    );
+    assert!(
+        !with_cache.contains("<template>"),
+        "registered template markup must not leak into script content, got:\n{with_cache}"
+    );
 }
 
 // ── Attribute fallthrough on the parent-facing props type ────────────

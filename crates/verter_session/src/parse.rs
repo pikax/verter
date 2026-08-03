@@ -1515,12 +1515,21 @@ pub(crate) fn build_vue_snapshot_from_parsed(
             provenance,
         ),
         VueScriptProgram::Shared(program) => {
-            debug_assert_eq!(
-                Some(program.source_str()),
-                crate::host_resolve::extract_vue_script_content(source, Some(parsed)).as_deref(),
-                "a shared script program must carry this SFC's \
-                 position-preserving extracted script",
-            );
+            #[cfg(debug_assertions)]
+            {
+                let expected_script = crate::host_resolve::extract_vue_script_content(
+                    source, parsed,
+                )
+                .unwrap_or_else(|| {
+                    crate::host_resolve::build_position_preserving_script_source(source, &[])
+                });
+                assert_eq!(
+                    program.source_str(),
+                    expected_script,
+                    "a shared script program must carry this SFC's \
+                     position-preserving extracted script",
+                );
+            }
             match script_owners {
                 Some(owners) => vue_script_walks_from_program(
                     program.source_str(),
@@ -2054,7 +2063,7 @@ fn build_vue_script_outputs(
     if !needs_exports && !needs_script_analysis {
         return outputs;
     }
-    let Some(script_source) = crate::host_resolve::extract_vue_script_content(source, Some(parsed))
+    let Some(script_source) = crate::host_resolve::extract_vue_script_content(source, parsed)
     else {
         return outputs;
     };

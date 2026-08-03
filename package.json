@@ -44,8 +44,6 @@
     "watch": "pnpm --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
     "dev-extension": "pnpm run build:lsp && pnpm --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
     "update-all": "pnpm up -r -i -L",
-    "package": "cd extensions/vscode && npm install --omit=dev && npx shx mkdir -p node_modules/@verter && npx shx cp -r ../typescript-plugin node_modules/@verter/typescript-plugin && npx shx rm -r node_modules/@oxc-parser && npx vsce package",
-    "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin",
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "gen:query-key-spec": "cargo run -p verter_session --bin gen-query-key-spec",
     "gen:oracle-snapshots": "cargo run -p verter_session --features oracle-gen --bin oracle_gen",

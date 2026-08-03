@@ -437,8 +437,14 @@ fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
+    getrandom::getrandom(bytes).map_err(|error| io::Error::other(error.to_string()))
+}
+
 #[cfg(not(any(
     windows,
+    all(target_arch = "wasm32", target_os = "unknown"),
     target_os = "linux",
     target_os = "android",
     target_os = "macos",

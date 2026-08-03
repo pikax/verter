@@ -52,7 +52,9 @@ export function filterCriticalErrors(errors: string[]): string[] {
  * all rendered lines to reconstruct the full content.
  */
 export async function getOutputCode(page: Page): Promise<string> {
-  const codeOutput = page.locator(".code-output .monaco-editor").first();
+  const codeOutput = page
+    .locator(".vfiles-code .monaco-editor, .code-output .monaco-editor")
+    .first();
   await expect(codeOutput).toBeVisible({ timeout: 5000 });
 
   // Wait for lines to render

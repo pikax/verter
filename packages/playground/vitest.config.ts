@@ -5,6 +5,10 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": resolve(__dirname, "src"),
+      "monaco-editor-core": resolve(
+        __dirname,
+        "node_modules/monaco-editor-core/esm/vs/editor/editor.main.js",
+      ),
       "verter-wasm-glue": resolve(__dirname, "../wasm/wasm/verter_wasm.js"),
       // Resolve the descriptor-generated client framework manifest directly from
       // language-shared source, so the playground never couples to a built dist.

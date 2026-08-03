@@ -17,39 +17,36 @@ test.describe("Output tabs", () => {
     await expect(previewTab).toBeVisible({ timeout: 5000 });
   });
 
-  test("JS tab is visible", async ({ page }) => {
-    const jsTab = page.locator(".output-tabs button", { hasText: "JS" });
-    await expect(jsTab).toBeVisible({ timeout: 5000 });
+  test("Files tab is visible", async ({ page }) => {
+    const filesTab = page.locator(".output-tabs button", { hasText: "Files" });
+    await expect(filesTab).toBeVisible({ timeout: 5000 });
   });
 
-  test("CSS tab is visible", async ({ page }) => {
-    const cssTab = page.getByRole("button", { name: "CSS", exact: true });
-    await expect(cssTab).toBeVisible({ timeout: 5000 });
+  test("Files tab exposes the style output", async ({ page }) => {
+    await page.locator(".output-tabs button", { hasText: "Files" }).click();
+    await expect(page.locator(".vfile-btn", { hasText: "style[0]" })).toBeVisible();
   });
 
-  test("clicking JS tab shows compiled JavaScript", async ({ page }) => {
-    const jsTab = page.locator(".output-tabs button", { hasText: "JS" });
-    await jsTab.click();
-    await page.waitForTimeout(1000);
+  test("clicking the script file shows compiled JavaScript", async ({ page }) => {
+    await page.locator(".output-tabs button", { hasText: "Files" }).click();
+    await page.locator(".vfile-btn", { hasText: "script" }).click();
 
-    // Should show compiled code with __sfc__ or similar
-    const codeOutput = page.locator(".code-output");
+    const codeOutput = page.locator(".vfiles-code .monaco-editor");
     await expect(codeOutput).toBeVisible({ timeout: 5000 });
   });
 
-  test("clicking CSS tab shows compiled CSS", async ({ page }) => {
-    const cssTab = page.getByRole("button", { name: "CSS", exact: true });
-    await cssTab.click();
-    await page.waitForTimeout(1000);
+  test("clicking the style file shows compiled CSS", async ({ page }) => {
+    await page.locator(".output-tabs button", { hasText: "Files" }).click();
+    await page.locator(".vfile-btn", { hasText: "style[0]" }).click();
 
-    const codeOutput = page.locator(".code-output");
+    const codeOutput = page.locator(".vfiles-code .monaco-editor");
     await expect(codeOutput).toBeVisible({ timeout: 5000 });
   });
 
   test("switching back to Preview shows the iframe", async ({ page }) => {
-    // Switch to JS first
-    const jsTab = page.locator(".output-tabs button", { hasText: "JS" });
-    await jsTab.click();
+    // Switch to Files first
+    const filesTab = page.locator(".output-tabs button", { hasText: "Files" });
+    await filesTab.click();
     await page.waitForTimeout(500);
 
     // Switch back to Preview
@@ -63,15 +60,8 @@ test.describe("Output tabs", () => {
     await expect(iframe).toBeVisible({ timeout: 5000 });
   });
 
-  test("JS tab shows compilation timing", async ({ page }) => {
-    const jsTab = page.locator(".output-tabs button", { hasText: "JS" });
-    await jsTab.click();
-    await page.waitForTimeout(1000);
-
-    // Look for timing information (ms display)
-    const timing = page.locator("text=/\\d+(\\.\\d+)?\\s*ms/");
-    const count = await timing.count();
-    // Timing may or may not be visible depending on UI
-    expect(count).toBeGreaterThanOrEqual(0);
+  test("Files tab shows compilation timing", async ({ page }) => {
+    const filesTab = page.locator(".output-tabs button", { hasText: /Files.*ms/ });
+    await expect(filesTab).toBeVisible({ timeout: 5000 });
   });
 });

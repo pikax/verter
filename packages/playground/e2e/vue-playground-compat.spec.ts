@@ -46,7 +46,7 @@ test.describe("Vue playground URL compatibility", () => {
   test("loads Verter-encoded hash with metadata", async ({ page }) => {
     const flat: Record<string, string> = {
       "App.vue": "<template><h1>verter test</h1></template>",
-      _outputMode: "js",
+      _outputMode: "files",
     };
     const hash = encodeFlat(flat);
 
@@ -57,9 +57,9 @@ test.describe("Vue playground URL compatibility", () => {
     const appTab = page.locator(".file-selector .tab", { hasText: "App.vue" });
     await expect(appTab).toBeVisible({ timeout: 5000 });
 
-    // JS output tab should be active (since _outputMode: "js")
-    const jsTab = page.locator(".output-tabs .output-tab.active", { hasText: "JS" });
-    await expect(jsTab).toBeVisible({ timeout: 5000 });
+    // Files output tab should be active (since _outputMode: "files")
+    const filesTab = page.locator(".output-tabs .output-tab.active", { hasText: "Files" });
+    await expect(filesTab).toBeVisible({ timeout: 5000 });
   });
 
   test("roundtrip: load hash → hash updates → reload → same files", async ({ page }) => {
