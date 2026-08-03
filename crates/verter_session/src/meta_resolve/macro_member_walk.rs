@@ -126,12 +126,14 @@ pub(crate) fn slot_binding_targets_define_props_root(
             crate::semantic_query::ProjectionMode::Navigate,
         );
     let raised = field
-        .shallow_source
+        .authored_evidence
         .as_ref()
-        .and_then(|locator| dispatch.raise_authored_locator_to_hot(locator, transit_ctx))
+        .and_then(|evidence| {
+            dispatch.raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
+        })
         .or_else(|| {
             dispatch.raise_semantic_type_source_to_hot(
-                field.r#type.present()?,
+                field.authority.source()?,
                 crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id: owner_canonical,
                     scope_owner: owner,

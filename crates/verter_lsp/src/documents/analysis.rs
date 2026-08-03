@@ -194,11 +194,15 @@ impl DocumentRegistry {
                                 .props
                                 .into_iter()
                                 .zip(types.into_lanes().props)
-                                .map(|(prop, prop_type)| {
-                                    let is_boolean = type_expr_contains_boolean(&prop_type);
+                                .map(|(prop, publication)| {
+                                    let is_boolean = publication
+                                        .materialized_type()
+                                        .is_some_and(type_expr_contains_boolean);
+                                    let type_annotation =
+                                        publication.terminal_display().text().map(str::to_string);
                                     verter_semantic::analysis::AnalyzedPropDefinition {
                                         name: prop.name,
-                                        type_annotation: prop.raw_type,
+                                        type_annotation,
                                         has_default: prop.has_default,
                                         is_required: prop.required,
                                         is_boolean,

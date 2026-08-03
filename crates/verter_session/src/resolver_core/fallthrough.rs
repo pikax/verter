@@ -12,7 +12,9 @@ use verter_semantic::analysis::html_intrinsics::{
 use verter_semantic::analysis::types::AnalyzedImport;
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource, SourcePosition};
 use verter_type_expr::intrinsics::StaticIntrinsicTypeId;
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{
+    PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypeExpr, TypePublication,
+};
 
 use crate::resolver_core::{FactVersionRef, FallthroughNodeKey, FallthroughOverrideIdentity};
 
@@ -80,6 +82,20 @@ impl IntrinsicMemberTypeSource {
             },
         }
     }
+}
+
+fn type_publication_from_position(
+    position: &SourcePosition,
+    provenance: ResolutionProvenance,
+) -> TypePublication {
+    TypePublication::from_source_position(
+        position,
+        ResolutionExactness::ExactConcrete,
+        provenance,
+        std::sync::Arc::from([]),
+        None,
+        &PublicationPolicy::exact_only(),
+    )
 }
 
 pub trait FallthroughResolutionView {
@@ -309,14 +325,16 @@ pub fn append_native_candidate_branch<H: FallthroughResolverHost>(
                 if consumed_attrs.iter().any(|attr| attr == &member.name) {
                     continue;
                 }
-                let (type_source, raw_type) = member.source.type_channels();
+                let (type_source, _) = member.source.type_channels();
                 inherited_props.push(FallthroughPropEntry {
                     name: member.name.clone(),
-                    type_source,
+                    publication: type_publication_from_position(
+                        &type_source,
+                        ResolutionProvenance::Schema,
+                    ),
                     // Intrinsic sources carry lib-global / closed facts —
                     // no producing FILE scope (the owner scope applies).
                     type_source_scope: None,
-                    raw_type,
                     sources: vec![InheritedSource::NativeTag {
                         tag: tag.to_string(),
                     }],
@@ -612,7 +630,7 @@ pub fn merge_fallthrough_branches(
     > = FxHashMap::default();
     let mut inherited_event_map: FxHashMap<
         String,
-        (AcceptedEventAnalysis, Vec<String>, MergedSourceState),
+        (AcceptedEventAnalysis, Vec<String>, MergedEventSourceState),
     > = FxHashMap::default();
 
     for branch in fallthrough_branches {
@@ -629,13 +647,14 @@ pub fn merge_fallthrough_branches(
                             name: prop.name.clone(),
                             // Finalized from the absorbing accumulator
                             // AFTER every branch folded — never per-branch.
-                            type_source: SourcePosition::unannotated(),
+                            publication: type_publication_from_position(
+                                &SourcePosition::unannotated(),
+                                ResolutionProvenance::FallthroughInheritance,
+                            ),
                             type_source_scope: None,
-                            raw_type: prop.raw_type.clone(),
                             // Inherited fallthrough props lose their
                             // origin source-annotation typed companion;
                             // they only carry the resolved type source.
-                            raw_type_source: None,
                             required: false,
                             provenance: MemberProvenance::Inherited {
                                 sources: prop.sources.clone(),
@@ -649,10 +668,7 @@ pub fn merge_fallthrough_branches(
                 });
             entry
                 .2
-                .fold(&prop.type_source, prop.type_source_scope.as_deref());
-            if entry.0.raw_type != prop.raw_type {
-                entry.0.raw_type = None;
-            }
+                .fold(&prop.publication, prop.type_source_scope.as_deref());
             if let MemberProvenance::Inherited { sources } = &mut entry.0.provenance {
                 merge_inherited_sources(sources, &prop.sources);
             }
@@ -678,7 +694,7 @@ pub fn merge_fallthrough_branches(
                             kind: AcceptedEventKind::Listener,
                         },
                         Vec::new(),
-                        MergedSourceState::Unset,
+                        MergedEventSourceState::Unset,
                     )
                 });
             entry.2.fold(&event.payload, event.payload_scope.as_deref());
@@ -714,8 +730,8 @@ pub fn merge_fallthrough_branches(
     let mut inherited_props: Vec<AcceptedPropAnalysis> = inherited_prop_map
         .into_values()
         .map(|(mut prop, _, source_state)| {
-            let (source, scope) = source_state.finalize();
-            prop.type_source = source;
+            let (publication, scope) = source_state.finalize();
+            prop.publication = publication;
             prop.type_source_scope = scope;
             prop
         })
@@ -776,12 +792,10 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
         .iter()
         .map(|prop| AcceptedPropAnalysis {
             name: prop.name.clone(),
-            type_source: prop.type_source.clone(),
+            publication: prop.publication.clone(),
             // Own declared rows: the source is spelled in the owner's own
             // file — the owner scope applies.
             type_source_scope: None,
-            raw_type: prop.raw_type.clone(),
-            raw_type_source: prop.raw_type_source.clone(),
             required: prop.required,
             provenance: MemberProvenance::Declared,
             availability: MemberAvailability::Always,
@@ -1356,7 +1370,8 @@ fn inherited_component_props(
         .filter(|prop| !declared_prop_names.contains(&prop.name))
         .filter(|prop| !consumed_attrs.iter().any(|attr| attr == &prop.name))
         .map(|prop| {
-            let type_source = self_anchor_inherited_source(&prop.type_source, child_id);
+            let publication = prop.publication.absolutized_against(child_id);
+            let type_source = publication.source_position();
             // PRODUCING scope for the source's scope-relative names: the
             // child's OWN effective scope when the child's row was itself
             // inherited (multi-hop chain — the terminal origin survives),
@@ -1366,9 +1381,8 @@ fn inherited_component_props(
                 inherited_source_scope(&type_source, &prop.type_source_scope, child_id);
             FallthroughPropEntry {
                 name: prop.name.clone(),
-                type_source,
+                publication,
                 type_source_scope,
-                raw_type: prop.raw_type.clone(),
                 sources: vec![InheritedSource::Component {
                     canonical_id: child_id.to_string(),
                 }],
@@ -1424,16 +1438,16 @@ fn inherited_declared_component_props(
         .filter(|prop| !declared_prop_names.contains(&prop.name))
         .filter(|prop| !consumed_attrs.iter().any(|attr| attr == &prop.name))
         .map(|prop| {
-            let type_source = self_anchor_inherited_source(&prop.type_source, child_id);
+            let publication = prop.publication.absolutized_against(child_id);
+            let type_source = publication.source_position();
             // Producer scope attached ONLY while the absolutized source is
             // scope-relative (see `inherited_source_scope`).
             let type_source_scope =
                 inherited_source_scope(&type_source, &prop.type_source_scope, child_id);
             FallthroughPropEntry {
                 name: prop.name.clone(),
-                type_source,
+                publication,
                 type_source_scope,
-                raw_type: prop.raw_type.clone(),
                 sources: vec![InheritedSource::Component {
                     canonical_id: child_id.to_string(),
                 }],
@@ -1510,84 +1524,113 @@ fn inherited_declared_component_events(
 /// including nested scope-relative refs — under its PRODUCING scope, never
 /// blindly under the parent owner.
 enum MergedSourceState {
-    /// No typed branch side folded yet.
     Unset,
-    /// Every typed branch side so far carried this one source identity
-    /// (boxed: the accumulator's other states carry no data).
-    Agreed(Box<AgreedSourceIdentity>),
-    /// Two typed branch sides disagreed. Absorbing (except by `Failed`).
+    Agreed(Box<AgreedPublicationIdentity>),
     Conflict,
-    /// A branch side carried a typed source-construction FAILURE. Absorbing
-    /// over every other state: a failed required position inherited from any
-    /// branch must not vanish into a merged "untyped" success.
-    Failed(verter_type_expr::facts::SemanticSourceFailure),
+    Failed(Box<TypePublication>),
 }
 
-/// The agreement identity [`MergedSourceState::Agreed`] carries.
-struct AgreedSourceIdentity {
-    source: verter_type_expr::facts::SemanticTypeSource,
-    /// The first contributing entry's positional producing scope —
-    /// identity-bearing only while `source.is_scope_relative()`, and
-    /// carried onto the finalized flat row as its raise scope.
+struct AgreedPublicationIdentity {
+    publication: TypePublication,
     scope: Option<String>,
 }
 
 impl MergedSourceState {
-    fn fold(
-        &mut self,
-        incoming: &verter_type_expr::facts::SourcePosition,
-        incoming_scope: Option<&str>,
-    ) {
-        use verter_type_expr::facts::SourcePosition;
+    fn fold(&mut self, incoming: &TypePublication, incoming_scope: Option<&str>) {
+        match incoming.result() {
+            verter_type_expr::PublicationResult::Absent { .. } => {}
+            verter_type_expr::PublicationResult::Failed { .. } => {
+                *self = Self::Failed(Box::new(incoming.clone()));
+            }
+            verter_type_expr::PublicationResult::Published {
+                selected_source, ..
+            } => match self {
+                Self::Unset => {
+                    *self = Self::Agreed(Box::new(AgreedPublicationIdentity {
+                        publication: incoming.clone(),
+                        scope: incoming_scope.map(str::to_string),
+                    }));
+                }
+                Self::Agreed(agreed) => {
+                    let same_scope = !selected_source.is_scope_relative()
+                        || agreed.scope.as_deref() == incoming_scope;
+                    if agreed.publication != *incoming || !same_scope {
+                        *self = Self::Conflict;
+                    }
+                }
+                Self::Conflict | Self::Failed(_) => {}
+            },
+        }
+    }
+
+    fn finalize(self) -> (TypePublication, Option<String>) {
+        use verter_type_expr::facts::{SchemaAbsence, SourcePosition};
+        match self {
+            Self::Agreed(agreed) => (agreed.publication, agreed.scope),
+            Self::Failed(publication) => (*publication, None),
+            Self::Unset => (
+                type_publication_from_position(
+                    &SourcePosition::unannotated(),
+                    ResolutionProvenance::FallthroughInheritance,
+                ),
+                None,
+            ),
+            Self::Conflict => (
+                type_publication_from_position(
+                    &SourcePosition::Absent(SchemaAbsence::BranchDivergent),
+                    ResolutionProvenance::FallthroughInheritance,
+                ),
+                None,
+            ),
+        }
+    }
+}
+
+enum MergedEventSourceState {
+    Unset,
+    Agreed {
+        source: Box<SemanticTypeSource>,
+        scope: Option<String>,
+    },
+    Conflict,
+    Failed(verter_type_expr::facts::SemanticSourceFailure),
+}
+
+impl MergedEventSourceState {
+    fn fold(&mut self, incoming: &SourcePosition, incoming_scope: Option<&str>) {
         let incoming = match incoming {
-            // An ABSENT branch side neither conflicts nor revives: the
-            // one-sided merge adopts the typed side (state unchanged).
             SourcePosition::Absent(_) => return,
-            // A FAILED branch side absorbs the whole merged row: a failed
-            // required position must never vanish into a merged success.
             SourcePosition::Failed(failure) => {
-                *self = MergedSourceState::Failed(*failure);
+                *self = Self::Failed(*failure);
                 return;
             }
             SourcePosition::Present(source) => source,
         };
         match self {
-            MergedSourceState::Unset => {
-                *self = MergedSourceState::Agreed(Box::new(AgreedSourceIdentity {
-                    source: incoming.clone(),
+            Self::Unset => {
+                *self = Self::Agreed {
+                    source: Box::new(incoming.clone()),
                     scope: incoming_scope.map(str::to_string),
-                }));
+                };
             }
-            MergedSourceState::Agreed(agreed) => {
-                let same_identity = agreed.source == *incoming
-                    && (!agreed.source.is_scope_relative()
-                        || agreed.scope.as_deref() == incoming_scope);
+            Self::Agreed { source, scope } => {
+                let same_identity = source.as_ref() == incoming
+                    && (!source.is_scope_relative() || scope.as_deref() == incoming_scope);
                 if !same_identity {
-                    *self = MergedSourceState::Conflict;
+                    *self = Self::Conflict;
                 }
             }
-            MergedSourceState::Conflict => {}
-            MergedSourceState::Failed(_) => {}
+            Self::Conflict | Self::Failed(_) => {}
         }
     }
 
-    /// Finalize AFTER every branch folded: `Unset` publishes the proven
-    /// unannotated absence (no typed side existed); `Conflict` publishes the
-    /// PROVEN branch-divergent absence (typed sides with distinct
-    /// identities); a `Failed` side publishes the typed failure (fails
-    /// output materialization); agreement publishes the source TOGETHER WITH
-    /// its producing scope.
-    fn finalize(self) -> (verter_type_expr::facts::SourcePosition, Option<String>) {
-        use verter_type_expr::facts::{SchemaAbsence, SourcePosition};
+    fn finalize(self) -> (SourcePosition, Option<String>) {
+        use verter_type_expr::facts::SchemaAbsence;
         match self {
-            MergedSourceState::Agreed(agreed) => {
-                (SourcePosition::Present(agreed.source), agreed.scope)
-            }
-            MergedSourceState::Unset => (SourcePosition::unannotated(), None),
-            MergedSourceState::Conflict => {
-                (SourcePosition::Absent(SchemaAbsence::BranchDivergent), None)
-            }
-            MergedSourceState::Failed(failure) => (SourcePosition::Failed(failure), None),
+            Self::Agreed { source, scope } => (SourcePosition::Present(*source), scope),
+            Self::Unset => (SourcePosition::unannotated(), None),
+            Self::Conflict => (SourcePosition::Absent(SchemaAbsence::BranchDivergent), None),
+            Self::Failed(failure) => (SourcePosition::Failed(failure), None),
         }
     }
 }
@@ -1660,9 +1703,10 @@ mod tests {
         collect_dynamic_root_candidates_from_type, fallthrough_cache_key,
         inherited_component_events, inherited_component_props, known_spread_keys_from_type_expr,
         merge_fallthrough_branches, resolve_fallthrough_surface, structural_substitute_typeof_refs,
-        DynamicRootCandidate, FallthroughComputeHost, FallthroughPropOverrideSet,
-        FallthroughResolutionView, FallthroughResolverHost, IntrinsicMemberTypeSource,
-        IntrinsicSurfaceMember, ResolvedConsumedBindings,
+        type_publication_from_position, DynamicRootCandidate, FallthroughComputeHost,
+        FallthroughPropOverrideSet, FallthroughResolutionView, FallthroughResolverHost,
+        IntrinsicMemberTypeSource, IntrinsicSurfaceMember, MergedSourceState,
+        ResolvedConsumedBindings,
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::Arc;
@@ -1681,7 +1725,7 @@ mod tests {
     };
     use verter_span::Span;
     use verter_type_expr::facts::{
-        ClosedTypeFact, LeafTypeFact, SemanticTypeSource, SourcePosition,
+        ClosedTypeFact, LeafTypeFact, SemanticSourceFailure, SemanticTypeSource, SourcePosition,
     };
     use verter_type_expr::intrinsics::StaticIntrinsicTypeId;
     use verter_type_expr::{
@@ -1694,6 +1738,32 @@ mod tests {
         accepted_events: Vec<AcceptedEventAnalysis>,
         fallthrough_surface: FallthroughSurface,
         fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    }
+
+    #[test]
+    fn failed_prop_publication_is_absorbing_across_fallthrough_merge() {
+        let published = type_publication_from_position(
+            &SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
+                LeafTypeFact::Primitive(PrimitiveName::String),
+            ))),
+            verter_type_expr::ResolutionProvenance::FallthroughInheritance,
+        );
+        let failed = type_publication_from_position(
+            &SourcePosition::Failed(SemanticSourceFailure::UnrepresentableRequiredMemberValue),
+            verter_type_expr::ResolutionProvenance::FallthroughInheritance,
+        );
+        let mut state = MergedSourceState::Unset;
+
+        state.fold(&published, Some("/first.vue"));
+        state.fold(&failed, Some("/failed.vue"));
+        state.fold(&published, Some("/later.vue"));
+        let (merged, scope) = state.finalize();
+
+        assert!(matches!(
+            merged.result(),
+            verter_type_expr::PublicationResult::Failed { .. }
+        ));
+        assert_eq!(scope, None);
     }
 
     impl FallthroughResolutionView for TestResolution {
@@ -2052,7 +2122,7 @@ mod tests {
             match &expected[&(0, prop.name.clone())] {
                 IntrinsicTypeShape::Primitive(name) => {
                     assert_eq!(
-                        prop.type_source,
+                        prop.publication.source_position(),
                         verter_type_expr::facts::SourcePosition::Present(
                             SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
                                 LeafTypeFact::Primitive(*name)
@@ -2061,16 +2131,27 @@ mod tests {
                         "primitive attr `{}` publishes the closed leaf fact",
                         prop.name
                     );
-                    assert_eq!(prop.raw_type, None);
-                }
-                IntrinsicTypeShape::AttrDisplay(text) => {
                     assert_eq!(
-                        prop.type_source,
+                        prop.publication
+                            .evidence()
+                            .map(|evidence| evidence.text().to_string()),
+                        None
+                    );
+                }
+                IntrinsicTypeShape::AttrDisplay(_text) => {
+                    assert_eq!(
+                        prop.publication.source_position(),
                         verter_type_expr::facts::SourcePosition::unannotated(),
                         "display attr `{}` must not fabricate a semantic fact",
                         prop.name
                     );
-                    assert_eq!(prop.raw_type.as_deref(), Some(text.as_str()));
+                    assert_eq!(
+                        prop.publication
+                            .evidence()
+                            .map(verter_type_expr::AuthoredTypeEvidence::text),
+                        None,
+                        "intrinsic display text is not authored semantic evidence"
+                    );
                 }
                 IntrinsicTypeShape::ListenerFunction(_) => {
                     panic!("attr `{}` cannot carry a listener shape", prop.name)
@@ -2143,14 +2224,17 @@ mod tests {
             TestResolution {
                 accepted_props: vec![AcceptedPropAnalysis {
                     name: "title".to_string(),
-                    type_source: verter_type_expr::facts::SourcePosition::Present(
-                        SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
-                            PrimitiveName::String,
-                        ))),
+                    publication: crate::test_only::type_publication_fixture(
+                        verter_type_expr::facts::SourcePosition::Present(
+                            SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
+                                LeafTypeFact::Primitive(PrimitiveName::String),
+                            )),
+                        ),
+                        verter_type_expr::ResolutionExactness::ExactConcrete,
+                        Some("string".to_string()),
+                        None,
                     ),
                     type_source_scope: None,
-                    raw_type: Some("string".to_string()),
-                    raw_type_source: None,
                     required: false,
                     provenance: MemberProvenance::Declared,
                     availability: MemberAvailability::Always,
@@ -2237,14 +2321,17 @@ mod tests {
             TestResolution {
                 accepted_props: vec![AcceptedPropAnalysis {
                     name: "title".to_string(),
-                    type_source: verter_type_expr::facts::SourcePosition::Present(
-                        SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
-                            PrimitiveName::String,
-                        ))),
+                    publication: crate::test_only::type_publication_fixture(
+                        verter_type_expr::facts::SourcePosition::Present(
+                            SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
+                                LeafTypeFact::Primitive(PrimitiveName::String),
+                            )),
+                        ),
+                        verter_type_expr::ResolutionExactness::ExactConcrete,
+                        Some("string".to_string()),
+                        None,
                     ),
                     type_source_scope: None,
-                    raw_type: Some("string".to_string()),
-                    raw_type_source: None,
                     required: false,
                     provenance: MemberProvenance::Declared,
                     availability: MemberAvailability::Always,
@@ -2330,11 +2417,20 @@ mod tests {
                 condition_text: None,
                 props: vec![verter_semantic::analysis::component_meta::FallthroughPropEntry {
                     name: "id".to_string(),
-                    type_source: verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
+                    publication: crate::test_only::type_publication_fixture(
+
+                        verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
                         ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::String))
                     )),
+
+                        verter_type_expr::ResolutionExactness::ExactConcrete,
+
+                        Some("string".to_string()),
+
+                        None,
+
+                    ),
                     type_source_scope: None,
-                    raw_type: Some("string".to_string()),
                     sources: vec![InheritedSource::NativeTag {
                         tag: "div".to_string(),
                     }],
@@ -2798,12 +2894,20 @@ mod tests {
             TestResolution {
                 accepted_props: vec![AcceptedPropAnalysis {
                     name: "id".to_string(),
-                    type_source: verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
+                    publication: crate::test_only::type_publication_fixture(
+
+                        verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
                         ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::String))
                     )),
+
+                        verter_type_expr::ResolutionExactness::ExactConcrete,
+
+                        Some("string".to_string()),
+
+                        None,
+
+                    ),
                     type_source_scope: None,
-                    raw_type: Some("string".to_string()),
-                    raw_type_source: None,
                     required: false,
                     provenance: MemberProvenance::Declared,
                     availability: MemberAvailability::Always,
@@ -2878,10 +2982,13 @@ mod tests {
             }));
         let child_props = vec![AcceptedPropAnalysis {
             name: "inherited".to_string(),
-            type_source: verter_type_expr::facts::SourcePosition::Present(producer_local),
+            publication: crate::test_only::type_publication_fixture(
+                verter_type_expr::facts::SourcePosition::Present(producer_local),
+                verter_type_expr::ResolutionExactness::ExactConcrete,
+                None,
+                None,
+            ),
             type_source_scope: None,
-            raw_type: None,
-            raw_type_source: None,
             required: false,
             provenance: MemberProvenance::Declared,
             availability: MemberAvailability::Always,
@@ -2891,7 +2998,7 @@ mod tests {
         let rows = inherited_component_props(&child_props, &declared, &[], "/Child.vue");
         assert_eq!(rows.len(), 1);
         let Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(slot))) =
-            rows[0].type_source.present()
+            rows[0].publication.result().selected_source()
         else {
             panic!("the cloned row keeps the authored decl-body source arm");
         };
@@ -2933,10 +3040,13 @@ mod tests {
         let child_props = |source: SemanticTypeSource| {
             vec![AcceptedPropAnalysis {
                 name: "inherited".to_string(),
-                type_source: verter_type_expr::facts::SourcePosition::Present(source),
+                publication: crate::test_only::type_publication_fixture(
+                    verter_type_expr::facts::SourcePosition::Present(source),
+                    verter_type_expr::ResolutionExactness::ExactConcrete,
+                    None,
+                    None,
+                ),
                 type_source_scope: None,
-                raw_type: None,
-                raw_type_source: None,
                 required: false,
                 provenance: MemberProvenance::Declared,
                 availability: MemberAvailability::Always,
@@ -2962,7 +3072,8 @@ mod tests {
         // CROSS-CHILD INEQUALITY: the same spelling from two different
         // children names two different declarations once self-anchored.
         assert_ne!(
-            rows_a[0].type_source, rows_b[0].type_source,
+            rows_a[0].publication.source_position(),
+            rows_b[0].publication.source_position(),
             "self-anchoring must make same-shaped producer-local sources \
              from DIFFERENT children compare UNEQUAL — without the clone \
              boundary rewrite both keep the empty anchor and collapse"
@@ -2996,7 +3107,7 @@ mod tests {
             .find(|p| p.name == "inherited")
             .expect("merged row");
         assert_eq!(
-            merged.type_source,
+            merged.publication.source_position(),
             verter_type_expr::facts::SourcePosition::Absent(
                 verter_type_expr::facts::SchemaAbsence::BranchDivergent
             ),
@@ -3029,13 +3140,17 @@ mod tests {
     ) -> verter_semantic::analysis::component_meta::FallthroughPropEntry {
         verter_semantic::analysis::component_meta::FallthroughPropEntry {
             name: name.to_string(),
-            type_source: source
-                .map(SourcePosition::Present)
-                .unwrap_or_else(SourcePosition::unannotated),
+            publication: crate::test_only::type_publication_fixture(
+                source
+                    .map(SourcePosition::Present)
+                    .unwrap_or_else(SourcePosition::unannotated),
+                verter_type_expr::ResolutionExactness::ExactConcrete,
+                None,
+                None,
+            ),
             // Mirror the clone boundary: the producing scope is the origin
             // child the entry was inherited from.
             type_source_scope: Some(origin.to_string()),
-            raw_type: None,
             sources: vec![InheritedSource::Component {
                 canonical_id: origin.to_string(),
             }],
@@ -3126,7 +3241,7 @@ mod tests {
         merge_fallthrough_branches(&mut props, &mut events, &branches, false, false);
         let merged = props.iter().find(|p| p.name == "size").expect("merged row");
         assert_eq!(
-            merged.type_source,
+            merged.publication.source_position(),
             verter_type_expr::facts::SourcePosition::Absent(
                 verter_type_expr::facts::SchemaAbsence::BranchDivergent
             ),
@@ -3221,7 +3336,7 @@ mod tests {
             .find(|p| p.name == "inherited")
             .expect("merged row");
         assert_eq!(
-            merged.type_source,
+            merged.publication.source_position(),
             verter_type_expr::facts::SourcePosition::Absent(
                 verter_type_expr::facts::SchemaAbsence::BranchDivergent
             ),
@@ -3315,14 +3430,15 @@ mod tests {
         let child_rows = vec![
             AcceptedPropAnalysis {
                 name: "fromGrandchild".to_string(),
-                type_source: verter_type_expr::facts::SourcePosition::Present(closed_ref(
-                    "GrandchildAlias",
-                )),
+                publication: crate::test_only::type_publication_fixture(
+                    verter_type_expr::facts::SourcePosition::Present(closed_ref("GrandchildAlias")),
+                    verter_type_expr::ResolutionExactness::ExactConcrete,
+                    None,
+                    None,
+                ),
                 // The child's row was itself inherited: its producing
                 // scope is the grandchild.
                 type_source_scope: Some("/Grandchild.vue".to_string()),
-                raw_type: None,
-                raw_type_source: None,
                 required: false,
                 provenance: MemberProvenance::Inherited {
                     sources: vec![InheritedSource::Component {
@@ -3334,13 +3450,14 @@ mod tests {
             },
             AcceptedPropAnalysis {
                 name: "fromChild".to_string(),
-                type_source: verter_type_expr::facts::SourcePosition::Present(closed_ref(
-                    "ChildAlias",
-                )),
+                publication: crate::test_only::type_publication_fixture(
+                    verter_type_expr::facts::SourcePosition::Present(closed_ref("ChildAlias")),
+                    verter_type_expr::ResolutionExactness::ExactConcrete,
+                    None,
+                    None,
+                ),
                 // Child-declared: spelled in the child's own file.
                 type_source_scope: None,
-                raw_type: None,
-                raw_type_source: None,
                 required: false,
                 provenance: MemberProvenance::Declared,
                 availability: MemberAvailability::Always,
@@ -3389,12 +3506,15 @@ mod tests {
          -> AcceptedPropAnalysis {
             AcceptedPropAnalysis {
                 name: name.to_string(),
-                type_source: source
-                    .map(SourcePosition::Present)
-                    .unwrap_or_else(SourcePosition::unannotated),
+                publication: crate::test_only::type_publication_fixture(
+                    source
+                        .map(SourcePosition::Present)
+                        .unwrap_or_else(SourcePosition::unannotated),
+                    verter_type_expr::ResolutionExactness::ExactConcrete,
+                    None,
+                    None,
+                ),
                 type_source_scope: row_scope.map(str::to_string),
-                raw_type: None,
-                raw_type_source: None,
                 required: false,
                 provenance: MemberProvenance::Declared,
                 availability: MemberAvailability::Always,
@@ -3555,12 +3675,15 @@ mod tests {
         let child_props = |name: &str| {
             vec![AcceptedPropAnalysis {
                 name: name.to_string(),
-                type_source: verter_type_expr::facts::SourcePosition::Present(closed_primitive(
-                    PrimitiveName::String,
-                )),
+                publication: crate::test_only::type_publication_fixture(
+                    verter_type_expr::facts::SourcePosition::Present(closed_primitive(
+                        PrimitiveName::String,
+                    )),
+                    verter_type_expr::ResolutionExactness::ExactConcrete,
+                    None,
+                    None,
+                ),
                 type_source_scope: None,
-                raw_type: None,
-                raw_type_source: None,
                 required: false,
                 provenance: MemberProvenance::Declared,
                 availability: MemberAvailability::Always,
@@ -3574,11 +3697,11 @@ mod tests {
             inherited_component_props(&child_props("shared"), &declared, &[], "/ChildB.vue");
         assert_eq!(
             (
-                rows_a[0].type_source.present(),
+                rows_a[0].publication.result().selected_source(),
                 rows_a[0].type_source_scope.as_deref()
             ),
             (
-                rows_b[0].type_source.present(),
+                rows_b[0].publication.result().selected_source(),
                 rows_b[0].type_source_scope.as_deref()
             ),
             "identical fully-closed sources inherited from two different \
@@ -3619,7 +3742,8 @@ mod tests {
                 .iter()
                 .find(|p| p.name == "inherited")
                 .expect("merged row")
-                .type_source,
+                .publication
+                .source_position(),
             verter_type_expr::facts::SourcePosition::Present(closed_ref("Alias")),
             "the same child's spelling agrees across branches"
         );
@@ -3646,7 +3770,8 @@ mod tests {
                 .iter()
                 .find(|p| p.name == "shared")
                 .expect("merged row")
-                .type_source,
+                .publication
+                .source_position(),
             verter_type_expr::facts::SourcePosition::Present(anchored),
             "a fully-anchored source names ONE declaration — different \
              publishers still agree"
@@ -3677,7 +3802,8 @@ mod tests {
                 .iter()
                 .find(|p| p.name == "oneSided")
                 .expect("merged row")
-                .type_source,
+                .publication
+                .source_position(),
             verter_type_expr::facts::SourcePosition::Present(closed_primitive(
                 PrimitiveName::String
             )),

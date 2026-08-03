@@ -4839,6 +4839,67 @@ pub struct FieldExpansionContext {
     pub output_path: std::sync::Arc<[PathSegment]>,
 }
 
+fn publication_exactness(
+    exactness: crate::analysis::type_expand::ExpansionExactness,
+) -> verter_type_expr::ResolutionExactness {
+    match exactness {
+        crate::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+            verter_type_expr::ResolutionExactness::ExactConcrete
+        }
+        crate::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
+            verter_type_expr::ResolutionExactness::ExactSymbolic
+        }
+        crate::analysis::type_expand::ExpansionExactness::Incomplete => {
+            verter_type_expr::ResolutionExactness::Incomplete
+        }
+    }
+}
+
+fn publication_diagnostic_kind(
+    reason: crate::analysis::type_expand::ExpansionStopReason,
+) -> verter_type_expr::ResolutionDiagnosticKind {
+    use crate::analysis::type_expand::ExpansionStopReason as Source;
+    use verter_type_expr::ResolutionDiagnosticKind as Target;
+    match reason {
+        Source::BudgetExceeded => Target::BudgetExceeded,
+        Source::ProjectionWorkLimit => Target::ProjectionWorkLimit,
+        Source::ConnectedQueryDepthLimit => Target::ConnectedQueryDepthLimit,
+        Source::MappedDepthExceeded => Target::MappedDepthExceeded,
+        Source::UnresolvedReference => Target::UnresolvedReference,
+        Source::IndeterminateConditional => Target::IndeterminateConditional,
+        Source::InfiniteKeySpace => Target::InfiniteKeySpace,
+        Source::UnsupportedOperator => Target::UnsupportedOperator,
+        Source::ConditionalContextTruncated => Target::ConditionalContextTruncated,
+        Source::IdempotentArm => Target::IdempotentArm,
+        Source::CyclicReference => Target::CyclicReference,
+        Source::CyclicInstantiation => Target::CyclicInstantiation,
+        Source::InstantiationError => Target::InstantiationError,
+        Source::EmptyUnionArm => Target::EmptyUnionArm,
+    }
+}
+
+fn expanded_field_authority(
+    source: SemanticTypeSource,
+    exactness: crate::analysis::type_expand::ExpansionExactness,
+    diagnostics: &[crate::analysis::type_expand::ExpansionDiagnostic],
+) -> verter_type_expr::ResolvedTypeAuthority {
+    let diagnostics: Arc<[verter_type_expr::ResolutionDiagnostic]> = diagnostics
+        .iter()
+        .map(|diagnostic| verter_type_expr::ResolutionDiagnostic {
+            kind: publication_diagnostic_kind(diagnostic.reason),
+            context: Arc::from(diagnostic.context.as_str()),
+            property_name: diagnostic.property_name.as_deref().map(Arc::from),
+        })
+        .collect::<Vec<_>>()
+        .into();
+    verter_type_expr::ResolvedTypeAuthority::present(
+        source,
+        publication_exactness(exactness),
+        verter_type_expr::ResolutionProvenance::SemanticEvaluator,
+        diagnostics,
+    )
+}
+
 pub fn expand_macro_types_impl_with_expander<F>(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
@@ -4871,6 +4932,9 @@ where
         )
     });
 
+    // SAFETY: this is the evaluator's analyzer-row producer loop; every
+    // evidence row joins a payload locator and text from the same field.
+    let authored_source_mint = unsafe { verter_type_expr::AuthoredSourceMint::new_unchecked() };
     for (macro_index, m) in macros.iter().enumerate() {
         // Expand prop field type annotations.
         //
@@ -4907,22 +4971,24 @@ where
                         &expanded.diagnostics,
                         debug_env.as_deref(),
                     );
-                    let shallow_source = Some(
-                        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
-                            payload.clone(),
-                        ),
-                    );
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
-                        r#type: verter_type_expr::facts::SourcePosition::Present(
-                            expanded.value.expr,
+                        authority: expanded_field_authority(
+                            expanded.value.expr.clone(),
+                            expanded.exactness,
+                            &expanded.diagnostics,
                         ),
-                        raw_type: field.type_annotation.clone(),
+                        authored_evidence: field.type_annotation.as_deref().map(|text| {
+                            verter_type_expr::AuthoredTypeEvidence::from_macro_payload(
+                                &authored_source_mint,
+                                payload,
+                                Arc::from(text),
+                            )
+                        }),
                         optional: field.is_optional,
                         exactness: expanded.exactness,
                         execution_status: expanded.execution_status,
                         diagnostics: expanded.diagnostics,
-                        shallow_source,
                         declared_in_macro_type_arg: field.declared_in_macro_type_arg,
                     });
                 }
@@ -4963,22 +5029,24 @@ where
                         &expanded.diagnostics,
                         debug_env.as_deref(),
                     );
-                    let shallow_source = Some(
-                        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
-                            payload.clone(),
-                        ),
-                    );
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
-                        r#type: verter_type_expr::facts::SourcePosition::Present(
-                            expanded.value.expr,
+                        authority: expanded_field_authority(
+                            expanded.value.expr.clone(),
+                            expanded.exactness,
+                            &expanded.diagnostics,
                         ),
-                        raw_type: field.payload_type.clone(),
+                        authored_evidence: field.payload_type.as_deref().map(|text| {
+                            verter_type_expr::AuthoredTypeEvidence::from_macro_payload(
+                                &authored_source_mint,
+                                payload,
+                                Arc::from(text),
+                            )
+                        }),
                         optional: false,
                         exactness: expanded.exactness,
                         execution_status: expanded.execution_status,
                         diagnostics: expanded.diagnostics,
-                        shallow_source,
                         // `AnalyzedEmitField` is the upstream type at this
                         // layer. It carries `name`, `payload_type`, and
                         // `payload_expr` — not own-body-vs-heritage
@@ -5032,22 +5100,24 @@ where
                                 &expanded.diagnostics,
                                 debug_env.as_deref(),
                             );
-                            let shallow_source = Some(
-                                verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
-                                    payload.clone(),
-                                ),
-                            );
                             result.slot_bindings.push(ExpandedField {
                                 name: slot_binding_target,
-                                r#type: verter_type_expr::facts::SourcePosition::Present(
-                                    expanded.value.expr,
+                                authority: expanded_field_authority(
+                                    expanded.value.expr.clone(),
+                                    expanded.exactness,
+                                    &expanded.diagnostics,
                                 ),
-                                raw_type: binding.type_annotation.clone(),
+                                authored_evidence: binding.type_annotation.as_deref().map(|text| {
+                                    verter_type_expr::AuthoredTypeEvidence::from_macro_payload(
+                                        &authored_source_mint,
+                                        payload,
+                                        Arc::from(text),
+                                    )
+                                }),
                                 optional: false,
                                 exactness: expanded.exactness,
                                 execution_status: expanded.execution_status,
                                 diagnostics: expanded.diagnostics,
-                                shallow_source,
                                 // SAFETY: slot bindings are positional
                                 // parameters of a slot's function signature
                                 // (not declared members of the macro T's own
@@ -5106,13 +5176,16 @@ where
             // and no analyzer-side authored shallow source exists).
             result.bindings.push(ExpandedField {
                 name: name.clone(),
-                r#type: verter_type_expr::facts::SourcePosition::Present(expanded.value.expr),
-                raw_type: None,
+                authority: expanded_field_authority(
+                    expanded.value.expr.clone(),
+                    expanded.exactness,
+                    &expanded.diagnostics,
+                ),
+                authored_evidence: None,
                 optional: false,
                 exactness: expanded.exactness,
                 execution_status: expanded.execution_status,
                 diagnostics: expanded.diagnostics,
-                shallow_source: None,
                 declared_in_macro_type_arg: false,
             });
         }

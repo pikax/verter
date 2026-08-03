@@ -336,7 +336,10 @@ fn component_meta_props_surface_is_stable() {
             format!(
                 "{}:{}:{}",
                 p.name,
-                p.raw_type.as_deref().unwrap_or("<none>"),
+                p.publication
+                    .evidence()
+                    .map(verter_type_expr::AuthoredTypeEvidence::text)
+                    .unwrap_or("<none>"),
                 p.required
             )
         })

@@ -712,14 +712,118 @@ pub struct FfiExpansionMetadata {
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct FfiTerminalTypeDisplay {
+    pub text: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiTypePublication {
+    Failed {
+        failure: FfiTypePublicationFailure,
+        provenance: FfiResolutionProvenance,
+    },
+    Absent {
+        absence: FfiTypePublicationAbsence,
+        provenance: FfiResolutionProvenance,
+    },
+    Published {
+        semantic_authority: FfiPublicationSemanticAuthority,
+        exactness: FfiPublicationExactness,
+        reason: FfiPublicationReason,
+        provenance: FfiPublicationProvenance,
+    },
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiTypePublicationFailure {
+    UnrepresentableRequiredMemberValue,
+    UnrepresentableRequiredPayload,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiTypePublicationAbsence {
+    Unannotated,
+    BranchDivergent,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiResolutionProvenance {
+    SemanticEvaluator,
+    SessionProjector,
+    FrameworkSurface,
+    FallthroughInheritance,
+    Schema,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiAuthoredProvenance {
+    MacroPayload,
+    DeclarationBody,
+    AugmentationBody,
+    JsdocTypedefBody,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum FfiPublicationProvenance {
+    Resolved(FfiResolutionProvenance),
+    Authored(FfiAuthoredProvenance),
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiPublicationSemanticAuthority {
+    Resolved,
+    AuthoredFallback,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiPublicationExactness {
+    ExactConcrete,
+    ExactSymbolic,
+    Incomplete,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiPublicationReason {
+    ResolvedExactConcrete,
+    ResolvedExactSymbolic,
+    ResolvedIncomplete,
+    AuthoredForIncomplete { policy: FfiPublicationPolicyReason },
+    AuthoredSymbolicRepresentation { proof: FfiSymbolicEquivalenceKind },
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiPublicationPolicyReason {
+    ImportedMacroCompound,
+    ImportedIndexedAccess,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiSymbolicEquivalenceKind {
+    ImportedMacroCompound,
+    ImportedIndexedAccess,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct FfiPropMeta {
     pub name: String,
     /// Structured type IR (passes through unchanged — TypeExpr implements Serialize).
-    pub r#type: verter_type_expr::TypeExpr,
+    pub r#type: Option<verter_type_expr::TypeExpr>,
+    pub publication: FfiTypePublication,
+    pub terminal_display: FfiTerminalTypeDisplay,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_expansion: Option<FfiExpansionMetadata>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_type: Option<String>,
     pub required: bool,
     pub has_default: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -780,11 +884,11 @@ pub struct FfiSlotMeta {
 #[serde(rename_all = "camelCase")]
 pub struct FfiSlotBindingMeta {
     pub name: String,
-    pub r#type: verter_type_expr::TypeExpr,
+    pub r#type: Option<verter_type_expr::TypeExpr>,
+    pub publication: FfiTypePublication,
+    pub terminal_display: FfiTerminalTypeDisplay,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_expansion: Option<FfiExpansionMetadata>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_type: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1387,9 +1491,9 @@ pub enum FfiAcceptedSurfaceCompleteness {
 #[serde(rename_all = "camelCase")]
 pub struct FfiAcceptedPropMeta {
     pub name: String,
-    pub r#type: verter_type_expr::TypeExpr,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_type: Option<String>,
+    pub r#type: Option<verter_type_expr::TypeExpr>,
+    pub publication: FfiTypePublication,
+    pub terminal_display: FfiTerminalTypeDisplay,
     pub required: bool,
     pub provenance: FfiMemberProvenance,
     pub availability: FfiMemberAvailability,
@@ -1426,9 +1530,9 @@ pub enum FfiFallthroughSurface {
 #[serde(rename_all = "camelCase")]
 pub struct FfiFallthroughPropEntry {
     pub name: String,
-    pub r#type: verter_type_expr::TypeExpr,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_type: Option<String>,
+    pub r#type: Option<verter_type_expr::TypeExpr>,
+    pub publication: FfiTypePublication,
+    pub terminal_display: FfiTerminalTypeDisplay,
     pub sources: Vec<FfiInheritedSource>,
 }
 

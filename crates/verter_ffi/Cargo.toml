@@ -25,5 +25,6 @@ serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+verter_session = { path = "../verter_session", features = ["test-util"] }
 verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
 verter_macro_dto = { path = "../verter_macro_dto" }

@@ -55,8 +55,9 @@ fn prop_type(
         .iter()
         .find(|p| p.name == name)
         .unwrap_or_else(|| panic!("missing prop `{name}`"))
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .unwrap_or_else(|| panic!("prop `{name}` must publish a typed source"));
     verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
         .unwrap_or_else(|| panic!("prop `{name}`'s published source must demand-materialize"))

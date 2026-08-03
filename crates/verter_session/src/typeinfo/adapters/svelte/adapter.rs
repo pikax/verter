@@ -405,10 +405,10 @@ mod tests {
         let runes = ResolvedOutcome::Resolved(Arc::new(MacroSurfaceDtos {
             props: Some(crate::typeinfo::framework_surface::results::PropsSurface {
                 fields: vec![
-                    crate::typeinfo::framework_surface::results::ResolvedPropField {
-                        analysis: prop("a"),
-                        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
-                    },
+                    crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
+                        prop("a"),
+                        verter_type_expr::facts::SourcePosition::unannotated(),
+                    ),
                 ],
                 index_signatures: Vec::new(),
                 ..Default::default()

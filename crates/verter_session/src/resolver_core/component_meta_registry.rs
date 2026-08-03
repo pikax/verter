@@ -91,9 +91,11 @@ impl RegistryProducerScope {
         explicit_resolution_scope: &Self,
     ) -> Self {
         field
-            .shallow_source
+            .authored_evidence
             .as_ref()
-            .map(|locator| Self::from_locator(locator, explicit_resolution_scope))
+            .map(|evidence| {
+                Self::from_locator(evidence.source().locator(), explicit_resolution_scope)
+            })
             .unwrap_or_else(|| explicit_resolution_scope.clone())
     }
 }
@@ -679,8 +681,8 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             crate::semantic_query::ProjectionMode::Navigate,
         );
     let type_node = field
-        .r#type
-        .present()
+        .authority
+        .source()
         .and_then(|source| {
             dispatch.raise_semantic_type_source_to_hot(
                 source,
@@ -702,9 +704,9 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     let shallow_node = (!type_node
         .is_some_and(|node| component_meta_registry_node_has_actionable_route(ctx, node)))
     .then(|| {
-        field.shallow_source.as_ref().and_then(|locator| {
+        field.authored_evidence.as_ref().and_then(|evidence| {
             dispatch
-                .raise_authored_locator_to_hot(locator, transit_ctx)
+                .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
                 .map(|hot| hot.node())
         })
     })
@@ -910,7 +912,11 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             // it re-derives navigation + substitution.
             let use_site = match &route {
                 RouteDemand::MemberPath(path) if path.len() == 1 => {
-                    match field.shallow_source.as_ref() {
+                    match field
+                        .authored_evidence
+                        .as_ref()
+                        .map(|evidence| evidence.source().locator())
+                    {
                         Some(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)) => {
                             Some((path[0].clone(), slot.clone()))
                         }
@@ -955,7 +961,11 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         };
         let use_site = match &route {
             RouteDemand::MemberPath(path) if path.len() == 1 => {
-                match field.shallow_source.as_ref() {
+                match field
+                    .authored_evidence
+                    .as_ref()
+                    .map(|evidence| evidence.source().locator())
+                {
                     Some(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)) => {
                         Some((path[0].clone(), slot.clone()))
                     }

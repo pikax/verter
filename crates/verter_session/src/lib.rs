@@ -48,7 +48,6 @@
 //! - [`parse`] â€” SFC tokenization â†’ [`ParseSnapshot`](types::ParseSnapshot), non-SFC hashing
 //! - [`shared`] â€” feature-gated `RwLock`/`RefCell` abstraction
 //! - [`upsert`] â€” change detection, result building, export signature diffing
-
 pub mod app_config_proof_db;
 #[cfg(test)]
 mod audit_caps_truncation_tests;
@@ -57,6 +56,7 @@ mod audit_warm_cache_tests;
 pub mod audited_request;
 #[cfg(test)]
 mod audited_request_tests;
+mod authored_evidence_producer;
 #[cfg(test)]
 mod block_6c_view_hoist_tests;
 mod cache;

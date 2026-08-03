@@ -6715,9 +6715,13 @@ fn an_unnameable_root_component_zeroes_its_whole_arm() {
         condition_text: None,
         props: vec![FallthroughPropEntry {
             name: "label".to_string(),
-            type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+            publication: crate::test_only::type_publication_fixture(
+                verter_type_expr::facts::SourcePosition::unannotated(),
+                verter_type_expr::ResolutionExactness::ExactConcrete,
+                None,
+                None,
+            ),
             type_source_scope: None,
-            raw_type: None,
             sources: vec![InheritedSource::Component {
                 canonical_id: "/src/Child.vue".to_string(),
             }],

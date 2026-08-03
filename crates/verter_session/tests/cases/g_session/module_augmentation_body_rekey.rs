@@ -71,8 +71,9 @@ fn prop_type_repr(
 ) -> Option<String> {
     meta.props.iter().find(|p| p.name == name).map(|p| {
         let source = p
-            .type_source
-            .present()
+            .publication
+            .result()
+            .selected_source()
             .unwrap_or_else(|| panic!("prop `{name}` must publish a typed source"));
         let ty =
             verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)

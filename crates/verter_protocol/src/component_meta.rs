@@ -26,12 +26,13 @@ use crate::verter::v1::{
     ResolvedTypeDeclaration, RestNode, RootBranch, RootInfo, RootReachability, RootTargetRef,
     ScriptBlockMeta, SelectorMeta, SfcAttributeMeta, SfcBlocksMeta, SlotBindingMeta, SlotMeta,
     StyleBlockMeta as ProtoStyleBlockMeta, StyleMeta, TemplateBlockMeta, TemplateLiteralNode,
-    TemplateRefMeta, TupleElement, TupleNode, TypeGraph, TypeNode, TypeOfNode, TypeParameterNode,
+    TemplateRefMeta, TerminalTypeDisplay as ProtoTerminalTypeDisplay, TupleElement, TupleNode,
+    TypeGraph, TypeNode, TypeOfNode, TypeParameterNode, TypePublication as ProtoTypePublication,
     TypeRegistryEntry, UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason,
     VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 3;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 4;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -231,12 +232,15 @@ fn component_meta_body_to_proto(
 fn prop_meta_to_proto(builder: &mut GraphBuilder, prop: &FfiPropMeta) -> PropMeta {
     PropMeta {
         name_id: builder.string_id(&prop.name),
-        type_node_id: builder.node_id(&prop.r#type),
+        type_node_id: prop
+            .r#type
+            .as_ref()
+            .map(|r#type| builder.node_id(r#type))
+            .unwrap_or(0),
         type_expansion: prop
             .type_expansion
             .as_ref()
             .map(|metadata| expansion_metadata_to_proto(builder, metadata)),
-        raw_type_id: builder.string_id_opt(prop.raw_type.as_deref()),
         required: prop.required,
         has_default: prop.has_default,
         default_value_id: builder.string_id_opt(prop.default_value.as_deref()),
@@ -247,6 +251,152 @@ fn prop_meta_to_proto(builder: &mut GraphBuilder, prop: &FfiPropMeta) -> PropMet
             .map(|tag| jsdoc_tag_to_proto(builder, tag))
             .collect(),
         declared_in_macro_type_arg: prop.declared_in_macro_type_arg,
+        publication: Some(type_publication_to_proto(&prop.publication)),
+        terminal_display: Some(terminal_type_display_to_proto(
+            builder,
+            &prop.terminal_display,
+        )),
+    }
+}
+
+fn type_publication_to_proto(publication: &FfiTypePublication) -> ProtoTypePublication {
+    use proto::{
+        SymbolicEquivalenceKind, TypePublicationAbsence, TypePublicationExactness,
+        TypePublicationFailure, TypePublicationKind, TypePublicationPolicyReason,
+        TypePublicationReason, TypePublicationSemanticAuthority,
+    };
+
+    let mut output = ProtoTypePublication::default();
+    match publication {
+        FfiTypePublication::Failed {
+            failure,
+            provenance,
+        } => {
+            output.kind = TypePublicationKind::Failed as i32;
+            output.failure = match failure {
+                FfiTypePublicationFailure::UnrepresentableRequiredMemberValue => {
+                    TypePublicationFailure::UnrepresentableRequiredMemberValue
+                }
+                FfiTypePublicationFailure::UnrepresentableRequiredPayload => {
+                    TypePublicationFailure::UnrepresentableRequiredPayload
+                }
+            } as i32;
+            output.provenance = resolution_provenance_to_proto(*provenance) as i32;
+        }
+        FfiTypePublication::Absent {
+            absence,
+            provenance,
+        } => {
+            output.kind = TypePublicationKind::Absent as i32;
+            output.absence = match absence {
+                FfiTypePublicationAbsence::Unannotated => TypePublicationAbsence::Unannotated,
+                FfiTypePublicationAbsence::BranchDivergent => {
+                    TypePublicationAbsence::BranchDivergent
+                }
+            } as i32;
+            output.provenance = resolution_provenance_to_proto(*provenance) as i32;
+        }
+        FfiTypePublication::Published {
+            semantic_authority,
+            exactness,
+            reason,
+            provenance,
+        } => {
+            output.kind = TypePublicationKind::Published as i32;
+            output.semantic_authority = match semantic_authority {
+                FfiPublicationSemanticAuthority::Resolved => {
+                    TypePublicationSemanticAuthority::Resolved
+                }
+                FfiPublicationSemanticAuthority::AuthoredFallback => {
+                    TypePublicationSemanticAuthority::AuthoredFallback
+                }
+            } as i32;
+            output.exactness = match exactness {
+                FfiPublicationExactness::ExactConcrete => TypePublicationExactness::ExactConcrete,
+                FfiPublicationExactness::ExactSymbolic => TypePublicationExactness::ExactSymbolic,
+                FfiPublicationExactness::Incomplete => TypePublicationExactness::Incomplete,
+            } as i32;
+            output.provenance = publication_provenance_to_proto(*provenance) as i32;
+            match reason {
+                FfiPublicationReason::ResolvedExactConcrete => {
+                    output.reason = TypePublicationReason::ResolvedExactConcrete as i32;
+                }
+                FfiPublicationReason::ResolvedExactSymbolic => {
+                    output.reason = TypePublicationReason::ResolvedExactSymbolic as i32;
+                }
+                FfiPublicationReason::ResolvedIncomplete => {
+                    output.reason = TypePublicationReason::ResolvedIncomplete as i32;
+                }
+                FfiPublicationReason::AuthoredForIncomplete { policy } => {
+                    output.reason = TypePublicationReason::AuthoredForIncomplete as i32;
+                    output.policy_reason = match policy {
+                        FfiPublicationPolicyReason::ImportedMacroCompound => {
+                            TypePublicationPolicyReason::ImportedMacroCompound
+                        }
+                        FfiPublicationPolicyReason::ImportedIndexedAccess => {
+                            TypePublicationPolicyReason::ImportedIndexedAccess
+                        }
+                    } as i32;
+                }
+                FfiPublicationReason::AuthoredSymbolicRepresentation { proof } => {
+                    output.reason = TypePublicationReason::AuthoredSymbolicRepresentation as i32;
+                    output.symbolic_proof = match proof {
+                        FfiSymbolicEquivalenceKind::ImportedMacroCompound => {
+                            SymbolicEquivalenceKind::ImportedMacroCompound
+                        }
+                        FfiSymbolicEquivalenceKind::ImportedIndexedAccess => {
+                            SymbolicEquivalenceKind::ImportedIndexedAccess
+                        }
+                    } as i32;
+                }
+            }
+        }
+    }
+    output
+}
+
+fn resolution_provenance_to_proto(
+    value: FfiResolutionProvenance,
+) -> proto::TypePublicationProvenance {
+    use proto::TypePublicationProvenance as P;
+    match value {
+        FfiResolutionProvenance::SemanticEvaluator => P::SemanticEvaluator,
+        FfiResolutionProvenance::SessionProjector => P::SessionProjector,
+        FfiResolutionProvenance::FrameworkSurface => P::FrameworkSurface,
+        FfiResolutionProvenance::FallthroughInheritance => P::FallthroughInheritance,
+        FfiResolutionProvenance::Schema => P::Schema,
+    }
+}
+
+fn publication_provenance_to_proto(
+    value: FfiPublicationProvenance,
+) -> proto::TypePublicationProvenance {
+    use proto::TypePublicationProvenance as P;
+    match value {
+        FfiPublicationProvenance::Resolved(provenance) => {
+            resolution_provenance_to_proto(provenance)
+        }
+        FfiPublicationProvenance::Authored(FfiAuthoredProvenance::MacroPayload) => {
+            P::AuthoredMacroPayload
+        }
+        FfiPublicationProvenance::Authored(FfiAuthoredProvenance::DeclarationBody) => {
+            P::AuthoredDeclarationBody
+        }
+        FfiPublicationProvenance::Authored(FfiAuthoredProvenance::AugmentationBody) => {
+            P::AuthoredAugmentationBody
+        }
+        FfiPublicationProvenance::Authored(FfiAuthoredProvenance::JsdocTypedefBody) => {
+            P::AuthoredJsdocTypedefBody
+        }
+    }
+}
+
+fn terminal_type_display_to_proto(
+    builder: &mut GraphBuilder,
+    display: &FfiTerminalTypeDisplay,
+) -> ProtoTerminalTypeDisplay {
+    ProtoTerminalTypeDisplay {
+        text_id: builder.string_id_opt(display.text.as_deref()),
     }
 }
 
@@ -277,12 +427,20 @@ fn slot_meta_to_proto(builder: &mut GraphBuilder, slot: &FfiSlotMeta) -> SlotMet
             .iter()
             .map(|binding| SlotBindingMeta {
                 name_id: builder.string_id(&binding.name),
-                type_node_id: builder.node_id(&binding.r#type),
+                type_node_id: binding
+                    .r#type
+                    .as_ref()
+                    .map(|r#type| builder.node_id(r#type))
+                    .unwrap_or(0),
                 type_expansion: binding
                     .type_expansion
                     .as_ref()
                     .map(|metadata| expansion_metadata_to_proto(builder, metadata)),
-                raw_type_id: builder.string_id_opt(binding.raw_type.as_deref()),
+                publication: Some(type_publication_to_proto(&binding.publication)),
+                terminal_display: Some(terminal_type_display_to_proto(
+                    builder,
+                    &binding.terminal_display,
+                )),
             })
             .collect(),
         is_required: slot.is_required,
@@ -404,12 +562,20 @@ fn accepted_prop_meta_to_proto(
 ) -> AcceptedPropMeta {
     AcceptedPropMeta {
         name_id: builder.string_id(&prop.name),
-        type_node_id: builder.node_id(&prop.r#type),
-        raw_type_id: builder.string_id_opt(prop.raw_type.as_deref()),
+        type_node_id: prop
+            .r#type
+            .as_ref()
+            .map(|r#type| builder.node_id(r#type))
+            .unwrap_or(0),
         required: prop.required,
         provenance: Some(member_provenance_to_proto(builder, &prop.provenance)),
         availability: Some(member_availability_to_proto(builder, &prop.availability)),
         kind: accepted_prop_kind_to_proto(&prop.kind) as i32,
+        publication: Some(type_publication_to_proto(&prop.publication)),
+        terminal_display: Some(terminal_type_display_to_proto(
+            builder,
+            &prop.terminal_display,
+        )),
     }
 }
 
@@ -807,13 +973,21 @@ fn fallthrough_branch_to_proto(
             .iter()
             .map(|prop| FallthroughPropEntry {
                 name_id: builder.string_id(&prop.name),
-                type_node_id: builder.node_id(&prop.r#type),
-                raw_type_id: builder.string_id_opt(prop.raw_type.as_deref()),
+                type_node_id: prop
+                    .r#type
+                    .as_ref()
+                    .map(|r#type| builder.node_id(r#type))
+                    .unwrap_or(0),
                 sources: prop
                     .sources
                     .iter()
                     .map(|source| inherited_source_to_proto(builder, source))
                     .collect(),
+                publication: Some(type_publication_to_proto(&prop.publication)),
+                terminal_display: Some(terminal_type_display_to_proto(
+                    builder,
+                    &prop.terminal_display,
+                )),
             })
             .collect(),
         events: branch
@@ -1465,9 +1639,19 @@ fn build_test_meta() -> FfiComponentMeta {
         ),
         props: vec![FfiPropMeta {
             name: "root".to_string(),
-            r#type: tree_ref.clone(),
+            r#type: Some(tree_ref.clone()),
+            publication: FfiTypePublication::Published {
+                semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+                exactness: FfiPublicationExactness::ExactSymbolic,
+                reason: FfiPublicationReason::ResolvedExactSymbolic,
+                provenance: FfiPublicationProvenance::Resolved(
+                    FfiResolutionProvenance::SemanticEvaluator,
+                ),
+            },
+            terminal_display: FfiTerminalTypeDisplay {
+                text: Some("TreeNode".to_string()),
+            },
             type_expansion: None,
-            raw_type: Some("TreeNode".to_string()),
             required: true,
             has_default: false,
             default_value: None,
@@ -1481,9 +1665,19 @@ fn build_test_meta() -> FfiComponentMeta {
             is_scoped: true,
             bindings: vec![FfiSlotBindingMeta {
                 name: "root".to_string(),
-                r#type: tree_ref.clone(),
+                r#type: Some(tree_ref.clone()),
+                publication: FfiTypePublication::Published {
+                    semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+                    exactness: FfiPublicationExactness::ExactSymbolic,
+                    reason: FfiPublicationReason::ResolvedExactSymbolic,
+                    provenance: FfiPublicationProvenance::Resolved(
+                        FfiResolutionProvenance::SemanticEvaluator,
+                    ),
+                },
+                terminal_display: FfiTerminalTypeDisplay {
+                    text: Some("TreeNode".to_string()),
+                },
                 type_expansion: None,
-                raw_type: Some("TreeNode".to_string()),
             }],
             is_required: false,
             return_type: Some("VNode[]".to_string()),
@@ -1546,9 +1740,14 @@ fn build_test_meta() -> FfiComponentMeta {
 mod tests {
     use prost::Message;
 
-    use super::{build_test_payload, ComponentMetaPayload};
+    use super::{build_test_payload, proto, ComponentMetaPayload, ProtoTypePublication};
     use crate::graph::GraphBuilder;
-    use crate::types::FfiComponentMetaFlags;
+    use crate::types::{
+        FfiAuthoredProvenance, FfiComponentMetaFlags, FfiPublicationExactness,
+        FfiPublicationProvenance, FfiPublicationReason, FfiPublicationSemanticAuthority,
+        FfiResolutionProvenance, FfiSymbolicEquivalenceKind, FfiTypePublication,
+        FfiTypePublicationAbsence, FfiTypePublicationFailure,
+    };
     use verter_type_expr::TypeExpr;
 
     #[test]
@@ -1668,7 +1867,56 @@ mod tests {
         assert!(proto.events[0].modifier_ids.is_empty());
 
         // SCHEMA bump landed (2 → 3).
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 3);
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 4);
+    }
+
+    #[test]
+    fn type_publication_proto_roundtrips_all_outcomes_without_display() {
+        let cases = [
+            FfiTypePublication::Failed {
+                failure: FfiTypePublicationFailure::UnrepresentableRequiredPayload,
+                provenance: FfiResolutionProvenance::FrameworkSurface,
+            },
+            FfiTypePublication::Absent {
+                absence: FfiTypePublicationAbsence::BranchDivergent,
+                provenance: FfiResolutionProvenance::FallthroughInheritance,
+            },
+            FfiTypePublication::Published {
+                semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+                exactness: FfiPublicationExactness::ExactSymbolic,
+                reason: FfiPublicationReason::AuthoredSymbolicRepresentation {
+                    proof: FfiSymbolicEquivalenceKind::ImportedIndexedAccess,
+                },
+                provenance: FfiPublicationProvenance::Authored(
+                    FfiAuthoredProvenance::DeclarationBody,
+                ),
+            },
+        ];
+
+        let decoded = cases.map(|case| {
+            let encoded = super::type_publication_to_proto(&case).encode_to_vec();
+            ProtoTypePublication::decode(encoded.as_slice()).expect("publication decodes")
+        });
+
+        assert_eq!(decoded[0].kind(), proto::TypePublicationKind::Failed);
+        assert_eq!(
+            decoded[0].failure(),
+            proto::TypePublicationFailure::UnrepresentableRequiredPayload
+        );
+        assert_eq!(decoded[1].kind(), proto::TypePublicationKind::Absent);
+        assert_eq!(
+            decoded[1].absence(),
+            proto::TypePublicationAbsence::BranchDivergent
+        );
+        assert_eq!(decoded[2].kind(), proto::TypePublicationKind::Published);
+        assert_eq!(
+            decoded[2].reason(),
+            proto::TypePublicationReason::AuthoredSymbolicRepresentation
+        );
+        assert_eq!(
+            decoded[2].symbolic_proof(),
+            proto::SymbolicEquivalenceKind::ImportedIndexedAccess
+        );
     }
 
     #[test]

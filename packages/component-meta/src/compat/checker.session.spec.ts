@@ -5,6 +5,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { ComponentMetaChecker } from "./checker.js";
 
+function resolvedTypeRow(display: string) {
+  return {
+    publication: {
+      kind: "published",
+      semanticAuthority: "resolved",
+      exactness: "exactConcrete",
+      reason: { kind: "resolvedExactConcrete" },
+      provenance: { kind: "resolved", value: "semanticEvaluator" },
+    } as const,
+    terminalDisplay: { text: display },
+  };
+}
+
 describe("ComponentMetaChecker session requirement", () => {
   it("rejects adapter-only getComponentMeta calls instead of rebuilding metadata from snapshots", async () => {
     const checker = new ComponentMetaChecker(
@@ -146,7 +159,7 @@ describe("ComponentMetaChecker session requirement", () => {
         {
           name: "label",
           type: { kind: "primitive", name: "string" },
-          rawType: "string",
+          ...resolvedTypeRow("string"),
           required: true,
           hasDefault: false,
         },
@@ -176,6 +189,7 @@ describe("ComponentMetaChecker session requirement", () => {
         {
           name: "label",
           type: { kind: "primitive", name: "string" },
+          ...resolvedTypeRow("string"),
           required: true,
           provenance: { kind: "declared" },
           availability: { kind: "always" },
@@ -184,6 +198,7 @@ describe("ComponentMetaChecker session requirement", () => {
         {
           name: "id",
           type: { kind: "primitive", name: "string" },
+          ...resolvedTypeRow("string"),
           required: false,
           provenance: { kind: "inherited", sources: [{ kind: "nativeTag", tag: "div" }] },
           availability: { kind: "always" },

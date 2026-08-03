@@ -23,6 +23,14 @@ describe("decodeTypedComponentMetaPayload", () => {
 
     const result = decodeTypedComponentMetaPayload(bytes);
 
+    expect(result.props[0]?.publication).toEqual({
+      kind: "published",
+      semanticAuthority: "resolved",
+      exactness: "exactSymbolic",
+      reason: { kind: "resolvedExactSymbolic" },
+      provenance: { kind: "resolved", value: "semanticEvaluator" },
+    });
+    expect(result.props[0]?.terminalDisplay).toEqual({ text: "TreeNode" });
     expect(result.origin).toBeDefined();
     expect(result.origin!.nodes).toHaveLength(2);
     expect(result.origin!.edges).toHaveLength(1);
@@ -61,5 +69,128 @@ describe("decodeTypedComponentMetaPayload", () => {
     const result = decodeTypedComponentMetaPayload(bytes);
     expect(result.origin!.edges[0].metaIndex).toBe(0);
     expect(result.origin!.metaStrings[0]).toBe('SubstitutedParam("T")');
+  });
+
+  it.each([
+    {
+      label: "Absent",
+      publication: { kind: 2, absence: 1, provenance: 1 },
+      expected: {
+        kind: "absent",
+        absence: "unannotated",
+        provenance: "semanticEvaluator",
+      },
+      typeNodeId: 1,
+      displayId: 2,
+      expectedDisplay: { text: "TreeNode" },
+      hasType: true,
+    },
+    {
+      label: "Failed",
+      publication: { kind: 1, failure: 1, provenance: 1 },
+      expected: {
+        kind: "failed",
+        failure: "unrepresentableRequiredMemberValue",
+        provenance: "semanticEvaluator",
+      },
+      typeNodeId: 0,
+      displayId: 0,
+      expectedDisplay: {},
+      hasType: false,
+    },
+  ])(
+    "decodes $label without changing its structured outcome",
+    ({ publication, expected, typeNodeId, displayId, expectedDisplay, hasType }) => {
+      const base = createTestComponentMetaPayload();
+      const payload = create(ComponentMetaPayloadSchema, {
+        ...base,
+        body: {
+          ...base.body!,
+          props: [
+            {
+              nameId: 3,
+              typeNodeId,
+              publication,
+              terminalDisplay: { textId: displayId },
+              required: true,
+              hasDefault: false,
+              tags: [],
+            },
+          ],
+        },
+      });
+
+      const result = decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload));
+      expect(result.props[0]?.publication).toEqual(expected);
+      expect(result.props[0]?.type !== undefined).toBe(hasType);
+      expect(result.props[0]?.terminalDisplay).toEqual(expectedDisplay);
+    },
+  );
+
+  it("rejects Failed rows carrying a type or terminal display", () => {
+    const base = createTestComponentMetaPayload();
+    const payload = create(ComponentMetaPayloadSchema, {
+      ...base,
+      body: {
+        ...base.body!,
+        props: [
+          {
+            nameId: 3,
+            typeNodeId: 1,
+            publication: { kind: 1, failure: 1, provenance: 1 },
+            terminalDisplay: { textId: 2 },
+            required: true,
+            hasDefault: false,
+            tags: [],
+          },
+        ],
+      },
+    });
+
+    expect(() =>
+      decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload)),
+    ).toThrow(/carries success output/i);
+  });
+
+  it("rejects dropped publication and Published rows without a type", () => {
+    const base = createTestComponentMetaPayload();
+    const encodeWithProp = (prop: Record<string, unknown>) =>
+      toBinary(
+        ComponentMetaPayloadSchema,
+        create(ComponentMetaPayloadSchema, {
+          ...base,
+          body: { ...base.body!, props: [prop] },
+        }),
+      );
+
+    expect(() =>
+      decodeTypedComponentMetaPayload(
+        encodeWithProp({
+          nameId: 3,
+          typeNodeId: 1,
+          terminalDisplay: { textId: 2 },
+          required: true,
+          tags: [],
+        }),
+      ),
+    ).toThrow(/publication/i);
+    expect(() =>
+      decodeTypedComponentMetaPayload(
+        encodeWithProp({
+          nameId: 3,
+          typeNodeId: 0,
+          publication: {
+            kind: 3,
+            provenance: 1,
+            semanticAuthority: 1,
+            exactness: 1,
+            reason: 1,
+          },
+          terminalDisplay: { textId: 2 },
+          required: true,
+          tags: [],
+        }),
+      ),
+    ).toThrow(/missing its type/i);
   });
 });

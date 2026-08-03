@@ -1620,7 +1620,7 @@ impl VerterHost {
                 // workspace type alias — the typed SOURCE-variant identity is
                 // the refuse-to-enqueue signal.
                 if matches!(
-                    field.r#type.present(),
+                    field.authority.source(),
                     Some(verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(_))
                 ) {
                     continue;

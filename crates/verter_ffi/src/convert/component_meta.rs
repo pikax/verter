@@ -22,10 +22,11 @@ use super::string_helpers::{
     binding_kind_to_string, component_prop_constness_to_string, expansion_exactness_to_string,
     expansion_execution_status_to_string, expansion_metadata_to_ffi,
     expansion_stop_reason_to_string, jsdoc_to_ffi, macro_expansion_kind_to_string,
-    macro_kind_to_string, member_visibility_to_string, projection_mode_to_string,
-    public_instance_completeness_to_string, public_instance_member_kind_to_string,
-    reactivity_kind_to_string, resolved_declaration_kind_to_string, resolved_jsdoc_tag_to_ffi,
-    style_lang_to_string, vue_api_to_string,
+    macro_kind_to_string, materialized_publication_to_ffi, member_visibility_to_string,
+    projection_mode_to_string, public_instance_completeness_to_string,
+    public_instance_member_kind_to_string, reactivity_kind_to_string,
+    resolved_declaration_kind_to_string, resolved_jsdoc_tag_to_ffi, style_lang_to_string,
+    vue_api_to_string,
 };
 
 /// Convert the session-owned output envelope to the FFI boundary DTO.
@@ -141,17 +142,21 @@ pub(super) fn component_meta_parts_to_ffi(
             .props
             .into_iter()
             .zip(lanes.props)
-            .map(|(p, r#type)| FfiPropMeta {
-                name: p.name,
-                r#type,
-                type_expansion: p.type_expansion.map(expansion_metadata_to_ffi),
-                raw_type: p.raw_type,
-                required: p.required,
-                has_default: p.has_default,
-                default_value: p.default_value,
-                description: p.description,
-                tags: p.tags.into_iter().map(jsdoc_to_ffi).collect(),
-                declared_in_macro_type_arg: p.declared_in_macro_type_arg,
+            .map(|(p, lane)| {
+                let (r#type, publication, terminal_display) = materialized_publication_to_ffi(lane);
+                FfiPropMeta {
+                    name: p.name,
+                    r#type,
+                    publication,
+                    terminal_display,
+                    type_expansion: p.type_expansion.map(expansion_metadata_to_ffi),
+                    required: p.required,
+                    has_default: p.has_default,
+                    default_value: p.default_value,
+                    description: p.description,
+                    tags: p.tags.into_iter().map(jsdoc_to_ffi).collect(),
+                    declared_in_macro_type_arg: p.declared_in_macro_type_arg,
+                }
             })
             .collect(),
         events: analysis
@@ -178,11 +183,16 @@ pub(super) fn component_meta_parts_to_ffi(
                     .bindings
                     .into_iter()
                     .zip(binding_types)
-                    .map(|(b, r#type)| FfiSlotBindingMeta {
-                        name: b.name,
-                        r#type,
-                        type_expansion: b.type_expansion.map(expansion_metadata_to_ffi),
-                        raw_type: b.raw_type,
+                    .map(|(b, lane)| {
+                        let (r#type, publication, terminal_display) =
+                            materialized_publication_to_ffi(lane);
+                        FfiSlotBindingMeta {
+                            name: b.name,
+                            r#type,
+                            publication,
+                            terminal_display,
+                            type_expansion: b.type_expansion.map(expansion_metadata_to_ffi),
+                        }
                     })
                     .collect(),
                 is_required: s.is_required,

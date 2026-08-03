@@ -177,20 +177,20 @@ fn reduce_published_field_types_leaf_projects_the_resolved_source() {
         .expect("prop `b` published");
 
     assert_eq!(
-        prop_a.type_source,
+        prop_a.publication.source_position(),
         verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
             ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::String))
         )),
         "prop `a` must publish the complete closed `string` leaf fact; got {:?}",
-        prop_a.type_source,
+        prop_a.publication.source_position(),
     );
     assert_eq!(
-        prop_b.type_source,
+        prop_b.publication.source_position(),
         verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
             ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::Number))
         )),
         "prop `b` must publish the complete closed `number` leaf fact; got {:?}",
-        prop_b.type_source,
+        prop_b.publication.source_position(),
     );
 }
 
@@ -253,12 +253,12 @@ fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
         .find(|p| p.name == "label")
         .expect("imported `label` must surface in published props");
     assert_eq!(
-        label.type_source,
+        label.publication.source_position(),
         verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
             ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::String))
         )),
         "imported `label` must publish the closed `string` leaf fact; got {:?}",
-        label.type_source,
+        label.publication.source_position(),
     );
 
     // `variant` is a literal union — no complete closed fact exists for it,
@@ -270,8 +270,9 @@ fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
         .find(|p| p.name == "variant")
         .expect("imported `variant` must surface in published props");
     let source = variant
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .expect("imported `variant` must carry a typed source");
     assert!(
         !matches!(

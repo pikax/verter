@@ -17,7 +17,80 @@ const defaultFallthroughFields = {
   fallthroughSurface: { kind: "none" as const, reason: "noTemplate" as const },
 };
 
+function publishedTypeFields(text?: string) {
+  return {
+    publication: {
+      kind: "published" as const,
+      semanticAuthority: "resolved" as const,
+      exactness: "exactConcrete" as const,
+      reason: { kind: "resolvedExactConcrete" as const },
+      provenance: { kind: "resolved" as const, value: "semanticEvaluator" as const },
+    },
+    terminalDisplay: { text },
+  };
+}
+
+function nativeMetaWithProp(prop: Record<string, unknown>) {
+  return {
+    filePath: "/project/src/App.vue",
+    optionsApi: false,
+    props: [prop],
+    events: [],
+    slots: [],
+    models: [],
+    exposed: [],
+    components: [],
+    templateRefs: [],
+    imports: [],
+    bindings: [],
+    vueApiCalls: [],
+    styles: [],
+    flags: {
+      asyncSetup: false,
+      hasReactiveState: false,
+      hasComputed: false,
+      hasWatchers: false,
+      hasLifecycleHooks: false,
+      hasProvide: false,
+      hasInject: false,
+      hasInheritAttrsFalse: false,
+      hasStoreUsage: false,
+    },
+    ...defaultFallthroughFields,
+  } as any;
+}
+
 describe("nativeComponentMetaToComponentMeta", () => {
+  it("projects compat rawType only from terminal display and rejects Failed publication", () => {
+    const published = nativeComponentMetaToComponentMeta(
+      nativeMetaWithProp({
+        name: "value",
+        type: { kind: "primitive", name: "string" },
+        ...publishedTypeFields("TerminalDisplayOnly"),
+        required: true,
+        hasDefault: false,
+      }),
+    );
+
+    expect(published.props[0].rawType).toBe("TerminalDisplayOnly");
+    expect(() =>
+      nativeComponentMetaToComponentMeta(
+        nativeMetaWithProp({
+          name: "value",
+          type: { kind: "primitive", name: "string" },
+          publication: {
+            kind: "failed",
+            failure: "unrepresentableRequiredMemberValue",
+            provenance: "semanticEvaluator",
+          },
+          terminalDisplay: {},
+          required: true,
+          hasDefault: false,
+        }),
+      ),
+    ).toThrow(/failed type publication/i);
+  });
+
   it("preserves full metadata fields from the native result", () => {
     const meta = nativeComponentMetaToComponentMeta({
       filePath: "/project/src/App.vue",
@@ -197,7 +270,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
         {
           name: "visible",
           type: { kind: "primitive", name: "string" },
-          rawType: "string",
+          ...publishedTypeFields("string"),
           required: true,
           hasDefault: false,
         },
@@ -286,6 +359,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
         {
           name: "items",
           type: { kind: "ref", name: "Items", typeArguments: [] },
+          ...publishedTypeFields("Items"),
           typeExpansion: {
             exactness: "incomplete",
             executionStatus: "completed",
@@ -325,6 +399,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
             {
               name: "row",
               type: { kind: "ref", name: "Row", typeArguments: [] },
+              ...publishedTypeFields("Row"),
               typeExpansion: {
                 exactness: "incomplete",
                 executionStatus: "completed",
@@ -451,6 +526,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
         {
           name: "label",
           type: { kind: "primitive", name: "string" },
+          ...publishedTypeFields("string"),
           required: true,
           hasDefault: false,
         },
@@ -461,7 +537,13 @@ describe("nativeComponentMetaToComponentMeta", () => {
           name: "default",
           isScoped: true,
           isRequired: false,
-          bindings: [{ name: "item", type: { kind: "primitive", name: "number" } }],
+          bindings: [
+            {
+              name: "item",
+              type: { kind: "primitive", name: "number" },
+              ...publishedTypeFields("number"),
+            },
+          ],
         },
       ],
       models: [],
@@ -917,7 +999,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
             object: { kind: "ref", name: "NuxtLinkProps", typeArguments: [] },
             index: { kind: "literal", literalKind: "string", value: "to" },
           },
-          rawType: "NuxtLinkProps['to']",
+          ...publishedTypeFields("NuxtLinkProps['to']"),
           required: false,
           hasDefault: false,
         },

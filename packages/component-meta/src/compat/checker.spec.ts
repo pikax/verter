@@ -54,7 +54,14 @@ function nativeMetaPayload(filePath: string) {
       {
         name: "label",
         type: { kind: "primitive", name: "string" },
-        rawType: "string",
+        publication: {
+          kind: "published",
+          semanticAuthority: "resolved",
+          exactness: "exactConcrete",
+          reason: { kind: "resolvedExactConcrete" },
+          provenance: { kind: "resolved", value: "semanticEvaluator" },
+        },
+        terminalDisplay: { text: "string" },
         required: true,
         hasDefault: false,
       },

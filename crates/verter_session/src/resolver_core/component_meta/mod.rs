@@ -205,7 +205,8 @@ pub(crate) fn component_meta_resolved_macros(
                     .map(
                         |row| verter_semantic::analysis::component_meta::ResolvedPropInput {
                             field: row.analysis.clone(),
-                            type_source: row.type_source.clone(),
+                            authority: row.authority.clone(),
+                            authored_evidence: row.authored_evidence.clone(),
                         },
                     )
                     .collect(),

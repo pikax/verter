@@ -278,11 +278,28 @@ message ExpansionDiagnostic {
   uint32 property_name_id = 3;
 }
 
+message TypePublication {
+  TypePublicationKind kind = 1;
+  TypePublicationFailure failure = 2;
+  TypePublicationAbsence absence = 3;
+  TypePublicationProvenance provenance = 4;
+  TypePublicationSemanticAuthority semantic_authority = 5;
+  TypePublicationExactness exactness = 6;
+  TypePublicationReason reason = 7;
+  TypePublicationPolicyReason policy_reason = 8;
+  SymbolicEquivalenceKind symbolic_proof = 9;
+}
+
+message TerminalTypeDisplay {
+  uint32 text_id = 1;
+}
+
 message PropMeta {
   uint32 name_id = 1;
   uint32 type_node_id = 2;
   ExpansionMetadata type_expansion = 3;
-  uint32 raw_type_id = 4;
+  reserved 4;
+  reserved "raw_type_id";
   bool required = 5;
   bool has_default = 6;
   uint32 default_value_id = 7;
@@ -295,6 +312,8 @@ message PropMeta {
   // expansion. Consumed by
   // `@verter/component-meta/published-surface`'s `Refined` policy.
   bool declared_in_macro_type_arg = 10;
+  TypePublication publication = 11;
+  TerminalTypeDisplay terminal_display = 12;
 }
 
 message EventMeta {
@@ -326,7 +345,10 @@ message SlotBindingMeta {
   uint32 name_id = 1;
   uint32 type_node_id = 2;
   ExpansionMetadata type_expansion = 3;
-  uint32 raw_type_id = 4;
+  reserved 4;
+  reserved "raw_type_id";
+  TypePublication publication = 5;
+  TerminalTypeDisplay terminal_display = 6;
 }
 
 message ModelMeta {
@@ -518,11 +540,14 @@ message ComponentFlags {
 message AcceptedPropMeta {
   uint32 name_id = 1;
   uint32 type_node_id = 2;
-  uint32 raw_type_id = 3;
+  reserved 3;
+  reserved "raw_type_id";
   bool required = 4;
   MemberProvenance provenance = 5;
   MemberAvailability availability = 6;
   AcceptedPropKind kind = 7;
+  TypePublication publication = 8;
+  TerminalTypeDisplay terminal_display = 9;
 }
 
 message AcceptedEventMeta {
@@ -610,8 +635,11 @@ message FallthroughBranch {
 message FallthroughPropEntry {
   uint32 name_id = 1;
   uint32 type_node_id = 2;
-  uint32 raw_type_id = 3;
+  reserved 3;
+  reserved "raw_type_id";
   repeated InheritedSource sources = 4;
+  TypePublication publication = 5;
+  TerminalTypeDisplay terminal_display = 6;
 }
 
 message FallthroughEventEntry {
@@ -903,4 +931,70 @@ enum ResolvedRootStepKind {
   RESOLVED_ROOT_STEP_KIND_NATIVE_TAG = 1;
   RESOLVED_ROOT_STEP_KIND_COMPONENT = 2;
   RESOLVED_ROOT_STEP_KIND_UNRESOLVED = 3;
+}
+
+enum TypePublicationKind {
+  TYPE_PUBLICATION_KIND_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_KIND_FAILED = 1;
+  TYPE_PUBLICATION_KIND_ABSENT = 2;
+  TYPE_PUBLICATION_KIND_PUBLISHED = 3;
+}
+
+enum TypePublicationFailure {
+  TYPE_PUBLICATION_FAILURE_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_FAILURE_UNREPRESENTABLE_REQUIRED_MEMBER_VALUE = 1;
+  TYPE_PUBLICATION_FAILURE_UNREPRESENTABLE_REQUIRED_PAYLOAD = 2;
+}
+
+enum TypePublicationAbsence {
+  TYPE_PUBLICATION_ABSENCE_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_ABSENCE_UNANNOTATED = 1;
+  TYPE_PUBLICATION_ABSENCE_BRANCH_DIVERGENT = 2;
+}
+
+enum TypePublicationProvenance {
+  TYPE_PUBLICATION_PROVENANCE_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_PROVENANCE_SEMANTIC_EVALUATOR = 1;
+  TYPE_PUBLICATION_PROVENANCE_SESSION_PROJECTOR = 2;
+  TYPE_PUBLICATION_PROVENANCE_FRAMEWORK_SURFACE = 3;
+  TYPE_PUBLICATION_PROVENANCE_FALLTHROUGH_INHERITANCE = 4;
+  TYPE_PUBLICATION_PROVENANCE_SCHEMA = 5;
+  TYPE_PUBLICATION_PROVENANCE_AUTHORED_MACRO_PAYLOAD = 6;
+  TYPE_PUBLICATION_PROVENANCE_AUTHORED_DECLARATION_BODY = 7;
+  TYPE_PUBLICATION_PROVENANCE_AUTHORED_AUGMENTATION_BODY = 8;
+  TYPE_PUBLICATION_PROVENANCE_AUTHORED_JSDOC_TYPEDEF_BODY = 9;
+}
+
+enum TypePublicationSemanticAuthority {
+  TYPE_PUBLICATION_SEMANTIC_AUTHORITY_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_SEMANTIC_AUTHORITY_RESOLVED = 1;
+  TYPE_PUBLICATION_SEMANTIC_AUTHORITY_AUTHORED_FALLBACK = 2;
+}
+
+enum TypePublicationExactness {
+  TYPE_PUBLICATION_EXACTNESS_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_EXACTNESS_EXACT_CONCRETE = 1;
+  TYPE_PUBLICATION_EXACTNESS_EXACT_SYMBOLIC = 2;
+  TYPE_PUBLICATION_EXACTNESS_INCOMPLETE = 3;
+}
+
+enum TypePublicationReason {
+  TYPE_PUBLICATION_REASON_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_REASON_RESOLVED_EXACT_CONCRETE = 1;
+  TYPE_PUBLICATION_REASON_RESOLVED_EXACT_SYMBOLIC = 2;
+  TYPE_PUBLICATION_REASON_RESOLVED_INCOMPLETE = 3;
+  TYPE_PUBLICATION_REASON_AUTHORED_FOR_INCOMPLETE = 4;
+  TYPE_PUBLICATION_REASON_AUTHORED_SYMBOLIC_REPRESENTATION = 5;
+}
+
+enum TypePublicationPolicyReason {
+  TYPE_PUBLICATION_POLICY_REASON_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_POLICY_REASON_IMPORTED_MACRO_COMPOUND = 1;
+  TYPE_PUBLICATION_POLICY_REASON_IMPORTED_INDEXED_ACCESS = 2;
+}
+
+enum SymbolicEquivalenceKind {
+  SYMBOLIC_EQUIVALENCE_KIND_UNSPECIFIED = 0;
+  SYMBOLIC_EQUIVALENCE_KIND_IMPORTED_MACRO_COMPOUND = 1;
+  SYMBOLIC_EQUIVALENCE_KIND_IMPORTED_INDEXED_ACCESS = 2;
 }

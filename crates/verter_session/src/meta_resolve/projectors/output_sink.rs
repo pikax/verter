@@ -867,17 +867,24 @@ pub(crate) fn surface_member_to_expanded_field(
     // (the cross-file-simple discriminating positive test rejects that accident).
     let declared_in_macro_type_arg = member.declared_in_macro_type_arg.get()
         && member.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
-    ExpandedField {
-        name: member.name.as_ref().to_string(),
+    let authored_evidence =
+        shallow_source
+            .as_ref()
+            .zip(raw_type.as_deref())
+            .map(|(locator, text)| {
+                crate::authored_evidence_producer::from_admitted_member(admitted, locator, text)
+            });
+    ExpandedField::from_source_position(
+        member.name.as_ref().to_string(),
         r#type,
-        raw_type,
-        optional: member.optional,
+        authored_evidence,
+        member.optional,
         exactness,
-        execution_status: ExpansionExecutionStatus::Completed,
-        diagnostics: Vec::new(),
-        shallow_source,
+        ExpansionExecutionStatus::Completed,
+        Vec::new(),
         declared_in_macro_type_arg,
-    }
+        verter_type_expr::ResolutionProvenance::SessionProjector,
+    )
 }
 
 /// Resolve a surface member's value to its underlying body for
@@ -1097,21 +1104,21 @@ pub(crate) fn project_model(
 
     let name = model_name;
 
-    Some(ExpandedField {
+    Some(ExpandedField::from_source_position(
         name,
         r#type,
-        raw_type: None,
-        optional: false,
+        None,
+        false,
         exactness,
-        execution_status: ExpansionExecutionStatus::Completed,
-        diagnostics: Vec::new(),
-        shallow_source: None,
+        ExpansionExecutionStatus::Completed,
+        Vec::new(),
         // `defineModel<T>()` synthesizes the model member at the
         // macro's T position. The member is structurally
         // author-declared in the macro's type argument by virtue of
         // the `defineModel` syntax itself — set `true`.
-        declared_in_macro_type_arg: true,
-    })
+        true,
+        verter_type_expr::ResolutionProvenance::SessionProjector,
+    ))
 }
 
 /// The ONE centralized missing-source output policy: a lane position whose

@@ -3,6 +3,19 @@ import { ComponentMetaSession, evictComponentMetaSession, shutdownMetaRuntime } 
 import { createMetaRuntime, getMetaRuntime, resolvePath } from "./runtime/index.js";
 import type { NativeMetaProject, NativeMetaSession } from "./runtime/index.js";
 
+function resolvedTypeRow(display: string) {
+  return {
+    publication: {
+      kind: "published",
+      semanticAuthority: "resolved",
+      exactness: "exactConcrete",
+      reason: { kind: "resolvedExactConcrete" },
+      provenance: { kind: "resolved", value: "semanticEvaluator" },
+    } as const,
+    terminalDisplay: { text: display },
+  };
+}
+
 function nativeMetaPayload(filePath: string) {
   return {
     filePath,
@@ -11,7 +24,7 @@ function nativeMetaPayload(filePath: string) {
       {
         name: "label",
         type: { kind: "primitive", name: "string" },
-        rawType: "string",
+        ...resolvedTypeRow("string"),
         required: true,
         hasDefault: false,
       },
@@ -351,7 +364,7 @@ describe("ComponentMetaSession public API", () => {
             {
               name: "searchInput",
               type: { kind: "primitive", name: "boolean" },
-              rawType: "boolean | Omit<InputProps, 'modelValue'>",
+              ...resolvedTypeRow("boolean | Omit<InputProps, 'modelValue'>"),
               required: false,
               hasDefault: false,
             },
@@ -412,7 +425,7 @@ describe("ComponentMetaSession public API", () => {
                 {
                   name: "item",
                   type: { kind: "ref", name: "Item", typeArguments: [] },
-                  rawType: "Item",
+                  ...resolvedTypeRow("Item"),
                 },
               ],
             },

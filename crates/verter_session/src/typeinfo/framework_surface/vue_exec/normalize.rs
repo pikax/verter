@@ -230,8 +230,8 @@ pub(crate) fn props_from_typeinfo_surface(
             // is an own-body `member_index` member).
             let declared_in_macro_type_arg = member.declared_in_macro_type_arg
                 && member.origin.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
-            crate::typeinfo::framework_surface::results::ResolvedPropField {
-                analysis: AnalyzedPropField {
+            crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
+                AnalyzedPropField {
                     name: member.name.as_ref().to_string(),
                     is_optional: member.optional,
                     span: verter_span::Span::default(),
@@ -245,7 +245,7 @@ pub(crate) fn props_from_typeinfo_surface(
                     declared_in_macro_type_arg,
                 },
                 type_source,
-            }
+            )
         })
         .collect()
 }
@@ -638,13 +638,13 @@ pub(crate) fn model_prop_fields(
                     )
                 })
                 .unwrap_or_else(verter_type_expr::facts::SourcePosition::unannotated);
-            crate::typeinfo::framework_surface::results::ResolvedPropField {
-                analysis: AnalyzedPropField {
+            crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
+                AnalyzedPropField {
                     type_expr_scope,
                     ..field.clone()
                 },
                 type_source,
-            }
+            )
         })
         .collect()
 }

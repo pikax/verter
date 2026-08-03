@@ -187,8 +187,39 @@ pub struct ResolvedPropField {
     /// The prop analysis row (name, optionality, display annotation, JSDoc,
     /// authored payload locator).
     pub analysis: AnalyzedPropField,
-    /// The member value's published source position.
-    pub type_source: verter_type_expr::facts::SourcePosition,
+    /// Immutable resolved member-value authority.
+    pub authority: verter_type_expr::ResolvedTypeAuthority,
+    /// Atomic locator/text/provenance evidence, when both authored parts exist.
+    pub authored_evidence: Option<verter_type_expr::AuthoredTypeEvidence>,
+}
+
+impl ResolvedPropField {
+    /// Construct a framework-surface prop row without deriving authority from
+    /// display text.
+    pub(crate) fn from_source_position(
+        analysis: AnalyzedPropField,
+        source: verter_type_expr::facts::SourcePosition,
+    ) -> Self {
+        use verter_type_expr::facts::SemanticTypeSource;
+        let exactness = match source.present() {
+            Some(SemanticTypeSource::Closed(_)) => {
+                verter_type_expr::ResolutionExactness::ExactConcrete
+            }
+            Some(_) => verter_type_expr::ResolutionExactness::ExactSymbolic,
+            None => verter_type_expr::ResolutionExactness::ExactConcrete,
+        };
+        let authored_evidence = crate::authored_evidence_producer::from_analyzed_prop(&analysis);
+        Self {
+            analysis,
+            authority: verter_type_expr::ResolvedTypeAuthority::from_source_position(
+                &source,
+                exactness,
+                verter_type_expr::ResolutionProvenance::FrameworkSurface,
+                Arc::from([]),
+            ),
+            authored_evidence,
+        }
+    }
 }
 
 /// One session-resolved expose row: the expose analysis field plus the

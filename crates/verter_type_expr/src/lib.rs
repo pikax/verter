@@ -60,6 +60,18 @@ pub use facts::{
 
 /// Generated static-intrinsic catalog substrate — the interned-id + member-fact
 /// replacement for raw-`TypeExpr` HTML intrinsic member shapes.
+/// Resolved authority, locator-backed authored evidence, and pure publication
+/// selection for component-meta type lanes.
+pub mod publication;
+pub use publication::{
+    select_type_publication, AuthoredProvenance, AuthoredSourceMint, AuthoredTypeEvidence,
+    AuthoredTypeSource, PublicationPolicy, PublicationPolicyReason, PublicationProvenance,
+    PublicationReason, PublicationResult, ResolutionDiagnostic, ResolutionDiagnosticKind,
+    ResolutionExactness, ResolutionProvenance, ResolvedTypeAuthority, ResolvedTypeOutcome,
+    SemanticAuthority, SymbolicEquivalenceKind, SymbolicEquivalenceMint, SymbolicEquivalenceProof,
+    TypePublication, TypedResolutionFailure,
+};
+
 pub mod intrinsics;
 
 /// Compile-time marker witnesses + [P2] discrimination fixtures for the closed

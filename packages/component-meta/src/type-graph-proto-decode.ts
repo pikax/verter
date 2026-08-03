@@ -10,9 +10,13 @@ import type { NativeComponentMetaResult } from "./native-component-meta.js";
 import type {
   NativeConsumedRootBindings,
   NativeOriginGraph,
+  NativePublicationReason,
+  NativeResolutionProvenance,
   NativeRootBranch,
   NativeRootReachability,
   NativeRootTargetRef,
+  NativeTerminalTypeDisplay,
+  NativeTypePublication,
   NativeUnresolvedRootTargetReason,
 } from "./native-component-meta.js";
 import {
@@ -121,6 +125,10 @@ const ACCEPTED_PROP_KIND_ATTR = 2;
 
 const ACCEPTED_EVENT_KIND_DECLARED_EMIT = 1;
 const ACCEPTED_EVENT_KIND_LISTENER = 2;
+
+const TYPE_PUBLICATION_FAILED = 1;
+const TYPE_PUBLICATION_ABSENT = 2;
+const TYPE_PUBLICATION_PUBLISHED = 3;
 
 const NO_FALLTHROUGH_REASON_INHERIT_ATTRS_FALSE = 1;
 const NO_FALLTHROUGH_REASON_MULTI_ROOT = 2;
@@ -789,15 +797,197 @@ function deriveRootInfo(
   };
 }
 
+function decodeResolutionProvenance(value: number): NativeResolutionProvenance {
+  switch (value) {
+    case 1:
+      return "semanticEvaluator";
+    case 2:
+      return "sessionProjector";
+    case 3:
+      return "frameworkSurface";
+    case 4:
+      return "fallthroughInheritance";
+    case 5:
+      return "schema";
+    default:
+      throw graphError(`component-meta graph payload has unknown resolution provenance ${value}`);
+  }
+}
+
+function decodePublicationProvenance(
+  value: number,
+): Extract<NativeTypePublication, { kind: "published" }>["provenance"] {
+  if (value >= 1 && value <= 5) {
+    return { kind: "resolved", value: decodeResolutionProvenance(value) };
+  }
+  switch (value) {
+    case 6:
+      return { kind: "authored", value: "macroPayload" };
+    case 7:
+      return { kind: "authored", value: "declarationBody" };
+    case 8:
+      return { kind: "authored", value: "augmentationBody" };
+    case 9:
+      return { kind: "authored", value: "jsdocTypedefBody" };
+    default:
+      throw graphError(`component-meta graph payload has unknown publication provenance ${value}`);
+  }
+}
+
+function decodePublicationPolicyReason(
+  value: number,
+): "importedMacroCompound" | "importedIndexedAccess" {
+  switch (value) {
+    case 1:
+      return "importedMacroCompound";
+    case 2:
+      return "importedIndexedAccess";
+    default:
+      throw graphError(`component-meta graph payload has unknown publication policy ${value}`);
+  }
+}
+
+function decodeSymbolicEquivalenceKind(
+  value: number,
+): "importedMacroCompound" | "importedIndexedAccess" {
+  switch (value) {
+    case 1:
+      return "importedMacroCompound";
+    case 2:
+      return "importedIndexedAccess";
+    default:
+      throw graphError(`component-meta graph payload has unknown symbolic proof ${value}`);
+  }
+}
+
+function decodePublicationReason(publication: ProtoRecord): NativePublicationReason {
+  switch (Number(publication.reason ?? 0)) {
+    case 1:
+      return { kind: "resolvedExactConcrete" };
+    case 2:
+      return { kind: "resolvedExactSymbolic" };
+    case 3:
+      return { kind: "resolvedIncomplete" };
+    case 4:
+      return {
+        kind: "authoredForIncomplete",
+        policy: decodePublicationPolicyReason(Number(publication.policyReason ?? 0)),
+      };
+    case 5:
+      return {
+        kind: "authoredSymbolicRepresentation",
+        proof: decodeSymbolicEquivalenceKind(Number(publication.symbolicProof ?? 0)),
+      };
+    default:
+      throw graphError(
+        `component-meta graph payload has unknown publication reason ${String(publication.reason)}`,
+      );
+  }
+}
+
+function decodeTypePublication(publication: ProtoRecord): NativeTypePublication {
+  switch (Number(publication.kind ?? 0)) {
+    case TYPE_PUBLICATION_FAILED: {
+      const failure = Number(publication.failure ?? 0);
+      if (failure !== 1 && failure !== 2) {
+        throw graphError(`component-meta graph payload has unknown publication failure ${failure}`);
+      }
+      return {
+        kind: "failed",
+        failure:
+          failure === 1 ? "unrepresentableRequiredMemberValue" : "unrepresentableRequiredPayload",
+        provenance: decodeResolutionProvenance(Number(publication.provenance ?? 0)),
+      };
+    }
+    case TYPE_PUBLICATION_ABSENT: {
+      const absence = Number(publication.absence ?? 0);
+      if (absence !== 1 && absence !== 2) {
+        throw graphError(`component-meta graph payload has unknown publication absence ${absence}`);
+      }
+      return {
+        kind: "absent",
+        absence: absence === 1 ? "unannotated" : "branchDivergent",
+        provenance: decodeResolutionProvenance(Number(publication.provenance ?? 0)),
+      };
+    }
+    case TYPE_PUBLICATION_PUBLISHED: {
+      const semanticAuthority = Number(publication.semanticAuthority ?? 0);
+      const exactness = Number(publication.exactness ?? 0);
+      if (semanticAuthority !== 1 && semanticAuthority !== 2) {
+        throw graphError(
+          `component-meta graph payload has unknown semantic authority ${semanticAuthority}`,
+        );
+      }
+      if (exactness < 1 || exactness > 3) {
+        throw graphError(
+          `component-meta graph payload has unknown publication exactness ${exactness}`,
+        );
+      }
+      return {
+        kind: "published",
+        semanticAuthority: semanticAuthority === 1 ? "resolved" : "authoredFallback",
+        exactness:
+          exactness === 1 ? "exactConcrete" : exactness === 2 ? "exactSymbolic" : "incomplete",
+        reason: decodePublicationReason(publication),
+        provenance: decodePublicationProvenance(Number(publication.provenance ?? 0)),
+      };
+    }
+    default:
+      throw graphError(
+        `component-meta graph payload has unknown publication kind ${String(publication.kind)}`,
+      );
+  }
+}
+
+function decodeTerminalTypeDisplay(
+  display: ProtoRecord,
+  graph: DecodedTypeGraph,
+): NativeTerminalTypeDisplay {
+  return {
+    ...maybe("text", graph.getStringMaybe(Number(display.textId ?? 0))),
+  };
+}
+
+function decodePublishedTypeFields(
+  row: ProtoRecord,
+  graph: DecodedTypeGraph,
+  label: string,
+): Record<string, unknown> {
+  const publication = decodeTypePublication(
+    requireProtoMessage(row.publication as ProtoRecord | undefined, `${label} publication`),
+  );
+  const terminalDisplay = decodeTerminalTypeDisplay(
+    requireProtoMessage(
+      row.terminalDisplay as ProtoRecord | undefined,
+      `${label} terminal display`,
+    ),
+    graph,
+  );
+  const typeNodeId = Number(row.typeNodeId ?? 0);
+  if (publication.kind === "failed") {
+    if (typeNodeId !== 0 || terminalDisplay.text !== undefined) {
+      throw graphError(`component-meta ${label} Failed publication carries success output`);
+    }
+    return { publication, terminalDisplay };
+  }
+  if (publication.kind === "published" && typeNodeId === 0) {
+    throw graphError(`component-meta ${label} Published publication is missing its type`);
+  }
+  return {
+    ...(typeNodeId !== 0 ? { type: createGraphTypeExprRef(graph, typeNodeId) } : {}),
+    publication,
+    terminalDisplay,
+  };
+}
+
 function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
   return {
     name: graph.getString(readRequiredId(prop.nameId, "prop name")),
-    type: createGraphTypeExprRef(graph, readRequiredId(prop.typeNodeId, "prop type")),
+    ...decodePublishedTypeFields(prop, graph, "prop"),
     ...maybe(
       "typeExpansion",
       decodeOptionalExpansionMetadata(prop.typeExpansion as ProtoRecord | undefined, graph),
     ),
-    ...maybe("rawType", graph.getStringMaybe(Number(prop.rawTypeId ?? 0))),
     required: Boolean(prop.required),
     hasDefault: Boolean(prop.hasDefault),
     ...maybe("defaultValue", graph.getStringMaybe(Number(prop.defaultValueId ?? 0))),
@@ -835,12 +1025,11 @@ function decodeSlot(slot: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
     isScoped: Boolean(slot.isScoped),
     bindings: ((slot.bindings as ProtoRecord[] | undefined) ?? []).map((binding) => ({
       name: graph.getString(readRequiredId(binding.nameId, "slot binding name")),
-      type: createGraphTypeExprRef(graph, readRequiredId(binding.typeNodeId, "slot binding type")),
+      ...decodePublishedTypeFields(binding, graph, "slot binding"),
       ...maybe(
         "typeExpansion",
         decodeOptionalExpansionMetadata(binding.typeExpansion as ProtoRecord | undefined, graph),
       ),
-      ...maybe("rawType", graph.getStringMaybe(Number(binding.rawTypeId ?? 0))),
     })),
     isRequired: Boolean(slot.isRequired),
     // Field 8 (`declared_in_macro_type_arg`) — proto3 bool defaults make
@@ -1003,8 +1192,7 @@ function decodeComponentFlags(flags: ProtoRecord | undefined): Record<string, bo
 function decodeAcceptedProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
   return {
     name: graph.getString(readRequiredId(prop.nameId, "accepted prop name")),
-    type: createGraphTypeExprRef(graph, readRequiredId(prop.typeNodeId, "accepted prop type")),
-    ...maybe("rawType", graph.getStringMaybe(Number(prop.rawTypeId ?? 0))),
+    ...decodePublishedTypeFields(prop, graph, "accepted prop"),
     required: Boolean(prop.required),
     provenance: decodeMemberProvenance(
       requireProtoMessage(prop.provenance as ProtoRecord | undefined, "member provenance"),
@@ -1257,8 +1445,7 @@ function decodeFallthroughBranch(
     ...maybe("conditionText", graph.getStringMaybe(Number(branch.conditionTextId ?? 0))),
     props: ((branch.props as ProtoRecord[] | undefined) ?? []).map((prop) => ({
       name: graph.getString(readRequiredId(prop.nameId, "fallthrough prop name")),
-      type: createGraphTypeExprRef(graph, readRequiredId(prop.typeNodeId, "fallthrough prop type")),
-      ...maybe("rawType", graph.getStringMaybe(Number(prop.rawTypeId ?? 0))),
+      ...decodePublishedTypeFields(prop, graph, "fallthrough prop"),
       sources: decodeInheritedSources((prop.sources as ProtoRecord[] | undefined) ?? [], graph),
     })),
     events: ((branch.events as ProtoRecord[] | undefined) ?? []).map((event) => ({

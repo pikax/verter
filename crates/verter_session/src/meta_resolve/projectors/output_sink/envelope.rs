@@ -202,6 +202,87 @@ impl<'a> OutputSourceMemo<'a> {
             }
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_publication_lane_slot(
+        &mut self,
+        dispatch: &ProjectSemanticDispatch<'_>,
+        cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        effective_scope: &'a str,
+        lane: crate::meta_resolve::ComponentMetaOutputLane,
+        index: usize,
+        inner_index: Option<usize>,
+        publication: &'a verter_type_expr::TypePublication,
+    ) -> Result<
+        crate::meta_resolve::MaterializedTypePublication,
+        crate::meta_resolve::ComponentMetaOutputError,
+    > {
+        use verter_type_expr::PublicationResult;
+
+        let (materialized_type, display) = match publication.result() {
+            PublicationResult::Failed { .. } => (None, None),
+            PublicationResult::Absent { .. } => {
+                let materialized = missing_source_output_type_expr();
+                let display = verter_type_expr::render_type_expr_display(&materialized)
+                    .ok()
+                    .map(|rendered| rendered.text);
+                (Some(materialized), display)
+            }
+            PublicationResult::Published {
+                selected_source, ..
+            } => {
+                let materialized = match self.memo.entry((effective_scope, selected_source)) {
+                    std::collections::hash_map::Entry::Occupied(hit) => hit.get().clone(),
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        self.materialize_calls += 1;
+                        let value = materialize_output_source(
+                            dispatch,
+                            cap,
+                            effective_scope,
+                            verter_type_expr::TopLevelOwnerId::instance(0),
+                            selected_source,
+                        )
+                        .map_err(|failure| {
+                            crate::meta_resolve::ComponentMetaOutputError {
+                                lane,
+                                index,
+                                inner_index,
+                                position: Box::new(
+                                    verter_type_expr::facts::SourcePosition::Present(
+                                        selected_source.as_ref().clone(),
+                                    ),
+                                ),
+                                failure,
+                            }
+                        })?;
+                        slot.insert(value.clone());
+                        value
+                    }
+                };
+                let display = publication
+                    .evidence()
+                    .filter(|evidence| {
+                        evidence.source().to_semantic_source() == *selected_source.as_ref()
+                    })
+                    .map(|evidence| evidence.text().to_string())
+                    .or_else(|| {
+                        verter_type_expr::render_type_expr_display(&materialized)
+                            .ok()
+                            .map(|rendered| rendered.text)
+                    });
+                (Some(materialized), display)
+            }
+        };
+        let terminal_display = crate::meta_resolve::TerminalTypeDisplay::from_text(cap, display);
+        Ok(
+            crate::meta_resolve::MaterializedTypePublication::from_parts(
+                cap,
+                publication.result().clone(),
+                materialized_type,
+                terminal_display,
+            ),
+        )
+    }
 }
 
 /// Materialize ALL 11 component-meta output type lanes against the caller's
@@ -257,14 +338,14 @@ fn materialize_component_meta_output_types<'a>(
     let mut lanes = crate::meta_resolve::output::MaterializedComponentMetaTypeLanes::default();
 
     for (index, prop) in analysis.props.iter().enumerate() {
-        lanes.props.push(memo.materialize_output_lane_slot(
+        lanes.props.push(memo.materialize_publication_lane_slot(
             dispatch,
             cap,
             scope,
             Lane::Prop,
             index,
             None,
-            &prop.type_source,
+            &prop.publication,
         )?);
     }
     for (index, event) in analysis.events.iter().enumerate() {
@@ -281,14 +362,14 @@ fn materialize_component_meta_output_types<'a>(
     for (index, slot) in analysis.slots.iter().enumerate() {
         let mut bindings = Vec::with_capacity(slot.bindings.len());
         for (inner, binding) in slot.bindings.iter().enumerate() {
-            bindings.push(memo.materialize_output_lane_slot(
+            bindings.push(memo.materialize_publication_lane_slot(
                 dispatch,
                 cap,
                 scope,
                 Lane::SlotBinding,
                 index,
                 Some(inner),
-                &binding.type_source,
+                &binding.publication,
             )?);
         }
         lanes.slot_bindings.push(bindings);
@@ -345,15 +426,17 @@ fn materialize_component_meta_output_types<'a>(
     }
     for (index, prop) in analysis.accepted_props.iter().enumerate() {
         let effective = effective_output_scope(scope, prop.type_source_scope.as_deref());
-        lanes.accepted_props.push(memo.materialize_output_lane_slot(
-            dispatch,
-            cap,
-            effective,
-            Lane::AcceptedProp,
-            index,
-            None,
-            &prop.type_source,
-        )?);
+        lanes
+            .accepted_props
+            .push(memo.materialize_publication_lane_slot(
+                dispatch,
+                cap,
+                effective,
+                Lane::AcceptedProp,
+                index,
+                None,
+                &prop.publication,
+            )?);
     }
     for (index, event) in analysis.accepted_events.iter().enumerate() {
         let effective = effective_output_scope(scope, event.payload_scope.as_deref());
@@ -374,14 +457,14 @@ fn materialize_component_meta_output_types<'a>(
             let mut props = Vec::with_capacity(branch.props.len());
             for (inner, prop) in branch.props.iter().enumerate() {
                 let effective = effective_output_scope(scope, prop.type_source_scope.as_deref());
-                props.push(memo.materialize_output_lane_slot(
+                props.push(memo.materialize_publication_lane_slot(
                     dispatch,
                     cap,
                     effective,
                     Lane::FallthroughProp,
                     index,
                     Some(inner),
-                    &prop.type_source,
+                    &prop.publication,
                 )?);
             }
             lanes.fallthrough_props.push(props);

@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use verter_session as host;
+use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::types::*;
 
@@ -12,6 +13,246 @@ use super::error::*;
 use super::offset::*;
 use super::string_helpers::*;
 use super::*;
+
+fn publication_fixture(
+    position: verter_type_expr::facts::SourcePosition,
+) -> verter_type_expr::TypePublication {
+    host::test_only::type_publication_fixture(
+        position,
+        verter_type_expr::ResolutionExactness::ExactConcrete,
+        None,
+        None,
+    )
+}
+
+fn materialized_publication(r#type: TypeExpr) -> host::meta_resolve::MaterializedTypePublication {
+    let selected_source = match &r#type {
+        TypeExpr::Primitive(name) => verter_type_expr::facts::SemanticTypeSource::Closed(
+            verter_type_expr::facts::ClosedTypeFact::Leaf(
+                verter_type_expr::facts::LeafTypeFact::Primitive(*name),
+            ),
+        ),
+        _ => verter_type_expr::facts::SemanticTypeSource::Closed(
+            verter_type_expr::facts::ClosedTypeFact::Leaf(
+                verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::Unknown),
+            ),
+        ),
+    };
+    host::meta_resolve::MaterializedTypePublication::for_test(
+        verter_type_expr::PublicationResult::Published {
+            selected_source: std::sync::Arc::new(selected_source),
+            semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
+            exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
+            reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),
+            provenance: verter_type_expr::PublicationProvenance::Resolved {
+                provenance: verter_type_expr::ResolutionProvenance::SemanticEvaluator,
+            },
+        },
+        Some(r#type),
+        None,
+    )
+}
+
+#[test]
+fn type_publication_wire_keeps_outcome_and_terminal_display_separate() {
+    let published = host::meta_resolve::MaterializedTypePublication::for_test(
+        verter_type_expr::PublicationResult::Published {
+            selected_source: std::sync::Arc::new(
+                verter_type_expr::facts::SemanticTypeSource::Closed(
+                    verter_type_expr::facts::ClosedTypeFact::Leaf(
+                        verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String),
+                    ),
+                ),
+            ),
+            semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
+            exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
+            reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),
+            provenance: verter_type_expr::PublicationProvenance::Resolved {
+                provenance: verter_type_expr::ResolutionProvenance::SessionProjector,
+            },
+        },
+        Some(TypeExpr::Primitive(PrimitiveName::String)),
+        Some("terminal-only".to_string()),
+    );
+    let (published_type, published_outcome, published_display) =
+        materialized_publication_to_ffi(published);
+    assert_eq!(
+        published_type,
+        Some(TypeExpr::Primitive(PrimitiveName::String))
+    );
+    assert!(matches!(
+        published_outcome,
+        FfiTypePublication::Published {
+            semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+            exactness: FfiPublicationExactness::ExactConcrete,
+            reason: FfiPublicationReason::ResolvedExactConcrete,
+            provenance: FfiPublicationProvenance::Resolved(
+                FfiResolutionProvenance::SessionProjector
+            ),
+        }
+    ));
+    assert_eq!(published_display.text.as_deref(), Some("terminal-only"));
+
+    let absent = host::meta_resolve::MaterializedTypePublication::for_test(
+        verter_type_expr::PublicationResult::Absent {
+            absence: verter_type_expr::facts::SchemaAbsence::BranchDivergent,
+            provenance: verter_type_expr::ResolutionProvenance::FallthroughInheritance,
+        },
+        None,
+        None,
+    );
+    let (absent_type, absent_outcome, absent_display) = materialized_publication_to_ffi(absent);
+    assert_eq!(absent_type, None);
+    assert!(matches!(
+        absent_outcome,
+        FfiTypePublication::Absent {
+            absence: FfiTypePublicationAbsence::BranchDivergent,
+            provenance: FfiResolutionProvenance::FallthroughInheritance,
+        }
+    ));
+    assert_eq!(absent_display.text, None);
+
+    let failed = host::meta_resolve::MaterializedTypePublication::for_test(
+        verter_type_expr::PublicationResult::Failed {
+            failure: verter_type_expr::TypedResolutionFailure::SourceConstruction(
+                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+            ),
+            provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        },
+        Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
+        Some("must-not-leak".to_string()),
+    );
+    let (failed_type, failed_outcome, failed_display) = materialized_publication_to_ffi(failed);
+    assert_eq!(failed_type, None, "Failed cannot publish a type success");
+    assert!(matches!(
+        failed_outcome,
+        FfiTypePublication::Failed {
+            failure: FfiTypePublicationFailure::UnrepresentableRequiredMemberValue,
+            provenance: FfiResolutionProvenance::FrameworkSurface,
+        }
+    ));
+    assert_eq!(
+        failed_display.text, None,
+        "Failed cannot publish terminal display"
+    );
+}
+
+#[test]
+fn failed_publication_is_absorbing_in_all_target_ffi_lanes() {
+    use verter_semantic::analysis::component_meta as cm;
+    use verter_type_expr::facts::{SemanticSourceFailure, SourcePosition};
+    use verter_type_expr::{PublicationResult, ResolutionProvenance, TypedResolutionFailure};
+
+    let failed_position =
+        SourcePosition::Failed(SemanticSourceFailure::UnrepresentableRequiredMemberValue);
+    let failed_publication = || publication_fixture(failed_position.clone());
+    let failed_lane = || {
+        host::meta_resolve::MaterializedTypePublication::for_test(
+            PublicationResult::Failed {
+                failure: TypedResolutionFailure::SourceConstruction(
+                    SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+                ),
+                provenance: ResolutionProvenance::SemanticEvaluator,
+            },
+            Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
+            Some("must-not-leak".to_string()),
+        )
+    };
+
+    let mut analysis = empty_analysis();
+    analysis.props = vec![cm::PropAnalysis {
+        name: "prop".to_string(),
+        publication: failed_publication(),
+        type_expansion: None,
+        required: true,
+        has_default: false,
+        default_value: None,
+        description: None,
+        tags: Vec::new(),
+        declared_in_macro_type_arg: true,
+    }];
+    analysis.slots = vec![cm::SlotAnalysis {
+        name: "default".to_string(),
+        is_scoped: true,
+        bindings: vec![cm::SlotBindingAnalysis {
+            name: "slot".to_string(),
+            publication: failed_publication(),
+            type_expansion: None,
+        }],
+        is_required: false,
+        return_type: None,
+        return_source: None,
+        return_source_scope: None,
+        description: None,
+        tags: Vec::new(),
+        declared_in_macro_type_arg: true,
+    }];
+    analysis.accepted_props = vec![cm::AcceptedPropAnalysis {
+        name: "accepted".to_string(),
+        publication: failed_publication(),
+        type_source_scope: None,
+        required: true,
+        provenance: cm::MemberProvenance::Declared,
+        availability: cm::MemberAvailability::Always,
+        kind: cm::AcceptedPropKind::DeclaredProp,
+    }];
+    analysis.fallthrough_surface = cm::FallthroughSurface::Branches {
+        branches: vec![cm::FallthroughBranch {
+            branch_key: "0".to_string(),
+            condition_text: None,
+            props: vec![cm::FallthroughPropEntry {
+                name: "inherited".to_string(),
+                publication: failed_publication(),
+                type_source_scope: None,
+                sources: Vec::new(),
+            }],
+            events: Vec::new(),
+            root_chain: Vec::new(),
+            status: cm::BranchStatus::Resolved,
+        }],
+    };
+
+    let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
+        props: vec![failed_lane()],
+        slot_bindings: vec![vec![failed_lane()]],
+        accepted_props: vec![failed_lane()],
+        fallthrough_props: vec![vec![failed_lane()]],
+        fallthrough_event_payloads: vec![Vec::new()],
+        ..Default::default()
+    };
+    let ffi = component_meta_parts_to_ffi(analysis, None, lanes);
+
+    let assert_failed = |r#type: &Option<TypeExpr>,
+                         publication: &FfiTypePublication,
+                         display: &FfiTerminalTypeDisplay| {
+        assert!(r#type.is_none(), "Failed must not publish a type");
+        assert!(matches!(publication, FfiTypePublication::Failed { .. }));
+        assert!(display.text.is_none(), "Failed must not publish display");
+    };
+    assert_failed(
+        &ffi.props[0].r#type,
+        &ffi.props[0].publication,
+        &ffi.props[0].terminal_display,
+    );
+    assert_failed(
+        &ffi.slots[0].bindings[0].r#type,
+        &ffi.slots[0].bindings[0].publication,
+        &ffi.slots[0].bindings[0].terminal_display,
+    );
+    assert_failed(
+        &ffi.accepted_props[0].r#type,
+        &ffi.accepted_props[0].publication,
+        &ffi.accepted_props[0].terminal_display,
+    );
+    let FfiFallthroughSurface::Branches { branches } = &ffi.fallthrough_surface else {
+        panic!("fallthrough branches expected");
+    };
+    assert_failed(
+        &branches[0].props[0].r#type,
+        &branches[0].props[0].publication,
+        &branches[0].props[0].terminal_display,
+    );
+}
 
 /// A resolution-output sidecar for converter tests: `Expanded` mode, no
 /// macros, the given registry declaration metadata + origin graph.
@@ -2180,10 +2421,8 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     let mut analysis = empty_analysis();
     let binding = |name: &str| cm::SlotBindingAnalysis {
         name: name.to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_expansion: None,
-        raw_type: None,
-        raw_type_source: None,
     };
     let slot = |name: &str, bindings: Vec<cm::SlotBindingAnalysis>| cm::SlotAnalysis {
         name: name.to_string(),
@@ -2206,9 +2445,8 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     ];
     let prop_entry = |name: &str| cm::FallthroughPropEntry {
         name: name.to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_source_scope: None,
-        raw_type: None,
         sources: Vec::new(),
     };
     let event_entry = |name: &str| cm::FallthroughEventEntry {
@@ -2244,17 +2482,21 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
         slot_bindings: vec![
             vec![
-                TypeExpr::Primitive(PrimitiveName::String), // default.row
-                TypeExpr::Primitive(PrimitiveName::Number), // default.other
+                materialized_publication(TypeExpr::Primitive(PrimitiveName::String)), // default.row
+                materialized_publication(TypeExpr::Primitive(PrimitiveName::Number)), // default.other
             ],
-            vec![TypeExpr::Primitive(PrimitiveName::Boolean)], // second.row
+            vec![materialized_publication(TypeExpr::Primitive(
+                PrimitiveName::Boolean,
+            ))], // second.row
         ],
         fallthrough_props: vec![
             vec![
-                TypeExpr::Primitive(PrimitiveName::String), // b0 inherited
-                TypeExpr::Primitive(PrimitiveName::Number), // b0 extraA
+                materialized_publication(TypeExpr::Primitive(PrimitiveName::String)), // b0 inherited
+                materialized_publication(TypeExpr::Primitive(PrimitiveName::Number)), // b0 extraA
             ],
-            vec![TypeExpr::Primitive(PrimitiveName::Boolean)], // b1 inherited
+            vec![materialized_publication(TypeExpr::Primitive(
+                PrimitiveName::Boolean,
+            ))], // b1 inherited
         ],
         fallthrough_event_payloads: vec![
             vec![TypeExpr::Primitive(PrimitiveName::Number)], // b0 changed
@@ -2272,18 +2514,24 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     assert_eq!(ffi.slots[0].bindings[0].name, "row");
     assert_eq!(
         ffi.slots[0].bindings[0].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        ))
     );
     assert_eq!(ffi.slots[0].bindings[1].name, "other");
     assert_eq!(
         ffi.slots[0].bindings[1].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
     );
     assert_eq!(ffi.slots[1].name, "second");
     assert_eq!(ffi.slots[1].bindings[0].name, "row");
     assert_eq!(
         ffi.slots[1].bindings[0].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Boolean
+        )),
         "the repeated binding name keeps ITS OWN slot's sentinel — a \
          cross-slot collapse or flattened zip moves default.row here"
     );
@@ -2297,17 +2545,23 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     assert_eq!(branches[0].props[0].name, "inherited");
     assert_eq!(
         branches[0].props[0].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        ))
     );
     assert_eq!(branches[0].props[1].name, "extraA");
     assert_eq!(
         branches[0].props[1].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
     );
     assert_eq!(branches[1].props[0].name, "inherited");
     assert_eq!(
         branches[1].props[0].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Boolean
+        )),
         "the same-named row keeps ITS OWN branch's sentinel — a branch swap \
          or flattened zip moves branch 0's value here"
     );
@@ -2335,10 +2589,8 @@ fn component_meta_lane_misalignment_fails_closed_not_silent_truncation() {
     // One analysis prop against the EMPTY default lanes — misaligned.
     analysis.props = vec![cm::PropAnalysis {
         name: "misaligned".to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_expansion: None,
-        raw_type: None,
-        raw_type_source: None,
         required: true,
         has_default: false,
         default_value: None,
@@ -2387,9 +2639,8 @@ fn fallthrough_prop_entry(
 ) -> verter_semantic::analysis::component_meta::FallthroughPropEntry {
     verter_semantic::analysis::component_meta::FallthroughPropEntry {
         name: name.to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_source_scope: None,
-        raw_type: None,
         sources: Vec::new(),
     }
 }
@@ -2463,7 +2714,9 @@ fn fallthrough_inner_prop_lane_misalignment_fails_closed() {
     let message = conversion_panic_message(|| {
         let _ = fallthrough::fallthrough_surface_to_ffi(
             surface,
-            vec![vec![TypeExpr::Primitive(PrimitiveName::String)]],
+            vec![vec![materialized_publication(TypeExpr::Primitive(
+                PrimitiveName::String,
+            ))]],
             vec![vec![TypeExpr::Primitive(PrimitiveName::Number)]],
         );
     });
@@ -2496,7 +2749,9 @@ fn fallthrough_inner_event_lane_misalignment_fails_closed() {
     let message = conversion_panic_message(|| {
         let _ = fallthrough::fallthrough_surface_to_ffi(
             surface,
-            vec![vec![TypeExpr::Primitive(PrimitiveName::String)]],
+            vec![vec![materialized_publication(TypeExpr::Primitive(
+                PrimitiveName::String,
+            ))]],
             vec![vec![TypeExpr::Primitive(PrimitiveName::Number)]],
         );
     });
@@ -2524,7 +2779,9 @@ fn fallthrough_none_surface_with_nonempty_lanes_fails_closed() {
     let message = conversion_panic_message(|| {
         let _ = fallthrough::fallthrough_surface_to_ffi(
             surface,
-            vec![vec![TypeExpr::Primitive(PrimitiveName::String)]],
+            vec![vec![materialized_publication(TypeExpr::Primitive(
+                PrimitiveName::String,
+            ))]],
             Vec::new(),
         );
     });
@@ -2549,10 +2806,8 @@ fn component_meta_aligned_lanes_convert_unchanged_through_the_hard_guard() {
     let mut analysis = empty_analysis();
     analysis.props = vec![cm::PropAnalysis {
         name: "aligned".to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_expansion: None,
-        raw_type: None,
-        raw_type_source: None,
         required: true,
         has_default: false,
         default_value: None,
@@ -2561,7 +2816,9 @@ fn component_meta_aligned_lanes_convert_unchanged_through_the_hard_guard() {
         declared_in_macro_type_arg: true,
     }];
     let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
-        props: vec![TypeExpr::Primitive(PrimitiveName::String)],
+        props: vec![materialized_publication(TypeExpr::Primitive(
+            PrimitiveName::String,
+        ))],
         ..Default::default()
     };
     let ffi = component_meta_parts_to_ffi(analysis, None, lanes);
@@ -2569,7 +2826,7 @@ fn component_meta_aligned_lanes_convert_unchanged_through_the_hard_guard() {
     assert_eq!(ffi.props[0].name, "aligned");
     assert_eq!(
         ffi.props[0].r#type,
-        TypeExpr::Primitive(PrimitiveName::String)
+        Some(TypeExpr::Primitive(PrimitiveName::String))
     );
 }
 

@@ -174,7 +174,7 @@ fn merge_projected_fields_by_name(
             if std::env::var("VERTER_PROJECTOR_MERGE_TRACE").is_ok() {
                 eprintln!(
                     "[MERGE] name={} existing={:?} projected={:?}",
-                    field.name, existing.r#type, field.r#type
+                    field.name, existing.authority, field.authority
                 );
             }
             // Projector pipeline is the sole post-projection authority
@@ -302,7 +302,7 @@ pub(crate) fn project_evaluated_types(
             AnalyzedMacroKind::DefineExpose => {
                 let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Exposed);
                 // The projected surface members carry the exposed members'
-                // typed sources (`ExpandedField.r#type`); publish them on
+                // typed sources (`ExpandedField.authority`); publish them on
                 // the canonical aggregate's per-macro `exposed` lane so the
                 // exposed-analysis join pairs them by the stable
                 // `(macro_index, member name)` identity. Idempotent per

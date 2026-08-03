@@ -34,6 +34,21 @@ fn workspace_accessor_visibility() {
     t.compile_fail("tests/cases/compile-fail/workspace_accessor_visibility.rs");
 }
 
+/// Type publication accepts only typed authority/evidence/policy inputs;
+/// authored sources require locators and terminal display is sink-minted.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn type_publication_capability_boundary() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/type_publication_capability.rs");
+    t.compile_fail("tests/cases/compile-fail/authored_source_from_public_locator.rs");
+    t.compile_fail("tests/cases/compile-fail/authored_source_deserialize.rs");
+    t.compile_fail("tests/cases/compile-fail/symbolic_equivalence_direct_mint.rs");
+}
+
 /// API-surface half of `carrier_access_token_minted_only_in_verter_language`:
 /// an out-of-crate `CarrierAccessToken` struct literal must fail
 /// to compile — the `_private: ()` field is the in-language forging

@@ -861,9 +861,11 @@ mod tests {
     fn props_surface(fields: Vec<AnalyzedPropField>) -> NormalizedSurfaces {
         let fields = fields
             .into_iter()
-            .map(|analysis| results::ResolvedPropField {
-                analysis,
-                type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+            .map(|analysis| {
+                results::ResolvedPropField::from_source_position(
+                    analysis,
+                    verter_type_expr::facts::SourcePosition::unannotated(),
+                )
             })
             .collect();
         NormalizedSurfaces {
@@ -1064,10 +1066,10 @@ mod tests {
                 kind: FrameworkSurfaceKind::Props,
                 outcome: ResolvedOutcome::Resolved(MacroSurfaceDtos {
                     props: Some(PropsSurface {
-                        fields: vec![results::ResolvedPropField {
-                            analysis: prop_field("named"),
-                            type_source: verter_type_expr::facts::SourcePosition::unannotated(),
-                        }],
+                        fields: vec![results::ResolvedPropField::from_source_position(
+                            prop_field("named"),
+                            verter_type_expr::facts::SourcePosition::unannotated(),
+                        )],
                         index_signatures: vec![ExpandedIndexSignature {
                             key_type: verter_type_expr::facts::SourcePosition::Present(
                                 verter_type_expr::facts::SemanticTypeSource::Closed(

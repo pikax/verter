@@ -3887,7 +3887,8 @@ const len = computed(() => props.text.length)
         project.host(),
         "/Shimmer.vue",
         ui_prop
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("ui prop must publish a typed source"),
     )

@@ -508,8 +508,8 @@ fn resolve_legacy_export_let(facts: Option<&SvelteScriptFacts>) -> ResolvedMacro
 fn legacy_prop_field(
     prop: &SvelteLegacyProp,
 ) -> crate::typeinfo::framework_surface::results::ResolvedPropField {
-    crate::typeinfo::framework_surface::results::ResolvedPropField {
-        analysis: AnalyzedPropField {
+    crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
+        AnalyzedPropField {
             name: prop.name.clone(),
             // A prop with a default value is optional.
             is_optional: prop.has_default,
@@ -523,8 +523,8 @@ fn legacy_prop_field(
             resolution_error: None,
             declared_in_macro_type_arg: false,
         },
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
-    }
+        verter_type_expr::facts::SourcePosition::unannotated(),
+    )
 }
 
 /// MODEL from `$bindable()` props: each bindable member's prop is its

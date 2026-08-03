@@ -12202,7 +12202,11 @@ defineProps<{ ui: typeof importedTheme }>()
     let ui_ty = crate::test_only::semantic_source_probe::demand_type_expr(
         &host,
         "/App.vue",
-        ui_prop.type_source.present().expect("typed ui prop"),
+        ui_prop
+            .publication
+            .source_position()
+            .present()
+            .expect("typed ui prop"),
     )
     .unwrap_or_else(|| panic!("ui's published source must demand-materialize"));
     assert!(

@@ -50,11 +50,62 @@ export interface NativeExpansionMetadata extends TypeExpansionMeta {
   diagnostics: NativeExpansionDiagnostic[];
 }
 
+export interface NativeTerminalTypeDisplay {
+  text?: string | null;
+}
+
+export type NativeResolutionProvenance =
+  | "semanticEvaluator"
+  | "sessionProjector"
+  | "frameworkSurface"
+  | "fallthroughInheritance"
+  | "schema";
+
+export type NativePublicationProvenance =
+  | { kind: "resolved"; value: NativeResolutionProvenance }
+  | {
+      kind: "authored";
+      value: "macroPayload" | "declarationBody" | "augmentationBody" | "jsdocTypedefBody";
+    };
+
+export type NativePublicationReason =
+  | { kind: "resolvedExactConcrete" }
+  | { kind: "resolvedExactSymbolic" }
+  | { kind: "resolvedIncomplete" }
+  | {
+      kind: "authoredForIncomplete";
+      policy: "importedMacroCompound" | "importedIndexedAccess";
+    }
+  | {
+      kind: "authoredSymbolicRepresentation";
+      proof: "importedMacroCompound" | "importedIndexedAccess";
+    };
+
+export type NativeTypePublication =
+  | {
+      kind: "failed";
+      failure: "unrepresentableRequiredMemberValue" | "unrepresentableRequiredPayload";
+      provenance: NativeResolutionProvenance;
+    }
+  | {
+      kind: "absent";
+      absence: "unannotated" | "branchDivergent";
+      provenance: NativeResolutionProvenance;
+    }
+  | {
+      kind: "published";
+      semanticAuthority: "resolved" | "authoredFallback";
+      exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+      reason: NativePublicationReason;
+      provenance: NativePublicationProvenance;
+    };
+
 export interface NativePropMeta {
   name: string;
-  type: NativeTypeExprLike;
+  type?: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
   typeExpansion?: NativeExpansionMetadata;
-  rawType?: string;
   required: boolean;
   hasDefault: boolean;
   defaultValue?: string;
@@ -85,9 +136,10 @@ export interface NativeEventMeta {
 
 export interface NativeSlotBindingMeta {
   name: string;
-  type: NativeTypeExprLike;
+  type?: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
   typeExpansion?: NativeExpansionMetadata;
-  rawType?: string;
 }
 
 export interface NativeSlotMeta {
@@ -352,8 +404,9 @@ export interface NativeComponentFlags {
 
 export interface NativeAcceptedPropMeta {
   name: string;
-  type: NativeTypeExprLike;
-  rawType?: string;
+  type?: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
   required: boolean;
   provenance: NativeMemberProvenance;
   availability: NativeMemberAvailability;
@@ -470,8 +523,9 @@ export type NativeUnresolvedBranchReason =
 
 export interface NativeFallthroughPropEntry {
   name: string;
-  type: NativeTypeExprLike;
-  rawType?: string;
+  type?: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
   sources: NativeInheritedSource[];
 }
 
@@ -563,6 +617,26 @@ function deriveComponentName(filePath: string): string {
   return basename(filePath).replace(/\.[^.]+$/, "") || "AnonymousComponent";
 }
 
+function requirePublishedType(
+  row: {
+    type?: NativeTypeExprLike;
+    publication: NativeTypePublication;
+  },
+  label: string,
+): NativeTypeExprLike {
+  if (row.publication.kind === "failed") {
+    throw new Error(`component-meta ${label} has failed type publication`);
+  }
+  if (row.type === undefined) {
+    throw new Error(`component-meta ${label} has no materialized type`);
+  }
+  return row.type;
+}
+
+function compatRawType(display: NativeTerminalTypeDisplay): { rawType?: string } {
+  return typeof display.text === "string" ? { rawType: display.text } : {};
+}
+
 export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResult): ComponentMeta {
   const nativeRegistry = buildNativeTypeRegistry(meta);
   return {
@@ -571,11 +645,11 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     optionsApi: meta.optionsApi,
     props: meta.props.map((prop) => ({
       name: prop.name,
-      type: typeExprToDescriptor(prop.type, nativeRegistry),
+      type: typeExprToDescriptor(requirePublishedType(prop, `prop ${prop.name}`), nativeRegistry),
       ...(prop.typeExpansion !== undefined ? { typeExpansion: prop.typeExpansion } : {}),
       required: prop.required,
       hasDefault: prop.hasDefault,
-      ...(prop.rawType !== undefined ? { rawType: prop.rawType } : {}),
+      ...compatRawType(prop.terminalDisplay),
       ...(prop.defaultValue !== undefined ? { default: prop.defaultValue } : {}),
       ...(prop.description !== undefined ? { description: prop.description } : {}),
       ...(prop.tags?.length ? { tags: prop.tags } : {}),
@@ -603,9 +677,12 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       isScoped: slot.isScoped,
       bindings: slot.bindings.map((binding) => ({
         name: binding.name,
-        type: typeExprToDescriptor(binding.type, nativeRegistry),
+        type: typeExprToDescriptor(
+          requirePublishedType(binding, `slot binding ${slot.name}.${binding.name}`),
+          nativeRegistry,
+        ),
         ...(binding.typeExpansion !== undefined ? { typeExpansion: binding.typeExpansion } : {}),
-        ...(binding.rawType !== undefined ? { rawType: binding.rawType } : {}),
+        ...compatRawType(binding.terminalDisplay),
       })),
       isRequired: slot.isRequired,
       ...(slot.returnType !== undefined ? { returnType: slot.returnType } : {}),
@@ -830,8 +907,8 @@ function mapNativeAcceptedProps(
 ): AcceptedPropMeta[] {
   return props.map((p) => ({
     name: p.name,
-    type: typeExprToDescriptor(p.type, nativeRegistry),
-    ...(p.rawType !== undefined ? { rawType: p.rawType } : {}),
+    type: typeExprToDescriptor(requirePublishedType(p, `accepted prop ${p.name}`), nativeRegistry),
+    ...compatRawType(p.terminalDisplay),
     required: p.required,
     provenance: p.provenance,
     availability: p.availability,
@@ -875,8 +952,11 @@ function mapNativeFallthroughBranch(
     ...(branch.conditionText !== undefined ? { conditionText: branch.conditionText } : {}),
     props: branch.props.map((p) => ({
       name: p.name,
-      type: typeExprToDescriptor(p.type, nativeRegistry),
-      ...(p.rawType !== undefined ? { rawType: p.rawType } : {}),
+      type: typeExprToDescriptor(
+        requirePublishedType(p, `fallthrough prop ${p.name}`),
+        nativeRegistry,
+      ),
+      ...compatRawType(p.terminalDisplay),
       sources: p.sources,
     })),
     events: branch.events.map((e) => ({

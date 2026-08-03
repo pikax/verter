@@ -1153,7 +1153,10 @@ fn encode_full_surface(output: crate::meta_resolve::ComponentMetaOutput) -> Vec<
         let _ = writeln!(
             out,
             "prop {} req={} default={} type={:?}",
-            p.name, p.required, p.has_default, p.type_source
+            p.name,
+            p.required,
+            p.has_default,
+            p.publication.source_position()
         );
     }
     for e in &analysis.events {

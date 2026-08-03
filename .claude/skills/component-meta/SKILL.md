@@ -103,6 +103,7 @@ Best-architecture target for component-meta:
 
 - Native Rust owns semantic completeness. The TS bridge and compat layer perform mechanical schema adaptation only.
 - Published metadata derives from typed `TypeExpr` / `TypeDescriptor` structures plus explicit exactness/provenance, never from display strings.
+- `AuthoredTypeEvidence` is minted only at audited parser/analyzer producer boundaries from one inseparable locator/text row; its source/evidence types are not deserializable, and safe consumers cannot construct the mint capability. `SymbolicEquivalenceProof` is minted only after the shared node-domain raise proves the exact resolved/authored source pair has equal lossless structure. Matching policy permits alone are never proof.
 - Projection planning is explicit: shallow publication, path walking, package-backed object preservation, cycle handling, and fuse behavior are modeled as policy data, not scattered predicates.
 - Unsupported cases are visible API states with diagnostics/provenance, not fallback strings.
 - TS adapters may be lossy only through explicit unsupported/partial output. They must not silently erase typed structure to `unknown`, prefer raw display text over typed descriptors, or turn structured degraded state back into strings.
@@ -142,7 +143,15 @@ The native component-meta / typeinfo type resolver — analyzer (`verter_semanti
 
 - The projector reads `field.r#type` (already typed). The "raw-annotation fallback" branch in `reduce_published_field_types` is removed once the producer guarantees the typed form.
 - The registry's `collect_component_meta_registry_public_field_refs` drives route extraction from the typed expression; `component_meta_registry_public_indexed_access_route` already takes `&TypeExpr`.
-- Policy helpers (`raw_restoration::restore_props_suffix_from_raw`, `slot_preservation::slot_binding_should_preserve_symbolic_raw_type`) take `Option<&TypeExpr>` rather than `Option<&str>`. `parse_indexed_access_from_raw` was deleted — the policy reads the typed source annotation (`PropAnalysis::raw_type_expr` / `SlotBindingAnalysis::raw_type_expr` / `AcceptedPropAnalysis::raw_type_expr`, populated by the analyzer's `lower_ts_type` pass) directly.
+- **Type publication authority.** Props, slot bindings, accepted props, and
+  fallthrough props carry immutable resolved authority separately from bundled
+  authored evidence. The pure selector in
+  `verter_type_expr::publication` consumes only authority, evidence, and typed
+  structural policy/proof. `Failed` is absorbing; incomplete publication never
+  becomes exact. `TerminalTypeDisplay` is minted only by the session output
+  sink and may not feed semantic policy. The complete owner, selector, carrier,
+  merge, compat, and version-4 wire rules are in
+  [`docs/arch/scanners-replacement-type-authority.md`](../../../docs/arch/scanners-replacement-type-authority.md).
 - Materialise / cold-resolver consumers (`synthesize_define_props_shape_from_known_surface_with_authority`, `slot_field_function_type_expr`, `resolve_component_meta_parts`) construct `TypeExpr::Function`/`TypeExpr::Object` directly from typed inputs — no `format!("(props: { … }) => RT")` synthesise-and-reparse.
 - The JS compat layer (`@verter/component-meta/compat/checker.ts`) walks `prop.type` (`TypeDescriptor` from `@verter/type-ir`) for every semantic decision. `prop.rawType` is display passthrough only — it does not feed any `looksLike*`, `extract*`, `normalize*`, `split*`, `strip*`, `prefer*`, `shouldPrefer*`, `compat*ToString`, or `repairOpaque*` branch. Operator splits use union/intersection tag matching on `TypeDescriptor`, not hand-rolled string operator parsers.
 

@@ -18,7 +18,11 @@ use crate::analysis::types::{
 };
 use verter_type_expr::facts::{SemanticTypeSource, SourcePosition};
 use verter_type_expr::locators::{AuthoredBodyLocator, MacroPayloadLocator};
-use verter_type_expr::TypeExprScope;
+use verter_type_expr::{
+    AuthoredSourceMint, AuthoredTypeEvidence, PublicationPolicy, ResolutionDiagnostic,
+    ResolutionDiagnosticKind, ResolutionExactness, ResolutionProvenance, ResolvedTypeAuthority,
+    ResolvedTypeOutcome, TypeExprScope, TypePublication,
+};
 /// The authored SOURCE of an analyzer field's payload position: the
 /// content-free locator wrapped as the four-source `Authored` arm. Consumers
 /// demand the typed body through the shared dispatch from it.
@@ -39,6 +43,113 @@ fn authored_payload_position(payload: Option<&MacroPayloadLocator>) -> SourcePos
         .unwrap_or_else(SourcePosition::unannotated)
 }
 
+fn authored_type_evidence(
+    payload: Option<&MacroPayloadLocator>,
+    text: Option<&str>,
+) -> Option<AuthoredTypeEvidence> {
+    // SAFETY: this helper is the analyzer-row producer join: `payload` and
+    // `text` are read from the same `Analyzed*Field`.
+    let mint = unsafe { AuthoredSourceMint::new_unchecked() };
+    Some(AuthoredTypeEvidence::from_macro_payload(
+        &mint,
+        payload?,
+        std::sync::Arc::from(text?),
+    ))
+}
+
+fn exactness_from_expansion(
+    metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
+    position: &SourcePosition,
+) -> ResolutionExactness {
+    metadata.map_or_else(
+        || match position.present() {
+            Some(
+                SemanticTypeSource::Closed(_)
+                | SemanticTypeSource::Projected(_)
+                | SemanticTypeSource::Synthesized(_),
+            ) => ResolutionExactness::ExactConcrete,
+            Some(SemanticTypeSource::Authored(_) | SemanticTypeSource::SyntheticSlotBinding(_)) => {
+                ResolutionExactness::ExactSymbolic
+            }
+            None => ResolutionExactness::Incomplete,
+        },
+        |metadata| match metadata.exactness {
+            crate::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+                ResolutionExactness::ExactConcrete
+            }
+            crate::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
+                ResolutionExactness::ExactSymbolic
+            }
+            crate::analysis::type_expand::ExpansionExactness::Incomplete => {
+                ResolutionExactness::Incomplete
+            }
+        },
+    )
+}
+
+fn diagnostic_kind(
+    reason: crate::analysis::type_expand::ExpansionStopReason,
+) -> ResolutionDiagnosticKind {
+    use crate::analysis::type_expand::ExpansionStopReason as Source;
+    match reason {
+        Source::BudgetExceeded => ResolutionDiagnosticKind::BudgetExceeded,
+        Source::ProjectionWorkLimit => ResolutionDiagnosticKind::ProjectionWorkLimit,
+        Source::ConnectedQueryDepthLimit => ResolutionDiagnosticKind::ConnectedQueryDepthLimit,
+        Source::MappedDepthExceeded => ResolutionDiagnosticKind::MappedDepthExceeded,
+        Source::UnresolvedReference => ResolutionDiagnosticKind::UnresolvedReference,
+        Source::IndeterminateConditional => ResolutionDiagnosticKind::IndeterminateConditional,
+        Source::InfiniteKeySpace => ResolutionDiagnosticKind::InfiniteKeySpace,
+        Source::UnsupportedOperator => ResolutionDiagnosticKind::UnsupportedOperator,
+        Source::ConditionalContextTruncated => {
+            ResolutionDiagnosticKind::ConditionalContextTruncated
+        }
+        Source::IdempotentArm => ResolutionDiagnosticKind::IdempotentArm,
+        Source::CyclicReference => ResolutionDiagnosticKind::CyclicReference,
+        Source::CyclicInstantiation => ResolutionDiagnosticKind::CyclicInstantiation,
+        Source::InstantiationError => ResolutionDiagnosticKind::InstantiationError,
+        Source::EmptyUnionArm => ResolutionDiagnosticKind::EmptyUnionArm,
+    }
+}
+
+fn diagnostics_from_expansion(
+    metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
+) -> std::sync::Arc<[ResolutionDiagnostic]> {
+    metadata.map_or_else(
+        || std::sync::Arc::from([]),
+        |metadata| {
+            metadata
+                .diagnostics
+                .iter()
+                .map(|diagnostic| ResolutionDiagnostic {
+                    kind: diagnostic_kind(diagnostic.reason),
+                    context: std::sync::Arc::from(diagnostic.context.as_str()),
+                    property_name: diagnostic
+                        .property_name
+                        .as_deref()
+                        .map(std::sync::Arc::from),
+                })
+                .collect::<Vec<_>>()
+                .into()
+        },
+    )
+}
+
+fn publication_from_position(
+    position: &SourcePosition,
+    metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
+    evidence: Option<AuthoredTypeEvidence>,
+    provenance: ResolutionProvenance,
+) -> TypePublication {
+    TypePublication::from_source_position(
+        position,
+        exactness_from_expansion(metadata, position),
+        provenance,
+        diagnostics_from_expansion(metadata),
+        evidence,
+        &PublicationPolicy::exact_only(),
+    )
+}
+
 /// A present source, else the PROVEN unannotated schema absence. Used at
 /// the extraction fallbacks whose `None` structurally means "this position
 /// carries no semantic annotation" (untyped bindings, unevaluated exposures,
@@ -49,33 +160,6 @@ fn present_or_unannotated(source: Option<SemanticTypeSource>) -> SourcePosition 
     source
         .map(SourcePosition::Present)
         .unwrap_or_else(SourcePosition::unannotated)
-}
-
-/// Choose the resolved source POSITION for a field: the evaluated position,
-/// unless the expansion is INCOMPLETE and an authored payload exists — an
-/// incomplete evaluation's honest surface is the author's own annotation
-/// position (the symbolic fallback), never a torn partial.
-///
-/// A `Failed` evaluated position is FINAL and never falls back: it is the
-/// producer's TYPED fail-closed decision (e.g. a merged same-name member
-/// with an unresolvable contributor), not a torn partial — degrading it to
-/// one contributor's authored annotation would mask the failure with that
-/// contributor's value (a wrong concrete success). The authored fallback
-/// applies only to the incomplete evaluation's non-failed positions.
-fn prefer_authored_on_incomplete(
-    evaluated: &SourcePosition,
-    authored: Option<&MacroPayloadLocator>,
-    metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
-) -> SourcePosition {
-    let incomplete = metadata.is_some_and(|m| {
-        m.exactness == crate::analysis::type_expand::ExpansionExactness::Incomplete
-    });
-    if incomplete && !matches!(evaluated, SourcePosition::Failed(_)) {
-        if let Some(source) = authored_payload_source(authored) {
-            return SourcePosition::Present(source);
-        }
-    }
-    evaluated.clone()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -90,7 +174,8 @@ pub struct ResolvedPropInput {
     /// The prop analysis field.
     pub field: AnalyzedPropField,
     /// The member value's published source position.
-    pub type_source: SourcePosition,
+    pub authority: ResolvedTypeAuthority,
+    pub authored_evidence: Option<AuthoredTypeEvidence>,
 }
 
 /// One host-resolved emit row: the emit analysis field plus the payload's
@@ -225,16 +310,11 @@ pub struct PropAnalysis {
     /// fallback); a PROVEN schema absence when the position carries no
     /// annotation; a typed failure when the REQUIRED value position's source
     /// could not be constructed (fails output materialization).
-    pub type_source: SourcePosition,
+    pub publication: TypePublication,
     /// Completeness and diagnostics from native expansion when available.
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
-    /// Original annotation text from the source.
-    pub raw_type: Option<String>,
-    /// Authored-source companion of `raw_type` — the author's own annotation
-    /// position when the chosen `raw_type` text equals the source annotation.
-    /// `None` when the chosen `raw_type` came from a backend's textual
-    /// rendering or the source had no typed payload.
-    pub raw_type_source: Option<SemanticTypeSource>,
+    /// The author's own annotation is carried separately as bundled evidence
+    /// inside `publication`.
     pub required: bool,
     pub has_default: bool,
     pub default_value: Option<String>,
@@ -300,12 +380,8 @@ pub struct SlotBindingAnalysis {
     pub name: String,
     /// The resolved binding type SOURCE POSITION (`Absent` = display text
     /// only; the typed binding channel is host-raised).
-    pub type_source: SourcePosition,
+    pub publication: TypePublication,
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
-    pub raw_type: Option<String>,
-    /// Authored-source companion of `raw_type`. See
-    /// [`PropAnalysis::raw_type_source`] for the contract.
-    pub raw_type_source: Option<SemanticTypeSource>,
 }
 
 /// Analyzed model from `defineModel`.
@@ -819,17 +895,13 @@ pub struct AcceptedPropAnalysis {
     pub name: String,
     /// The accepted prop's resolved type SOURCE POSITION (`Absent` =
     /// untyped / cross-branch divergent).
-    pub type_source: SourcePosition,
+    pub publication: TypePublication,
     /// The canonical file scope `type_source`'s SCOPE-RELATIVE names (bare
     /// `Ref` leaf spellings, producer-local anchors at any nesting depth)
     /// resolve under — the PRODUCING owner of an inherited source, carried
     /// positionally per the cross-owner effective-scope invariant. `None` =
     /// the analysis owner itself (own/declared rows, intrinsic attr rows).
     pub type_source_scope: Option<String>,
-    pub raw_type: Option<String>,
-    /// Authored-source companion of `raw_type`. See
-    /// [`PropAnalysis::raw_type_source`] for the contract.
-    pub raw_type_source: Option<SemanticTypeSource>,
     pub required: bool,
     pub provenance: MemberProvenance,
     pub availability: MemberAvailability,
@@ -869,14 +941,13 @@ pub struct FallthroughPropEntry {
     pub name: String,
     /// The inherited prop's resolved type SOURCE POSITION (`Absent` =
     /// untyped).
-    pub type_source: SourcePosition,
+    pub publication: TypePublication,
     /// The canonical file scope `type_source`'s SCOPE-RELATIVE names resolve
     /// under — the PRODUCING owner (the terminal origin of a multi-hop
     /// inheritance chain), carried positionally per the cross-owner
     /// effective-scope invariant. `None` = the intrinsic/native case with no
     /// producing file (the branch owner's scope applies).
     pub type_source_scope: Option<String>,
-    pub raw_type: Option<String>,
     pub sources: Vec<InheritedSource>,
 }
 
@@ -1579,15 +1650,8 @@ fn extract_props_from_macro(
     if let Some(eval_fields) = expanded_define_props_fields(evaluated, macro_index) {
         if !eval_fields.is_empty() {
             for field in eval_fields {
-                let source_field = prop_fields
-                    .iter()
-                    .find(|row| row.field.name == field.name)
-                    .map(|row| &row.field);
-                let evaluated_field = evaluated.and_then(|eval| {
-                    eval.props
-                        .iter()
-                        .find(|candidate| candidate.name == field.name)
-                });
+                let source_row = prop_fields.iter().find(|row| row.field.name == field.name);
+                let source_field = source_row.map(|row| &row.field);
                 let has_default = default_keys.contains(field.name.as_str());
                 let default_value = default_values
                     .get(field.name.as_str())
@@ -1597,20 +1661,11 @@ fn extract_props_from_macro(
                     macro_index,
                     field.name.as_str(),
                 );
-                let raw_type = prop_raw_type_from_evaluated_and_source(
-                    evaluated_field.and_then(|candidate| candidate.raw_type.as_deref()),
-                    source_field.and_then(|prop| prop.type_annotation.as_deref()),
-                    field.optional,
-                );
-                let raw_type_source = raw_type_source_from_source_annotation(
-                    raw_type.as_deref(),
-                    source_field.and_then(|prop| prop.type_annotation.as_deref()),
-                    source_field.and_then(|prop| prop.payload.as_ref()),
-                );
-                let type_source = prefer_authored_on_incomplete(
+                let publication = publication_from_position(
                     &field.ty,
-                    source_field.and_then(|prop| prop.payload.as_ref()),
                     type_expansion.as_ref(),
+                    source_row.and_then(|row| row.authored_evidence.clone()),
+                    ResolutionProvenance::SemanticEvaluator,
                 );
 
                 // JSDoc rides the span-borne supply: the source field (analyzer
@@ -1623,10 +1678,8 @@ fn extract_props_from_macro(
 
                 out.push(PropAnalysis {
                     name: field.name.clone(),
-                    type_source,
+                    publication,
                     type_expansion,
-                    raw_type,
-                    raw_type_source,
                     required: !field.optional && !has_default,
                     has_default,
                     default_value,
@@ -1675,34 +1728,16 @@ fn extract_props_from_macro(
 
     for row in prop_fields {
         let field = &row.field;
-        let (type_source, type_expansion) = resolve_prop_type(row, evaluated);
+        let (publication, type_expansion) = resolve_prop_type(row, evaluated);
         let has_default = default_keys.contains(field.name.as_str());
         let default_value = default_values
             .get(field.name.as_str())
             .map(|v| v.to_string());
 
-        let raw_type = prop_raw_type_from_evaluated_and_source(
-            evaluated.and_then(|eval| {
-                eval.props
-                    .iter()
-                    .find(|candidate| candidate.name == field.name)
-                    .and_then(|candidate| candidate.raw_type.as_deref())
-            }),
-            field.type_annotation.as_deref(),
-            field.is_optional,
-        );
-        let raw_type_source = raw_type_source_from_source_annotation(
-            raw_type.as_deref(),
-            field.type_annotation.as_deref(),
-            field.payload.as_ref(),
-        );
-
         out.push(PropAnalysis {
             name: field.name.clone(),
-            type_source,
+            publication,
             type_expansion,
-            raw_type,
-            raw_type_source,
             required: !field.is_optional && !has_default,
             has_default,
             default_value,
@@ -1731,16 +1766,15 @@ fn extract_props_from_macro(
                 macro_index,
                 field.name.as_str(),
             );
-            let raw_type = evaluated.and_then(|eval| {
-                eval.props
-                    .iter()
-                    .find(|candidate| candidate.name == field.name)
-                    .and_then(|candidate| candidate.raw_type.clone())
-            });
+            let publication = publication_from_position(
+                &field.ty,
+                type_expansion.as_ref(),
+                None,
+                ResolutionProvenance::SemanticEvaluator,
+            );
             // Evaluator-only branch: no source AnalyzedPropField in scope, so
             // no authored symbolic fallback is available — the evaluated
             // position is kept as-is.
-            let type_source = field.ty.clone();
 
             // No source field reachable from this branch, so no JSDoc supply:
             // doc text rides the span-borne member supply only — an
@@ -1749,10 +1783,8 @@ fn extract_props_from_macro(
             // which has no typed companion.
             out.push(PropAnalysis {
                 name: field.name.clone(),
-                type_source,
+                publication,
                 type_expansion,
-                raw_type,
-                raw_type_source: None,
                 required: !field.optional && !has_default,
                 has_default,
                 default_value,
@@ -1937,7 +1969,7 @@ fn resolve_prop_type(
     row: &ResolvedPropInput,
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
 ) -> (
-    SourcePosition,
+    TypePublication,
     Option<crate::analysis::type_expand::ExpansionMetadata>,
 ) {
     // The row's own session-resolved source is the authority; the flat
@@ -1950,215 +1982,30 @@ fn resolve_prop_type(
             .find(|f| f.name == row.field.name)
             .map(field_expansion_metadata)
     });
-    let type_source = prefer_authored_on_incomplete(
-        &row.type_source,
-        row.field.payload.as_ref(),
-        metadata.as_ref(),
+    let publication = TypePublication::new(
+        row.authority.clone(),
+        row.authored_evidence.clone(),
+        &PublicationPolicy::exact_only(),
     );
-    (type_source, metadata)
+    (publication, metadata)
 }
 
 // ── Events ─────────────────────────────────────────────────────────────────
-
-fn prop_raw_type_from_evaluated_and_source(
-    evaluated_raw_type: Option<&str>,
-    source_annotation: Option<&str>,
-    _is_optional: bool,
-) -> Option<String> {
-    symbolic_type_from_evaluated_and_source(evaluated_raw_type, source_annotation)
-}
-
-/// Compute the authored-source companion `raw_type_source` for a
-/// `PropAnalysis` / `SlotBindingAnalysis` when the chosen `raw_type` text
-/// equals the user's source annotation text: the author's own payload
-/// position, demanded through the shared dispatch on read.
-///
-/// Returns `None` when the chosen `raw_type` came from a backend's textual
-/// rendering (no authored companion) or when the source had no payload
-/// position.
-fn raw_type_source_from_source_annotation(
-    chosen_raw_type: Option<&str>,
-    source_annotation: Option<&str>,
-    source_payload: Option<&MacroPayloadLocator>,
-) -> Option<SemanticTypeSource> {
-    let chosen = chosen_raw_type?.trim();
-    let source = source_annotation?.trim();
-    if chosen.is_empty() || source.is_empty() || chosen != source {
-        return None;
-    }
-    authored_payload_source(source_payload)
-}
-
-fn symbolic_type_from_evaluated_and_source(
-    evaluated_raw_type: Option<&str>,
-    source_annotation: Option<&str>,
-) -> Option<String> {
-    let evaluated_raw_type = evaluated_raw_type
-        .map(str::trim)
-        .filter(|text| !text.is_empty());
-    let source_annotation = source_annotation
-        .map(str::trim)
-        .filter(|text| !text.is_empty());
-
-    match (evaluated_raw_type, source_annotation) {
-        (Some(raw_type), Some(source_annotation))
-            if backend_raw_type_is_suspicious_identifier(raw_type)
-                && normalize_type_text_for_compare(raw_type)
-                    != normalize_type_text_for_compare(source_annotation) =>
-        {
-            Some(source_annotation.to_string())
-        }
-        (Some(raw_type), Some(source_annotation))
-            if source_annotation_beats_backend_prop_display(raw_type, source_annotation) =>
-        {
-            Some(source_annotation.to_string())
-        }
-        (Some(raw_type), _) => Some(raw_type.to_string()),
-        (None, Some(source_annotation)) => Some(source_annotation.to_string()),
-        (None, None) => None,
-    }
-}
-
-fn prop_raw_type_is_placeholder(raw_type: &str) -> bool {
-    matches!(raw_type.trim(), "" | "any" | "unknown")
-}
-
-fn backend_raw_type_is_suspicious_identifier(raw_type: &str) -> bool {
-    let trimmed = raw_type.trim();
-    !trimmed.is_empty()
-        && trimmed
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
-        && trimmed
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_' || ch == '$')
-        && !matches!(
-            trimmed,
-            "any"
-                | "unknown"
-                | "string"
-                | "number"
-                | "boolean"
-                | "symbol"
-                | "bigint"
-                | "void"
-                | "never"
-                | "null"
-                | "undefined"
-                | "object"
-                | "true"
-                | "false"
-        )
-}
-
-fn source_annotation_beats_placeholder_backend_type(annotation: &str) -> bool {
-    let annotation = annotation.trim();
-    !annotation.is_empty() && !matches!(annotation, "any" | "unknown")
-}
-
-fn source_annotation_beats_backend_prop_display(raw_type: &str, source_annotation: &str) -> bool {
-    if !source_annotation_beats_placeholder_backend_type(source_annotation) {
-        return false;
-    }
-
-    prop_raw_type_is_placeholder(raw_type)
-        || backend_optionalizes_source_annotation(raw_type, source_annotation)
-        || (source_annotation_contains_conditional(source_annotation)
-            && !source_annotation_contains_conditional(raw_type))
-        || (source_annotation_contains_indexed_access(source_annotation)
-            && backend_raw_type_is_expanded_display(raw_type))
-}
-
-fn backend_optionalizes_source_annotation(raw_type: &str, source_annotation: &str) -> bool {
-    let Some(stripped) = strip_top_level_undefined_from_union(raw_type) else {
-        return false;
-    };
-    normalize_type_text_for_compare(&stripped) == normalize_type_text_for_compare(source_annotation)
-}
-
-fn strip_top_level_undefined_from_union(text: &str) -> Option<String> {
-    let mut parts = split_top_level_union(text);
-    let original_len = parts.len();
-    parts.retain(|part| normalize_type_text_for_compare(part) != "undefined");
-    if parts.len() == original_len {
-        return None;
-    }
-    Some(parts.join(" | "))
-}
-
-fn split_top_level_union(text: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut paren_depth = 0i32;
-    let mut bracket_depth = 0i32;
-    let mut brace_depth = 0i32;
-    let chars: Vec<_> = text.char_indices().collect();
-
-    for (index, ch) in chars {
-        match ch {
-            '(' => paren_depth += 1,
-            ')' => paren_depth -= 1,
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth -= 1,
-            '{' => brace_depth += 1,
-            '}' => brace_depth -= 1,
-            '|' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
-                let part = text[start..index].trim();
-                if !part.is_empty() {
-                    parts.push(part.to_string());
-                }
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-
-    let tail = text[start..].trim();
-    if !tail.is_empty() {
-        parts.push(tail.to_string());
-    }
-    parts
-}
-
-fn normalize_type_text_for_compare(text: &str) -> String {
-    text.split_whitespace().collect()
-}
-
-fn source_annotation_contains_conditional(text: &str) -> bool {
-    text.contains(" extends ")
-}
-
-fn source_annotation_contains_indexed_access(text: &str) -> bool {
-    text.contains('[') && text.contains(']')
-}
-
-fn backend_raw_type_is_expanded_display(text: &str) -> bool {
-    let text = text.trim();
-    text.starts_with('{') || text.contains('\n')
-}
 
 fn event_raw_signature_from_evaluated_and_source(
     evaluated_raw_type: Option<&str>,
     source_payload: Option<&str>,
 ) -> Option<String> {
-    let evaluated_raw_type = evaluated_raw_type
+    if let Some(source_payload) = source_payload
         .map(str::trim)
-        .filter(|text| !text.is_empty());
-    let source_payload = source_payload
-        .map(str::trim)
-        .filter(|text| !text.is_empty());
-
-    match (evaluated_raw_type, source_payload) {
-        (Some(raw_type), Some(source_payload))
-            if source_payload_beats_backend_event_display(raw_type, source_payload) =>
-        {
-            Some(source_payload.to_string())
-        }
-        (Some(raw_type), _) => Some(preserve_or_wrap_event_payload(raw_type)),
-        (None, Some(source_payload)) => Some(source_payload.to_string()),
-        (None, None) => None,
+        .filter(|text| !text.is_empty())
+    {
+        return Some(source_payload.to_string());
     }
+    evaluated_raw_type
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(preserve_or_wrap_event_payload)
 }
 
 fn preserve_or_wrap_event_payload(raw_type: &str) -> String {
@@ -2168,28 +2015,6 @@ fn preserve_or_wrap_event_payload(raw_type: &str) -> String {
     } else {
         format!("[value: {trimmed}]")
     }
-}
-
-fn source_payload_beats_backend_event_display(raw_type: &str, source_payload: &str) -> bool {
-    let raw_inner = strip_event_tuple_wrapper(raw_type).unwrap_or(raw_type);
-    let source_inner = strip_event_tuple_wrapper(source_payload).unwrap_or(source_payload);
-    source_annotation_beats_placeholder_backend_type(source_inner)
-        && (prop_raw_type_is_placeholder(raw_type)
-            || (backend_raw_type_is_suspicious_identifier(raw_inner)
-                && normalize_type_text_for_compare(raw_inner)
-                    != normalize_type_text_for_compare(source_inner))
-            || backend_optionalizes_source_annotation(source_inner, raw_inner)
-            || (source_annotation_contains_conditional(source_inner)
-                && !source_annotation_contains_conditional(raw_type))
-            || (source_annotation_contains_indexed_access(source_inner)
-                && backend_raw_type_is_expanded_display(raw_type)))
-}
-
-fn strip_event_tuple_wrapper(source_payload: &str) -> Option<&str> {
-    let payload = source_payload.trim();
-    let payload = payload.strip_prefix("[value:")?;
-    let payload = payload.strip_suffix(']')?;
-    Some(payload.trim())
 }
 
 fn extract_events_from_macro(
@@ -2218,7 +2043,9 @@ fn extract_events_from_macro(
                     payload: event.payload,
                     payload_expansion: event.payload_expansion,
                     raw_signature: event_raw_signature_from_evaluated_and_source(
-                        evaluated_field.and_then(|candidate| candidate.raw_type.as_deref()),
+                        evaluated_field
+                            .and_then(|candidate| candidate.authored_evidence.as_ref())
+                            .map(AuthoredTypeEvidence::text),
                         None,
                     ),
                     description: None,
@@ -2257,7 +2084,8 @@ fn extract_events_from_macro(
                         eval.emits
                             .iter()
                             .find(|candidate| candidate.name == field.name)
-                            .and_then(|candidate| candidate.raw_type.as_deref())
+                            .and_then(|candidate| candidate.authored_evidence.as_ref())
+                            .map(AuthoredTypeEvidence::text)
                     }),
                     field.payload_type.as_deref(),
                 ),
@@ -2288,7 +2116,8 @@ fn extract_events_from_macro(
                     eval.emits
                         .iter()
                         .find(|candidate| candidate.name == field.name)
-                        .and_then(|candidate| candidate.raw_type.as_deref())
+                        .and_then(|candidate| candidate.authored_evidence.as_ref())
+                        .map(AuthoredTypeEvidence::text)
                 }),
                 field.payload_type.as_deref(),
             ),
@@ -2508,8 +2337,8 @@ fn expanded_slot_bindings(
         .filter_map(|field| {
             // Graph-native no-parser rows carry the exact typed pair. Other
             // rows use the established flat `slot.binding` transport key.
-            let binding_name = match &field.r#type {
-                SourcePosition::Present(SemanticTypeSource::SyntheticSlotBinding(key))
+            let binding_name = match field.authority.source() {
+                Some(SemanticTypeSource::SyntheticSlotBinding(key))
                     if key.surface_kind
                         == verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding =>
                 {
@@ -2526,10 +2355,12 @@ fn expanded_slot_bindings(
             let type_expansion = field_expansion_metadata(field);
             Some(SlotBindingAnalysis {
                 name: binding_name.to_string(),
-                type_source: field.r#type.clone(),
+                publication: TypePublication::new(
+                    field.authority.clone(),
+                    field.authored_evidence.clone(),
+                    &PublicationPolicy::exact_only(),
+                ),
                 type_expansion: Some(type_expansion),
-                raw_type: field.raw_type.clone(),
-                raw_type_source: None,
             })
         })
         .collect()
@@ -2563,43 +2394,36 @@ fn merge_slot_bindings_with_source(
         else {
             merged.push(SlotBindingAnalysis {
                 name: source_binding.name.clone(),
-                type_source: authored_payload_position(source_binding.payload.as_ref()),
+                publication: publication_from_position(
+                    &authored_payload_position(source_binding.payload.as_ref()),
+                    None,
+                    authored_type_evidence(
+                        source_binding.payload.as_ref(),
+                        source_binding.type_annotation.as_deref(),
+                    ),
+                    ResolutionProvenance::SemanticEvaluator,
+                ),
                 type_expansion: None,
-                raw_type: source_binding.type_annotation.clone(),
-                raw_type_source: authored_payload_source(source_binding.payload.as_ref()),
             });
             continue;
         };
         let mut binding = expanded_remaining.remove(position);
-        let raw_type = symbolic_type_from_evaluated_and_source(
-            binding.raw_type.as_deref(),
+        let source_evidence = authored_type_evidence(
+            source_binding.payload.as_ref(),
             source_binding.type_annotation.as_deref(),
         );
         // An incomplete per-binding evaluation falls back to the author's own
         // annotation position when one exists; an ABSENT evaluated position
         // adopts the authored annotation position.
-        binding.type_source = if binding.type_source.is_present() {
-            prefer_authored_on_incomplete(
-                &binding.type_source,
-                source_binding.payload.as_ref(),
-                binding.type_expansion.as_ref(),
-            )
-        } else if matches!(binding.type_source, SourcePosition::Absent(_)) {
-            authored_payload_position(source_binding.payload.as_ref())
-        } else {
-            // A typed FAILURE position is preserved — the authored fallback
-            // must not paper over a failed required position unless the
-            // author actually annotated it.
-            authored_payload_source(source_binding.payload.as_ref())
-                .map(SourcePosition::Present)
-                .unwrap_or_else(|| binding.type_source.clone())
-        };
-        binding.raw_type = raw_type;
-        binding.raw_type_source = raw_type_source_from_source_annotation(
-            binding.raw_type.as_deref(),
-            source_binding.type_annotation.as_deref(),
-            source_binding.payload.as_ref(),
+        let evidence = source_evidence.or_else(|| binding.publication.evidence().cloned());
+        binding.publication = TypePublication::new(
+            binding.publication.authority().clone(),
+            evidence,
+            &PublicationPolicy::exact_only(),
         );
+        // A typed FAILURE position is preserved — the authored fallback
+        // must not paper over a failed required position unless the
+        // author actually annotated it.
         merged.push(binding);
     }
 
@@ -2638,8 +2462,9 @@ fn reconcile_update_events_with_props(
             continue;
         };
         let Some(prop_raw_type) = prop
-            .raw_type
-            .as_deref()
+            .publication
+            .evidence()
+            .map(AuthoredTypeEvidence::text)
             .map(str::trim)
             .filter(|text| !text.is_empty())
         else {
@@ -2702,7 +2527,7 @@ fn extract_model_from_macro(
     let type_source = prop_fields
         .iter()
         .find(|row| row.field.name == name)
-        .map(|row| row.type_source.clone())
+        .map(|row| row.authority.source_position())
         .unwrap_or_else(SourcePosition::unannotated);
 
     out.push(ModelAnalysis { name, type_source });
@@ -2743,12 +2568,25 @@ fn synthesize_model_prop_and_event(
     // shadow the sole-authority rule removed). The `| undefined`
     // optionality decoration is a projection-time concern (derivable from
     // `required`/`has_default`), never synthesized into the carrier.
-    let prop_type_source = source_prop
-        .map(|row| row.type_source.clone())
-        .unwrap_or_else(SourcePosition::unannotated);
+    let prop_publication = source_prop
+        .map(|row| {
+            TypePublication::new(
+                row.authority.clone(),
+                row.authored_evidence.clone(),
+                &PublicationPolicy::exact_only(),
+            )
+        })
+        .unwrap_or_else(|| {
+            publication_from_position(
+                &SourcePosition::unannotated(),
+                None,
+                None,
+                ResolutionProvenance::SemanticEvaluator,
+            )
+        });
 
     if let Some(existing_prop) = props.iter_mut().find(|prop| prop.name == name) {
-        existing_prop.type_source = prop_type_source.clone();
+        existing_prop.publication = prop_publication.clone();
         existing_prop.type_expansion = existing_prop.type_expansion.clone().or_else(|| {
             evaluated.and_then(|eval| {
                 eval.props
@@ -2757,9 +2595,6 @@ fn synthesize_model_prop_and_event(
                     .map(field_expansion_metadata)
             })
         });
-        if existing_prop.raw_type.is_none() {
-            existing_prop.raw_type = raw_type.clone();
-        }
         existing_prop.required = !has_default && !is_optional;
         existing_prop.has_default |= has_default;
         if existing_prop.default_value.is_none() {
@@ -2771,15 +2606,13 @@ fn synthesize_model_prop_and_event(
         // typed companion is unset.
         props.push(PropAnalysis {
             name: name.clone(),
-            type_source: prop_type_source.clone(),
+            publication: prop_publication.clone(),
             type_expansion: evaluated.and_then(|eval| {
                 eval.props
                     .iter()
                     .find(|field| field.name == name)
                     .map(field_expansion_metadata)
             }),
-            raw_type: raw_type.clone(),
-            raw_type_source: None,
             required: !has_default && !is_optional,
             has_default,
             default_value,
@@ -2805,7 +2638,9 @@ fn synthesize_model_prop_and_event(
         }
     });
     let raw_signature = event_raw_signature_from_evaluated_and_source(
-        evaluated_event.and_then(|field| field.raw_type.as_deref()),
+        evaluated_event
+            .and_then(|field| field.authored_evidence.as_ref())
+            .map(AuthoredTypeEvidence::text),
         source_payload_type
             .as_deref()
             .map(|raw| format!("[value: {raw}]"))
@@ -3018,7 +2853,10 @@ fn resolve_exposed_type(
 ) -> Option<SemanticTypeSource> {
     if let Some(eval) = evaluated {
         if let Some(f) = eval.bindings.iter().find(|f| f.name == name) {
-            return f.r#type.present().cloned();
+            return match f.authority.outcome() {
+                ResolvedTypeOutcome::Present { source, .. } => Some(source.as_ref().clone()),
+                ResolvedTypeOutcome::Absent { .. } | ResolvedTypeOutcome::Failed { .. } => None,
+            };
         }
     }
     // `AnalyzedBinding` carries no typed payload position (its raw annotation
@@ -3044,9 +2882,21 @@ fn merged_prop_fields(
     let mut rows: Vec<ResolvedPropInput> = mac
         .prop_fields
         .iter()
-        .map(|field| ResolvedPropInput {
-            type_source: authored_payload_position(field.payload.as_ref()),
-            field: field.clone(),
+        .map(|field| {
+            let position = authored_payload_position(field.payload.as_ref());
+            ResolvedPropInput {
+                authority: ResolvedTypeAuthority::from_source_position(
+                    &position,
+                    exactness_from_expansion(None, &position),
+                    ResolutionProvenance::SemanticEvaluator,
+                    std::sync::Arc::from([]),
+                ),
+                authored_evidence: authored_type_evidence(
+                    field.payload.as_ref(),
+                    field.type_annotation.as_deref(),
+                ),
+                field: field.clone(),
+            }
         })
         .collect();
     if let Some(resolved) = resolved {
@@ -3059,7 +2909,8 @@ fn merged_prop_fields(
                 // The normalized-surface source is authoritative for the
                 // merged row (it already prefers the PROVEN authored
                 // position when one denotes the resolved member).
-                existing.type_source = prop.type_source.clone();
+                existing.authority = prop.authority.clone();
+                existing.authored_evidence = prop.authored_evidence.clone();
             } else {
                 rows.push(prop.clone());
             }
@@ -3069,10 +2920,7 @@ fn merged_prop_fields(
 }
 
 fn merge_prop_field(target: &mut AnalyzedPropField, candidate: &AnalyzedPropField) {
-    if should_replace_merged_prop_type_annotation(
-        target.type_annotation.as_deref(),
-        candidate.type_annotation.as_deref(),
-    ) {
+    if target.type_annotation.is_none() {
         target.type_annotation = candidate.type_annotation.clone();
     }
     if target.description.is_none() {
@@ -3084,24 +2932,6 @@ fn merge_prop_field(target: &mut AnalyzedPropField, candidate: &AnalyzedPropFiel
     if target.resolution_error.is_none() {
         target.resolution_error = candidate.resolution_error.clone();
     }
-}
-
-fn should_replace_merged_prop_type_annotation(
-    current: Option<&str>,
-    candidate: Option<&str>,
-) -> bool {
-    let Some(candidate) = candidate.map(str::trim).filter(|text| !text.is_empty()) else {
-        return false;
-    };
-    let Some(current) = current.map(str::trim).filter(|text| !text.is_empty()) else {
-        return true;
-    };
-
-    prop_raw_type_is_placeholder(current)
-        || (backend_raw_type_is_suspicious_identifier(current)
-            && !backend_raw_type_is_suspicious_identifier(candidate))
-        || (source_annotation_contains_indexed_access(candidate)
-            && !source_annotation_contains_indexed_access(current))
 }
 
 /// Merge the analyzer's parse-domain emit fields with the host-resolved
@@ -3218,12 +3048,15 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
         });
         out.push(PropAnalysis {
             name: prop.name.clone(),
-            type_source: present_or_unannotated(type_source),
+            publication: publication_from_position(
+                &present_or_unannotated(type_source),
+                None,
+                authored_type_evidence(prop.payload.as_ref(), raw_type.as_deref()),
+                ResolutionProvenance::SemanticEvaluator,
+            ),
             type_expansion: None,
-            raw_type,
             // Options API path: no authored companion for the raw display
             // text (the typed source is above).
-            raw_type_source: None,
             required: prop.is_required,
             has_default: prop.has_default,
             default_value: prop.default_value.clone(),

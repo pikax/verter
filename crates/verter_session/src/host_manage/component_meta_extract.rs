@@ -248,9 +248,12 @@ pub(crate) fn populate_public_instance_sidecar(
         verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
             name: prop.name.clone(),
             kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Prop,
-            type_source: prop.type_source.clone(),
+            type_source: prop.publication.source_position(),
             type_expansion: prop.type_expansion.clone(),
-            raw_type: prop.raw_type.clone(),
+            raw_type: prop
+                .publication
+                .evidence()
+                .map(|evidence| evidence.text().to_string()),
             description: prop.description.clone(),
             tags: prop.tags.clone(),
         }

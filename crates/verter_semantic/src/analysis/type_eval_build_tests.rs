@@ -3214,7 +3214,7 @@ fn expand_macro_types_threads_prop_payload_locator_to_the_closure() {
     // fabricated or renumbered one — the stand-in echoes it as the authored
     // source, so a threading regression shifts the position and fails here.
     assert_eq!(
-        result.props[0].r#type,
+        result.props[0].authority.source_position(),
         verter_type_expr::facts::SourcePosition::Present(
             verter_type_expr::facts::SemanticTypeSource::Authored(
                 verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(3)),
@@ -3223,12 +3223,18 @@ fn expand_macro_types_threads_prop_payload_locator_to_the_closure() {
         "the closure must receive the producer-supplied payload position unchanged"
     );
     assert_eq!(
-        result.props[0].shallow_source,
-        Some(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(3),)),
+        result.props[0]
+            .authored_evidence
+            .as_ref()
+            .map(|evidence| evidence.source().locator()),
+        Some(&verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(3),)),
         "shallow_source must carry the same authored position"
     );
     assert_eq!(
-        result.props[0].raw_type.as_deref(),
+        result.props[0]
+            .authored_evidence
+            .as_ref()
+            .map(AuthoredTypeEvidence::text),
         Some("garbage<<<unparseable"),
         "raw_type passthrough should preserve the original annotation text"
     );
@@ -3254,7 +3260,7 @@ fn expand_macro_types_threads_emit_payload_locator_to_the_closure() {
 
     assert_eq!(result.emits.len(), 1, "emit should expand from its payload");
     assert_eq!(
-        result.emits[0].r#type,
+        result.emits[0].authority.source_position(),
         verter_type_expr::facts::SourcePosition::Present(
             verter_type_expr::facts::SemanticTypeSource::Authored(
                 verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(1)),
@@ -3262,8 +3268,11 @@ fn expand_macro_types_threads_emit_payload_locator_to_the_closure() {
         ),
     );
     assert_eq!(
-        result.emits[0].shallow_source,
-        Some(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(1),)),
+        result.emits[0]
+            .authored_evidence
+            .as_ref()
+            .map(|evidence| evidence.source().locator()),
+        Some(&verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(1),)),
     );
 }
 
@@ -3398,8 +3407,11 @@ fn expand_macro_types_props_publish_shallow_source_from_prop_payload_position() 
 
     assert_eq!(result.props.len(), 1);
     assert_eq!(
-        result.props[0].shallow_source,
-        Some(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(2),)),
+        result.props[0]
+            .authored_evidence
+            .as_ref()
+            .map(|evidence| evidence.source().locator()),
+        Some(&verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(2),)),
         "shallow_source must surface the analyzer-side authored payload position"
     );
 }
@@ -3424,8 +3436,11 @@ fn expand_macro_types_emits_publish_shallow_source_from_emit_payload_position() 
 
     assert_eq!(result.emits.len(), 1);
     assert_eq!(
-        result.emits[0].shallow_source,
-        Some(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(4),)),
+        result.emits[0]
+            .authored_evidence
+            .as_ref()
+            .map(|evidence| evidence.source().locator()),
+        Some(&verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(4),)),
         "shallow_source must surface the authored payload position for emits"
     );
 }

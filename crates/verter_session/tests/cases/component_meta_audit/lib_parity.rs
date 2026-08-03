@@ -195,8 +195,9 @@ pub(crate) fn render_pair(
     prop: &verter_semantic::analysis::component_meta::PropAnalysis,
 ) -> (String, String) {
     let source = prop
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name));
     let ty =
         verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)

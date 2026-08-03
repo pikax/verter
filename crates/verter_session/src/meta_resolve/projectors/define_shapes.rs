@@ -191,7 +191,7 @@ fn define_props_shape(
         }
         properties.push(ExpandedProperty {
             name: prop.analysis.name.clone(),
-            ty: prop.type_source.clone(),
+            ty: prop.authority.source_position(),
             optional: prop.analysis.is_optional,
             readonly: false,
             // A macro-published prop has no class accessibility origin —

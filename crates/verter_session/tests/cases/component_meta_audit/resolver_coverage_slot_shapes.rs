@@ -39,12 +39,16 @@ fn demand_binding_type(
     owner: &str,
     binding: &verter_semantic::analysis::component_meta::SlotBindingAnalysis,
 ) -> TypeExpr {
-    let source = binding.type_source.present().unwrap_or_else(|| {
-        panic!(
-            "slot binding `{}` must publish a typed source",
-            binding.name
-        )
-    });
+    let source = binding
+        .publication
+        .result()
+        .selected_source()
+        .unwrap_or_else(|| {
+            panic!(
+                "slot binding `{}` must publish a typed source",
+                binding.name
+            )
+        });
     verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
         .unwrap_or_else(|| {
             panic!(
