@@ -910,10 +910,46 @@ fn scanners_replacement_b_78_names_exactly_five_inspection_rows() {
 #[test]
 fn scanners_replacement_b_70_has_single_extension_authority() {
     let workspace = workspace_root();
-    assert!(
-        !workspace.join("extensions/vscode").exists(),
-        "legacy extensions/vscode authority must be physically deleted"
-    );
+
+    // Single-extension authority (B-70): the ONLY live `extensions/*` trees
+    // are the editor extensions below. Every retired authority must be gone
+    // BOTH physically and from git tracking — the live VS Code extension is
+    // `packages/vue-vscode` and the live TypeScript plugin is
+    // `packages/typescript-plugin`; nothing under `extensions/` may shadow
+    // them.
+    const LIVE_EXTENSIONS: &[&str] = &["extensions/lapce", "extensions/zed"];
+    const RETIRED_EXTENSIONS: &[&str] = &[
+        "extensions/vscode",
+        "extensions/typescript-plugin",
+        "extensions/vue-vscode",
+    ];
+
+    // PHYSICAL arm: no retired extension tree may exist on disk.
+    for retired in RETIRED_EXTENSIONS {
+        assert!(
+            !workspace.join(retired).exists(),
+            "legacy {retired} authority must be physically deleted"
+        );
+    }
+
+    // TRACKED arm: every tracked path under extensions/ must belong to a live
+    // extension.
+    let tracked = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--", "extensions"])
+        .current_dir(&workspace)
+        .output()
+        .expect("git ls-files for the extensions tree");
+    assert!(tracked.status.success(), "git ls-files failed");
+    let tracked = String::from_utf8(tracked.stdout).expect("tracked paths are utf-8");
+    for path in tracked.split('\0').filter(|path| !path.is_empty()) {
+        let path = path.replace('\\', "/");
+        assert!(
+            LIVE_EXTENSIONS
+                .iter()
+                .any(|live| path.starts_with(&format!("{live}/"))),
+            "tracked extensions residue outside the live allowlist: {path}"
+        );
+    }
 
     for entry in walkdir::WalkDir::new(&workspace)
         .into_iter()
@@ -928,11 +964,14 @@ fn scanners_replacement_b_70_has_single_extension_authority() {
     {
         let source = fs::read_to_string(entry.path())
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", entry.path().display()));
-        assert!(
-            !source.contains("extensions/vscode") && !source.contains("extensions\\\\vscode"),
-            "{} still references the deleted extension authority",
-            entry.path().display()
-        );
+        let normalized = source.replace("\\\\", "/");
+        for retired in RETIRED_EXTENSIONS {
+            assert!(
+                !normalized.contains(retired),
+                "{} still references the retired {retired} authority",
+                entry.path().display()
+            );
+        }
     }
 
     for relative in [
@@ -945,9 +984,11 @@ fn scanners_replacement_b_70_has_single_extension_authority() {
             source.contains("packages/vue-vscode"),
             "{relative} must name packages/vue-vscode as grammar authority"
         );
-        assert!(
-            !source.contains("extensions/vscode"),
-            "{relative} still names the deleted extension authority"
-        );
+        for retired in RETIRED_EXTENSIONS {
+            assert!(
+                !source.contains(retired),
+                "{relative} still names the retired {retired} authority"
+            );
+        }
     }
 }

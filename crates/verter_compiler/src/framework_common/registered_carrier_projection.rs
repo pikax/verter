@@ -843,23 +843,69 @@ fn vue_attribute(
         let prefix = builder.raw_span(p.start, p.start + prefix_len as u32);
         let argument = match (p.is_dynamic.unwrap_or(false), p.arg_start, p.arg_end) {
             (true, Some(start), Some(end)) => {
+                // The tokenizer's EOF recovery still emits a dynamic `DirArg`
+                // for an UNCLOSED `[` (X_MISSING_DYNAMIC_DIRECTIVE_ARGUMENT_END),
+                // so the bracket geometry is fact-derived: a missing close
+                // bracket projects a TYPED recovery argument (`close_span:
+                // None`, `UnclosedEof`) — never a panic, never a fabricated
+                // closed bracket.
                 let authored = &builder.source[start as usize..end as usize];
-                let open = authored.find('[').expect("dynamic argument open bracket");
-                let close = authored.rfind(']').expect("dynamic argument close bracket");
-                let inner = &authored[open + 1..close];
-                let expression_start = inner.len() - inner.trim_start().len();
-                let expression_end = inner.trim_end().len();
-                let open = start + open as u32;
-                let close = start + close as u32;
-                DirectiveArgument::Dynamic {
-                    full_span: builder.raw_span(open, close + 1),
-                    open_span: builder.raw_span(open, open + 1),
-                    expression_span: builder.raw_span(
-                        open + 1 + expression_start as u32,
-                        open + 1 + expression_end as u32,
-                    ),
-                    close_span: Some(builder.raw_span(close, close + 1)),
-                    termination: SyntaxTermination::Closed,
+                let open = authored.find('[');
+                let close = open.and_then(|open| authored.rfind(']').filter(|close| *close > open));
+                match (open, close) {
+                    (Some(open), Some(close)) => {
+                        let inner = &authored[open + 1..close];
+                        let expression_start = inner.len() - inner.trim_start().len();
+                        let expression_end = inner.trim_end().len();
+                        let open = start + open as u32;
+                        let close = start + close as u32;
+                        DirectiveArgument::Dynamic {
+                            full_span: builder.raw_span(open, close + 1),
+                            open_span: builder.raw_span(open, open + 1),
+                            expression_span: builder.raw_span(
+                                open + 1 + expression_start as u32,
+                                open + 1 + expression_end as u32,
+                            ),
+                            close_span: Some(builder.raw_span(close, close + 1)),
+                            termination: SyntaxTermination::Closed,
+                        }
+                    }
+                    (Some(open), None) => {
+                        let inner = &authored[open + 1..];
+                        let expression_start = inner.len() - inner.trim_start().len();
+                        let expression_end = inner.trim_end().len();
+                        let open = start + open as u32;
+                        DirectiveArgument::Dynamic {
+                            full_span: builder.raw_span(open, end),
+                            open_span: builder.raw_span(open, open + 1),
+                            expression_span: builder.raw_span(
+                                open + 1 + expression_start as u32,
+                                open + 1 + expression_end as u32,
+                            ),
+                            close_span: None,
+                            termination: SyntaxTermination::UnclosedEof,
+                        }
+                    }
+                    (None, _) => {
+                        // A dynamic-flagged argument with no `[` at all has no
+                        // live tokenizer producer; keep it recoverable-typed
+                        // rather than panicking on a producer drift.
+                        let expression_start = authored.len() - authored.trim_start().len();
+                        let expression_end = authored.trim_end().len();
+                        DirectiveArgument::Dynamic {
+                            full_span: builder.raw_span(start, end),
+                            open_span: builder.raw_span(start, start),
+                            expression_span: builder.raw_span(
+                                start + expression_start as u32,
+                                start + expression_end as u32,
+                            ),
+                            close_span: None,
+                            termination: SyntaxTermination::Recovered {
+                                reason: verter_language::BlockRecoveryReason::ParserRejectedSyntax,
+                                recovery_span: None,
+                            },
+                        }
+                    }
                 }
             }
             (false, Some(start), Some(end)) => {

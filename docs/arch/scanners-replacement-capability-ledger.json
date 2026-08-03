@@ -404,8 +404,8 @@
                      "capability_class":  "shipped_bundle",
                      "disposition":  "delete",
                      "acceptance_id":  "B-70",
-                     "test":  "unpacked_vsix_has_zero_legacy_geometry",
-                     "architecture_guard":  "fresh_vsix_candidate_set_equality"
+                     "test":  "scanners_replacement_b_70_has_single_extension_authority",
+                     "architecture_guard":  "verifyNoLegacyExtensionAuthority"
                  },
                  {
                      "path":  "extensions/vscode/package.json",
@@ -960,7 +960,7 @@
                                 "pre_semantic":  "required",
                                 "edit":  "required",
                                 "close_reopen":  "required",
-                                "test":  "unpacked_vsix_has_zero_legacy_geometry",
+                                "test":  "scanners_replacement_b_70_has_single_extension_authority",
                                 "audit_assertion":  "alternate producer/root-scan counter zero or typed admission event"
                             },
                             {

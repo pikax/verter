@@ -7,7 +7,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = resolve(SCRIPT_DIR, "..");
-const LEGACY_EXTENSION = "extensions/vscode";
+// Single-extension authority (B-70): the ONLY live `extensions/*` trees are
+// the editor extensions below. Every retired authority must be gone BOTH
+// physically and from git tracking — the live VS Code extension is
+// `packages/vue-vscode` and the live TypeScript plugin is
+// `packages/typescript-plugin`; nothing under `extensions/` may shadow them.
+const LIVE_EXTENSIONS = ["extensions/lapce", "extensions/zed"];
+const RETIRED_EXTENSIONS = [
+  "extensions/vscode",
+  "extensions/typescript-plugin",
+  "extensions/vue-vscode",
+];
 const PRODUCTION_VSIX_TARGETS = new Set([
   "darwin-arm64",
   "darwin-x64",
@@ -54,15 +64,31 @@ function trackedFiles(root) {
 }
 
 export function verifyNoLegacyExtensionAuthority(root = DEFAULT_ROOT, files = trackedFiles(root)) {
-  invariant(!existsSync(join(root, LEGACY_EXTENSION)), `${LEGACY_EXTENSION} still exists`);
-  invariant(
-    !files.some((path) => path === LEGACY_EXTENSION || path.startsWith(`${LEGACY_EXTENSION}/`)),
-    `${LEGACY_EXTENSION} still has tracked files`,
-  );
+  // PHYSICAL arm: no retired extension tree may exist on disk.
+  for (const retired of RETIRED_EXTENSIONS) {
+    invariant(!existsSync(join(root, retired)), `${retired} still exists`);
+  }
+  // TRACKED arm (retired): no retired extension tree may have tracked files.
+  for (const retired of RETIRED_EXTENSIONS) {
+    invariant(
+      !files.some((path) => path === retired || path.startsWith(`${retired}/`)),
+      `${retired} still has tracked files`,
+    );
+  }
+  // TRACKED arm (allowlist): every tracked path under extensions/ must belong
+  // to a live extension.
+  for (const path of files.filter((candidate) => candidate.startsWith("extensions/"))) {
+    invariant(
+      LIVE_EXTENSIONS.some((live) => path.startsWith(`${live}/`)),
+      `tracked extensions residue outside the live allowlist: ${path}`,
+    );
+  }
 
   for (const path of files.filter((candidate) => candidate.endsWith("package.json"))) {
     const source = readFileSync(join(root, path), "utf8").replaceAll("\\", "/");
-    invariant(!source.includes(LEGACY_EXTENSION), `${path} references ${LEGACY_EXTENSION}`);
+    for (const retired of RETIRED_EXTENSIONS) {
+      invariant(!source.includes(retired), `${path} references ${retired}`);
+    }
   }
 
   for (const path of [
@@ -74,7 +100,9 @@ export function verifyNoLegacyExtensionAuthority(root = DEFAULT_ROOT, files = tr
       source.includes("packages/vue-vscode"),
       `${path} lacks the current grammar authority`,
     );
-    invariant(!source.includes(LEGACY_EXTENSION), `${path} references ${LEGACY_EXTENSION}`);
+    for (const retired of RETIRED_EXTENSIONS) {
+      invariant(!source.includes(retired), `${path} references ${retired}`);
+    }
   }
 }
 

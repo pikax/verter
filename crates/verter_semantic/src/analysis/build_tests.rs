@@ -2417,6 +2417,29 @@ fn mark_bindings_used_in_style_quoted_expression() {
     );
 }
 
+/// An external `<style src="...">` block's content is DEFERRED: its usage
+/// facts are unknowable, so liveness marking fails OPEN exactly like an
+/// unparseable v-bind expression — every binding is style-used and no false
+/// unused diagnostic can fire for a binding consumed only by the external
+/// sheet's `v-bind()`.
+#[test]
+fn mark_bindings_used_in_style_external_src_deferred_fails_open() {
+    let mut result = analyze("const color = 'red';\nconst size = 12;");
+    let style_analyses = vec![crate::analysis::style::StyleBlockAnalysis {
+        content_availability: crate::analysis::style::StyleContentAvailability::ExternalSrcDeferred,
+        ..Default::default()
+    }];
+    result.mark_bindings_used_in_style(&style_analyses);
+
+    for binding in &result.bindings {
+        assert!(
+            binding.used_in_style,
+            "{} must be marked style-used when an external style sheet is deferred",
+            binding.name
+        );
+    }
+}
+
 #[test]
 fn define_model_with_default_extracts_default_keys() {
     let code = r#"const checked = defineModel<boolean>('checked', { default: false });"#;

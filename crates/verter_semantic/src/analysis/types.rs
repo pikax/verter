@@ -336,6 +336,12 @@ impl ScriptAnalysisSnapshot {
         let mut referenced: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
         let mut any_v_bind = false;
         let mut all_complete = true;
+        // An external `<style src="...">` block's content is DEFERRED (B-23):
+        // its usage facts are unknowable, which is the same epistemic state as
+        // an unparseable v-bind expression — fail OPEN below.
+        let external_deferred = style_analyses
+            .iter()
+            .any(crate::analysis::style::StyleBlockAnalysis::is_external_src_deferred);
         for vb in style_analyses.iter().flat_map(|s| &s.v_binds) {
             any_v_bind = true;
             if !vb.roots_complete {
@@ -349,7 +355,7 @@ impl ScriptAnalysisSnapshot {
             );
         }
 
-        if !any_v_bind {
+        if !any_v_bind && !external_deferred {
             return;
         }
 
@@ -357,9 +363,11 @@ impl ScriptAnalysisSnapshot {
         roots.sort_unstable();
         self.style_vbind_roots = roots;
 
-        if !all_complete {
-            // An unparseable v-bind expression: fail OPEN — every binding is
-            // treated as style-used so no false unused diagnostic can fire.
+        if !all_complete || external_deferred {
+            // An unparseable v-bind expression, or a deferred external style
+            // sheet whose `v-bind()` usage cannot be seen: fail OPEN — every
+            // binding is treated as style-used so no false unused diagnostic
+            // can fire.
             for binding in &mut self.bindings {
                 binding.used_in_style = true;
             }

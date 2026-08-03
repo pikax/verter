@@ -1792,9 +1792,6 @@ fn build_style_analyses_from_inventory(
             else {
                 return None;
             };
-            let css_content = inventory
-                .slice(SourceSlice::new(syntax.content_span))
-                .ok()?;
             let content_offset = syntax.content_span.start;
             let lang_attr = named_attr(inventory, syntax, "lang").flatten();
             let module_attr = named_attr(inventory, syntax, "module");
@@ -1802,6 +1799,27 @@ fn build_style_analyses_from_inventory(
                 .flatten()
                 .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("true"));
             let is_module = !matches!(module, StyleModule::None) || module_attr.is_some();
+
+            // `<style src="...">`: the content lives in an external file and
+            // stays DEFERRED (B-23) — never slice the inline span (Vue ignores
+            // it) and never fabricate an empty-but-positive analysis. The
+            // typed deferred state is what consumers key "unavailable" off.
+            if named_attr(inventory, syntax, "src").is_some() {
+                let mut analysis =
+                    verter_semantic::analysis::build_external_src_deferred_style_analysis(
+                        analysis_lang(dialect, lang_attr),
+                        !vue_style_semantics || *scoped,
+                        is_module,
+                        module_name,
+                        content_offset,
+                    );
+                analysis.block_id = Some(id.get());
+                return Some(analysis);
+            }
+
+            let css_content = inventory
+                .slice(SourceSlice::new(syntax.content_span))
+                .ok()?;
 
             let prepass_result = vue_style_semantics.then(|| {
                 let component_name = verter_compiler::compile::extract_component_name(canonical_id);

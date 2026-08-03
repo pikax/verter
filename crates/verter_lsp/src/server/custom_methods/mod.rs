@@ -11,6 +11,8 @@
 //! rules).
 
 mod component_meta;
+#[cfg(test)]
+mod document_structure_tests;
 
 use std::sync::Arc;
 
@@ -39,42 +41,66 @@ impl VerterLanguageServer {
                 params.expected_client_version,
             )
         };
-        let Some(before) = self.documents.get(&params.text_document.uri) else {
-            let (request_token, client_open_epoch, expected_client_version) = echo();
-            return Ok(DocumentStructureResponseV1::Closed {
-                request_token,
-                client_open_epoch,
-                expected_client_version,
-            });
-        };
-        if before.version != params.expected_client_version {
-            let (request_token, client_open_epoch, expected_client_version) = echo();
-            return Ok(DocumentStructureResponseV1::StaleClientDocument {
-                request_token,
-                client_open_epoch,
-                expected_client_version,
-            });
-        }
-        let Some(snapshot) = before.feature_snapshot.clone() else {
-            let (request_token, client_open_epoch, expected_client_version) = echo();
-            return Ok(DocumentStructureResponseV1::Unavailable {
-                request_token,
-                client_open_epoch,
-                expected_client_version,
-                reason: DocumentUnavailableReasonV1::StructureNotReady,
-            });
+        // `DocumentRegistry::get` hands out a LIVE DashMap shard READ guard;
+        // `did_change` takes the WRITE side of the same shard through a
+        // blocking `get_mut`, and the stdio loop polls this handler inline on
+        // a single task. Copy what each fence needs and DROP every guard
+        // before any await — a guard held across the yield below parks the
+        // whole server behind its own read lock.
+        let snapshot = {
+            let Some(before) = self.documents.get(&params.text_document.uri) else {
+                let (request_token, client_open_epoch, expected_client_version) = echo();
+                return Ok(DocumentStructureResponseV1::Closed {
+                    request_token,
+                    client_open_epoch,
+                    expected_client_version,
+                });
+            };
+            if before.version != params.expected_client_version {
+                let (request_token, client_open_epoch, expected_client_version) = echo();
+                return Ok(DocumentStructureResponseV1::StaleClientDocument {
+                    request_token,
+                    client_open_epoch,
+                    expected_client_version,
+                });
+            }
+            match before.feature_snapshot.clone() {
+                Some(snapshot) => snapshot,
+                None => {
+                    let (request_token, client_open_epoch, expected_client_version) = echo();
+                    return Ok(DocumentStructureResponseV1::Unavailable {
+                        request_token,
+                        client_open_epoch,
+                        expected_client_version,
+                        reason: DocumentUnavailableReasonV1::StructureNotReady,
+                    });
+                }
+            }
         };
 
         tokio::task::yield_now().await;
-        let Some(after) = self.documents.get(&params.text_document.uri) else {
-            let (request_token, client_open_epoch, expected_client_version) = echo();
-            return Ok(DocumentStructureResponseV1::Closed {
-                request_token,
-                client_open_epoch,
-                expected_client_version,
-            });
+        // Post-await re-admission: copy the after-state facts under one scoped
+        // guard acquisition (a single consistent registry observation), then
+        // decide with no guard held. The check ALGEBRA and its order are
+        // unchanged: version, then document revision, then artifact identity.
+        let (after_version, after_document_revision, artifact_diverged) = {
+            let Some(after) = self.documents.get(&params.text_document.uri) else {
+                let (request_token, client_open_epoch, expected_client_version) = echo();
+                return Ok(DocumentStructureResponseV1::Closed {
+                    request_token,
+                    client_open_epoch,
+                    expected_client_version,
+                });
+            };
+            (
+                after.version,
+                after.document_revision,
+                after.feature_snapshot.as_ref().is_none_or(|current| {
+                    current.structure().artifact_id() != snapshot.structure().artifact_id()
+                }),
+            )
         };
-        if after.version != params.expected_client_version {
+        if after_version != params.expected_client_version {
             let (request_token, client_open_epoch, expected_client_version) = echo();
             return Ok(DocumentStructureResponseV1::Superseded {
                 request_token,
@@ -82,7 +108,7 @@ impl VerterLanguageServer {
                 expected_client_version,
             });
         }
-        if after.document_revision != snapshot.document_revision() {
+        if after_document_revision != snapshot.document_revision() {
             let (request_token, client_open_epoch, expected_client_version) = echo();
             return Ok(DocumentStructureResponseV1::ReplacementDocument {
                 request_token,
@@ -90,9 +116,7 @@ impl VerterLanguageServer {
                 expected_client_version,
             });
         }
-        if after.feature_snapshot.as_ref().is_none_or(|current| {
-            current.structure().artifact_id() != snapshot.structure().artifact_id()
-        }) {
+        if artifact_diverged {
             let (request_token, client_open_epoch, expected_client_version) = echo();
             return Ok(DocumentStructureResponseV1::Superseded {
                 request_token,

@@ -2854,6 +2854,91 @@ fn warm_upsert_still_returns_external_style_src_requests() {
     );
 }
 
+/// An external `<style src="...">` block must produce the TYPED deferred
+/// analysis state — never a fabricated empty (or inline-sliced) `CssAnalysis`
+/// presented as a positive zero-classes fact — and binding liveness must fail
+/// OPEN so a binding consumed only by the external sheet's `v-bind()` is never
+/// diagnosed unused.
+#[test]
+fn external_src_style_defers_content_and_fails_open_on_binding_liveness() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    // The stray inline content inside a `src` block is IGNORED by Vue (the
+    // external file replaces the block content) — analyzing it would be a
+    // fabricated analysis of content the framework never uses.
+    let src = r#"<script setup>const themeColor = 'red'</script>
+<template><div class="x"/></template>
+<style src="./theme.css">.stray { color: #fff }</style>
+"#;
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/src/Themed.vue".to_string(),
+            source: Arc::from(src),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    let analysis = host.get_analysis("/workspace/src/Themed.vue").unwrap();
+    assert_eq!(analysis.styles.len(), 1, "one style block");
+    let style = &analysis.styles[0];
+    assert!(
+        style.is_external_src_deferred(),
+        "external src block must carry the typed deferred state"
+    );
+    assert!(
+        style.css.is_none(),
+        "no fabricated CssAnalysis for deferred external content: {:?}",
+        style.css
+    );
+    assert!(
+        style.v_binds.is_empty(),
+        "no v-bind facts may be minted from unseen external content"
+    );
+
+    let binding = analysis
+        .bindings
+        .iter()
+        .find(|b| b.name == "themeColor")
+        .expect("themeColor binding");
+    assert!(
+        binding.used_in_style,
+        "binding liveness must fail OPEN while the external sheet is deferred \
+         (no false unused-binding diagnostic)"
+    );
+
+    // Negative control: an INLINE style block still analyzes normally.
+    let inline = r#"<script setup>const inlineColor = 'red'</script>
+<template><div class="x"/></template>
+<style>.local { color: v-bind(inlineColor) }</style>
+"#;
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/src/Inline.vue".to_string(),
+            source: Arc::from(inline),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let inline_analysis = host.get_analysis("/workspace/src/Inline.vue").unwrap();
+    assert_eq!(inline_analysis.styles.len(), 1);
+    assert!(!inline_analysis.styles[0].is_external_src_deferred());
+    assert!(
+        inline_analysis.styles[0].css.is_some(),
+        "inline blocks keep their scanned analysis"
+    );
+}
+
 #[test]
 fn resolve_dep_source_reuses_cached_source_without_loading_dependency_into_host_state() {
     let ws = Arc::new(CountingWorkspace::new());

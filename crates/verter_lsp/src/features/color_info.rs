@@ -27,6 +27,12 @@ pub fn document_colors(
         if block.tag_name != "style" {
             continue;
         }
+        // `<style src="...">` content is external and DEFERRED: Vue ignores
+        // any stray inline bytes, so chips must never be fabricated from
+        // them — the block is unavailable to CSS features.
+        if block.attr("src").is_some() {
+            continue;
+        }
 
         let (content_start, content_end) = block.content_range();
         let content = match source.get(content_start as usize..content_end as usize) {
@@ -480,6 +486,23 @@ mod tests {
         assert!((colors[0].color.red - 1.0).abs() < 0.01);
         assert!(colors[0].color.green.abs() < 0.01);
         assert!(colors[0].color.blue.abs() < 0.01);
+    }
+
+    /// `<style src="...">` content is external and DEFERRED: any stray inline
+    /// bytes inside the block are ignored by Vue (the external file replaces
+    /// the block content), so color chips must never be fabricated from them —
+    /// the block is unavailable to CSS features, not an empty success.
+    #[test]
+    fn external_src_style_block_yields_no_color_chips() {
+        let source = "<style src=\"./theme.css\">\n.stray { color: #ff0000; }\n</style>";
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let colors = document_colors(source, &blocks, &line_index);
+        assert!(
+            colors.is_empty(),
+            "external src style must be unavailable, never fabricated chips: {colors:?}"
+        );
     }
 
     #[test]

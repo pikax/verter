@@ -1005,6 +1005,75 @@ fn malformed_registered_sources_preserve_parser_owned_termination() {
     }
 }
 
+/// An unclosed dynamic directive argument at EOF (`<div v-bind:[key`) reaches
+/// the projector: the tokenizer's EOF recovery still emits a dynamic
+/// `DirArg` event (`X_MISSING_DYNAMIC_DIRECTIVE_ARGUMENT_END`). The projector
+/// must emit a TYPED recovery argument — `close_span: None` +
+/// `SyntaxTermination::UnclosedEof` — never panic and never fabricate a
+/// closed bracket.
+#[test]
+fn unclosed_dynamic_directive_argument_at_eof_projects_typed_recovery() {
+    use verter_language::{DirectiveArgument, DirectiveFamily, SyntaxTermination};
+
+    let vue = "<template><div v-bind:[key";
+    let (_, _, accepted) = accepted(
+        "file:///workspace/UnclosedDynamicArg.vue",
+        verter_language::FileLanguage::vue(),
+        vue,
+    );
+    let projection = project(&accepted);
+    let inventory = projection.inventory();
+    inventory.validate().expect("recovered inventory");
+
+    let attrs = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .flat_map(|node| node.kind().attributes())
+        .collect::<Vec<_>>();
+
+    assert!(
+        attrs.iter().any(|attr| matches!(
+            attr,
+            CarrierAttribute::Directive {
+                family: DirectiveFamily::Vue(verter_language::VueDirectiveKind::Bind),
+                argument: DirectiveArgument::Dynamic {
+                    open_span,
+                    expression_span,
+                    close_span: None,
+                    termination: SyntaxTermination::UnclosedEof,
+                    ..
+                },
+                ..
+            } if inventory.slice_span(*open_span).expect("open bracket") == "["
+                && inventory.slice_span(*expression_span).expect("expression") == "key"
+        )),
+        "unclosed dynamic argument must project typed recovery: {attrs:#?}"
+    );
+    // Negative: NO fabricated closed bracket — no dynamic argument in this
+    // document may carry a close span or a `Closed` termination.
+    assert!(attrs.iter().all(|attr| !matches!(
+        attr,
+        CarrierAttribute::Directive {
+            argument: DirectiveArgument::Dynamic {
+                close_span: Some(_),
+                ..
+            },
+            ..
+        }
+    )));
+    assert!(attrs.iter().all(|attr| !matches!(
+        attr,
+        CarrierAttribute::Directive {
+            argument: DirectiveArgument::Dynamic {
+                termination: SyntaxTermination::Closed,
+                ..
+            },
+            ..
+        }
+    )));
+}
+
 #[test]
 fn registered_projector_signature_requires_authority_seal() {
     let _: RegisteredProjectorForTests = project_registered_carrier;
