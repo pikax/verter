@@ -220,8 +220,8 @@ export function registerLspProviders(
         const source = model.getValue();
         const offset = model.getOffsetAt(position);
         const structure = file?.structure ?? null;
-        const isInScript = isOffsetInScriptBlock(structure, offset);
-        const isInTemplate = !isInScript && isOffsetInTemplateBlock(structure, offset);
+        const isInScript = isOffsetInScriptBlock(structure, source, offset);
+        const isInTemplate = !isInScript && isOffsetInTemplateBlock(structure, source, offset);
 
         // Detect member access: cursor right after `.` → only TS member completions
         const lineContent = model.getLineContent(position.lineNumber);

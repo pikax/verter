@@ -536,24 +536,31 @@ fn push_directive_family(
     match value {
         DirectiveFamily::Vue(kind) => {
             out.push(1);
-            out.push(match kind {
-                VueDirectiveKind::Bind => 1,
-                VueDirectiveKind::On => 2,
-                VueDirectiveKind::Model => 3,
-                VueDirectiveKind::Show => 4,
-                VueDirectiveKind::If => 5,
-                VueDirectiveKind::ElseIf => 6,
-                VueDirectiveKind::Else => 7,
-                VueDirectiveKind::For => 8,
-                VueDirectiveKind::Slot => 9,
-                VueDirectiveKind::Pre => 10,
-                VueDirectiveKind::Cloak => 11,
-                VueDirectiveKind::Once => 12,
-                VueDirectiveKind::Memo => 13,
-                VueDirectiveKind::Html => 14,
-                VueDirectiveKind::Text => 15,
-                VueDirectiveKind::Custom => 16,
-            });
+            match kind {
+                VueDirectiveKind::Bind => out.push(1),
+                VueDirectiveKind::On => out.push(2),
+                VueDirectiveKind::Model => out.push(3),
+                VueDirectiveKind::Show => out.push(4),
+                VueDirectiveKind::If => out.push(5),
+                VueDirectiveKind::ElseIf => out.push(6),
+                VueDirectiveKind::Else => out.push(7),
+                VueDirectiveKind::For => out.push(8),
+                VueDirectiveKind::Slot => out.push(9),
+                VueDirectiveKind::Pre => out.push(10),
+                VueDirectiveKind::Cloak => out.push(11),
+                VueDirectiveKind::Once => out.push(12),
+                VueDirectiveKind::Memo => out.push(13),
+                VueDirectiveKind::Html => out.push(14),
+                VueDirectiveKind::Text => out.push(15),
+                VueDirectiveKind::Custom {
+                    authored,
+                    normalized,
+                } => {
+                    out.push(16);
+                    push_slice(out, inventory, *authored);
+                    push_name(out, inventory, *normalized);
+                }
+            }
         }
         DirectiveFamily::Svelte(kind) => {
             out.push(2);

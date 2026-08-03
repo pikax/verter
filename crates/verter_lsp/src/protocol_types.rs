@@ -471,7 +471,11 @@ pub struct DocumentStructureV1 {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum DocumentStructureResponseV1 {
     Available {
         request_token: String,
@@ -519,12 +523,17 @@ pub enum DocumentUnavailableReasonV1 {
 
 #[cfg(test)]
 mod document_structure_response_tests {
-    use super::DocumentStructureResponseV1;
+    use super::{DocumentStructureResponseV1, DocumentUnavailableReasonV1};
 
     fn stamps() -> (String, String, i32) {
         ("request-1".into(), "open-7".into(), 19)
     }
 
+    /// Ratified six-arm sum (`Available`, `StaleClientDocument`,
+    /// `ReplacementDocument`, `Superseded`, `Unavailable`, `Closed`): every
+    /// non-`Available` arm is CONTENT-FREE (no `structure` key), and the wire
+    /// tags stay pairwise disjoint. `Unavailable` additionally carries its
+    /// typed `reason` — still no structure.
     #[test]
     fn freshness_failures_have_disjoint_content_free_wire_tags() {
         let (request_token, client_open_epoch, expected_client_version) = stamps();
@@ -544,19 +553,52 @@ mod document_structure_response_tests {
                 client_open_epoch: client_open_epoch.clone(),
                 expected_client_version,
             },
+            DocumentStructureResponseV1::Unavailable {
+                request_token: request_token.clone(),
+                client_open_epoch: client_open_epoch.clone(),
+                expected_client_version,
+                reason: DocumentUnavailableReasonV1::StructureNotReady,
+            },
+            DocumentStructureResponseV1::Closed {
+                request_token: request_token.clone(),
+                client_open_epoch: client_open_epoch.clone(),
+                expected_client_version,
+            },
         ];
         let tags = responses
             .iter()
             .map(|response| {
                 let value = serde_json::to_value(response).expect("serialize response");
                 let object = value.as_object().expect("response object");
-                assert_eq!(object.len(), 4, "failure response must remain content-free");
+                assert!(
+                    !object.contains_key("structure"),
+                    "non-available response must remain content-free"
+                );
+                let expected_len = if object["kind"] == "unavailable" {
+                    5
+                } else {
+                    4
+                };
+                assert_eq!(
+                    object.len(),
+                    expected_len,
+                    "non-available response must carry only its stamps (+ typed reason)"
+                );
+                for stamp in ["requestToken", "clientOpenEpoch", "expectedClientVersion"] {
+                    assert!(object.contains_key(stamp), "missing echo stamp {stamp}");
+                }
                 object["kind"].as_str().expect("kind tag").to_owned()
             })
             .collect::<Vec<_>>();
         assert_eq!(
             tags,
-            ["staleClientDocument", "replacementDocument", "superseded"]
+            [
+                "staleClientDocument",
+                "replacementDocument",
+                "superseded",
+                "unavailable",
+                "closed"
+            ]
         );
     }
 }

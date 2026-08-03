@@ -8,6 +8,7 @@ import type {
   AnalysisStyleBlock,
   OrderedSfcStructure,
 } from "../core/types";
+import { utf8ToUtf16Offset } from "./offsets";
 
 /** Decoration descriptor for a binding in the script block. */
 export interface BindingDecoration {
@@ -165,7 +166,10 @@ export function computeCodeLenses(
     (block) => block.kind === "section" && block.section.role.kind === "script",
   );
   if (scriptBlock?.kind === "section") {
-    const line = countLines(source, scriptBlock.section.openingRange.start);
+    const line = countLines(
+      source,
+      utf8ToUtf16Offset(source, scriptBlock.section.openingRange.start),
+    );
     const parts: string[] = [];
 
     const bindingCount = analysis.bindings.filter((b) => !b.name.startsWith("___VERTER___")).length;
@@ -194,7 +198,10 @@ export function computeCodeLenses(
     (block) => block.kind === "section" && block.section.role.kind === "templateHost",
   );
   if (templateBlock?.kind === "section") {
-    const line = countLines(source, templateBlock.section.openingRange.start);
+    const line = countLines(
+      source,
+      utf8ToUtf16Offset(source, templateBlock.section.openingRange.start),
+    );
     // We don't have template element count from analysis yet
     lenses.push({ line, title: "template" });
   }
@@ -213,7 +220,10 @@ export function computeCodeLenses(
     (block) => block.kind === "section" && block.section.role.kind === "style",
   ) ?? []) {
     if (styleBlock.kind !== "section") continue;
-    const line = countLines(source, styleBlock.section.openingRange.start);
+    const line = countLines(
+      source,
+      utf8ToUtf16Offset(source, styleBlock.section.openingRange.start),
+    );
     const styleAnalysis = stylesByToken.get(styleBlock.section.blockToken);
     if (!styleAnalysis) continue;
     const parts: string[] = [];
@@ -318,7 +328,8 @@ export function getDecorationStyles(): string {
 
 // ── Helpers ──
 
-/** Count lines (1-based) up to a byte offset. */
+/** Count lines (1-based) up to a UTF-16 code-unit offset. Structure BYTE
+ * offsets must be converted via `utf8ToUtf16Offset` before calling. */
 function countLines(source: string, offset: number): number {
   let count = 1;
   for (let i = 0; i < offset && i < source.length; i++) {

@@ -509,12 +509,14 @@ fn registered_projector_closed_variant_matrix_is_exhaustive_for_live_parsers() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    // Parser-bound limitation: `SvelteBlock` carries only its opening and full
-    // spans, not a closing span or recovery fact. Pin the absent projection
-    // channel here until the parser DTO can publish those authored facts.
+    // The parser records the consumed `{/keyword}` close-tag span; every
+    // CLOSED control block in this matrix carries its authored closing span
+    // and a truthful Closed termination.
     assert!(nodes.iter().all(|node| !matches!(
         node.kind(),
-        MarkupNodeKind::SvelteControlBlock(block) if block.closing_span.is_some()
+        MarkupNodeKind::SvelteControlBlock(block)
+            if block.closing_span.is_none()
+                || block.termination != SyntaxTermination::Closed
     )));
     assert!(heads
         .iter()
@@ -814,11 +816,17 @@ fn registered_projector_closed_variant_matrix_is_exhaustive_for_live_parsers() {
     assert!(vue_attrs.iter().any(|attr| matches!(
         attr,
         CarrierAttribute::Directive {
-            family: DirectiveFamily::Vue(verter_language::VueDirectiveKind::Custom),
+            family:
+                DirectiveFamily::Vue(verter_language::VueDirectiveKind::Custom {
+                    authored,
+                    normalized,
+                }),
             local_name: None,
             argument: verter_language::DirectiveArgument::Static { name },
             ..
         } if inventory.slice(name.authored).expect("static argument") == "arg"
+            && inventory.slice(*authored).expect("custom family") == "v-custom"
+            && inventory.normalized_name(*normalized).expect("custom family name") == "v-custom"
     )));
     assert!(inventory.markup().nodes().iter().any(|node| matches!(node.kind(), MarkupNodeKind::Element(element) if element.namespace == verter_language::MarkupNamespace::Svg)));
     assert!(inventory.markup().nodes().iter().any(|node| matches!(node.kind(), MarkupNodeKind::Element(element) if element.namespace == verter_language::MarkupNamespace::MathMl)));
@@ -1077,4 +1085,382 @@ fn unclosed_dynamic_directive_argument_at_eof_projects_typed_recovery() {
 #[test]
 fn registered_projector_signature_requires_authority_seal() {
     let _: RegisteredProjectorForTests = project_registered_carrier;
+}
+
+// ── FL2-E TE-C-12 / T-B1-D03: Svelte style dialect derives from `lang` ──
+
+#[test]
+fn registered_svelte_style_dialect_derives_from_authored_lang() {
+    use verter_language::{SectionRole, StyleDialect, StyleModule};
+    let cases: [(&str, StyleDialect); 5] = [
+        ("<style>.x{}</style>", StyleDialect::Css),
+        ("<style lang=\"css\">.x{}</style>", StyleDialect::Css),
+        ("<style lang=\"scss\">.x{}</style>", StyleDialect::Scss),
+        ("<style lang=\"less\">.x{}</style>", StyleDialect::Less),
+        ("<style lang=\"stylus\">.x{}</style>", StyleDialect::Stylus),
+    ];
+    for (source, expected) in cases {
+        let (_, _, accepted) = accepted(
+            "file:///workspace/StyleLang.svelte",
+            verter_language::FileLanguage::svelte(),
+            source,
+        );
+        let projection = project(&accepted);
+        let inventory = projection.inventory();
+        inventory.validate().expect("style-lang inventory");
+        let role = inventory
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                CarrierBlock::Section {
+                    role:
+                        SectionRole::Style {
+                            dialect,
+                            scoped,
+                            module,
+                        },
+                    ..
+                } => Some((dialect.clone(), *scoped, module.clone())),
+                _ => None,
+            })
+            .expect("style section");
+        assert_eq!(role.0, expected, "dialect for {source}");
+        // Svelte has no authored `scoped` / `module` attributes; the projection
+        // must not fabricate them.
+        assert!(!role.1, "scoped for {source}");
+        assert_eq!(role.2, StyleModule::None, "module for {source}");
+    }
+}
+
+#[test]
+fn registered_svelte_style_dialect_mutation_discriminates_structure_hash() {
+    let (_, _, scss) = accepted(
+        "file:///workspace/A.svelte",
+        verter_language::FileLanguage::svelte(),
+        "<style lang=\"scss\">.x{}</style>",
+    );
+    let (_, _, less) = accepted(
+        "file:///workspace/B.svelte",
+        verter_language::FileLanguage::svelte(),
+        "<style lang=\"less\">.x{}</style>",
+    );
+    assert_ne!(
+        project(&scss).carrier_structure_hash(),
+        project(&less).carrier_structure_hash(),
+        "distinct authored style dialects must hash differently"
+    );
+}
+
+// ── FL2-E TE-B-06 / T-B1-D02: custom-name hash closure ──
+
+#[test]
+fn custom_block_name_mutation_discriminates_structure_hash() {
+    let (_, _, docs) = accepted(
+        "file:///workspace/A.vue",
+        verter_language::FileLanguage::vue(),
+        "<docs>x</docs>",
+    );
+    let (_, _, spec) = accepted(
+        "file:///workspace/B.vue",
+        verter_language::FileLanguage::vue(),
+        "<spec>x</spec>",
+    );
+    let (_, _, moved) = accepted(
+        "file:///workspace/C.vue",
+        verter_language::FileLanguage::vue(),
+        "\n\n<docs>x</docs>",
+    );
+    assert_ne!(
+        project(&docs).carrier_structure_hash(),
+        project(&spec).carrier_structure_hash(),
+        "distinct custom block names must hash differently"
+    );
+    assert_eq!(
+        project(&docs).carrier_structure_hash(),
+        project(&moved).carrier_structure_hash(),
+        "custom block offset motion must not change the hash"
+    );
+}
+
+#[test]
+fn custom_directive_family_name_mutation_discriminates_structure_hash() {
+    let (_, _, foo) = accepted(
+        "file:///workspace/A.vue",
+        verter_language::FileLanguage::vue(),
+        "<template><div v-foo=\"x\"/></template>",
+    );
+    let (_, _, bar) = accepted(
+        "file:///workspace/B.vue",
+        verter_language::FileLanguage::vue(),
+        "<template><div v-bar=\"x\"/></template>",
+    );
+    assert_ne!(
+        project(&foo).carrier_structure_hash(),
+        project(&bar).carrier_structure_hash(),
+        "distinct custom directive family names must hash differently"
+    );
+}
+
+// ── FL2-E TE-B-08 / T-B1-D05: parser-produced golden depth ──
+
+#[test]
+fn vue_nested_same_name_template_blocks_close_at_the_outermost_marker() {
+    use verter_language::{SectionRole, SyntaxTermination};
+    let source = "<template><div><template v-if=\"x\"><span/></template></div></template>";
+    let (_, _, accepted) = accepted(
+        "file:///workspace/Nested.vue",
+        verter_language::FileLanguage::vue(),
+        source,
+    );
+    let projection = project(&accepted);
+    let inventory = projection.inventory();
+    inventory.validate().expect("nested inventory");
+    let sections = inventory
+        .blocks()
+        .iter()
+        .filter_map(|block| match block {
+            CarrierBlock::Section { role, syntax, .. } => Some((role, syntax)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sections.len(), 1, "exactly one template HOST block");
+    let (role, syntax) = sections[0];
+    assert!(matches!(role, SectionRole::TemplateHost));
+    let outer_close = source.rfind("</template>").expect("outer close") as u32;
+    let close = syntax.closing_span.expect("outer template close span");
+    assert_eq!(close.start, outer_close, "block closes at the LAST marker");
+    assert_eq!(syntax.termination, SyntaxTermination::Closed);
+
+    let inner_close = source.find("</template>").expect("inner close") as u32;
+    let inner = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .find_map(|node| match node.kind() {
+            MarkupNodeKind::Element(element)
+                if inventory
+                    .normalized_name(element.normalized_name)
+                    .expect("name")
+                    == "template" =>
+            {
+                Some(element)
+            }
+            _ => None,
+        })
+        .expect("nested template element");
+    assert_eq!(inner.termination, SyntaxTermination::Closed);
+    assert_eq!(
+        inner.closing_span.expect("inner close span").start,
+        inner_close,
+        "nested same-name element closes at the FIRST marker"
+    );
+}
+
+#[test]
+fn vue_recovered_unclosed_element_projects_truthful_termination() {
+    use verter_language::SyntaxTermination;
+    let source = "<template><div>text</template>";
+    let (_, _, accepted) = accepted(
+        "file:///workspace/Unclosed.vue",
+        verter_language::FileLanguage::vue(),
+        source,
+    );
+    let projection = project(&accepted);
+    let inventory = projection.inventory();
+    inventory.validate().expect("unclosed inventory");
+    let div = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .find_map(|node| match node.kind() {
+            MarkupNodeKind::Element(element)
+                if inventory
+                    .normalized_name(element.normalized_name)
+                    .expect("name")
+                    == "div" =>
+            {
+                Some(element)
+            }
+            _ => None,
+        })
+        .expect("unclosed div");
+    // The parser recovered an unclosed element: no fabricated Closed, no
+    // fabricated closing span.
+    assert!(div.closing_span.is_none(), "no fabricated closing span");
+    assert!(
+        !matches!(div.termination, SyntaxTermination::Closed),
+        "no fabricated Closed termination: {:?}",
+        div.termination
+    );
+}
+
+#[test]
+fn svelte_nested_same_name_blocks_and_elements_close_at_their_own_markers() {
+    use verter_language::SyntaxTermination;
+    let source = "{#if a}{#if b}<div><div>x</div></div>{/if}{/if}";
+    let (_, _, accepted) = accepted(
+        "file:///workspace/Nested.svelte",
+        verter_language::FileLanguage::svelte(),
+        source,
+    );
+    let projection = project(&accepted);
+    let inventory = projection.inventory();
+    inventory.validate().expect("nested inventory");
+    let nodes = inventory.markup().nodes();
+
+    let inner_close = source.find("{/if}").expect("inner if close") as u32;
+    let outer_close = source.rfind("{/if}").expect("outer if close") as u32;
+    let inner_start = source.find("{#if b}").expect("inner if") as u32;
+    let blocks = nodes
+        .iter()
+        .filter_map(|node| match node.kind() {
+            MarkupNodeKind::SvelteControlBlock(block) => Some(block),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(blocks.len(), 2, "two nested if blocks");
+    for block in &blocks {
+        assert_eq!(
+            block.termination,
+            SyntaxTermination::Closed,
+            "closed control block"
+        );
+    }
+    let inner = blocks
+        .iter()
+        .find(|block| block.full_span.start == inner_start)
+        .expect("inner block");
+    let outer = blocks
+        .iter()
+        .find(|block| block.full_span.start == 0)
+        .expect("outer block");
+    assert_eq!(
+        inner.closing_span.expect("inner close span").start,
+        inner_close,
+        "inner block closes at the FIRST close marker"
+    );
+    assert_eq!(
+        outer.closing_span.expect("outer close span").start,
+        outer_close,
+        "outer block closes at the LAST close marker"
+    );
+
+    let inner_div_close = source.find("</div>").expect("inner div close") as u32;
+    let outer_div_close = source.rfind("</div>").expect("outer div close") as u32;
+    let divs = nodes
+        .iter()
+        .filter_map(|node| match node.kind() {
+            MarkupNodeKind::Element(element)
+                if inventory
+                    .normalized_name(element.normalized_name)
+                    .expect("name")
+                    == "div" =>
+            {
+                Some(element)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(divs.len(), 2, "two nested divs");
+    let closes = divs
+        .iter()
+        .map(|element| element.closing_span.expect("div close").start)
+        .collect::<Vec<_>>();
+    assert!(closes.contains(&inner_div_close));
+    assert!(closes.contains(&outer_div_close));
+}
+
+#[test]
+fn svelte_unclosed_control_block_projects_recovered_not_fabricated_closed() {
+    use verter_language::{BlockRecoveryReason, SyntaxTermination};
+    let source = "{#if a}txt";
+    let (_, _, accepted) = accepted(
+        "file:///workspace/UnclosedBlock.svelte",
+        verter_language::FileLanguage::svelte(),
+        source,
+    );
+    let projection = project(&accepted);
+    let inventory = projection.inventory();
+    inventory.validate().expect("unclosed inventory");
+    let block = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .find_map(|node| match node.kind() {
+            MarkupNodeKind::SvelteControlBlock(block) => Some(block),
+            _ => None,
+        })
+        .expect("unclosed if block");
+    assert!(block.closing_span.is_none(), "no fabricated closing span");
+    assert_eq!(
+        block.termination,
+        SyntaxTermination::Recovered {
+            reason: BlockRecoveryReason::MissingCloseTag,
+            recovery_span: None,
+        },
+        "a missing close marker must project recovery, not a fabricated Closed"
+    );
+}
+
+#[test]
+fn svelte_unknown_block_and_tag_project_unknown_node_kinds() {
+    use verter_language::{SvelteStandaloneTagFamily, SyntaxTermination, UnknownMarkupReason};
+    let source = "{#wat q}body{/wat}{@wat expr}";
+    let (_, _, accepted) = accepted(
+        "file:///workspace/Unknown.svelte",
+        verter_language::FileLanguage::svelte(),
+        source,
+    );
+    let projection = project(&accepted);
+    let inventory = projection.inventory();
+    inventory.validate().expect("unknown inventory");
+    let nodes = inventory.markup().nodes();
+
+    // An unknown `{#wat}` block is an UNKNOWN node kind (parser-owned
+    // classification), never silently reshaped into a known block family.
+    let unknown = nodes
+        .iter()
+        .find_map(|node| match node.kind() {
+            MarkupNodeKind::Unknown {
+                termination,
+                authored_head,
+                reason,
+                closing_span,
+                full_span,
+                ..
+            } => Some((termination, authored_head, reason, closing_span, full_span)),
+            _ => None,
+        })
+        .expect("unknown block node");
+    assert_eq!(*unknown.2, UnknownMarkupReason::ParserUnknownVariant);
+    let head = unknown.1.expect("authored head");
+    assert_eq!(
+        inventory.slice(head).expect("head slice"),
+        "wat",
+        "authored head names the unknown keyword"
+    );
+    assert_eq!(
+        *unknown.0,
+        SyntaxTermination::Closed,
+        "the close marker was consumed"
+    );
+    assert_eq!(
+        unknown.3.expect("unknown block close span").start,
+        source.find("{/wat}").expect("close") as u32
+    );
+    assert_eq!(unknown.4.start, 0);
+
+    // No control-block node may absorb the unknown keyword.
+    assert!(nodes
+        .iter()
+        .all(|node| !matches!(node.kind(), MarkupNodeKind::SvelteControlBlock(_))));
+
+    // `{@wat}` stays a standalone tag with an UNKNOWN family.
+    assert!(nodes.iter().any(|node| matches!(
+        node.kind(),
+        MarkupNodeKind::SvelteStandaloneTag(tag)
+            if matches!(&tag.family, SvelteStandaloneTagFamily::Unknown { authored_name, reason }
+                if *reason == UnknownMarkupReason::ParserUnknownVariant
+                    && inventory.slice(*authored_name).expect("tag name").starts_with("@wat"))
+    )));
 }

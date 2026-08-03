@@ -839,8 +839,15 @@ fn vue_attribute(
     let full_end = attribute_full_end(builder.source, p);
     let full = builder.raw_span(p.start, full_end);
     if p.is_directive {
-        let (family, prefix_len) = vue_directive(&name_text);
+        let (known_family, prefix_len) = vue_directive(&name_text);
         let prefix = builder.raw_span(p.start, p.start + prefix_len as u32);
+        let family = known_family.unwrap_or_else(|| {
+            let normalized = builder.intern(&name_text[..prefix_len].to_ascii_lowercase());
+            VueDirectiveKind::Custom {
+                authored: SourceSlice::new(prefix),
+                normalized,
+            }
+        });
         let argument = match (p.is_dynamic.unwrap_or(false), p.arg_start, p.arg_end) {
             (true, Some(start), Some(end)) => {
                 // The tokenizer's EOF recovery still emits a dynamic `DirArg`
@@ -969,34 +976,37 @@ fn vue_attribute(
         }
     }
 }
-fn vue_directive(name: &str) -> (VueDirectiveKind, usize) {
+/// Classify a Vue directive family. `None` marks a userland (custom) family —
+/// the caller mints the payload-carrying [`VueDirectiveKind::Custom`] with the
+/// authored family slice and its normalized name.
+fn vue_directive(name: &str) -> (Option<VueDirectiveKind>, usize) {
     if name.starts_with(':') {
-        return (VueDirectiveKind::Bind, 1);
+        return (Some(VueDirectiveKind::Bind), 1);
     }
     if name.starts_with('@') {
-        return (VueDirectiveKind::On, 1);
+        return (Some(VueDirectiveKind::On), 1);
     }
     if name.starts_with('#') {
-        return (VueDirectiveKind::Slot, 1);
+        return (Some(VueDirectiveKind::Slot), 1);
     }
     let family = name.split([':', '.']).next().unwrap_or(name);
     let kind = match family {
-        "v-bind" => VueDirectiveKind::Bind,
-        "v-on" => VueDirectiveKind::On,
-        "v-model" => VueDirectiveKind::Model,
-        "v-show" => VueDirectiveKind::Show,
-        "v-if" => VueDirectiveKind::If,
-        "v-else-if" => VueDirectiveKind::ElseIf,
-        "v-else" => VueDirectiveKind::Else,
-        "v-for" => VueDirectiveKind::For,
-        "v-slot" => VueDirectiveKind::Slot,
-        "v-pre" => VueDirectiveKind::Pre,
-        "v-cloak" => VueDirectiveKind::Cloak,
-        "v-once" => VueDirectiveKind::Once,
-        "v-memo" => VueDirectiveKind::Memo,
-        "v-html" => VueDirectiveKind::Html,
-        "v-text" => VueDirectiveKind::Text,
-        _ => VueDirectiveKind::Custom,
+        "v-bind" => Some(VueDirectiveKind::Bind),
+        "v-on" => Some(VueDirectiveKind::On),
+        "v-model" => Some(VueDirectiveKind::Model),
+        "v-show" => Some(VueDirectiveKind::Show),
+        "v-if" => Some(VueDirectiveKind::If),
+        "v-else-if" => Some(VueDirectiveKind::ElseIf),
+        "v-else" => Some(VueDirectiveKind::Else),
+        "v-for" => Some(VueDirectiveKind::For),
+        "v-slot" => Some(VueDirectiveKind::Slot),
+        "v-pre" => Some(VueDirectiveKind::Pre),
+        "v-cloak" => Some(VueDirectiveKind::Cloak),
+        "v-once" => Some(VueDirectiveKind::Once),
+        "v-memo" => Some(VueDirectiveKind::Memo),
+        "v-html" => Some(VueDirectiveKind::Html),
+        "v-text" => Some(VueDirectiveKind::Text),
+        _ => None,
     };
     (kind, family.len())
 }
@@ -1132,10 +1142,26 @@ fn project_svelte(
                     v.tag_close,
                     &v.attributes,
                 );
+                // Dialect derives from the parser-owned `lang` (mirrors the Vue
+                // path: recognised names map, an unrecognised name is Missing,
+                // no lang is CSS). Svelte has no authored `scoped` / `module`
+                // attributes, so those stay un-fabricated.
+                let dialect = match v.lang.as_deref() {
+                    None => StyleDialect::Css,
+                    Some(lang) => match lang.to_ascii_lowercase().as_str() {
+                        "css" => StyleDialect::Css,
+                        "scss" => StyleDialect::Scss,
+                        "sass" => StyleDialect::Sass,
+                        "less" => StyleDialect::Less,
+                        "stylus" => StyleDialect::Stylus,
+                        "postcss" => StyleDialect::PostCss,
+                        _ => StyleDialect::Missing,
+                    },
+                };
                 blocks.push(CarrierBlock::Section {
                     id,
                     role: SectionRole::Style {
-                        dialect: StyleDialect::Css,
+                        dialect,
                         scoped: false,
                         module: StyleModule::None,
                     },
@@ -1421,6 +1447,41 @@ fn project_svelte_node(
                 }
                 child_ids.push(clause_id);
             }
+            if let SvelteBlockKind::Unknown { keyword } = &v.kind {
+                // An unrecognised `{#keyword}` block projects as an UNKNOWN
+                // node (parser-owned classification): no known block family is
+                // fabricated and no head expression is demanded.
+                let content_end = v.close_tag.map(|s| s.start).unwrap_or(v.span.end);
+                let kind = MarkupNodeKind::Unknown {
+                    opening_span: Some(builder.span(v.head_span)),
+                    opening_name_span: Some(builder.span(*keyword)),
+                    content_span: Some(builder.raw_span(v.head_span.end, content_end)),
+                    closing_span: v.close_tag.map(|s| builder.span(s)),
+                    closing_name_span: None,
+                    full_span: builder.span(v.span),
+                    termination: if v.close_tag.is_some() {
+                        SyntaxTermination::Closed
+                    } else {
+                        SyntaxTermination::Recovered {
+                            reason: verter_language::BlockRecoveryReason::MissingCloseTag,
+                            recovery_span: None,
+                        }
+                    },
+                    authored_head: Some(SourceSlice::new(builder.span(*keyword))),
+                    reason: UnknownMarkupReason::ParserUnknownVariant,
+                };
+                let start = builder.child_ids.len() as u32;
+                builder.child_ids.extend(child_ids);
+                let end = builder.child_ids.len() as u32;
+                builder.nodes[placeholder.0 as usize] = MarkupSyntaxNode {
+                    id: placeholder,
+                    root_block,
+                    parent,
+                    children: start..end,
+                    kind,
+                };
+                return placeholder;
+            }
             let head = match &v.kind {
                 SvelteBlockKind::If => SvelteControlBlockHead::If {
                     condition: builder.span(v.head_expr.expect("if head")),
@@ -1469,14 +1530,27 @@ fn project_svelte_node(
                     name_span: builder.span(*name),
                     params_span: params.map(|s| builder.span(s)),
                 },
+                SvelteBlockKind::Unknown { .. } => {
+                    unreachable!("unknown blocks project as MarkupNodeKind::Unknown above")
+                }
             };
             (
                 MarkupNodeKind::SvelteControlBlock(SvelteControlBlockSyntax {
                     head,
                     opening_span: builder.span(v.head_span),
-                    closing_span: None,
+                    // Parser-owned close geometry: the consumed `{/keyword}`
+                    // span when present; a missing close marker projects
+                    // typed recovery — never a fabricated Closed.
+                    closing_span: v.close_tag.map(|s| builder.span(s)),
                     full_span: builder.span(v.span),
-                    termination: SyntaxTermination::Closed,
+                    termination: if v.close_tag.is_some() {
+                        SyntaxTermination::Closed
+                    } else {
+                        SyntaxTermination::Recovered {
+                            reason: verter_language::BlockRecoveryReason::MissingCloseTag,
+                            recovery_span: None,
+                        }
+                    },
                 }),
                 child_ids,
             )
@@ -1491,7 +1565,9 @@ fn project_svelte_node(
                 SvelteTagKind::Debug => SvelteStandaloneTagFamily::Debug,
                 SvelteTagKind::Attach => SvelteStandaloneTagFamily::Attach,
                 SvelteTagKind::Unknown => SvelteStandaloneTagFamily::Unknown {
-                    authored_name: SourceSlice::new(builder.span(v.inner)),
+                    // Parser-owned keyword span (`@wat`) — the authored NAME,
+                    // never the tag's expression payload.
+                    authored_name: SourceSlice::new(builder.span(v.keyword)),
                     reason: UnknownMarkupReason::ParserUnknownVariant,
                 },
             };

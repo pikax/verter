@@ -3321,6 +3321,52 @@
         }
       ]
     },
+    "DocumentStructureResponseV1ReplacementDocument": {
+      "kind": "record",
+      "fields": [
+        {
+          "name": "request_token",
+          "type": "ClientRequestTokenV1",
+          "tag": 1,
+          "presence": "R"
+        },
+        {
+          "name": "client_open_epoch",
+          "type": "ClientOpenEpochTokenV1",
+          "tag": 2,
+          "presence": "R"
+        },
+        {
+          "name": "expected_client_version",
+          "type": "ClientVersionV1",
+          "tag": 3,
+          "presence": "R"
+        }
+      ]
+    },
+    "DocumentStructureResponseV1Superseded": {
+      "kind": "record",
+      "fields": [
+        {
+          "name": "request_token",
+          "type": "ClientRequestTokenV1",
+          "tag": 1,
+          "presence": "R"
+        },
+        {
+          "name": "client_open_epoch",
+          "type": "ClientOpenEpochTokenV1",
+          "tag": 2,
+          "presence": "R"
+        },
+        {
+          "name": "expected_client_version",
+          "type": "ClientVersionV1",
+          "tag": 3,
+          "presence": "R"
+        }
+      ]
+    },
     "DocumentStructureResponseV1Unavailable": {
       "kind": "record",
       "fields": [
@@ -3397,6 +3443,16 @@
           "name": "closed",
           "type": "DocumentStructureResponseV1Closed",
           "tag": 4
+        },
+        {
+          "name": "replacement_document",
+          "type": "DocumentStructureResponseV1ReplacementDocument",
+          "tag": 5
+        },
+        {
+          "name": "superseded",
+          "type": "DocumentStructureResponseV1Superseded",
+          "tag": 6
         }
       ]
     },
@@ -7877,7 +7933,9 @@
       "DocumentStructureResponseV1",
       "DocumentStructureResponseV1Available",
       "DocumentStructureResponseV1Closed",
+      "DocumentStructureResponseV1ReplacementDocument",
       "DocumentStructureResponseV1StaleClientDocument",
+      "DocumentStructureResponseV1Superseded",
       "DocumentStructureResponseV1Unavailable",
       "DocumentStructureV1",
       "DocumentUnavailableReasonV1",

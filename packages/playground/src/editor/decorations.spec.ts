@@ -17,6 +17,11 @@ import type {
   StructureBlock,
 } from "../core/types";
 
+/** Structure ranges are UTF-8 BYTE offsets (production wire contract). */
+function toBytes(source: string, utf16Offset: number): number {
+  return new TextEncoder().encode(source.slice(0, utf16Offset)).length;
+}
+
 function structureFor(source: string): OrderedSfcStructure {
   const blocks: StructureBlock[] = [];
   const re = /<(template|script|style)\b[^>]*>/gi;
@@ -26,7 +31,11 @@ function structureFor(source: string): OrderedSfcStructure {
     const start = match.index + match[0].length;
     const close = source.indexOf(`</${name}>`, start);
     const end = close < 0 ? source.length : close;
-    const range = (a: number, b: number) => ({ sourceSpaceToken: "test", start: a, end: b });
+    const range = (a: number, b: number) => ({
+      sourceSpaceToken: "test",
+      start: toBytes(source, a),
+      end: toBytes(source, b),
+    });
     blocks.push({
       kind: "section",
       markupRootTokens: [],
@@ -466,5 +475,20 @@ describe("getDecorationStyles", () => {
     expect(css).toContain(".verter-class");
     expect(css).toContain(".verter-css-used");
     expect(css).toContain(".verter-css-unused");
+  });
+});
+
+describe("computeCodeLenses UTF-8/UTF-16 conversion (B-48)", () => {
+  it("computes lens lines from byte offsets converted to UTF-16 (astral + CRLF)", () => {
+    const source =
+      "<script setup>\r\n// \u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\r\nconst a = 1\r\n</script>\r\n<template>\r\n<div/>\r\n</template>";
+
+    const lenses = computeCodeLenses(source, makeAnalysis(), structureFor(source));
+
+    // The template block opens on line 5 (1-based). An unconverted BYTE
+    // offset walks past the newline after `<template>` and mis-reports the
+    // line.
+    expect(lenses.some((lens) => lens.title === "template" && lens.line === 5)).toBe(true);
+    expect(lenses.some((lens) => lens.title === "template" && lens.line !== 5)).toBe(false);
   });
 });

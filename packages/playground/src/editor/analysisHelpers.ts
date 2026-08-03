@@ -10,6 +10,7 @@ import type {
   AnalysisBindingInitializer,
   OrderedSfcStructure,
 } from "../core/types";
+import { utf16ToUtf8Offset } from "./offsets";
 
 // ── Hover formatting ──
 
@@ -191,15 +192,19 @@ export function collectCompletions(
 /** Check script membership from the host's registered structure projection. */
 export function isOffsetInScriptBlock(
   structure: OrderedSfcStructure | null,
+  source: string,
   offset: number,
 ): boolean {
+  // Structure ranges are UTF-8 BYTES; the editor offset is UTF-16. Convert
+  // once, compare in byte space.
+  const utf8Offset = utf16ToUtf8Offset(source, offset);
   return (
     structure?.blocks.some(
       (block) =>
         block.kind === "section" &&
         block.section.role.kind === "script" &&
-        offset >= block.section.contentRange.start &&
-        offset <= block.section.contentRange.end,
+        utf8Offset >= block.section.contentRange.start &&
+        utf8Offset <= block.section.contentRange.end,
     ) ?? false
   );
 }

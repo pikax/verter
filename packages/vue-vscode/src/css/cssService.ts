@@ -163,13 +163,23 @@ export class CssService {
 
   /**
    * Get CSS diagnostics for all style blocks in the document.
+   *
+   * FAIL CLOSED on availability (TE-C-11): returns `null` — NOT an empty
+   * array — unless the structure response for THIS version was an admitted
+   * `available`. An empty array is a successful "genuinely clean" validation
+   * the publisher may publish (clearing prior diagnostics); `null` means the
+   * structure was stale/unavailable/closed or the transport failed, and the
+   * publisher must keep the last-known real diagnostics and publish nothing.
    */
   async doValidation(
     uri: string,
     source: string,
     version: number,
-  ): Promise<Array<{ blockToken: string; diagnostics: CSSDiagnostic[] }>> {
+  ): Promise<Array<{ blockToken: string; diagnostics: CSSDiagnostic[] }> | null> {
     const entry = await this.ensureCache(uri, source, version);
+    if (entry.availability !== "available") {
+      return null;
+    }
     const results: Array<{ blockToken: string; diagnostics: CSSDiagnostic[] }> = [];
 
     for (const block of entry.blocks) {

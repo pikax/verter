@@ -576,12 +576,21 @@ impl CarrierBlockInventory {
                 self.validate_value(value)?;
             }
             CarrierAttribute::Directive {
+                family,
                 local_name,
                 argument,
                 modifiers,
                 value,
                 ..
             } => {
+                if let DirectiveFamily::Vue(VueDirectiveKind::Custom {
+                    authored,
+                    normalized,
+                }) = family
+                {
+                    self.slice(*authored)?;
+                    self.normalized_name(*normalized)?;
+                }
                 if let Some(name) = local_name {
                     validate_name(name)?;
                 }
@@ -1093,7 +1102,14 @@ pub enum VueDirectiveKind {
     Memo,
     Html,
     Text,
-    Custom,
+    /// A userland directive family (`v-foo`). Carries the authored family
+    /// slice and its normalized (lowercased) name so distinct custom families
+    /// stay distinct in every meaning-bearing consumer (structure hash
+    /// included) — two live custom directives must never collide.
+    Custom {
+        authored: SourceSlice,
+        normalized: InternedNameId,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SvelteDirectiveKind {

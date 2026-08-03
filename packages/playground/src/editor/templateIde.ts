@@ -5,6 +5,7 @@ import type {
   StructureRange,
 } from "../core/types";
 import { collectCompletions } from "./analysisHelpers";
+import { utf16ToUtf8Offset, utf8ToUtf16Offset } from "./offsets";
 
 const HTML_TAGS = [
   "a",
@@ -157,22 +158,24 @@ function sections(
 
 export function isOffsetInTemplateBlock(
   structure: OrderedSfcStructure | null,
+  source: string,
   offset: number,
 ): boolean {
+  // Structure ranges are UTF-8 BYTES; the editor offset is UTF-16. Convert
+  // once, compare in byte space.
+  const utf8Offset = utf8OffsetOf(source, offset);
   return sections(structure).some(
     (block) =>
       block.section.role.kind === "templateHost" &&
-      offset >= block.section.contentRange.start &&
-      offset <= block.section.contentRange.end,
+      utf8Offset >= block.section.contentRange.start &&
+      utf8Offset <= block.section.contentRange.end,
   );
 }
 
 /** Bounded current-token lookback (mirrors the plugin's 256-byte contract). */
 const MAX_CURRENT_TOKEN_LOOKBACK = 256;
 
-function utf8OffsetOf(source: string, offset: number): number {
-  return new TextEncoder().encode(source.slice(0, offset)).length;
-}
+const utf8OffsetOf = utf16ToUtf8Offset;
 
 function isTagNameChar(char: string): boolean {
   return /[\w.-]/.test(char);
@@ -346,11 +349,15 @@ function findScriptBlock(
 ): ScriptBlock | null {
   const block = sections(structure).find((candidate) => candidate.section.role.kind === "script");
   if (!block) return null;
+  // Structure ranges are UTF-8 BYTES; slicing and edit offsets are UTF-16.
+  const openStart = utf8ToUtf16Offset(source, block.section.openingRange.start);
+  const openEnd = utf8ToUtf16Offset(source, block.section.contentRange.start);
+  const closeStart = utf8ToUtf16Offset(source, block.section.contentRange.end);
   return {
-    openStart: block.section.openingRange.start,
-    openEnd: block.section.contentRange.start,
-    closeStart: block.section.contentRange.end,
-    content: source.slice(block.section.contentRange.start, block.section.contentRange.end),
+    openStart,
+    openEnd,
+    closeStart,
+    content: source.slice(openEnd, closeStart),
   };
 }
 
@@ -485,7 +492,7 @@ function currentMarkupElement(
   offset: number,
 ): string | null {
   if (structure === null) return null;
-  const utf8Offset = new TextEncoder().encode(source.slice(0, offset)).length;
+  const utf8Offset = utf8OffsetOf(source, offset);
   let best: { start: number; name: string } | null = null;
   for (const node of structure.markupNodes) {
     const syntax = node.syntax;
@@ -538,7 +545,7 @@ export function computeAutoCloseTagText(
 ): string | null {
   if (offset <= 0 || source[offset - 1] !== ">") return null;
   if (
-    !isOffsetInTemplateBlock(structure, offset) ||
+    !isOffsetInTemplateBlock(structure, source, offset) ||
     isInsideInterpolation(structure, source, offset)
   ) {
     return null;
@@ -586,7 +593,7 @@ export function collectTemplateInterpolationCompletions(
 ): TemplateCompletion[] {
   const { source, offset, analysis } = params;
   if (
-    !isOffsetInTemplateBlock(params.structure, offset) ||
+    !isOffsetInTemplateBlock(params.structure, source, offset) ||
     !isInsideInterpolation(params.structure, source, offset)
   ) {
     return [];
@@ -628,7 +635,7 @@ export function collectTemplateCompletions(params: TemplateCompletionParams): Te
   const { source, offset, activeFilename, openFilenames, analysis } = params;
 
   if (
-    !isOffsetInTemplateBlock(params.structure, offset) ||
+    !isOffsetInTemplateBlock(params.structure, source, offset) ||
     isInsideInterpolation(params.structure, source, offset)
   ) {
     return [];

@@ -1518,6 +1518,12 @@ async function startVueLanguageServer(
       const uri = document.uri.toString();
       const source = document.getText();
       const results = await getCssService().doValidation(uri, source, document.version);
+      if (results === null) {
+        // Structure stale/unavailable (or transport failed): NOT a successful
+        // validation — keep the last-known diagnostics, publish nothing
+        // (TE-C-11 fail-closed).
+        return;
+      }
       const allDiags: VDiagnostic[] = [];
       for (const { diagnostics } of results) {
         for (const d of diagnostics) {

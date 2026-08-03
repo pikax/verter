@@ -8,6 +8,12 @@ import {
 } from "./templateIde";
 import type { FileAnalysis, OrderedSfcStructure, StructureBlock } from "../core/types";
 
+/** Structure ranges are UTF-8 BYTE offsets (production wire contract): the
+ * fixture converts every JS string index to its byte offset. */
+function toBytes(source: string, utf16Offset: number): number {
+  return new TextEncoder().encode(source.slice(0, utf16Offset)).length;
+}
+
 function structureFor(source: string): OrderedSfcStructure {
   const blocks: StructureBlock[] = [];
   const re = /<(template|script|style)\b[^>]*>/gi;
@@ -17,7 +23,11 @@ function structureFor(source: string): OrderedSfcStructure {
     const contentStart = match.index + match[0].length;
     const close = source.indexOf(`</${name}>`, contentStart);
     const contentEnd = close < 0 ? source.length : close;
-    const range = (start: number, end: number) => ({ sourceSpaceToken: "test", start, end });
+    const range = (start: number, end: number) => ({
+      sourceSpaceToken: "test",
+      start: toBytes(source, start),
+      end: toBytes(source, end),
+    });
     blocks.push({
       kind: "section",
       markupRootTokens: [],
@@ -42,7 +52,11 @@ function structureFor(source: string): OrderedSfcStructure {
   while ((match = elementRe.exec(source))) {
     const name = match[1];
     if (["template", "script", "style"].includes(name.toLowerCase())) continue;
-    const range = (start: number, end: number) => ({ sourceSpaceToken: "test", start, end });
+    const range = (start: number, end: number) => ({
+      sourceSpaceToken: "test",
+      start: toBytes(source, start),
+      end: toBytes(source, end),
+    });
     markupNodes.push({
       nodeToken: `node-${markupNodes.length}`,
       childNodeTokens: [],
@@ -310,5 +324,53 @@ describe("templateIde scanner-free geometry", () => {
     });
 
     expect(items.some((item) => item.label === "section")).toBe(false);
+  });
+});
+
+describe("templateIde UTF-8/UTF-16 offset conversion (B-48)", () => {
+  it("treats a UTF-16 offset inside the template as in-block when astral characters precede it", () => {
+    // Four astral scalars: the UTF-8 byte surplus (+8) exceeds the cursor's
+    // depth into the template content, so an unconverted byte comparison
+    // wrongly classifies the offset as OUTSIDE the template block.
+    const source =
+      '<script setup>const s = "\u{1F600}\u{1F680}\u{1F600}\u{1F680}"</script><template>\n  <di\n</template>';
+    const offset = source.indexOf("<di") + 3;
+
+    const items = collectTemplateCompletions({
+      source,
+      structure: structureFor(source),
+      offset,
+      activeFilename: "App.vue",
+      openFilenames: ["App.vue"],
+      analysis: null,
+    });
+
+    expect(items.some((item) => item.label === "div")).toBe(true);
+  });
+
+  it("anchors auto-import edits at UTF-16 offsets when astral text precedes the script (CRLF)", () => {
+    // The astral template text sits BEFORE the script block, so every script
+    // byte range exceeds its UTF-16 offset by +8. An unconverted slice reads
+    // the wrong script text and an unconverted anchor mis-places the edit.
+    const source =
+      "<template>\r\n\u{1F600}\u{1F680}\u{1F600}\u{1F680}\r\n</template>\r\n<script setup>\r\nimport A from './A.vue'\r\n</script>";
+
+    const edit = buildComponentImportEdit(
+      source,
+      structureFor(source),
+      "MyCard",
+      "./components/my-card.vue",
+    );
+
+    expect(edit).not.toBeNull();
+    // The import matcher's trailing `\s*` consumes the CRLF after the last
+    // import, so the UTF-16 anchor is the script content end (the `</script>`
+    // start).
+    const expected = source.indexOf("</script>");
+    expect(edit!.offset).toBe(expected);
+    expect(edit!.text).toBe("\nimport MyCard from './components/my-card.vue'");
+    // Negative: the byte-shifted anchor (the pre-conversion defect) must not
+    // be produced.
+    expect(edit!.offset).not.toBe(new TextEncoder().encode(source.slice(0, expected)).length);
   });
 });

@@ -93,6 +93,11 @@ pub struct DocumentRegistry {
     /// the document shard is still held.
     #[cfg(test)]
     after_semantic_admission_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
+    /// TEST SEAM: a one-shot callback immediately after `did_change` commits
+    /// the document entry and releases its shard write guard. Tests use it to
+    /// probe the commit→semantic-invalidation window.
+    #[cfg(test)]
+    after_change_commit_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
     /// TEST SEAM: a one-shot callback immediately before semantic cache
     /// publication. Tests use it to race an admitted result against an edit.
     #[cfg(test)]
@@ -318,6 +323,8 @@ impl DocumentRegistry {
             after_semantic_admission_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             before_semantic_cache_publication_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            after_change_commit_hook: parking_lot::Mutex::new(None),
         }
     }
 
@@ -339,6 +346,19 @@ impl DocumentRegistry {
     #[cfg(test)]
     pub(crate) fn set_before_projection_install_hook(&self, hook: AfterCompileHook) {
         *self.before_projection_install_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_after_change_commit_hook(&self, hook: AfterCompileHook) {
+        *self.after_change_commit_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn run_after_change_commit_hook(&self, uri: &Uri) {
+        let hook = self.after_change_commit_hook.lock().take();
+        if let Some(hook) = hook {
+            hook(self, uri);
+        }
     }
 
     #[cfg(test)]
@@ -784,8 +804,20 @@ impl DocumentRegistry {
                     analysis: None,
                 })
             });
+            // Invalidate the semantic snapshot INSIDE the same shard mutation:
+            // the remove happens-before the write guard releases, so any
+            // reader that observes the committed entry can never also read the
+            // superseded snapshot. (`cached_semantic_analysis` carries no
+            // revision predicate — this ordering is its correctness rail.
+            // The semantic publication path holds the same document guard
+            // while inserting, so the documents→semantic_snapshots lock order
+            // is shared and deadlock-free.)
+            self.semantic_snapshots.remove(&canonical_id);
+        } else {
+            self.semantic_snapshots.remove(&canonical_id);
         }
-        self.semantic_snapshots.remove(&canonical_id);
+        #[cfg(test)]
+        self.run_after_change_commit_hook(uri);
 
         result.unwrap_or_else(|e| {
             tracing::error!("upsert failed for {}: {:?}", uri_str, e);
@@ -959,6 +991,14 @@ impl DocumentRegistry {
         {
             return;
         }
+        // SOURCE-IDENTITY FENCE: the host-cache read below happens with no
+        // lock held, so a `didChange` can commit a newer revision in the
+        // read→install window. Capture the revision this cached surface is
+        // being installed FOR, and compare under the shard write guard —
+        // never install a mapper over bytes it does not describe.
+        let Some(attempted) = self.snapshot_identity(&uri) else {
+            return;
+        };
         let Some(mapper) = self
             .host
             .get_ide(canonical_id, &self.tsx_profile.read())
@@ -966,9 +1006,14 @@ impl DocumentRegistry {
         else {
             return;
         };
+        #[cfg(test)]
+        self.run_before_projection_install_hook(&uri);
         let mut installed = false;
         if let Some(mut entry) = self.documents.get_mut(&uri_str) {
-            if entry.projection.is_none() {
+            if entry.version == attempted.version
+                && entry.document_revision == attempted.revision
+                && entry.projection.is_none()
+            {
                 entry.projection = Some(DocumentProviderProjection::carrier_ide(mapper));
                 installed = true;
             }
@@ -1067,6 +1112,14 @@ impl DocumentRegistry {
             return None;
         }
 
+        // SOURCE-IDENTITY FENCE: capture the exact revision this slow-path
+        // compile serves. The compile below is a blocking call with no lock
+        // held over it, so a `didChange` can commit a different revision while
+        // it runs — installing the produced mapper (or returning the response)
+        // would then describe bytes the document no longer holds. Same
+        // pattern as `recompile_and_refresh_mapper`.
+        let attempted = self.snapshot_identity(uri)?;
+
         // IDE-sync: drive the IDE/TSX surface, NOT the runtime `Main` node. A
         // Main-less carrier (Svelte) has a `CachedTsx` but no `Main`, so
         // `ensure_compiled` (which demands `Main`) would return
@@ -1081,10 +1134,23 @@ impl DocumentRegistry {
             return None;
         }
         let resp = self.host.get_ide(&canonical_id, &profile)?;
+        #[cfg(test)]
+        self.run_after_compile_hook(uri);
+        // A `didChange` that committed while the compile ran makes this
+        // response describe a superseded revision: install nothing and return
+        // nothing; the newer revision owes its own repair.
+        if !self.snapshot_identity_is_current(uri, &attempted) {
+            return None;
+        }
 
-        // Rebuild position mapper since TSX output was regenerated
+        // Rebuild position mapper since TSX output was regenerated. Compare
+        // under the document's shard write guard — the installation
+        // linearization point (no check→write gap).
         let mut installed = false;
         if let Some(mut entry) = self.documents.get_mut(uri.as_str()) {
+            if entry.version != attempted.version || entry.document_revision != attempted.revision {
+                return None;
+            }
             if let Some(mapper) = resp
                 .source_map
                 .as_ref()

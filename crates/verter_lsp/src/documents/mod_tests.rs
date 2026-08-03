@@ -129,6 +129,66 @@ mod source_identity_fence {
         );
     }
 
+    /// The `get_ide` SLOW path (host cache miss → recompile) must not install
+    /// a mapper — nor return output — for a revision the document no longer
+    /// holds (TE-C-15 window b: unfenced `get_mut` install).
+    #[test]
+    fn get_ide_slow_path_discards_output_when_source_moves_mid_compile() {
+        let (registry, uri) = projectionless_registry();
+        // Commit revision B: the did_change commit compiles nothing, so the
+        // host's IDE cache misses and `get_ide` must take its SLOW path.
+        let _ = registry.did_change(&uri, 2, REVISION_B);
+        assert!(registry.get_projection(&uri).is_none());
+        // While the slow-path compile runs, revision A re-commits as v3.
+        registry.set_after_compile_hook(Box::new(|registry, uri| {
+            let _ = registry.did_change(uri, 3, REVISION_A);
+        }));
+
+        let response = registry.get_ide(&uri);
+
+        assert!(
+            registry
+                .get(&uri)
+                .is_some_and(|doc| doc.source.as_ref() == REVISION_A),
+            "the interleaved edit must commit the newest revision"
+        );
+        assert!(
+            response.is_none(),
+            "the superseded compile's retained IDE output must be discarded"
+        );
+        assert!(
+            registry.get_projection(&uri).is_none(),
+            "the superseded compile's mapper must not be installed over the newer revision"
+        );
+    }
+
+    /// `install_missing_carrier_projection` reads the host cache with no
+    /// compile; an edit committed in the read→install window must reject the
+    /// now-stale mapper (TE-C-15 window b).
+    #[test]
+    fn install_missing_projection_rejects_a_mapper_from_a_superseded_revision() {
+        let (registry, uri) = projectionless_registry();
+        let canonical = uri_to_canonical_id(&uri);
+        // The host cache still holds revision A's IDE surface; revision B
+        // commits in the read→install window.
+        registry.set_before_projection_install_hook(Box::new(|registry, uri| {
+            let _ = registry.did_change(uri, 2, REVISION_B);
+        }));
+
+        registry.install_missing_carrier_projection(&canonical);
+
+        assert!(
+            registry
+                .get(&uri)
+                .is_some_and(|doc| doc.source.as_ref() == REVISION_B),
+            "the interleaved edit must commit revision B"
+        );
+        assert!(
+            registry.get_projection(&uri).is_none(),
+            "revision A's mapper must not be installed over revision B"
+        );
+    }
+
     fn compile_error(code: &str) -> Result<bool, verter_session::HostError> {
         Err(verter_session::HostError::CompileError(
             verter_session::CompileFailure {
@@ -726,4 +786,46 @@ async fn identical_text_version_close_reopen_rejects_old_semantic_completion() {
             .is_none(),
         "the previous lifetime's completion must not enter the semantic snapshot cache"
     );
+}
+
+/// TE-C-15 window a: after `did_change` commits the document entry, the stale
+/// semantic snapshot must never be observable alongside the new entry — the
+/// invalidation happens inside the same shard mutation, not after the guard
+/// drops.
+#[tokio::test(flavor = "multi_thread")]
+async fn did_change_commit_window_never_exposes_a_stale_semantic_snapshot() {
+    let registry = semantic_test_registry();
+    let uri: Uri = "file:///workspace/CommitWindow.vue".parse().unwrap();
+    let canonical_id = uri_to_canonical_id(&uri);
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SEMANTIC_REVISION_A.to_string(),
+    });
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+    assert!(
+        registry.cached_semantic_analysis(&canonical_id).is_some(),
+        "precondition: the opened revision's semantic snapshot is published"
+    );
+
+    let observed: Arc<std::sync::Mutex<Option<bool>>> = Arc::new(std::sync::Mutex::new(None));
+    let hook_observed = Arc::clone(&observed);
+    let hook_canonical = canonical_id.clone();
+    registry.set_after_change_commit_hook(Box::new(move |registry, _| {
+        *hook_observed.lock().unwrap() =
+            Some(registry.cached_semantic_analysis(&hook_canonical).is_some());
+    }));
+    let _ = registry.did_change(&uri, 2, SEMANTIC_REVISION_B);
+
+    assert_eq!(
+        *observed.lock().unwrap(),
+        Some(false),
+        "a reader observing the committed entry must never read the stale semantic snapshot"
+    );
+    assert!(registry.cached_semantic_analysis(&canonical_id).is_none());
 }

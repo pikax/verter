@@ -31,6 +31,10 @@ impl TemplateProjector<'_, '_> {
                 name_text,
                 params,
             } => self.project_snippet(block, *name, name_text, *params),
+            // An unrecognised `{#keyword}` block has no TSX projection
+            // (behaviour-preserving with the pre-classification state: an
+            // unknown block projected nothing).
+            SvelteBlockKind::Unknown { .. } => {}
         }
     }
 
