@@ -47,8 +47,24 @@ impl VerterHost {
         }
     }
 
-    /// Select a base or return-only overlay resolver context, then delegate the
-    /// semantic demand to the resolver-tier builder.
+    /// Select a base or cold-seed resolver context, then delegate the semantic
+    /// demand to the resolver-tier builder.
+    ///
+    /// The `indexed()` probe below decides the CONTEXT (base host vs a
+    /// cold-seed session context) and nothing else. It must never reach the
+    /// publication scope: `FileArtifactStore::get` is a pure cache-presence
+    /// probe, and "no `IndexedReady` is cached at this content hash yet" is
+    /// neither an overlay, nor a fenced input, nor any enumerated `ReturnOnly`
+    /// trigger. Folding it into the caller's attestation relabelled a
+    /// store-published lane as non-store-published whenever its artifact
+    /// merely was not cached yet — which made cache WARMTH decide publication
+    /// SCOPE (the same bytes publishing or not depending on the entry point)
+    /// and cost a file with zero `:class` subjects its raw-template persist.
+    ///
+    /// The cold branch instead composes the caller's own attestation with the
+    /// seed's own currentness proof, which the fixed view carries as an
+    /// explicit typed fact
+    /// ([`crate::resolver_store::ColdSeedHostStoreView::is_current`]).
     pub(crate) fn build_template_class_semantic_facts(
         &self,
         canonical: &str,
@@ -58,10 +74,10 @@ impl VerterHost {
             '_,
         >,
         raw: &verter_compiler::compile::template_data::RawTemplateData,
-        store_published: bool,
+        scope: crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope,
     ) -> crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts
     {
-        if store_published
+        if scope.is_base_publishable()
             && self
                 .project_type_store()
                 .indexed()
@@ -74,7 +90,7 @@ impl VerterHost {
                 whole_hash,
                 script,
                 raw,
-                true,
+                scope,
             );
         }
 
@@ -85,6 +101,7 @@ impl VerterHost {
         let tombstones = std::collections::HashSet::new();
         let view = crate::session_view::OverlaidViewRef::new(self, &sources, &hashes, &tombstones);
         let fixed = self.capture_batch_fixed_view(&view);
+        let scope = scope.narrowed_by_seed(fixed.cold_seed());
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             self,
@@ -93,7 +110,7 @@ impl VerterHost {
             overlay,
         );
         crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
-            &ctx, canonical, whole_hash, script, raw, false,
+            &ctx, canonical, whole_hash, script, raw, scope,
         )
     }
 
@@ -157,7 +174,12 @@ impl VerterHost {
                 bindings: &script_analysis.bindings,
             },
             &raw,
-            false,
+            // This builder's only caller is the content-override lane
+            // (`compute_override_template_analysis`): the bytes are a
+            // compile-profile override layer the store never published.
+            crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::ContentOverride,
+            ),
         );
         let class_domains = crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
             &facts, canonical, whole_hash,
@@ -329,7 +351,18 @@ impl VerterHost {
                     bindings: &snapshot.bindings,
                 },
                 &raw,
-                store_published,
+                // The lane's own bytes attestation, threaded in by the caller
+                // that captured them: a live scheduler/workspace read at one
+                // generation is store-published; the session-overlay entry
+                // point attests `false` for its own overlay bytes. The
+                // seed-currentness half is composed inside the wrapper.
+                if store_published {
+                    crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable
+                } else {
+                    crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
+                        crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::SessionOverlay,
+                    )
+                },
             );
             let class_domains =
                 crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(

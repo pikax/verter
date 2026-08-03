@@ -106,7 +106,7 @@ fn template_class_facts_for(
             bindings: &data.parse.script_analysis.bindings,
         },
         &raw,
-        true,
+        crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable,
     )
 }
 
@@ -7515,6 +7515,578 @@ const variant: Variant = 'primary'
             .is_none_or(|derived| derived.raw_template_analysis().is_none()),
         "content override facts are served return-only and never base-published"
     );
+}
+
+/// The file's authoritative current `whole_hash`, for probing whether the
+/// content-addressed artifact store already holds its `IndexedReady`.
+fn current_whole_hash(host: &VerterHost, canonical: &str) -> verter_semantic::analysis::Hash16 {
+    let snapshot = host
+        .scheduler
+        .try_get_source(canonical)
+        .expect("source snapshot");
+    snapshot
+        .downcast_data::<crate::host_executor::HostSourceData>()
+        .expect("host source data")
+        .parse
+        .whole_hash
+}
+
+/// The persisted raw-template entry's `(template, class-fact signature)` pair,
+/// or `None` when the slot declined.
+fn persisted_raw_template(
+    host: &VerterHost,
+    canonical: &str,
+) -> Option<(
+    Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    crate::fact_signature_helpers::ReadSetSignature,
+)> {
+    host.derived_raw_cache().get(canonical).and_then(|derived| {
+        derived.raw_template_analysis().map(|entry| {
+            (
+                Arc::clone(&entry.template),
+                entry.template_class_signature.clone(),
+            )
+        })
+    })
+}
+
+/// A COLD artifact store is not a fence.
+///
+/// The lazy `raw_template_analysis_for_file` lane attests
+/// `store_published = true` — live scheduler reads joined at one generation.
+/// Whether the content-addressed `FileArtifactStore` happens to hold an
+/// `IndexedReady` at that `whole_hash` yet is a CACHE-WARMTH fact: not an
+/// overlay, not a fenced input, and not one of the enumerated `ReturnOnly`
+/// triggers (overflow, budget exhaustion, cancellation, generation
+/// supersession, incomplete self-rooting, unresolved provenance). Folding it
+/// into the attestation made a zero-`:class` file's class-fact set
+/// `ReturnOnly`, which made `complete_dependency_signature()` `None`, which
+/// made `RawTemplateSlotAdmission::admitted_generation()` decline — so a file
+/// with NO class content lost its raw-template persist entirely.
+///
+/// POSITIVE: the persist happens on a cold store, and the recorded signature
+/// is EMPTY — a dependency-free fact set is an empty PRESENT signature, never
+/// an absent one (empty and overflowed/absent are different states).
+///
+/// NEGATIVE (same test): an otherwise identical file whose only class subject
+/// is unresolvable still declines the slot — the fix restored the persist
+/// without widening what `ReturnOnly` declines.
+#[test]
+fn cold_artifact_store_does_not_fence_a_store_published_class_fact_set() {
+    let host = make_host();
+
+    let zero_subject = "/workspace/src/ColdZeroSubject.vue";
+    upsert_vue(
+        &host,
+        zero_subject,
+        r#"<script setup lang="ts">
+const label = 'plain'
+</script><template><div>{{ label }}</div></template>"#,
+    );
+
+    // FIXTURE INVARIANT: the lane must run against a COLD artifact store, so
+    // it takes the cold-seed fork. A warm `IndexedReady` would take the base
+    // fork and the test would prove nothing about the cold classification.
+    let whole_hash = current_whole_hash(&host, zero_subject);
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get(zero_subject, whole_hash)
+            .is_none(),
+        "fixture invariant: no IndexedReady may be cached at the file's current \
+         whole_hash before the lazy lane runs",
+    );
+
+    let template = host
+        .raw_template_analysis_for_file(zero_subject)
+        .expect("the store-published lazy lane must serve its template");
+    assert!(
+        template
+            .elements
+            .iter()
+            .all(|element| element.dynamic_classes.is_empty()),
+        "fixture invariant: the file carries no `:class` subject at all",
+    );
+
+    let (_, signature) = persisted_raw_template(&host, zero_subject).expect(
+        "a store-published lane must persist its raw template even when the \
+         artifact store is COLD — artifact-cache warmth is not a fence and \
+         cannot decide publication scope",
+    );
+    assert!(
+        !signature.overflowed,
+        "a dependency-free class-fact set is not an overflow",
+    );
+    assert!(
+        signature.facts.is_empty(),
+        "a dependency-free class-fact set records an EMPTY PRESENT signature; \
+         got {} facts",
+        signature.facts.len(),
+    );
+
+    // NEGATIVE half — the decline is not widened. The same host, the same
+    // lane, the same store-published attestation: a file whose ONLY class
+    // subject is unresolvable has no rail that could fire when the dependency
+    // later arrives, so it must still decline.
+    let unresolvable = "/workspace/src/ColdUnresolvableSubject.vue";
+    upsert_vue(
+        &host,
+        unresolvable,
+        r#"<script setup lang="ts">
+import type { Absent } from './absent-module'
+const variant: Absent = null as never
+</script><template><div :class="variant" /></template>"#,
+    );
+    let unresolvable_template = host
+        .raw_template_analysis_for_file(unresolvable)
+        .expect("the lane still serves the template");
+    assert!(
+        unresolvable_template.elements[0].dynamic_classes.is_empty(),
+        "an unresolvable class subject publishes no closed domain",
+    );
+    assert!(
+        persisted_raw_template(&host, unresolvable).is_none(),
+        "an unresolvable class row keeps the raw-template slot DECLINED — \
+         admitting it would serve a stale empty domain forever",
+    );
+}
+
+/// Run the lazy raw-template lane once on a fresh host, optionally pre-warming
+/// the file's `IndexedReady` artifact first so the lane takes the BASE fork
+/// instead of the cold-seed fork. Returns the published class domain of the
+/// first element and the persisted entry's class-fact signature — `None` when
+/// the slot declined.
+#[allow(clippy::type_complexity)]
+fn lazy_template_lane_arm(
+    canonical: &str,
+    owner_source: &str,
+    dependency: Option<(&str, &str, &str)>,
+    prewarm_indexed: bool,
+) -> (
+    Vec<String>,
+    Option<crate::fact_signature_helpers::ReadSetSignature>,
+) {
+    let host = make_host();
+    if let Some((_, dep_path, dep_source)) = dependency {
+        upsert_non_sfc(&host, dep_path, dep_source);
+    }
+    upsert_vue(&host, canonical, owner_source);
+    if let Some((specifier, dep_path, _)) = dependency {
+        host.set_import_dependencies(canonical, vec![exact_dependency(specifier, dep_path)]);
+    }
+
+    let whole_hash = current_whole_hash(&host, canonical);
+    if prewarm_indexed {
+        let indexed = host
+            .ensure_indexed_ready(canonical)
+            .expect("the pre-warm indexing read must materialise IndexedReady");
+        assert_eq!(
+            indexed.whole_hash, whole_hash,
+            "warm-arm invariant: the pre-warmed artifact is at the file's CURRENT hash",
+        );
+    }
+    assert_eq!(
+        host.project_type_store()
+            .indexed()
+            .get(canonical, whole_hash)
+            .is_some(),
+        prewarm_indexed,
+        "arm invariant: the artifact store's warmth for this whole_hash must be \
+         exactly what the arm asked for (prewarm_indexed = {prewarm_indexed})",
+    );
+
+    let template = host
+        .raw_template_analysis_for_file(canonical)
+        .expect("the lazy lane must serve its template");
+    let domain = template.elements[0].dynamic_classes.clone();
+    (
+        domain,
+        persisted_raw_template(&host, canonical).map(|(_, signature)| signature),
+    )
+}
+
+/// The CROSS-FILE facts a signature recorded — every fact attributed to a
+/// canonical other than `owner`. These are the rails the owner's own
+/// `source_generation` stamp cannot see, so losing one is the only way a
+/// different observation granularity could actually weaken invalidation.
+fn cross_file_facts(
+    signature: &crate::fact_signature_helpers::ReadSetSignature,
+    owner: &str,
+) -> rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> {
+    signature
+        .facts
+        .iter()
+        .filter(|fact| fact.canonical_id().is_some_and(|id| id != owner))
+        .cloned()
+        .collect()
+}
+
+/// The owner-rooted `FileWholeHash` facts a signature recorded — the rail every
+/// entry must carry.
+fn owner_whole_hash_facts(
+    signature: &crate::fact_signature_helpers::ReadSetSignature,
+    owner: &str,
+) -> rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> {
+    signature
+        .facts
+        .iter()
+        .filter(|fact| {
+            matches!(fact, crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == owner)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Cache population is path-independent: the raw-template persist verdict, the
+/// served template, and the recorded class-fact invalidation rail must not
+/// depend on whether the `IndexedReady` artifact happened to be cached first.
+///
+/// Two hosts, the SAME bytes, two orders — one pre-warms the artifact store
+/// through `ensure_indexed_ready` (the lane then takes the base fork), one does
+/// not (the cold-seed fork). Run for a purely LOCAL closed domain and again for
+/// a CROSS-FILE one.
+///
+/// On the recorded signature this asserts what path-independence actually
+/// requires, not raw set equality: the same owner `FileWholeHash` rooting, and
+/// the SAME cross-file fact set — no rail the owner's `source_generation` stamp
+/// cannot see may be lost by taking the cold fork. The two forks legitimately
+/// differ by OWNER-SCOPED incidental observations (the base context reads the
+/// owner's already-materialised route surface; the cold-seed context resolves
+/// without it), and a signature must record what its compute actually observed
+/// — fabricating the missing observation to force byte equality would be the
+/// real defect. The cross-file pair proves the cross-file assertion is not
+/// vacuous: its shared fact set is non-empty.
+///
+/// DISCRIMINATION: the last arm's verdict is legitimately `false` (a
+/// content-override lane never populates the base slot), so the agreeing
+/// verdicts above are not "both `true` by construction".
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn raw_template_persist_is_independent_of_indexed_artifact_warmth() {
+    // ── Pair 1: a purely LOCAL closed domain ──
+    const LOCAL: &str = "/workspace/src/WarmthIndependentLocal.vue";
+    const LOCAL_SOURCE: &str = r#"<script setup lang="ts">
+type Variant = 'primary' | 'secondary'
+const variant: Variant = 'primary'
+</script><template><div :class="variant" /></template>"#;
+
+    let (cold_domain, cold_signature) = lazy_template_lane_arm(LOCAL, LOCAL_SOURCE, None, false);
+    let (warm_domain, warm_signature) = lazy_template_lane_arm(LOCAL, LOCAL_SOURCE, None, true);
+    let cold_signature = cold_signature.expect(
+        "path-independent cache population: the COLD-store order must reach the \
+         SAME persist verdict as the warm-store order — a cold artifact store is \
+         not a fence",
+    );
+    let warm_signature =
+        warm_signature.expect("the warm-store order persists (the pre-fix behaviour)");
+
+    assert_eq!(
+        cold_domain,
+        ["primary", "secondary"],
+        "the cold-store order still publishes the closed domain",
+    );
+    assert_eq!(
+        cold_domain, warm_domain,
+        "the served class domain must not depend on artifact-cache warmth",
+    );
+    assert_eq!(
+        cold_signature.overflowed, warm_signature.overflowed,
+        "the overflow state must not depend on artifact-cache warmth",
+    );
+    let cold_root = owner_whole_hash_facts(&cold_signature, LOCAL);
+    assert!(
+        !cold_root.is_empty(),
+        "every admitted entry roots on the owner's own FileWholeHash",
+    );
+    assert_eq!(
+        cold_root,
+        owner_whole_hash_facts(&warm_signature, LOCAL),
+        "the owner rooting must not depend on artifact-cache warmth",
+    );
+    assert_eq!(
+        cross_file_facts(&cold_signature, LOCAL),
+        cross_file_facts(&warm_signature, LOCAL),
+        "no cross-file rail may be lost by taking the cold fork: cold={:?} warm={:?}",
+        cold_signature.facts,
+        warm_signature.facts,
+    );
+
+    // ── Pair 2: a CROSS-FILE closed domain — proves the cross-file assertion
+    // above is not vacuously satisfied by two empty sets. ──
+    const IMPORTED: &str = "/workspace/src/WarmthIndependentImported.vue";
+    const IMPORTED_SOURCE: &str = r#"<script setup lang="ts">
+import type { Variant } from './warmth-types'
+const variant: Variant = 'primary'
+</script><template><div :class="variant" /></template>"#;
+    let dependency = Some((
+        "./warmth-types",
+        "/workspace/src/warmth-types.ts",
+        "export type Variant = 'primary' | 'secondary';",
+    ));
+
+    let (cold_imported_domain, cold_imported_signature) =
+        lazy_template_lane_arm(IMPORTED, IMPORTED_SOURCE, dependency, false);
+    let (warm_imported_domain, warm_imported_signature) =
+        lazy_template_lane_arm(IMPORTED, IMPORTED_SOURCE, dependency, true);
+    let cold_imported_signature = cold_imported_signature.expect(
+        "path-independent cache population: a cross-file closed domain persists \
+         from the COLD-store order too",
+    );
+    let warm_imported_signature =
+        warm_imported_signature.expect("the warm-store order persists the cross-file domain");
+
+    assert_eq!(
+        cold_imported_domain,
+        ["primary", "secondary"],
+        "the cold-store order resolves the IMPORTED closed domain",
+    );
+    assert_eq!(
+        cold_imported_domain, warm_imported_domain,
+        "the served cross-file class domain must not depend on artifact-cache warmth",
+    );
+    let cold_cross = cross_file_facts(&cold_imported_signature, IMPORTED);
+    assert!(
+        !cold_cross.is_empty(),
+        "non-vacuity: a cross-file class domain records at least one cross-file \
+         rail; got {:?}",
+        cold_imported_signature.facts,
+    );
+    assert_eq!(
+        cold_cross,
+        cross_file_facts(&warm_imported_signature, IMPORTED),
+        "no cross-file rail may be lost by taking the cold fork: cold={:?} warm={:?}",
+        cold_imported_signature.facts,
+        warm_imported_signature.facts,
+    );
+    assert_eq!(
+        owner_whole_hash_facts(&cold_imported_signature, IMPORTED),
+        owner_whole_hash_facts(&warm_imported_signature, IMPORTED),
+        "the owner rooting must not depend on artifact-cache warmth",
+    );
+
+    // ── DISCRIMINATION: a verdict that is legitimately `false`. A
+    // content-override lane is a genuinely fenced input and must never populate
+    // the base slot, so the agreeing verdicts above are a real agreement rather
+    // than an unfalsifiable one. ──
+    let override_host = make_host();
+    upsert_vue(&override_host, LOCAL, LOCAL_SOURCE);
+    let profile = CompileProfile::default();
+    let profile_hash = crate::hash::compile_profile_hash(&profile);
+    let _ = override_host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: LOCAL.to_string(),
+            compile_profile: profile,
+            overrides: vec![BlockOverrideEntry {
+                block_type: PreprocessorBlockType::Template,
+                index: 0,
+                code: Arc::from("<div :class=\"variant\" /><span :class=\"variant\" />"),
+                source_map: None,
+            }],
+        })
+        .expect("template override must apply");
+    let override_template = override_host
+        .compute_override_template_analysis(LOCAL, profile_hash)
+        .expect("the override lane must serve its own template");
+    assert_eq!(
+        override_template.elements.len(),
+        2,
+        "discrimination invariant: the served template is the OVERRIDE's template",
+    );
+    assert_eq!(
+        override_template.elements[0].dynamic_classes,
+        ["primary", "secondary"],
+        "discrimination invariant: the override lane still SERVES its resolved \
+         domain — it is fenced from publishing, not from resolving",
+    );
+    assert!(
+        persisted_raw_template(&override_host, LOCAL).is_none(),
+        "a content-override lane is a fenced INPUT and must never populate the \
+         base raw-template slot — this is the arm whose verdict is legitimately \
+         false, so the arms above are not both true by construction",
+    );
+}
+
+/// THE DIRECT GUARD on the ratified sentence: "overlay or fenced inputs remain
+/// return-only and cannot populate base caches".
+///
+/// Three arms, all NEGATIVE, one per producer of a genuine fence. Each arm
+/// first proves its lane still RESOLVES and SERVES the closed domain, so the
+/// decline is a publication fence and not a resolution failure — a decline that
+/// happened because nothing resolved would guard nothing.
+///
+/// 1. content-override bytes (`compute_override_template_analysis` →
+///    `build_template_analysis`);
+/// 2. store-published bytes over a NON-CURRENT cold seed
+///    (`ColdSeedHostStoreView::is_current() == false`) with a fully resolvable
+///    closed domain — no base slot AND no pure-content entry;
+/// 3. session-overlay bytes (`get_analysis_via_view`, `store_published == false`).
+///
+/// WHICH ARM CATCHES WHICH REGRESSION — recorded, because the three arms are
+/// NOT equally railed, and claiming otherwise would overstate them.
+///
+/// * Arm 2's base-slot decline is carried by the class-fact publication scope
+///   ALONE: removing the fenced arm from the builder turns it RED, as does
+///   making the scope ignore the seed's currentness. It is the discriminating
+///   arm for this rail.
+/// * Arms 1 and 3 are genuinely fenced lanes whose base-slot decline is held by
+///   rails OUTSIDE the class-fact scope, so no scope mutation can falsify them:
+///   `build_template_analysis` (arm 1) has no persist site at all, and the
+///   overlay builder (arm 3) attests `source_generation: None` on top of
+///   `store_published: false` — either alone declines. They are therefore
+///   characterization guards on the ratified sentence (they fire if a future
+///   change adds a persist site to the override lane, or lets an overlay lane
+///   attest a node generation), not discriminators of this change. Their
+///   non-vacuity halves — each fenced lane still RESOLVES and SERVES its own
+///   closed domain — are the assertions that discriminate here: a fence that
+///   suppressed resolution rather than publication would fail them.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn fenced_and_overridden_class_fact_lanes_still_never_populate_the_base_slot() {
+    const SOURCE: &str = r#"<script setup lang="ts">
+type Variant = 'primary' | 'secondary'
+const variant: Variant = 'primary'
+</script><template><div :class="variant" /></template>"#;
+
+    // ── Arm 1: content-override bytes ──
+    {
+        let host = make_host();
+        let canonical = "/workspace/src/FencedOverride.vue";
+        upsert_vue(&host, canonical, SOURCE);
+        let profile = CompileProfile::default();
+        let profile_hash = crate::hash::compile_profile_hash(&profile);
+        let _ = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: canonical.to_string(),
+                compile_profile: profile,
+                overrides: vec![BlockOverrideEntry {
+                    block_type: PreprocessorBlockType::Template,
+                    index: 0,
+                    code: Arc::from("<span :class=\"variant\" />"),
+                    source_map: None,
+                }],
+            })
+            .expect("template override must apply");
+        let served = host
+            .compute_override_template_analysis(canonical, profile_hash)
+            .expect("the override lane must serve its own template");
+        assert_eq!(
+            served.elements[0].dynamic_classes,
+            ["primary", "secondary"],
+            "arm 1 non-vacuity: the override lane RESOLVES and SERVES the closed \
+             domain — it is fenced from publishing, not from resolving",
+        );
+        assert!(
+            persisted_raw_template(&host, canonical).is_none(),
+            "arm 1: content-override bytes must never populate the base \
+             raw-template slot",
+        );
+        assert_eq!(
+            host.compile_output_pure_content_entry_count(),
+            0,
+            "arm 1: content-override facts must never seed the pure-content cache",
+        );
+    }
+
+    // ── Arm 2: store-published bytes over a NON-CURRENT cold seed ──
+    {
+        let host = make_host();
+        let canonical = "/workspace/src/FencedStaleSeed.vue";
+        upsert_vue(&host, canonical, SOURCE);
+        // The lane must take the COLD-SEED fork, where the seed's own
+        // currentness is the second half of the derivation. A warm
+        // `IndexedReady` would take the base fork and the seed would never be
+        // consulted.
+        let whole_hash = current_whole_hash(&host, canonical);
+        assert!(
+            host.project_type_store()
+                .indexed()
+                .get(canonical, whole_hash)
+                .is_none(),
+            "arm 2 invariant: the artifact store must be cold so the lane takes \
+             the cold-seed fork",
+        );
+
+        // Force every store-view publish to decline WITHOUT advancing any token
+        // dimension, so the read exhausts its bounded retry and hands back a
+        // `StoreViewRead::ReturnOnly` — a known-stale seed and nothing else.
+        let _ = host.resolver_store_view_read();
+        host.bump_store_view_epoch();
+        crate::resolver_store::HostStoreView::arm_reset_fence_decline_always_for_tests();
+        let seed_is_stale = !host.resolver_store_view_read().is_current_for_tests();
+        let served = host.raw_template_analysis_for_file(canonical);
+        crate::resolver_store::HostStoreView::disarm_reset_fence_decline_always_for_tests();
+
+        assert!(
+            seed_is_stale,
+            "arm 2 choreography: the armed knob must produce a known non-current \
+             store-view read",
+        );
+        let served = served.expect("arm 2: a fenced lane still SERVES its caller");
+        assert_eq!(
+            served.elements[0].dynamic_classes,
+            ["primary", "secondary"],
+            "arm 2 non-vacuity: the domain is fully resolvable, so the decline \
+             below is attributable to the non-current seed alone",
+        );
+        assert!(
+            persisted_raw_template(&host, canonical).is_none(),
+            "arm 2: store-published bytes resolved against a KNOWN-STALE seed are \
+             return-only — they must not populate the base raw-template slot",
+        );
+        assert_eq!(
+            host.compile_output_pure_content_entry_count(),
+            0,
+            "arm 2: a non-current seed must not seed the pure-content cache",
+        );
+    }
+
+    // ── Arm 3: session-overlay bytes ──
+    {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = Arc::new(VerterHost::new(HostConfig::default(), workspace));
+        let canonical = "/workspace/src/FencedOverlay.vue";
+        upsert_vue(&host, canonical, SOURCE);
+
+        let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> =
+            rustc_hash::FxHashMap::default();
+        overlays.insert(
+            canonical.to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+type Variant = 'overlaid-a' | 'overlaid-b'
+const variant: Variant = 'overlaid-a'
+</script><template><div :class="variant" /></template>"#,
+            ),
+        );
+        let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+
+        let snapshot = host
+            .get_analysis_via_view(canonical, &view)
+            .expect("the overlay arm must serve the overlay snapshot");
+        let served = snapshot
+            .template
+            .as_ref()
+            .expect("the overlay caller must be served a template");
+        assert_eq!(
+            served.elements[0].dynamic_classes,
+            ["overlaid-a", "overlaid-b"],
+            "arm 3 non-vacuity: the overlay lane RESOLVES and SERVES the OVERLAY's \
+             own closed domain — it is fenced from publishing, not from resolving",
+        );
+        assert!(
+            persisted_raw_template(&host, canonical).is_none(),
+            "arm 3: session-overlay bytes must never populate the base \
+             raw-template slot (overlay results never populate base caches)",
+        );
+        assert_eq!(
+            host.compile_output_pure_content_entry_count(),
+            0,
+            "arm 3: overlay facts must never seed the pure-content cache",
+        );
+    }
 }
 
 /// @ai-generated - template slots computed even when type deps are unresolved

@@ -3187,7 +3187,15 @@ impl VerterHost {
                     bindings: &snapshot.script_bindings,
                 },
                 raw,
-                snapshot.content_override_layer.is_none(),
+                // The compile lane's bytes attestation: an override layer is a
+                // fenced input, plain snapshot bytes are store-published. The
+                // seed-currentness half is composed inside the wrapper.
+                match snapshot.content_override_layer {
+                    Some(_) => crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
+                        crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::ContentOverride,
+                    ),
+                    None => crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable,
+                },
             );
             let class_domains =
                 crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(

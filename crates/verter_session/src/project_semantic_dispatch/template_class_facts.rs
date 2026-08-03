@@ -23,6 +23,7 @@ use super::symbol_identity::TerminalSymbolInstantiationDemandOutcome;
 use super::ProjectSemanticDispatch;
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::resolver_core::{FactReadSetFinalise, ResolverContext};
+use crate::resolver_store::ColdSeedHostStoreView;
 use crate::semantic_query::{
     LiteralValue, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ScopeId,
     SemanticNodeData, SemanticNodeId, ValueRootKey,
@@ -34,6 +35,69 @@ pub(crate) type SessionTemplateClassSemanticFacts = TemplateClassSemanticFacts<R
 pub(crate) struct TemplateClassScriptInputs<'a> {
     pub(crate) macros: &'a [AnalyzedMacro],
     pub(crate) bindings: &'a [AnalyzedBinding],
+}
+
+/// Why a template-class fact set may not populate BASE caches.
+///
+/// Every variant is a property of the computation's INPUTS (bytes the store
+/// never published) or of the store-view seed the resolver context was built
+/// from. Artifact-cache warmth is deliberately NOT one of them: "the
+/// content-addressed artifact store holds no entry for this content hash yet"
+/// is neither an overlay nor a fenced input, and it appears in no enumerated
+/// `ReturnOnly` trigger (overflow, budget exhaustion, cancellation, generation
+/// supersession, incomplete self-rooting, unresolved provenance).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemplateClassFenceReason {
+    /// The bytes are a compile-profile content-override layer.
+    ContentOverride,
+    /// The bytes come from a session overlay.
+    SessionOverlay,
+    /// The bytes are store-published, but the resolver context seeded from a
+    /// known non-current (`StoreViewRead::ReturnOnly`) store-view read.
+    NonCurrentSeed,
+}
+
+/// Whether a template-class fact set may populate BASE caches.
+///
+/// TYPED ADMISSION — no boolean flag decides cacheability. The only inputs
+/// that can yield [`Self::Fenced`] are a call site's own attestation about the
+/// bytes it is handing the builder and the store-view seed's OWN currentness
+/// proof, composed through [`Self::narrowed_by_seed`]. That method takes the
+/// real [`ColdSeedHostStoreView`], not a flag, and there is no `bool`
+/// parameter, no `From<bool>`, and no cache-presence constructor anywhere on
+/// this type — so a call site cannot re-derive the fence from artifact
+/// warmth, which is exactly the derivation that made publication scope depend
+/// on the entry point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemplateClassPublicationScope {
+    /// Store-published bytes over a seed that is not known-stale: the fact set
+    /// may warm the class-fact rails and the base raw-template slot.
+    BasePublishable,
+    /// Return-only: serve the facts to this caller, publish nothing.
+    Fenced(TemplateClassFenceReason),
+}
+
+impl TemplateClassPublicationScope {
+    /// Compose a call site's bytes attestation with the store-view seed's OWN
+    /// currentness proof ([`ColdSeedHostStoreView::is_current`]).
+    ///
+    /// An already-fenced attestation keeps its reason (a content override does
+    /// not become base-publishable by seeding from a current read);
+    /// store-published bytes over a known-stale seed narrow to
+    /// [`TemplateClassFenceReason::NonCurrentSeed`].
+    #[must_use]
+    pub(crate) fn narrowed_by_seed(self, seed: &ColdSeedHostStoreView) -> Self {
+        match self {
+            Self::Fenced(reason) => Self::Fenced(reason),
+            Self::BasePublishable if seed.is_current() => Self::BasePublishable,
+            Self::BasePublishable => Self::Fenced(TemplateClassFenceReason::NonCurrentSeed),
+        }
+    }
+
+    /// Whether this scope may reach the base publication rails.
+    pub(crate) fn is_base_publishable(self) -> bool {
+        matches!(self, Self::BasePublishable)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -59,7 +123,7 @@ pub(crate) fn build_template_class_semantic_facts(
     whole_hash: verter_semantic::analysis::Hash16,
     script: TemplateClassScriptInputs<'_>,
     raw: &RawTemplateData,
-    store_published: bool,
+    scope: TemplateClassPublicationScope,
 ) -> SessionTemplateClassSemanticFacts {
     let host = ctx.host_for_fact_tracer_install();
     // Stamp the revision the classification ACTUALLY RESOLVED AGAINST — the
@@ -118,7 +182,14 @@ pub(crate) fn build_template_class_semantic_facts(
             ReadSetSignature::overflow()
         }
     };
-    if !store_published {
+    // A FENCED input is return-only: content-override bytes, session-overlay
+    // bytes, and a known-stale store-view seed all serve their caller and
+    // publish nothing. `BasePublishable` leaves the per-row / finalise
+    // verdicts above untouched — in particular a dependency-free (zero
+    // requested subject) fact set stays `Complete` with an EMPTY signature,
+    // which is what `TemplateClassCacheAdmission::not_applicable` already says
+    // in the same voice.
+    if let TemplateClassPublicationScope::Fenced(_) = scope {
         completeness = TemplateClassFactsCompleteness::ReturnOnly;
     }
 
@@ -855,6 +926,187 @@ fn is_simple_identifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Typed admission (rule 16 — no boolean flag decides cacheability), pinned
+    /// on the type's own surface.
+    ///
+    /// The scope composes from exactly two facts: a call site's attestation
+    /// about the bytes it hands the builder, and the store-view seed's OWN
+    /// currentness proof. `narrowed_by_seed` takes the REAL
+    /// [`ColdSeedHostStoreView`] — both states are produced here by the manager
+    /// itself, never manufactured — and the mapping is pinned in every
+    /// direction:
+    ///
+    /// * `(store-published, proven-current seed)` → `BasePublishable`
+    /// * `(store-published, non-current seed)` → `Fenced(NonCurrentSeed)`
+    /// * `(fenced bytes, _)` → the caller's own `Fenced(reason)`, preserved
+    ///
+    /// The STRUCTURAL half is the absence of any `bool` / `From<bool>` /
+    /// cache-presence constructor on [`TemplateClassPublicationScope`]: the only
+    /// way to reach `Fenced(NonCurrentSeed)` is to hand `narrowed_by_seed` a
+    /// seed that itself reports non-current, so no call site can re-derive the
+    /// fence from artifact-cache warmth. That is enforced by the type's own
+    /// surface, not by any source scan.
+    ///
+    /// Finally: `BasePublishable` leaves a zero-subject (dependency-free) fact
+    /// set `Complete` with an EMPTY signature, and the fenced scope is the only
+    /// thing that turns the SAME fact set `ReturnOnly` with no complete
+    /// signature — empty and absent are different states.
+    #[test]
+    fn template_class_publication_scope_is_typed_and_cache_presence_cannot_fence() {
+        use crate::types::{HostConfig, UpsertRequest};
+        use crate::VerterHost;
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let canonical = "/scope/ZeroSubject.vue";
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical.to_string()),
+                input_id: canonical.to_string(),
+                source: Arc::from(
+                    "<script setup lang=\"ts\">\nconst label = 'plain'\n</script>\n<template><div>{{ label }}</div></template>",
+                ),
+                file_language: verter_language::LanguageRegistry::global()
+                    .classify_static(canonical)
+                    .static_resolution(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert must succeed");
+
+        // ── Real seeds, both states, produced by the store-view manager ──
+        let current_seed = host.resolver_store_view_read().into_cold_seed_view();
+        assert!(
+            current_seed.is_current(),
+            "fixture invariant: a quiescent host yields a proven-current read",
+        );
+        // Force every publish to decline WITHOUT advancing a token dimension, so
+        // the bounded retry exhausts and the read is a typed `ReturnOnly`.
+        host.bump_store_view_epoch();
+        crate::resolver_store::HostStoreView::arm_reset_fence_decline_always_for_tests();
+        let stale_seed = host.resolver_store_view_read().into_cold_seed_view();
+        crate::resolver_store::HostStoreView::disarm_reset_fence_decline_always_for_tests();
+        assert!(
+            !stale_seed.is_current(),
+            "fixture invariant: the armed knob yields a KNOWN non-current seed",
+        );
+
+        // ── The mapping, pinned in every direction ──
+        assert_eq!(
+            TemplateClassPublicationScope::BasePublishable.narrowed_by_seed(&current_seed),
+            TemplateClassPublicationScope::BasePublishable,
+            "store-published bytes over a proven-current seed stay base-publishable",
+        );
+        assert_eq!(
+            TemplateClassPublicationScope::BasePublishable.narrowed_by_seed(&stale_seed),
+            TemplateClassPublicationScope::Fenced(TemplateClassFenceReason::NonCurrentSeed),
+            "store-published bytes over a KNOWN-STALE seed are fenced — and this \
+             is the ONLY fence the seed can produce",
+        );
+        for reason in [
+            TemplateClassFenceReason::SessionOverlay,
+            TemplateClassFenceReason::ContentOverride,
+        ] {
+            let fenced = TemplateClassPublicationScope::Fenced(reason);
+            assert_eq!(
+                fenced.narrowed_by_seed(&current_seed),
+                fenced,
+                "a fenced attestation keeps its own reason ({reason:?}) — seeding \
+                 from a current read never launders fenced bytes",
+            );
+            assert_eq!(
+                fenced.narrowed_by_seed(&stale_seed),
+                fenced,
+                "a fenced attestation keeps its own reason ({reason:?}) over a \
+                 stale seed too",
+            );
+            assert!(
+                !fenced.is_base_publishable(),
+                "a fenced scope never reaches the base publication rails",
+            );
+        }
+        assert!(
+            TemplateClassPublicationScope::BasePublishable.is_base_publishable(),
+            "the base-publishable scope reaches the base publication rails",
+        );
+
+        // ── `BasePublishable` leaves a zero-subject fact set Complete + EMPTY ──
+        let source_snapshot = host
+            .scheduler
+            .try_get_source(canonical)
+            .expect("source snapshot");
+        let data = source_snapshot
+            .downcast_data::<crate::host_executor::HostSourceData>()
+            .expect("host source data");
+        let raw = crate::parse::compile_template_data(
+            &data.file_language,
+            source_snapshot.source.as_ref(),
+            data.framework_parse.as_deref(),
+            true,
+            &host.provenance,
+        )
+        .expect("raw template data");
+        let script = TemplateClassScriptInputs {
+            macros: &data.parse.script_analysis.macros,
+            bindings: &data.parse.script_analysis.bindings,
+        };
+
+        let publishable = build_template_class_semantic_facts(
+            &host,
+            canonical,
+            data.parse.whole_hash,
+            script,
+            &raw,
+            TemplateClassPublicationScope::BasePublishable,
+        );
+        assert!(
+            publishable.requested_subjects().is_empty() && publishable.rows().is_empty(),
+            "fixture invariant: the file requests ZERO class subjects",
+        );
+        assert_eq!(
+            publishable.completeness(),
+            TemplateClassFactsCompleteness::Complete,
+            "a dependency-free fact set over base-publishable bytes is COMPLETE — \
+             a cold artifact store is not a fence",
+        );
+        assert!(
+            publishable.dependency_signature().facts.is_empty()
+                && !publishable.dependency_signature().overflowed,
+            "a dependency-free fact set records an EMPTY PRESENT signature",
+        );
+        assert!(
+            complete_dependency_signature(&publishable).is_some_and(|s| s.facts.is_empty()),
+            "the raw-template slot's invalidation rail is PRESENT and empty, so \
+             the slot admits",
+        );
+        assert!(
+            owner_only_publication_safe(&publishable),
+            "a dependency-free fact set is trivially owner-only",
+        );
+
+        // The fenced scope is the ONLY difference that flips the same fact set.
+        let fenced = build_template_class_semantic_facts(
+            &host,
+            canonical,
+            data.parse.whole_hash,
+            script,
+            &raw,
+            TemplateClassPublicationScope::Fenced(TemplateClassFenceReason::NonCurrentSeed),
+        );
+        assert_eq!(
+            fenced.completeness(),
+            TemplateClassFactsCompleteness::ReturnOnly,
+            "fenced bytes make the SAME fact set return-only",
+        );
+        assert!(
+            complete_dependency_signature(&fenced).is_none(),
+            "a return-only fact set has no complete signature, so the raw-template \
+             slot declines",
+        );
+        assert!(
+            !owner_only_publication_safe(&fenced),
+            "a return-only fact set declines the pure-content publish",
+        );
+    }
 
     #[test]
     fn wrapper_export_vocabulary_is_closed_and_writable_computed_normalizes() {
