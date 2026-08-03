@@ -1,5 +1,15 @@
-//! Require-mode (fail-closed) provider gating for the real-provider test
-//! harness: the provider-kind identity and the absent-provider policy.
+//! Fail-closed provider gating for the real-provider test harness: the
+//! provider-kind identity, and the policy for a test that obtained no session.
+//!
+//! Two orthogonal inputs decide that policy, and both matter:
+//!
+//! - the CAUSE ([`ProviderUnavailable`]) — was the engine merely absent, or was
+//!   it found and then crashed;
+//! - the run's require-mode (`VERTER_REQUIRE_{TSGO,TSSERVER}=1`, set by CI).
+//!
+//! A crash fails on every run; an absence fails only when the run requires the
+//! engine. Folding the cause away is what let an entire provider lane report
+//! passes on a platform where not one provider process ever started.
 //!
 //! Split from [`crate::test_harness`] so the pure decision surface
 //! (`provider_absence_outcome`) stays independently unit-testable and harness
@@ -44,26 +54,64 @@ impl TestProviderKind {
 // Require-mode (fail-closed) provider gating
 // ---------------------------------------------------------------------------
 
-/// What an absent provider means for a real-provider test: a HARD failure when
-/// the run requires that provider (`VERTER_REQUIRE_{TSGO,TSSERVER}=1`, e.g.
-/// strict CI), else a graceful skip. Pure so both branches are unit-tested
-/// regardless of whether the provider happens to be installed on the running
-/// machine.
+/// WHY a real-provider test obtained no session. The two causes are NOT
+/// interchangeable, and collapsing them is what made an entire provider lane
+/// vacuous on one platform while reporting green.
+///
+/// A machine that does not have the engine is a legitimate platform absence: the
+/// test has nothing to run against and skipping is the honest answer (unless the
+/// run declares the engine required). An engine that was FOUND, started, and
+/// then died is a different event entirely — the platform HAS the provider, so
+/// something about the environment or the harness is broken, and reporting that
+/// as "provider not available" launders a fault into an expected condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderUnavailable {
+    /// Nothing was ever started: discovery found no engine, or the toolchain
+    /// support policy REFUSED every candidate it found. A platform absence.
+    NotFound,
+    /// An engine was discovered and a process WAS started, and it failed to
+    /// become usable — a spawn or `--api` attach crash. An environment or
+    /// harness fault, never a platform absence.
+    SpawnFailed,
+}
+
+/// What "no session" means for a real-provider test: a HARD failure, or a
+/// graceful skip. Pure so both branches are unit-tested regardless of whether
+/// the provider happens to be installed on the running machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderAbsence {
-    /// Required but missing — the test must FAIL (never skip-as-pass).
+    /// The test must FAIL (never skip-as-pass): either the run requires the
+    /// provider, or the provider was found and CRASHED.
     HardFail,
-    /// Not required — record a skip and degrade gracefully.
+    /// A genuine platform absence on a run that does not require the provider —
+    /// record a skip and degrade gracefully.
     SkipWithReason,
 }
 
-/// Pure decision: given whether the provider is required, how should its
-/// absence be handled.
-pub(crate) fn provider_absence_outcome(required: bool) -> ProviderAbsence {
-    if required {
-        ProviderAbsence::HardFail
-    } else {
-        ProviderAbsence::SkipWithReason
+/// Pure decision: given WHY no session was obtained and whether the run requires
+/// the provider, how should that be handled.
+///
+/// A [`ProviderUnavailable::SpawnFailed`] cause is a HARD failure on every run,
+/// require-mode or not. This is deliberately NOT a require-mode question: the
+/// require env answers "must this machine have the engine", and a crashed spawn
+/// has already answered that YES — the engine was there. Routing it through the
+/// require gate is what let a Windows-only exec-boundary defect report 93 green
+/// passes for tests that never started a single provider process, while CI
+/// (which sets the require env) stayed green and honest and so never contradicted
+/// them.
+pub(crate) fn provider_absence_outcome(
+    cause: ProviderUnavailable,
+    required: bool,
+) -> ProviderAbsence {
+    match cause {
+        ProviderUnavailable::SpawnFailed => ProviderAbsence::HardFail,
+        ProviderUnavailable::NotFound => {
+            if required {
+                ProviderAbsence::HardFail
+            } else {
+                ProviderAbsence::SkipWithReason
+            }
+        }
     }
 }
 
@@ -85,10 +133,16 @@ pub(crate) enum BodyReceiptStatus {
     BodyReturned,
     /// The body recorded a degradation and never reached its assertions.
     SkippedWarmup,
-    /// No session was ever built: the provider was absent, unspawnable, or
-    /// REJECTED by the toolchain support policy (e.g. a below-floor tsgo). The
-    /// body never started, so it can attest nothing.
+    /// No session was ever built because no engine EXISTS here: the provider was
+    /// absent, or REJECTED by the toolchain support policy (e.g. a below-floor
+    /// tsgo). The body never started, so it can attest nothing.
     SkippedNoProvider,
+    /// No session was built because an engine that DOES exist here was started
+    /// and crashed. Distinct from [`Self::SkippedNoProvider`] because it is not a
+    /// skip at all: the test FAILS. The receipt is still minted, before the
+    /// failure, so a log scan can separate the fault from a platform absence
+    /// instead of finding the two under one token.
+    SpawnCrashed,
 }
 
 impl BodyReceiptStatus {
@@ -98,6 +152,7 @@ impl BodyReceiptStatus {
             BodyReceiptStatus::BodyReturned => "body-returned",
             BodyReceiptStatus::SkippedWarmup => "SKIPPED-WARMUP",
             BodyReceiptStatus::SkippedNoProvider => "SKIPPED-NO-PROVIDER",
+            BodyReceiptStatus::SpawnCrashed => "SPAWN-CRASHED",
         }
     }
 }
@@ -198,6 +253,32 @@ pub(crate) fn absent_provider_receipt_line(
     )
 }
 
+/// Render the receipt for a test whose engine was FOUND and then crashed at
+/// spawn or attach.
+///
+/// A separate token from `SKIPPED-NO-PROVIDER` because the two demand opposite
+/// responses: one means "this machine cannot run this test", the other means
+/// "this machine can, and something is broken". Under one token a whole lane's
+/// spawn failures are indistinguishable from a machine without the engine
+/// installed, which is exactly how a Windows-only exec-boundary defect stayed
+/// invisible while every affected test reported a pass. The receipt is minted
+/// even though the test then FAILS: the failure names one test, the receipt makes
+/// the class greppable across the whole run.
+pub(crate) fn spawn_crashed_receipt_line(
+    test: &str,
+    provider_label: &str,
+    require_mode: bool,
+    reason: &str,
+) -> String {
+    receipt_line(
+        test,
+        provider_label,
+        require_mode,
+        BodyReceiptStatus::SpawnCrashed,
+        Some(reason),
+    )
+}
+
 /// The running test's identity for a receipt line.
 ///
 /// libtest names the thread it runs each test on after the test's full path, so
@@ -219,53 +300,92 @@ pub(crate) fn provider_required(kind: TestProviderKind) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve an absent-provider situation: under require-mode this PANICS (the
-/// fail-closed gate); otherwise it emits the `SKIPPED-NO-PROVIDER` receipt and
-/// returns `None` so the caller returns early. A skip is never reported as a
-/// pass.
+/// Resolve a "no session" situation. A genuine platform absence on a permissive
+/// run emits the `SKIPPED-NO-PROVIDER` receipt and returns `None` so the caller
+/// returns early; every other case PANICS — a required-but-missing provider, and
+/// ANY spawn/attach crash regardless of require-mode. A skip is never reported as
+/// a pass, and a crash is never reported as a skip.
 ///
 /// This is the SINGLE funnel every `None` return out of
 /// [`crate::test_harness::TestSessionBuilder::build`] passes through
 /// (discovery miss, policy rejection, spawn failure, `--api` attach failure),
-/// so emitting the receipt HERE covers every real-provider test — the
+/// so the disposition HERE covers every real-provider test — the
 /// macro-generated ones and the hand-written ones alike — without any per-test
-/// opt-in a new test could forget.
+/// opt-in a new test could forget. `cause` is what the funnel cannot infer and
+/// the call site knows for free: whether a process was ever started.
 ///
 /// Split from the env read (`provider_required`) so the panic-vs-skip policy
 /// (`provider_absence_outcome`) is independently unit testable.
 pub(crate) fn handle_absent_provider(
     kind: TestProviderKind,
+    cause: ProviderUnavailable,
     reason: &str,
 ) -> Option<RealProviderTestSession> {
-    match provider_absence_outcome(provider_required(kind)) {
-        ProviderAbsence::HardFail => panic!(
+    // Mint the receipt BEFORE dispositioning, so a crash is greppable in the log
+    // even on the path that panics immediately after.
+    if let Some(receipt) = provider_unavailable_receipt(kind, cause, reason) {
+        eprintln!("{receipt}");
+    }
+    match provider_absence_outcome(cause, provider_required(kind)) {
+        ProviderAbsence::HardFail => panic!("{}", hard_fail_message(kind, cause, reason)),
+        ProviderAbsence::SkipWithReason => None,
+    }
+}
+
+/// Why the run is failing, in the terms of the situation that caused it.
+///
+/// The two messages must not be interchangeable: a require-mode absence tells the
+/// reader to install the engine, whereas a crash tells them the engine is already
+/// here and something else is wrong. Handing a developer the "install it" message
+/// for a value-mangling defect in the spawn path is how the class survives.
+fn hard_fail_message(kind: TestProviderKind, cause: ProviderUnavailable, reason: &str) -> String {
+    match cause {
+        ProviderUnavailable::NotFound => format!(
             "{}=1 but the {} real-provider test cannot run: {reason}",
             kind.require_env(),
             kind.label(),
         ),
-        ProviderAbsence::SkipWithReason => {
-            if let Some(receipt) = absent_provider_skip_receipt(kind, reason) {
-                eprintln!("{receipt}");
-            }
-            None
-        }
+        ProviderUnavailable::SpawnFailed => format!(
+            "the {} real-provider engine was DISCOVERED on this machine and then failed to \
+             start: {reason}. A spawn/attach crash is an environment or harness fault, not a \
+             platform absence, so it FAILS the test on every run — {} does not gate it and \
+             cannot silence it. Fix the spawn (or the value handed to it); do not skip.",
+            kind.label(),
+            kind.require_env(),
+        ),
     }
 }
 
-/// The receipt line an absent-provider SKIP must emit, or `None` when the
-/// absence is a require-mode HARD FAILURE (which panics instead of skipping).
+/// The receipt line a "no session" situation must emit, or `None` when there is
+/// nothing to attest — a require-mode ABSENCE, which panics instead of skipping
+/// and must not advertise a tolerated skip on exactly the run that must fail.
 ///
-/// Pure, so the funnel's own decision — "a skip always emits a named
-/// `SKIPPED-NO-PROVIDER` receipt" — is unit-testable without capturing stderr
+/// A spawn crash always emits, on every run: it is the only record that the
+/// engine was present and the fault was ours.
+///
+/// Pure, so the funnel's own decision is unit-testable without capturing stderr
 /// and without a provider installed on the running machine.
-pub(crate) fn absent_provider_skip_receipt(kind: TestProviderKind, reason: &str) -> Option<String> {
-    match provider_absence_outcome(provider_required(kind)) {
-        ProviderAbsence::HardFail => None,
-        ProviderAbsence::SkipWithReason => Some(absent_provider_receipt_line(
+pub(crate) fn provider_unavailable_receipt(
+    kind: TestProviderKind,
+    cause: ProviderUnavailable,
+    reason: &str,
+) -> Option<String> {
+    let required = provider_required(kind);
+    match cause {
+        ProviderUnavailable::SpawnFailed => Some(spawn_crashed_receipt_line(
             &current_test_identity(),
             kind.label(),
-            false,
+            required,
             reason,
         )),
+        ProviderUnavailable::NotFound => match provider_absence_outcome(cause, required) {
+            ProviderAbsence::HardFail => None,
+            ProviderAbsence::SkipWithReason => Some(absent_provider_receipt_line(
+                &current_test_identity(),
+                kind.label(),
+                false,
+                reason,
+            )),
+        },
     }
 }

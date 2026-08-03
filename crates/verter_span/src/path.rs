@@ -9,7 +9,8 @@
 //! - Forward slashes only (no backslashes).
 //! - Windows drive prefixes: lowercase drive letter, colon kept (`c:/Users/Dev`)
 //!   — never `C:/`, never the drive-as-segment `/c/` form.
-//! - `\\?\` / `\\?\UNC\` extended-length prefixes stripped.
+//! - `\\?\` / `\\?\UNC\` extended-length prefixes stripped (in any separator
+//!   spelling — `//?/` too).
 //! - No trailing slash, except the roots `/` and `x:/`.
 //! - All other casing is preserved (case-sensitive Linux paths must round-trip
 //!   unchanged).
@@ -31,12 +32,21 @@ use std::path::{Path, PathBuf};
 // So the canonical path stays canonical for filesystem work and identity, and
 // the verbatim prefix is stripped at the EXEC boundary — the one place the value
 // stops being a path we open and becomes a string another program parses.
+//
+// Detection is SPELLING-AGNOSTIC (`\\?\`, `//?/`, and every mix). Win32 emits
+// only the backslash spelling, but a value can reach this boundary after a
+// separator normalizer has run over it, and a gate that recognizes one spelling
+// is a gate an upstream `.replace('\\', "/")` silently disarms: the refusal
+// reports "not verbatim", the simplifier returns the string untouched, and the
+// known-fatal value is handed to the child anyway. A `/`-spelled prefix also
+// tells the classifier that the body's `/` are SEPARATORS rather than the
+// literal filename characters they are under a true `\\?\` path.
 
-/// The Windows extended-length prefix, disk form: `\\?\D:\…`.
-const VERBATIM_PREFIX: &str = r"\\?\";
-
-/// The Windows extended-length prefix, UNC form: `\\?\UNC\server\share\…`.
-const VERBATIM_UNC_PREFIX: &str = r"\\?\UNC\";
+/// The UNC marker that follows the extended-length prefix in its network form:
+/// `\\?\UNC\server\share\…`. Only the marker is spelled here — the prefix and
+/// the separator after the marker are recognized in every separator spelling by
+/// [`split_verbatim_prefix`].
+const VERBATIM_UNC_MARKER: &str = "UNC";
 
 /// Windows `MAX_PATH`, measured in **UTF-16 code units** — Win32's own unit, and
 /// the limit counts the terminating NUL, so a usable path must be strictly
@@ -185,6 +195,11 @@ enum VerbatimClass {
 ///
 /// - `\\?\D:\dir\file` → `D:\dir\file` (verbatim-disk)
 /// - `\\?\UNC\server\share\file` → `\\server\share\file` (verbatim-UNC)
+/// - `//?/D:/dir/file` → `D:/dir/file` — the prefix is recognized in EVERY
+///   separator spelling, because a value can arrive here already
+///   separator-normalized and a spelling-specific gate would let exactly that
+///   value through untouched. Separators are never rewritten: the body keeps the
+///   spelling it arrived in.
 /// - anything else — an already-simple Win32 path, a POSIX path, a verbatim path
 ///   with no Win32 equivalent — is returned UNCHANGED.
 ///
@@ -244,23 +259,122 @@ pub fn simplify_verbatim_path(path: &Path) -> Cow<'_, Path> {
     }
 }
 
+/// Whether `b` is a path separator in either spelling. Win32 accepts both in a
+/// NORMAL path; only the verbatim prefix itself is documented backslash-only.
+fn is_separator(b: u8) -> bool {
+    b == b'\\' || b == b'/'
+}
+
+/// A recognized extended-length prefix, and what its SPELLING implies about the
+/// path below it.
+struct VerbatimPrefix<'a> {
+    /// The two leading separators exactly as authored. The UNC form re-emits
+    /// them, so a simplified path keeps the spelling it arrived in (this
+    /// boundary changes no separators — [`canonicalize_path`] owns that).
+    lead: &'a str,
+    /// The path below the prefix, and below the `UNC<sep>` marker for the UNC
+    /// form.
+    body: &'a str,
+    /// Whether `/` separates components inside [`Self::body`].
+    ///
+    /// Under a TRUE `\\?\` path it does NOT: `/` is an ordinary filename
+    /// character there, which is why dropping the prefix off `…\a/b` would split
+    /// one component into two and is refused. But Win32 never EMITS a prefix
+    /// containing `/`, so a `/`-spelled prefix proves the whole string passed
+    /// through a separator normalizer — its `/` were backslashes moments ago, and
+    /// treating them as filename characters would refuse (or corrupt) an
+    /// ordinary path.
+    slash_is_separator: bool,
+    /// The network form (`\\?\UNC\server\share\…`) rather than the disk form.
+    unc: bool,
+}
+
+impl VerbatimPrefix<'_> {
+    /// Whether `b` separates components in THIS path's spelling.
+    fn is_body_separator(&self, b: u8) -> bool {
+        b == b'\\' || (self.slash_is_separator && b == b'/')
+    }
+
+    /// This path's component separators, as a `split`/`strip_*` pattern.
+    fn separators(&self) -> &'static [char] {
+        if self.slash_is_separator {
+            &['\\', '/']
+        } else {
+            &['\\']
+        }
+    }
+}
+
+/// Recognize the extended-length prefix in EVERY separator spelling — `\\?\`,
+/// `//?/`, and every mix — returning the body and the separator policy its
+/// spelling implies. `None` when `raw` is not an extended-length path.
+///
+/// Spelling-agnostic because the gate this feeds is FAIL-CLOSED: a value that
+/// reaches it having already been separator-normalized (the harness's own
+/// `.replace('\\', "/")`, or TypeScript's `normalizeSlashes`, which rewrites
+/// `\\?\D:\ext` to `//?/D:/ext` before every plugin probe) must still be seen.
+/// A spelling-specific test reported "not verbatim at all", so neither the
+/// refusal nor the simplification fired and the known-fatal value was handed to
+/// a child that cannot parse it. [`canonicalize_path`] already strips a leading
+/// `//?/` on every host, so this also settles a disagreement inside this one
+/// module about what that spelling means.
+fn split_verbatim_prefix(raw: &str) -> Option<VerbatimPrefix<'_>> {
+    // The grammar is exactly `<sep><sep>?<sep>` — an ordinary UNC path
+    // (`//server/share`) and a POSIX path never match it.
+    let bytes = raw.as_bytes();
+    if bytes.len() < 4
+        || !is_separator(bytes[0])
+        || !is_separator(bytes[1])
+        || bytes[2] != b'?'
+        || !is_separator(bytes[3])
+    {
+        return None;
+    }
+    let slash_is_separator = bytes[0] == b'/' || bytes[1] == b'/' || bytes[3] == b'/';
+    let lead = &raw[..2];
+    let rest = &raw[4..];
+
+    // UNC form FIRST — its marker sits inside what would otherwise be the disk
+    // body. The marker's own case is NOT folded (Win32 documents `UNC`), only
+    // the separator after it is spelling-agnostic.
+    let marker = VERBATIM_UNC_MARKER.len();
+    let rest_bytes = rest.as_bytes();
+    if rest_bytes.len() > marker
+        && rest.starts_with(VERBATIM_UNC_MARKER)
+        && is_separator(rest_bytes[marker])
+    {
+        return Some(VerbatimPrefix {
+            lead,
+            body: &rest[marker + 1..],
+            slash_is_separator,
+            unc: true,
+        });
+    }
+    Some(VerbatimPrefix {
+        lead,
+        body: rest,
+        slash_is_separator,
+        unc: false,
+    })
+}
+
 fn classify_verbatim(raw: &str) -> VerbatimClass {
-    // UNC form FIRST — `\\?\UNC\` also matches the shorter `\\?\` prefix.
-    if let Some(body) = raw.strip_prefix(VERBATIM_UNC_PREFIX) {
+    let Some(prefix) = split_verbatim_prefix(raw) else {
+        return VerbatimClass::NotVerbatim;
+    };
+    let body = prefix.body;
+
+    if prefix.unc {
         // `\\server\share\…`. Server AND share must both be present: `\\server`
         // alone names no directory, so it is not a usable Win32 path.
-        let mut parts = body.split('\\');
+        let mut parts = body.split(prefix.separators());
         let server = parts.next().unwrap_or_default();
         let share = parts.next().unwrap_or_default();
         if server.is_empty() || share.is_empty() {
             return VerbatimClass::Refused(VerbatimRefusal::IncompleteUnc);
         }
-        return finish(format!(r"\\{body}"), body);
+        return finish(format!("{}{body}", prefix.lead), body, &prefix);
     }
-
-    let Some(body) = raw.strip_prefix(VERBATIM_PREFIX) else {
-        return VerbatimClass::NotVerbatim;
-    };
 
     // Only the DISK form has a Win32 equivalent. `\\?\Volume{…}` and other
     // device-namespace names do not.
@@ -271,15 +385,17 @@ fn classify_verbatim(raw: &str) -> VerbatimClass {
     match bytes.get(2) {
         // `\\?\D:` — `D:` alone is drive-RELATIVE, not the drive root.
         None => VerbatimClass::Refused(VerbatimRefusal::DriveRelative),
-        Some(b'\\') => finish(body.to_string(), &body[2..]),
+        Some(&sep) if prefix.is_body_separator(sep) => {
+            finish(body.to_string(), &body[2..], &prefix)
+        }
         Some(_) => VerbatimClass::Refused(VerbatimRefusal::DeviceNamespace),
     }
 }
 
 /// Validate `tail` (the part below the root) and length-check the assembled
 /// `simplified` path.
-fn finish(simplified: String, tail: &str) -> VerbatimClass {
-    if let Some(reason) = tail_refusal(tail) {
+fn finish(simplified: String, tail: &str, prefix: &VerbatimPrefix<'_>) -> VerbatimClass {
+    if let Some(reason) = tail_refusal(tail, prefix) {
         return VerbatimClass::Refused(reason);
     }
     let units = utf16_len(&simplified);
@@ -290,19 +406,24 @@ fn finish(simplified: String, tail: &str) -> VerbatimClass {
 }
 
 /// The first reason (if any) that a path tail would not survive Win32
-/// normalization intact. `tail` is backslash-separated, with an optional leading
-/// and/or trailing separator.
-fn tail_refusal(tail: &str) -> Option<VerbatimRefusal> {
-    if tail.contains('/') {
+/// normalization intact. `tail` is separated by `prefix`'s separators, with an
+/// optional leading and/or trailing one.
+fn tail_refusal(tail: &str, prefix: &VerbatimPrefix<'_>) -> Option<VerbatimRefusal> {
+    // Under a true `\\?\` path `/` is an ordinary filename character, so
+    // simplifying would split one component into two — a DIFFERENT target.
+    // A `/`-spelled prefix means those slashes are separators instead (see
+    // [`VerbatimPrefix::slash_is_separator`]), so the check does not apply.
+    if !prefix.slash_is_separator && tail.contains('/') {
         return Some(VerbatimRefusal::LiteralForwardSlash);
     }
-    let trimmed = tail.strip_prefix('\\').unwrap_or(tail);
-    let trimmed = trimmed.strip_suffix('\\').unwrap_or(trimmed);
+    let seps = prefix.separators();
+    let trimmed = tail.strip_prefix(seps).unwrap_or(tail);
+    let trimmed = trimmed.strip_suffix(seps).unwrap_or(trimmed);
     if trimmed.is_empty() {
         // A bare root (`D:\`, or `\\server\share`) — nothing below it to check.
         return None;
     }
-    trimmed.split('\\').find_map(|component| {
+    trimmed.split(seps).find_map(|component| {
         component_refusal(component).map(|reason| VerbatimRefusal::Component {
             component: component.to_string(),
             reason,
