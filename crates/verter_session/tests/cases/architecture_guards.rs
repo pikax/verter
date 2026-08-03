@@ -5193,6 +5193,14 @@ mod foundations_guards {
             "crates/verter_scheduler/src/source_loader.rs",
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_tsc/src/tsconfig.rs",
+            // Trusted-processor broker substrate — executable attestation,
+            // denial probes, and namespace/AppContainer profile staging are
+            // real-OS process security duties, never workspace source. A VFS
+            // route would attest or probe different authority.
+            "crates/verter_processor_broker/src/attestation.rs",
+            "crates/verter_processor_broker/src/lifecycle.rs",
+            "crates/verter_processor_broker/src/platform/linux.rs",
+            "crates/verter_processor_broker/src/platform/windows.rs",
             // tsgo toolchain provisioning (the 4-tier resolver) — real-OS
             // walks of PATH dirs, project `node_modules` (flat + pnpm store),
             // the update cache, and the bundled sidecar to locate a supported
@@ -9273,9 +9281,25 @@ mod foundations_guards {
             "crates/verter_svelte_conformance/src/generate.rs",
             "dev/CI-only, non-published (`publish = false`) Svelte CSS-conformance corpus generator. `write_corpus` / `check_corpus` materialize and reconcile ONLY the crate-owned committed corpus under `env!(\"CARGO_MANIFEST_DIR\")/corpus` for the CLI (`cargo run -p verter_svelte_conformance -- write`) and the crate's own tests — never user workspace, semantic, overlay, or VFS state. `WorkspaceAccess` governs user workspace source/config; tool/output I/O stays on `std::fs` (the same tooling precedent as the `oracle-gen` snapshot generator and `verter_tsc`). Not a NativeFs/VFS disk-boundary bypass.",
         ),
-            (
+        (
             "crates/verter_vue_conformance/src/lib.rs",
             "dev/CI-only, non-published Vue conformance corpus READER (`read_text_normalized` + case-dir enumeration) — reads ONLY the crate-owned vendored/committed corpus (`env!(\"CARGO_MANIFEST_DIR\")/corpus`: cases, official goldens, known-divergences), never workspace/semantic/VFS state. Test-fixture I/O, not a NativeFs/VFS disk-boundary bypass — sibling of the `verter_svelte_conformance/src/generate.rs` exemption.",
+        ),
+        (
+            "crates/verter_processor_broker/src/attestation.rs",
+            "trusted-processor executable attestation hashes the exact real-OS worker image the kernel launches before dispatch and admission. This is security evidence over an executable, never workspace/semantic/VFS source; WorkspaceAccess would attest different authority.",
+        ),
+        (
+            "crates/verter_processor_broker/src/lifecycle.rs",
+            "private denied-worker conformance performs a real ambient filesystem escape attempt inside the sandbox. Direct OS access is the mutation under test; WorkspaceAccess would bypass the OS sandbox and make the proof non-discriminating. No workspace content is admitted or published.",
+        ),
+        (
+            "crates/verter_processor_broker/src/platform/linux.rs",
+            "Linux namespace sandbox launch owns a private tmpfs/chroot staging directory and removes the parent-side scratch directory on teardown. These are kernel sandbox artifacts for an external process, never workspace/semantic/VFS state.",
+        ),
+        (
+            "crates/verter_processor_broker/src/platform/windows.rs",
+            "Windows AppContainer launch copies the attested worker into its private profile storage and removes that sandbox artifact on teardown. AppContainer profile storage is real-OS process substrate and cannot route through WorkspaceAccess.",
         ),
 ];
 
