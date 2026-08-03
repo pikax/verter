@@ -489,11 +489,12 @@ impl Sha256 {
             self.buffer[self.buffer_len..self.buffer_len + take].copy_from_slice(&input[..take]);
             self.buffer_len += take;
             input = &input[take..];
-            if self.buffer_len == 64 {
-                let block = self.buffer;
-                self.compress(&block);
-                self.buffer_len = 0;
+            if self.buffer_len < 64 {
+                return;
             }
+            let block = self.buffer;
+            self.compress(&block);
+            self.buffer_len = 0;
         }
         while input.len() >= 64 {
             let block: &[u8; 64] = input[..64].try_into().expect("64-byte SHA-256 block");
@@ -672,6 +673,43 @@ mod tests {
                 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
                 0xf2, 0x00, 0x15, 0xad,
             ]
+        );
+    }
+
+    #[test]
+    fn sha256_multipart_matches_the_standard_abc_vector() {
+        assert_eq!(
+            sha256(&[b"a", b"bc"]),
+            [
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+                0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+                0xf2, 0x00, 0x15, 0xad,
+            ]
+        );
+    }
+
+    #[test]
+    fn short_canonical_ids_have_distinct_digests_and_snapshot_ids() {
+        let authority = RegisteredSourceAuthority::new().expect("source authority");
+        let register = |canonical| {
+            authority
+                .register_source(
+                    CanonicalFileId::new(canonical),
+                    FileIncarnation::new(7),
+                    SourceGeneration::new(11),
+                    crate::FileLanguage::vue(),
+                    Arc::from("<template>same</template>"),
+                )
+                .expect("registered snapshot")
+        };
+        let a = register("file:///a.vue");
+        let b = register("file:///b.vue");
+
+        let canonical_digests_differ = a.canonical_digest() != b.canonical_digest();
+        let snapshot_ids_differ = a.snapshot_id() != b.snapshot_id();
+        assert!(
+            canonical_digests_differ && snapshot_ids_differ,
+            "canonical digest distinct: {canonical_digests_differ}; snapshot ID distinct: {snapshot_ids_differ}"
         );
     }
 
