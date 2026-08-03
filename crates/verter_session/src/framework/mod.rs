@@ -17,6 +17,7 @@ pub mod ctx;
 pub mod descriptor;
 pub mod language_classifier;
 pub mod project_capabilities;
+pub mod public_contract;
 pub mod registry;
 pub mod script_facts;
 pub mod self_file;
@@ -25,7 +26,7 @@ pub mod svelte_jsx_assets;
 pub mod synth;
 pub mod virtual_file_naming_ts;
 
-pub use api_projector::{ComponentApiProjector, ComponentApiProjectorCtx};
+pub use api_projector::{ComponentApiProjection, ComponentApiProjector, ComponentApiProjectorCtx};
 pub use ctx::FrameworkAdapterCtx;
 pub use descriptor::{
     svelte_rune_module_naming, vue_descriptor, FrameworkAdapterDescriptor, VirtualFileNaming,
@@ -33,6 +34,14 @@ pub use descriptor::{
 };
 pub use language_classifier::HostLanguageClassifier;
 pub use project_capabilities::ProjectCapabilitySnapshot;
+pub use public_contract::{
+    ComponentContractAvailability, ComponentContractUnsupported,
+    ComponentContractUnsupportedReason, ComponentPublicContract, ContractDegradation,
+    ContractDegradationReason, ContractExactness, ContractProvenance, ContractSurface,
+    PublicCallSignature, PublicDerivedHandlerShape, PublicEvent, PublicHandlerSignature,
+    PublicParameter, PublicProp, PublicSlot, PublicSlotBinding, PublicSlotInput,
+    PublicTypeReference,
+};
 pub use registry::{
     CarrierLeg, FrameworkAdapterRegistry, FrameworkRegistration, SurfaceRegistration,
     TagDisposition,

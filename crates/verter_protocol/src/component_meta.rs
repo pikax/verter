@@ -32,7 +32,7 @@ use crate::verter::v1::{
     VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 5;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 6;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -226,6 +226,10 @@ fn component_meta_body_to_proto(
                     .collect(),
             })
             .collect(),
+        component_public_contract: Some(component_contract_to_proto(
+            builder,
+            &meta.component_public_contract,
+        )),
     }
 }
 
@@ -400,6 +404,355 @@ fn terminal_type_display_to_proto(
     }
 }
 
+fn component_contract_to_proto(
+    builder: &mut GraphBuilder,
+    availability: &FfiComponentContractAvailability,
+) -> proto::ComponentContractAvailability {
+    use proto::component_contract_availability::Availability;
+    let availability = match availability {
+        FfiComponentContractAvailability::Supported { contract } => {
+            Availability::Supported(component_public_contract_to_proto(builder, contract))
+        }
+        FfiComponentContractAvailability::Unsupported { unsupported } => Availability::Unsupported(
+            component_contract_unsupported_to_proto(builder, unsupported),
+        ),
+    };
+    proto::ComponentContractAvailability {
+        availability: Some(availability),
+    }
+}
+
+fn component_public_contract_to_proto(
+    builder: &mut GraphBuilder,
+    contract: &FfiComponentPublicContract,
+) -> proto::ComponentPublicContract {
+    proto::ComponentPublicContract {
+        adapter_id: builder.string_id(&contract.adapter_id),
+        exactness: contract_exactness_to_proto(contract.exactness) as i32,
+        degradation: contract
+            .degradation
+            .iter()
+            .map(|row| contract_degradation_to_proto(builder, row))
+            .collect(),
+        provenance: proto::ContractProvenance::ComponentMetaOutput as i32,
+        props: contract
+            .props
+            .iter()
+            .map(|prop| proto::PublicProp {
+                name_id: builder.string_id(&prop.name),
+                optional: prop.optional,
+                has_default: prop.has_default,
+                r#type: Some(public_type_reference_to_proto(builder, &prop.ty)),
+                exactness: contract_exactness_to_proto(prop.exactness) as i32,
+                degradation: prop
+                    .degradation
+                    .iter()
+                    .map(|row| contract_degradation_to_proto(builder, row))
+                    .collect(),
+                provenance: proto::ContractProvenance::ComponentMetaOutput as i32,
+            })
+            .collect(),
+        events: contract
+            .events
+            .iter()
+            .map(|event| proto::PublicEvent {
+                name_id: builder.string_id(&event.name),
+                overloads: event
+                    .overloads
+                    .iter()
+                    .map(|signature| public_call_signature_to_proto(builder, signature))
+                    .collect(),
+                derived_handler: Some(proto::PublicDerivedHandlerShape {
+                    overloads: event
+                        .derived_handler
+                        .overloads
+                        .iter()
+                        .map(|signature| proto::PublicHandlerSignature {
+                            parameters: signature
+                                .parameters
+                                .iter()
+                                .map(|parameter| public_parameter_to_proto(builder, parameter))
+                                .collect(),
+                            return_type_node_id: builder.node_id(&signature.return_type),
+                        })
+                        .collect(),
+                }),
+                exactness: contract_exactness_to_proto(event.exactness) as i32,
+                degradation: event
+                    .degradation
+                    .iter()
+                    .map(|row| contract_degradation_to_proto(builder, row))
+                    .collect(),
+                provenance: proto::ContractProvenance::ComponentMetaOutput as i32,
+            })
+            .collect(),
+        slots: contract
+            .slots
+            .iter()
+            .map(|slot| proto::PublicSlot {
+                name_id: builder.string_id(&slot.name),
+                optional: slot.optional,
+                input: Some(proto::PublicSlotInput {
+                    bindings: slot
+                        .input
+                        .bindings
+                        .iter()
+                        .map(|binding| proto::PublicSlotBinding {
+                            name_id: builder.string_id(&binding.name),
+                            r#type: Some(public_type_reference_to_proto(builder, &binding.ty)),
+                        })
+                        .collect(),
+                }),
+                return_type: slot
+                    .return_type
+                    .as_ref()
+                    .map(|reference| public_type_reference_to_proto(builder, reference)),
+                exactness: contract_exactness_to_proto(slot.exactness) as i32,
+                degradation: slot
+                    .degradation
+                    .iter()
+                    .map(|row| contract_degradation_to_proto(builder, row))
+                    .collect(),
+                provenance: proto::ContractProvenance::ComponentMetaOutput as i32,
+            })
+            .collect(),
+    }
+}
+
+fn public_call_signature_to_proto(
+    builder: &mut GraphBuilder,
+    signature: &FfiPublicCallSignature,
+) -> proto::PublicCallSignature {
+    proto::PublicCallSignature {
+        source: Some(public_type_reference_to_proto(builder, &signature.source)),
+        parameters: signature
+            .parameters
+            .iter()
+            .map(|parameter| public_parameter_to_proto(builder, parameter))
+            .collect(),
+        return_type_node_id: builder.node_id(&signature.return_type),
+    }
+}
+
+fn public_parameter_to_proto(
+    builder: &mut GraphBuilder,
+    parameter: &FfiPublicParameter,
+) -> proto::PublicParameter {
+    proto::PublicParameter {
+        name_id: builder.string_id_opt(parameter.name.as_deref()),
+        type_node_id: builder.node_id(&parameter.ty),
+        optional: parameter.optional,
+        rest: parameter.rest,
+    }
+}
+
+fn public_type_reference_to_proto(
+    builder: &mut GraphBuilder,
+    reference: &FfiPublicTypeReference,
+) -> proto::PublicTypeReference {
+    proto::PublicTypeReference {
+        type_node_id: reference
+            .r#type
+            .as_ref()
+            .map(|ty| builder.node_id(ty))
+            .unwrap_or(0),
+        publication: Some(type_publication_to_proto(&reference.publication)),
+        terminal_display: Some(terminal_type_display_to_proto(
+            builder,
+            &reference.terminal_display,
+        )),
+    }
+}
+
+fn component_contract_unsupported_to_proto(
+    builder: &mut GraphBuilder,
+    unsupported: &FfiComponentContractUnsupported,
+) -> proto::ComponentContractUnsupported {
+    let mut output = proto::ComponentContractUnsupported {
+        adapter_id: builder.string_id(&unsupported.adapter_id),
+        diagnostics: unsupported
+            .diagnostics
+            .iter()
+            .map(|diagnostic| resolution_diagnostic_to_proto(builder, diagnostic))
+            .collect(),
+        ..Default::default()
+    };
+    match &unsupported.reason {
+        FfiComponentContractUnsupportedReason::AdapterUnavailable => {
+            output.reason = proto::ComponentContractUnsupportedReason::AdapterUnavailable as i32;
+        }
+        FfiComponentContractUnsupportedReason::ComponentMetaUnavailable => {
+            output.reason =
+                proto::ComponentContractUnsupportedReason::ComponentMetaUnavailable as i32;
+        }
+        FfiComponentContractUnsupportedReason::OutputMaterializationFailed {
+            lane,
+            index,
+            inner_index,
+            failure,
+        } => {
+            output.reason =
+                proto::ComponentContractUnsupportedReason::OutputMaterializationFailed as i32;
+            output.output_lane = component_meta_output_lane_to_proto(*lane) as i32;
+            output.index = *index;
+            output.inner_index = inner_index.unwrap_or(0);
+            output.has_inner_index = inner_index.is_some();
+            output.output_failure = component_meta_output_failure_to_proto(failure) as i32;
+            if let FfiComponentMetaOutputFailure::RequiredSourceUnavailable { failure } = failure {
+                output.publication_failure = publication_failure_to_proto(*failure) as i32;
+            }
+        }
+        FfiComponentContractUnsupportedReason::PublicationFailed {
+            surface,
+            failure,
+            provenance,
+        } => {
+            output.reason = proto::ComponentContractUnsupportedReason::PublicationFailed as i32;
+            output.publication_surface = Some(contract_surface_to_proto(builder, surface));
+            output.publication_failure = publication_failure_to_proto(*failure) as i32;
+            output.publication_provenance = resolution_provenance_to_proto(*provenance) as i32;
+        }
+    }
+    output
+}
+
+fn contract_degradation_to_proto(
+    builder: &mut GraphBuilder,
+    degradation: &FfiContractDegradation,
+) -> proto::ContractDegradation {
+    proto::ContractDegradation {
+        surface: Some(contract_surface_to_proto(builder, &degradation.surface)),
+        reason: match degradation.reason {
+            FfiContractDegradationReason::Absent => proto::ContractDegradationReason::Absent,
+            FfiContractDegradationReason::Incomplete => {
+                proto::ContractDegradationReason::Incomplete
+            }
+        } as i32,
+        diagnostics: degradation
+            .diagnostics
+            .iter()
+            .map(|diagnostic| resolution_diagnostic_to_proto(builder, diagnostic))
+            .collect(),
+    }
+}
+
+fn contract_surface_to_proto(
+    builder: &mut GraphBuilder,
+    surface: &FfiContractSurface,
+) -> proto::ContractSurface {
+    match surface {
+        FfiContractSurface::Prop { name } => proto::ContractSurface {
+            kind: proto::ContractSurfaceKind::Prop as i32,
+            name_id: builder.string_id(name),
+            ..Default::default()
+        },
+        FfiContractSurface::Event {
+            name,
+            overload_index,
+        } => proto::ContractSurface {
+            kind: proto::ContractSurfaceKind::Event as i32,
+            name_id: builder.string_id(name),
+            overload_index: *overload_index,
+            ..Default::default()
+        },
+        FfiContractSurface::SlotBinding { slot, binding } => proto::ContractSurface {
+            kind: proto::ContractSurfaceKind::SlotBinding as i32,
+            name_id: builder.string_id(slot),
+            binding_id: builder.string_id(binding),
+            ..Default::default()
+        },
+        FfiContractSurface::SlotReturn { slot } => proto::ContractSurface {
+            kind: proto::ContractSurfaceKind::SlotReturn as i32,
+            name_id: builder.string_id(slot),
+            ..Default::default()
+        },
+    }
+}
+
+fn resolution_diagnostic_to_proto(
+    builder: &mut GraphBuilder,
+    diagnostic: &FfiResolutionDiagnostic,
+) -> proto::ResolutionDiagnostic {
+    use proto::ResolutionDiagnosticKind as P;
+    use FfiResolutionDiagnosticKind as F;
+    let kind = match diagnostic.kind {
+        F::BudgetExceeded => P::BudgetExceeded,
+        F::ProjectionWorkLimit => P::ProjectionWorkLimit,
+        F::ConnectedQueryDepthLimit => P::ConnectedQueryDepthLimit,
+        F::MappedDepthExceeded => P::MappedDepthExceeded,
+        F::UnresolvedReference => P::UnresolvedReference,
+        F::IndeterminateConditional => P::IndeterminateConditional,
+        F::InfiniteKeySpace => P::InfiniteKeySpace,
+        F::UnsupportedOperator => P::UnsupportedOperator,
+        F::ConditionalContextTruncated => P::ConditionalContextTruncated,
+        F::IdempotentArm => P::IdempotentArm,
+        F::CyclicReference => P::CyclicReference,
+        F::CyclicInstantiation => P::CyclicInstantiation,
+        F::InstantiationError => P::InstantiationError,
+        F::EmptyUnionArm => P::EmptyUnionArm,
+    };
+    proto::ResolutionDiagnostic {
+        kind: kind as i32,
+        context_id: builder.string_id(&diagnostic.context),
+        property_name_id: builder.string_id_opt(diagnostic.property_name.as_deref()),
+    }
+}
+
+fn contract_exactness_to_proto(value: FfiContractExactness) -> proto::ContractExactness {
+    match value {
+        FfiContractExactness::Exact => proto::ContractExactness::Exact,
+        FfiContractExactness::Degraded => proto::ContractExactness::Degraded,
+    }
+}
+
+fn publication_failure_to_proto(
+    failure: FfiTypePublicationFailure,
+) -> proto::TypePublicationFailure {
+    match failure {
+        FfiTypePublicationFailure::UnrepresentableRequiredMemberValue => {
+            proto::TypePublicationFailure::UnrepresentableRequiredMemberValue
+        }
+        FfiTypePublicationFailure::UnrepresentableRequiredPayload => {
+            proto::TypePublicationFailure::UnrepresentableRequiredPayload
+        }
+    }
+}
+
+fn component_meta_output_lane_to_proto(
+    lane: FfiComponentMetaOutputLane,
+) -> proto::ComponentMetaOutputLane {
+    use proto::ComponentMetaOutputLane as P;
+    use FfiComponentMetaOutputLane as F;
+    match lane {
+        F::Prop => P::Prop,
+        F::EventPayload => P::EventPayload,
+        F::SlotBinding => P::SlotBinding,
+        F::SlotReturn => P::SlotReturn,
+        F::Model => P::Model,
+        F::Exposed => P::Exposed,
+        F::PublicInstanceMember => P::PublicInstanceMember,
+        F::TypeRegistryEntry => P::TypeRegistryEntry,
+        F::AcceptedProp => P::AcceptedProp,
+        F::AcceptedEventPayload => P::AcceptedEventPayload,
+        F::FallthroughProp => P::FallthroughProp,
+        F::FallthroughEventPayload => P::FallthroughEventPayload,
+    }
+}
+
+fn component_meta_output_failure_to_proto(
+    failure: &FfiComponentMetaOutputFailure,
+) -> proto::ComponentMetaOutputFailure {
+    use proto::ComponentMetaOutputFailure as P;
+    use FfiComponentMetaOutputFailure as F;
+    match failure {
+        F::UnraisableSource => P::UnraisableSource,
+        F::RequiredSourceUnavailable { .. } => P::RequiredSourceUnavailable,
+        F::InteriorSourceMiss => P::InteriorSourceMiss,
+        F::ShellMaterializationMiss => P::ShellMaterializationMiss,
+        F::UnknownMaterializingSourceInterior => P::UnknownMaterializingSourceInterior,
+    }
+}
+
 fn event_meta_to_proto(builder: &mut GraphBuilder, event: &FfiEventMeta) -> EventMeta {
     EventMeta {
         name_id: builder.string_id(&event.name),
@@ -415,6 +768,11 @@ fn event_meta_to_proto(builder: &mut GraphBuilder, event: &FfiEventMeta) -> Even
             .iter()
             .map(|tag| jsdoc_tag_to_proto(builder, tag))
             .collect(),
+        publication: Some(type_publication_to_proto(&event.publication)),
+        terminal_display: Some(terminal_type_display_to_proto(
+            builder,
+            &event.terminal_display,
+        )),
     }
 }
 
@@ -447,6 +805,19 @@ fn slot_meta_to_proto(builder: &mut GraphBuilder, slot: &FfiSlotMeta) -> SlotMet
         return_type_id: builder.string_id_opt(slot.return_type.as_deref()),
         description_id: builder.string_id_opt(slot.description.as_deref()),
         declared_in_macro_type_arg: slot.declared_in_macro_type_arg,
+        return_value_node_id: slot
+            .return_value
+            .as_ref()
+            .map(|ty| builder.node_id(ty))
+            .unwrap_or(0),
+        return_publication: slot
+            .return_publication
+            .as_ref()
+            .map(type_publication_to_proto),
+        return_terminal_display: slot
+            .return_terminal_display
+            .as_ref()
+            .map(|display| terminal_type_display_to_proto(builder, display)),
         tags: slot
             .tags
             .iter()
@@ -1633,6 +2004,38 @@ fn build_test_meta() -> FfiComponentMeta {
     }));
 
     FfiComponentMeta {
+        component_public_contract: FfiComponentContractAvailability::Supported {
+            contract: FfiComponentPublicContract {
+                adapter_id: "vue".to_string(),
+                exactness: FfiContractExactness::Exact,
+                degradation: Vec::new(),
+                provenance: FfiContractProvenance::ComponentMetaOutput,
+                props: vec![FfiPublicProp {
+                    name: "root".to_string(),
+                    optional: false,
+                    has_default: false,
+                    ty: FfiPublicTypeReference {
+                        r#type: Some(tree_ref.clone()),
+                        publication: FfiTypePublication::Published {
+                            semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+                            exactness: FfiPublicationExactness::ExactSymbolic,
+                            reason: FfiPublicationReason::ResolvedExactSymbolic,
+                            provenance: FfiPublicationProvenance::Resolved(
+                                FfiResolutionProvenance::SemanticEvaluator,
+                            ),
+                        },
+                        terminal_display: FfiTerminalTypeDisplay {
+                            text: Some("TreeNode".to_string()),
+                        },
+                    },
+                    exactness: FfiContractExactness::Exact,
+                    degradation: Vec::new(),
+                    provenance: FfiContractProvenance::ComponentMetaOutput,
+                }],
+                events: Vec::new(),
+                slots: Vec::new(),
+            },
+        },
         // The synthetic test payload carries no resolution seed.
         resolution_status: crate::types::FfiComponentMetaResolutionStatus::Unavailable(
             crate::types::FfiResolutionUnavailableReason::ResolutionProviderAbsent,
@@ -1681,6 +2084,9 @@ fn build_test_meta() -> FfiComponentMeta {
             }],
             is_required: false,
             return_type: Some("VNode[]".to_string()),
+            return_value: None,
+            return_publication: None,
+            return_terminal_display: None,
             description: None,
             tags: Vec::new(),
             declared_in_macro_type_arg: true,
@@ -1867,7 +2273,65 @@ mod tests {
         assert!(proto.events[0].modifier_ids.is_empty());
 
         // SCHEMA bump landed (2 → 3).
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 5);
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 6);
+    }
+
+    #[test]
+    fn v6_full_body_uses_tag_26_and_roundtrips_supported_contract() {
+        let payload = build_test_payload();
+        assert_eq!(payload.schema_version, 6);
+        let body = payload.body.expect("component-meta body");
+        let bytes = body.encode_to_vec();
+        assert!(
+            bytes.windows(2).any(|window| window == [0xd2, 0x01]),
+            "field 26 wire key must be present"
+        );
+        let availability = body
+            .component_public_contract
+            .expect("mandatory contract availability")
+            .availability
+            .expect("closed availability arm");
+        let proto::component_contract_availability::Availability::Supported(contract) =
+            availability
+        else {
+            panic!("test payload must carry Supported");
+        };
+        assert_eq!(contract.props.len(), 1);
+        assert_ne!(
+            contract.props[0]
+                .r#type
+                .as_ref()
+                .expect("public prop type")
+                .type_node_id,
+            0
+        );
+    }
+
+    #[test]
+    fn v6_full_body_roundtrips_typed_unsupported_contract() {
+        let mut meta = super::build_test_meta();
+        meta.component_public_contract = crate::types::FfiComponentContractAvailability::Unsupported {
+            unsupported: crate::types::FfiComponentContractUnsupported {
+                adapter_id: "vue".to_string(),
+                reason: crate::types::FfiComponentContractUnsupportedReason::ComponentMetaUnavailable,
+                diagnostics: Vec::new(),
+            },
+        };
+        let payload = super::component_meta_payload(&meta);
+        let availability = payload
+            .body
+            .and_then(|body| body.component_public_contract)
+            .and_then(|availability| availability.availability)
+            .expect("unsupported availability");
+        let proto::component_contract_availability::Availability::Unsupported(unsupported) =
+            availability
+        else {
+            panic!("Unsupported expected");
+        };
+        assert_eq!(
+            unsupported.reason,
+            proto::ComponentContractUnsupportedReason::ComponentMetaUnavailable as i32
+        );
     }
 
     #[test]

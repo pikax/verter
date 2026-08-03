@@ -219,21 +219,31 @@ impl DocumentRegistry {
                             .get_public_api_projection(&work_canonical)
                             .ok()
                             .flatten()
-                            .and_then(|projection| projection.contract)
+                            .and_then(|projection| match projection.contract {
+                                verter_session::framework::ComponentContractAvailability::Supported(
+                                    contract,
+                                ) => Some(contract),
+                                verter_session::framework::ComponentContractAvailability::Unsupported(
+                                    _,
+                                ) => None,
+                            })
                             .map(|contract| {
                                 contract
                                     .props
-                                    .into_iter()
+                                    .iter()
                                     .map(|prop| {
+                                        let materialized = prop.ty.publication.materialized_type();
                                         verter_semantic::analysis::AnalyzedPropDefinition {
-                                            name: prop.name,
-                                            type_annotation: prop.type_annotation,
+                                            name: prop.name.to_string(),
+                                            type_annotation: materialized.and_then(|expression| {
+                                                verter_type_expr::render_type_expr_display(expression)
+                                                    .ok()
+                                                    .map(|rendered| rendered.text)
+                                            }),
                                             has_default: prop.has_default,
                                             is_required: !prop.optional,
-                                            // This compatibility sidecar exposes
-                                            // display text only. Do not recover
-                                            // semantic meaning from that string.
-                                            is_boolean: false,
+                                            is_boolean: materialized
+                                                .is_some_and(type_expr_contains_boolean),
                                             used_in_template: false,
                                             used_in_script: false,
                                             span: verter_span::Span::new(0, 0),

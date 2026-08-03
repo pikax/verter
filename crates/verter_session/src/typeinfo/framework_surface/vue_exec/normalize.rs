@@ -675,9 +675,8 @@ pub(crate) fn model_prop_fields(
 ///    substituted member publishes the graph-native closed/use-site source
 ///    projected from its value node; `None` only when no faithful source
 ///    exists (see [`property_style_emit_fields`]).
-/// 3. **De-duplicate by event name, first-writer-wins.** Call-signature emits
-///    are pushed first, so a duplicate name takes CALL-SIGNATURE precedence;
-///    order is deterministic (signature order, then member order).
+/// 3. Preserve duplicate names positionally. They are distinct overload rows
+///    grouped only by the terminal public-contract projector.
 #[must_use]
 pub(crate) fn emits_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
@@ -820,10 +819,6 @@ pub(crate) fn emits_from_typeinfo_surface(
     // precedence.
     emits.extend(property_style_emit_fields(ctx, resolved));
 
-    // (3) De-duplicate by event name, first-writer-wins (call-signature emits
-    // were pushed first, so they win duplicate names).
-    let mut seen = std::collections::HashSet::new();
-    emits.retain(|emit| seen.insert(emit.analysis.name.clone()));
     emits
 }
 

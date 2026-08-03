@@ -109,7 +109,7 @@ export interface TestComponentMetaPayload {
   typeRegistry?: TestTypeRegistryEntry[];
 }
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 const NODE_PRIMITIVE = 1;
 const NODE_UNION = 3;
@@ -370,6 +370,16 @@ export function buildTestComponentMetaProtoPayload(
       kind: FALLTHROUGH_NONE,
       reason: NO_FALLTHROUGH_REASON_NO_TEMPLATE,
       branches: [],
+    },
+    componentPublicContract: {
+      availability: {
+        case: "unsupported" as const,
+        value: {
+          adapterId: builder.stringId("vue"),
+          reason: 1,
+          diagnostics: [],
+        },
+      },
     },
   };
 

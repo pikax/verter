@@ -9,6 +9,10 @@ import {
 import type { NativeComponentMetaResult } from "./native-component-meta.js";
 import type {
   NativeConsumedRootBindings,
+  NativeComponentContractAvailability,
+  NativeComponentPublicContract,
+  NativeContractDegradation,
+  NativeContractSurface,
   NativeOriginGraph,
   NativePublicationReason,
   NativeResolutionProvenance,
@@ -551,6 +555,13 @@ function decodeComponentMetaBody(
     deriveRootInfo(rootReachability);
   return {
     filePath: graph.getString(readRequiredId(body.filePathId, "file path")),
+    componentPublicContract: decodeComponentContractAvailability(
+      requireProtoMessage(
+        body.componentPublicContract as ProtoRecord | undefined,
+        "component public contract",
+      ),
+      graph,
+    ),
     componentName: "",
     optionsApi: Boolean(body.optionsApi),
     props: ((body.props as ProtoRecord[] | undefined) ?? []).map((prop) => decodeProp(prop, graph)),
@@ -612,6 +623,369 @@ function decodeComponentMetaBody(
     ...maybe("resolution", resolution),
     ...decodeMacroExpansionDiagnostics(body, graph),
   } as unknown as Omit<NativeComponentMetaResult, "typeRegistry">;
+}
+
+function decodeComponentContractAvailability(
+  message: ProtoRecord,
+  graph: DecodedTypeGraph,
+): NativeComponentContractAvailability {
+  const availability = message.availability as
+    | { case: "supported" | "unsupported" | undefined; value?: ProtoRecord }
+    | undefined;
+  if (!availability?.case || !availability.value) {
+    throw graphError("component-meta component public contract has no availability");
+  }
+  if (availability.case === "supported") {
+    return {
+      kind: "supported",
+      contract: decodeSupportedComponentContract(availability.value, graph),
+    };
+  }
+  const unsupported = availability.value;
+  const adapterId = graph.getString(readRequiredId(unsupported.adapterId, "contract adapter"));
+  const diagnostics = decodeResolutionDiagnostics(
+    (unsupported.diagnostics as ProtoRecord[] | undefined) ?? [],
+    graph,
+  );
+  const reason = Number(unsupported.reason ?? 0);
+  switch (reason) {
+    case 1:
+      return {
+        kind: "unsupported",
+        adapterId,
+        reason: { kind: "adapterUnavailable" },
+        diagnostics,
+      };
+    case 2:
+      return {
+        kind: "unsupported",
+        adapterId,
+        reason: { kind: "componentMetaUnavailable" },
+        diagnostics,
+      };
+    case 3:
+      return {
+        kind: "unsupported",
+        adapterId,
+        reason: {
+          kind: "outputMaterializationFailed",
+          lane: decodeOutputLane(Number(unsupported.outputLane ?? 0)),
+          index: Number(unsupported.index ?? 0),
+          ...(Boolean(unsupported.hasInnerIndex)
+            ? { innerIndex: Number(unsupported.innerIndex ?? 0) }
+            : {}),
+          failure: decodeOutputFailure(Number(unsupported.outputFailure ?? 0)),
+        },
+        diagnostics,
+      };
+    case 4:
+      return {
+        kind: "unsupported",
+        adapterId,
+        reason: {
+          kind: "publicationFailed",
+          surface: decodeContractSurface(
+            requireProtoMessage(
+              unsupported.publicationSurface as ProtoRecord | undefined,
+              "publication-failed contract surface",
+            ),
+            graph,
+          ),
+          failure: decodePublicationFailure(Number(unsupported.publicationFailure ?? 0)),
+          provenance: decodeResolutionProvenance(Number(unsupported.publicationProvenance ?? 0)),
+        },
+        diagnostics,
+      };
+    default:
+      throw graphError(`component-meta contract has unknown unsupported reason ${reason}`);
+  }
+}
+
+function decodeSupportedComponentContract(
+  contract: ProtoRecord,
+  graph: DecodedTypeGraph,
+): NativeComponentPublicContract {
+  requireContractProvenance(contract.provenance);
+  return {
+    adapterId: graph.getString(readRequiredId(contract.adapterId, "contract adapter")),
+    exactness: decodeContractExactness(Number(contract.exactness ?? 0)),
+    degradation: ((contract.degradation as ProtoRecord[] | undefined) ?? []).map((row) =>
+      decodeContractDegradation(row, graph),
+    ),
+    provenance: "componentMetaOutput",
+    props: ((contract.props as ProtoRecord[] | undefined) ?? []).map((prop) => {
+      requireContractProvenance(prop.provenance);
+      return {
+        name: graph.getString(readRequiredId(prop.nameId, "public prop name")),
+        optional: Boolean(prop.optional),
+        hasDefault: Boolean(prop.hasDefault),
+        type: decodePublicTypeReference(
+          requireProtoMessage(prop.type as ProtoRecord | undefined, "public prop type"),
+          graph,
+          "public prop",
+        ),
+        exactness: decodeContractExactness(Number(prop.exactness ?? 0)),
+        degradation: ((prop.degradation as ProtoRecord[] | undefined) ?? []).map((row) =>
+          decodeContractDegradation(row, graph),
+        ),
+        provenance: "componentMetaOutput",
+      };
+    }),
+    events: ((contract.events as ProtoRecord[] | undefined) ?? []).map((event) => {
+      requireContractProvenance(event.provenance);
+      return {
+        name: graph.getString(readRequiredId(event.nameId, "public event name")),
+        overloads: ((event.overloads as ProtoRecord[] | undefined) ?? []).map((signature) =>
+          decodePublicCallSignature(signature, graph),
+        ),
+        derivedHandler: {
+          overloads: (
+            (requireProtoMessage(
+              event.derivedHandler as ProtoRecord | undefined,
+              "public event derived handler",
+            ).overloads as ProtoRecord[] | undefined) ?? []
+          ).map((signature) => ({
+            parameters: decodePublicParameters(
+              (signature.parameters as ProtoRecord[] | undefined) ?? [],
+              graph,
+            ),
+            returnType: createGraphTypeExprRef(
+              graph,
+              readRequiredId(signature.returnTypeNodeId, "public handler return"),
+            ),
+          })),
+        },
+        exactness: decodeContractExactness(Number(event.exactness ?? 0)),
+        degradation: ((event.degradation as ProtoRecord[] | undefined) ?? []).map((row) =>
+          decodeContractDegradation(row, graph),
+        ),
+        provenance: "componentMetaOutput",
+      };
+    }),
+    slots: ((contract.slots as ProtoRecord[] | undefined) ?? []).map((slot) => {
+      requireContractProvenance(slot.provenance);
+      const input = requireProtoMessage(slot.input as ProtoRecord | undefined, "public slot input");
+      return {
+        name: graph.getString(readRequiredId(slot.nameId, "public slot name")),
+        optional: Boolean(slot.optional),
+        input: {
+          bindings: ((input.bindings as ProtoRecord[] | undefined) ?? []).map((binding) => ({
+            name: graph.getString(readRequiredId(binding.nameId, "public slot binding name")),
+            type: decodePublicTypeReference(
+              requireProtoMessage(
+                binding.type as ProtoRecord | undefined,
+                "public slot binding type",
+              ),
+              graph,
+              "public slot binding",
+            ),
+          })),
+        },
+        ...maybe(
+          "returnType",
+          slot.returnType === undefined
+            ? undefined
+            : decodePublicTypeReference(
+                slot.returnType as ProtoRecord,
+                graph,
+                "public slot return",
+              ),
+        ),
+        exactness: decodeContractExactness(Number(slot.exactness ?? 0)),
+        degradation: ((slot.degradation as ProtoRecord[] | undefined) ?? []).map((row) =>
+          decodeContractDegradation(row, graph),
+        ),
+        provenance: "componentMetaOutput",
+      };
+    }),
+  };
+}
+
+function decodePublicCallSignature(
+  signature: ProtoRecord,
+  graph: DecodedTypeGraph,
+): NativeComponentPublicContract["events"][number]["overloads"][number] {
+  return {
+    source: decodePublicTypeReference(
+      requireProtoMessage(signature.source as ProtoRecord | undefined, "public event source"),
+      graph,
+      "public event source",
+    ),
+    parameters: decodePublicParameters(
+      (signature.parameters as ProtoRecord[] | undefined) ?? [],
+      graph,
+    ),
+    returnType: createGraphTypeExprRef(
+      graph,
+      readRequiredId(signature.returnTypeNodeId, "public event return"),
+    ),
+  };
+}
+
+function decodePublicParameters(
+  parameters: ProtoRecord[],
+  graph: DecodedTypeGraph,
+): NativeComponentPublicContract["events"][number]["overloads"][number]["parameters"] {
+  return parameters.map((parameter) => ({
+    ...maybe("name", graph.getStringMaybe(Number(parameter.nameId ?? 0))),
+    optional: Boolean(parameter.optional),
+    rest: Boolean(parameter.rest),
+    type: createGraphTypeExprRef(
+      graph,
+      readRequiredId(parameter.typeNodeId, "public parameter type"),
+    ),
+  }));
+}
+
+function decodePublicTypeReference(
+  reference: ProtoRecord,
+  graph: DecodedTypeGraph,
+  label: string,
+): NativeComponentPublicContract["props"][number]["type"] {
+  return decodePublishedTypeFields(
+    reference,
+    graph,
+    label,
+  ) as unknown as NativeComponentPublicContract["props"][number]["type"];
+}
+
+function decodeContractDegradation(
+  degradation: ProtoRecord,
+  graph: DecodedTypeGraph,
+): NativeContractDegradation {
+  const reason = Number(degradation.reason ?? 0);
+  if (reason !== 1 && reason !== 2) {
+    throw graphError(`component-meta contract has unknown degradation reason ${reason}`);
+  }
+  return {
+    surface: decodeContractSurface(
+      requireProtoMessage(
+        degradation.surface as ProtoRecord | undefined,
+        "contract degradation surface",
+      ),
+      graph,
+    ),
+    reason: reason === 1 ? "absent" : "incomplete",
+    diagnostics: decodeResolutionDiagnostics(
+      (degradation.diagnostics as ProtoRecord[] | undefined) ?? [],
+      graph,
+    ),
+  };
+}
+
+function decodeContractSurface(
+  surface: ProtoRecord,
+  graph: DecodedTypeGraph,
+): NativeContractSurface {
+  const name = graph.getString(readRequiredId(surface.nameId, "contract surface name"));
+  switch (Number(surface.kind ?? 0)) {
+    case 1:
+      return { kind: "prop", name };
+    case 2:
+      return { kind: "event", name, overloadIndex: Number(surface.overloadIndex ?? 0) };
+    case 3:
+      return {
+        kind: "slotBinding",
+        slot: name,
+        binding: graph.getString(readRequiredId(surface.bindingId, "contract slot binding name")),
+      };
+    case 4:
+      return { kind: "slotReturn", slot: name };
+    default:
+      throw graphError(`component-meta contract has unknown surface kind ${String(surface.kind)}`);
+  }
+}
+
+function decodeResolutionDiagnostics(
+  diagnostics: ProtoRecord[],
+  graph: DecodedTypeGraph,
+): NativeContractDegradation["diagnostics"] {
+  return diagnostics.map((diagnostic) => ({
+    kind: decodeResolutionDiagnosticKind(Number(diagnostic.kind ?? 0)),
+    context: graph.getString(readRequiredId(diagnostic.contextId, "resolution diagnostic context")),
+    ...maybe("propertyName", graph.getStringMaybe(Number(diagnostic.propertyNameId ?? 0))),
+  }));
+}
+
+function decodeResolutionDiagnosticKind(
+  value: number,
+): NativeContractDegradation["diagnostics"][number]["kind"] {
+  const kinds = [
+    "budgetExceeded",
+    "projectionWorkLimit",
+    "connectedQueryDepthLimit",
+    "mappedDepthExceeded",
+    "unresolvedReference",
+    "indeterminateConditional",
+    "infiniteKeySpace",
+    "unsupportedOperator",
+    "conditionalContextTruncated",
+    "idempotentArm",
+    "cyclicReference",
+    "cyclicInstantiation",
+    "instantiationError",
+    "emptyUnionArm",
+  ] as const;
+  const kind = kinds[value - 1];
+  if (!kind) {
+    throw graphError(`component-meta contract has unknown resolution diagnostic ${value}`);
+  }
+  return kind;
+}
+
+function decodeContractExactness(value: number): "exact" | "degraded" {
+  if (value === 1) return "exact";
+  if (value === 2) return "degraded";
+  throw graphError(`component-meta contract has unknown exactness ${value}`);
+}
+
+function requireContractProvenance(value: unknown): void {
+  if (Number(value ?? 0) !== 1) {
+    throw graphError(`component-meta contract has unknown provenance ${String(value)}`);
+  }
+}
+
+function decodePublicationFailure(
+  value: number,
+): "unrepresentableRequiredMemberValue" | "unrepresentableRequiredPayload" {
+  if (value === 1) return "unrepresentableRequiredMemberValue";
+  if (value === 2) return "unrepresentableRequiredPayload";
+  throw graphError(`component-meta contract has unknown publication failure ${value}`);
+}
+
+function decodeOutputLane(value: number): string {
+  const lanes = [
+    "prop",
+    "eventPayload",
+    "slotBinding",
+    "slotReturn",
+    "model",
+    "exposed",
+    "publicInstanceMember",
+    "typeRegistryEntry",
+    "acceptedProp",
+    "acceptedEventPayload",
+    "fallthroughProp",
+    "fallthroughEventPayload",
+  ];
+  const lane = lanes[value - 1];
+  if (!lane) throw graphError(`component-meta contract has unknown output lane ${value}`);
+  return lane;
+}
+
+function decodeOutputFailure(value: number): string {
+  const failures = [
+    "unraisableSource",
+    "requiredSourceUnavailable",
+    "interiorSourceMiss",
+    "shellMaterializationMiss",
+    "unknownMaterializingSourceInterior",
+  ];
+  const failure = failures[value - 1];
+  if (!failure) {
+    throw graphError(`component-meta contract has unknown output failure ${value}`);
+  }
+  return failure;
 }
 
 function decodeOptionalPublicInstance(
@@ -1006,9 +1380,20 @@ function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
 }
 
 function decodeEvent(event: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
+  const published = decodePublishedTypeFields(
+    {
+      typeNodeId: event.payloadNodeId,
+      publication: event.publication,
+      terminalDisplay: event.terminalDisplay,
+    } as unknown as ProtoRecord,
+    graph,
+    "event payload",
+  );
   return {
     name: graph.getString(readRequiredId(event.nameId, "event name")),
-    payload: createGraphTypeExprRef(graph, readRequiredId(event.payloadNodeId, "event payload")),
+    payload: published.type,
+    publication: published.publication,
+    terminalDisplay: published.terminalDisplay,
     ...maybe(
       "payloadExpansion",
       decodeOptionalExpansionMetadata(event.payloadExpansion as ProtoRecord | undefined, graph),
@@ -1020,6 +1405,18 @@ function decodeEvent(event: ProtoRecord, graph: DecodedTypeGraph): Record<string
 }
 
 function decodeSlot(slot: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
+  const typedReturn =
+    slot.returnPublication === undefined
+      ? {}
+      : decodePublishedTypeFields(
+          {
+            typeNodeId: slot.returnValueNodeId,
+            publication: slot.returnPublication,
+            terminalDisplay: slot.returnTerminalDisplay,
+          } as unknown as ProtoRecord,
+          graph,
+          "slot return",
+        );
   return {
     name: graph.getString(readRequiredId(slot.nameId, "slot name")),
     isScoped: Boolean(slot.isScoped),
@@ -1036,6 +1433,13 @@ function decodeSlot(slot: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
     // the coercion read `false` when the field is absent.
     declaredInMacroTypeArg: Boolean(slot.declaredInMacroTypeArg),
     ...maybe("returnType", graph.getStringMaybe(Number(slot.returnTypeId ?? 0))),
+    ...(typedReturn.type !== undefined ? { returnValue: typedReturn.type } : {}),
+    ...(typedReturn.publication !== undefined
+      ? { returnPublication: typedReturn.publication }
+      : {}),
+    ...(typedReturn.terminalDisplay !== undefined
+      ? { returnTerminalDisplay: typedReturn.terminalDisplay }
+      : {}),
     ...maybe("description", graph.getStringMaybe(Number(slot.descriptionId ?? 0))),
     ...maybeArray("tags", decodeJsdocTags((slot.tags as ProtoRecord[] | undefined) ?? [], graph)),
   };

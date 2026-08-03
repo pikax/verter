@@ -48,6 +48,8 @@ pub struct ComponentMetaOutput {
     resolution: Option<ComponentMetaResolutionOutput>,
     /// The materialized positional type lanes.
     types: MaterializedComponentMetaTypes,
+    /// Public contract projected at the same terminal sink and view.
+    contract: crate::framework::ComponentContractAvailability,
 }
 
 impl ComponentMetaOutput {
@@ -59,11 +61,13 @@ impl ComponentMetaOutput {
         analysis: ComponentMetaAnalysis,
         resolution: Option<ComponentMetaResolutionOutput>,
         types: MaterializedComponentMetaTypes,
+        contract: crate::framework::ComponentContractAvailability,
     ) -> Self {
         Self {
             analysis,
             resolution,
             types,
+            contract,
         }
     }
 
@@ -77,6 +81,23 @@ impl ComponentMetaOutput {
         MaterializedComponentMetaTypes,
     ) {
         (self.analysis, self.resolution, self.types)
+    }
+
+    /// Consume the envelope while preserving its public contract.
+    pub fn into_parts_with_contract(
+        self,
+    ) -> (
+        ComponentMetaAnalysis,
+        Option<ComponentMetaResolutionOutput>,
+        MaterializedComponentMetaTypes,
+        crate::framework::ComponentContractAvailability,
+    ) {
+        (self.analysis, self.resolution, self.types, self.contract)
+    }
+
+    /// Borrow the public contract availability.
+    pub fn contract(&self) -> &crate::framework::ComponentContractAvailability {
+        &self.contract
     }
 }
 
@@ -95,7 +116,7 @@ pub struct MaterializedComponentMetaTypes {
 }
 
 /// Output-only display text branded by the terminal sink.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TerminalTypeDisplay {
     text: Option<String>,
 }
@@ -121,11 +142,12 @@ impl TerminalTypeDisplay {
 
 /// Structured publication outcome plus its optional materialized success and
 /// separately-branded terminal display.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MaterializedTypePublication {
     publication: PublicationResult,
     materialized_type: Option<TypeExpr>,
     terminal_display: TerminalTypeDisplay,
+    diagnostics: std::sync::Arc<[verter_type_expr::ResolutionDiagnostic]>,
 }
 
 impl MaterializedTypePublication {
@@ -134,11 +156,13 @@ impl MaterializedTypePublication {
         publication: PublicationResult,
         materialized_type: Option<TypeExpr>,
         terminal_display: TerminalTypeDisplay,
+        diagnostics: std::sync::Arc<[verter_type_expr::ResolutionDiagnostic]>,
     ) -> Self {
         Self {
             publication,
             materialized_type,
             terminal_display,
+            diagnostics,
         }
     }
 
@@ -157,6 +181,7 @@ impl MaterializedTypePublication {
             terminal_display: TerminalTypeDisplay {
                 text: terminal_display,
             },
+            diagnostics: std::sync::Arc::from([]),
         }
     }
 
@@ -183,10 +208,15 @@ impl MaterializedTypePublication {
     pub fn terminal_display(&self) -> &TerminalTypeDisplay {
         &self.terminal_display
     }
+
+    /// Borrow producer-owned typed resolution diagnostics.
+    pub fn diagnostics(&self) -> &[verter_type_expr::ResolutionDiagnostic] {
+        &self.diagnostics
+    }
 }
 
 impl MaterializedComponentMetaTypes {
-    /// Assemble all 11 lanes. Requires the terminal output sink's
+    /// Assemble all 13 lanes. Requires the terminal output sink's
     /// capability — only the sink materializes output lanes.
     pub(crate) fn from_lanes(
         _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
@@ -195,10 +225,15 @@ impl MaterializedComponentMetaTypes {
         Self { lanes }
     }
 
-    /// Destructive transfer of the 11 positional lanes, each order-aligned
+    /// Destructive transfer of the 13 positional lanes, each order-aligned
     /// 1:1 with the analysis vectors the envelope was materialized from.
     pub fn into_lanes(self) -> MaterializedComponentMetaTypeLanes {
         self.lanes
+    }
+
+    /// Borrow the positional lanes inside the terminal sink.
+    pub(crate) fn lanes(&self) -> &MaterializedComponentMetaTypeLanes {
+        &self.lanes
     }
 }
 
@@ -214,9 +249,14 @@ pub struct MaterializedComponentMetaTypeLanes {
     /// `events[i].payload` — aligned with `ComponentMetaAnalysis::events`
     /// (duplicate event names preserved positionally).
     pub event_payloads: Vec<TypeExpr>,
+    /// A1 publications aligned with `event_payloads`.
+    pub event_publications: Vec<MaterializedTypePublication>,
     /// `slots[i].bindings[j].type` — outer aligned with
     /// `ComponentMetaAnalysis::slots`, inner with `slots[i].bindings`.
     pub slot_bindings: Vec<Vec<MaterializedTypePublication>>,
+    /// `slots[i].return` — aligned with `ComponentMetaAnalysis::slots`;
+    /// `None` means the slot has no meaningful typed return position.
+    pub slot_returns: Vec<Option<MaterializedTypePublication>>,
     /// `models[i].type` — aligned with `ComponentMetaAnalysis::models`.
     pub models: Vec<TypeExpr>,
     /// `exposed[i].type` — aligned with `ComponentMetaAnalysis::exposed`.
@@ -320,6 +360,8 @@ pub enum ComponentMetaOutputLane {
     EventPayload,
     /// The `slots[].bindings[].type` lane.
     SlotBinding,
+    /// The optional `slots[].return` lane.
+    SlotReturn,
     /// The `models[].type` lane.
     Model,
     /// The `exposed[].type` lane.
@@ -345,6 +387,7 @@ impl ComponentMetaOutputLane {
             ComponentMetaOutputLane::Prop => "props[].type",
             ComponentMetaOutputLane::EventPayload => "events[].payload",
             ComponentMetaOutputLane::SlotBinding => "slots[].bindings[].type",
+            ComponentMetaOutputLane::SlotReturn => "slots[].return",
             ComponentMetaOutputLane::Model => "models[].type",
             ComponentMetaOutputLane::Exposed => "exposed[].type",
             ComponentMetaOutputLane::PublicInstanceMember => "publicInstance.members[].type",

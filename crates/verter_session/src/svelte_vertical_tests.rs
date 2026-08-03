@@ -33,6 +33,53 @@ fn host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
 }
 
+fn workspace_host_with_svelte(
+    component_canonical: &str,
+    component_source: &str,
+    extra: &[(&str, &str)],
+) -> Arc<VerterHost> {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    #[allow(deprecated)]
+    let project_graph =
+        verter_workspace::ProjectGraph::from_configs(vec![verter_workspace::VfsProjectConfig {
+            root: "/workspace".to_string(),
+            rank: verter_workspace::ProjectRank::Explicit,
+            tsconfig_path: Some("/workspace/tsconfig.json".to_string()),
+            root_files: vec![],
+            extensions: vec![],
+            workspace_root: "/workspace".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/workspace"),
+            ),
+        }]);
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    workspace.set_project_graph(project_graph);
+    for (canonical, content) in extra {
+        workspace.inject_file((*canonical).into(), Arc::from(*content));
+    }
+    workspace.inject_file(component_canonical.into(), Arc::from(component_source));
+    let workspace: Arc<dyn WorkspaceAccess> = workspace;
+    let host = Arc::new(VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        workspace,
+    ));
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    host
+}
+
 fn upsert(host: &VerterHost, id: &str, src: &str, lang: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
@@ -769,25 +816,140 @@ let { contractProp, optionalCount = 0 }: Props = $props();
         .get_public_api_projection("/EditorContract.svelte")
         .expect("Svelte projection request")
         .expect("Svelte public API projects");
-    let contract = projection
-        .contract
-        .expect("Svelte projector supplies a structured public contract");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Svelte projector supplies a supported structured public contract");
+    };
     let required = contract
         .props
         .iter()
-        .find(|prop| prop.name == "contractProp")
+        .find(|prop| prop.name.as_ref() == "contractProp")
         .expect("resolved contract prop");
-    assert_eq!(required.type_annotation.as_deref(), Some("string"));
+    assert_eq!(
+        required
+            .ty
+            .publication
+            .materialized_type()
+            .and_then(|ty| verter_type_expr::render_type_expr_display(ty).ok())
+            .map(|rendered| rendered.text),
+        Some("string".to_string())
+    );
     assert!(!required.optional);
     assert!(!required.has_default);
     let optional = contract
         .props
         .iter()
-        .find(|prop| prop.name == "optionalCount")
+        .find(|prop| prop.name.as_ref() == "optionalCount")
         .expect("resolved optional prop");
-    assert_eq!(optional.type_annotation.as_deref(), Some("number"));
+    assert_eq!(
+        optional
+            .ty
+            .publication
+            .materialized_type()
+            .and_then(|ty| verter_type_expr::render_type_expr_display(ty).ok())
+            .map(|rendered| rendered.text),
+        Some("number".to_string())
+    );
     assert!(optional.optional);
     assert!(optional.has_default);
+}
+
+#[test]
+fn svelte_public_projection_carries_props_event_overloads_and_slots() {
+    let source = r#"<script lang="ts">
+import { createEventDispatcher } from 'svelte';
+interface Props {
+  title: string;
+  count?: number;
+  onselect: (value: string, index?: number) => void;
+}
+let { title, count = 0, onselect }: Props = $props();
+let item: string = 'row';
+const dispatch = createEventDispatcher<{ select: string }>();
+void title; void count; void onselect; void dispatch;
+</script>
+<slot name="itemRow" item={item} />"#;
+    let host = workspace_host_with_svelte(
+        "/workspace/StructuredContract.svelte",
+        source,
+        &[
+            (
+                "/workspace/node_modules/svelte/package.json",
+                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+            ),
+            (
+                "/workspace/node_modules/svelte/index.d.ts",
+                "export declare function createEventDispatcher<E>(): \
+                 (name: keyof E, detail: E[keyof E]) => void;\n",
+            ),
+        ],
+    );
+    upsert_svelte(&host, "/workspace/StructuredContract.svelte", source);
+    let projection = host
+        .get_public_api_projection("/workspace/StructuredContract.svelte")
+        .expect("Svelte declaration projection succeeds")
+        .expect("Svelte carrier projects");
+    let contract = match projection.contract {
+        crate::framework::ComponentContractAvailability::Supported(contract) => contract,
+        crate::framework::ComponentContractAvailability::Unsupported(unsupported) => {
+            panic!("Svelte carrier must publish a supported contract: {unsupported:?}")
+        }
+    };
+    let title = contract
+        .props
+        .iter()
+        .find(|prop| prop.name.as_ref() == "title")
+        .unwrap_or_else(|| {
+            panic!(
+                "title prop; got {:?}",
+                contract
+                    .props
+                    .iter()
+                    .map(|prop| prop.name.as_ref())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(!title.optional && !title.has_default);
+    let count = contract
+        .props
+        .iter()
+        .find(|prop| prop.name.as_ref() == "count")
+        .expect("count prop");
+    assert!(count.optional && count.has_default);
+
+    let select = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "select")
+        .expect("dispatcher derives select event");
+    assert_eq!(
+        select.overloads.len(),
+        2,
+        "callback and dispatcher rows group as overloads"
+    );
+    assert_eq!(select.overloads[0].parameters.len(), 2);
+    assert_eq!(
+        select.overloads[0].parameters[0].name.as_deref(),
+        Some("value")
+    );
+    assert_eq!(
+        select.overloads[0].parameters[1].name.as_deref(),
+        Some("index")
+    );
+    assert!(select.overloads[0].parameters[1].optional);
+    assert_eq!(
+        select.overloads[1].parameters[0].name.as_deref(),
+        Some("payload")
+    );
+
+    let slot = contract
+        .slots
+        .iter()
+        .find(|slot| slot.name.as_ref() == "itemRow")
+        .expect("Snippet prop derives itemRow slot");
+    assert!(slot.optional);
+    assert_eq!(slot.input.bindings.len(), 1);
+    assert_eq!(slot.input.bindings[0].name.as_ref(), "item");
 }
 
 #[test]

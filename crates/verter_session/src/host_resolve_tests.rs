@@ -49,6 +49,149 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
         })
         .unwrap();
 }
+
+#[test]
+fn vue_public_projection_carries_structured_props_event_overloads_and_slots() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/Contract.vue",
+        r#"<script setup lang="ts">
+const props = withDefaults(defineProps<{
+  required: string
+  optional?: number
+}>(), { optional: 1 })
+defineEmits<{
+  save: [value: string]
+  save: [count?: number, ...string[]]
+}>()
+defineSlots<{
+  itemRow?(props: { item: string }): number
+}>()
+void props
+</script>
+<template><slot name="itemRow" item="x" /></template>"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/Contract.vue")
+        .expect("Vue declaration projection succeeds")
+        .expect("Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Vue carrier must publish a supported contract");
+    };
+    let required = contract
+        .props
+        .iter()
+        .find(|prop| prop.name.as_ref() == "required")
+        .expect("required prop");
+    assert!(!required.optional);
+    let optional = contract
+        .props
+        .iter()
+        .find(|prop| prop.name.as_ref() == "optional")
+        .expect("defaulted prop");
+    assert!(optional.optional && optional.has_default);
+
+    let save = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "save")
+        .expect("save event");
+    assert_eq!(save.overloads.len(), 2, "duplicate rows form overloads");
+    assert_eq!(
+        save.overloads[0].parameters[0].name.as_deref(),
+        Some("value")
+    );
+    assert_eq!(
+        save.overloads[1].parameters[0].name.as_deref(),
+        Some("count")
+    );
+    assert!(save.overloads[1].parameters[0].optional);
+    assert_eq!(
+        save.overloads[1].parameters.len(),
+        2,
+        "{:?}",
+        save.overloads[1].parameters
+    );
+    assert_eq!(
+        save.overloads[1].parameters[1].name.as_deref(),
+        None,
+        "{:?}",
+        save.overloads[1].parameters
+    );
+    assert!(save.overloads[1].parameters[1].rest);
+    assert_eq!(save.derived_handler.overloads.len(), 2);
+
+    let slot = contract
+        .slots
+        .iter()
+        .find(|slot| slot.name.as_ref() == "itemRow")
+        .expect("itemRow slot");
+    assert!(slot.optional);
+    assert_eq!(slot.input.bindings[0].name.as_ref(), "item");
+    assert_eq!(
+        slot.return_type
+            .as_ref()
+            .and_then(|ty| ty.publication.materialized_type()),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
+    );
+
+    upsert_vue(
+        &host,
+        "/src/Contract.vue",
+        r#"<script setup lang="ts">
+defineProps<{ replacement: boolean }>()
+</script>"#,
+    );
+    let refreshed = host
+        .get_public_api_projection("/src/Contract.vue")
+        .expect("updated Vue projection succeeds")
+        .expect("updated Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(refreshed) = refreshed.contract
+    else {
+        panic!("updated Vue carrier remains supported");
+    };
+    assert_eq!(refreshed.props.len(), 1);
+    assert_eq!(refreshed.props[0].name.as_ref(), "replacement");
+    assert!(refreshed.events.is_empty() && refreshed.slots.is_empty());
+}
+
+#[test]
+fn declaration_survives_typed_component_contract_output_failure() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/ContractOutputFailure.vue",
+        "<script setup lang=\"ts\">defineProps<{ value: string }>()</script>",
+    );
+    crate::test_only::component_meta_output::force_output_failure_for(
+        "/src/ContractOutputFailure.vue",
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/ContractOutputFailure.vue")
+        .expect("contract failure does not suppress declaration")
+        .expect("Vue declaration remains available");
+    assert!(projection.response.ts_labeled_code().contains("$props"));
+    let crate::framework::ComponentContractAvailability::Unsupported(unsupported) =
+        projection.contract
+    else {
+        panic!("output failure must not become supported-empty");
+    };
+    assert!(matches!(
+        unsupported.reason,
+        crate::framework::ComponentContractUnsupportedReason::OutputMaterializationFailed {
+            lane: crate::meta_resolve::ComponentMetaOutputLane::Prop,
+            index: 0,
+            inner_index: None,
+            failure: crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource,
+        }
+    ));
+}
 /// A completely EMPTY .vue file (0 bytes — e.g. motion-vue's playground
 /// Home.vue) is a valid empty component. The host must serve a Main virtual
 /// node exporting `defineComponent({ __name })` with an empty public surface

@@ -8,17 +8,29 @@ import {
 import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 
 describe("decodeTypedComponentMetaPayload", () => {
-  it("accepts v5 and rejects the retired v4 response", () => {
+  it("accepts v6 and rejects the retired v5 response", () => {
     const current = createTestComponentMetaPayload();
-    expect(current.schemaVersion).toBe(5);
+    expect(current.schemaVersion).toBe(6);
     expect(() =>
       decodeTypedComponentMetaPayload(
         toBinary(
           ComponentMetaPayloadSchema,
-          create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 4 }),
+          create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 5 }),
         ),
       ),
-    ).toThrow(/expected 5, found 4/);
+    ).toThrow(/expected 6, found 5/);
+  });
+
+  it("decodes supported contract type references from the shared graph", () => {
+    const current = createTestComponentMetaPayload();
+    const result = decodeTypedComponentMetaPayload(
+      toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, current)),
+    );
+    expect(result.componentPublicContract.kind).toBe("supported");
+    if (result.componentPublicContract.kind !== "supported") return;
+    expect(result.componentPublicContract.contract.adapterId).toBe("vue");
+    expect(result.componentPublicContract.contract.props[0]?.name).toBe("root");
+    expect(result.componentPublicContract.contract.props[0]?.type.type).toBeDefined();
   });
 
   it("decodes origin graph from protobuf binary", () => {

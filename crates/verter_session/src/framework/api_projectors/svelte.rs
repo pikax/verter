@@ -28,10 +28,7 @@ use verter_type_expr::facts::{
 use verter_type_expr::locators::AuthoredBodyLocator;
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
-use crate::framework::api_projector::{
-    ComponentApiProjection, ComponentApiProjector, ComponentApiProjectorCtx,
-    ComponentPublicContract, ComponentPublicProp,
-};
+use crate::framework::api_projector::{ComponentApiProjector, ComponentApiProjectorCtx};
 use crate::types::{PublicApiMode, TscResponse};
 
 /// The Svelte component-API projector.
@@ -42,7 +39,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
     fn render_api(
         &self,
         cx: ComponentApiProjectorCtx<'_>,
-    ) -> Result<Option<ComponentApiProjection>, crate::PublicApiProjectionError> {
+    ) -> Result<Option<TscResponse>, crate::PublicApiProjectionError> {
         let ComponentApiProjectorCtx {
             host,
             resolved_canonical,
@@ -373,25 +370,23 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             &name_mappings,
         );
 
-        Ok(Some(ComponentApiProjection {
+        Ok(Some(
             // The Svelte API surface is rendered declaration text
             // (`export declare const …`), never an authored body: it is
             // TypeScript whatever the component's script language is — and
             // therefore never needs a distinct TS-labeled rendering.
-            response: TscResponse::new(
+            TscResponse::new(
                 Arc::from(code.as_str()),
                 Some(source_map),
                 verter_compiler::tsc::SfcScriptDialect::TypeScript,
                 None,
             ),
-            contract: resolved_props.map(|props| ComponentPublicContract { props: props.props }),
-        }))
+        ))
     }
 }
 
 struct ResolvedPublicProps {
     text: String,
-    props: Vec<ComponentPublicProp>,
     /// Prop NAME-token map anchors: each rendered prop name's byte offset
     /// within [`Self::text`] paired with its authored SFC-absolute byte offset
     /// (the `$props()` annotation member / local interface member name). Only
@@ -399,6 +394,12 @@ struct ResolvedPublicProps {
     /// name span, contribute an anchor; the anchors are valid ONLY while
     /// [`Self::text`] ships byte-identical in the carrier.
     name_mappings: Vec<PropNameMapping>,
+}
+
+struct RenderedPublicProp {
+    name: String,
+    type_annotation: Option<String>,
+    optional: bool,
 }
 
 /// One prop NAME-token source-map anchor: the rendered name token's byte
@@ -562,11 +563,10 @@ fn resolve_public_props_text(
                 .prop_defaults
                 .iter()
                 .any(|default| default.key == field.analysis.name);
-            ComponentPublicProp {
+            RenderedPublicProp {
                 name: field.analysis.name.clone(),
                 type_annotation: field.analysis.type_annotation.clone(),
                 optional: field.analysis.is_optional || has_default,
-                has_default,
             }
         })
         .collect::<Vec<_>>();
@@ -634,7 +634,6 @@ fn resolve_public_props_text(
     }
     Some(ResolvedPublicProps {
         text,
-        props: contract_props,
         name_mappings,
     })
 }

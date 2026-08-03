@@ -524,6 +524,7 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
             emits: Vec::new(),
             slots: Vec::new(),
             exposed: Vec::new(),
+            default_keys: Vec::new(),
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
@@ -531,6 +532,7 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
             emits: Vec::new(),
             slots: Vec::new(),
             exposed: Vec::new(),
+            default_keys: Vec::new(),
         },
     ];
 
@@ -572,6 +574,7 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
             emits: Vec::new(),
             slots: Vec::new(),
             exposed: Vec::new(),
+            default_keys: Vec::new(),
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
@@ -579,6 +582,7 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
             emits: Vec::new(),
             slots: Vec::new(),
             exposed: Vec::new(),
+            default_keys: Vec::new(),
         },
     ];
 
@@ -755,6 +759,7 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
             }),
         ],
         slots: Vec::new(),
+        default_keys: Vec::new(),
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
@@ -871,6 +876,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
             }),
         ],
         slots: Vec::new(),
+        default_keys: Vec::new(),
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
@@ -2023,6 +2029,7 @@ fn partial_identifier_props_keep_resolved_authority_and_authored_evidence() {
         emits: Vec::new(),
         slots: Vec::new(),
         exposed: Vec::new(),
+        default_keys: Vec::new(),
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
@@ -2575,6 +2582,7 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
         exposed: Vec::new(),
         props: Vec::new(),
         emits: Vec::new(),
+        default_keys: Vec::new(),
         slots: vec![
             crate::analysis::types::AnalyzedSlotField {
                 name: "default".to_string(),
@@ -3134,6 +3142,7 @@ fn resolved_macros_supply_imported_metadata_without_snapshot_mutation() {
         emits: Vec::new(),
         slots: Vec::new(),
         exposed: Vec::new(),
+        default_keys: Vec::new(),
     }];
 
     let mut input = empty_input(&macros);
@@ -3171,6 +3180,7 @@ fn resolved_macros_merge_with_local_prop_fields_for_mixed_type_sources() {
         emits: Vec::new(),
         slots: Vec::new(),
         exposed: Vec::new(),
+        default_keys: Vec::new(),
     }];
 
     let mut input = empty_input(&macros);
@@ -3188,6 +3198,75 @@ fn resolved_macros_merge_with_local_prop_fields_for_mixed_type_sources() {
         names.contains(&"importedOnly"),
         "host-resolved imported fields should merge with local fields for mixed type sources: {:?}",
         names
+    );
+}
+
+#[test]
+fn native_framework_input_preserves_defaults_duplicate_event_publications_and_slot_return() {
+    let macros = Vec::new();
+    let slot_payload = lower_for_test(Some("number"));
+    let resolved_macros = vec![ResolvedMacroInput {
+        macro_index: 0,
+        props: vec![resolved_prop_input(make_prop(
+            "count",
+            Some("number"),
+            true,
+        ))],
+        emits: vec![
+            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+                name: "save".to_string(),
+                span: verter_span::Span::default(),
+                payload_type: Some("[value: string]".to_string()),
+                payload: lower_for_test(Some("[value: string]")).0,
+                payload_expr_scope: lower_for_test(Some("[value: string]")).1,
+                description: None,
+                tags: Vec::new(),
+            }),
+            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+                name: "save".to_string(),
+                span: verter_span::Span::default(),
+                payload_type: Some("[index?: number]".to_string()),
+                payload: Some(test_payload(1)),
+                payload_expr_scope: Some(verter_type_expr::TypeExprScope::new("test:fixture")),
+                description: None,
+                tags: Vec::new(),
+            }),
+        ],
+        slots: vec![crate::analysis::types::AnalyzedSlotField {
+            name: "itemRow".to_string(),
+            is_required: false,
+            span: verter_span::Span::default(),
+            bindings: Vec::new(),
+            return_type: Some("number".to_string()),
+            description: None,
+            tags: Vec::new(),
+            payload: slot_payload.0,
+            return_expr_scope: slot_payload.1,
+        }],
+        exposed: Vec::new(),
+        default_keys: vec!["count".to_string()],
+    }];
+    let mut input = empty_input(&macros);
+    input.resolved_macros = &resolved_macros;
+
+    let result = extract_component_meta(input);
+    assert!(result.props[0].has_default);
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["save", "save"]
+    );
+    assert_ne!(
+        result.events[0].publication.result().source_position(),
+        result.events[1].publication.result().source_position(),
+        "duplicate rows retain their own A1 publication authority"
+    );
+    assert!(
+        result.slots[0].typed_return_publication().is_some(),
+        "meaningful native slot returns publish typed A1 authority"
     );
 }
 

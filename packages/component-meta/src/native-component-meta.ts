@@ -100,6 +100,114 @@ export type NativeTypePublication =
       provenance: NativePublicationProvenance;
     };
 
+export type NativeContractExactness = "exact" | "degraded";
+export type NativeContractProvenance = "componentMetaOutput";
+
+export type NativeContractSurface =
+  | { kind: "prop"; name: string }
+  | { kind: "event"; name: string; overloadIndex: number }
+  | { kind: "slotBinding"; slot: string; binding: string }
+  | { kind: "slotReturn"; slot: string };
+
+export interface NativeResolutionDiagnostic {
+  kind: NativeExpansionDiagnostic["reason"];
+  context: string;
+  propertyName?: string;
+}
+
+export interface NativeContractDegradation {
+  surface: NativeContractSurface;
+  reason: "absent" | "incomplete";
+  diagnostics: NativeResolutionDiagnostic[];
+}
+
+export interface NativePublicTypeReference {
+  type?: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
+}
+
+export interface NativePublicParameter {
+  name?: string;
+  optional: boolean;
+  rest: boolean;
+  type: NativeTypeExprLike;
+}
+
+export interface NativePublicCallSignature {
+  source: NativePublicTypeReference;
+  parameters: NativePublicParameter[];
+  returnType: NativeTypeExprLike;
+}
+
+export interface NativePublicHandlerSignature {
+  parameters: NativePublicParameter[];
+  returnType: NativeTypeExprLike;
+}
+
+export interface NativePublicProp {
+  name: string;
+  optional: boolean;
+  hasDefault: boolean;
+  type: NativePublicTypeReference;
+  exactness: NativeContractExactness;
+  degradation: NativeContractDegradation[];
+  provenance: NativeContractProvenance;
+}
+
+export interface NativePublicEvent {
+  name: string;
+  overloads: NativePublicCallSignature[];
+  derivedHandler: { overloads: NativePublicHandlerSignature[] };
+  exactness: NativeContractExactness;
+  degradation: NativeContractDegradation[];
+  provenance: NativeContractProvenance;
+}
+
+export interface NativePublicSlot {
+  name: string;
+  optional: boolean;
+  input: { bindings: Array<{ name: string; type: NativePublicTypeReference }> };
+  returnType?: NativePublicTypeReference;
+  exactness: NativeContractExactness;
+  degradation: NativeContractDegradation[];
+  provenance: NativeContractProvenance;
+}
+
+export interface NativeComponentPublicContract {
+  adapterId: string;
+  exactness: NativeContractExactness;
+  degradation: NativeContractDegradation[];
+  provenance: NativeContractProvenance;
+  props: NativePublicProp[];
+  events: NativePublicEvent[];
+  slots: NativePublicSlot[];
+}
+
+export type NativeComponentContractAvailability =
+  | { kind: "supported"; contract: NativeComponentPublicContract }
+  | {
+      kind: "unsupported";
+      adapterId: string;
+      reason:
+        | { kind: "adapterUnavailable" }
+        | { kind: "componentMetaUnavailable" }
+        | {
+            kind: "outputMaterializationFailed";
+            lane: string;
+            index: number;
+            innerIndex?: number;
+            failure: string;
+          }
+        | {
+            kind: "publicationFailed";
+            surface: NativeContractSurface;
+            failure: "unrepresentableRequiredMemberValue" | "unrepresentableRequiredPayload";
+            provenance: NativeResolutionProvenance;
+          };
+      diagnostics: NativeResolutionDiagnostic[];
+    };
+
 export interface NativePropMeta {
   name: string;
   type?: NativeTypeExprLike;
@@ -128,6 +236,8 @@ export interface NativePropMeta {
 export interface NativeEventMeta {
   name: string;
   payload: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
   payloadExpansion?: NativeExpansionMetadata;
   rawSignature?: string;
   description?: string;
@@ -148,6 +258,9 @@ export interface NativeSlotMeta {
   bindings: NativeSlotBindingMeta[];
   isRequired: boolean;
   returnType?: string;
+  returnValue?: NativeTypeExprLike;
+  returnPublication?: NativeTypePublication;
+  returnTerminalDisplay?: NativeTerminalTypeDisplay;
   description?: string;
   tags?: NativeJsdocTag[];
   /**
@@ -577,6 +690,7 @@ export interface NativeOriginGraph {
 }
 
 export interface NativeComponentMetaResult {
+  componentPublicContract: NativeComponentContractAvailability;
   props: NativePropMeta[];
   events: NativeEventMeta[];
   slots: NativeSlotMeta[];
@@ -664,7 +778,13 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     })),
     events: meta.events.map((event) => ({
       name: event.name,
-      payload: typeExprToDescriptor(event.payload, nativeRegistry),
+      payload: typeExprToDescriptor(
+        requirePublishedType(
+          { type: event.payload, publication: event.publication },
+          `event ${event.name}`,
+        ),
+        nativeRegistry,
+      ),
       ...(event.payloadExpansion !== undefined ? { payloadExpansion: event.payloadExpansion } : {}),
       hasValidator: false,
       isDeclared: true,

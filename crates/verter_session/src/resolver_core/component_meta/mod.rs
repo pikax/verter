@@ -231,8 +231,78 @@ pub(crate) fn component_meta_resolved_macros(
                         },
                     )
                     .collect(),
+                default_keys: Vec::new(),
             },
         );
+    }
+
+    let host = ctx.host_for_fact_tracer_install();
+    let is_svelte = host
+        .scheduler
+        .try_get_source(owner_canonical)
+        .and_then(|snapshot| {
+            snapshot
+                .downcast_data::<crate::host_executor::HostSourceData>()
+                .map(|data| data.file_language.clone())
+        })
+        .and_then(|language| language.adapter_id().cloned())
+        .is_some_and(|adapter| adapter.is_svelte());
+    if is_svelte {
+        use crate::typeinfo::framework_surface::SvelteSurfaceSource;
+
+        let native_index = snapshot_macros.len();
+        let mut native = verter_semantic::analysis::component_meta::ResolvedMacroInput {
+            macro_index: native_index,
+            props: Vec::new(),
+            emits: Vec::new(),
+            slots: Vec::new(),
+            exposed: Vec::new(),
+            default_keys: Vec::new(),
+        };
+        for source in [
+            SvelteSurfaceSource::RunesProps,
+            SvelteSurfaceSource::LegacyExportLet,
+            SvelteSurfaceSource::CallbackPropEvents,
+            SvelteSurfaceSource::LegacyDispatcher,
+            SvelteSurfaceSource::SnippetProps,
+            SvelteSurfaceSource::LegacySlotInventory,
+        ] {
+            let outcome = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
+                host,
+                ctx,
+                owner_canonical,
+                source,
+            );
+            if matches!(
+                outcome,
+                crate::typeinfo::framework_surface::ResolvedOutcome::Partial { .. }
+            ) {
+                crate::request_context::mark_request_result_partial();
+            }
+            let Some(dtos) = outcome.value() else {
+                continue;
+            };
+            native.props.extend(dtos.prop_fields().iter().map(|row| {
+                verter_semantic::analysis::component_meta::ResolvedPropInput {
+                    field: row.analysis.clone(),
+                    authority: row.authority.clone(),
+                    authored_evidence: row.authored_evidence.clone(),
+                }
+            }));
+            native.default_keys.extend(
+                dtos.prop_defaults()
+                    .iter()
+                    .map(|default| default.key.clone()),
+            );
+            native.emits.extend(dtos.emit_fields().iter().map(|row| {
+                verter_semantic::analysis::component_meta::ResolvedEmitInput {
+                    field: row.analysis.clone(),
+                    payload_source: row.payload_source.clone(),
+                }
+            }));
+            native.slots.extend_from_slice(dtos.slot_fields());
+        }
+        inputs.push(native);
     }
     inputs
 }

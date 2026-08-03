@@ -358,6 +358,26 @@ fn resolve_runes_props(
         // empty, never a Missing.
         None => (Vec::new(), Vec::new()),
     };
+    for row in &mut fields {
+        if matches!(
+            row.authority.outcome(),
+            verter_type_expr::ResolvedTypeOutcome::Failed { .. }
+        ) {
+            let source = verter_type_expr::facts::SourcePosition::Present(
+                verter_type_expr::facts::SemanticTypeSource::Projected(
+                    verter_type_expr::facts::ProjectedTypeFact::MemberPath {
+                        base: props_type.locator.clone(),
+                        path: Arc::from(vec![row.analysis.name.clone()].into_boxed_slice()),
+                    },
+                ),
+            );
+            *row =
+                crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
+                    row.analysis.clone(),
+                    source,
+                );
+        }
+    }
     // Apply runtime DEFAULTS DIRECTLY (the Svelte path does NOT use Vue's
     // analyzer default-merge path): a prop with a captured default is OPTIONAL
     // on the surface (`required = !is_optional` downstream), and the default
@@ -1142,9 +1162,6 @@ fn callback_events_from_props_surface(
             payload_source,
         });
     }
-    // De-duplicate by event name, first-writer-wins.
-    let mut seen = std::collections::HashSet::new();
-    events.retain(|e| seen.insert(e.analysis.name.clone()));
     events
 }
 

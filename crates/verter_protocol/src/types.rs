@@ -610,6 +610,7 @@ pub struct OriginEdgeDto {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FfiComponentMeta {
+    pub component_public_contract: FfiComponentContractAvailability,
     pub props: Vec<FfiPropMeta>,
     pub events: Vec<FfiEventMeta>,
     pub slots: Vec<FfiSlotMeta>,
@@ -649,6 +650,232 @@ pub struct FfiComponentMeta {
     pub resolution_status: FfiComponentMetaResolutionStatus,
     #[serde(skip_serializing_if = "origin_graph_is_empty")]
     pub origin: OriginGraphDto,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiComponentContractAvailability {
+    Supported {
+        contract: FfiComponentPublicContract,
+    },
+    Unsupported {
+        unsupported: FfiComponentContractUnsupported,
+    },
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiComponentContractUnsupported {
+    pub adapter_id: String,
+    pub reason: FfiComponentContractUnsupportedReason,
+    pub diagnostics: Vec<FfiResolutionDiagnostic>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiComponentContractUnsupportedReason {
+    AdapterUnavailable,
+    ComponentMetaUnavailable,
+    OutputMaterializationFailed {
+        lane: FfiComponentMetaOutputLane,
+        index: u32,
+        inner_index: Option<u32>,
+        failure: FfiComponentMetaOutputFailure,
+    },
+    PublicationFailed {
+        surface: FfiContractSurface,
+        failure: FfiTypePublicationFailure,
+        provenance: FfiResolutionProvenance,
+    },
+}
+
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiComponentMetaOutputLane {
+    Prop,
+    EventPayload,
+    SlotBinding,
+    SlotReturn,
+    Model,
+    Exposed,
+    PublicInstanceMember,
+    TypeRegistryEntry,
+    AcceptedProp,
+    AcceptedEventPayload,
+    FallthroughProp,
+    FallthroughEventPayload,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiComponentMetaOutputFailure {
+    UnraisableSource,
+    RequiredSourceUnavailable { failure: FfiTypePublicationFailure },
+    InteriorSourceMiss,
+    ShellMaterializationMiss,
+    UnknownMaterializingSourceInterior,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiComponentPublicContract {
+    pub adapter_id: String,
+    pub exactness: FfiContractExactness,
+    pub degradation: Vec<FfiContractDegradation>,
+    pub provenance: FfiContractProvenance,
+    pub props: Vec<FfiPublicProp>,
+    pub events: Vec<FfiPublicEvent>,
+    pub slots: Vec<FfiPublicSlot>,
+}
+
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiContractExactness {
+    Exact,
+    Degraded,
+}
+
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiContractProvenance {
+    ComponentMetaOutput,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiContractDegradation {
+    pub surface: FfiContractSurface,
+    pub reason: FfiContractDegradationReason,
+    pub diagnostics: Vec<FfiResolutionDiagnostic>,
+}
+
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiContractDegradationReason {
+    Absent,
+    Incomplete,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FfiContractSurface {
+    Prop { name: String },
+    Event { name: String, overload_index: u32 },
+    SlotBinding { slot: String, binding: String },
+    SlotReturn { slot: String },
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiResolutionDiagnostic {
+    pub kind: FfiResolutionDiagnosticKind,
+    pub context: String,
+    pub property_name: Option<String>,
+}
+
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiResolutionDiagnosticKind {
+    BudgetExceeded,
+    ProjectionWorkLimit,
+    ConnectedQueryDepthLimit,
+    MappedDepthExceeded,
+    UnresolvedReference,
+    IndeterminateConditional,
+    InfiniteKeySpace,
+    UnsupportedOperator,
+    ConditionalContextTruncated,
+    IdempotentArm,
+    CyclicReference,
+    CyclicInstantiation,
+    InstantiationError,
+    EmptyUnionArm,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicTypeReference {
+    pub r#type: Option<verter_type_expr::TypeExpr>,
+    pub publication: FfiTypePublication,
+    pub terminal_display: FfiTerminalTypeDisplay,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicProp {
+    pub name: String,
+    pub optional: bool,
+    pub has_default: bool,
+    pub ty: FfiPublicTypeReference,
+    pub exactness: FfiContractExactness,
+    pub degradation: Vec<FfiContractDegradation>,
+    pub provenance: FfiContractProvenance,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicEvent {
+    pub name: String,
+    pub overloads: Vec<FfiPublicCallSignature>,
+    pub derived_handler: FfiPublicDerivedHandlerShape,
+    pub exactness: FfiContractExactness,
+    pub degradation: Vec<FfiContractDegradation>,
+    pub provenance: FfiContractProvenance,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicCallSignature {
+    pub source: FfiPublicTypeReference,
+    pub parameters: Vec<FfiPublicParameter>,
+    pub return_type: verter_type_expr::TypeExpr,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicParameter {
+    pub name: Option<String>,
+    pub optional: bool,
+    pub rest: bool,
+    pub ty: verter_type_expr::TypeExpr,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicDerivedHandlerShape {
+    pub overloads: Vec<FfiPublicHandlerSignature>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicHandlerSignature {
+    pub parameters: Vec<FfiPublicParameter>,
+    pub return_type: verter_type_expr::TypeExpr,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicSlot {
+    pub name: String,
+    pub optional: bool,
+    pub input: FfiPublicSlotInput,
+    pub return_type: Option<FfiPublicTypeReference>,
+    pub exactness: FfiContractExactness,
+    pub degradation: Vec<FfiContractDegradation>,
+    pub provenance: FfiContractProvenance,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicSlotInput {
+    pub bindings: Vec<FfiPublicSlotBinding>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicSlotBinding {
+    pub name: String,
+    pub ty: FfiPublicTypeReference,
 }
 
 /// Typed resolution status of a component-meta payload — see
@@ -848,6 +1075,8 @@ pub struct FfiPropMeta {
 pub struct FfiEventMeta {
     pub name: String,
     pub payload: verter_type_expr::TypeExpr,
+    pub publication: FfiTypePublication,
+    pub terminal_display: FfiTerminalTypeDisplay,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_expansion: Option<FfiExpansionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -867,6 +1096,9 @@ pub struct FfiSlotMeta {
     pub is_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_type: Option<String>,
+    pub return_value: Option<verter_type_expr::TypeExpr>,
+    pub return_publication: Option<FfiTypePublication>,
+    pub return_terminal_display: Option<FfiTerminalTypeDisplay>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

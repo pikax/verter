@@ -220,6 +220,8 @@ pub struct ResolvedMacroInput {
     /// type-argument surface members with their span-sliced JSDoc), each
     /// with its member-value source.
     pub exposed: Vec<ResolvedExposeInput>,
+    /// Producer-owned prop names with authored runtime defaults.
+    pub default_keys: Vec<String>,
 }
 
 pub struct ComponentMetaInput<'a> {
@@ -335,10 +337,12 @@ pub struct PropAnalysis {
 #[derive(Debug, Clone)]
 pub struct EventAnalysis {
     pub name: String,
-    /// The resolved payload SOURCE POSITION: present, PROVEN schema-absent
-    /// (an unannotated runtime emit), or a typed failure at the REQUIRED
-    /// payload-tuple position (fails output materialization).
+    /// Legacy semantic source lane retained for accepted/fallthrough mechanics.
+    /// Public contract consumers use `publication`.
     pub payload: SourcePosition,
+    /// Producer-owned payload publication. This retains typed authority,
+    /// exactness, diagnostics, and provenance through terminal materialization.
+    pub publication: TypePublication,
     pub payload_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     pub raw_signature: Option<String>,
     pub description: Option<String>,
@@ -372,6 +376,20 @@ pub struct SlotAnalysis {
     /// `Compat` / `Refined` slot blocklist (an author-declared slot is
     /// never blocked, whatever its name).
     pub declared_in_macro_type_arg: bool,
+}
+
+impl SlotAnalysis {
+    /// Build the A1 publication for a meaningful typed return from the
+    /// producer-owned semantic source. Legacy display text is not consulted.
+    pub fn typed_return_publication(&self) -> Option<TypePublication> {
+        let position = SourcePosition::Present(self.return_source.clone()?);
+        Some(publication_from_position(
+            &position,
+            None,
+            None,
+            ResolutionProvenance::FrameworkSurface,
+        ))
+    }
 }
 
 /// A single binding property on a scoped slot.
@@ -1419,6 +1437,12 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             )
         })
         .flat_map(|m| m.default_keys.iter().map(|k| k.as_str()))
+        .chain(
+            input
+                .resolved_macros
+                .iter()
+                .flat_map(|resolved| resolved.default_keys.iter().map(String::as_str)),
+        )
         .collect();
 
     // Runtime defineProps({ ... default }) stores defaults on the DefineProps macro
@@ -1479,6 +1503,36 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
                 // Handled above (default_keys) or flags
             }
         }
+    }
+
+    // Framework-native carriers without Vue macro syntax (for example
+    // Svelte `$props`, callback events, and snippets) enter as synthetic
+    // resolved inputs after the snapshot macro ordinal range. They use the
+    // same typed extraction functions and publication policy as macro-backed
+    // rows; no declaration or display text is inspected.
+    let mut native_indices = input
+        .resolved_macros
+        .iter()
+        .filter_map(|resolved| {
+            (resolved.macro_index >= input.macros.len()).then_some(resolved.macro_index)
+        })
+        .collect::<Vec<_>>();
+    native_indices.sort_unstable();
+    native_indices.dedup();
+    for macro_index in native_indices {
+        let Some(resolved) = merged_resolved_macro_input(input.resolved_macros, macro_index) else {
+            continue;
+        };
+        extract_props_from_macro(
+            macro_index,
+            &resolved.props,
+            &default_keys,
+            &default_values,
+            evaluated_types,
+            &mut props,
+        );
+        extract_events_from_macro(macro_index, &resolved.emits, evaluated_types, &mut events);
+        extract_slots_from_macro(macro_index, &resolved.slots, evaluated_types, &mut slots);
     }
 
     // Merge template-discovered slots with defineSlots
@@ -1898,7 +1952,6 @@ fn merged_resolved_macro_input(
 ) -> Option<ResolvedMacroInput> {
     let mut merged: Option<ResolvedMacroInput> = None;
     let mut seen_props = rustc_hash::FxHashSet::default();
-    let mut seen_emits = rustc_hash::FxHashSet::default();
     let mut seen_slots = rustc_hash::FxHashSet::default();
     let mut seen_exposed = rustc_hash::FxHashSet::default();
 
@@ -1912,6 +1965,7 @@ fn merged_resolved_macro_input(
             emits: Vec::new(),
             slots: Vec::new(),
             exposed: Vec::new(),
+            default_keys: Vec::new(),
         });
 
         for prop in &resolved.props {
@@ -1926,9 +1980,7 @@ fn merged_resolved_macro_input(
             }
         }
         for emit in &resolved.emits {
-            if seen_emits.insert(emit.field.name.clone()) {
-                entry.emits.push(emit.clone());
-            }
+            entry.emits.push(emit.clone());
         }
         for slot in &resolved.slots {
             if seen_slots.insert(slot.name.clone()) {
@@ -1938,6 +1990,11 @@ fn merged_resolved_macro_input(
         for exposed in &resolved.exposed {
             if seen_exposed.insert(exposed.field.name.clone()) {
                 entry.exposed.push(exposed.clone());
+            }
+        }
+        for key in &resolved.default_keys {
+            if !entry.default_keys.iter().any(|existing| existing == key) {
+                entry.default_keys.push(key.clone());
             }
         }
     }
@@ -2024,12 +2081,15 @@ fn extract_events_from_macro(
     out: &mut Vec<EventAnalysis>,
 ) {
     let expanded_events = expanded_define_emit_events(evaluated, macro_index);
+    let emit_name_counts = emit_fields.iter().fold(
+        rustc_hash::FxHashMap::<&str, usize>::default(),
+        |mut counts, row| {
+            *counts.entry(row.field.name.as_str()).or_default() += 1;
+            counts
+        },
+    );
     if !expanded_events.is_empty() {
-        let expanded_by_name: rustc_hash::FxHashMap<_, _> = expanded_events
-            .iter()
-            .cloned()
-            .map(|event| (event.name.clone(), event))
-            .collect();
+        let mut expanded_remaining = expanded_events.clone();
 
         if emit_fields.is_empty() {
             for event in expanded_events {
@@ -2040,7 +2100,13 @@ fn extract_events_from_macro(
                 });
                 out.push(EventAnalysis {
                     name: event.name,
-                    payload: event.payload,
+                    payload: event.payload.clone(),
+                    publication: publication_from_position(
+                        &event.payload,
+                        event.payload_expansion.as_ref(),
+                        None,
+                        ResolutionProvenance::FrameworkSurface,
+                    ),
                     payload_expansion: event.payload_expansion,
                     raw_signature: event_raw_signature_from_evaluated_and_source(
                         evaluated_field
@@ -2062,9 +2128,16 @@ fn extract_events_from_macro(
             // row's own session-resolved `payload_source` covers the rest.
             // The flat evaluated lane contributes ONLY expansion metadata —
             // never the payload source.
-            let (payload, payload_expansion) = expanded_by_name
-                .get(&field.name)
-                .map(|event| (event.payload.clone(), event.payload_expansion.clone()))
+            let (payload, payload_expansion) = expanded_remaining
+                .iter()
+                .position(|event| {
+                    emit_name_counts
+                        .get(field.name.as_str())
+                        .is_some_and(|count| *count == 1)
+                        && event.name == field.name
+                })
+                .map(|index| expanded_remaining.remove(index))
+                .map(|event| (event.payload, event.payload_expansion))
                 .unwrap_or_else(|| {
                     let metadata = evaluated.and_then(|eval| {
                         eval.emits
@@ -2077,7 +2150,13 @@ fn extract_events_from_macro(
 
             out.push(EventAnalysis {
                 name: field.name.clone(),
-                payload,
+                payload: payload.clone(),
+                publication: publication_from_position(
+                    &payload,
+                    payload_expansion.as_ref(),
+                    authored_type_evidence(field.payload.as_ref(), field.payload_type.as_deref()),
+                    ResolutionProvenance::FrameworkSurface,
+                ),
                 payload_expansion,
                 raw_signature: event_raw_signature_from_evaluated_and_source(
                     evaluated.and_then(|eval| {
@@ -2110,6 +2189,12 @@ fn extract_events_from_macro(
         out.push(EventAnalysis {
             name: field.name.clone(),
             payload: row.payload_source.clone(),
+            publication: publication_from_position(
+                &row.payload_source,
+                payload_expansion.as_ref(),
+                authored_type_evidence(field.payload.as_ref(), field.payload_type.as_deref()),
+                ResolutionProvenance::FrameworkSurface,
+            ),
             payload_expansion,
             raw_signature: event_raw_signature_from_evaluated_and_source(
                 evaluated.and_then(|eval| {
@@ -2232,13 +2317,9 @@ fn expanded_define_emit_events(
         return Vec::new();
     };
 
-    let mut seen = rustc_hash::FxHashSet::default();
     let mut events = Vec::new();
 
     for prop in &entry.result.value.properties {
-        if !seen.insert(prop.name.clone()) {
-            continue;
-        }
         events.push(ExpandedEventEntry {
             name: prop.name.clone(),
             payload: prop.ty.clone(),
@@ -2272,25 +2353,23 @@ fn expanded_define_emit_events(
         if let SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::StringLiteral(name))) =
             &first.ty
         {
-            if seen.insert(name.clone()) {
-                let payload = if sig.parameters.len() == 1 {
-                    SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(
-                        verter_type_expr::facts::TuplePayloadFact {
-                            readonly: false,
-                            elements: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-                        },
-                    )))
-                } else {
-                    SourcePosition::Failed(
-                        verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
-                    )
-                };
-                events.push(ExpandedEventEntry {
-                    name: name.clone(),
-                    payload,
-                    payload_expansion: payload_expansion.clone(),
-                });
-            }
+            let payload = if sig.parameters.len() == 1 {
+                SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(
+                    verter_type_expr::facts::TuplePayloadFact {
+                        readonly: false,
+                        elements: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                )))
+            } else {
+                SourcePosition::Failed(
+                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+                )
+            };
+            events.push(ExpandedEventEntry {
+                name: name.clone(),
+                payload,
+                payload_expansion: payload_expansion.clone(),
+            });
         }
     }
 
@@ -2681,8 +2760,19 @@ fn synthesize_model_prop_and_event(
         // A TYPED model's payload is authoritative for its own update event;
         // an untyped model must not DOWNGRADE an event another producer
         // already published with a present source.
-        if payload.is_present() || !existing_event.payload.is_present() {
-            existing_event.payload = payload;
+        if payload.is_present() || !existing_event.publication.source_position().is_present() {
+            existing_event.payload = payload.clone();
+            existing_event.publication = publication_from_position(
+                &payload,
+                evaluated_event.map(field_expansion_metadata).as_ref(),
+                source_prop.and_then(|row| {
+                    authored_type_evidence(
+                        row.field.payload.as_ref(),
+                        source_payload_type.as_deref(),
+                    )
+                }),
+                ResolutionProvenance::FrameworkSurface,
+            );
         }
         existing_event.payload_expansion = existing_event
             .payload_expansion
@@ -2694,7 +2784,18 @@ fn synthesize_model_prop_and_event(
     } else {
         events.push(EventAnalysis {
             name: event_name.clone(),
-            payload,
+            payload: payload.clone(),
+            publication: publication_from_position(
+                &payload,
+                evaluated_event.map(field_expansion_metadata).as_ref(),
+                source_prop.and_then(|row| {
+                    authored_type_evidence(
+                        row.field.payload.as_ref(),
+                        source_payload_type.as_deref(),
+                    )
+                }),
+                ResolutionProvenance::FrameworkSurface,
+            ),
             payload_expansion: evaluated_event.map(field_expansion_metadata),
             raw_signature,
             description: None,
@@ -2953,18 +3054,33 @@ fn merged_emit_fields(
         })
         .collect();
     if let Some(resolved) = resolved {
+        let mut matched = vec![false; rows.len()];
         for emit in &resolved.emits {
-            if let Some(existing) = rows
+            let matching_indices = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| (row.field.name == emit.field.name).then_some(index))
+                .collect::<Vec<_>>();
+            if matching_indices.len() > 1 {
+                for index in matching_indices {
+                    matched[index] = true;
+                }
+                continue;
+            }
+            if let Some((index, existing)) = rows
                 .iter_mut()
-                .find(|row| row.field.name == emit.field.name)
+                .enumerate()
+                .find(|(index, row)| !matched[*index] && row.field.name == emit.field.name)
             {
                 // The normalized-surface payload source is authoritative for
                 // the merged row (it already prefers the PROVEN authored
                 // position when one denotes the resolved member); the
                 // analyzer row keeps its local analysis metadata.
                 existing.payload_source = emit.payload_source.clone();
+                matched[index] = true;
             } else {
                 rows.push(emit.clone());
+                matched.push(true);
             }
         }
     }
@@ -3079,6 +3195,12 @@ fn extract_events_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<EventAna
         out.push(EventAnalysis {
             name: field.name.clone(),
             payload: authored_payload_position(field.payload.as_ref()),
+            publication: publication_from_position(
+                &authored_payload_position(field.payload.as_ref()),
+                None,
+                authored_type_evidence(field.payload.as_ref(), field.payload_type.as_deref()),
+                ResolutionProvenance::FrameworkSurface,
+            ),
             payload_expansion: None,
             raw_signature: field.payload_type.clone(),
             description: field.description.clone(),

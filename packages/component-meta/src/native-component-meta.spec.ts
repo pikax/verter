@@ -389,6 +389,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
         {
           name: "select",
           payload: { kind: "ref", name: "Payload", typeArguments: [] },
+          ...publishedTypeFields("Payload"),
           payloadExpansion: {
             exactness: "incomplete",
             executionStatus: "completed",

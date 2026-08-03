@@ -299,6 +299,14 @@ fn hot_materialize_structural_rails_smoke() {
     t.compile_fail("tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs");
 }
 
+/// A produced public-API projection must carry a closed contract availability;
+/// the old optional construction is rejected by the type system.
+#[test]
+fn component_api_projection_contract_not_optional_compile_fail() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/component_api_projection_contract_not_optional.rs");
+}
+
 /// The sealed `InstantiateBodySource` construction: the source-kind
 /// constructors `InstantiateContext::file_backed` / `::non_file` are
 /// `pub(crate)` AND require the `BodySourceWitness` mintable only inside

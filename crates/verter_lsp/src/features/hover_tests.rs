@@ -1,8 +1,16 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
+use std::sync::Arc;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::types::VueApiCallSite;
 use verter_semantic::analysis::*;
+use verter_session::framework::{
+    ComponentContractAvailability, ComponentPublicContract, ContractExactness, ContractProvenance,
+    FrameworkAdapterId, PublicCallSignature, PublicDerivedHandlerShape, PublicEvent,
+    PublicHandlerSignature, PublicParameter, PublicProp, PublicSlot, PublicSlotBinding,
+    PublicSlotInput, PublicTypeReference,
+};
+use verter_type_expr::{PrimitiveName, TupleElement, TypeExpr};
 
 fn make_analysis(
     bindings: Vec<AnalyzedBinding>,
@@ -15,6 +23,174 @@ fn make_analysis(
         macros: macros.into(),
         ..Default::default()
     }
+}
+
+fn public_type(expression: TypeExpr, terminal_decoy: &str) -> PublicTypeReference {
+    let selected_source = verter_type_expr::facts::SemanticTypeSource::Closed(
+        verter_type_expr::facts::ClosedTypeFact::Leaf(
+            verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::Unknown),
+        ),
+    );
+    PublicTypeReference {
+        publication: verter_session::meta_resolve::MaterializedTypePublication::for_test(
+            verter_type_expr::PublicationResult::Published {
+                selected_source: Arc::new(selected_source),
+                semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
+                exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
+                reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),
+                provenance: verter_type_expr::PublicationProvenance::Resolved {
+                    provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
+                },
+            },
+            Some(expression),
+            Some(terminal_decoy.to_string()),
+        ),
+    }
+}
+
+fn structured_contract(adapter_id: FrameworkAdapterId) -> ComponentContractAvailability {
+    let event_source = public_type(
+        TypeExpr::Tuple {
+            elements: Arc::from([
+                TupleElement {
+                    label: Some("value".to_string()),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    rest: false,
+                },
+                TupleElement {
+                    label: Some("tail".to_string()),
+                    ty: TypeExpr::Array {
+                        element: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+                        readonly: false,
+                    },
+                    optional: false,
+                    rest: true,
+                },
+            ]),
+            readonly: false,
+        },
+        "[hostile?: never]",
+    );
+    let first_parameters: Arc<[PublicParameter]> = Arc::from([PublicParameter {
+        name: Some(Arc::from("value")),
+        optional: false,
+        rest: false,
+        ty: TypeExpr::Primitive(PrimitiveName::String),
+    }]);
+    let second_parameters: Arc<[PublicParameter]> = Arc::from([
+        PublicParameter {
+            name: Some(Arc::from("count")),
+            optional: true,
+            rest: false,
+            ty: TypeExpr::Primitive(PrimitiveName::Number),
+        },
+        PublicParameter {
+            name: Some(Arc::from("tail")),
+            optional: false,
+            rest: true,
+            ty: TypeExpr::Array {
+                element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+                readonly: false,
+            },
+        },
+    ]);
+    let void_type = TypeExpr::Primitive(PrimitiveName::Void);
+    let boolean_type = TypeExpr::Primitive(PrimitiveName::Boolean);
+    ComponentContractAvailability::Supported(Arc::new(ComponentPublicContract {
+        adapter_id,
+        exactness: ContractExactness::Exact,
+        degradation: Arc::from([]),
+        provenance: ContractProvenance::ComponentMetaOutput,
+        props: Arc::from([
+            PublicProp {
+                name: Arc::from("contractProp"),
+                optional: false,
+                has_default: false,
+                ty: public_type(
+                    TypeExpr::Ref {
+                        name: Arc::from("ContractValue"),
+                        type_arguments: Arc::from([TypeExpr::Ref {
+                            name: Arc::from("T"),
+                            type_arguments: Arc::from([]),
+                        }]),
+                    },
+                    "HOSTILE_PROP_DISPLAY",
+                ),
+                exactness: ContractExactness::Exact,
+                degradation: Arc::from([]),
+                provenance: ContractProvenance::ComponentMetaOutput,
+            },
+            PublicProp {
+                name: Arc::from("optionalCount"),
+                optional: true,
+                has_default: true,
+                ty: public_type(
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    "HOSTILE_DEFAULT_DISPLAY",
+                ),
+                exactness: ContractExactness::Exact,
+                degradation: Arc::from([]),
+                provenance: ContractProvenance::ComponentMetaOutput,
+            },
+        ]),
+        events: Arc::from([PublicEvent {
+            name: Arc::from("select"),
+            overloads: Arc::from([
+                PublicCallSignature {
+                    source: event_source.clone(),
+                    parameters: Arc::clone(&first_parameters),
+                    return_type: void_type.clone(),
+                },
+                PublicCallSignature {
+                    source: event_source,
+                    parameters: Arc::clone(&second_parameters),
+                    return_type: boolean_type.clone(),
+                },
+            ]),
+            derived_handler: PublicDerivedHandlerShape {
+                overloads: Arc::from([
+                    PublicHandlerSignature {
+                        parameters: first_parameters,
+                        return_type: void_type,
+                    },
+                    PublicHandlerSignature {
+                        parameters: second_parameters,
+                        return_type: boolean_type,
+                    },
+                ]),
+            },
+            exactness: ContractExactness::Exact,
+            degradation: Arc::from([]),
+            provenance: ContractProvenance::ComponentMetaOutput,
+        }]),
+        slots: Arc::from([PublicSlot {
+            name: Arc::from("itemRow"),
+            optional: true,
+            input: PublicSlotInput {
+                bindings: Arc::from([PublicSlotBinding {
+                    name: Arc::from("item"),
+                    ty: public_type(
+                        TypeExpr::Ref {
+                            name: Arc::from("Item"),
+                            type_arguments: Arc::from([]),
+                        },
+                        "HOSTILE_SLOT_INPUT",
+                    ),
+                }]),
+            },
+            return_type: Some(public_type(
+                TypeExpr::Ref {
+                    name: Arc::from("VNode"),
+                    type_arguments: Arc::from([]),
+                },
+                "HOSTILE_SLOT_RETURN",
+            )),
+            exactness: ContractExactness::Exact,
+            degradation: Arc::from([]),
+            provenance: ContractProvenance::ComponentMetaOutput,
+        }]),
+    }))
 }
 
 #[test]
@@ -466,59 +642,10 @@ fn child_component_hover_recovers_import_source_from_script_binding() {
 
 #[test]
 fn svelte_child_component_hover_reads_native_component_props() {
-    use verter_semantic::analysis::template::AnalyzedPropDefinition;
-    use verter_session::framework::api_projector::{ComponentPublicContract, ComponentPublicProp};
+    let public_contract = structured_contract(FrameworkAdapterId::svelte());
 
-    let child_analysis = FileAnalysisSnapshot {
-        template: Some(
-            TemplateAnalysisSnapshot {
-                prop_definitions: vec![AnalyzedPropDefinition {
-                    name: "contractProp".to_owned(),
-                    type_annotation: None,
-                    has_default: false,
-                    is_required: true,
-                    is_boolean: false,
-                    used_in_template: true,
-                    used_in_script: true,
-                    span: verter_span::Span::new(0, 0),
-                }],
-                ..Default::default()
-            }
-            .into(),
-        ),
-        ..Default::default()
-    };
-    let public_contract = ComponentPublicContract {
-        props: vec![
-            ComponentPublicProp {
-                name: "contractProp".to_owned(),
-                type_annotation: Some("ContractValue<T>".to_owned()),
-                optional: false,
-                has_default: false,
-            },
-            ComponentPublicProp {
-                name: "optionalCount".to_owned(),
-                type_annotation: Some("number".to_owned()),
-                optional: true,
-                has_default: true,
-            },
-            ComponentPublicProp {
-                name: "onselect".to_owned(),
-                type_annotation: Some("(value: string) => void".to_owned()),
-                optional: true,
-                has_default: false,
-            },
-        ],
-    };
-
-    let hover = build_child_component_hover(
-        "DirectChild",
-        "./DirectChild.svelte",
-        &child_analysis,
-        Some(&public_contract),
-        None,
-        &[],
-    );
+    let hover =
+        build_child_component_hover("DirectChild", "./DirectChild.svelte", &public_contract, &[]);
     let HoverContents::Markup(markup) = hover.contents else {
         panic!("expected markdown child-component hover");
     };
@@ -533,9 +660,64 @@ fn svelte_child_component_hover_reads_native_component_props() {
         markup.value
     );
     assert!(markup.value.contains("`optionalCount`?: number"));
+    assert!(markup.value.contains("`select`(value: string) => void"));
     assert!(markup
         .value
-        .contains("`onselect`?: (value: string) => void"));
+        .contains("`select`(count?: number, ...tail: Array<string>) => boolean"));
+    assert!(markup
+        .value
+        .contains("`itemRow`?(props: { item: Item }): VNode"));
+    for hostile in [
+        "HOSTILE_PROP_DISPLAY",
+        "HOSTILE_DEFAULT_DISPLAY",
+        "hostile?: never",
+        "HOSTILE_SLOT_INPUT",
+        "HOSTILE_SLOT_RETURN",
+    ] {
+        assert!(
+            !markup.value.contains(hostile),
+            "terminal display changed structured hover meaning: {hostile}"
+        );
+    }
+}
+
+#[test]
+fn child_event_and_slot_hovers_render_structured_overloads_and_slot_contract() {
+    let contract = structured_contract(FrameworkAdapterId::vue());
+    let event = build_child_event_hover("@select", &contract).expect("event contract");
+    let event_text = hover_text(&event);
+    assert!(event_text.contains("@select(value: string) => void"));
+    assert!(event_text.contains("@select(count?: number, ...tail: Array<string>) => boolean"));
+    assert!(!event_text.contains("hostile?: never"));
+
+    let slot = build_child_slot_hover("#item-row", "item-row", &contract).expect("slot contract");
+    let slot_text = hover_text(&slot);
+    assert!(slot_text.contains("(slot) itemRow(props: { item: Item }): VNode"));
+    assert!(slot_text.contains("`#item-row`"));
+    assert!(!slot_text.contains("HOSTILE_SLOT"));
+}
+
+#[test]
+fn child_summary_surfaces_typed_unsupported_contract_without_fabricated_rows() {
+    let unsupported = ComponentContractAvailability::Unsupported(
+        verter_session::framework::ComponentContractUnsupported {
+            adapter_id: FrameworkAdapterId::vue(),
+            reason:
+                verter_session::framework::ComponentContractUnsupportedReason::ComponentMetaUnavailable,
+            diagnostics: Arc::from([]),
+        },
+    );
+    for hover in [
+        build_child_component_hover("Child", "./Child.vue", &unsupported, &[]),
+        build_child_event_hover("@save", &unsupported).expect("typed unsupported event hover"),
+        build_child_slot_hover("#default", "default", &unsupported)
+            .expect("typed unsupported slot hover"),
+    ] {
+        let text = hover_text(&hover);
+        assert!(text.contains("ComponentMetaUnavailable"));
+        assert!(!text.contains("unknown"));
+        assert!(!text.contains("Props:"));
+    }
 }
 
 #[test]

@@ -2217,18 +2217,50 @@ impl VerterHost {
                 else {
                     return Ok(None);
                 };
-                projector.render_api(crate::framework::api_projector::ComponentApiProjectorCtx {
-                    host: self,
-                    resolved_canonical: &canonical,
-                    file_language: &file_language,
-                    mode,
-                    profile,
-                    render_seed: Some(crate::framework::api_projector::PublicApiRenderSeed {
-                        cold_seed: fixed.cold_seed(),
+                let response = projector.render_api(
+                    crate::framework::api_projector::ComponentApiProjectorCtx {
+                        host: self,
+                        resolved_canonical: &canonical,
+                        file_language: &file_language,
+                        mode,
+                        profile,
+                        render_seed: Some(crate::framework::api_projector::PublicApiRenderSeed {
+                            cold_seed: fixed.cold_seed(),
+                            view,
+                            fixed,
+                        }),
+                    },
+                )?;
+                let Some(response) = response else {
+                    return Ok(None);
+                };
+                let contract = match self
+                    .get_component_meta_output_via_view_with_fixed_store_view(
+                        &canonical,
                         view,
                         fixed,
-                    }),
-                })
+                        false,
+                    )
+                {
+                    Ok(Some(output)) => output.contract().clone(),
+                    Ok(None) => crate::framework::ComponentContractAvailability::Unsupported(
+                        crate::framework::ComponentContractUnsupported {
+                            adapter_id: adapter_id.clone(),
+                            reason: crate::framework::ComponentContractUnsupportedReason::
+                                ComponentMetaUnavailable,
+                            diagnostics: std::sync::Arc::from([]),
+                        },
+                    ),
+                    Err(error) => {
+                        crate::framework::public_contract::unsupported_from_output_error(
+                            adapter_id.clone(),
+                            &error,
+                        )
+                    }
+                };
+                Ok(Some(
+                    crate::framework::api_projector::ComponentApiProjection { response, contract },
+                ))
             })
             .collect()
     }

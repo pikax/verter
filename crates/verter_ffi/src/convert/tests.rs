@@ -215,6 +215,7 @@ fn failed_publication_is_absorbing_in_all_target_ffi_lanes() {
     let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
         props: vec![failed_lane()],
         slot_bindings: vec![vec![failed_lane()]],
+        slot_returns: vec![None],
         accepted_props: vec![failed_lane()],
         fallthrough_props: vec![vec![failed_lane()]],
         fallthrough_event_payloads: vec![Vec::new()],
@@ -2489,6 +2490,7 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
                 PrimitiveName::Boolean,
             ))], // second.row
         ],
+        slot_returns: vec![None, None],
         fallthrough_props: vec![
             vec![
                 materialized_publication(TypeExpr::Primitive(PrimitiveName::String)), // b0 inherited

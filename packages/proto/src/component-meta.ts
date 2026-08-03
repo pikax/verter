@@ -27,7 +27,7 @@ export type ProtoOriginGraph = ProtoRecord<"verter.v1.OriginGraph"> & RawOriginG
 export type ProtoOriginNode = ProtoRecord<"verter.v1.OriginNode"> & RawOriginNode;
 export type ProtoOriginEdge = ProtoRecord<"verter.v1.OriginEdge"> & RawOriginEdge;
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const PRIMITIVE_STRING = 1;
 const PRIMITIVE_UNDEFINED = 11;
 const OBJECT_MEMBER_PROPERTY = 1;
@@ -56,7 +56,7 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
   return {
     schemaVersion: SCHEMA_VERSION,
     typeGraph: {
-      strings: ["/src/Tree.vue", "TreeNode", "root", "default", "VNode[]", "label", "next"],
+      strings: ["/src/Tree.vue", "TreeNode", "root", "default", "VNode[]", "label", "next", "vue"],
       nodes: [
         typeNode("primitive", { primitive: PRIMITIVE_STRING }),
         typeNode("primitive", { primitive: PRIMITIVE_UNDEFINED }),
@@ -183,6 +183,40 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
         kind: FALLTHROUGH_SURFACE_NONE,
         reason: NO_FALLTHROUGH_REASON_NO_TEMPLATE,
         branches: [],
+      },
+      componentPublicContract: {
+        availability: {
+          case: "supported",
+          value: {
+            adapterId: 8,
+            exactness: 1,
+            degradation: [],
+            provenance: 1,
+            props: [
+              {
+                nameId: 3,
+                optional: false,
+                hasDefault: false,
+                type: {
+                  typeNodeId: 3,
+                  publication: {
+                    kind: 3,
+                    provenance: 1,
+                    semanticAuthority: 1,
+                    exactness: 2,
+                    reason: 2,
+                  },
+                  terminalDisplay: { textId: 2 },
+                },
+                exactness: 1,
+                degradation: [],
+                provenance: 1,
+              },
+            ],
+            events: [],
+            slots: [],
+          },
+        },
       },
     },
   };

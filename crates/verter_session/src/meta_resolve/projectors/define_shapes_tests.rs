@@ -486,3 +486,61 @@ defineEmits<ImportedEmits>()
         "an inherited typed event must not fall to the Unknown leaf"
     );
 }
+
+/// Event payloads and slot returns leave the terminal sink as structured A1
+/// publications. Display text is carried separately for terminal consumers.
+#[test]
+fn event_and_slot_shapes_publish_structured_output_lanes() {
+    let project = project_with(
+        "/App.vue",
+        r#"<script setup lang="ts">
+defineEmits<{ save: [value: string] }>()
+defineSlots<{ default(props: { item: string }): number }>()
+</script>
+<template><div /></template>"#,
+    );
+    let (analysis, _resolution, types) = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("component-meta output materializes")
+        .expect("component resolves")
+        .into_parts();
+    let lanes = types.into_lanes();
+
+    assert_eq!(analysis.events.len(), 1);
+    assert_eq!(
+        lanes.event_publications[0].materialized_type(),
+        Some(&TypeExpr::Tuple {
+            elements: vec![verter_type_expr::TupleElement {
+                ty: TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                optional: false,
+                rest: false,
+                label: Some("value".to_string()),
+            }]
+            .into(),
+            readonly: false,
+        })
+    );
+    assert!(
+        lanes.event_publications[0]
+            .terminal_display()
+            .text()
+            .is_some(),
+        "terminal display is carried separately"
+    );
+
+    assert_eq!(analysis.slots.len(), 1);
+    let slot_return = lanes.slot_returns[0]
+        .as_ref()
+        .expect("typed slot return publication");
+    assert_eq!(
+        slot_return.materialized_type(),
+        Some(&TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
+    );
+    assert!(
+        slot_return.terminal_display().text().is_some(),
+        "slot return display is carried separately"
+    );
+}

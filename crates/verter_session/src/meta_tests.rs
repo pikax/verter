@@ -26864,7 +26864,8 @@ defineEmits<{ first: [id: number]; dup: [a: string]; dup: [b: boolean]; last: []
         "fixture premise: the analysis preserves the duplicate `dup` rows in source order"
     );
 
-    let payloads = types.into_lanes().event_payloads;
+    let lanes = types.into_lanes();
+    let payloads = &lanes.event_payloads;
     assert_eq!(
         payloads.len(),
         4,
@@ -26877,18 +26878,16 @@ defineEmits<{ first: [id: number]; dup: [a: string]; dup: [b: boolean]; last: []
         "index 0 must be `first`'s `[id: number]`, got {:?}",
         payloads[0]
     );
-    // Both `dup` rows carry the same analyzer-published field payload (the
-    // analyzer keys expanded fields by name), so each POSITION must still
-    // materialize — same value, two rows.
-    let dup_expected = labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))]);
     assert_eq!(
-        payloads[1], dup_expected,
+        payloads[1],
+        labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))]),
         "index 1 must be the first `dup` row, got {:?}",
         payloads[1]
     );
     assert_eq!(
-        payloads[2], dup_expected,
-        "index 2 must be the second `dup` row (duplicate preserved), got {:?}",
+        payloads[2],
+        labeled_tuple(&[("b", TypeExpr::Primitive(PrimitiveName::Boolean))]),
+        "index 2 must be the second authored `dup` overload, got {:?}",
         payloads[2]
     );
     assert_eq!(
@@ -26897,10 +26896,23 @@ defineEmits<{ first: [id: number]; dup: [a: string]; dup: [b: boolean]; last: []
         "index 3 must be `last`'s empty tuple `[]`, got {:?}",
         payloads[3]
     );
+    assert_eq!(
+        lanes.event_publications.len(),
+        4,
+        "the A1 publication lane aligns 1:1 with duplicate event rows"
+    );
+    assert_eq!(
+        published_type(&lanes.event_publications[1]),
+        &labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))])
+    );
+    assert_eq!(
+        published_type(&lanes.event_publications[2]),
+        &labeled_tuple(&[("b", TypeExpr::Primitive(PrimitiveName::Boolean))])
+    );
 }
 
 // ===========================================================================
-// Full output-boundary conversion: all 11 wire lanes, view-fence equivalence,
+// Full output-boundary conversion: all 13 wire lanes, view-fence equivalence,
 // cache rails, request-local dedupe, cross-owner effective scope
 // ===========================================================================
 
@@ -26969,7 +26981,7 @@ fn authored_decl_body_source(
     )
 }
 
-/// The ALL-11-LANES sentinel fixture: one component populating every wire
+/// The ALL-13-LANES sentinel fixture: one component populating every wire
 /// type lane — props (distinct middle element), DUPLICATE event names,
 /// nested slot bindings (repeated binding name across slots), models,
 /// exposed, public-instance members, merged type-registry rows, accepted
@@ -26981,7 +26993,7 @@ fn authored_decl_body_source(
 /// positional swap moves the DISTINCT middle prop sentinel (`middle:
 /// number`) onto a neighbour. Both fail the exact positional assertions.
 #[test]
-fn component_meta_output_materializes_all_eleven_lanes_positionally() {
+fn component_meta_output_materializes_all_thirteen_lanes_positionally() {
     let project = make_project();
     project
         .upsert_base(
@@ -27012,7 +27024,7 @@ import ChildB from './ChildB.vue'
 type Named = { x: number }
 defineProps<{ first: string; middle: number; last: boolean; named: Named }>()
 defineEmits<{ first: [id: number]; dup: [a: string]; dup: [b: boolean] }>()
-defineSlots<{ default(props: { row: string; other: number }): any; second(props: { row: boolean }): any }>()
+defineSlots<{ default(props: { row: string; other: number }): number; second(props: { row: boolean }): string }>()
 const modelSentinel = defineModel<boolean>('modelSentinel')
 const exposedVal: string = 'x'
 defineExpose({ exposedVal })
@@ -27069,18 +27081,16 @@ const cond = true
         2,
         "duplicate event names are positional rows, never name-collapsed; got {event_names:?}"
     );
-    // Both `dup` ROWS survive positionally; the analyzer's duplicate-key
-    // payload-source semantics (first authored payload wins per name — the
-    // upstream behavior the foundation events test pins) apply to BOTH rows'
-    // sources, and the lane transports each row's source faithfully.
+    // Both authored `dup` overloads survive positionally with their distinct
+    // payload sources.
     assert_eq!(
         lanes.event_payloads[dup_positions[0]],
         labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))]),
     );
     assert_eq!(
         lanes.event_payloads[dup_positions[1]],
-        labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))]),
-        "the duplicate row transports its analysis source 1:1 (never dropped)"
+        labeled_tuple(&[("b", TypeExpr::Primitive(PrimitiveName::Boolean))]),
+        "the second duplicate row transports its own authored payload"
     );
     // The DISTINCT `first` event keeps its own payload — an internal
     // positional swap moves it onto a `dup` row.
@@ -27090,9 +27100,23 @@ const cond = true
         labeled_tuple(&[("id", TypeExpr::Primitive(PrimitiveName::Number))]),
         "the distinct event keeps its own positional payload"
     );
+    assert_eq!(
+        analysis.events.len(),
+        lanes.event_publications.len(),
+        "A1 event publications are positionally aligned"
+    );
+    assert_eq!(
+        published_type(&lanes.event_publications[dup_positions[0]]),
+        &labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))])
+    );
+    assert_eq!(
+        published_type(&lanes.event_publications[dup_positions[1]]),
+        &labeled_tuple(&[("b", TypeExpr::Primitive(PrimitiveName::Boolean))])
+    );
 
-    // ── Lane 3: slot bindings (nested topology; repeated `row` name). ──
+    // ── Lanes 4-5: slot bindings and typed returns. ──
     assert_eq!(analysis.slots.len(), lanes.slot_bindings.len());
+    assert_eq!(analysis.slots.len(), lanes.slot_returns.len());
     for (slot, binding_lane) in analysis.slots.iter().zip(lanes.slot_bindings.iter()) {
         assert_eq!(
             slot.bindings.len(),
@@ -27149,6 +27173,22 @@ const cond = true
         }
         other => panic!("second.row publishes its own binding carrier; got {other:?}"),
     }
+    assert_eq!(
+        published_type(
+            lanes.slot_returns[default_idx]
+                .as_ref()
+                .expect("default slot has a typed return")
+        ),
+        &TypeExpr::Primitive(PrimitiveName::Number)
+    );
+    assert_eq!(
+        published_type(
+            lanes.slot_returns[second_idx]
+                .as_ref()
+                .expect("second slot has a typed return")
+        ),
+        &TypeExpr::Primitive(PrimitiveName::String)
+    );
 
     // ── Lane 4: models — exact sentinel VALUE (a deleted model
     // materializer empties the lane; an Unknown-returning one fails the
@@ -27657,6 +27697,12 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
     analysis.events.push(cm::EventAnalysis {
         name: "e".to_string(),
         payload: verter_type_expr::facts::SourcePosition::unannotated(),
+        publication: crate::test_only::type_publication_fixture(
+            verter_type_expr::facts::SourcePosition::unannotated(),
+            verter_type_expr::ResolutionExactness::ExactConcrete,
+            None,
+            None,
+        ),
         payload_expansion: None,
         raw_signature: Some("(e: 'e') => void".to_string()),
         description: None,
@@ -28964,6 +29010,12 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
         .push(verter_semantic::analysis::component_meta::EventAnalysis {
             name: "e".to_string(),
             payload: verter_type_expr::facts::SourcePosition::Present(shared.clone()),
+            publication: crate::test_only::type_publication_fixture(
+                verter_type_expr::facts::SourcePosition::Present(shared.clone()),
+                verter_type_expr::ResolutionExactness::ExactConcrete,
+                None,
+                None,
+            ),
             payload_expansion: None,
             raw_signature: None,
             description: None,

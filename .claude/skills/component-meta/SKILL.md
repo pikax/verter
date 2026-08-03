@@ -81,7 +81,31 @@ The official/native component-meta payload is the semantic authority. `@verter/c
 - Component-meta output must be deterministic for a coherent snapshot/query. The same inputs should produce the same graph identities, metadata shape, and compat-visible meaning.
 - If native code truly cannot represent part of a type, encode that explicitly as a structured unsupported/HardStop-style result with diagnostics/provenance sidecars. Do not silently degrade a representable type to raw text or `unknown`.
 - The native response contract must remain explicit and versioned. If the component-meta payload shape changes, do it as a deliberate schema/API cutover rather than compat-side drift.
-- Component-meta response v5 guarantees a structurally complete descriptor graph for compat classification. Shallow imported refs that a published surface demands must have the required native registry entries (for example, `Fn | Fn[]` retains both arms and publishes `Fn` as callable); unreferenced siblings and package-backed internals remain shallow. Compat never fills a missing registry entry from display text. See [`docs/arch/scanners-replacement-compat-descriptor.md`](../../../docs/arch/scanners-replacement-compat-descriptor.md).
+- Component-meta response v6 guarantees a structurally complete descriptor graph for compat classification and adds the mandatory full-response public component contract at tag 26. Shallow imported refs that a published surface demands must have the required native registry entries (for example, `Fn | Fn[]` retains both arms and publishes `Fn` as callable); unreferenced siblings and package-backed internals remain shallow. Compat never fills a missing registry entry from display text. See [`docs/arch/scanners-replacement-compat-descriptor.md`](../../../docs/arch/scanners-replacement-compat-descriptor.md) and [`docs/arch/scanners-replacement-public-contract.md`](../../../docs/arch/scanners-replacement-public-contract.md).
+
+### Framework public contract
+
+Every produced Vue or Svelte declaration projection carries mandatory
+`ComponentContractAvailability`. `Supported` contains one structured
+`ComponentPublicContract`; `Unsupported` carries the adapter identity, a closed
+reason, and producer-owned typed diagnostics. Never replace a failed output
+with absence, supported-empty, `unknown`, or a string diagnostic.
+
+`framework::public_contract` is the sole projector. It consumes component-meta
+analysis plus its positionally aligned materialized lanes under the same fixed
+store view as declaration rendering. Framework adapters render declaration
+carriers only and must not build their own contract path.
+
+Props preserve optional/default facts. Events preserve source-ordered duplicate
+rows as structured overloads, including parameter labels and optional/rest
+flags, return types, and derived handler shape. Slots preserve scoped binding
+rows and meaningful typed returns. Each type reference carries its descriptor,
+A1 publication, diagnostics, and separately branded terminal display.
+
+Consumers use availability and structured rows only. Generated declaration
+code, `TscResponse`, `rawSignature`, legacy slot `returnType`, and terminal
+display never establish public-contract meaning. See
+[`docs/arch/scanners-replacement-public-contract.md`](../../../docs/arch/scanners-replacement-public-contract.md).
 - Host-owned resolver artifacts, graph artifacts, and encoded payload caches must share one invalidation story. Do not add a second ownership path for the same component-meta query state.
 - Raw graph cycles reaching JS without explicit recursion nodes are native bugs, not a normal compat fallback path.
 
@@ -153,7 +177,7 @@ The native component-meta / typeinfo type resolver — analyzer (`verter_semanti
   sink and may not feed semantic policy. The complete owner, selector, carrier,
   merge, compat, and the original version-4 wire rules are in
   [`docs/arch/scanners-replacement-type-authority.md`](../../../docs/arch/scanners-replacement-type-authority.md).
-- The response-v5 compat cutover is descriptor-only: `unknown` is unsupported,
+- The response-v6 compat cutover is descriptor-only: `unknown` is unsupported,
   `rawType`/`rawSignature` are terminal display data, and structural role
   classification precedes rendering. The complete mapping and default checker
   gate are in
