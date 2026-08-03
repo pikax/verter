@@ -63,14 +63,15 @@ pub(crate) fn collect_define_props_root_names(
         // The type argument's root reference name is read off its structural
         // mirror node (the ONE sanctioned type-arg producer; parens are
         // structurally transparent there) — never a stored body.
-        let Some(handle) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             ctx,
             owner_canonical,
             macro_index,
         ) else {
             continue;
         };
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, handle.node()) else {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, product.hot.node())
+        else {
             continue;
         };
         if let Some((name, _)) = data.bare_ref_head() {

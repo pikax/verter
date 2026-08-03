@@ -1,0 +1,1 @@
+p:nth-child(4n of html:root>body>p+p:not(empty), :not(*), p:not(p), span, .notthere), p:nth-last-child(4n of html:root>body>p+p:not(empty), :not(*), p:not(p), span, .notthere)

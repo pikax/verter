@@ -741,7 +741,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 owner_canonical,
                 macro_index,
             ) {
-                Some(handle) => Arc::from(vec![handle.node()].into_boxed_slice()),
+                Some(product) => Arc::from(vec![product.hot.node()].into_boxed_slice()),
                 None => continue,
             };
         // Carrier-fact propagation: walk the lowered macro arg and

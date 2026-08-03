@@ -555,15 +555,15 @@ pub(crate) fn collect_component_meta_registry_public_macro_root_refs(
         if !macro_call.is_type_based || macro_call.parsed_type_argument.is_none() {
             continue;
         }
-        let Some(hot) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             ctx,
             owner_canonical,
             macro_index,
         ) else {
             continue;
         };
-        let route_root_name = component_meta_registry_node_utility_route(ctx, hot.node())
-            .or_else(|| component_meta_registry_node_indexed_access_route(ctx, hot.node()))
+        let route_root_name = component_meta_registry_node_utility_route(ctx, product.hot.node())
+            .or_else(|| component_meta_registry_node_indexed_access_route(ctx, product.hot.node()))
             .map(|(root, _)| root);
         let producer_scope = RegistryProducerScope::explicit(owner_canonical, macro_call.owner);
         let Some(owner_local_root) = component_meta_registry_public_route_owner_local_root(

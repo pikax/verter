@@ -769,6 +769,7 @@ impl VerterHost {
                 // host's scheduler and caches stay untouched).
                 let template_inputs = crate::types::VueTemplateInputs {
                     source: Arc::clone(&facts.raw_source),
+                    whole_hash: facts.whole_hash,
                     framework_parse: facts.framework_parse.clone(),
                     store_published: false,
                     // Overlay artifact read — no scheduler node
@@ -2421,6 +2422,7 @@ impl VerterHost {
             // no-op there. No hardcoded `.vue` extension gate.
             let template_inputs = crate::types::VueTemplateInputs {
                 source: Arc::clone(&facts.raw_source),
+                whole_hash: facts.whole_hash,
                 framework_parse: facts.framework_parse.clone(),
                 store_published: serve.store_published,
                 // Artifact-serve read — no scheduler node

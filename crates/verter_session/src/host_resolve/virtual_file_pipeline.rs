@@ -974,6 +974,7 @@ impl VerterHost {
             CompileInput {
                 canonical_id: canonical.clone(),
                 source: efs.source,
+                whole_hash: efs.whole_hash,
                 meta: effective_meta,
                 parse_diagnostics: parse.parse_diagnostics.clone(),
                 src_blocks: parse.src_blocks.clone(),
@@ -1299,6 +1300,7 @@ impl VerterHost {
                 let compile_input = CompileInput {
                     canonical_id: canonical_id.clone(),
                     source: efs.source,
+                    whole_hash: effective_whole_hash,
                     meta: effective_meta.clone(),
                     parse_diagnostics: parse.parse_diagnostics.clone(),
                     src_blocks: parse.src_blocks.clone(),
@@ -1692,11 +1694,18 @@ impl VerterHost {
             stale,
             compiled_tsx,
             compiled_template_analysis,
+            template_class_admission,
             runtime_surface_refused,
         ) = match compile_result {
-            Ok((outputs, diagnostics, tsx, tpl, refused)) => {
-                (outputs, diagnostics, false, tsx, tpl, refused)
-            }
+            Ok((outputs, diagnostics, tsx, tpl, class_admission, refused)) => (
+                outputs,
+                diagnostics,
+                false,
+                tsx,
+                tpl,
+                class_admission,
+                refused,
+            ),
             Err(diagnostics) => {
                 self.store_latest_diagnostics_if_source_unmoved(
                     &canonical_id,
@@ -1718,7 +1727,15 @@ impl VerterHost {
                 if serve_last_good {
                     if let Some(last_good) = fallback_last_good.clone() {
                         // A last-good serve is not a fresh runtime refusal.
-                        (last_good, diagnostics, true, None, None, false)
+                        (
+                            last_good,
+                            diagnostics,
+                            true,
+                            None,
+                            None,
+                            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::refused(),
+                            false,
+                        )
                     } else {
                         return Err(HostError::CompileError(CompileFailure {
                             diagnostics,
@@ -1845,7 +1862,7 @@ impl VerterHost {
                                 )
                             })
                     });
-                if live_key.as_ref() == Some(&captured_key) {
+                if live_key.as_ref() == Some(&captured_key) && template_class_admission.owner_only {
                     self.compile_output_pure_content().publish_content(
                         captured_key,
                         compile_output_value,
@@ -1902,6 +1919,9 @@ impl VerterHost {
                                 source_generation: Some(source_snap.generation),
                                 has_src_blocks: !compile_input.src_blocks.is_empty(),
                                 default_extraction: !profile.has_parse_affecting_template_options(),
+                                template_class_signature: template_class_admission
+                                    .signature
+                                    .clone(),
                             },
                         );
                     }
@@ -2718,6 +2738,7 @@ impl VerterHost {
             DiagnosticsSnapshot,
             Option<CachedTsx>,
             Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
             // Whether the carrier fail-closed on an unsupported runtime surface (the
             // TYPED runtime-refusal signal, sourced from the bundle).
             bool,
@@ -3151,13 +3172,32 @@ impl VerterHost {
         });
 
         // Convert raw template data into analysis types when available
+        let mut template_class_admission =
+            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::not_applicable();
         let template_analysis = compiled.template_data.as_ref().map(|raw| {
             // Build script import pairs for component â†’ source resolution
-            let (all_imports, binding_class_unions, props_binding_name) = template_converter_inputs(
-                &snapshot.script_imports,
-                &snapshot.script_macros,
-                &snapshot.script_bindings,
+            let all_imports =
+                template_converter_inputs(&snapshot.script_imports, &snapshot.script_bindings);
+            let facts = self.build_template_class_semantic_facts(
+                &snapshot.canonical_id,
+                snapshot.whole_hash,
+                Arc::clone(&snapshot.source),
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+                    macros: &snapshot.script_macros,
+                    bindings: &snapshot.script_bindings,
+                },
+                raw,
+                snapshot.content_override_layer.is_none(),
             );
+            let class_domains =
+                crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
+                    &facts,
+                    &snapshot.canonical_id,
+                    snapshot.whole_hash,
+                )
+                .unwrap_or_else(crate::template_convert::TemplateClassDomainIndex::empty);
+            template_class_admission =
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::from_facts(&facts);
             let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
                 &snapshot.script_macros,
                 snapshot.script_macro_usage.as_ref(),
@@ -3170,8 +3210,7 @@ impl VerterHost {
             crate::template_convert::convert_raw_to_analysis(
                 raw,
                 &all_imports,
-                &binding_class_unions,
-                props_binding_name.as_deref(),
+                &class_domains,
                 Some(&unused_ctx),
             )
         });
@@ -3181,6 +3220,7 @@ impl VerterHost {
             compile_diags,
             cached_tsx,
             template_analysis,
+            template_class_admission,
             // The TYPED runtime-refusal signal the carrier set on the bundle (no
             // `Main` was produced for an unsupported runtime surface), captured
             // before the bundle's fields were moved out.

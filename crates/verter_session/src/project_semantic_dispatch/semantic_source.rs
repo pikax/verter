@@ -357,11 +357,13 @@ impl ProjectSemanticDispatch<'_> {
         if let AuthoredBodyLocator::MacroPayload(payload) = locator {
             match payload.payload {
                 MacroPayloadPosition::TypeArgument => {
-                    if let Some(handle) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-                        self.ctx,
-                        payload.anchor.canonical_id.as_ref(),
-                        payload.macro_index as usize,
-                    ) {
+                    if let Some(product) =
+                        crate::structural_carrier_producer::macro_type_arg_hot_ref(
+                            self.ctx,
+                            payload.anchor.canonical_id.as_ref(),
+                            payload.macro_index as usize,
+                        )
+                    {
                         // Terminal-demand mode split (mirroring the per-FIELD
                         // arm below): `Expanded` / `Identity` complete the
                         // carrier-head resolution through the one dispatch.
@@ -371,10 +373,10 @@ impl ProjectSemanticDispatch<'_> {
                                 | crate::semantic_query::ProjectionMode::Identity
                         ) {
                             return Some(HotTypeRef::new(
-                                self.resolve_hot_handle_with_context(handle, context),
+                                self.resolve_hot_handle_with_context(product.hot, context),
                             ));
                         }
-                        return Some(handle);
+                        return Some(product.hot);
                     }
                     // Framework script-fact macros are not analyzer-macro
                     // mirror rows. Fall through to the retained-AST locator
@@ -455,14 +457,14 @@ impl ProjectSemanticDispatch<'_> {
                 _ => return None,
             }
         };
-        let base = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let product = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             self.ctx,
             canonical,
             payload.macro_index as usize,
         )?;
         let path: Arc<[PathSegment]> = std::iter::once(PathSegment::Member(member_name)).collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
-            base: base.node(),
+            base: product.hot.node(),
             path,
             context,
         });
@@ -1047,7 +1049,9 @@ impl ProjectSemanticDispatch<'_> {
         match demand.route {
             // The hot-mirror route IS the base handle: the demand names the
             // macro payload itself.
-            SessionDemandRoute::MacroHotMirror if demand.member_role_path.is_empty() => Some(base),
+            SessionDemandRoute::MacroHotMirror if demand.member_role_path.is_empty() => {
+                Some(base.hot)
+            }
             // A member-role path projects off the base through the one
             // dispatch — both routes converge on the same `ProjectPath`
             // projection when a path is present.
@@ -1058,10 +1062,10 @@ impl ProjectSemanticDispatch<'_> {
                     .map(|segment| PathSegment::Member(Arc::from(segment.as_str())))
                     .collect();
                 if path.is_empty() {
-                    return Some(base);
+                    return Some(base.hot);
                 }
                 let read = self.execute_read(SemanticQueryKey::ProjectPath {
-                    base: base.node(),
+                    base: base.hot.node(),
                     path,
                     context,
                 });

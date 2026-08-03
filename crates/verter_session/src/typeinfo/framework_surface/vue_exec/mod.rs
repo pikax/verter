@@ -598,7 +598,7 @@ impl VerterHost {
         // shared path walker runs intermediate hops in `Navigate` and the
         // TERMINAL hop under `terminal_context` (Shallow). A non-indexed type
         // argument decomposes to `(handle_node, [])`.
-        let handle = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let product = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             ctx,
             request.owner_canonical.as_ref(),
             request.macro_index,
@@ -606,7 +606,7 @@ impl VerterHost {
         let (base_carrier, path) =
             crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain_node(
                 ctx,
-                handle.node(),
+                product.hot.node(),
             );
         // Resolve the carrier base ONE Navigate hop through the shared dispatch
         // (carrier head resolution — a `BareRef` head routes to its `DeclRef`,

@@ -8,9 +8,13 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_type_expr::{PropCallableRoleUnresolvedReason, ResolvedSymbolIdentity};
+use verter_type_expr::facts::AuthoredReferenceHeadFact;
+use verter_type_expr::{
+    PropCallableRoleUnresolvedReason, ResolutionExactness, ResolvedSymbolIdentity,
+};
 
 use super::ProjectSemanticDispatch;
+use crate::resolver_core::shallow_file_state::ExportTarget;
 use crate::semantic_query::{
     PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
     ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
@@ -27,12 +31,239 @@ pub(crate) enum SymbolIdentityDemandOutcome {
     Partial(PropCallableRoleUnresolvedReason),
 }
 
+/// Exact identity proof paired with the terminal carrier that proved it.
+///
+/// The carrier is the fully substituted `InstantiationRef` reached after
+/// traversing every alias hop through the shared dispatcher. Feature readers
+/// must use its arguments rather than the authored arguments of an outer alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalSymbolInstantiation {
+    pub(crate) symbol: ResolvedSymbolIdentity,
+    pub(crate) args: Arc<[SemanticNodeId]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedReferenceRoute {
+    pub(crate) authored_head: AuthoredReferenceHeadFact,
+    pub(crate) owner_canonical: Arc<str>,
+    pub(crate) local_binding: Arc<str>,
+    pub(crate) import_source: Arc<str>,
+    pub(crate) imported_name: Arc<str>,
+    pub(crate) terminal_import_source: Arc<str>,
+    pub(crate) local_alias_hops: Arc<[Arc<str>]>,
+    pub(crate) terminal: ResolvedSymbolIdentity,
+    pub(crate) exactness: ResolutionExactness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TerminalSymbolInstantiationDemandOutcome {
+    Complete(Option<TerminalSymbolInstantiation>),
+    Partial(PropCallableRoleUnresolvedReason),
+}
+
 enum IdentitySubject {
     Node(SemanticNodeId),
     Symbol(ResolvedSymbolIdentity),
 }
 
+/// The authored first import hop of a reference route:
+/// `(owner_canonical, local_binding, source_specifier, imported_name)`.
+type AuthoredImportEdge = (Arc<str>, Arc<str>, Arc<str>, Arc<str>);
+
 impl ProjectSemanticDispatch<'_> {
+    /// Compose exact authored-route evidence through requested local aliases
+    /// and the shared direct-import route authority.
+    pub(crate) fn resolve_authored_reference_route(
+        &self,
+        owner_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        origin: &AuthoredReferenceHeadFact,
+    ) -> Result<Option<ResolvedReferenceRoute>, PropCallableRoleUnresolvedReason> {
+        let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
+        if let Some(reasons) = initial_trip {
+            return Err(partial_reason(reasons));
+        }
+        let (mut head, mut pending_members, import_type_specifier) = match origin {
+            AuthoredReferenceHeadFact::Bare { local_name, .. } => {
+                (Arc::clone(local_name), Vec::new(), None)
+            }
+            AuthoredReferenceHeadFact::Qualified {
+                local_root,
+                member_path,
+                ..
+            } => (
+                Arc::clone(local_root),
+                member_path.iter().cloned().collect(),
+                None,
+            ),
+            AuthoredReferenceHeadFact::NotReference => return Ok(None),
+            AuthoredReferenceHeadFact::ImportType {
+                specifier,
+                member_path,
+                ..
+            } => {
+                let Some((first, rest)) = member_path.split_first() else {
+                    return Err(PropCallableRoleUnresolvedReason::Unsupported);
+                };
+                (
+                    Arc::clone(first),
+                    rest.to_vec(),
+                    Some(Arc::clone(specifier)),
+                )
+            }
+            AuthoredReferenceHeadFact::Unavailable => {
+                return Err(PropCallableRoleUnresolvedReason::Unsupported)
+            }
+        };
+        let mut aliases = Vec::new();
+        let mut visited = FxHashSet::default();
+        let mut current_canonical = Arc::<str>::from(owner_canonical);
+        let mut current_owner = owner;
+        let mut resolve_export = false;
+        let mut import_edge: Option<AuthoredImportEdge> = None;
+        let mut terminal_import_source: Option<Arc<str>> = None;
+
+        if let Some(specifier) = import_type_specifier {
+            observe_import_route_fact(self.ctx, owner_canonical);
+            let serve = self
+                .ctx
+                .ensure_indexed_ready_serve(owner_canonical)
+                .ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
+            let target = serve
+                .indexed
+                .import_routes
+                .get(specifier.as_ref())
+                .and_then(|route| route.effective_target())
+                .ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
+            import_edge = Some((
+                Arc::from(owner_canonical),
+                Arc::from(""),
+                Arc::clone(&specifier),
+                Arc::clone(&head),
+            ));
+            terminal_import_source = Some(Arc::clone(&specifier));
+            let (resolved, route_facts) = self
+                .ctx
+                .resolve_imported_type_root_with_facts(target, head.as_ref());
+            self.ctx.observe_borrowed_signature(&route_facts);
+            let _terminal = resolved.ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
+            current_canonical = Arc::from(target);
+            current_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+            resolve_export = true;
+        }
+        loop {
+            if !visited.insert((
+                Arc::clone(&current_canonical),
+                current_owner,
+                Arc::clone(&head),
+            )) {
+                return Err(PropCallableRoleUnresolvedReason::Cycle);
+            }
+            if let Err(reasons) = self.charge_connected_work() {
+                return Err(partial_reason(reasons));
+            }
+            let shallow = self
+                .ctx
+                .shallow_file_state(current_canonical.as_ref())
+                .ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
+            if resolve_export {
+                match shallow.export_target(head.as_ref()) {
+                    Some(ExportTarget::Local { owner, symbol_name }) => {
+                        current_owner = *owner;
+                        head = Arc::from(symbol_name.as_str());
+                        resolve_export = false;
+                    }
+                    Some(ExportTarget::Reexport {
+                        source_specifier,
+                        original_name,
+                        canonical_id,
+                        ..
+                    }) => {
+                        terminal_import_source = Some(Arc::from(source_specifier.as_str()));
+                        current_canonical = Arc::from(canonical_id.as_str());
+                        current_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+                        head = Arc::from(original_name.as_str());
+                        continue;
+                    }
+                    None => return Err(PropCallableRoleUnresolvedReason::MissingDependency),
+                }
+            }
+            if let Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(
+                target,
+            )) = shallow.visible_value_binding(current_owner, head.as_ref())
+            {
+                let routed_name = if target.is_namespace {
+                    if pending_members.is_empty() {
+                        return Err(PropCallableRoleUnresolvedReason::Unsupported);
+                    }
+                    pending_members.remove(0)
+                } else {
+                    if !pending_members.is_empty() {
+                        return Err(PropCallableRoleUnresolvedReason::Unsupported);
+                    }
+                    Arc::from(target.imported_name.as_str())
+                };
+                terminal_import_source = Some(Arc::from(target.source_specifier.as_str()));
+                if import_edge.is_none() {
+                    import_edge = Some((
+                        Arc::clone(&current_canonical),
+                        Arc::clone(&head),
+                        Arc::from(target.source_specifier.as_str()),
+                        Arc::clone(&routed_name),
+                    ));
+                }
+                let (resolved, route_facts) = self.ctx.resolve_imported_type_root_with_facts(
+                    &target.canonical_id,
+                    routed_name.as_ref(),
+                );
+                self.ctx.observe_borrowed_signature(&route_facts);
+                let _terminal =
+                    resolved.ok_or(PropCallableRoleUnresolvedReason::MissingDependency)?;
+                current_canonical = Arc::from(target.canonical_id.as_str());
+                current_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+                head = routed_name;
+                resolve_export = true;
+                continue;
+            }
+
+            if !pending_members.is_empty() {
+                return Err(PropCallableRoleUnresolvedReason::Unsupported);
+            }
+
+            let prepared = self
+                .ctx
+                .prepared_type_decl(current_canonical.as_ref(), current_owner, head.as_ref())
+                .map_err(|_| PropCallableRoleUnresolvedReason::Fault)?
+                .ok_or(PropCallableRoleUnresolvedReason::Unsupported)?;
+            let verter_type_expr::facts::PreparedProjectionClassFact::ForwardSubject(forward) =
+                &prepared.projection_class
+            else {
+                let Some((edge_owner, local_binding, import_source, imported_name)) = import_edge
+                else {
+                    return Ok(None);
+                };
+                return Ok(Some(ResolvedReferenceRoute {
+                    authored_head: origin.clone(),
+                    owner_canonical: edge_owner,
+                    local_binding,
+                    import_source,
+                    imported_name,
+                    terminal_import_source: terminal_import_source
+                        .expect("a resolved reference route has an import edge"),
+                    local_alias_hops: Arc::from(aliases),
+                    terminal: ResolvedSymbolIdentity {
+                        canonical_id: current_canonical,
+                        owner: current_owner,
+                        symbol: head,
+                    },
+                    exactness: ResolutionExactness::ExactSymbolic,
+                }));
+            };
+            aliases.push(Arc::clone(&head));
+            head = Arc::from(forward.target_name.as_str());
+        }
+    }
+
     /// Resolve `node`, stopping as soon as an exact expected declaration
     /// identity is reached. This preserves direct package-export proof without
     /// expanding the export's unrelated body.
@@ -42,6 +273,155 @@ impl ProjectSemanticDispatch<'_> {
         expected: &[ResolvedSymbolIdentity],
     ) -> SymbolIdentityDemandOutcome {
         self.demand_symbol_identity_subject(IdentitySubject::Node(node), expected)
+    }
+
+    /// Resolve an exact expected symbol and retain the terminal
+    /// `InstantiationRef` arguments at the match point.
+    pub(crate) fn demand_terminal_symbol_instantiation(
+        &self,
+        node: SemanticNodeId,
+        expected: &[ResolvedSymbolIdentity],
+    ) -> TerminalSymbolInstantiationDemandOutcome {
+        let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
+        if let Some(reasons) = initial_trip {
+            let reason = partial_reason(reasons);
+            self.fold_local_partial_completeness(reason_partial_set(reason));
+            return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+        }
+
+        let context =
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+        let mut subject = IdentitySubject::Node(node);
+        let mut visited_nodes = FxHashSet::default();
+        let mut visited_symbols = FxHashSet::default();
+
+        loop {
+            match subject {
+                IdentitySubject::Symbol(symbol) => {
+                    if expected.contains(&symbol) {
+                        return TerminalSymbolInstantiationDemandOutcome::Complete(None);
+                    }
+                    if !visited_symbols.insert(symbol.clone()) {
+                        let reason = PropCallableRoleUnresolvedReason::Cycle;
+                        self.fold_local_partial_completeness(reason_partial_set(reason));
+                        return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                    }
+                    if let Err(reasons) = self.charge_connected_work() {
+                        let reason = partial_reason(reasons);
+                        self.fold_local_partial_completeness(reason_partial_set(reason));
+                        return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                    }
+                    let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                        scope: ScopeId::file(Arc::clone(&symbol.canonical_id), symbol.owner),
+                        name: Arc::clone(&symbol.symbol),
+                    }));
+                    subject = match self.identity_read_subject(read) {
+                        Ok(next) => IdentitySubject::Node(next),
+                        Err(reason) => {
+                            self.fold_local_partial_completeness(reason_partial_set(reason));
+                            return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                        }
+                    };
+                }
+                IdentitySubject::Node(current) => {
+                    let Some(data) = self.graph().node_data(current) else {
+                        let reason = PropCallableRoleUnresolvedReason::Fault;
+                        self.fold_local_partial_completeness(reason_partial_set(reason));
+                        return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                    };
+                    match data.as_ref() {
+                        SemanticNodeData::Alias(next) => {
+                            if !visited_nodes.insert(current) {
+                                let reason = PropCallableRoleUnresolvedReason::Cycle;
+                                self.fold_local_partial_completeness(reason_partial_set(reason));
+                                return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                            }
+                            if let Err(reasons) = self.charge_connected_work() {
+                                let reason = partial_reason(reasons);
+                                self.fold_local_partial_completeness(reason_partial_set(reason));
+                                return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                            }
+                            subject = IdentitySubject::Node(*next);
+                        }
+                        SemanticNodeData::DeclRef { identity } => {
+                            subject = IdentitySubject::Symbol(ResolvedSymbolIdentity {
+                                canonical_id: Arc::clone(&identity.canonical_id),
+                                owner: identity.owner,
+                                symbol: Arc::clone(&identity.decl_name),
+                            });
+                        }
+                        SemanticNodeData::InstantiationRef { base, args } => {
+                            let symbol = ResolvedSymbolIdentity {
+                                canonical_id: Arc::clone(&base.canonical_id),
+                                owner: base.owner,
+                                symbol: Arc::clone(&base.decl_name),
+                            };
+                            if expected.contains(&symbol) {
+                                return TerminalSymbolInstantiationDemandOutcome::Complete(Some(
+                                    TerminalSymbolInstantiation {
+                                        symbol,
+                                        args: Arc::clone(args),
+                                    },
+                                ));
+                            }
+                            if !visited_symbols.insert(symbol.clone()) {
+                                let reason = PropCallableRoleUnresolvedReason::Cycle;
+                                self.fold_local_partial_completeness(reason_partial_set(reason));
+                                return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                            }
+                            if let Err(reasons) = self.charge_connected_work() {
+                                let reason = partial_reason(reasons);
+                                self.fold_local_partial_completeness(reason_partial_set(reason));
+                                return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                            }
+                            let slot = self.type_slot_for(
+                                Arc::clone(&base.canonical_id),
+                                base.owner,
+                                Arc::clone(&base.decl_name),
+                            );
+                            let read = self.execute_read(SemanticQueryKey::Instantiate(
+                                crate::semantic_query::InstantiateKey::new(
+                                    slot,
+                                    Arc::clone(args),
+                                    self.instantiate_context_for(&base.canonical_id, context),
+                                ),
+                            ));
+                            subject = match self.identity_read_subject(read) {
+                                Ok(next) if next != current => IdentitySubject::Node(next),
+                                Ok(_) => {
+                                    let reason = PropCallableRoleUnresolvedReason::Cycle;
+                                    self.fold_local_partial_completeness(reason_partial_set(
+                                        reason,
+                                    ));
+                                    return TerminalSymbolInstantiationDemandOutcome::Partial(
+                                        reason,
+                                    );
+                                }
+                                Err(reason) => {
+                                    self.fold_local_partial_completeness(reason_partial_set(
+                                        reason,
+                                    ));
+                                    return TerminalSymbolInstantiationDemandOutcome::Partial(
+                                        reason,
+                                    );
+                                }
+                            };
+                        }
+                        SemanticNodeData::Opaque(error) => {
+                            let reason = query_error_reason(error);
+                            self.fold_local_partial_completeness(reason_partial_set(reason));
+                            return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                        }
+                        SemanticNodeData::RawFallback { .. } => {
+                            let reason = PropCallableRoleUnresolvedReason::Unsupported;
+                            self.fold_local_partial_completeness(reason_partial_set(reason));
+                            return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                        }
+                        _ => return TerminalSymbolInstantiationDemandOutcome::Complete(None),
+                    }
+                }
+            }
+        }
     }
 
     fn demand_symbol_identity_subject(
@@ -254,6 +634,21 @@ impl ProjectSemanticDispatch<'_> {
     ) -> SymbolIdentityDemandOutcome {
         self.fold_local_partial_completeness(reason_partial_set(reason));
         SymbolIdentityDemandOutcome::Partial(reason)
+    }
+}
+
+fn observe_import_route_fact(ctx: &dyn crate::resolver_core::ResolverContext, canonical: &str) {
+    if let Some(route_hash) = ctx
+        .host_for_fact_tracer_install()
+        .generation_current_import_route_hash(canonical)
+    {
+        crate::fact_signature_helpers::observe_fact_signature(&[
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id: canonical.to_string(),
+                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                hash: route_hash,
+            },
+        ]);
     }
 }
 

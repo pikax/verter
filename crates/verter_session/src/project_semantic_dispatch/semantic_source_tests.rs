@@ -198,7 +198,7 @@ fn authored_macro_type_argument_routes_to_the_sole_hot_mirror_producer() {
             .expect("the hot mirror must produce the macro type-arg handle");
     assert_eq!(
         raised.node(),
-        mirror.node(),
+        mirror.hot.node(),
         "bridge-raised macro type-arg must be the SAME node the sole producer mints"
     );
 }

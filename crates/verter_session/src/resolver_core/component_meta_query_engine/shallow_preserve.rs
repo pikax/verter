@@ -49,14 +49,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> bool {
         use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
 
-        let Some(mirror) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             self.ctx,
             scope_canonical_id,
             macro_index,
         ) else {
             return true;
         };
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, mirror.node())
+        let Some(data) =
+            crate::project_semantic_dispatch::node_data_for(self.ctx, product.hot.node())
         else {
             return true;
         };
@@ -64,7 +65,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .ctx
             .project_type_store()
             .semantic_graph()
-            .node_scope(mirror.node())
+            .node_scope(product.hot.node())
             .and_then(|scope| scope.top_level_owner())
         else {
             return true;
@@ -387,7 +388,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let [MacroPathSegment::Member(field_name)] = output_path else {
             return None;
         };
-        let mirror = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let product = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             self.ctx,
             scope_canonical_id,
             macro_index,
@@ -396,9 +397,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .ctx
             .project_type_store()
             .semantic_graph()
-            .node_scope(mirror.node())?
+            .node_scope(product.hot.node())?
             .top_level_owner()?;
-        let data = crate::project_semantic_dispatch::node_data_for(self.ctx, mirror.node())?;
+        let data = crate::project_semantic_dispatch::node_data_for(self.ctx, product.hot.node())?;
         if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
             return surface
                 .members

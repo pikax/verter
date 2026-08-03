@@ -110,6 +110,7 @@ mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
 pub(crate) mod substitute;
 pub(crate) mod symbol_identity;
+pub(crate) mod template_class_facts;
 pub(crate) mod walk;
 
 // Private leaf module sealing the `InstantiateBodySource` construction

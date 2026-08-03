@@ -47,10 +47,61 @@ impl VerterHost {
         }
     }
 
+    /// Select a base or return-only overlay resolver context, then delegate the
+    /// semantic demand to the resolver-tier builder.
+    pub(crate) fn build_template_class_semantic_facts(
+        &self,
+        canonical: &str,
+        whole_hash: verter_semantic::analysis::Hash16,
+        source: Arc<str>,
+        script: crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs<
+            '_,
+        >,
+        raw: &verter_compiler::compile::template_data::RawTemplateData,
+        store_published: bool,
+    ) -> crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts
+    {
+        if store_published
+            && self
+                .project_type_store()
+                .indexed()
+                .get(canonical, whole_hash)
+                .is_some()
+        {
+            return crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
+                self,
+                canonical,
+                whole_hash,
+                script,
+                raw,
+                true,
+            );
+        }
+
+        let mut sources = rustc_hash::FxHashMap::default();
+        sources.insert(canonical.to_string(), source);
+        let mut hashes = rustc_hash::FxHashMap::default();
+        hashes.insert(canonical.to_string(), whole_hash);
+        let tombstones = std::collections::HashSet::new();
+        let view = crate::session_view::OverlaidViewRef::new(self, &sources, &hashes, &tombstones);
+        let fixed = self.capture_batch_fixed_view(&view);
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
+            self,
+            &view,
+            fixed.cold_seed(),
+            overlay,
+        );
+        crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
+            &ctx, canonical, whole_hash, script, raw, false,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_template_analysis(
         &self,
         canonical: &str,
+        whole_hash: verter_semantic::analysis::Hash16,
         file_language: &FileLanguage,
         source: &Arc<str>,
         framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
@@ -96,8 +147,22 @@ impl VerterHost {
             src_blocks.is_empty(),
             &self.provenance,
         )?;
-        let (imports, unions, props_name) =
-            crate::host_resolve::template_converter_inputs(imports, macros, bindings);
+        let imports = crate::host_resolve::template_converter_inputs(imports, bindings);
+        let facts = self.build_template_class_semantic_facts(
+            canonical,
+            whole_hash,
+            Arc::clone(source),
+            crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+                macros: &script_analysis.macros,
+                bindings: &script_analysis.bindings,
+            },
+            &raw,
+            false,
+        );
+        let class_domains = crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
+            &facts, canonical, whole_hash,
+        )
+        .unwrap_or_else(crate::template_convert::TemplateClassDomainIndex::empty);
         let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
             macros,
             script_analysis.macro_usage.as_ref(),
@@ -108,8 +173,7 @@ impl VerterHost {
         Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
             &raw,
             &imports,
-            &unions,
-            props_name.as_deref(),
+            &class_domains,
             Some(&unused_ctx),
         )))
     }
@@ -171,6 +235,7 @@ impl VerterHost {
 
         let crate::types::VueTemplateInputs {
             source,
+            whole_hash,
             framework_parse,
             store_published,
             source_generation,
@@ -251,11 +316,26 @@ impl VerterHost {
         if let Some(raw) = raw {
             // Converter inputs come from the ONE shared projection (type-only
             // imports excluded, static async-component carriers linked).
-            let (imports, unions, props_name) = crate::host_resolve::template_converter_inputs(
+            let imports = crate::host_resolve::template_converter_inputs(
                 &snapshot.imports,
-                &snapshot.macros,
                 &snapshot.bindings,
             );
+            let facts = self.build_template_class_semantic_facts(
+                canonical,
+                whole_hash,
+                Arc::clone(&source),
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+                    macros: &snapshot.macros,
+                    bindings: &snapshot.bindings,
+                },
+                &raw,
+                store_published,
+            );
+            let class_domains =
+                crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
+                    &facts, canonical, whole_hash,
+                )
+                .unwrap_or_else(crate::template_convert::TemplateClassDomainIndex::empty);
 
             let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
                 &snapshot.macros,
@@ -267,8 +347,7 @@ impl VerterHost {
             let tpl = crate::template_convert::convert_raw_to_analysis(
                 &raw,
                 &imports,
-                &unions,
-                props_name.as_deref(),
+                &class_domains,
                 Some(&unused_ctx),
             );
             let tpl_arc = Arc::new(tpl);
@@ -287,6 +366,7 @@ impl VerterHost {
                     // This lane compiles with default `CodegenOptions`
                     // — no parse-affecting profile options reach it.
                     default_extraction: true,
+                    template_class_signature: crate::project_semantic_dispatch::template_class_facts::complete_dependency_signature(&facts),
                 },
             );
         }
@@ -322,6 +402,32 @@ impl VerterHost {
         derived_ref
             .value_mut()
             .install_raw_template_analysis(template, admission);
+    }
+
+    fn validated_raw_template_analysis(
+        &self,
+        canonical: &str,
+        source_generation: u64,
+    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+        let current = self.resolver_store_view_read().current()?;
+        let entry = self.derived_raw_cache().get(canonical)?;
+        let entry = entry.raw_template_analysis()?;
+        if entry.source_generation != source_generation {
+            return None;
+        }
+        use crate::resolver_core::StoreView;
+        if !entry
+            .template_class_signature
+            .facts
+            .iter()
+            .all(|fact| current.view().validates(fact))
+        {
+            return None;
+        }
+        crate::fact_signature_helpers::observe_fact_signature(
+            &entry.template_class_signature.facts,
+        );
+        Some(Arc::clone(&entry.template))
     }
 
     /// Return source-stage import/re-export facts without triggering analysis
@@ -405,6 +511,7 @@ impl VerterHost {
                 // only this branch captures here.
                 let template_inputs = Some(crate::types::VueTemplateInputs {
                     source: source.clone(),
+                    whole_hash: hd.parse.whole_hash,
                     framework_parse: framework_parse.clone(),
                     // Live scheduler read — store-authoritative.
                     store_published: true,
@@ -429,11 +536,8 @@ impl VerterHost {
                 // at THIS branch's own source generation — a late
                 // persist stamped with a superseded generation must
                 // not serve as current.
-                let template = self.derived_raw_cache().get(canonical).and_then(|cc| {
-                    cc.raw_template_analysis()
-                        .filter(|entry| entry.source_generation == source_snap.generation)
-                        .map(|entry| Arc::clone(&entry.template))
-                });
+                let template =
+                    self.validated_raw_template_analysis(canonical, source_snap.generation);
                 let export_sigs = hd.parse.export_signatures.clone();
                 drop(source_snap);
 
@@ -1418,6 +1522,7 @@ impl VerterHost {
                 }
                 Some(crate::types::VueTemplateInputs {
                     source: source_snap.source.clone(),
+                    whole_hash: hd.parse.whole_hash,
                     framework_parse: hd.framework_parse.clone(),
                     // Live scheduler reads at one generation —
                     // store-authoritative.
@@ -1442,11 +1547,7 @@ impl VerterHost {
         // generation-coherent with their source) — a late persist
         // stamped with a superseded generation must not serve as
         // current.
-        let template = self.derived_raw_cache().get(canonical).and_then(|cc| {
-            cc.raw_template_analysis()
-                .filter(|entry| entry.source_generation == analysis_snap.generation)
-                .map(|entry| Arc::clone(&entry.template))
-        });
+        let template = self.validated_raw_template_analysis(canonical, analysis_snap.generation);
 
         Some(FileAnalysisSnapshot {
             imports: ad.script_analysis.imports.clone(),
@@ -2195,6 +2296,7 @@ impl VerterHost {
         let file_language = self.language_classifier().classify(canonical);
         self.build_template_analysis(
             canonical,
+            override_with_parse.parse.whole_hash,
             &file_language,
             &override_with_parse.source,
             override_with_parse.framework_parse.clone(),

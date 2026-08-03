@@ -31,6 +31,8 @@ pub mod decl_headers;
 mod decl_dependencies_tests;
 mod exports;
 mod fact_projection;
+#[doc(hidden)]
+pub use fact_projection::macro_payload_reference_head_fact;
 pub mod file_usage;
 pub mod framework_facts;
 pub mod html_intrinsics;
@@ -55,6 +57,7 @@ pub mod script_shallow_index;
 pub mod selector_match;
 pub mod style;
 pub mod template;
+pub mod template_class_facts;
 pub mod top_level_owners;
 pub mod type_eval;
 pub mod type_eval_build;
@@ -111,14 +114,17 @@ pub use style::{
     StyleAnalysisLang, StyleBlockAnalysis, VBindInput, VueStyleInput,
 };
 pub use template::{
-    extract_dynamic_class_names, extract_dynamic_class_names_rich, parse_string_literal_union,
-    unwrap_reactive_type, AnalyzedEmitDefinition, AnalyzedMacroUsage, AnalyzedPropDefinition,
-    BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, DynamicClassName,
-    ElementNamespace, IfChain, MacroKind, MarkupClassToken, PropValueConstness, SnippetDefinition,
-    SvelteDirectiveInfo, TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence,
-    TemplateComponentUsage, TemplateDirective, TemplateElement, TemplateEventHandler,
-    TemplatePropUsage, TemplateRef, TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding,
-    VForDirective, VModelDirective,
+    extract_dynamic_class_names, extract_dynamic_class_names_rich, AnalyzedEmitDefinition,
+    AnalyzedMacroUsage, AnalyzedPropDefinition, BindingUsageKind, CommentDirective,
+    CommentDirectiveKind, DefinedSlot, DynamicClassName, ElementNamespace, IfChain, MacroKind,
+    MarkupClassToken, PropValueConstness, SnippetDefinition, SvelteDirectiveInfo,
+    TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence, TemplateComponentUsage,
+    TemplateDirective, TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef,
+    TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding, VForDirective, VModelDirective,
+};
+pub use template_class_facts::{
+    ReactiveWrapperProof, TemplateClassFactsCompleteness, TemplateClassSemanticFactRow,
+    TemplateClassSemanticFacts, TemplateClassSubject,
 };
 pub use top_level_owners::{
     DeclMap, DeclMapKey, TopLevelAttachedOwner, TopLevelOwnerRegion, TopLevelOwnerRegionError,

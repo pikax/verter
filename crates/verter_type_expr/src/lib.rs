@@ -61,7 +61,9 @@ pub use facts::{
 /// Closed feature-role facts derived from resolved symbol identity.
 pub mod feature_roles;
 pub use feature_roles::{
-    PropCallableRole, PropCallableRoleUnresolvedReason, ResolvedSymbolIdentity,
+    ClosedLiteralDomain, ClosedLiteralDomainUnresolvedReason, PropCallableRole,
+    PropCallableRoleUnresolvedReason, ReactiveWrapperImportProvenance, ReactiveWrapperRole,
+    ReactiveWrapperUnresolvedReason, ResolvedSymbolIdentity,
 };
 
 /// Generated static-intrinsic catalog substrate — the interned-id + member-fact

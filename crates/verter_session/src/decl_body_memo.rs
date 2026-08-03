@@ -2785,6 +2785,7 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Direct,
             annotation: Some(instance),
+            reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
         },
         vec![FunctionSignature {
             type_parameters: Arc::from(Vec::new().into_boxed_slice()),

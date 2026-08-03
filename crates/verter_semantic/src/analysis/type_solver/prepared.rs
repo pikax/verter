@@ -228,6 +228,10 @@ pub struct PreparedTypeDecl {
     verter_no_typeexpr::NoTypeExpr,
 )]
 pub struct PreparedExternalDep {
+    pub local_name: String,
+    pub source_specifier: String,
+    pub imported_name: String,
+    pub member_path: Arc<[Arc<str>]>,
     pub canonical_id: String,
     pub owner: verter_type_expr::TopLevelOwnerId,
     pub symbol_name: String,
@@ -254,11 +258,16 @@ impl std::error::Error for AuthoredOrdinalOverflow {}
 mod prepared_external_dep_owner_tests {
     use super::PreparedExternalDep;
     use std::collections::HashSet;
+    use std::sync::Arc;
     use verter_type_expr::TopLevelOwnerId;
 
     #[test]
     fn external_dependency_identity_discriminates_owner_in_memo_and_serde() {
         let make = |owner| PreparedExternalDep {
+            local_name: "Local".to_string(),
+            source_specifier: "./dep".to_string(),
+            imported_name: "Shared".to_string(),
+            member_path: Arc::from([]),
             canonical_id: "/src/dep.vue".to_string(),
             owner,
             symbol_name: "Shared".to_string(),
@@ -275,6 +284,46 @@ mod prepared_external_dep_owner_tests {
             serde_json::from_str::<PreparedExternalDep>(&serde_json::to_string(&module).unwrap())
                 .unwrap(),
             module
+        );
+
+        // Authored route data is value-side EVIDENCE that survives the persisted
+        // round trip and DISCRIMINATES two authored routes to one terminal. It
+        // is deliberately NOT semantic query or cache KEY identity — the
+        // route-provenance ruling forbids a local alias there, and this edge
+        // rides on the prepared decl VALUE (`PreparedValueDecl` /
+        // `LoweredValueDecl` derive neither `PartialEq` nor `Hash`), keyed by
+        // the owner's content-addressed identity.
+        let other_route = PreparedExternalDep {
+            source_specifier: "./other".to_string(),
+            ..module.clone()
+        };
+        assert_ne!(module, other_route);
+        assert_ne!(
+            serde_json::to_string(&module).unwrap(),
+            serde_json::to_string(&other_route).unwrap(),
+            "authored route evidence must survive the persisted VALUE round trip"
+        );
+        let alias_only = PreparedExternalDep {
+            local_name: "Aliased".to_string(),
+            ..module.clone()
+        };
+        assert_ne!(
+            module, alias_only,
+            "the authored local binding discriminates the evidence"
+        );
+        assert_eq!(
+            (
+                alias_only.canonical_id.as_str(),
+                alias_only.owner,
+                alias_only.symbol_name.as_str()
+            ),
+            (
+                module.canonical_id.as_str(),
+                module.owner,
+                module.symbol_name.as_str()
+            ),
+            "changing only the authored local alias must leave the RESOLVED \
+             terminal identity — the part any cache key may key on — untouched"
         );
     }
 }
@@ -1327,6 +1376,7 @@ impl PreparedValueDecl {
                 typeof_alias_target: None,
                 classification: ValueAnnotationClass::Absent,
                 annotation: None,
+                reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
             },
             signatures: Vec::new(),
             object_shape: None,

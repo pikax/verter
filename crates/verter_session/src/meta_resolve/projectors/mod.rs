@@ -546,7 +546,7 @@ pub(crate) fn resolve_macro_payload(
             file,
             macro_index,
         ) {
-            Some(handle) => Arc::from(vec![handle.node()].into_boxed_slice()),
+            Some(product) => Arc::from(vec![product.hot.node()].into_boxed_slice()),
             None => {
                 diag_sink.push(macro_expansion_for_query_error(
                     macro_index,
@@ -680,9 +680,9 @@ pub(crate) fn resolve_macro_payload(
                 file,
                 macro_index,
             )
-            .map(|handle| {
+            .map(|product| {
                 let probe_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-                    base: handle.node(),
+                    base: product.hot.node(),
                     path: empty_path(),
                     context:
                         crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
@@ -693,7 +693,7 @@ pub(crate) fn resolve_macro_payload(
                 match probe_read.value {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(id) => id,
-                    QueryResult::Error(_) => handle.node(),
+                    QueryResult::Error(_) => product.hot.node(),
                 }
             });
             if let Some(probe_node) = probe_node {

@@ -1,0 +1,1 @@
+:is(div + bar, div ~ .baz), :where(.a, .b+.c, .d), :not(span.a, div.b), .a:has(.b:is(.c .d)), .a:is(.b:has(.c) .d)

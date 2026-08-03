@@ -2,6 +2,36 @@ use super::*;
 use verter_compiler::common::Span;
 use verter_compiler::compile::template_data::*;
 
+/// Test-only adapter for legacy converter fixtures. Production callers cannot
+/// manufacture raw class-domain tuples; the opaque index is populated only
+/// from revision-stamped semantic facts.
+fn convert_raw_to_analysis(
+    raw: &RawTemplateData,
+    script_imports: &[(String, String)],
+    binding_domains: &[(String, Vec<String>)],
+    props_root: Option<&str>,
+    unused_declarations: Option<&UnusedDeclarationContext<'_>>,
+) -> TemplateAnalysisSnapshot {
+    let mut domains = TemplateClassDomainIndex::empty();
+    for (name, values) in binding_domains {
+        let values = std::sync::Arc::from(
+            values
+                .iter()
+                .map(|value| std::sync::Arc::<str>::from(value.as_str()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        if let Some(root) = props_root {
+            domains
+                .prop_domains
+                .insert((root.into(), name.as_str().into()), values);
+        } else {
+            domains.binding_domains.insert(name.as_str().into(), values);
+        }
+    }
+    super::convert_raw_to_analysis(raw, script_imports, &domains, unused_declarations)
+}
+
 /// @ai-generated - Empty raw data converts to empty snapshot
 #[test]
 fn empty_raw_converts_to_empty_snapshot() {
@@ -607,6 +637,87 @@ fn element_class_props_member_access_resolved() {
         result.elements[0].dynamic_classes,
         vec!["primary", "secondary"],
         "props.variant :class should resolve via props_binding_name"
+    );
+}
+
+/// The converter's coherence gate: an index is constructible ONLY from facts
+/// whose owner revision equals the lane's expected revision.
+///
+/// This is the mechanism the ratified design names as the pairing guarantee
+/// between the raw template and the script snapshot the classification used, so
+/// it must be able to REFUSE. The pair below arms it in both directions: the
+/// matching revision publishes the domain, a mismatched revision (or a
+/// mismatched canonical) yields `None`, and the resulting empty index publishes
+/// no `dynamic_classes` at all — never a stale domain from the other revision.
+#[test]
+fn the_revision_gate_refuses_facts_stamped_with_another_revision() {
+    const CANONICAL: &str = "/template-convert-test.vue";
+    let revision_a: verter_semantic::analysis::Hash16 = [1; 16];
+    let revision_b: verter_semantic::analysis::Hash16 = [2; 16];
+
+    let facts: crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts =
+        verter_semantic::analysis::TemplateClassSemanticFacts::new(
+            std::sync::Arc::from(CANONICAL),
+            revision_a,
+            std::sync::Arc::from([]),
+            std::sync::Arc::from([verter_semantic::analysis::TemplateClassSemanticFactRow {
+                subject: verter_semantic::analysis::TemplateClassSubject::Binding {
+                    label: std::sync::Arc::from("variant"),
+                    declaration: verter_type_expr::DeclBindingKey::new(
+                        verter_type_expr::TopLevelOwnerId::instance(0),
+                        "variant",
+                    ),
+                },
+                domain: verter_type_expr::ClosedLiteralDomain::Strings(std::sync::Arc::from([
+                    std::sync::Arc::from("primary"),
+                ])),
+                wrapper: verter_semantic::analysis::ReactiveWrapperProof {
+                    role: verter_type_expr::ReactiveWrapperRole::None,
+                    symbol: None,
+                    import_provenance: None,
+                    inner_source: None,
+                    inner_domain: verter_type_expr::ClosedLiteralDomain::NotClosed,
+                    completeness:
+                        verter_semantic::analysis::TemplateClassFactsCompleteness::Complete,
+                },
+            }]),
+            verter_semantic::analysis::TemplateClassFactsCompleteness::Complete,
+            crate::fact_signature_helpers::ReadSetSignature::new(std::sync::Arc::from([])),
+        );
+
+    let raw = RawTemplateData {
+        elements: vec![make_element_with_dynamic_class("variant")],
+        ..Default::default()
+    };
+
+    // POSITIVE — the matching revision admits and publishes.
+    let matching = TemplateClassDomainIndex::from_semantic_facts(&facts, CANONICAL, revision_a)
+        .expect("a matching owner revision must admit the facts");
+    assert_eq!(
+        super::convert_raw_to_analysis(&raw, &[], &matching, None).elements[0].dynamic_classes,
+        vec!["primary"],
+        "the matching revision must publish the classified domain"
+    );
+
+    // NEGATIVE — a different owner revision REFUSES.
+    assert!(
+        TemplateClassDomainIndex::from_semantic_facts(&facts, CANONICAL, revision_b).is_none(),
+        "facts stamped with revision A must never be accepted for revision B"
+    );
+    // ... and a different owner canonical refuses too.
+    assert!(
+        TemplateClassDomainIndex::from_semantic_facts(&facts, "/other.vue", revision_a).is_none(),
+        "facts stamped for one owner must never be accepted for another"
+    );
+    // The refusal's observable consequence: the empty fallback index publishes
+    // NO dynamic classes — the stale domain never reaches the template.
+    let refused = TemplateClassDomainIndex::from_semantic_facts(&facts, CANONICAL, revision_b)
+        .unwrap_or_else(TemplateClassDomainIndex::empty);
+    assert!(
+        super::convert_raw_to_analysis(&raw, &[], &refused, None).elements[0]
+            .dynamic_classes
+            .is_empty(),
+        "a refused revision must publish no dynamic classes at all"
     );
 }
 

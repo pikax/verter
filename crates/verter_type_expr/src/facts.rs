@@ -1530,6 +1530,77 @@ pub struct ValueTypeAnnotationFact {
     /// is [`SemanticTypeSource::Authored`]. Absent for
     /// [`ValueAnnotationClass::Absent`].
     pub annotation: Option<SemanticTypeSource>,
+    /// Producer-owned authored reference head for exact route provenance.
+    pub reference_head: AuthoredReferenceHeadFact,
+}
+
+/// Locator for one authored reference argument. Macro payloads need the macro
+/// index/field position that a declaration-only [`TypeArgLocator`] cannot
+/// represent.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum AuthoredReferenceArgLocator {
+    Value(TypeArgLocator),
+    MacroPayload {
+        payload: MacroPayloadLocator,
+        arg_index: u32,
+    },
+}
+
+/// Graph-free authored reference-head evidence. This records syntax identity
+/// and locator-backed arguments only; resolution remains demand-driven.
+///
+/// The head is VALUE-SIDE EVIDENCE, never query or cache identity: it rides on
+/// the prepared/lowered declaration VALUE (neither `PreparedValueDecl` nor
+/// `LoweredValueDecl` derives `PartialEq`/`Hash`) and is published as the
+/// `authored_head` of a wrapper proof. `local_name` / `local_root` are authored
+/// LOCAL ALIASES, and no semantic query key, family slot, graph node identity,
+/// or cache key may include them — `Ref as A` and `Ref as B` are the same
+/// instantiation and must keep hash-consing to one node.
+///
+/// `args` addresses the OUTER authored argument positions. It is deliberately
+/// not read by any classifier: exact classification must use the TERMINAL
+/// SUBSTITUTED argument reached through the shared demand, so that a
+/// transforming or reordering alias cannot be classified from the outer authored
+/// argument. `args` exists as published route evidence (diagnostics and exact
+/// argument-position recovery), not as a classification input.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum AuthoredReferenceHeadFact {
+    NotReference,
+    Bare {
+        local_name: Arc<str>,
+        args: Arc<[AuthoredReferenceArgLocator]>,
+    },
+    Qualified {
+        local_root: Arc<str>,
+        member_path: Arc<[Arc<str>]>,
+        args: Arc<[AuthoredReferenceArgLocator]>,
+    },
+    ImportType {
+        specifier: Arc<str>,
+        member_path: Arc<[Arc<str>]>,
+        args: Arc<[AuthoredReferenceArgLocator]>,
+    },
+    Unavailable,
 }
 
 /// One narrowed type parameter: its name, ordinal, and constraint/default

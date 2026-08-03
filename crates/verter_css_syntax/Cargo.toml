@@ -1,0 +1,20 @@
+[package]
+name = "verter_css_syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Framework-neutral lossless CSS, SCSS, and Less syntax"
+publish = false
+
+[dependencies]
+verter_span = { path = "../verter_span" }
+memchr = "2.8.0"
+smallvec = "1.15"
+rustc-hash = { workspace = true }
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

@@ -23,9 +23,10 @@ use crate::intrinsics::*;
 use crate::locators::*;
 use crate::span_origins::*;
 use crate::{
-    MemberSpans, MemberVisibility, PrimitiveName, PropCallableRole,
-    PropCallableRoleUnresolvedReason, ResolutionExactness, ResolutionProvenance,
-    ResolvedSymbolIdentity,
+    ClosedLiteralDomain, ClosedLiteralDomainUnresolvedReason, MemberSpans, MemberVisibility,
+    PrimitiveName, PropCallableRole, PropCallableRoleUnresolvedReason,
+    ReactiveWrapperImportProvenance, ReactiveWrapperRole, ReactiveWrapperUnresolvedReason,
+    ResolutionExactness, ResolutionProvenance, ResolvedSymbolIdentity,
 };
 
 /// Assert every listed type is a fully-witnessed closed fact carrier.
@@ -130,6 +131,8 @@ assert_fact_carriers!(
     MemberDependencyEdge,
     ShallowRouteFacts,
     ValueAnnotationClass,
+    AuthoredReferenceArgLocator,
+    AuthoredReferenceHeadFact,
     ValueTypeAnnotationFact,
     NarrowTypeParam,
     TypeParamDeclFact,
@@ -208,6 +211,9 @@ assert_fact_carriers!(
     SvelteScriptFactsFact,
     ResolvedSymbolIdentity,
     PropCallableRole,
+    ClosedLiteralDomain,
+    ReactiveWrapperRole,
+    ReactiveWrapperImportProvenance,
 );
 
 #[test]
@@ -236,6 +242,50 @@ fn prop_callable_role_defaults_fail_closed_and_round_trips() {
         decoded, role,
         "typed callable role must round-trip losslessly"
     );
+}
+
+#[test]
+fn template_class_roles_round_trip_without_display_authority() {
+    let domain = ClosedLiteralDomain::Strings(std::sync::Arc::from([
+        std::sync::Arc::<str>::from("a"),
+        std::sync::Arc::<str>::from("b"),
+    ]));
+    let json = serde_json::to_string(&domain).expect("domain serializes");
+    let decoded: ClosedLiteralDomain = serde_json::from_str(&json).expect("domain deserializes");
+    assert_eq!(decoded, domain);
+    assert_eq!(
+        ClosedLiteralDomain::default(),
+        ClosedLiteralDomain::Unresolved {
+            reason: ClosedLiteralDomainUnresolvedReason::AnalysisUnavailable,
+            exactness: ResolutionExactness::Incomplete,
+        }
+    );
+    assert_eq!(
+        ReactiveWrapperRole::default(),
+        ReactiveWrapperRole::Unresolved {
+            reason: ReactiveWrapperUnresolvedReason::AnalysisUnavailable,
+        }
+    );
+    let route = ReactiveWrapperImportProvenance {
+        authored_head: AuthoredReferenceHeadFact::Qualified {
+            local_root: std::sync::Arc::from("Vue"),
+            member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
+            args: std::sync::Arc::from([]),
+        },
+        package: std::sync::Arc::from("vue"),
+        import_source: std::sync::Arc::from("vue"),
+        local_binding: std::sync::Arc::from("Vue"),
+        owner_canonical: std::sync::Arc::from("/ws/App.vue"),
+        imported_name: std::sync::Arc::from("Ref"),
+        terminal_import_source: std::sync::Arc::from("vue"),
+        local_alias_hops: std::sync::Arc::from([]),
+        exactness: ResolutionExactness::ExactSymbolic,
+        provenance: ResolutionProvenance::FrameworkSurface,
+    };
+    let encoded = serde_json::to_string(&route).expect("route serializes");
+    let decoded: ReactiveWrapperImportProvenance =
+        serde_json::from_str(&encoded).expect("route deserializes");
+    assert_eq!(decoded, route);
 }
 
 // --- Four-source SemanticTypeSource + expansion-result wrapper + intrinsics ---
@@ -1425,6 +1475,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         annotation: Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
             LeafTypeFact::Primitive(PrimitiveName::Number),
         ))),
+        reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
     };
     // An authored TS annotation rides the SAME field under the `Authored` source
     // — proving the field widened to accept BOTH authored locators and closed
@@ -1436,6 +1487,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         annotation: Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
             slot(),
         ))),
+        reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
     };
     assert_ne!(
         inferred, authored,
@@ -1453,7 +1505,36 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         }),
         classification: ValueAnnotationClass::TypeOfAlias,
         annotation: None,
+        reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
     };
     assert_ne!(typeof_target, inferred);
     assert_eq!(inferred, inferred.clone());
+}
+
+#[test]
+fn authored_reference_head_fact_discriminates_exact_route_and_arguments() {
+    let first = AuthoredReferenceHeadFact::Qualified {
+        local_root: std::sync::Arc::from("Vue"),
+        member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
+        args: std::sync::Arc::from([AuthoredReferenceArgLocator::Value(TypeArgLocator {
+            anchor: anchor(),
+            path: std::sync::Arc::from([]),
+            arg_index: 0,
+        })]),
+    };
+    let other_root = AuthoredReferenceHeadFact::Qualified {
+        local_root: std::sync::Arc::from("Other"),
+        member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
+        args: std::sync::Arc::from([AuthoredReferenceArgLocator::Value(TypeArgLocator {
+            anchor: anchor(),
+            path: std::sync::Arc::from([]),
+            arg_index: 0,
+        })]),
+    };
+    assert_ne!(first, other_root);
+    assert_ne!(hash_input_stream(&first), hash_input_stream(&other_root));
+    let encoded = serde_json::to_string(&first).expect("reference head serializes");
+    let decoded: AuthoredReferenceHeadFact =
+        serde_json::from_str(&encoded).expect("reference head deserializes");
+    assert_eq!(decoded, first);
 }

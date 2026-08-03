@@ -2199,6 +2199,8 @@ pub(crate) struct SrcBlockInfo {
 /// overlay results never populate base caches.
 pub(crate) struct VueTemplateInputs {
     pub(crate) source: Arc<str>,
+    /// Exact source revision shared by source, parse, and script analysis.
+    pub(crate) whole_hash: Hash16,
     /// The framework-neutral carrier parse artifact of `source`. `None`
     /// routes the computation through one counted carrier parse of its
     /// own — a single parse, never a duplicate of one the caller ran.
@@ -2484,6 +2486,8 @@ pub(crate) struct CompileSlot {
 pub(crate) struct CompileInput {
     pub(crate) canonical_id: String,
     pub(crate) source: Arc<str>,
+    /// Exact source revision of the effective script/template snapshot.
+    pub(crate) whole_hash: Hash16,
     pub(crate) meta: FileMeta,
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
     pub(crate) src_blocks: Vec<SrcBlockInfo>,
@@ -2705,6 +2709,10 @@ pub(crate) struct RawTemplateAnalysisEntry {
     /// Scheduler node generation of the source read the template's
     /// inputs were captured from.
     pub(crate) source_generation: u64,
+    /// Exact semantic dependency read set for the dynamic-class projection.
+    /// Readers validate this against a proven-current store view before
+    /// serving the profileless slot.
+    pub(crate) template_class_signature: crate::fact_signature_helpers::ReadSetSignature,
 }
 
 /// A persist site's by-value admission statement for the
@@ -2745,6 +2753,9 @@ pub(crate) struct RawTemplateSlotAdmission {
     /// would carry a VALID current generation stamp no reader could
     /// reject.
     pub(crate) default_extraction: bool,
+    /// Complete dependency signature of the template-class semantic facts.
+    /// `None` means the fact set was ReturnOnly/partial and declines.
+    pub(crate) template_class_signature: Option<crate::fact_signature_helpers::ReadSetSignature>,
 }
 
 impl RawTemplateSlotAdmission {
@@ -2769,7 +2780,11 @@ impl RawTemplateSlotAdmission {
     ///   rail: an entry without a rail cannot be validated by any
     ///   reader, so it must not exist.
     pub(crate) fn admitted_generation(&self) -> Option<u64> {
-        if self.has_src_blocks || !self.default_extraction || !self.store_published {
+        if self.has_src_blocks
+            || !self.default_extraction
+            || !self.store_published
+            || self.template_class_signature.is_none()
+        {
             return None;
         }
         self.source_generation
@@ -2929,6 +2944,9 @@ impl DerivedRawState {
         let Some(source_generation) = admission.admitted_generation() else {
             return;
         };
+        let template_class_signature = admission
+            .template_class_signature
+            .expect("admitted raw-template statements carry complete class facts");
         let supersedes = self
             .raw_template_analysis
             .as_ref()
@@ -2937,6 +2955,7 @@ impl DerivedRawState {
             self.raw_template_analysis = Some(RawTemplateAnalysisEntry {
                 template,
                 source_generation,
+                template_class_signature,
             });
         }
     }

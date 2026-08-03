@@ -100,6 +100,157 @@ impl Default for PropCallableRole {
     }
 }
 
+/// Typed reason an exact closed string-literal domain could not be decided.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum ClosedLiteralDomainUnresolvedReason {
+    AnalysisUnavailable,
+    RevisionMismatch,
+    MissingDependency,
+    Cycle,
+    BudgetExceeded,
+    WorkLimitExceeded,
+    Cancelled,
+    Unsupported,
+    Fault,
+}
+
+/// Exact closed string-literal domain of one semantic type demand.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum ClosedLiteralDomain {
+    /// Every demanded arm resolved and was a string literal. Members retain
+    /// semantic union order and are de-duplicated by first occurrence.
+    Strings(Arc<[Arc<str>]>),
+    /// Resolution was complete and proved the domain open or non-string.
+    NotClosed,
+    /// Resolution was incomplete. No closed subset may be published.
+    Unresolved {
+        reason: ClosedLiteralDomainUnresolvedReason,
+        exactness: ResolutionExactness,
+    },
+}
+
+impl Default for ClosedLiteralDomain {
+    fn default() -> Self {
+        Self::Unresolved {
+            reason: ClosedLiteralDomainUnresolvedReason::AnalysisUnavailable,
+            exactness: ResolutionExactness::Incomplete,
+        }
+    }
+}
+
+/// Typed reason a reactive-wrapper role could not be decided.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum ReactiveWrapperUnresolvedReason {
+    AnalysisUnavailable,
+    RevisionMismatch,
+    MissingDependency,
+    Cycle,
+    BudgetExceeded,
+    WorkLimitExceeded,
+    Cancelled,
+    Unsupported,
+    Fault,
+}
+
+/// Package-backed reactive wrapper family of one semantic type demand.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ReactiveWrapperRole {
+    Ref,
+    ShallowRef,
+    ComputedRef,
+    /// `defineModel`'s wrapper type. Kept as its OWN role rather than collapsed
+    /// into [`Ref`](Self::Ref): it is the one wrapper source the compiler itself
+    /// synthesises, and a consumer distinguishing a model binding from a plain
+    /// ref must be able to.
+    ModelRef,
+    Reactive,
+    ShallowReactive,
+    None,
+    Unresolved {
+        reason: ReactiveWrapperUnresolvedReason,
+    },
+}
+
+impl Default for ReactiveWrapperRole {
+    fn default() -> Self {
+        Self::Unresolved {
+            reason: ReactiveWrapperUnresolvedReason::AnalysisUnavailable,
+        }
+    }
+}
+
+/// Exact package/import provenance for a wrapper-head identity.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ReactiveWrapperImportProvenance {
+    pub authored_head: crate::facts::AuthoredReferenceHeadFact,
+    pub package: Arc<str>,
+    pub import_source: Arc<str>,
+    pub local_binding: Arc<str>,
+    pub owner_canonical: Arc<str>,
+    pub imported_name: Arc<str>,
+    pub terminal_import_source: Arc<str>,
+    pub local_alias_hops: Arc<[Arc<str>]>,
+    pub exactness: ResolutionExactness,
+    pub provenance: ResolutionProvenance,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

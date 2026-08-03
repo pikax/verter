@@ -539,6 +539,7 @@ impl VerterHost {
             );
             let template_inputs = crate::types::VueTemplateInputs {
                 source: Arc::clone(source),
+                whole_hash: parse.whole_hash,
                 framework_parse: Some(parsed),
                 store_published,
                 // This builder reads no scheduler node, so it can
@@ -1280,10 +1281,10 @@ impl VerterHost {
                                                     canonical,
                                                     ctx.macro_index,
                                                 )
-                                                .and_then(|handle| {
+                                                .and_then(|product| {
                                                     crate::project_semantic_dispatch::node_data_for(
                                                         engine.ctx(),
-                                                        handle.node(),
+                                                        product.hot.node(),
                                                     )
                                                 })
                                                 .is_some_and(|data| {

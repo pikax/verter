@@ -619,3 +619,18 @@ Pinned by the static guards in `crates/verter_session/tests/cases/architecture_g
 | `crates/verter_lsp/src/tsserver/ipc.rs` | `TsserverTypeProvider`, newline-delimited JSON transport |
 | `crates/verter_lsp/src/tsserver/resilient.rs` | `ResilientTsserverProvider` |
 | `crates/verter_workspace/src/published_state.rs` | `PublishedRoot`, `ownership_ready` |
+
+### Template class fact lanes
+
+Normal compile, content override, and lazy raw-template conversion must all
+build `TemplateClassSemanticFacts` from the exact source `whole_hash` and the
+same script snapshot used by conversion. `CompileInput` and
+`VueTemplateInputs` carry that hash. Base-current computations may retain
+complete facts only with their validated dependency `ReadSetSignature`;
+overlay, missing/cyclic, or otherwise `ReturnOnly` computations never populate
+base-only caches. Content publication is owner-only, so dependency-derived
+class facts are served fresh without entering the pure-content store.
+
+`template_converter_inputs` is linkage-only. Semantic class domains flow
+through the opaque, revision-checked `TemplateClassDomainIndex`; callers must
+not manufacture raw class-domain tuples or recover domains from display text.

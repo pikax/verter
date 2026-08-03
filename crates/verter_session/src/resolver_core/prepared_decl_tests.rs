@@ -1315,3 +1315,142 @@ interface Shared { instance: InstanceOnly }
         .owner_scope(verter_type_expr::TopLevelOwnerId::instance(1))
         .is_none());
 }
+
+/// A namespace import the owner cannot canonicalize must not make the whole
+/// value declaration unavailable.
+///
+/// `insert_value_space_import_resolutions` skips `is_namespace` bindings for
+/// exactly this reason — so "this unrelated non-canonicalizable binding [does
+/// not] make every local value declaration in the owner unavailable". The
+/// authored-route arm must mirror that policy: record the first-hop edge when it
+/// is recordable, and otherwise SKIP it, never fail preparation. Failing would
+/// degrade `typeof variant` (and hover/definition on it) from "unresolved `Ref`"
+/// to nothing at all.
+#[test]
+fn a_namespace_annotation_without_a_dep_edge_still_prepares_the_value_decl() {
+    let source = r#"
+import * as Vue from 'vue'
+
+export const variant: Vue.Ref<'a' | 'b'> = null as never
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    // No `vue` dep edge and no canonicalization entry: the namespace binding is
+    // not routable at preparation time.
+    let prepared = prepare_local_value_decl(
+        "/src/Button.vue",
+        &state,
+        "variant",
+        None,
+        &ImportCanonicalization::default(),
+        &test_interner(),
+    )
+    .expect(
+        "an unroutable namespace annotation must leave the value decl AVAILABLE \
+         — preparation must not fail",
+    );
+
+    assert_eq!(prepared.root_identity.symbol_name.as_ref(), "variant");
+    // The annotation's authored head is still retained as evidence...
+    assert!(
+        matches!(
+            prepared.type_annotation.reference_head,
+            verter_type_expr::facts::AuthoredReferenceHeadFact::Qualified { .. }
+        ),
+        "the authored qualified head must survive an unroutable first hop"
+    );
+    // ...while the unroutable edge is SKIPPED rather than fabricated.
+    assert!(
+        prepared.external_deps.is_empty(),
+        "an unroutable namespace first hop must record no external dep, got {:?}",
+        prepared.external_deps
+    );
+}
+
+/// The recorded namespace-member edge carries the FILE-DEFAULT top-level owner,
+/// the same discriminant every sibling arm records for an ordinary declaring
+/// file — never the SFC-instance owner. `owner` participates in the derived
+/// `Hash`/serde identity pinned by
+/// `external_dependency_identity_discriminates_owner_in_memo_and_serde`, so a
+/// stable-but-wrong value is a wrong discriminant. Exactly ONE edge is recorded.
+#[test]
+fn a_routable_namespace_member_edge_records_the_file_default_owner_once() {
+    let source = r#"
+import * as Vue from 'vue'
+
+export const variant: Vue.Ref<'a' | 'b'> = null as never
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let mut dep_edges = FxHashMap::default();
+    dep_edges.insert(
+        "vue".to_string(),
+        "/node_modules/vue/index.d.ts".to_string(),
+    );
+
+    let prepared = prepare_local_value_decl(
+        "/src/Button.vue",
+        &state,
+        "variant",
+        Some(&dep_edges),
+        &ImportCanonicalization::default(),
+        &test_interner(),
+    )
+    .expect("variant should prepare");
+
+    assert_eq!(
+        prepared.external_deps.len(),
+        1,
+        "exactly one authored first-hop edge, never a duplicate, got {:?}",
+        prepared.external_deps
+    );
+    let edge = &prepared.external_deps[0];
+    assert_eq!(edge.local_name, "Vue");
+    assert_eq!(edge.source_specifier, "vue");
+    assert_eq!(edge.imported_name, "Ref");
+    assert_eq!(edge.symbol_name, "Ref");
+    assert_eq!(edge.canonical_id, "/node_modules/vue/index.d.ts");
+    assert_eq!(
+        edge.owner,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "a cross-file namespace-member edge declares the FILE-DEFAULT owner"
+    );
+    assert_ne!(
+        edge.owner,
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "the SFC-instance owner is not a declaring-file owner"
+    );
+}
+
+/// A `Bare` head naming a namespace import (`const v: Vue = ...`) has no member
+/// to route, so there is no first-hop edge to record — and that must not make
+/// the declaration unavailable either.
+#[test]
+fn a_bare_namespace_head_records_no_edge_and_still_prepares() {
+    let source = r#"
+import * as Vue from 'vue'
+
+export const bare: Vue = null as never
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let mut dep_edges = FxHashMap::default();
+    dep_edges.insert(
+        "vue".to_string(),
+        "/node_modules/vue/index.d.ts".to_string(),
+    );
+
+    let prepared = prepare_local_value_decl(
+        "/src/Button.vue",
+        &state,
+        "bare",
+        Some(&dep_edges),
+        &ImportCanonicalization::default(),
+        &test_interner(),
+    )
+    .expect("a bare namespace head must leave the value decl AVAILABLE");
+
+    assert_eq!(prepared.root_identity.symbol_name.as_ref(), "bare");
+    assert!(
+        prepared.external_deps.is_empty(),
+        "a bare namespace head selects no member, so it records no edge, got {:?}",
+        prepared.external_deps
+    );
+}

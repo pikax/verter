@@ -4,7 +4,7 @@
 //! [`RawTemplateData`] during compilation, and this function converts it into
 //! [`TemplateAnalysisSnapshot`] that `verter_session` stores alongside script/style analysis.
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_compiler::compile::template_data::RawTemplateData;
 use verter_semantic::analysis::macro_usage::MacroUsageFacts;
 use verter_semantic::analysis::template::{
@@ -72,18 +72,12 @@ impl<'a> UnusedDeclarationContext<'a> {
 /// paths for cross-file analysis. This is populated from the script analysis
 /// (e.g., `"Child"` → `"./Child.vue"`).
 ///
-/// `binding_class_unions` maps binding names to their string literal union values
-/// (e.g., `[("variant", ["primary", "secondary"])]`). Used to resolve bare
-/// `:class="variant"` bindings to CSS class names.
-///
-/// `props_binding_name` is the variable name used for `defineProps` return value
-/// (e.g., `"props"` from `const props = defineProps<...>()`). Used to resolve
-/// `:class="props.variant"` patterns.
-pub fn convert_raw_to_analysis(
+/// `class_domains` is an opaque, revision-checked projection of semantic facts.
+/// Callers cannot manufacture class-domain tuples or feed display strings.
+pub(crate) fn convert_raw_to_analysis(
     raw: &RawTemplateData,
     script_imports: &[(String, String)], // (local_name, source_path)
-    binding_class_unions: &[(String, Vec<String>)], // (binding_name, class_names)
-    props_binding_name: Option<&str>,
+    class_domains: &TemplateClassDomainIndex,
     unused_declarations: Option<&UnusedDeclarationContext<'_>>,
 ) -> TemplateAnalysisSnapshot {
     let components: Vec<TemplateComponentUsage> = raw
@@ -137,10 +131,11 @@ pub fn convert_raw_to_analysis(
             // bare identifier bindings via string literal union types.
             if dynamic_classes.is_empty() {
                 if let Some(expr) = c.dynamic_class_expr.as_deref() {
-                    if let Some(classes) =
-                        resolve_classes_from_binding(expr, binding_class_unions, props_binding_name)
-                    {
-                        dynamic_classes = classes.to_vec();
+                    if let Some(classes) = class_domains.lookup_expression(expr) {
+                        dynamic_classes = classes
+                            .iter()
+                            .map(|class_name| class_name.to_string())
+                            .collect();
                     }
                 }
             }
@@ -415,10 +410,9 @@ pub fn convert_raw_to_analysis(
                     .filter_map(|a| a.value.as_deref())
                     .chain(bind_class_expressions.iter().copied())
                 {
-                    if let Some(classes) =
-                        resolve_classes_from_binding(expr, binding_class_unions, props_binding_name)
-                    {
-                        dynamic_classes.extend_from_slice(classes);
+                    if let Some(classes) = class_domains.lookup_expression(expr) {
+                        dynamic_classes
+                            .extend(classes.iter().map(|class_name| class_name.to_string()));
                     }
                 }
             }
@@ -822,49 +816,168 @@ fn to_pascal_case(s: &str) -> String {
     result
 }
 
-/// Resolve a `:class` expression to class names via string literal union bindings.
+/// Opaque converter projection of exact, matching-revision semantic facts.
 ///
-/// Returns `Some(&[String])` if the expression is:
-/// - A bare identifier matching a name in `binding_class_unions`
-///   (e.g., `:class="variant"` where `variant: 'primary' | 'secondary'`)
-/// - A props member access matching `{props_binding_name}.{prop_name}`
-///   (e.g., `:class="props.variant"`)
+/// One template expression position addresses exactly ONE subject. A bare
+/// identifier is looked up in the BARE namespace and a `root.member`
+/// expression in the ROOTED namespace, so a prop row never supplies a domain
+/// for a different, same-named subject: `join_prop_field` records
+/// `props_root == ""` for a bare-REQUESTED prop and the authored root for a
+/// rooted-requested one, and the population below keys each row by exactly the
+/// namespace it was requested through.
 ///
-/// Returns `None` otherwise.
-fn resolve_classes_from_binding<'a>(
-    expr: &str,
-    binding_class_unions: &'a [(String, Vec<String>)],
-    props_binding_name: Option<&str>,
-) -> Option<&'a [String]> {
-    let trimmed = expr.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
+/// A row the facts did not admit — `NotClosed`, typed `Unresolved`, or an empty
+/// `Strings` — records its label as REFUSED in its own namespace. A refused
+/// label resolves to `None` even if some other subject admitted a domain under
+/// the same label, so an explicit negative semantic decision can never be
+/// overridden.
+/// The owner revision is the CONSTRUCTION-TIME gate above, not stored state:
+/// `from_semantic_facts` refuses facts whose stamp differs from the lane's
+/// expected revision, so an existing index is by construction revision-coherent
+/// and has nothing left to re-check on lookup.
+#[derive(Debug, Clone)]
+pub(crate) struct TemplateClassDomainIndex {
+    binding_domains: FxHashMap<ClassDomainLabel, ClosedClassMembers>,
+    bare_prop_domains: FxHashMap<ClassDomainLabel, ClosedClassMembers>,
+    prop_domains: FxHashMap<RootedClassSubject, ClosedClassMembers>,
+    /// Bare labels whose own row was refused — never served, never overridden.
+    refused_bare: FxHashSet<ClassDomainLabel>,
+    /// Rooted `(root, member)` subjects whose own row was refused.
+    refused_rooted: FxHashSet<RootedClassSubject>,
+}
 
-    // Check bare identifier: `:class="variant"`
-    if is_simple_identifier(trimmed) {
-        if let Some((_, classes)) = binding_class_unions.iter().find(|(n, _)| n == trimmed) {
-            return Some(classes);
+/// A converter lookup label — a bare binding/prop name, or a rooted member name.
+type ClassDomainLabel = std::sync::Arc<str>;
+/// A `root.member` subject key.
+type RootedClassSubject = (ClassDomainLabel, ClassDomainLabel);
+/// The published closed class members of one subject.
+type ClosedClassMembers = std::sync::Arc<[std::sync::Arc<str>]>;
+
+impl TemplateClassDomainIndex {
+    pub(crate) fn from_semantic_facts(
+        facts: &crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts,
+        expected_canonical: &str,
+        expected_whole_hash: verter_semantic::analysis::Hash16,
+    ) -> Option<Self> {
+        if facts.owner_canonical() != expected_canonical
+            || facts.owner_whole_hash() != expected_whole_hash
+        {
+            return None;
         }
-    }
-
-    // Check props member access: `:class="props.variant"`
-    if let Some(props_name) = props_binding_name {
-        if let Some(rest) = trimmed.strip_prefix(props_name) {
-            if let Some(member) = rest.strip_prefix('.') {
-                let member = member.trim();
-                if is_simple_identifier(member) {
-                    if let Some((_, classes)) =
-                        binding_class_unions.iter().find(|(n, _)| n == member)
-                    {
-                        return Some(classes);
+        let mut index = Self {
+            binding_domains: FxHashMap::default(),
+            bare_prop_domains: FxHashMap::default(),
+            prop_domains: FxHashMap::default(),
+            refused_bare: FxHashSet::default(),
+            refused_rooted: FxHashSet::default(),
+        };
+        for row in facts.rows() {
+            let admitted = match &row.domain {
+                verter_type_expr::ClosedLiteralDomain::Strings(classes) if !classes.is_empty() => {
+                    Some(classes)
+                }
+                _ => None,
+            };
+            match &row.subject {
+                verter_semantic::analysis::TemplateClassSubject::Binding { label, .. } => {
+                    match admitted {
+                        Some(classes) => {
+                            index.binding_domains.insert(
+                                std::sync::Arc::clone(label),
+                                std::sync::Arc::clone(classes),
+                            );
+                        }
+                        None => {
+                            index.refused_bare.insert(std::sync::Arc::clone(label));
+                        }
                     }
                 }
+                verter_semantic::analysis::TemplateClassSubject::Prop {
+                    label, props_root, ..
+                } => {
+                    // An EMPTY `props_root` marks a BARE-requested prop; a
+                    // non-empty one is the authored root the template wrote.
+                    // Each row populates only the namespace it was requested
+                    // through, so a rooted prop can never answer a bare lookup.
+                    let rooted_key = (
+                        std::sync::Arc::clone(props_root),
+                        std::sync::Arc::clone(label),
+                    );
+                    match (admitted, props_root.is_empty()) {
+                        (Some(classes), true) => {
+                            index.bare_prop_domains.insert(
+                                std::sync::Arc::clone(label),
+                                std::sync::Arc::clone(classes),
+                            );
+                        }
+                        (Some(classes), false) => {
+                            index
+                                .prop_domains
+                                .insert(rooted_key, std::sync::Arc::clone(classes));
+                        }
+                        (None, true) => {
+                            index.refused_bare.insert(std::sync::Arc::clone(label));
+                        }
+                        (None, false) => {
+                            index.refused_rooted.insert(rooted_key);
+                        }
+                    }
+                }
+                verter_semantic::analysis::TemplateClassSubject::Unresolved {
+                    label,
+                    props_root,
+                } => match props_root {
+                    Some(root) => {
+                        index
+                            .refused_rooted
+                            .insert((std::sync::Arc::clone(root), std::sync::Arc::clone(label)));
+                    }
+                    None => {
+                        index.refused_bare.insert(std::sync::Arc::clone(label));
+                    }
+                },
             }
+        }
+        Some(index)
+    }
+
+    /// The domain-free index a lane installs when the revision gate REFUSED —
+    /// no class domain reaches the template.
+    pub(crate) fn empty() -> Self {
+        Self {
+            binding_domains: FxHashMap::default(),
+            bare_prop_domains: FxHashMap::default(),
+            prop_domains: FxHashMap::default(),
+            refused_bare: FxHashSet::default(),
+            refused_rooted: FxHashSet::default(),
         }
     }
 
-    None
+    fn lookup_expression(&self, expression: &str) -> Option<&[std::sync::Arc<str>]> {
+        let trimmed = expression.trim();
+        if is_simple_identifier(trimmed) {
+            if self.refused_bare.contains(trimmed) {
+                return None;
+            }
+            return self
+                .binding_domains
+                .get(trimmed)
+                .or_else(|| self.bare_prop_domains.get(trimmed))
+                .map(std::convert::AsRef::as_ref);
+        }
+        let (root, member) = trimmed.split_once('.')?;
+        if !is_simple_identifier(root) || !is_simple_identifier(member) {
+            return None;
+        }
+        let key = (
+            std::sync::Arc::<str>::from(root),
+            std::sync::Arc::<str>::from(member),
+        );
+        if self.refused_rooted.contains(&key) {
+            return None;
+        }
+        self.prop_domains.get(&key).map(std::convert::AsRef::as_ref)
+    }
 }
 
 /// Check if a string is a valid JS identifier (no dots, brackets, parens, etc.).

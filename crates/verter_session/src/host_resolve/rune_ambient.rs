@@ -319,6 +319,7 @@ mod tests {
                 typeof_alias_target: None,
                 classification: verter_type_expr::facts::ValueAnnotationClass::Absent,
                 annotation: None,
+                reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
             },
             signatures: Vec::new(),
             object_shape: None,

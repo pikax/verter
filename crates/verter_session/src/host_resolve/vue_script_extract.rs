@@ -2,9 +2,9 @@
 //! shaping — the session's Vue-bridge extraction module.
 //!
 //! Owns:
-//! - `template_converter_inputs` — projects analysed imports / macros /
-//!   bindings into the `(all_imports, unions, props_binding_name)` tuple
-//!   consumed by `crate::template_convert::convert_raw_to_analysis`.
+//! - `template_converter_inputs` — projects analysed imports and value bindings
+//!   into runtime component-linkage pairs. Semantic class domains are
+//!   owned by the project semantic dispatcher.
 //! - `extract_vue_script_content` — public Vue-SFC `<script>` /
 //!   `<script setup>` position-preserving source builder used by the
 //!   eval-program pipeline. It copies each script block's content to its
@@ -24,16 +24,10 @@
 //!   (the dispatch `DeclarationScopePayload` rail), never through an eval
 //!   env.
 
-#[allow(clippy::type_complexity)]
 pub(crate) fn template_converter_inputs(
     imports: &[verter_semantic::analysis::AnalyzedImport],
-    macros: &[verter_semantic::analysis::AnalyzedMacro],
     bindings: &[verter_semantic::analysis::AnalyzedBinding],
-) -> (
-    Vec<(String, String)>,
-    Vec<(String, Vec<String>)>,
-    Option<String>,
-) {
+) -> Vec<(String, String)> {
     // Carrier-linkage map for template components. A `import type { X }` (or a
     // per-specifier `import { type X }`) is a TYPE-ONLY binding — it has no
     // runtime value, so a tag `<X/>` must NEVER be carrier-linked to it as a
@@ -66,36 +60,7 @@ pub(crate) fn template_converter_inputs(
         }
     }
 
-    let mut unions = Vec::new();
-    let define_props = macros
-        .iter()
-        .find(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps);
-    if let Some(dp) = define_props {
-        for field in &dp.prop_fields {
-            if let Some(type_ann) = &field.type_annotation {
-                let classes = verter_semantic::analysis::parse_string_literal_union(type_ann);
-                if !classes.is_empty() {
-                    unions.push((field.name.clone(), classes));
-                }
-            }
-        }
-    }
-
-    for binding in bindings {
-        if let Some(type_ann) = &binding.type_annotation {
-            let effective_type =
-                verter_semantic::analysis::unwrap_reactive_type(type_ann).unwrap_or(type_ann);
-            let classes = verter_semantic::analysis::parse_string_literal_union(effective_type);
-            if !classes.is_empty() {
-                unions.push((binding.name.clone(), classes));
-            }
-        }
-    }
-
-    let props_binding_name =
-        verter_semantic::analysis::props_root_binding(macros).map(str::to_owned);
-
-    (all_imports, unions, props_binding_name)
+    all_imports
 }
 
 /// Read the `<script setup generic="…">` type-parameter clause from the
@@ -587,74 +552,26 @@ pub(crate) fn populate_sfc_blocks_sidecar(
 
 #[cfg(test)]
 mod tests {
-    /// `const props = withDefaults(defineProps<T>(), …)`: the props-root
-    /// binding lives on the OUTER `WithDefaults` macro — the converter input
-    /// projection must surface it, while the prop fields (and their string
-    /// literal unions) stay on the INNER `DefineProps`.
+    /// Macro expression statements likewise contribute no runtime linkage.
     #[test]
-    fn template_converter_inputs_surfaces_bound_with_defaults_props_root() {
-        let alloc = oxc_allocator::Allocator::new();
-        let snapshot = verter_semantic::analysis::build_script_analysis(
-            "const props = withDefaults(defineProps<{ variant: 'primary' | 'secondary' }>(), { variant: 'primary' });",
-            oxc_span::SourceType::ts(),
-            &alloc,
-        );
-        let (_imports, unions, props_binding_name) = super::template_converter_inputs(
-            &snapshot.imports,
-            &snapshot.macros,
-            &snapshot.bindings,
-        );
-        assert_eq!(
-            props_binding_name.as_deref(),
-            Some("props"),
-            "the props-root binding bound through withDefaults must surface"
-        );
-        assert!(
-            unions.iter().any(|(name, classes)| name == "variant"
-                && classes.iter().any(|c| c == "primary")
-                && classes.iter().any(|c| c == "secondary")),
-            "union classes must still be read off the inner defineProps fields, got: {unions:?}"
-        );
-    }
-
-    /// The expression-statement form has NO declarator — the root correctly
-    /// stays unnamed (no binding to attribute `props.x` reads to). The bound
-    /// form in the same test is the arming half: selection must reach the
-    /// OUTER `WithDefaults` macro (which carries the declarator's binding),
-    /// not stop at the inner `DefineProps`' `None`.
-    #[test]
-    fn template_converter_inputs_expression_statement_with_defaults_has_no_root() {
+    fn template_converter_inputs_is_linkage_only_for_macro_statements() {
         let alloc = oxc_allocator::Allocator::new();
         let snapshot = verter_semantic::analysis::build_script_analysis(
             "withDefaults(defineProps<{ variant: string }>(), { variant: 'x' });",
             oxc_span::SourceType::ts(),
             &alloc,
         );
-        let (_imports, _unions, props_binding_name) = super::template_converter_inputs(
-            &snapshot.imports,
-            &snapshot.macros,
-            &snapshot.bindings,
-        );
-        assert_eq!(
-            props_binding_name, None,
-            "the expression-statement form has no declarator — no root to surface"
-        );
+        let imports = super::template_converter_inputs(&snapshot.imports, &snapshot.bindings);
+        assert!(imports.is_empty());
 
-        // Arming proof: the SAME projection surfaces the root exactly when a
-        // declarator binds the `withDefaults` result.
+        // Bound macros remain linkage-neutral too.
         let alloc = oxc_allocator::Allocator::new();
         let bound = verter_semantic::analysis::build_script_analysis(
             "const props = withDefaults(defineProps<{ variant: string }>(), { variant: 'x' });",
             oxc_span::SourceType::ts(),
             &alloc,
         );
-        let (_imports, _unions, bound_name) =
-            super::template_converter_inputs(&bound.imports, &bound.macros, &bound.bindings);
-        assert_eq!(
-            bound_name.as_deref(),
-            Some("props"),
-            "arming proof: the bound form must surface the root — selection that \
-             stops at the inner defineProps' None binding yields None here"
-        );
+        let imports = super::template_converter_inputs(&bound.imports, &bound.bindings);
+        assert!(imports.is_empty());
     }
 }

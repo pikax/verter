@@ -3932,6 +3932,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_css_syntax"
+version = "0.0.1-beta.3"
+dependencies = [
+ "memchr",
+ "rustc-hash 2.1.2",
+ "smallvec",
+ "verter_span",
+]
+
+[[package]]
 name = "verter_diagnostics"
 version = "0.0.1-beta.3"
 dependencies = [
