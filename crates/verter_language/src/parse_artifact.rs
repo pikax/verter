@@ -36,6 +36,9 @@ use verter_span::Span;
 use crate::ids::{FrameworkAdapterId, LanguageId};
 use crate::language::ScriptSourceType;
 
+pub mod carrier_inventory;
+pub mod carrier_structure_hash;
+
 /// Role of an embedded carrier script region (closed set).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScriptRegionKind {

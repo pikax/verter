@@ -69,7 +69,7 @@ fn candidate_store_is_content_addressed_hit_and_version_miss() {
 fn carrier_parser_v4_candidate_is_rejected_by_v5_key() {
     const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 4;
     const CALL_SIGNATURE_SPAN_PARSER_VERSION: u32 = 5;
-    assert!(
+    const _: () = assert!(
         crate::file_artifact_store::LEGACY_PARSER_VERSION >= CALL_SIGNATURE_SPAN_PARSER_VERSION
     );
 

@@ -989,6 +989,14 @@ pub struct SvelteAttribute {
     pub kind: SvelteAttributeKind,
     /// The full attribute span (name + value).
     pub span: Span,
+    /// Parser-owned ordered chunks for a mixed quoted value.
+    pub mixed_parts: Vec<SvelteMixedAttributePart>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvelteMixedAttributePart {
+    Text(Span),
+    Expression(Span),
 }
 
 /// The closed family of attribute / directive kinds.
@@ -1039,6 +1047,8 @@ pub enum SvelteAttributeValue {
 /// A directive attribute.
 #[derive(Debug, Clone)]
 pub struct SvelteDirective {
+    /// Authored directive family prefix before `:`.
+    pub prefix: String,
     /// The directive kind.
     pub kind: SvelteDirectiveKind,
     /// The directive's local name (the part after the `:`, before any
@@ -1046,6 +1056,8 @@ pub struct SvelteDirective {
     pub local: String,
     /// The `|modifier` list (e.g. `|important`, `|local`, `|stop`).
     pub modifiers: Vec<String>,
+    /// Parser-owned spans of each modifier name, excluding `|`.
+    pub modifier_spans: Vec<Span>,
     /// The value expression span (`{expr}` inner or quoted body), if present.
     /// A two-expression function binding `bind:x={get, set}` records the whole
     /// inner span (both expressions); the projector splits it.
@@ -1143,6 +1155,8 @@ pub enum SvelteBlockKind {
         then_binding: Option<Span>,
         /// The `{:catch <pattern>}` binding span, if present.
         catch_binding: Option<Span>,
+        /// Parser-owned evidence for an inline `then`/`catch` in the opening head.
+        inline_branch: SvelteAwaitInline,
     },
     /// `{#key expr}` … `{/key}`.
     Key,
@@ -1155,6 +1169,21 @@ pub enum SvelteBlockKind {
         name_text: String,
         /// The `(params)` span (excludes the parens), if present.
         params: Option<Span>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvelteAwaitInline {
+    None,
+    Then {
+        marker_span: Span,
+        head_span: Span,
+        binding: Option<Span>,
+    },
+    Catch {
+        marker_span: Span,
+        head_span: Span,
+        binding: Option<Span>,
     },
 }
 

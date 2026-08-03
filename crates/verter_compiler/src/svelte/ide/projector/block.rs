@@ -23,6 +23,7 @@ impl TemplateProjector<'_, '_> {
             SvelteBlockKind::Await {
                 then_binding,
                 catch_binding,
+                ..
             } => self.project_await(block, *then_binding, *catch_binding),
             SvelteBlockKind::Key => self.project_key(block),
             SvelteBlockKind::Snippet {

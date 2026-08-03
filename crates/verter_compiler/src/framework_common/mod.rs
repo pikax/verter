@@ -21,8 +21,12 @@
 pub mod carrier_compiler;
 pub mod ctx;
 pub mod generated_identifier;
+pub(crate) mod registered_carrier_projection;
 pub mod registry;
 pub mod vue_bridge;
+
+#[cfg(test)]
+mod registered_carrier_projection_tests;
 
 /// Reusable framework IDE sourcemap end-to-end assertion helpers, shared
 /// by every carrier vertical's `#[cfg(test)]` sourcemap suite.

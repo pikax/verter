@@ -61,6 +61,7 @@ mod authored_evidence_producer;
 mod block_6c_view_hoist_tests;
 mod cache;
 pub mod cache_schema;
+pub mod carrier_artifact_cohort;
 #[cfg(test)]
 mod cold_artifact_dedup_tests;
 mod compile;

@@ -270,6 +270,11 @@ pub struct VueRuntimeCompileExtras {
 /// a resolved canonical. This mirrors the session's `LEGACY_PARSER_VERSION`
 /// 5 to 6 bump.
 pub const VUE_CARRIER_PARSER_VERSION: u32 = 6;
+pub const VUE_CARRIER_ARTIFACT_VERSION: verter_language::carrier_versions::CarrierParserVersion =
+    match verter_language::carrier_versions::CarrierParserVersion::new(VUE_CARRIER_PARSER_VERSION) {
+        Some(version) => version,
+        None => panic!("Vue carrier parser version must be nonzero"),
+    };
 
 /// The Vue carrier compiler — the reference [`CarrierCompiler`].
 ///
@@ -299,7 +304,10 @@ impl VueCarrierCompiler {
     /// Reach the parsed SFC back out of a Vue artifact, or `None` when the
     /// artifact is not a Vue carrier (foreign adapter id or non-Vue
     /// erased payload). The blessed downcast home for the Vue bridge.
-    fn parsed_sfc<'a>(&self, artifact: &'a FrameworkParseArtifact) -> Option<&'a ParsedSfc> {
+    pub(super) fn parsed_sfc<'a>(
+        &self,
+        artifact: &'a FrameworkParseArtifact,
+    ) -> Option<&'a ParsedSfc> {
         self.ctx
             .carrier_for::<VueParseCarrier>(artifact)
             .map(|carrier| carrier.parsed())
@@ -307,6 +315,10 @@ impl VueCarrierCompiler {
 }
 
 impl CarrierCompiler for VueCarrierCompiler {
+    fn __verter_as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn adapter_id(&self) -> FrameworkAdapterId {
         FrameworkAdapterId::vue()
     }

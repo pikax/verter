@@ -3,6 +3,7 @@ pub mod graph;
 pub mod types;
 
 pub mod component_meta;
+pub mod consumer_compatibility_manifest;
 pub mod schema;
 pub mod typeinfo;
 

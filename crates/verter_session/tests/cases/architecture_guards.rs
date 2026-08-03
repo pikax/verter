@@ -5631,6 +5631,9 @@ mod foundations_guards {
         // ─── public modules: cited consumers ────────────────────────
         // tests/cases/g_misc0/audited_request_e2e.rs
         "pub mod audited_request",
+        // Frozen eight-field carrier-owned compatibility cohort consumed by
+        // B2 persistence/adoption and exercised by its owning module tests.
+        "pub mod carrier_artifact_cohort",
         // Workspace-wide cache-cluster schema-version constant + the
         // `CacheSchemaVersioned` trait. Public so
         // `tests/cases/g_cache/cache_invariant_migration.rs` (the W0.5 fixture cohort)

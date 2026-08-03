@@ -21,6 +21,7 @@ pub(super) fn lower_block(
         SvelteBlockKind::Await {
             then_binding,
             catch_binding,
+            ..
         } => Some(lower_await_block(
             ctx,
             block,

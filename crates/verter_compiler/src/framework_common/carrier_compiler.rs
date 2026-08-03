@@ -21,6 +21,7 @@
 //! not the codegen authority, which would weaken the
 //! CodeTransform-single-source invariant rather than honour it.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use verter_language::{FrameworkAdapterId, FrameworkParseArtifact, LanguageId};
@@ -405,6 +406,9 @@ impl RuntimeCompileOutput {
 /// (`vue_bridge::VueCarrierCompiler`) delegates to the existing Vue
 /// pipeline without editing any Vue parser/codegen module.
 pub trait CarrierCompiler: Send + Sync {
+    #[doc(hidden)]
+    fn __verter_as_any(&self) -> &dyn Any;
+
     /// The adapter id this compiler answers to (the registry key).
     fn adapter_id(&self) -> FrameworkAdapterId;
 
@@ -528,6 +532,10 @@ mod contract_tests {
     }
 
     impl CarrierCompiler for FixtureCompiler {
+        fn __verter_as_any(&self) -> &dyn Any {
+            self
+        }
+
         fn adapter_id(&self) -> FrameworkAdapterId {
             FrameworkAdapterId::new(Self::ADAPTER)
         }

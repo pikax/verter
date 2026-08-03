@@ -95,7 +95,7 @@ fn parser_v3_artifact_is_rejected_by_v4_base_key() {
     use super::CURRENT_PARSER_VERSION;
 
     const PREVIOUS_PARSER_VERSION: u32 = 3;
-    assert!(CURRENT_PARSER_VERSION > PREVIOUS_PARSER_VERSION);
+    const _: () = assert!(CURRENT_PARSER_VERSION > PREVIOUS_PARSER_VERSION);
 
     let store = FileArtifactStore::new();
     let current = FileArtifactKey::base(Arc::from("/owner-exact.ts"), [3u8; 16]);

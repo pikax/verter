@@ -150,6 +150,7 @@ fn scan_node_for_host(node: &SvelteNode, source: &str, declared: &[String]) -> b
                 SvelteBlockKind::Await {
                     then_binding,
                     catch_binding,
+                    ..
                 } => {
                     let has_then_clause = block
                         .clauses

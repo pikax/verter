@@ -90,7 +90,14 @@ fn svelte_script_source_type(script: Option<&SvelteScript>) -> ScriptSourceType 
 }
 
 /// The Svelte carrier parser version stamped on produced artifacts.
-pub const SVELTE_CARRIER_PARSER_VERSION: u32 = 1;
+pub const SVELTE_CARRIER_PARSER_VERSION: u32 = 2;
+pub const SVELTE_CARRIER_ARTIFACT_VERSION: verter_language::carrier_versions::CarrierParserVersion =
+    match verter_language::carrier_versions::CarrierParserVersion::new(
+        SVELTE_CARRIER_PARSER_VERSION,
+    ) {
+        Some(version) => version,
+        None => panic!("Svelte carrier parser version must be nonzero"),
+    };
 
 /// Lift a parsed Svelte component into the framework-neutral parse artifact.
 ///
@@ -206,7 +213,10 @@ impl SvelteCarrierCompiler {
     /// Reach the parsed component back out of a Svelte artifact, or `None` when
     /// the artifact is not a Svelte carrier.
     #[must_use]
-    fn parsed_svelte<'a>(&self, artifact: &'a FrameworkParseArtifact) -> Option<&'a ParsedSvelte> {
+    pub(crate) fn parsed_svelte<'a>(
+        &self,
+        artifact: &'a FrameworkParseArtifact,
+    ) -> Option<&'a ParsedSvelte> {
         self.ctx
             .carrier_for::<SvelteParseCarrier>(artifact)
             .map(|carrier| carrier.parsed())
@@ -271,6 +281,10 @@ impl SvelteCarrierCompiler {
 }
 
 impl CarrierCompiler for SvelteCarrierCompiler {
+    fn __verter_as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn adapter_id(&self) -> FrameworkAdapterId {
         FrameworkAdapterId::svelte()
     }

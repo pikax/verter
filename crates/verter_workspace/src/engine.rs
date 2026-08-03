@@ -2263,14 +2263,14 @@ impl Engine {
 
     /// The content generation at which `canonical`'s base resolution evidence
     /// was last read LIVE, or `None` when it never has been.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn evidence_verified_generation_for_test(&self, canonical: &str) -> Option<u64> {
         let key = crate::resolver::normalize_canonical_id(canonical);
         self.evidence_verified_generation.read().get(&key).copied()
     }
 
     /// Whether `canonical` is still awaiting evidence re-observation.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn pending_resolution_refresh_for_test(&self, canonical: &str) -> bool {
         let key = crate::resolver::normalize_canonical_id(canonical);
         self.pending_resolution_refresh.read().contains(&key)

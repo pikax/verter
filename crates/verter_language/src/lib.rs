@@ -30,14 +30,19 @@
 
 mod ids;
 mod language;
-mod parse_artifact;
+pub mod parse_artifact;
 mod registry;
 
 pub mod carrier_grammar;
+pub mod carrier_versions;
 pub mod registered_source_authority;
 
 pub use ids::{CapabilityId, FrameworkAdapterId, LanguageId};
 pub use language::{FileLanguage, JsModuleKind, ScriptFlavor, ScriptSourceType};
+pub use parse_artifact::carrier_inventory::*;
+pub use parse_artifact::carrier_structure_hash::{
+    compute_carrier_structure_hash, CarrierStructureHash,
+};
 pub use parse_artifact::{
     __carrier_downcast_arc, __carrier_downcast_ref, CarrierAccessToken, CarrierParse, ExternalLink,
     ExternalLinkKind, FrameworkParseArtifact, FrameworkParseCommon, LanguageDiagnostic,
