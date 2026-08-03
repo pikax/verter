@@ -1835,10 +1835,33 @@ pub struct FunctionSignatureFact {
     /// whether an implicit fallthrough return remains reachable.
     #[serde(default)]
     pub return_inference: ReturnInferenceCompleteness,
+    /// Producer-owned authored reference head of the AUTHORED return
+    /// annotation, for exact demand-time route provenance — the return-position
+    /// peer of [`ValueTypeAnnotationFact::reference_head`].
+    ///
+    /// Minted ONLY when the signature carried an explicit authored TS return
+    /// annotation. An INFERRED return still mints [`Self::return_ty`] (that
+    /// locator replays the retained lowering regardless of authorship), so
+    /// minting a head from that carrier would fabricate authored evidence for a
+    /// return the author never wrote: every non-authored return position —
+    /// inferred returns, object-shape member signatures, synthesized
+    /// constructors — publishes
+    /// [`AuthoredReferenceHeadFact::Unavailable`] instead. An authored
+    /// annotation that is not a type reference at all publishes
+    /// [`AuthoredReferenceHeadFact::NotReference`].
+    #[serde(default = "authored_reference_head_unavailable")]
+    pub return_reference_head: AuthoredReferenceHeadFact,
     /// Overload-visibility fact: hide the trailing implementation signature.
     pub has_implementation_body: bool,
     /// Origin locator recovering `FunctionSpans`.
     pub spans_origin: FunctionSpansOrigin,
+}
+
+/// Serde default for [`FunctionSignatureFact::return_reference_head`]: a
+/// previously persisted signature fact carries no head, and "no head was
+/// produced" is exactly `Unavailable` — never a fabricated authored head.
+fn authored_reference_head_unavailable() -> AuthoredReferenceHeadFact {
+    AuthoredReferenceHeadFact::Unavailable
 }
 
 /// A narrowed object property member. Carries the identity-participating
@@ -3702,13 +3725,77 @@ impl FunctionParamFact {
     }
 }
 
+impl AuthoredReferenceArgLocator {
+    fn absolutize(&self, canonical_id: &str) -> Option<Self> {
+        match self {
+            AuthoredReferenceArgLocator::Value(locator) => locator
+                .absolutize(canonical_id)
+                .map(AuthoredReferenceArgLocator::Value),
+            AuthoredReferenceArgLocator::MacroPayload { payload, arg_index } => payload
+                .absolutize(canonical_id)
+                .map(|payload| AuthoredReferenceArgLocator::MacroPayload {
+                    payload,
+                    arg_index: *arg_index,
+                }),
+        }
+    }
+}
+
+impl AuthoredReferenceHeadFact {
+    /// Written generically over the head fact — every head-bearing position
+    /// (value annotation, value-signature return, and any future member
+    /// position) reuses this one walk rather than inlining an arm-specific copy.
+    /// The authored LOCAL SPELLING is never rewritten; only the argument
+    /// locators' anchors absolutize.
+    fn absolutize(&self, canonical_id: &str) -> Option<Self> {
+        let args = |args: &Arc<[AuthoredReferenceArgLocator]>| {
+            absolutize_fact_slice(args, |arg| arg.absolutize(canonical_id))
+        };
+        match self {
+            AuthoredReferenceHeadFact::Bare {
+                local_name,
+                args: a,
+            } => args(a).map(|args| AuthoredReferenceHeadFact::Bare {
+                local_name: Arc::clone(local_name),
+                args,
+            }),
+            AuthoredReferenceHeadFact::Qualified {
+                local_root,
+                member_path,
+                args: a,
+            } => args(a).map(|args| AuthoredReferenceHeadFact::Qualified {
+                local_root: Arc::clone(local_root),
+                member_path: Arc::clone(member_path),
+                args,
+            }),
+            AuthoredReferenceHeadFact::ImportType {
+                specifier,
+                member_path,
+                args: a,
+            } => args(a).map(|args| AuthoredReferenceHeadFact::ImportType {
+                specifier: Arc::clone(specifier),
+                member_path: Arc::clone(member_path),
+                args,
+            }),
+            AuthoredReferenceHeadFact::NotReference | AuthoredReferenceHeadFact::Unavailable => {
+                None
+            }
+        }
+    }
+}
+
 impl FunctionSignatureFact {
     fn absolutize(&self, canonical_id: &str) -> Option<Self> {
         let type_parameters =
             absolutize_fact_slice(&self.type_parameters, |p| p.absolutize(canonical_id));
         let parameters = absolutize_fact_slice(&self.parameters, |p| p.absolutize(canonical_id));
         let return_ty = absolutize_slot_opt(&self.return_ty, canonical_id);
-        if type_parameters.is_none() && parameters.is_none() && return_ty.is_none() {
+        let return_reference_head = self.return_reference_head.absolutize(canonical_id);
+        if type_parameters.is_none()
+            && parameters.is_none()
+            && return_ty.is_none()
+            && return_reference_head.is_none()
+        {
             return None;
         }
         Some(Self {
@@ -3716,6 +3803,8 @@ impl FunctionSignatureFact {
             parameters: parameters.unwrap_or_else(|| Arc::clone(&self.parameters)),
             return_ty: return_ty.unwrap_or_else(|| self.return_ty.clone()),
             return_inference: self.return_inference,
+            return_reference_head: return_reference_head
+                .unwrap_or_else(|| self.return_reference_head.clone()),
             has_implementation_body: self.has_implementation_body,
             spans_origin: self.spans_origin.clone(),
         })
@@ -4105,6 +4194,33 @@ fn key_shape_scope_relative(key: &KeyTypeShape) -> bool {
     }
 }
 
+fn authored_reference_arg_scope_relative(arg: &AuthoredReferenceArgLocator) -> bool {
+    match arg {
+        AuthoredReferenceArgLocator::Value(locator) => anchor_scope_relative(&locator.anchor),
+        AuthoredReferenceArgLocator::MacroPayload { payload, .. } => {
+            anchor_scope_relative(&payload.anchor)
+        }
+    }
+}
+
+/// Deep-walk companion of [`AuthoredReferenceHeadFact::absolutize`], written
+/// generically over the head fact so every head-bearing position shares it.
+///
+/// Only the ARGUMENT anchors decide. The head's own `local_name` / `local_root`
+/// is authored route EVIDENCE that the demand side resolves against the owner
+/// recorded on the route, not a name the raise scope re-resolves — so it does
+/// not make the enclosing source scope-relative on its own.
+fn authored_reference_head_scope_relative(head: &AuthoredReferenceHeadFact) -> bool {
+    match head {
+        AuthoredReferenceHeadFact::Bare { args, .. }
+        | AuthoredReferenceHeadFact::Qualified { args, .. }
+        | AuthoredReferenceHeadFact::ImportType { args, .. } => {
+            args.iter().any(authored_reference_arg_scope_relative)
+        }
+        AuthoredReferenceHeadFact::NotReference | AuthoredReferenceHeadFact::Unavailable => false,
+    }
+}
+
 fn function_fact_scope_relative(signature: &FunctionSignatureFact) -> bool {
     signature.type_parameters.iter().any(|param| {
         slot_opt_scope_relative(&param.constraint) || slot_opt_scope_relative(&param.default)
@@ -4113,6 +4229,7 @@ fn function_fact_scope_relative(signature: &FunctionSignatureFact) -> bool {
         .iter()
         .any(|param| slot_opt_scope_relative(&param.ty))
         || slot_opt_scope_relative(&signature.return_ty)
+        || authored_reference_head_scope_relative(&signature.return_reference_head)
 }
 
 fn object_member_scope_relative(member: &ObjectMemberFact) -> bool {

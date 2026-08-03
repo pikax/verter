@@ -389,6 +389,7 @@ fn empty_fn() -> FunctionSignatureFact {
         parameters: std::sync::Arc::from(Vec::<FunctionParamFact>::new().into_boxed_slice()),
         return_ty: None,
         return_inference: ReturnInferenceCompleteness::NotInferred,
+        return_reference_head: AuthoredReferenceHeadFact::Unavailable,
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::AliasBody {
             anchor: DeclContributorAnchor {
@@ -511,6 +512,192 @@ fn member_visibility_participates_in_fact_identity() {
     assert_ne!(protected, private);
     assert_ne!(public, private);
     assert_eq!(public, prop("x", false, MemberVisibility::Public));
+}
+
+/// The value-space signature return position's authored reference head is a
+/// producer-owned route-evidence FACT: two signatures that differ ONLY in the
+/// authored head are DISTINCT facts, so a cache slot can never collapse
+/// `(): Ref<T>` with `(): ShallowRef<T>` (or with an inferred return, whose
+/// head is `Unavailable`).
+#[test]
+fn return_reference_head_participates_in_signature_fact_identity() {
+    let with_head = |local_name: &str| FunctionSignatureFact {
+        return_reference_head: AuthoredReferenceHeadFact::Bare {
+            local_name: std::sync::Arc::from(local_name),
+            args: std::sync::Arc::from(
+                Vec::<AuthoredReferenceArgLocator>::new().into_boxed_slice(),
+            ),
+        },
+        ..empty_fn()
+    };
+    let referenced = with_head("Ref");
+    let shallow = with_head("ShallowRef");
+    assert_ne!(
+        referenced, shallow,
+        "the authored return head must discriminate signature fact identity"
+    );
+    assert_eq!(referenced, with_head("Ref"));
+    // The mint-gate states are distinct identities too: an INFERRED return
+    // (`Unavailable`) must never alias an authored non-reference return
+    // (`NotReference`) nor an authored reference head.
+    let inferred = FunctionSignatureFact {
+        return_reference_head: AuthoredReferenceHeadFact::Unavailable,
+        ..empty_fn()
+    };
+    let authored_non_reference = FunctionSignatureFact {
+        return_reference_head: AuthoredReferenceHeadFact::NotReference,
+        ..empty_fn()
+    };
+    assert_ne!(inferred, authored_non_reference);
+    assert_ne!(inferred, referenced);
+    assert_ne!(authored_non_reference, referenced);
+    // Hash identity agrees on the recorded hash INPUT STREAM.
+    assert_ne!(
+        hash_input_stream(&referenced),
+        hash_input_stream(&shallow),
+        "the authored return head must feed distinct hash input streams"
+    );
+    assert_ne!(
+        hash_input_stream(&inferred),
+        hash_input_stream(&authored_non_reference),
+        "Unavailable and NotReference heads must feed distinct hash input streams"
+    );
+    assert_eq!(
+        hash_input_stream(&referenced),
+        hash_input_stream(&with_head("Ref")),
+        "equal signature facts must feed identical hash input streams"
+    );
+}
+
+/// Deep-walk completeness of the producer-local anchor absolutization family:
+/// a return head's ARGUMENT locators sit at a nesting depth the family had no
+/// arm for, so a producer-local (empty-`canonical_id`) argument anchor would
+/// have survived a cross-owner re-anchor unrewritten. Already-absolute
+/// argument anchors are never rewritten.
+#[test]
+fn authored_reference_head_absolutizes_producer_local_arg_anchors() {
+    const OWNER: &str = "/ws/owner.ts";
+    let arg = |canonical: &str| {
+        AuthoredReferenceArgLocator::Value(TypeArgLocator {
+            anchor: AuthoredAnchor {
+                canonical_id: std::sync::Arc::from(canonical),
+                owner: crate::TopLevelOwnerId::ordinary_file(),
+                symbol: std::sync::Arc::from("getRef"),
+                space: LocatorSymbolSpace::Value,
+            },
+            path: std::sync::Arc::from(
+                vec![
+                    TypeBodyPathStep::ValueSignature { ordinal: 0 },
+                    TypeBodyPathStep::FunctionReturn,
+                ]
+                .into_boxed_slice(),
+            ),
+            arg_index: 0,
+        })
+    };
+    let signature = FunctionSignatureFact {
+        return_reference_head: AuthoredReferenceHeadFact::Bare {
+            local_name: std::sync::Arc::from("Ref"),
+            args: std::sync::Arc::from(vec![arg(""), arg("/lib/keep.ts")].into_boxed_slice()),
+        },
+        ..empty_fn()
+    };
+    let source = SemanticTypeSource::Closed(ClosedTypeFact::Function(signature));
+    let normalized = source.absolutized_against(OWNER);
+    let SemanticTypeSource::Closed(ClosedTypeFact::Function(rewritten)) = &normalized else {
+        panic!("the normalizer must preserve the closed function arm, got {normalized:?}");
+    };
+    let AuthoredReferenceHeadFact::Bare { local_name, args } = &rewritten.return_reference_head
+    else {
+        panic!(
+            "the normalizer must preserve the head arm, got {:?}",
+            rewritten.return_reference_head
+        );
+    };
+    assert_eq!(
+        local_name.as_ref(),
+        "Ref",
+        "the authored local spelling is never rewritten"
+    );
+    let canonical_of = |arg: &AuthoredReferenceArgLocator| match arg {
+        AuthoredReferenceArgLocator::Value(locator) => locator.anchor.canonical_id.to_string(),
+        AuthoredReferenceArgLocator::MacroPayload { payload, .. } => {
+            payload.anchor.canonical_id.to_string()
+        }
+    };
+    assert_eq!(
+        canonical_of(&args[0]),
+        OWNER,
+        "a producer-local return-head argument anchor must absolutize to the owning canonical"
+    );
+    assert_eq!(
+        canonical_of(&args[1]),
+        "/lib/keep.ts",
+        "an already-absolute return-head argument anchor must NOT be rewritten"
+    );
+    // The anchor-free head arms are pass-through: nothing to rewrite, and the
+    // arm is preserved rather than collapsed.
+    for head in [
+        AuthoredReferenceHeadFact::NotReference,
+        AuthoredReferenceHeadFact::Unavailable,
+    ] {
+        let source = SemanticTypeSource::Closed(ClosedTypeFact::Function(FunctionSignatureFact {
+            return_reference_head: head.clone(),
+            ..empty_fn()
+        }));
+        let normalized = source.absolutized_against(OWNER);
+        let SemanticTypeSource::Closed(ClosedTypeFact::Function(rewritten)) = &normalized else {
+            panic!("the normalizer must preserve the closed function arm");
+        };
+        assert_eq!(rewritten.return_reference_head, head);
+    }
+}
+
+/// The scope-relative predicate is the deep-walk companion of the
+/// absolutization family: a signature whose return head carries a
+/// producer-local argument anchor is scope-relative (two equal values from
+/// different origins may name different declarations), and a fully-anchored
+/// one is not.
+#[test]
+fn function_fact_scope_relative_sees_a_scope_relative_return_head() {
+    let head_with = |canonical: &str| AuthoredReferenceHeadFact::Bare {
+        local_name: std::sync::Arc::from("Ref"),
+        args: std::sync::Arc::from(
+            vec![AuthoredReferenceArgLocator::Value(TypeArgLocator {
+                anchor: AuthoredAnchor {
+                    canonical_id: std::sync::Arc::from(canonical),
+                    owner: crate::TopLevelOwnerId::ordinary_file(),
+                    symbol: std::sync::Arc::from("getRef"),
+                    space: LocatorSymbolSpace::Value,
+                },
+                path: std::sync::Arc::from(
+                    vec![TypeBodyPathStep::FunctionReturn].into_boxed_slice(),
+                ),
+                arg_index: 0,
+            })]
+            .into_boxed_slice(),
+        ),
+    };
+    let source_for = |head: AuthoredReferenceHeadFact| {
+        SemanticTypeSource::Closed(ClosedTypeFact::Function(FunctionSignatureFact {
+            return_reference_head: head,
+            ..empty_fn()
+        }))
+    };
+    assert!(
+        source_for(head_with("")).is_scope_relative(),
+        "a producer-local return-head argument anchor makes the source scope-relative"
+    );
+    assert!(
+        !source_for(head_with("/ws/owner.ts")).is_scope_relative(),
+        "a fully-anchored return head must NOT be reported scope-relative"
+    );
+    // The anchor-free arms carry no scope dependence of their own.
+    assert!(!source_for(AuthoredReferenceHeadFact::NotReference).is_scope_relative());
+    assert!(!source_for(AuthoredReferenceHeadFact::Unavailable).is_scope_relative());
+    // Control: `empty_fn()` has no scope-relative position at all, so the
+    // predicate is not simply always-true for a function fact.
+    assert!(!source_for(AuthoredReferenceHeadFact::NotReference).is_scope_relative());
 }
 
 #[test]

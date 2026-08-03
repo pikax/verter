@@ -11,9 +11,9 @@ use crate::analysis::types::{
 };
 use std::sync::Arc;
 use verter_type_expr::facts::{
-    ClosedTypeFact, EnumPrimitiveDomain, EnumScalar, FunctionSignatureFact,
-    InferenceUnavailableReason, LeafTypeFact, ObjectMemberFact, ObjectShapeFact,
-    ReturnInferenceCompleteness, ReturnInferenceUnsupported, SemanticTypeSource,
+    AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, ClosedTypeFact, EnumPrimitiveDomain,
+    EnumScalar, FunctionSignatureFact, InferenceUnavailableReason, LeafTypeFact, ObjectMemberFact,
+    ObjectShapeFact, ReturnInferenceCompleteness, ReturnInferenceUnsupported, SemanticTypeSource,
     ValueAnnotationClass,
 };
 use verter_type_expr::locators::{
@@ -1969,12 +1969,19 @@ fn overload_group_signature_locators_take_group_ordinals() {
     // GROUP position (0/1/2), maintained at registration time — a producer
     // that kept contributor-local ordinals would store `0` on every fact and
     // fail below.
+    //
+    // Every contributor carries an AUTHORED reference return (`Ref<A|B|C>`), so
+    // the group rebase must repoint THREE locator families: the parameter slot,
+    // the return slot, and the authored return HEAD's argument locators. The
+    // head's locator is a `TypeArgLocator`, not a `TypeBodySlot`, so a rebase
+    // typed only to the slot position leaves every head reporting ordinal 0.
     let env = parse_and_build_env(
-        "function f(a: string): void;\nfunction f(a: number): void;\nfunction f(a: unknown) {}",
+        "function f(a: string): Ref<A>;\nfunction f(a: number): Ref<B>;\nfunction f(a: unknown): Ref<C> {}",
     );
     let merged = env.value_symbols["f"].merged_signatures();
     assert_eq!(merged.len(), 3);
     for (expected_ordinal, fact) in merged.iter().enumerate() {
+        let ordinal = expected_ordinal as u32;
         let param_ty = fact.parameters[0]
             .ty
             .as_ref()
@@ -1982,19 +1989,112 @@ fn overload_group_signature_locators_take_group_ordinals() {
         assert_eq!(
             &*param_ty.path,
             &[
-                TypeBodyPathStep::ValueSignature {
-                    ordinal: expected_ordinal as u32
-                },
+                TypeBodyPathStep::ValueSignature { ordinal },
                 TypeBodyPathStep::FunctionParam { ordinal: 0 },
             ],
             "signature {expected_ordinal} must carry its group ordinal"
         );
+        let return_ty = fact
+            .return_ty
+            .as_ref()
+            .expect("authored return annotation mints a slot");
+        assert_eq!(
+            &*return_ty.path,
+            &[
+                TypeBodyPathStep::ValueSignature { ordinal },
+                TypeBodyPathStep::FunctionReturn,
+            ],
+            "signature {expected_ordinal} return slot must carry its group ordinal"
+        );
+        let AuthoredReferenceHeadFact::Bare { local_name, args } = &fact.return_reference_head
+        else {
+            panic!(
+                "an authored `Ref<…>` return must mint a bare head, got {:?}",
+                fact.return_reference_head
+            );
+        };
+        assert_eq!(local_name.as_ref(), "Ref");
+        assert_eq!(args.len(), 1, "one authored type argument");
+        let AuthoredReferenceArgLocator::Value(arg) = &args[0] else {
+            panic!("a value-space signature return head carries a value arg locator");
+        };
+        assert_eq!(
+            &*arg.path,
+            &[
+                TypeBodyPathStep::ValueSignature { ordinal },
+                TypeBodyPathStep::FunctionReturn,
+            ],
+            "signature {expected_ordinal} return HEAD argument locator must be rebased \
+             to its group ordinal — an unrebased head addresses the wrong overload"
+        );
+        assert_eq!(arg.arg_index, 0);
+        assert_eq!(arg.anchor.symbol.as_ref(), "f");
+        assert_eq!(arg.anchor.space, LocatorSymbolSpace::Value);
     }
     // The trailing implementation carries the visibility flag; the bodiless
     // overloads do not.
     assert!(!merged[0].has_implementation_body);
     assert!(!merged[1].has_implementation_body);
     assert!(merged[2].has_implementation_body);
+}
+
+#[test]
+fn inferred_return_mints_unavailable_not_a_fabricated_head() {
+    // The mint GATE. `return_ty` mints a replay locator whenever the lowering
+    // produced a return carrier — INCLUDING an inferred return — so a head
+    // minted from that carrier without consulting `has_authored_return` would
+    // publish authored route evidence for a return the author never wrote.
+    //
+    // `return maybe as Ref<number>` infers the asserted type, so the inferred
+    // carrier is literally `Ref<number>`: the ungated mint produces
+    // `Bare { local_name: "Ref" }` and this test REDs.
+    let inferred = parse_and_build_env("function getRef() { return maybe as Ref<number>; }");
+    let inferred_fact = &inferred.value_symbols["getRef"].merged_signatures()[0];
+    assert!(
+        inferred_fact.return_ty.is_some(),
+        "the inferred return still mints its replay locator — the trap this gate closes"
+    );
+    assert_eq!(
+        inferred_fact.return_reference_head,
+        AuthoredReferenceHeadFact::Unavailable,
+        "an INFERRED return must publish `Unavailable`, never a fabricated authored head"
+    );
+
+    // Authored control: the same shape WITH the annotation mints the head.
+    let authored =
+        parse_and_build_env("function getRef(): Ref<number> { return maybe as Ref<number>; }");
+    let authored_fact = &authored.value_symbols["getRef"].merged_signatures()[0];
+    let AuthoredReferenceHeadFact::Bare { local_name, args } = &authored_fact.return_reference_head
+    else {
+        panic!(
+            "an authored `Ref<number>` return must mint a bare head, got {:?}",
+            authored_fact.return_reference_head
+        );
+    };
+    assert_eq!(local_name.as_ref(), "Ref");
+    assert_eq!(args.len(), 1);
+
+    // An authored NON-reference return is `NotReference` — distinguishable from
+    // both the inferred (`Unavailable`) and the reference (`Bare`) states.
+    let primitive = parse_and_build_env("function plain(): string { return ''; }");
+    assert_eq!(
+        primitive.value_symbols["plain"].merged_signatures()[0].return_reference_head,
+        AuthoredReferenceHeadFact::NotReference,
+        "an authored non-reference return is a complete non-reference fact"
+    );
+
+    // An OBJECT-MEMBER method's return head is `Unavailable` by the same gate
+    // (`member_signature_fact` passes `has_authored_return: false`) — the
+    // structural T-A6/T-A7 boundary, not a special case.
+    let member = parse_and_build_env(
+        "class Service { static getRef(): Ref<number> { return maybe as Ref<number>; } }",
+    );
+    let member_fact = static_class_method_fact(&member, "Service", "getRef");
+    assert_eq!(
+        member_fact.return_reference_head,
+        AuthoredReferenceHeadFact::Unavailable,
+        "an object-member method return position mints NO authored head in this unit"
+    );
 }
 
 #[test]

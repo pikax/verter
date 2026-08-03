@@ -883,13 +883,58 @@ Guards: `no_verter_semantic_to_verter_session_dep`, `synthetic_binding_identity_
 
 ### Macro Hot Mirror (Stage 5A, LANDED)
 
-**T-A5 authored-route sidecar widening.** The historical `HotTypeRef` cell
+**Authored-route sidecar widening.** The historical `HotTypeRef` cell
 shorthand below now means the `hot` field of one `MacroHotProduct`. Each lazy,
 singleflight cell commits that handle together with graph-free per-prop
 `AuthoredReferenceHeadFact` values projected from the same transient typed-IR
 borrow. Requested prop classification can therefore retain an exact authored
 route without a payload/body reread; the sidecar never changes semantic-node
 or query identity. `macro_type_arg_hot_ref` remains the sole producer entry.
+
+**Authored-reference-head positions (the closed producer inventory).** Three
+positions mint the graph-free `AuthoredReferenceHeadFact`, all from a transient
+typed-IR borrow the producer already holds, all zero extra parse / lowering /
+resolution:
+
+| Position | Fact field | Minter |
+| --- | --- | --- |
+| Value annotation | `ValueTypeAnnotationFact.reference_head` | `fact_projection::value_type_annotation_fact` |
+| Macro prop payload | `MacroHotProduct.prop_reference_heads` | `fact_projection::macro_payload_reference_head_fact` |
+| Value-space signature RETURN | `FunctionSignatureFact.return_reference_head` | `fact_projection::signature_return_reference_head_fact`, called from `type_eval_build::signature_fact` |
+
+The return position carries an **authorship mint gate**: the head mints only
+when `LoweredSignatureParts.has_authored_return` is true. `return_ty` mints its
+content-free replay locator whenever the lowering produced a return carrier —
+*including an inferred return* — so an ungated mint would publish authored route
+evidence for a return the author never wrote (an inferred
+`return x as Ref<number>` lowers to literally `Ref<number>`). Every
+non-authored return position publishes `AuthoredReferenceHeadFact::Unavailable`:
+inferred returns, synthesized constructors, and every OBJECT-MEMBER signature
+(`member_signature_fact` passes `has_authored_return: false`). That gate is what
+makes the member-position boundary structural rather than disciplinary — no
+member position can mint or read a head. An authored annotation that is not a
+type reference publishes `NotReference`, which the demand side treats as a
+COMPLETE non-wrapper proof.
+
+Signature locators rebase with their overload group. `EvalEnv::add_value` →
+`rebase_value_signature_ordinals` (`type_eval.rs`) re-points the leading
+`ValueSignature { ordinal }` step of THREE locator families when a declaration
+joins a merged overload group: the parameter slots, the return slot, and the
+return head's `TypeArgLocator` argument paths. The head's locator is a
+`TypeArgLocator`, not a `TypeBodySlot`, so the repointer is generalized over the
+`path` position; a rebase typed to the slot alone leaves every contributor's
+head addressing overload ordinal 0 — the wrong overload
+(`overload_group_signature_locators_take_group_ordinals`).
+
+The head participates in the deep producer-local anchor walks:
+`TypeArgLocator::absolutize` (`locators.rs`) plus
+`AuthoredReferenceArgLocator::absolutize` /
+`AuthoredReferenceHeadFact::absolutize` and
+`authored_reference_head_scope_relative` (`facts.rs`), both written generically
+over the head fact so every head-bearing position shares one walk. Only the
+ARGUMENT anchors decide scope-relativity; the authored local spelling is route
+evidence the demand resolves against the route's recorded owner, and is never
+rewritten.
 
 The **macro hot mirror** (`crate::structural_carrier_producer::macro_arg_producer`, the single private producer module) is the SOLE production producer of a macro type-argument's structural carrier graph. `MacroHotMirror` lives on `IndexedReady`, keyed `(owner, whole_hash, macro_index)` → `MacroHotProduct` (lazy / singleflight / content-addressed `OnceLock<Option<Arc<MacroHotProduct>>>` per macro index); its `hot` field is the historical graph handle. `macro_type_arg_hot_ref(ctx, file, macro_index)` is the sole production entry. The mirror is PURE: it performs NO host route lookup and emits NO dependency facts — it only produces the UNRESOLVED structural carrier graph (the `BareRef` / `ImportType` / operator-shell carriers, resolved on demand at the consuming dispatch) via the mode-neutral `lower_type_expr_structural`, plus the graph-free authored-head sidecar described above. Script-setup `generic="T"` binders are SEEDED at build (lower to the `SemanticNodeData::TypeParam` binder, not `BareRef(T)`); macro-own-body provenance (`declared_in_macro_type_arg`) is baked at production time. Direct dispatch lowering of an authored SFC macro shell must likewise use `lower_type_expr_in_owner_scope_with_mode` with the macro's recorded owner. The owner-agnostic convenience entry denotes the ordinary/module owner; it cannot infer that a synthetic test expression came from `<script setup>`, and callers must not compensate with file-wide or get-any owner matching.
 
@@ -923,3 +968,51 @@ positional arguments. Any open or partial arm produces no class members.
 The neutral artifact is revision-stamped and dependency-signed. Consumers use
 the opaque session `TemplateClassDomainIndex`; do not reintroduce raw
 `(binding, classes)` projections or type-annotation parsing.
+
+## Reactive-wrapper demand (shared vocabulary)
+
+`project_semantic_dispatch/reactive_wrapper.rs` is the ONE owner of the question
+"does this authored reference head resolve to a reactive wrapper exported by the
+`vue` package?". It owns `WrapperCandidate`, the exact route gate
+`wrapper_candidate_for_route` (terminal import source is exactly `vue` **and**
+`ResolverContext::workspace_is_package_backed`), and the closed vocabulary
+`wrapper_role_for_vue_export` (`Ref` / `ShallowRef` / `ComputedRef` — with
+`WritableComputedRef` normalizing onto it — / `ModelRef` / `Reactive` /
+`ShallowReactive`). Template-class classification and the value-signature return
+position both consume those items; a second copy is a one-engine violation.
+
+`wrapper_role_for_value_signature_return(dispatch, canonical, owner, symbol,
+signature_ordinal)` is the return-position demand entry, reachable from the host
+as `VerterHost::value_signature_return_wrapper_role`. It composes only landed
+machinery: `prepared_value_decl` (a fact COPY — no locator deref, no resolution)
+→ `signatures[ordinal].return_reference_head` →
+`resolve_authored_reference_route` → `wrapper_candidate_for_route` →
+`raise_semantic_type_source_to_hot` over
+`SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(signature.return_ty))`
+→ `demand_terminal_symbol_instantiation` (`ProjectionMode::Navigate`). It is
+NOT `typeof_key_for`, which yields the function's own type rather than its
+return. Demand begins only for the requested subject; there is no owner-wide
+wrapper-candidate scan, and the entry publishes nothing of its own.
+
+Published states are exact: a proven package-backed `vue` terminal publishes its
+role plus a complete `ReactiveWrapperImportProvenance`; a resolved non-Vue
+terminal (or an authored `NotReference` return) publishes
+`ReactiveWrapperRole::None` — a COMPLETE non-wrapper proof; every partial
+(cycle, missing dependency, unsupported head, unavailable prepared declaration,
+tripped work/budget envelope, or a terminal the graph did not reach) publishes
+`Unresolved { reason }` with the exact typed reason and no provenance. `None` is
+never used for a partial, and `Unresolved { AnalysisUnavailable }` is never used
+as "not a wrapper".
+
+Two landed boundaries, both fail-closed and both asserted rather than implied:
+an OBJECT-MEMBER method typed `(): Ref<number>` never classifies (the
+`has_authored_return` gate publishes `Unavailable`), and a package wrapper
+authored as a TRANSPARENT ALIAS (`type Reactive<T> = Unwrapped<T>`) routes past
+its own name to the alias terminal, which is outside the closed vocabulary, so
+it publishes `None`.
+
+No production reader consumes the whole-return role yet. A snapshot consumer
+must resolve from a view-bound, request-scoped context per requested subject;
+the context-free snapshot accessors that carry today's composable
+`reactivity_kind` (decided by the VALUE-space body walk) satisfy neither, so
+that authority is owned separately and is not wired here.

@@ -14,7 +14,9 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use crate::analysis::fact_projection::value_type_annotation_fact;
+use crate::analysis::fact_projection::{
+    signature_return_reference_head_fact, value_type_annotation_fact,
+};
 use crate::analysis::top_level_owners::{TopLevelOwnerTable, TopLevelStatementOwner};
 use crate::analysis::type_eval::*;
 use oxc_ast::ast::{
@@ -27,9 +29,9 @@ use oxc_ast::ast::{
 };
 use oxc_span::GetSpan;
 use verter_type_expr::facts::{
-    ClosedTypeFact, EnumMemberEntry, EnumMemberFact, EnumMemberNamesFact, EnumPrimitiveDomain,
-    EnumScalar, FunctionParamFact, FunctionSignatureFact, IndexSignatureFact,
-    InferenceUnavailableReason, KeyTypeShape, LeafTypeFact, MemberHeaderFact,
+    AuthoredReferenceHeadFact, ClosedTypeFact, EnumMemberEntry, EnumMemberFact,
+    EnumMemberNamesFact, EnumPrimitiveDomain, EnumScalar, FunctionParamFact, FunctionSignatureFact,
+    IndexSignatureFact, InferenceUnavailableReason, KeyTypeShape, LeafTypeFact, MemberHeaderFact,
     MemberReturnInferenceFact, NarrowTypeParam, ObjectMemberFact, ObjectMethodFact,
     ObjectPropertyFact, ObjectShapeFact, ReturnInferenceCompleteness, ReturnInferenceUnsupported,
     SemanticTypeSource, TypeParamDeclFact,
@@ -970,6 +972,20 @@ fn signature_fact(
             .as_ref()
             .map(|_| anchored_slot(anchor, vec![first_step, TypeBodyPathStep::FunctionReturn])),
         return_inference: sig.return_inference,
+        // The AUTHORSHIP GATE. `return_ty` above mints a replay locator for an
+        // INFERRED return too, so minting the head from that same carrier
+        // without the gate would publish authored route evidence for a return
+        // the author never wrote (an inferred `return x as Ref<number>` lowers
+        // to literally `Ref<number>`). Every non-authored return position —
+        // inferred returns, object-shape member signatures
+        // ([`member_signature_fact`] passes `has_authored_return: false`),
+        // synthesized constructors — publishes the typed `Unavailable`.
+        return_reference_head: match (sig.has_authored_return, sig.return_type.as_ref()) {
+            (true, Some(annotation)) => {
+                signature_return_reference_head_fact(annotation, anchor, first_step)
+            }
+            _ => AuthoredReferenceHeadFact::Unavailable,
+        },
         has_implementation_body: sig.has_implementation_body,
         spans_origin,
     }

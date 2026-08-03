@@ -2090,7 +2090,6 @@ fn analyze_exported_functions(
                                     false,
                                     func.r#async,
                                     &func.params,
-                                    func.return_type.as_deref(),
                                     func.body.as_deref(),
                                     import_map,
                                 ));
@@ -2132,7 +2131,6 @@ fn analyze_exported_functions(
                         true,
                         func.r#async,
                         &func.params,
-                        func.return_type.as_deref(),
                         func.body.as_deref(),
                         import_map,
                     ));
@@ -2152,30 +2150,16 @@ fn analyze_exported_functions(
 }
 
 /// Analyze a single named function (either `function` declaration or expression).
-#[allow(clippy::too_many_arguments)]
 fn analyze_single_function(
     content: &str,
     name: &str,
     is_default: bool,
     is_async: bool,
     params: &FormalParameters<'_>,
-    return_type: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
     body: Option<&FunctionBody<'_>>,
     import_map: &ImportBindingMap,
 ) -> AnalyzedExportedFunction {
     let extracted_params = extract_function_params(content, params);
-    let return_type_annotation = return_type.map(|rt| {
-        content[rt.type_annotation.span().start as usize..rt.type_annotation.span().end as usize]
-            .to_string()
-    });
-
-    let return_reactivity = if let Some(annotation) = &return_type_annotation {
-        classify_return_type_annotation(annotation)
-    } else if let Some(body) = body {
-        classify_return_reactivity_from_body(body, import_map)
-    } else {
-        ReturnReactivity::Unknown
-    };
 
     let composable = if is_composable_name(name) {
         Some(build_composable_info(name, body, import_map))
@@ -2187,8 +2171,6 @@ fn analyze_single_function(
         name: name.to_string(),
         is_default,
         params: extracted_params,
-        return_type_annotation,
-        return_reactivity,
         is_async,
         composable,
     }
@@ -2203,26 +2185,10 @@ fn analyze_arrow_function(
     import_map: &ImportBindingMap,
 ) -> AnalyzedExportedFunction {
     let extracted_params = extract_function_params(content, &arrow.params);
-    let return_type_annotation = arrow.return_type.as_ref().map(|rt| {
-        content[rt.type_annotation.span().start as usize..rt.type_annotation.span().end as usize]
-            .to_string()
-    });
 
     // Arrow functions in OXC always have a FunctionBody.
     // Expression arrows have a single ExpressionStatement in the body.
     let body: &FunctionBody<'_> = &arrow.body;
-    let return_reactivity = if let Some(annotation) = &return_type_annotation {
-        classify_return_type_annotation(annotation)
-    } else if arrow.expression {
-        // Arrow with expression body: `() => ref(0)` — single expression statement
-        if let Some(Statement::ExpressionStatement(expr_stmt)) = body.statements.first() {
-            classify_single_return_expr(&expr_stmt.expression, import_map, &[])
-        } else {
-            ReturnReactivity::Unknown
-        }
-    } else {
-        classify_return_reactivity_from_body(body, import_map)
-    };
 
     let composable = if is_composable_name(name) {
         Some(build_composable_info(name, Some(body), import_map))
@@ -2234,8 +2200,6 @@ fn analyze_arrow_function(
         name: name.to_string(),
         is_default,
         params: extracted_params,
-        return_type_annotation,
-        return_reactivity,
         is_async: arrow.r#async,
         composable,
     }
@@ -2263,7 +2227,6 @@ fn extract_function_from_expr(
                 false,
                 func.r#async,
                 &func.params,
-                func.return_type.as_deref(),
                 func.body.as_deref(),
                 import_map,
             ))
@@ -2306,49 +2269,6 @@ fn extract_function_params(content: &str, params: &FormalParameters<'_>) -> Vec<
 /// Check if a name follows the composable convention (`useXxx`).
 fn is_composable_name(name: &str) -> bool {
     name.starts_with("use") && name.len() > 3 && name.as_bytes()[3].is_ascii_uppercase()
-}
-
-/// Classify return reactivity from a TS return type annotation string.
-/// Checks for well-known Vue type wrappers.
-fn classify_return_type_annotation(annotation: &str) -> ReturnReactivity {
-    let trimmed = annotation.trim();
-    if trimmed.starts_with("Ref<")
-        || trimmed.starts_with("ShallowRef<")
-        || trimmed.starts_with("ComputedRef<")
-    {
-        ReturnReactivity::Ref
-    } else if trimmed.starts_with("Reactive<") || trimmed.starts_with("ShallowReactive<") {
-        ReturnReactivity::Reactive
-    } else if trimmed == "void" || trimmed == "undefined" || trimmed == "never" {
-        ReturnReactivity::Plain
-    } else {
-        // Cannot determine from annotation alone — could be object, union, etc.
-        ReturnReactivity::Unknown
-    }
-}
-
-/// Classify return reactivity by walking return statements in a function body (heuristic).
-fn classify_return_reactivity_from_body(
-    body: &FunctionBody<'_>,
-    import_map: &ImportBindingMap,
-) -> ReturnReactivity {
-    let mut return_kinds = Vec::new();
-    collect_return_expressions(body, import_map, &[], &mut return_kinds);
-
-    if return_kinds.is_empty() {
-        return ReturnReactivity::Plain;
-    }
-    if return_kinds.len() == 1 {
-        return return_kinds.into_iter().next().unwrap();
-    }
-
-    // Multiple return paths: check if they're all the same
-    let first = &return_kinds[0];
-    if return_kinds.iter().all(|k| k == first) {
-        return_kinds.into_iter().next().unwrap()
-    } else {
-        ReturnReactivity::Unknown
-    }
 }
 
 /// Collect return reactivity from all return statements in a function body.

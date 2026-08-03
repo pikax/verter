@@ -1362,10 +1362,15 @@ export function useCounter() {
     assert_eq!(result.exported_functions.len(), 1);
     let f = &result.exported_functions[0];
     assert_eq!(f.name, "useCounter");
-    assert_eq!(f.return_reactivity, ReturnReactivity::Ref);
     assert!(f.composable.is_some());
     let comp = f.composable.as_ref().unwrap();
     assert_eq!(comp.name, "useCounter");
+    // The LIVE fact: the value-space body walk classifies `return ref(0)`
+    // through the file's Vue import bindings.
+    assert_eq!(
+        comp.return_shape,
+        ComposableReturn::Single(ReactivityKind::Ref)
+    );
 }
 
 #[test]
@@ -1379,8 +1384,12 @@ export function useState() {
     let result = analyze_with_scope(code, AnalysisScope::all());
     assert_eq!(result.exported_functions.len(), 1);
     assert_eq!(
-        result.exported_functions[0].return_reactivity,
-        ReturnReactivity::Reactive
+        result.exported_functions[0]
+            .composable
+            .as_ref()
+            .expect("useState is a composable")
+            .return_shape,
+        ComposableReturn::Single(ReactivityKind::Reactive)
     );
 }
 
@@ -1395,10 +1404,11 @@ export function useCounter() {
 "#;
     let result = analyze_with_scope(code, AnalysisScope::all());
     let f = &result.exported_functions[0];
-    // Identifier returns can't be resolved by the heuristic body walk
-    assert_eq!(f.return_reactivity, ReturnReactivity::Unknown);
-    // But composable info still detects internal reactive state
     let comp = f.composable.as_ref().unwrap();
+    // A bare identifier return is not classifiable by the value-space body
+    // walk: the returned expression is a local binding, not a Vue API call.
+    assert_eq!(comp.return_shape, ComposableReturn::Unknown);
+    // But composable info still detects internal reactive state
     assert!(!comp.internal_reactive_state.is_empty());
 }
 
@@ -1415,17 +1425,8 @@ export function useCounter() {
     let result = analyze_with_scope(code, AnalysisScope::all());
     assert_eq!(result.exported_functions.len(), 1);
     let f = &result.exported_functions[0];
-    // The top-level `return_reactivity` doesn't resolve local identifiers
-    // (it uses a general heuristic without function-local binding context).
-    // The composable `return_shape` DOES resolve identifiers via `internal_reactive_state`.
-    assert!(
-        matches!(
-            f.return_reactivity,
-            ReturnReactivity::Plain | ReturnReactivity::ObjectWithReactiveFields(_)
-        ),
-        "return_reactivity: {:?}",
-        f.return_reactivity,
-    );
+    // The composable `return_shape` resolves the returned object's identifiers
+    // via `internal_reactive_state`.
     // Verify composable return shape has per-field reactivity
     let composable = f.composable.as_ref().expect("should be a composable");
     if let ComposableReturn::Object(fields) = &composable.return_shape {
@@ -1453,21 +1454,6 @@ export function useCounter() {
             composable.return_shape
         );
     }
-}
-
-#[test]
-fn simple_function_returning_literal_is_plain() {
-    let code = r#"
-export function getVersion() {
-    return 42;
-}
-"#;
-    let result = analyze_with_scope(code, AnalysisScope::all());
-    assert_eq!(result.exported_functions.len(), 1);
-    assert_eq!(
-        result.exported_functions[0].return_reactivity,
-        ReturnReactivity::Plain
-    );
 }
 
 #[test]
@@ -1535,7 +1521,14 @@ export default function useTheme() {
     let f = &result.exported_functions[0];
     assert_eq!(f.name, "useTheme");
     assert!(f.is_default);
-    assert_eq!(f.return_reactivity, ReturnReactivity::Plain);
+    assert_eq!(
+        f.composable
+            .as_ref()
+            .expect("useTheme is a composable")
+            .return_shape,
+        ComposableReturn::Single(ReactivityKind::None),
+        "a non-reactive literal return is a classified non-reactive single value"
+    );
 }
 
 #[test]
@@ -1550,21 +1543,18 @@ export const useCount = () => {
     assert_eq!(result.exported_functions.len(), 1);
     let f = &result.exported_functions[0];
     assert_eq!(f.name, "useCount");
-    assert_eq!(f.return_reactivity, ReturnReactivity::Ref);
-}
-
-#[test]
-fn function_with_return_type_annotation() {
-    let code = r#"
-export function getRef(): Ref<number> {
-    return ref(0);
-}
-"#;
-    let result = analyze_with_scope(code, AnalysisScope::all());
-    assert_eq!(result.exported_functions.len(), 1);
-    let f = &result.exported_functions[0];
-    assert_eq!(f.return_type_annotation.as_deref(), Some("Ref<number>"));
-    assert_eq!(f.return_reactivity, ReturnReactivity::Ref);
+    assert!(!f.is_default);
+    assert!(!f.is_async);
+    // Characterization of a pre-existing gap, not a T-A6 change: the composable
+    // inventory is decided from the name known when the ARROW is analyzed, and a
+    // `const` arrow is anonymous at that point — the binding name is attached
+    // afterwards by functional update. So a const-arrow export carries no
+    // composable info even when its name follows the convention. If that gap is
+    // ever closed, this assertion flips and is re-pointed at `return_shape`.
+    assert!(
+        f.composable.is_none(),
+        "a const-arrow export is anonymous at arrow-analysis time"
+    );
 }
 
 #[test]

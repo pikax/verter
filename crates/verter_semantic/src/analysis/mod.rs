@@ -141,7 +141,7 @@ pub use types::{
     DomQueryKind, ExportSignature, FunctionParam, Hash16, ImportSourceInfo, LiteralKind,
     LocalDeclarationEntry, LocalDeclarationKind, MacroTypeDep, MacroTypeDepUsage,
     ModuleReferenceAnalyzability, ModuleReferenceSemantics, ModuleReferenceSyntax, NestedMacroCall,
-    ReactivityKind, ResolvedLocalType, ResolvedTypeInfo, ReturnReactivity, ScriptAnalysisSnapshot,
+    ReactivityKind, ResolvedLocalType, ResolvedTypeInfo, ScriptAnalysisSnapshot,
     ScriptTypeEnhancements, StableDeclarationId, StoreApiClassification, StoreDefinition,
     StoreUsage, TypeResolutionSource, VueApiClassification,
 };

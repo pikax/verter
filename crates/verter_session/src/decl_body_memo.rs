@@ -2792,6 +2792,9 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
             parameters: Arc::from(Vec::new().into_boxed_slice()),
             return_ty: None,
             return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
+            // A synthesised default-export constructor has no authored return
+            // annotation at all.
+            return_reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable,
             has_implementation_body: true,
             spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
         }],

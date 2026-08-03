@@ -22,7 +22,7 @@ use verter_type_expr::facts::{
     ValueTypeAnnotationFact,
 };
 use verter_type_expr::locators::{
-    AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, TypeArgLocator,
+    AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, TypeArgLocator, TypeBodyPathStep,
 };
 use verter_type_expr::{TopLevelOwnerId, TypeExpr};
 
@@ -140,6 +140,33 @@ pub(crate) fn value_type_annotation_fact(
             }))
         }),
     }
+}
+
+/// Mint the closed authored reference head of a VALUE-SPACE function
+/// signature's AUTHORED return annotation, while the signature producer already
+/// holds the transient lowered return `TypeExpr`.
+///
+/// `anchor` is the owning value declaration's authored anchor and `first_step`
+/// roots the argument locators at the signature's authored position — the same
+/// `(anchor, first_step)` pair the signature's parameter / return body locators
+/// use — so the head's arguments address
+/// `[first_step, FunctionReturn]` at `arg_index`.
+///
+/// The CALLER owns the authorship gate: this entry must be reached only for a
+/// signature whose return annotation was actually authored. Reading the
+/// transient `TypeExpr` here is producer-legal; the produced fact carries none.
+pub(crate) fn signature_return_reference_head_fact(
+    annotation: &TypeExpr,
+    anchor: &AuthoredAnchor,
+    first_step: TypeBodyPathStep,
+) -> AuthoredReferenceHeadFact {
+    authored_reference_head_fact_with(annotation, |arg_index| {
+        Some(AuthoredReferenceArgLocator::Value(TypeArgLocator {
+            anchor: anchor.clone(),
+            path: Arc::from([first_step, TypeBodyPathStep::FunctionReturn]),
+            arg_index: u32::try_from(arg_index).ok()?,
+        }))
+    })
 }
 
 /// Mint the closed authored reference head for a macro field while the macro

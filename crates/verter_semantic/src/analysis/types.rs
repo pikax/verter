@@ -1784,12 +1784,6 @@ pub struct AnalyzedExportedFunction {
     pub is_default: bool,
     /// Parameters (name + optional type annotation string).
     pub params: Vec<FunctionParam>,
-    /// TypeScript return type annotation extracted directly from the AST.
-    /// e.g., `"Ref<number>"`, `"{ count: Ref<number>, increment: () => void }"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub return_type_annotation: Option<String>,
-    /// Inferred return reactivity from body analysis (heuristic).
-    pub return_reactivity: ReturnReactivity,
     /// Whether this is async.
     pub is_async: bool,
     /// Composable info (None if not a composable).
@@ -1862,14 +1856,23 @@ pub struct FunctionParam {
     pub span: Span,
 }
 
-/// What a function returns in terms of reactivity.
+/// The VALUE-SPACE per-return-expression reactivity vocabulary.
 ///
-/// Determined via two levels:
-/// 1. **AST-level** (immediate, from OXC): explicit TS return type annotations
-/// 2. **Body-level** (heuristic): walk return statements to detect patterns
+/// Produced by the body walk (`collect_return_expressions` →
+/// `classify_single_return_expr`), which classifies returned VALUE expressions
+/// (`return ref(0)`, `return { count, doubled }`) through the file's import
+/// bindings. Its only consumer is `detect_composable_return_shape`, which folds
+/// it into [`ComposableReturn`].
+///
+/// This is deliberately NOT a type-space vocabulary: the reactive-wrapper
+/// identity of a function's declared RETURN TYPE is a resolution decision
+/// answered at demand time from the lowered typed IR plus a package-backed
+/// route proof (`verter_type_expr::ReactiveWrapperRole`), never from annotation
+/// text. That is why this enum is crate-private — a text-classified role is
+/// unrepresentable on the public analyzer surface.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ReturnReactivity {
+pub(crate) enum ReturnReactivity {
     /// Returns a ref-like value (detected via return type annotation or `return ref(...)`).
     Ref,
     /// Returns a reactive object (detected via `return reactive(...)`).

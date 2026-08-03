@@ -444,6 +444,9 @@ pub(crate) fn slot_field_function_source(
         // payload-less slot — the typed miss, recovered on demand.
         return_ty: None,
         return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
+        // A synthesized signature has no authored return annotation, so it
+        // carries no authored reference head.
+        return_reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable,
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
     }))

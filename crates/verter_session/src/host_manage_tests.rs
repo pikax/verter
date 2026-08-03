@@ -230,6 +230,15 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         self.inner.content_generation()
     }
 
+    /// The counting decorator is TRANSPARENT over its inner workspace: package
+    /// classification must delegate like every other method, or a
+    /// `CountingWorkspace`-backed host silently classifies nothing as
+    /// package-backed and every exact package-route proof fails closed for a
+    /// harness reason rather than a semantic one.
+    fn is_package_backed(&self, canonical_id: &str) -> bool {
+        self.inner.is_package_backed(canonical_id)
+    }
+
     fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.inner.reverse_deps_for(canonical_id)
     }
@@ -7040,6 +7049,826 @@ const variant: A = null as never
             ..
         }
     ));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Value-signature return wrapper role (T-A6)
+//
+// The demand boundary for the authored return-reference head. Every case below
+// goes through the SAME shared route/demand machinery the template-class facts
+// use — there is no return-specific classifier, and no `&str` is an input to any
+// role decision.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The vue package surface every return-wrapper fixture routes to.
+///
+/// Every wrapper is declared as a NON-FORWARDING declaration. That is a
+/// deliberate fixture property, not a convenience: the shared authored-route
+/// walk resolves THROUGH a transparent alias to its terminal, so a package
+/// wrapper authored as `type Reactive<T> = Other<T>` routes past its own name
+/// and lands on `Other` — outside the closed vocabulary. That boundary is a
+/// property of the shared route walk (identical for the template-class path) and
+/// is asserted explicitly by
+/// `return_wrapper_role_fails_closed_for_a_transparent_alias_wrapper` below
+/// rather than hidden by the fixture.
+const RETURN_WRAPPER_VUE_DTS: &str = r#"
+export interface Ref<T> { value: T }
+export interface ShallowRef<T> { value: T }
+export interface ComputedRef<T> { readonly value: T }
+export interface WritableComputedRef<T> { value: T }
+export interface ModelRef<T> { value: T }
+export interface Reactive<T> { __reactive: T }
+export interface ShallowReactive<T> { __shallowReactive: T }
+"#;
+
+fn return_wrapper_role_for(
+    host: &VerterHost,
+    canonical: &str,
+    symbol: &str,
+) -> (
+    verter_type_expr::ReactiveWrapperRole,
+    Option<verter_type_expr::ReactiveWrapperImportProvenance>,
+) {
+    host.value_signature_return_wrapper_role(
+        canonical,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        symbol,
+        0,
+    )
+}
+
+/// A6-01 — every direct wrapper role in the closed Vue vocabulary is decided
+/// STRUCTURALLY, from the lowered authored return head plus a composed
+/// package-backed route proof. Restoring a type-text prefix classifier collapses
+/// `ComputedRef`/`ShallowRef`/`ModelRef` onto `Ref`, cannot produce
+/// `WritableComputedRef → ComputedRef`, and publishes no provenance at all.
+#[test]
+fn return_wrapper_roles_cover_the_exact_vue_vocabulary_structurally() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    let cases = [
+        ("Ref", verter_type_expr::ReactiveWrapperRole::Ref),
+        (
+            "ShallowRef",
+            verter_type_expr::ReactiveWrapperRole::ShallowRef,
+        ),
+        (
+            "ComputedRef",
+            verter_type_expr::ReactiveWrapperRole::ComputedRef,
+        ),
+        // The vocabulary NORMALIZATION: a distinct authored export folds onto
+        // the same role.
+        (
+            "WritableComputedRef",
+            verter_type_expr::ReactiveWrapperRole::ComputedRef,
+        ),
+        ("ModelRef", verter_type_expr::ReactiveWrapperRole::ModelRef),
+        ("Reactive", verter_type_expr::ReactiveWrapperRole::Reactive),
+        (
+            "ShallowReactive",
+            verter_type_expr::ReactiveWrapperRole::ShallowReactive,
+        ),
+    ];
+    for (index, (wrapper, expected_role)) in cases.into_iter().enumerate() {
+        let canonical = format!("/workspace/src/direct{index}.ts");
+        upsert_ts(
+            &host,
+            &canonical,
+            &format!(
+                "import type {{ {wrapper} }} from 'vue'\n\
+                 export function getValue(): {wrapper}<number> {{ return null as never; }}\n"
+            ),
+        );
+        host.set_import_dependencies(
+            &canonical,
+            vec![exact_dependency(
+                "vue",
+                "/workspace/node_modules/vue/index.d.ts",
+            )],
+        );
+        let (role, provenance) = return_wrapper_role_for(&host, &canonical, "getValue");
+        assert_eq!(role, expected_role, "{wrapper} must classify structurally");
+        let provenance = provenance
+            .unwrap_or_else(|| panic!("{wrapper} must publish a complete route provenance"));
+        assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+        assert_eq!(provenance.package.as_ref(), "vue");
+        assert_eq!(provenance.import_source.as_ref(), "vue");
+        assert_eq!(provenance.local_binding.as_ref(), wrapper);
+        assert_eq!(provenance.imported_name.as_ref(), wrapper);
+        assert_eq!(provenance.owner_canonical.as_ref(), canonical);
+        // The published head is the AUTHORED spelling, never the terminal name.
+        assert!(
+            matches!(
+                &provenance.authored_head,
+                verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, .. }
+                    if local_name.as_ref() == wrapper
+            ),
+            "{wrapper} provenance must carry the authored head, got {:?}",
+            provenance.authored_head
+        );
+        // Negative: the role is never the fail-closed default, and never `None`.
+        assert!(!matches!(
+            role,
+            verter_type_expr::ReactiveWrapperRole::Unresolved { .. }
+                | verter_type_expr::ReactiveWrapperRole::None
+        ));
+    }
+}
+
+/// The FAIL-CLOSED boundary of the vocabulary gate: a package wrapper authored
+/// as a TRANSPARENT ALIAS is not recognized by its own name.
+///
+/// The shared authored-route walk follows a forwarding declaration to its
+/// terminal, so `type Reactive<T> = Unwrapped<T>` in the package routes past
+/// `Reactive` and terminates at `Unwrapped`, which is outside the closed
+/// vocabulary. This is landed shared-route-walk semantics — the template-class
+/// path behaves identically — and it fails CLOSED: no role is guessed from the
+/// authored spelling `Reactive`, and no provenance is published. This test
+/// exists so the boundary is visible instead of being hidden by the fixture
+/// shape; a future change to where the route walk stops inverts it.
+#[test]
+fn return_wrapper_role_fails_closed_for_a_transparent_alias_wrapper() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Unwrapped<T> { __u: T }\nexport type Reactive<T> = Unwrapped<T>\n",
+    );
+    let canonical = "/workspace/src/transparent.ts";
+    upsert_ts(
+        &host,
+        canonical,
+        "import type { Reactive } from 'vue'\n\
+         export function getValue(): Reactive<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, canonical, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::None,
+        "the route terminates outside the closed vocabulary, so the wrapper is \
+         proven absent rather than claimed from the authored name"
+    );
+    assert!(provenance.is_none());
+}
+
+/// A6-02 — renamed imports, one- and multi-hop local aliases, a direct
+/// re-export and an import-then-export barrel all resolve to the SAME role as
+/// the direct form, through the shared demand. The ordered alias hops and the
+/// final `vue` edge are retained; dropping a hop or canonicalizing the edge
+/// before proof composition REDs.
+#[test]
+fn return_wrapper_routes_follow_renamed_imports_local_aliases_and_barrels() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+
+    // Renamed import + two local alias hops in the OWNER file.
+    let aliased = "/workspace/src/aliased.ts";
+    upsert_ts(
+        &host,
+        aliased,
+        "import type { Ref as R } from 'vue'\n\
+         type W<T> = R<T>\n\
+         type Outer<T> = W<T>\n\
+         export function getValue(): Outer<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        aliased,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, aliased, "getValue");
+    assert_eq!(role, verter_type_expr::ReactiveWrapperRole::Ref);
+    let provenance = provenance.expect("route proof");
+    assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+    assert_eq!(
+        provenance.local_binding.as_ref(),
+        "R",
+        "the exact renamed local import binding must be retained"
+    );
+    assert_eq!(provenance.imported_name.as_ref(), "Ref");
+    assert_eq!(
+        provenance
+            .local_alias_hops
+            .iter()
+            .map(|hop| hop.as_ref())
+            .collect::<Vec<_>>(),
+        ["Outer", "W"],
+        "the ORDERED local alias hops must be retained"
+    );
+
+    // Direct re-export.
+    upsert_ts(
+        &host,
+        "/workspace/src/reexport.ts",
+        "export type { Ref as ReRef } from 'vue'\n",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/reexport.ts",
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let via_reexport = "/workspace/src/via-reexport.ts";
+    upsert_ts(
+        &host,
+        via_reexport,
+        "import type { ReRef } from './reexport'\n\
+         export function getValue(): ReRef<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        via_reexport,
+        vec![exact_dependency("./reexport", "/workspace/src/reexport.ts")],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, via_reexport, "getValue");
+    assert_eq!(role, verter_type_expr::ReactiveWrapperRole::Ref);
+    let provenance = provenance.expect("re-export route proof");
+    assert_eq!(provenance.import_source.as_ref(), "./reexport");
+    assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+
+    // Import-then-export barrel plus a barrel-local generic alias.
+    upsert_ts(
+        &host,
+        "/workspace/src/barrel-a.ts",
+        "import type { Ref } from 'vue'; export type { Ref as ImportedRef };",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/barrel-a.ts",
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    upsert_ts(
+        &host,
+        "/workspace/src/barrel-b.ts",
+        "import type { ImportedRef } from './barrel-a'; export type LocalRef<T> = ImportedRef<T>;",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/barrel-b.ts",
+        vec![exact_dependency("./barrel-a", "/workspace/src/barrel-a.ts")],
+    );
+    let via_barrel = "/workspace/src/via-barrel.ts";
+    upsert_ts(
+        &host,
+        via_barrel,
+        "import type { LocalRef as Selected } from './barrel-b'\n\
+         export function getValue(): Selected<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        via_barrel,
+        vec![exact_dependency("./barrel-b", "/workspace/src/barrel-b.ts")],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, via_barrel, "getValue");
+    assert_eq!(role, verter_type_expr::ReactiveWrapperRole::Ref);
+    let provenance = provenance.expect("barrel route proof");
+    assert_eq!(provenance.local_binding.as_ref(), "Selected");
+    assert_eq!(provenance.import_source.as_ref(), "./barrel-b");
+    assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+    assert!(provenance
+        .local_alias_hops
+        .iter()
+        .any(|hop| hop.as_ref() == "LocalRef"));
+}
+
+/// A6-03 — a wrapper-SHAPED head that is not Vue's is never classified. A
+/// resolved non-Vue terminal is a COMPLETE non-wrapper proof (`None`); an
+/// unresolvable bare name fails closed (typed unresolved) rather than claiming
+/// either a wrapper or a completed non-wrapper. No case publishes provenance.
+#[test]
+fn return_wrapper_role_rejects_local_and_foreign_package_fakes() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/not-vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+
+    // A local declaration that merely SPELLS the wrapper name.
+    let local_fake = "/workspace/src/local-fake.ts";
+    upsert_ts(
+        &host,
+        local_fake,
+        "interface Ref<T> { value: T }\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, local_fake, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::None,
+        "a local same-name declaration is a COMPLETE non-wrapper proof"
+    );
+    assert!(provenance.is_none());
+
+    // A package-backed same-shape wrapper outside the exact Vue route.
+    let package_fake = "/workspace/src/package-fake.ts";
+    upsert_ts(
+        &host,
+        package_fake,
+        "import type { Ref } from 'not-vue'\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        package_fake,
+        vec![exact_dependency(
+            "not-vue",
+            "/workspace/node_modules/not-vue/index.d.ts",
+        )],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, package_fake, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::None,
+        "a non-`vue` package terminal must fail the exact route gate"
+    );
+    assert!(provenance.is_none());
+
+    // A WORKSPACE-OWNED file that resolves the specifier `vue`. The terminal
+    // import source is spelled exactly `vue` and the terminal export is named
+    // exactly `Ref`, so the specifier half of the route gate passes: only the
+    // package-backed half rejects it. Dropping that half classifies a userland
+    // `vue.ts` as Vue's reactive wrapper.
+    upsert_ts(
+        &host,
+        "/workspace/src/vue.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    let workspace_vue = "/workspace/src/workspace-vue.ts";
+    upsert_ts(
+        &host,
+        workspace_vue,
+        "import type { Ref } from 'vue'\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        workspace_vue,
+        vec![exact_dependency("vue", "/workspace/src/vue.ts")],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, workspace_vue, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::None,
+        "a workspace-owned `vue` terminal must fail the package-backed half of the route gate"
+    );
+    assert!(provenance.is_none());
+
+    // The pinned defect, inverted: the `build_tests.rs` fixture that imported
+    // NOTHING and was still reported as Vue's `Ref` on spelling alone. An
+    // unbound name is not resolvable, so it fails closed — never `Ref`, and
+    // never a fabricated provenance.
+    let unimported = "/workspace/src/unimported.ts";
+    upsert_ts(
+        &host,
+        unimported,
+        "export function getRef(): Ref<number> { return null as never; }\n",
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, unimported, "getRef");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Unsupported
+        },
+        "an unbound `Ref<number>` must fail closed, not classify as Vue's Ref"
+    );
+    assert!(provenance.is_none());
+
+    // Positive control in the SAME host: the exact Vue route still classifies,
+    // so the rejections above are not a blanket refusal.
+    let exact = "/workspace/src/exact.ts";
+    upsert_ts(
+        &host,
+        exact,
+        "import type { Ref } from 'vue'\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        exact,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, exact, "getValue");
+    assert_eq!(role, verter_type_expr::ReactiveWrapperRole::Ref);
+    assert!(provenance.is_some());
+}
+
+/// A6-04 — cycle, missing dependency, an unsupported head and a budget-clamped
+/// host each publish the EXACT typed reason with no provenance, and re-demanding
+/// never promotes a partial into an exact role (nothing warm was admitted).
+/// Collapsing the reasons onto one value REDs; promoting a partial REDs.
+#[test]
+fn return_wrapper_role_degrades_typed_and_is_never_warmed() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+
+    // Cycle: a mutually recursive local alias pair on the return head.
+    let cycle = "/workspace/src/cycle.ts";
+    upsert_ts(
+        &host,
+        cycle,
+        "type A<T> = B<T>\n\
+         type B<T> = A<T>\n\
+         export function getValue(): A<number> { return null as never; }\n",
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, cycle, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Cycle
+        }
+    );
+    assert!(provenance.is_none());
+    // Re-demand: still the same typed cycle, never a promoted exact role.
+    assert_eq!(
+        return_wrapper_role_for(&host, cycle, "getValue").0,
+        role,
+        "a partial must not be promoted warm into an exact role"
+    );
+    // (Non-warmth is proven by RECOVERY at the end of this test, after the
+    // reason-distinctness control has read the degraded roles.)
+
+    // Missing dependency: the import edge resolves to a canonical the host has
+    // no state for, so the routed terminal cannot be reached.
+    let missing = "/workspace/src/missing.ts";
+    upsert_ts(
+        &host,
+        missing,
+        "import type { Ref } from './gone'\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        missing,
+        vec![exact_dependency("./gone", "/workspace/src/gone.ts")],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, missing, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::MissingDependency
+        }
+    );
+    assert!(provenance.is_none());
+    assert_eq!(return_wrapper_role_for(&host, missing, "getValue").0, role);
+    // (Arrival recovery is asserted at the end of this test.)
+
+    // A wholly UNRESOLVABLE import specifier is a distinct typed state: the
+    // declaration cannot be prepared at all, so the demand has no fact to read.
+    // It must never collapse onto either of the two reasons above.
+    let unprepared = "/workspace/src/unprepared.ts";
+    upsert_ts(
+        &host,
+        unprepared,
+        "import type { Ref } from 'nowhere'\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    let (unprepared_role, provenance) = return_wrapper_role_for(&host, unprepared, "getValue");
+    assert_eq!(
+        unprepared_role,
+        verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::AnalysisUnavailable
+        }
+    );
+    assert!(provenance.is_none());
+
+    // Unsupported: an INFERRED return has no authored head at all, so the
+    // demand has nothing to resolve. This is the mint gate surfacing at the
+    // demand boundary — it must never become a complete non-wrapper proof.
+    let inferred = "/workspace/src/inferred.ts";
+    upsert_ts(
+        &host,
+        inferred,
+        "import type { Ref } from 'vue'\n\
+         export function getValue() { return null as unknown as Ref<number>; }\n",
+    );
+    host.set_import_dependencies(
+        inferred,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, inferred, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Unsupported
+        },
+        "an inferred return publishes no authored head, so the demand fails closed"
+    );
+    assert!(provenance.is_none());
+    assert_ne!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::None,
+        "an inferred return is NOT a complete non-wrapper proof"
+    );
+
+    // The connected-work / projection ENVELOPE arm is proven in the demand
+    // entry's own module, where the envelope limit is settable: see
+    // `project_semantic_dispatch::reactive_wrapper::tests::
+    // clamped_connected_work_envelope_degrades_the_return_role_typed`. This
+    // host entry installs no `RequestContext`, so `current_request_budget()` is
+    // `None` at the sole projection-op charge site and `BudgetExceeded` is
+    // structurally unreachable from this boundary at any route length — faking
+    // one here would assert a state the boundary cannot actually reach. A
+    // request-scoped consumer (T-A6b) must install a `RequestContext` for the
+    // projection fuse to be armed.
+
+    // Control: the degradations are DISTINCT typed values — an implementation
+    // that collapsed them onto one reason fails here.
+    let cycle_role = return_wrapper_role_for(&host, cycle, "getValue").0;
+    let missing_role = return_wrapper_role_for(&host, missing, "getValue").0;
+    let inferred_role = return_wrapper_role_for(&host, inferred, "getValue").0;
+    for (a, b) in [
+        (&cycle_role, &missing_role),
+        (&missing_role, &inferred_role),
+        (&cycle_role, &inferred_role),
+        (&cycle_role, &unprepared_role),
+        (&missing_role, &unprepared_role),
+        (&inferred_role, &unprepared_role),
+    ] {
+        assert_ne!(a, b, "each failure class keeps its own typed reason");
+    }
+
+    // A re-demand equality alone cannot distinguish a cold recompute from a
+    // WARMED partial (both answer the same reason), so prove non-warmth by
+    // RECOVERY at the public boundary: fix each degraded input and re-demand —
+    // a warmed partial would keep answering its `Unresolved` reason forever,
+    // while a recomputing demand resolves exactly. (A TLS cold-compute-scope
+    // probe is the wrong instrument here: the cycle stop is the route
+    // resolver's own visited-set, not a folding query, so no scope partiality
+    // manifests at this boundary.)
+    //
+    // Cycle recovery: break the recursion.
+    upsert_ts(
+        &host,
+        cycle,
+        "import type { Ref } from 'vue'\n\
+         type A<T> = Ref<T>\n\
+         type B<T> = A<T>\n\
+         export function getValue(): A<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        cycle,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (recovered_role, recovered_provenance) = return_wrapper_role_for(&host, cycle, "getValue");
+    assert_eq!(
+        recovered_role,
+        verter_type_expr::ReactiveWrapperRole::Ref,
+        "breaking the cycle must recover the exact role — a warmed partial cannot"
+    );
+    assert!(
+        recovered_provenance.is_some(),
+        "the recovered route must carry exact provenance"
+    );
+    // Missing-dependency ARRIVAL (route-provenance required test #10): once
+    // the dependency exists, the demand must resolve exactly.
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/gone.ts",
+        "export type { Ref } from 'vue'\n",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/gone.ts",
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (arrived_role, arrived_provenance) = return_wrapper_role_for(&host, missing, "getValue");
+    assert_eq!(
+        arrived_role,
+        verter_type_expr::ReactiveWrapperRole::Ref,
+        "after the missing dependency arrives, the demand must resolve exactly — \
+         a warmed partial cannot recover"
+    );
+    assert!(
+        arrived_provenance.is_some(),
+        "the arrived route must carry exact provenance"
+    );
+}
+
+/// A6-05 — the structural twin of the A5-05 footprint test: resolving ONE
+/// requested return head must not read an unrelated cold wrapper-shaped import,
+/// and must not lower unrelated declarations in the owner. Reintroducing an
+/// owner-wide wrapper-candidate scan, or resolving at the analyzer boundary,
+/// makes the cold read count non-zero.
+#[test]
+fn return_wrapper_demand_does_not_read_unrelated_cold_wrapper_import() {
+    /// Resolve one requested return head in a fresh host whose owner file
+    /// carries `unrelated` extra deep declarations, and report the cold decoy's
+    /// read count plus the number of declaration bodies the demand lowered.
+    fn measure(unrelated: usize) -> (verter_type_expr::ReactiveWrapperRole, u64, u64) {
+        let ws = Arc::new(CountingWorkspace::new());
+        ws.inject_file(
+            "/workspace/src/cold.ts",
+            "export interface Ref<T> { value: T }\n",
+        );
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+        upsert_non_sfc(
+            &host,
+            "/workspace/node_modules/vue/index.d.ts",
+            RETURN_WRAPPER_VUE_DTS,
+        );
+        let decoys = (0..unrelated)
+            .map(|index| {
+                format!(
+                    "export type DeepUnrelated{index} = {{ a: {{ b: {{ c: ColdRef<{index}> }} }} }}\n"
+                )
+            })
+            .collect::<String>();
+        let canonical = "/workspace/src/cold-decoy.ts";
+        upsert_ts(
+            &host,
+            canonical,
+            &format!(
+                "import type {{ Ref }} from 'vue'\n\
+                 import type {{ Ref as ColdRef }} from './cold'\n\
+                 {decoys}\
+                 export function getValue(): Ref<number> {{ return null as never; }}\n"
+            ),
+        );
+        host.set_import_dependencies(
+            canonical,
+            vec![
+                exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+                exact_dependency("./cold", "/workspace/src/cold.ts"),
+            ],
+        );
+        host.provenance().reset();
+        ws.reset_reads();
+        let (role, provenance) = return_wrapper_role_for(&host, canonical, "getValue");
+        assert_eq!(
+            provenance
+                .expect("route proof")
+                .terminal_import_source
+                .as_ref(),
+            "vue"
+        );
+        (
+            role,
+            ws.read_count("/workspace/src/cold.ts"),
+            host.provenance().snapshot().decl_bodies_lowered,
+        )
+    }
+
+    let (role, cold_reads, lowered_one) = measure(1);
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::Ref,
+        "the requested subject must still resolve exactly"
+    );
+    assert_eq!(
+        cold_reads, 0,
+        "requested-subject return classification must not traverse unrelated \
+         wrapper-shaped imports"
+    );
+
+    // Differential footprint proof for the OWNER-local declarations: growing the
+    // file's unrelated deep declarations from 1 to 4 must not change how many
+    // declaration bodies the demand lowers. An owner-wide walk (or resolution at
+    // the analyzer boundary) scales with the file; a demand-scoped one does not.
+    let (role, cold_reads, lowered_four) = measure(4);
+    assert_eq!(role, verter_type_expr::ReactiveWrapperRole::Ref);
+    assert_eq!(cold_reads, 0);
+    assert_eq!(
+        lowered_one, lowered_four,
+        "the demand's lowering footprint must be independent of the owner's \
+         unrelated declaration count ({lowered_one} vs {lowered_four})"
+    );
+}
+
+/// Producer contract: publishing the canonical post-parse artifact mints NO
+/// authored return head (zero declaration bodies lower), and carrying the head
+/// to the prepared declaration is a COPY — no locator deref, no import
+/// resolution, no semantic dispatch at the producer boundary.
+#[test]
+fn signature_return_head_is_minted_without_extra_lowering_or_resolution() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    let canonical = "/workspace/src/producer.ts";
+    upsert_ts(
+        &host,
+        canonical,
+        "import type { Ref } from 'vue'\n\
+         export type Filler0 = { v: 0 }\n\
+         export type Filler1 = { v: 1 }\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+
+    host.provenance().reset();
+    ws.reset_reads();
+    let indexed = host
+        .ensure_indexed_ready(canonical)
+        .expect("artifact must materialise");
+    assert!(indexed.shallow_state.has_value_symbol("getValue"));
+    assert_eq!(
+        host.provenance().snapshot().decl_bodies_lowered,
+        0,
+        "publishing IndexedReady must lower ZERO declaration bodies, so it mints \
+         ZERO authored return heads"
+    );
+    // `read_count` is inert for an UPSERTED canonical (served from the host's
+    // own store, `read_file` never fires), so the load-bearing rail is the
+    // artifact store: upserting does not index, so any producer-side resolution
+    // of the import would have to materialise the dependency's IndexedReady.
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/workspace/node_modules/vue/index.d.ts")
+            .is_none(),
+        "the producer boundary must resolve nothing — the vue dependency must \
+         not be indexed by minting the head"
+    );
+
+    host.provenance().reset();
+    let prepared = host
+        .prepared_value_decl_in(
+            canonical,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "getValue",
+        )
+        .expect("prepared value decl");
+    let head = &prepared.signatures[0].return_reference_head;
+    assert!(
+        matches!(
+            head,
+            verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, args }
+                if local_name.as_ref() == "Ref" && args.len() == 1
+        ),
+        "the prepared declaration carries the producer-minted head by copy, got {head:?}"
+    );
+    assert_eq!(
+        host.provenance().snapshot().decl_bodies_lowered,
+        1,
+        "preparing the requested declaration lowers exactly its own body — never \
+         the file's unrelated declarations"
+    );
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/workspace/node_modules/vue/index.d.ts")
+            .is_none(),
+        "carrying the head to the prepared declaration must not resolve the \
+         import — the dependency stays unindexed"
+    );
+    // Positive control: the probe itself can detect indexing — materialise the
+    // dependency deliberately and the same probe flips.
+    host.ensure_indexed_ready("/workspace/node_modules/vue/index.d.ts")
+        .expect("control materialisation");
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/workspace/node_modules/vue/index.d.ts")
+            .is_some(),
+        "control: the unindexed probe must be capable of detecting an index"
+    );
 }
 
 #[test]

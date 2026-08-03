@@ -12,12 +12,12 @@ use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
 use verter_type_expr::locators::{AuthoredBodyLocator, MacroPayloadPosition};
 use verter_type_expr::{
     ClosedLiteralDomain, ClosedLiteralDomainUnresolvedReason, DeclBindingKey,
-    PropCallableRoleUnresolvedReason, ReactiveWrapperImportProvenance, ReactiveWrapperRole,
-    ReactiveWrapperUnresolvedReason, ResolutionExactness, ResolutionProvenance,
-    ResolvedSymbolIdentity, TopLevelOwnerId,
+    PropCallableRoleUnresolvedReason, ReactiveWrapperRole, ReactiveWrapperUnresolvedReason,
+    ResolutionExactness, TopLevelOwnerId,
 };
 
 use super::evaluate::StructuralFactDemandOutcome;
+use super::reactive_wrapper::{wrapper_candidate_for_route, WrapperCandidate};
 use super::semantic_source::SourceRaiseContext;
 use super::symbol_identity::TerminalSymbolInstantiationDemandOutcome;
 use super::ProjectSemanticDispatch;
@@ -107,13 +107,6 @@ enum RequestedSubject {
         props_root: Arc<str>,
         member: Arc<str>,
     },
-}
-
-#[derive(Debug, Clone)]
-struct WrapperCandidate {
-    role: ReactiveWrapperRole,
-    symbol: ResolvedSymbolIdentity,
-    provenance: ReactiveWrapperImportProvenance,
 }
 
 /// Build exact facts through the caller's already-selected resolver context.
@@ -691,46 +684,6 @@ fn classify_normalized_domain(
     result
 }
 
-fn wrapper_candidate_for_route(
-    ctx: &dyn ResolverContext,
-    route: super::symbol_identity::ResolvedReferenceRoute,
-) -> Option<WrapperCandidate> {
-    if route.terminal_import_source.as_ref() != "vue"
-        || !ctx.workspace_is_package_backed(route.terminal.canonical_id.as_ref())
-    {
-        return None;
-    }
-    let role = wrapper_role_for_vue_export(route.terminal.symbol.as_ref())?;
-    Some(WrapperCandidate {
-        role,
-        symbol: route.terminal,
-        provenance: ReactiveWrapperImportProvenance {
-            authored_head: route.authored_head,
-            package: Arc::from("vue"),
-            import_source: route.import_source,
-            local_binding: route.local_binding,
-            owner_canonical: route.owner_canonical,
-            imported_name: route.imported_name,
-            terminal_import_source: route.terminal_import_source,
-            local_alias_hops: route.local_alias_hops,
-            exactness: route.exactness,
-            provenance: ResolutionProvenance::FrameworkSurface,
-        },
-    })
-}
-
-fn wrapper_role_for_vue_export(name: &str) -> Option<ReactiveWrapperRole> {
-    match name {
-        "Ref" => Some(ReactiveWrapperRole::Ref),
-        "ShallowRef" => Some(ReactiveWrapperRole::ShallowRef),
-        "ComputedRef" | "WritableComputedRef" => Some(ReactiveWrapperRole::ComputedRef),
-        "ModelRef" => Some(ReactiveWrapperRole::ModelRef),
-        "Reactive" => Some(ReactiveWrapperRole::Reactive),
-        "ShallowReactive" => Some(ReactiveWrapperRole::ShallowReactive),
-        _ => None,
-    }
-}
-
 fn unresolved_row_from_query(
     subject: TemplateClassSubject,
     error: &QueryError,
@@ -838,7 +791,9 @@ fn wrapper_reason_from_query(error: &QueryError) -> ReactiveWrapperUnresolvedRea
     }
 }
 
-fn unresolved_reasons_from_identity(
+/// Shared with the sibling [`super::reactive_wrapper`] demand entry so the
+/// identity-partial → typed-reason mapping has exactly one owner.
+pub(super) fn unresolved_reasons_from_identity(
     reason: PropCallableRoleUnresolvedReason,
 ) -> (
     ClosedLiteralDomainUnresolvedReason,
@@ -1106,19 +1061,6 @@ mod tests {
             !owner_only_publication_safe(&fenced),
             "a return-only fact set declines the pure-content publish",
         );
-    }
-
-    #[test]
-    fn wrapper_export_vocabulary_is_closed_and_writable_computed_normalizes() {
-        assert_eq!(
-            wrapper_role_for_vue_export("WritableComputedRef"),
-            Some(ReactiveWrapperRole::ComputedRef)
-        );
-        assert_eq!(
-            wrapper_role_for_vue_export("ShallowReactive"),
-            Some(ReactiveWrapperRole::ShallowReactive)
-        );
-        assert_eq!(wrapper_role_for_vue_export("LocalRef"), None);
     }
 
     #[test]
