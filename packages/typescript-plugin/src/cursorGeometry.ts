@@ -11,14 +11,15 @@
  * Convert stamp span endpoints from UTF-8 BYTE offsets to UTF-16 code-unit
  * offsets in `source`.
  *
- * The stamped opening ranges are produced by the Rust side from inventory
- * byte spans (`carrier_sync.rs`); tsserver positions are UTF-16 code units.
- * Comparing them raw shifts every span after the first non-ASCII character
- * (TE-C-13 class). One forward pass; an endpoint that does not land on a
- * character boundary, or lies past the end of the source, clamps forward —
- * the fail-closed direction (it can only shrink a span, never widen it).
+ * The stamped ranges (`markup_opening_ranges`, `script_content_ranges`) are
+ * produced by the Rust side from inventory byte spans (`carrier_sync.rs`);
+ * tsserver positions are UTF-16 code units. Comparing them raw shifts every
+ * span after the first non-ASCII character (TE-C-13 class). One forward
+ * pass; an endpoint that does not land on a character boundary, or lies past
+ * the end of the source, clamps forward — the fail-closed direction (it can
+ * only shrink a span, never widen it).
  */
-function utf8RangesToUtf16(
+export function utf8RangesToUtf16(
   source: string,
   ranges: readonly (readonly [number, number])[],
 ): [number, number][] {

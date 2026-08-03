@@ -4034,6 +4034,89 @@ describe("editor-owned source diagnostic routing", () => {
     });
   });
 
+  // R3-B-02: `script_content_ranges` are UTF-8 BYTE spans from the Rust
+  // producer, while tsserver positions are UTF-16 code units. Astral content
+  // BEFORE the script block shifts the byte span past the caret: an
+  // unconverted compare denies script ownership at a genuine script position
+  // and the completion collapses onto the template-only route.
+  it("keeps script ownership when astral content precedes the script block", () => {
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
+    const sourceText =
+      '<!-- \u{1F49A}\u{1F49A} -->\n<script setup lang="ts">\ncomputed\n</script>\n<template>{{ computed }}</template>\n';
+    const companionText = "computed\n";
+    const byteAt = (index: number) => Buffer.byteLength(sourceText.slice(0, index), "utf8");
+    const manifest = mappableManifest();
+    const ready = manifest.projects["/ws/tsconfig.json"].ready_files[companionPath];
+    ready.blob_rel = "blobs/A.vue.tsx";
+    ready.map_hash = "script-completion-astral-map";
+    ready.structure = {
+      schema_version: 1,
+      artifact_token: "a".repeat(43),
+      script_content_ranges: [
+        [byteAt(sourceText.indexOf("computed")), byteAt(sourceText.indexOf("</script>"))],
+      ],
+    };
+    const dir = track(
+      writeStore(manifest, {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": companionText,
+        "maps/A.vue.json": JSON.stringify({
+          version: 3,
+          sources: [sourcePath],
+          names: [],
+          mappings: "AAEA",
+        }),
+      }),
+    );
+    // Caret after `co` — INSIDE the script content in UTF-16, but BEFORE the
+    // byte-valued span start (the two astral hearts shift bytes by 4).
+    const sourcePosition = sourceText.indexOf("computed") + "co".length;
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    info.languageService.__lsImpl = {
+      getCompletionsAtPosition: () => ({
+        isGlobalCompletion: true,
+        isMemberCompletion: false,
+        isNewIdentifierLocation: false,
+        entries: [
+          {
+            name: "AbortController",
+            kind: ts.ScriptElementKind.varElement,
+            kindModifiers: "declare",
+            sortText: "11",
+          },
+          {
+            name: "computed",
+            kind: ts.ScriptElementKind.alias,
+            kindModifiers: "export",
+            sortText: "16",
+            source: "vue",
+            hasAction: true,
+          },
+        ],
+      }),
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const completions = info.languageService.getCompletionsAtPosition(
+      sourcePath,
+      sourcePosition,
+      {},
+    );
+
+    // Script positions keep the complete TypeScript list; the template-only
+    // filter must NOT engage.
+    expect(completions?.entries.map((entry: ts.CompletionEntry) => entry.name)).toEqual([
+      "AbortController",
+      "computed",
+    ]);
+  });
+
   it("keeps carrier membership but yields source features to a selected managed provider", () => {
     const sourcePath = "/ws/src/A.vue";
     const companionPath = "/ws/src/A.vue.tsx";
@@ -4197,6 +4280,109 @@ describe("editor-owned source diagnostic routing", () => {
         textChanges: [
           {
             span: { start: sourceText.indexOf("\n") + 1, length: 0 },
+            newText: 'import { computed } from "vue";\n',
+          },
+        ],
+      },
+    ]);
+  });
+
+  // R3-B-02: the recovered auto-import anchor is the START of the owning
+  // `script_content_ranges` span — a UTF-8 BYTE offset. Writing it raw as a
+  // TS UTF-16 edit span lands the import inside the astral prefix instead of
+  // at the script content start.
+  it("reanchors the auto-import at the UTF-16 script start under an astral prefix", () => {
+    const sourcePath = "/ws/src/A.vue";
+    const companionPath = "/ws/src/A.vue.tsx";
+    const sourceText =
+      '<!-- \u{1F49A}\u{1F49A} -->\n<script setup lang="ts">\nconst doubled = computed(() => 1);\n</script>\n<template>{{ doubled }}</template>\n';
+    const companionText = "/** generated preamble */\nconst doubled = computed(() => 1);\n";
+    const byteAt = (index: number) => Buffer.byteLength(sourceText.slice(0, index), "utf8");
+    const scriptContentStart = sourceText.indexOf("const doubled");
+    const manifest = mappableManifest();
+    const ready = manifest.projects["/ws/tsconfig.json"].ready_files[companionPath];
+    ready.blob_rel = "blobs/A.vue.tsx";
+    ready.map_hash = "auto-import-preamble-astral-map";
+    ready.structure = {
+      schema_version: 1,
+      artifact_token: "b".repeat(43),
+      script_content_ranges: [
+        [byteAt(scriptContentStart), byteAt(sourceText.indexOf("</script>"))],
+      ],
+    };
+    const dir = track(
+      writeStore(manifest, {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": companionText,
+        "maps/A.vue.json": JSON.stringify({
+          version: 3,
+          sources: [sourcePath],
+          names: [],
+          // The generated preamble at line 0 has no source origin; generated
+          // line 1 maps to source line 2 (the script content line).
+          mappings: ";AAEA",
+        }),
+      }),
+    );
+    const sourcePosition = sourceText.indexOf("computed") + "computed".length;
+    const companionPosition = companionText.indexOf("computed") + "computed".length;
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    info.languageService.__lsImpl = {
+      getCompletionEntryDetails: (fileName: string, position: number) => {
+        expect({ fileName, position }).toEqual({
+          fileName: companionPath,
+          position: companionPosition,
+        });
+        return {
+          name: "computed",
+          kind: ts.ScriptElementKind.alias,
+          kindModifiers: "export",
+          displayParts: [],
+          codeActions: [
+            {
+              description: 'Add import from "vue"',
+              changes: [
+                {
+                  fileName: companionPath,
+                  textChanges: [
+                    {
+                      span: { start: 0, length: 0 },
+                      newText: 'import { computed } from "vue";\n',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        };
+      },
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const details = info.languageService.getCompletionEntryDetails(
+      sourcePath,
+      sourcePosition,
+      "computed",
+      {},
+      "vue",
+      {},
+      undefined,
+    );
+
+    expect(details?.codeActions).toHaveLength(1);
+    // The anchor is the UTF-16 script content start — NOT the raw byte
+    // offset (which the astral hearts shift 4 units to the right).
+    expect(details!.codeActions![0].changes).toEqual([
+      {
+        fileName: sourcePath,
+        textChanges: [
+          {
+            span: { start: scriptContentStart, length: 0 },
             newText: 'import { computed } from "vue";\n',
           },
         ],

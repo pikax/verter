@@ -102,6 +102,11 @@ pub struct DocumentRegistry {
     /// publication. Tests use it to race an admitted result against an edit.
     #[cfg(test)]
     before_semantic_cache_publication_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
+    /// TEST SEAM: a one-shot callback inside [`Self::apply_style_overrides`]
+    /// AFTER the revision/artifact token validation and BEFORE the host
+    /// apply — the exact window the document-commit fence must close.
+    #[cfg(test)]
+    before_style_override_host_apply_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
 }
 
 /// TEST SEAM callback type — see [`DocumentRegistry::after_compile_hook`].
@@ -325,7 +330,16 @@ impl DocumentRegistry {
             before_semantic_cache_publication_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             after_change_commit_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            before_style_override_host_apply_hook: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// TEST SEAM: arm the one-shot validation→host-apply window callback (see
+    /// [`Self::before_style_override_host_apply_hook`]).
+    #[cfg(test)]
+    pub(crate) fn set_before_style_override_host_apply_hook(&self, hook: AfterCompileHook) {
+        *self.before_style_override_host_apply_hook.lock() = Some(hook);
     }
 
     /// TEST SEAM: arm the one-shot post-compile callback (see
@@ -1453,11 +1467,19 @@ impl DocumentRegistry {
 
     /// Apply preprocessor-compiled style overrides for a document.
     ///
-    /// When the client supplies the captured `documentRevisionToken` /
-    /// `artifactToken` of the structure the override was computed against,
-    /// the apply is REVISION-BOUND: a token that no longer matches the live
-    /// document is refused typed, with no host mutation — an async transpile
-    /// result bound to revision A must never overwrite revision B's state.
+    /// The apply is REVISION-BOUND and both captured structure tokens — the
+    /// `documentRevisionToken` and the `artifactToken` of the structure the
+    /// override was computed against — are REQUIRED: a request missing
+    /// either token is refused typed before any host mutation, and a token
+    /// that no longer matches the live document is refused typed — an async
+    /// transpile result bound to revision A must never overwrite revision
+    /// B's state.
+    ///
+    /// ATOMICITY: the token validation and the host mutation form one
+    /// freshness transaction only while the caller holds the document-commit
+    /// fence (the server's `did_change_mutex`, which every did_change /
+    /// did_open commit path holds across its host upsert + registry commit).
+    /// The LSP handler is the sole production caller and takes that fence.
     pub fn apply_style_overrides(
         &self,
         uri: &Uri,
@@ -1465,27 +1487,30 @@ impl DocumentRegistry {
         expected_revision_token: Option<&str>,
         expected_artifact_token: Option<&str>,
     ) -> StyleOverrideApplyOutcome {
-        if expected_revision_token.is_some() || expected_artifact_token.is_some() {
-            // Compare against the LIVE document in a scoped guard (dropped
-            // before the host call). A closed document matches no token.
-            let matched = {
-                match self.documents.get(uri.as_str()) {
-                    Some(doc) => {
-                        let revision_ok = expected_revision_token
-                            .is_none_or(|token| token == doc.document_revision.public_token());
-                        let artifact_ok = expected_artifact_token.is_none_or(|token| {
-                            doc.feature_snapshot.as_ref().is_some_and(|snapshot| {
-                                snapshot.structure().public_artifact_token().as_str() == token
-                            })
-                        });
-                        revision_ok && artifact_ok
-                    }
-                    None => false,
+        let (Some(revision_token), Some(artifact_token)) =
+            (expected_revision_token, expected_artifact_token)
+        else {
+            return StyleOverrideApplyOutcome::MissingTokens;
+        };
+        // Compare against the LIVE document in a scoped guard (dropped
+        // before the host call). A closed document matches no token.
+        let matched = {
+            match self.documents.get(uri.as_str()) {
+                Some(doc) => {
+                    revision_token == doc.document_revision.public_token()
+                        && doc.feature_snapshot.as_ref().is_some_and(|snapshot| {
+                            snapshot.structure().public_artifact_token().as_str() == artifact_token
+                        })
                 }
-            };
-            if !matched {
-                return StyleOverrideApplyOutcome::RevisionMismatch;
+                None => false,
             }
+        };
+        if !matched {
+            return StyleOverrideApplyOutcome::RevisionMismatch;
+        }
+        #[cfg(test)]
+        if let Some(hook) = self.before_style_override_host_apply_hook.lock().take() {
+            hook(self, uri);
         }
         let canonical_id = uri_to_canonical_id(uri);
         let req = StyleOverrideRequest {
@@ -1528,6 +1553,9 @@ pub enum StyleOverrideApplyOutcome {
     /// The captured revision/artifact token no longer matches the live
     /// document: refused BEFORE any host mutation.
     RevisionMismatch,
+    /// The request carried no (or only one) captured structure token: a
+    /// revision-unvalidatable apply is refused, never applied unfenced.
+    MissingTokens,
 }
 
 // ── Analysis span conversion ─────────────────────────────────────────

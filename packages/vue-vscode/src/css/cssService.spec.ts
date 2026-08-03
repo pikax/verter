@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("vscode", () => {
   const textDocuments: Array<{ uri: { toString(): string }; version: number }> = [];
+  const diagnosticSets: Array<{ uri: string; count: number }> = [];
   class Position {
     constructor(
       public line: number,
@@ -28,13 +29,16 @@ vi.mock("vscode", () => {
   }
   return {
     __textDocuments: textDocuments,
+    __diagnosticSets: diagnosticSets,
     workspace: { textDocuments },
     window: {
       showWarningMessage: async () => undefined,
     },
     languages: {
       createDiagnosticCollection: () => ({
-        set() {},
+        set(uri: { toString(): string }, diags: readonly unknown[]) {
+          diagnosticSets.push({ uri: uri.toString(), count: diags?.length ?? 0 });
+        },
         delete() {},
         dispose() {},
       }),
@@ -69,6 +73,13 @@ function liveDocuments(): Array<{ uri: { toString(): string }; version: number }
   return (vscode as unknown as Record<string, unknown>).__textDocuments as Array<{
     uri: { toString(): string };
     version: number;
+  }>;
+}
+
+function diagnosticSets(): Array<{ uri: string; count: number }> {
+  return (vscode as unknown as Record<string, unknown>).__diagnosticSets as Array<{
+    uri: string;
+    count: number;
   }>;
 }
 
@@ -271,6 +282,84 @@ describe("CssService doValidation availability fail-closed (TE-C-11)", () => {
     transpileGate.started = undefined;
     await pending;
     expect(requests.filter((r) => r.type === RequestType.ApplyStyleOverrides)).toHaveLength(0);
+  });
+
+  it("a stale invocation publishes nothing and never overwrites a newer revision's cache (R3-B-04)", async () => {
+    const inline = '<style lang="sass">.a\n  color: red\n</style>';
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    const requests: Array<{ type: unknown; params: unknown }> = [];
+    const svc = service((params) => available(params, inline, { dialect: "sass" }), requests);
+
+    // Gate revision 1's transpile so its post-await writes run AFTER
+    // revision 2 has fully validated and cached.
+    let startedResolve!: () => void;
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+    transpileGate.started = () => startedResolve();
+    let release!: () => void;
+    transpileGate.block = new Promise((resolve) => {
+      release = resolve;
+    });
+    const pendingV1 = svc.doValidation(URI, inline, 1);
+    await started;
+    transpileGate.block = undefined;
+    transpileGate.started = undefined;
+
+    // Commit revision 2 and complete ITS validation (ungated transpile).
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 2 });
+    const second = await svc.doValidation(URI, inline, 2);
+    expect(second).not.toBeNull();
+    const structureRequestsAfterV2 = requests.filter(
+      (r) => r.type === RequestType.GetDocumentStructure,
+    ).length;
+    const diagnosticSetsAfterV2 = diagnosticSets().length;
+
+    // Release revision 1's stale in-flight invocation.
+    release();
+    await pendingV1;
+
+    // The stale invocation publishes NO diagnostics…
+    expect(diagnosticSets().length).toBe(diagnosticSetsAfterV2);
+    // …and does NOT overwrite revision 2's cache entry: a fresh revision-2
+    // demand is a cache hit (no additional structure request).
+    const third = await svc.doValidation(URI, inline, 2);
+    expect(third).not.toBeNull();
+    expect(requests.filter((r) => r.type === RequestType.GetDocumentStructure)).toHaveLength(
+      structureRequestsAfterV2,
+    );
+  });
+
+  it("re-queries a transient non-available structure on the next demand (R3-B-04)", async () => {
+    const dirty = "<style>.x{color:}</style>";
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    let mode: "available" | "unavailable" = "unavailable";
+    const requests: Array<{ type: unknown; params: unknown }> = [];
+    const svc = service(
+      (params) =>
+        mode === "available"
+          ? available(params, dirty)
+          : ({
+              kind: "unavailable",
+              requestToken: params.requestToken,
+              clientOpenEpoch: params.clientOpenEpoch,
+              expectedClientVersion: params.expectedClientVersion,
+              reason: "structureNotReady",
+            } as DocumentStructureResponseV1),
+      requests,
+    );
+
+    const first = await svc.doValidation(URI, dirty, 1);
+    expect(first).toBeNull();
+
+    // The structure host recovered at the SAME (version, openEpoch): the
+    // transient non-available must not be sticky — the next demand
+    // re-queries and serves real diagnostics.
+    mode = "available";
+    const second = await svc.doValidation(URI, dirty, 1);
+    expect(second).not.toBeNull();
+    expect(second?.length).toBeGreaterThan(0);
+    expect(requests.filter((r) => r.type === RequestType.GetDocumentStructure)).toHaveLength(2);
   });
 
   it("keeps real diagnostics distinguishable: dirty CSS yields diagnostics, a later unavailable yields null", async () => {

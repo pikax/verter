@@ -320,8 +320,22 @@ mod style_override_revision_fence {
             .document_revision
             .public_token();
         let _ = registry.did_change(&uri, 2, V2);
-        let outcome =
-            registry.apply_style_overrides(&uri, overrides(), Some(&stale_revision), None);
+        // The revision dimension discriminates on its own: pair the STALE
+        // revision token with the CURRENT artifact token.
+        let current_artifact = registry
+            .get(&uri)
+            .expect("doc")
+            .feature_snapshot
+            .as_ref()
+            .expect("carrier snapshot")
+            .structure()
+            .public_artifact_token();
+        let outcome = registry.apply_style_overrides(
+            &uri,
+            overrides(),
+            Some(&stale_revision),
+            Some(current_artifact.as_str()),
+        );
         assert_eq!(
             outcome,
             StyleOverrideApplyOutcome::RevisionMismatch,
@@ -388,25 +402,60 @@ mod style_override_revision_fence {
         assert_eq!(outcome, StyleOverrideApplyOutcome::Applied);
     }
 
-    /// Tokenless applies (older clients) keep the legacy unfenced behavior.
+    /// R3-B-01: tokens are REQUIRED. An absent or partial token pair cannot
+    /// be revision-validated, so the apply is refused typed BEFORE any host
+    /// mutation — there is no legacy unfenced arm.
     #[test]
-    fn absent_tokens_keep_legacy_behavior() {
+    fn absent_or_partial_tokens_are_refused_without_host_mutation() {
         let (registry, uri) = open_doc();
-        let outcome = registry.apply_style_overrides(&uri, overrides(), None, None);
-        assert_eq!(outcome, StyleOverrideApplyOutcome::Applied);
+        let (revision, artifact) = {
+            let doc = registry.get(&uri).expect("doc");
+            (
+                doc.document_revision.public_token(),
+                doc.feature_snapshot
+                    .as_ref()
+                    .expect("carrier snapshot")
+                    .structure()
+                    .public_artifact_token(),
+            )
+        };
+        for (case, revision_token, artifact_token) in [
+            ("no tokens", None, None),
+            ("revision only", Some(revision.as_str()), None),
+            ("artifact only", None, Some(artifact.as_str())),
+        ] {
+            let outcome =
+                registry.apply_style_overrides(&uri, overrides(), revision_token, artifact_token);
+            assert_eq!(
+                outcome,
+                StyleOverrideApplyOutcome::MissingTokens,
+                "{case}: a revision-unvalidatable apply must be refused typed"
+            );
+        }
     }
 
     /// A closed document cannot match any captured token: refused.
     #[test]
     fn closed_document_with_token_is_refused() {
         let (registry, uri) = open_doc();
-        let revision = registry
-            .get(&uri)
-            .expect("doc")
-            .document_revision
-            .public_token();
+        let (revision, artifact) = {
+            let doc = registry.get(&uri).expect("doc");
+            (
+                doc.document_revision.public_token(),
+                doc.feature_snapshot
+                    .as_ref()
+                    .expect("carrier snapshot")
+                    .structure()
+                    .public_artifact_token(),
+            )
+        };
         registry.did_close(&uri);
-        let outcome = registry.apply_style_overrides(&uri, overrides(), Some(&revision), None);
+        let outcome = registry.apply_style_overrides(
+            &uri,
+            overrides(),
+            Some(&revision),
+            Some(artifact.as_str()),
+        );
         assert_eq!(outcome, StyleOverrideApplyOutcome::RevisionMismatch);
     }
 }

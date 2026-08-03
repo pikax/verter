@@ -48,7 +48,10 @@ import {
 import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
 import { writeEditorTsserverAttestation } from "./helpers/editorAttestation";
 import { prepareVueJsxCarrier } from "./helpers/vueJsxAuthority";
-import { isFrameworkAttributeNamePosition as boundedFrameworkAttributeNamePosition } from "./cursorGeometry";
+import {
+  isFrameworkAttributeNamePosition as boundedFrameworkAttributeNamePosition,
+  utf8RangesToUtf16,
+} from "./cursorGeometry";
 
 const isFrameworkAttributeNamePosition = boundedFrameworkAttributeNamePosition;
 
@@ -1849,10 +1852,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           owned === undefined
             ? null
             : carrierSourceStructure(runtime.getStore(), owned.provider_uri);
+        // The stamped script spans are UTF-8 BYTE offsets; `sourcePosition`
+        // and the recovered anchor are UTF-16 code units — convert before
+        // comparing or anchoring (no source text ⇒ fail closed, no recovery).
+        const sourceTextForAnchor = runtime.readSource(sourceFileName);
         const importAnchor =
-          sourceStructure?.scriptContentRanges.find(
-            ([start, end]) => sourcePosition >= start && sourcePosition <= end,
-          )?.[0] ?? null;
+          sourceStructure === null || sourceTextForAnchor === undefined
+            ? null
+            : (utf8RangesToUtf16(sourceTextForAnchor, sourceStructure.scriptContentRanges).find(
+                ([start, end]) => sourcePosition >= start && sourcePosition <= end,
+              )?.[0] ?? null);
         if (
           importAnchor === null ||
           owned === undefined ||
@@ -2794,10 +2803,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
         const sourceStructure = carrierSourceStructure(routed.runtime.getStore(), routed.companion);
+        // The stamped script spans are UTF-8 BYTE offsets; `position` is a
+        // UTF-16 code-unit offset — convert before the ownership compare
+        // (no source text ⇒ fail closed: not script-owned).
+        const editorSourceText = routed.runtime.readSource(fileName);
         const scriptOwned =
-          sourceStructure?.scriptContentRanges.some(
+          sourceStructure !== null &&
+          editorSourceText !== undefined &&
+          utf8RangesToUtf16(editorSourceText, sourceStructure.scriptContentRanges).some(
             ([start, end]) => position >= start && position <= end,
-          ) ?? false;
+          );
         let companionResult = routed.runtime.languageService.getCompletionsAtPosition(
           routed.companion,
           routed.position,

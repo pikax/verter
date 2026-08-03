@@ -449,12 +449,22 @@ impl VerterLanguageServer {
             })
             .collect();
 
-        let outcome = self.documents.apply_style_overrides(
-            &parsed_uri,
-            overrides,
-            params.document_revision_token.as_deref(),
-            params.artifact_token.as_deref(),
-        );
+        let outcome = {
+            // The token validation and the host mutation must be ONE
+            // freshness transaction with respect to document commits. Hold
+            // the document-commit fence — the same `did_change_mutex` every
+            // did_change / did_open commit path holds across its host upsert
+            // + registry commit — so no revision can land between the token
+            // check and the host apply (revision A's compiled CSS must never
+            // land on revision B's host state).
+            let _document_commit_fence = self.did_change_mutex.lock().await;
+            self.documents.apply_style_overrides(
+                &parsed_uri,
+                overrides,
+                params.document_revision_token.as_deref(),
+                params.artifact_token.as_deref(),
+            )
+        };
 
         if outcome == StyleOverrideApplyOutcome::Applied {
             // Re-publish diagnostics since analysis has changed
@@ -473,6 +483,10 @@ impl VerterLanguageServer {
             StyleOverrideApplyOutcome::RevisionMismatch => ApplyStyleOverridesResponse {
                 success: false,
                 refusal: Some(StyleOverrideRefusal::RevisionMismatch),
+            },
+            StyleOverrideApplyOutcome::MissingTokens => ApplyStyleOverridesResponse {
+                success: false,
+                refusal: Some(StyleOverrideRefusal::MissingTokens),
             },
         })
     }

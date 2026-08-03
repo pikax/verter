@@ -422,8 +422,9 @@ export class CssService {
       live?.version === version &&
       this.getOpenEpoch(uri) === openEpoch;
     const blocks = admitted && response ? styleBlocksFromStructure(source, response) : [];
+    const admittedAvailable = admitted && response !== null && response.kind === "available";
     const captured =
-      admitted && response !== null && response.kind === "available"
+      admittedAvailable && response !== null && response.kind === "available"
         ? {
             documentRevisionToken: response.structure.documentRevisionToken,
             artifactToken: response.structure.artifactToken,
@@ -495,12 +496,28 @@ export class CssService {
       }
     }
 
-    // Update diagnostics atomically for this URI (clears stale entries)
-    try {
-      const vscodeUri = vscode.Uri.parse(uri);
-      this.diagnostics.set(vscodeUri, missingDiags);
-    } catch {
-      // URI parsing may fail for non-file URIs; ignore
+    // Everything below the transpile awaits publishes/persists only for a
+    // still-current invocation: the document may have moved (or been
+    // reopened) while an await was in flight, and a STALE invocation must
+    // never clear or replace a newer revision's diagnostics or cache entry.
+    const stillCurrent = () => {
+      const liveNow = vscode.workspace.textDocuments.find(
+        (document) => document.uri.toString() === uri,
+      );
+      return liveNow?.version === version && this.getOpenEpoch(uri) === openEpoch;
+    };
+
+    // Update diagnostics atomically for this URI (clears stale entries) —
+    // only from a current, admitted-available invocation. A non-available
+    // structure knows NOTHING about the blocks, so it has nothing
+    // authoritative to publish or clear.
+    if (admittedAvailable && stillCurrent()) {
+      try {
+        const vscodeUri = vscode.Uri.parse(uri);
+        this.diagnostics.set(vscodeUri, missingDiags);
+      } catch {
+        // URI parsing may fail for non-file URIs; ignore
+      }
     }
 
     const entry: DocumentCache = {
@@ -512,7 +529,13 @@ export class CssService {
       ...(captured ?? {}),
       transpiled,
     };
-    this.cache.set(uri, entry);
+    // Cache only current, admitted-available results: a transient
+    // non-available must be re-queried on the next demand — never sticky
+    // for the whole (version, openEpoch) — and a stale invocation must not
+    // overwrite the newer revision's entry.
+    if (admittedAvailable && stillCurrent()) {
+      this.cache.set(uri, entry);
+    }
     return entry;
   }
 
@@ -534,6 +557,11 @@ export class CssService {
     openEpoch: string,
     captured?: { documentRevisionToken: string; artifactToken: string },
   ): Promise<void> {
+    if (!captured) {
+      // The structure tokens are REQUIRED server-side: an apply that cannot
+      // carry them would be refused typed — send nothing.
+      return;
+    }
     const live = vscode.workspace.textDocuments.find((document) => document.uri.toString() === uri);
     if (live?.version !== version || this.getOpenEpoch(uri) !== openEpoch) {
       // Revision A's slow transpile result must not overwrite revision B's
@@ -551,7 +579,7 @@ export class CssService {
             sourceMap: result.sourceMap ? JSON.stringify(result.sourceMap) : undefined,
           },
         ],
-        ...(captured ?? {}),
+        ...captured,
       });
     } catch {
       // Silently fail — LSP might not support this yet

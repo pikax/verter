@@ -297,12 +297,14 @@ pub struct ApplyStyleOverridesParams {
     pub uri: String,
     pub overrides: Vec<StyleOverrideParam>,
     /// The `documentRevisionToken` of the structure the override was computed
-    /// against (additive; absent from older clients). When present, the
-    /// handler REFUSES a mismatched-revision apply — an async transpile
-    /// result bound to revision A must never overwrite revision B's state.
+    /// against. REQUIRED: a request without it is refused typed
+    /// (`missingTokens`) — the handler REFUSES a mismatched-revision apply,
+    /// because an async transpile result bound to revision A must never
+    /// overwrite revision B's state. `Option` only so an absent field yields
+    /// the typed refusal instead of a deserialization error.
     #[serde(default)]
     pub document_revision_token: Option<String>,
-    /// The `artifactToken` of the same captured structure (additive). Same
+    /// The `artifactToken` of the same captured structure. Same REQUIRED /
     /// refusal semantics as `document_revision_token`.
     #[serde(default)]
     pub artifact_token: Option<String>,
@@ -324,6 +326,9 @@ pub enum StyleOverrideRefusal {
     /// The captured revision/artifact token no longer matches the live
     /// document: the override describes superseded bytes and was NOT applied.
     RevisionMismatch,
+    /// The request carried no (or only one) captured structure token: a
+    /// revision-unvalidatable apply is refused, never applied unfenced.
+    MissingTokens,
 }
 
 /// Response for `$/verter/applyStyleOverrides` request.
