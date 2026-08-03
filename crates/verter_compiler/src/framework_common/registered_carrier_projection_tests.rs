@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use std::any::Any;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use verter_language::carrier_grammar::{
     AcceptedRegisteredCarrierSource, CarrierGrammarAuthority, CarrierGrammarConfig,
@@ -11,6 +15,10 @@ use verter_language::{
     CarrierAttribute, CarrierBlock, CarrierBlockInventory, CarrierStructureHash, MarkupNodeKind,
 };
 
+use super::carrier_compiler::{
+    CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
+    RuntimeCompileOptions, RuntimeCompileOutput, TemplateFacts,
+};
 use super::registered_carrier_projection::{
     project_registered_carrier_for_tests as project_registered_carrier, RegisteredCarrierPayload,
 };
@@ -26,7 +34,7 @@ struct RegisteredCarrierProjection {
 }
 
 type RegisteredProjectorForTests = fn(
-    &dyn super::carrier_compiler::CarrierCompiler,
+    &dyn CarrierCompiler,
     &AcceptedRegisteredCarrierSource,
     &RegisteredProjectorSeal,
 ) -> (
@@ -35,6 +43,84 @@ type RegisteredProjectorForTests = fn(
     CarrierStructureHash,
     bool,
 );
+
+struct CountingCarrierCompiler {
+    inner: Arc<dyn CarrierCompiler>,
+    parse_calls: AtomicUsize,
+}
+
+impl CountingCarrierCompiler {
+    fn new(inner: Arc<dyn CarrierCompiler>) -> Self {
+        Self {
+            inner,
+            parse_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn parse_calls(&self) -> usize {
+        self.parse_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl CarrierCompiler for CountingCarrierCompiler {
+    fn __verter_as_any(&self) -> &dyn Any {
+        // Keep the real framework projector selected while observing calls
+        // independently of the projector and its returned carrier witness.
+        self.inner.__verter_as_any()
+    }
+
+    fn adapter_id(&self) -> verter_language::FrameworkAdapterId {
+        self.inner.adapter_id()
+    }
+
+    fn carrier_language_id(&self) -> verter_language::LanguageId {
+        self.inner.carrier_language_id()
+    }
+
+    fn parse(
+        &self,
+        source: &str,
+        opts: &ParseOptions,
+    ) -> Arc<verter_language::FrameworkParseArtifact> {
+        self.parse_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.parse(source, opts)
+    }
+
+    fn eval_source(
+        &self,
+        source: &str,
+        artifact: &verter_language::FrameworkParseArtifact,
+    ) -> Arc<str> {
+        self.inner.eval_source(source, artifact)
+    }
+
+    fn compile_ide(
+        &self,
+        source: &str,
+        artifact: &verter_language::FrameworkParseArtifact,
+        opts: &IdeCompileOptions,
+    ) -> Result<IdeOutput, CompileUnsupported> {
+        self.inner.compile_ide(source, artifact, opts)
+    }
+
+    fn template_data(
+        &self,
+        source: &str,
+        artifact: &verter_language::FrameworkParseArtifact,
+    ) -> TemplateFacts {
+        self.inner.template_data(source, artifact)
+    }
+
+    fn compile_bundle(
+        &self,
+        source: &str,
+        artifact: &verter_language::FrameworkParseArtifact,
+        opts: &RuntimeCompileOptions,
+        alloc: &oxc_allocator::Allocator,
+    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+        self.inner.compile_bundle(source, artifact, opts, alloc)
+    }
+}
 
 impl RegisteredCarrierProjection {
     fn carrier(&self) -> &RegisteredCarrierPayload {
@@ -98,9 +184,18 @@ fn project(accepted: &AcceptedRegisteredCarrierSource) -> RegisteredCarrierProje
             language.carrier_language_id().expect("carrier language"),
         )
         .expect("registered compiler");
+    project_with_compiler(compiler.as_ref(), accepted)
+}
+
+fn project_with_compiler(
+    compiler: &dyn CarrierCompiler,
+    accepted: &AcceptedRegisteredCarrierSource,
+) -> RegisteredCarrierProjection {
     let seal = mint_registered_projector_seal_for_tests();
     let (carrier, inventory, carrier_structure_hash, same_carrier_arc) =
-        project_registered_carrier(compiler.as_ref(), accepted, &seal);
+        project_registered_carrier(compiler, accepted, &seal);
+    // This identity check complements the independent counting witness below;
+    // exact-one parse enforcement does not rely on the projector's own witness.
     assert!(
         same_carrier_arc,
         "projection payload must retain the exact Arc produced by the sole parse"
@@ -110,6 +205,45 @@ fn project(accepted: &AcceptedRegisteredCarrierSource) -> RegisteredCarrierProje
         inventory,
         carrier_structure_hash,
     }
+}
+
+#[test]
+fn registered_projection_calls_parse_exactly_once_for_vue_and_svelte() {
+    let registry = CarrierCompilerRegistry::built_in();
+    let mut observed_parse_calls = Vec::new();
+    for (path, language, source) in [
+        (
+            "file:///workspace/ParseCount.vue",
+            verter_language::FileLanguage::vue(),
+            "<template><div/></template>",
+        ),
+        (
+            "file:///workspace/ParseCount.svelte",
+            verter_language::FileLanguage::svelte(),
+            "<div />",
+        ),
+    ] {
+        let (_, _, accepted) = accepted(path, language, source);
+        let resolved = accepted.source().resolved_file_language();
+        let real_compiler = registry
+            .compiler_for_carrier_language(
+                resolved.adapter_id().expect("carrier adapter"),
+                resolved.carrier_language_id().expect("carrier language"),
+            )
+            .expect("registered compiler");
+        let counting_compiler = CountingCarrierCompiler::new(Arc::clone(real_compiler));
+
+        let _projection = project_with_compiler(&counting_compiler, &accepted);
+        observed_parse_calls.push((path, counting_compiler.parse_calls()));
+    }
+    assert_eq!(
+        observed_parse_calls,
+        [
+            ("file:///workspace/ParseCount.vue", 1),
+            ("file:///workspace/ParseCount.svelte", 1),
+        ],
+        "each registered projection must parse its carrier exactly once"
+    );
 }
 
 #[test]
