@@ -584,17 +584,11 @@ fn allowlist_is_the_known_standalone_targets() {
             "lsp_audit_trace_out_env_var".to_string(),
             "crates/verter_lsp/tests/lsp_audit_trace_out_env_var.rs".to_string(),
         ),
-        (
-            "verter_lsp".to_string(),
-            "typed_prop_callable_role_guard".to_string(),
-            "crates/verter_lsp/tests/typed_prop_callable_role_guard.rs".to_string(),
-        ),
     ]);
     assert_eq!(
         actual, expected,
         "the integration-test-layout allowlist drifted from the known standalone \
-         targets (allocator_canaries + lsp_audit_trace_out_env_var + \
-         typed_prop_callable_role_guard). \
+         targets (allocator_canaries + lsp_audit_trace_out_env_var). \
          Adding/removing an exception is an architecture decision: update BOTH this \
          guard's expectation and scripts/integration-test-layout-allowlist.json, and \
          justify the standalone target."

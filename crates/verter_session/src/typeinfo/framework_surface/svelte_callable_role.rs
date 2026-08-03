@@ -14,9 +14,6 @@ pub(super) fn classify_svelte_callable_role(
     prop_value: SemanticNodeId,
     snippet_imports: &[SvelteSnippetImportFact],
 ) -> PropCallableRole {
-    if snippet_imports.is_empty() {
-        return PropCallableRole::Other;
-    }
     let expected = snippet_imports
         .iter()
         .filter_map(|import| match import {
@@ -56,4 +53,52 @@ pub(super) fn classify_svelte_callable_role(
     unresolved.map_or(PropCallableRole::Other, |reason| {
         PropCallableRole::Unresolved { reason }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use verter_type_expr::PropCallableRoleUnresolvedReason;
+
+    use super::*;
+    use crate::semantic_query::{QueryError, SemanticNodeData};
+
+    /// Mutation recipe: restore the empty-`snippet_imports` early return in
+    /// `classify_svelte_callable_role`; this test must fail with `Other`.
+    #[test]
+    fn empty_snippet_inventory_still_demands_carrier_completeness() {
+        let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let unresolved = dispatch
+            .graph()
+            .intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+
+        assert_eq!(
+            classify_svelte_callable_role(&dispatch, unresolved, &[]),
+            PropCallableRole::Unresolved {
+                reason: PropCallableRoleUnresolvedReason::MissingDependency,
+            }
+        );
+
+        let unsupported = dispatch.graph().intern_node(SemanticNodeData::RawFallback {
+            raw: Arc::from("unsupported"),
+        });
+        assert_eq!(
+            classify_svelte_callable_role(&dispatch, unsupported, &[]),
+            PropCallableRole::Unresolved {
+                reason: PropCallableRoleUnresolvedReason::Unsupported,
+            },
+            "an incomplete carrier cannot prove Other even with no expected identities"
+        );
+
+        let complete_non_match = dispatch.graph().intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        assert_eq!(
+            classify_svelte_callable_role(&dispatch, complete_non_match, &[]),
+            PropCallableRole::Other,
+            "a complete non-match may prove Other"
+        );
+    }
 }

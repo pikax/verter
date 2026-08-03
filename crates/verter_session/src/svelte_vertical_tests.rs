@@ -1136,6 +1136,45 @@ void direct; void one; void two; void fake;
     );
 }
 
+/// Mutation recipe: restore the empty-`snippet_imports` early return in
+/// `classify_svelte_callable_role`; `missing` becomes `Other` and this fails.
+#[test]
+fn svelte_prop_with_empty_snippet_inventory_and_missing_carrier_is_unresolved() {
+    let source = r#"<script lang="ts">
+import type { Missing } from './absent';
+let { missing }: { missing: Missing } = $props();
+void missing;
+</script>"#;
+    let host = workspace_host_with_svelte("/workspace/Missing.svelte", source, &[]);
+    upsert_svelte(&host, "/workspace/Missing.svelte", source);
+
+    let facts = host
+        .resolve_svelte_script_facts("/workspace/Missing.svelte")
+        .expect("Svelte facts");
+    assert!(
+        facts.snippet_imports.is_empty(),
+        "fixture must exercise the empty expected-identity inventory"
+    );
+
+    let (meta, _, _) = host
+        .get_component_meta_output("/workspace/Missing.svelte")
+        .expect("component meta query")
+        .expect("component meta output")
+        .into_parts();
+    let missing = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "missing")
+        .expect("missing prop");
+    assert_eq!(
+        missing.callable_role,
+        verter_type_expr::PropCallableRole::Unresolved {
+            reason: verter_type_expr::PropCallableRoleUnresolvedReason::MissingDependency,
+        },
+        "incomplete carrier resolution cannot prove Other"
+    );
+}
+
 #[test]
 fn svelte_javascript_jsdoc_props_reach_the_declaration_import_surface() {
     // A no-lang component is authored JavaScript. Its JSDoc types must survive

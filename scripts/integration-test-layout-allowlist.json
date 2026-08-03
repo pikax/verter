@@ -26,12 +26,6 @@
       "target": "lsp_audit_trace_out_env_var",
       "src_path": "crates/verter_lsp/tests/lsp_audit_trace_out_env_var.rs",
       "reason": "process-global VERTER_LSP_AUDIT_TRACE_OUT env mutation; separate binary isolates it and preserves exact test parity"
-    },
-    {
-      "package": "verter_lsp",
-      "target": "typed_prop_callable_role_guard",
-      "src_path": "crates/verter_lsp/tests/typed_prop_callable_role_guard.rs",
-      "reason": "T-A4 binding structural guard requires this exact standalone integration-test target so completion authority cannot be weakened by unit-test cfg or module wiring"
     }
   ]
 }

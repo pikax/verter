@@ -1054,7 +1054,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> (
         SemanticNodeId,
         crate::project_semantic_dispatch::BuildLocalTaint,
+        crate::semantic_query::ResultCompleteness,
     ) {
+        let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
         let host = self.ctx.host_for_fact_tracer_install();
         let observation =
             crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
@@ -1079,8 +1081,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ) {
             observed.cache_suppress = true;
         }
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        completeness_scope.discard();
+        crate::request_context::fold_result_completeness(completeness);
         self.fold_into_top_build_local_taint(observed.result_is_partial, observed.cache_suppress);
-        (resolved, observed)
+        (resolved, observed, completeness)
     }
 
     /// Carrier-subject head-resolution body (see

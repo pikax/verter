@@ -159,12 +159,11 @@ impl ProjectSemanticDispatch<'_> {
                                 return self.partial_symbol_identity(partial_reason(reasons));
                             }
                             drop(data);
-                            let (resolved, observed) =
+                            let (resolved, observed, completeness) =
                                 self.resolve_carrier_subject_node_capturing_suppress(node, context);
                             if observed.result_is_partial {
-                                return self.partial_symbol_identity(
-                                    PropCallableRoleUnresolvedReason::Fault,
-                                );
+                                let reason = partial_reason(completeness.reasons());
+                                return self.partial_symbol_identity(reason);
                             }
                             if resolved == node {
                                 return self.partial_symbol_identity(
@@ -311,6 +310,10 @@ fn reason_partial_set(reason: PropCallableRoleUnresolvedReason) -> PartialReason
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_semantic_dispatch::carrier_head_resolution_tests::{
+        bare_ref_carrier, file_scope, host, import_type_carrier, upsert_ts,
+    };
+    use crate::request_context::{RequestContext, RequestContextGuard};
     use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
 
     fn expected() -> ResolvedSymbolIdentity {
@@ -384,6 +387,78 @@ mod tests {
         assert!(
             crate::request_context::current_cold_compute_completeness().is_partial(),
             "a partial identity demand must refuse warm admission"
+        );
+    }
+
+    /// Mutation recipe: map the partial observation returned by
+    /// `resolve_carrier_subject_node_capturing_suppress` to `Fault`; the
+    /// work-limited assertion must fail while the missing control stays green.
+    #[test]
+    fn real_carrier_path_preserves_partial_reason_classes() {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/identity.ts",
+            "export type Target = { value: string };\n",
+        );
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let scope = file_scope(&dispatch, "/identity.ts");
+
+        let missing = bare_ref_carrier(&dispatch, "Missing", scope.clone(), &[]);
+        assert_eq!(
+            dispatch.demand_symbol_identity(missing, &[expected()]),
+            SymbolIdentityDemandOutcome::Partial(
+                PropCallableRoleUnresolvedReason::MissingDependency
+            ),
+            "an unresolved real carrier must preserve MissingDependency"
+        );
+
+        let target = bare_ref_carrier(&dispatch, "Target", scope, &[]);
+        dispatch.set_connected_limits_for_tests(1, u16::MAX);
+        assert_eq!(
+            dispatch.demand_symbol_identity(target, &[expected()]),
+            SymbolIdentityDemandOutcome::Partial(
+                PropCallableRoleUnresolvedReason::WorkLimitExceeded
+            ),
+            "a nested real-carrier query must preserve its work-limit reason"
+        );
+
+        let limited_host = crate::VerterHost::new_standalone(crate::types::HostConfig {
+            projection_op_budget: 1,
+            ..crate::types::HostConfig::default()
+        });
+        upsert_ts(
+            &limited_host,
+            "/dep.ts",
+            "export namespace Surface { export type Target = { value: string } }\n",
+        );
+        upsert_ts(&limited_host, "/limited.ts", "export type Seed = string;\n");
+        let limited_dispatch = ProjectSemanticDispatch::new(&limited_host);
+        let limited_scope = file_scope(&limited_dispatch, "/limited.ts");
+        let import_carrier = import_type_carrier(
+            &limited_dispatch,
+            "./dep",
+            &["Surface", "Target"],
+            &[],
+            false,
+            limited_scope,
+        );
+        let request = RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from("/limited.ts"),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            1,
+        );
+        let _request_guard = RequestContextGuard::install(request);
+        assert_eq!(
+            limited_dispatch.demand_symbol_identity(import_carrier, &[expected()]),
+            SymbolIdentityDemandOutcome::Partial(
+                PropCallableRoleUnresolvedReason::WorkLimitExceeded
+            ),
+            "a projection-work-truncated import carrier must preserve WorkLimitExceeded"
         );
     }
 }

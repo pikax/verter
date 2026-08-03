@@ -32,3 +32,4 @@ mod stdio_launch_smoke;
 mod test_support_feature_off_in_default_build;
 mod tsgo_virtual_membership;
 mod tsserver_e2e_generated_outputs;
+mod typed_prop_callable_role_guard;
