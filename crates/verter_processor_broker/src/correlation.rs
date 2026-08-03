@@ -74,6 +74,11 @@ impl DependencyRequestIdV1 {
         }
         output
     }
+
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 16] {
+        self.0
+    }
 }
 
 impl BlockContentResolveContextTokenV1 {
@@ -81,12 +86,22 @@ impl BlockContentResolveContextTokenV1 {
     pub const fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(bytes)
     }
+
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 16] {
+        self.0
+    }
 }
 
 impl BlockContentWorkTokenV1 {
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 16] {
+        self.0
     }
 }
 

@@ -3,10 +3,12 @@
 mod attestation;
 mod channel;
 mod correlation;
+mod execution;
 mod lifecycle;
 mod platform;
 mod policy;
 mod protocol;
+mod work;
 
 pub use attestation::{
     CanonicalModuleGraph, LaunchEvidenceError, ModuleGraphEntry, ProcessorBrokerInstanceId,
@@ -22,6 +24,16 @@ pub use lifecycle::{
     SandboxUnavailableEvidence,
 };
 pub use policy::{DependencyReadKind, ProcessorSandboxKindV1, TrustedProcessorCapabilityManifest};
+pub use work::{
+    dependency_read_authority, CapabilityScopedDependencyBytes, DependencyReadAuthority,
+    DependencyReadAuthorityFn, DependencyReadDecision, DependencyReadDenial, DependencyReadRequest,
+    TrustedBrokerProcessingFailure, TrustedBrokerWork, TrustedBrokerWorkError,
+    TrustedBrokerWorkOutput, TrustedBrokerWorkResult, WorkerFrameRejection,
+    MAX_TRUSTED_BROKER_WORK_DESCRIPTOR_BYTES,
+};
+
+#[cfg(test)]
+pub(crate) use lifecycle::EvidenceMutationPoint;
 
 #[doc(hidden)]
 #[must_use]

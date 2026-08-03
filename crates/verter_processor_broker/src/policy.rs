@@ -12,6 +12,18 @@ pub enum DependencyReadKind {
     MapSource = 4,
 }
 
+impl DependencyReadKind {
+    pub(crate) const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Source),
+            2 => Some(Self::Config),
+            3 => Some(Self::Plugin),
+            4 => Some(Self::MapSource),
+            _ => None,
+        }
+    }
+}
+
 /// The platform sandbox named by a trusted-processor attestation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
