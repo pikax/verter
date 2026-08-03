@@ -284,6 +284,12 @@ Closed-contract rules:
 
 See the `/framework-adapters` skill for the substrate's module map, the descriptor/registry/ctx/executor contracts, the script-fact seam, and Vue as the reference adapter.
 
+### Carrier Geometry From Registered Facts (MANDATORY)
+
+The carrier parser is the only production owner allowed to discover carrier structure from raw source. Downstream production code must not infer carrier geometry, section dialect, or block identity from text: for example, by searching for tags or delimiters, applying regex dialect heuristics, or recounting source order. Consume registered `RegisteredFileStructure`/`CarrierBlockInventory` projections and parser-minted facts, refs, or tokens; any retained compatibility ordinal is projected from that inventory, never reconstructed from text.
+
+Local edit-time lexing may classify a bounded token or recovery window, but it must not become an alternate structure parser; any geometry-sensitive window is bounded by parser/inventory facts, including parser-unowned gaps bounded by registered parse boundaries. Tests may scan fixture text for setup, decoys, and assertions. This rule is review-enforced alongside the existing structural boundaries; do not add scanner-detection CI jobs or name-keyed source-tree guard scanners.
+
 ### Project-Bound External-TS Contract (CRITICAL)
 
 Production external-TypeScript results for carrier sources are project-bound. The result-producing backend path is `ExternalTsProjectResolver` → `CarrierRegistry` → `EngineBackend`: `EngineBackend::ensure_project` is reached only from a resolved `ProjectBinding`, and `publish_snapshot`, `query`, and `diagnostics` require the resulting `BoundProject` witness. No production external-TS result path may infer a project from a bare path, open a carrier into a config-less/inferred project, or fall back to an inferred backend. Path-shaped transport notifications may exist below this contract, but they cannot construct external-TS results or bypass `BoundProject`.
