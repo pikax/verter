@@ -916,6 +916,7 @@ mod tests {
             callee_import_source: Some("vue".to_string()),
             vue_api: Some(VueApiClassification::Ref),
             async_component_source: None,
+            binds_whole_call_result: true,
         });
         snapshot.bindings = vec![binding];
 

@@ -489,6 +489,60 @@ pub(super) fn reactivity_kind_to_string(
     }
 }
 
+/// The CLOSED wrapper-role vocabulary as it crosses the FFI boundary.
+///
+/// Exhaustive over [`verter_type_expr::ReactiveWrapperRole`] so a new role
+/// variant fails to compile rather than degrading silently. `Unresolved` maps to
+/// the single `"unresolved"` discriminant; its exact reason travels on the
+/// SEPARATE reason field ([`reactive_wrapper_unresolved_reason_to_string`]) so
+/// the two are independently observable and cannot collapse onto one another.
+pub(super) fn reactive_wrapper_role_to_string(
+    role: &verter_type_expr::ReactiveWrapperRole,
+) -> String {
+    match role {
+        verter_type_expr::ReactiveWrapperRole::Ref => "ref".to_string(),
+        verter_type_expr::ReactiveWrapperRole::ShallowRef => "shallowRef".to_string(),
+        verter_type_expr::ReactiveWrapperRole::ComputedRef => "computedRef".to_string(),
+        verter_type_expr::ReactiveWrapperRole::ModelRef => "modelRef".to_string(),
+        verter_type_expr::ReactiveWrapperRole::Reactive => "reactive".to_string(),
+        verter_type_expr::ReactiveWrapperRole::ShallowReactive => "shallowReactive".to_string(),
+        verter_type_expr::ReactiveWrapperRole::None => "none".to_string(),
+        verter_type_expr::ReactiveWrapperRole::Unresolved { .. } => "unresolved".to_string(),
+    }
+}
+
+/// The exact typed degradation reason, present only for an `Unresolved` role.
+/// Exhaustive over the closed reason vocabulary — no `format!("{:?}")`.
+pub(super) fn reactive_wrapper_unresolved_reason_to_string(
+    role: &verter_type_expr::ReactiveWrapperRole,
+) -> Option<String> {
+    let verter_type_expr::ReactiveWrapperRole::Unresolved { reason } = role else {
+        return None;
+    };
+    Some(
+        match reason {
+            verter_type_expr::ReactiveWrapperUnresolvedReason::AnalysisUnavailable => {
+                "analysisUnavailable"
+            }
+            verter_type_expr::ReactiveWrapperUnresolvedReason::RevisionMismatch => {
+                "revisionMismatch"
+            }
+            verter_type_expr::ReactiveWrapperUnresolvedReason::MissingDependency => {
+                "missingDependency"
+            }
+            verter_type_expr::ReactiveWrapperUnresolvedReason::Cycle => "cycle",
+            verter_type_expr::ReactiveWrapperUnresolvedReason::BudgetExceeded => "budgetExceeded",
+            verter_type_expr::ReactiveWrapperUnresolvedReason::WorkLimitExceeded => {
+                "workLimitExceeded"
+            }
+            verter_type_expr::ReactiveWrapperUnresolvedReason::Cancelled => "cancelled",
+            verter_type_expr::ReactiveWrapperUnresolvedReason::Unsupported => "unsupported",
+            verter_type_expr::ReactiveWrapperUnresolvedReason::Fault => "fault",
+        }
+        .to_string(),
+    )
+}
+
 pub(super) fn vue_api_to_string(
     api: verter_semantic::analysis::types::VueApiClassification,
 ) -> String {

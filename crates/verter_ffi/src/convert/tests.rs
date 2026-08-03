@@ -2986,3 +2986,112 @@ fn inline_maps_to_host_profile() {
     let absent = ffi_profile_to_host(Some(FfiCompileProfile::default())).unwrap();
     assert_eq!(absent.inline, None);
 }
+
+/// The FFI boundary preserves the whole-return wrapper role's EXACTNESS: an
+/// exact family, a completed non-wrapper proof, a typed degradation carrying its
+/// exact reason, and an undemanded binding all cross distinctly, and the JSON
+/// projection omits the two keys entirely when nothing was demanded.
+///
+/// Discriminating mutations: drop the role mapping in `component_meta.rs` and
+/// every arm reads absent; drop the reason mapping and the degradation collapses
+/// onto the bare `"unresolved"` discriminant; serialize `None` instead of
+/// skipping and the undemanded binding grows two null keys.
+#[test]
+fn binding_return_wrapper_role_crosses_the_ffi_boundary_with_exactness_intact() {
+    use verter_semantic::analysis::component_meta::{BindingAnalysis, BindingKindAnalysis};
+    use verter_semantic::analysis::types::ReactivityKind;
+
+    let binding =
+        |name: &str,
+         reactivity_kind: ReactivityKind,
+         return_wrapper_role: Option<verter_type_expr::ReactiveWrapperRole>| {
+            BindingAnalysis {
+                name: name.to_string(),
+                kind: BindingKindAnalysis::Const,
+                reactivity_kind,
+                return_wrapper_role,
+                type_annotation: None,
+                used_in_template: false,
+                used_in_style: false,
+            }
+        };
+    let mut analysis = empty_analysis();
+    analysis.bindings = vec![
+        binding(
+            "exact",
+            ReactivityKind::Ref,
+            Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        ),
+        binding(
+            "computed",
+            ReactivityKind::Computed,
+            Some(verter_type_expr::ReactiveWrapperRole::ComputedRef),
+        ),
+        binding(
+            "proven_non_wrapper",
+            ReactivityKind::MaybeRef,
+            Some(verter_type_expr::ReactiveWrapperRole::None),
+        ),
+        binding(
+            "degraded",
+            ReactivityKind::MaybeRef,
+            Some(verter_type_expr::ReactiveWrapperRole::Unresolved {
+                reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Cycle,
+            }),
+        ),
+        binding("undemanded", ReactivityKind::MaybeRef, None),
+    ];
+
+    let ffi = component_meta_parts_to_ffi(
+        analysis,
+        None,
+        host::meta_resolve::MaterializedComponentMetaTypeLanes::default(),
+    );
+
+    let roles = ffi
+        .bindings
+        .iter()
+        .map(|binding| {
+            (
+                binding.name.as_str(),
+                binding.return_wrapper_role.as_deref(),
+                binding.return_wrapper_unresolved_reason.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roles,
+        vec![
+            ("exact", Some("ref"), None),
+            ("computed", Some("computedRef"), None),
+            // The completed non-wrapper proof is PRESENT as `"none"` — never
+            // conflated with the undemanded absence below.
+            ("proven_non_wrapper", Some("none"), None),
+            // The degradation keeps its exact reason on its own field.
+            ("degraded", Some("unresolved"), Some("cycle")),
+            ("undemanded", None, None),
+        ],
+        "the role vocabulary must cross the FFI boundary without collapsing any class"
+    );
+
+    let json = serde_json::to_value(&ffi).expect("serialize");
+    assert_eq!(json["bindings"][0]["returnWrapperRole"], "ref");
+    assert!(
+        json["bindings"][0]
+            .get("returnWrapperUnresolvedReason")
+            .is_none(),
+        "an exact role must not emit a reason key"
+    );
+    assert_eq!(json["bindings"][3]["returnWrapperRole"], "unresolved");
+    assert_eq!(
+        json["bindings"][3]["returnWrapperUnresolvedReason"],
+        "cycle"
+    );
+    assert!(
+        json["bindings"][4].get("returnWrapperRole").is_none()
+            && json["bindings"][4]
+                .get("returnWrapperUnresolvedReason")
+                .is_none(),
+        "an undemanded binding must omit BOTH keys, never emit nulls"
+    );
+}

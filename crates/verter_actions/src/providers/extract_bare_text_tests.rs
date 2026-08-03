@@ -1047,6 +1047,7 @@ fn make_props_binding(name: &str, kind: AnalyzedBindingKind) -> AnalyzedBinding 
             callee_import_source: None,
             vue_api: Some(VueApiClassification::DefineProps),
             async_component_source: None,
+            binds_whole_call_result: false,
         }),
         span: Span::new(0, 0),
         used_in_script: false,

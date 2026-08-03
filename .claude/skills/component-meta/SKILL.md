@@ -127,6 +127,43 @@ is presentation detail only. Do not restore name/member filtering,
 display-root `Snippet` checks, or parse-candidate `$slots` synthesis. This role
 is analysis-side and does not extend the public component-contract wire shape.
 
+### Script-binding reactivity authority
+
+A published `BindingAnalysis` carries TWO fields for reactivity, with distinct
+jobs and a strict authority order.
+
+`reactivity_kind` (`ReactivityKind`) is the collapsed DECORATION vocabulary
+(`none`/`ref`/`computed`/`reactive`/`maybeRef`/`mutable`). It has no degraded
+arm, so it can never distinguish "proven a `Ref`" from "proven not a Vue
+wrapper" from "could not be resolved". Its FIRST authority is the analyzer's
+VALUE-space classification (`classify_reactivity_kind` plus, on the snapshot
+paths, `enrich_destructured_bindings`' body walk over
+`ComposableInfo.return_shape`).
+
+`return_wrapper_role` (`Option<ReactiveWrapperRole>`) is the EXACTNESS carrier
+and the second authority. The session resolves it on demand inside the
+component-meta extract — `host_manage/component_meta_extract.rs::
+resolved_binding_reactivity` → the shared
+`reactive_wrapper::wrapper_role_for_sole_value_signature_return` — for a binding
+that is STILL `MaybeRef`, binds a call's WHOLE result, and calls an imported
+composable. Absent means "not demanded" (never a claim about reactivity).
+
+The refinement is MONOTONE. An exact family maps onto the decoration kind
+(`Ref`/`ShallowRef`/`ModelRef` → `ref`; `ComputedRef` → `computed`;
+`Reactive`/`ShallowReactive` → `reactive`). `ReactiveWrapperRole::None` refines
+NOTHING — it proves only that the whole RETURN TYPE is not a Vue wrapper, and
+Vue's `reactive<T>()` returns `UnwrapNestedRefs<T>` rather than `Reactive<T>`, so
+it must never downgrade a value-space `reactive` fact to `none`. A typed
+`Unresolved { reason }` refines nothing and additionally refuses the whole
+component-meta result warm admission, while still publishing its own row and
+leaving every sibling row's exact answer intact.
+
+The role crosses BOTH FFI transports as a closed vocabulary
+(`FfiBindingMeta.return_wrapper_role` + `.return_wrapper_unresolved_reason`;
+proto `BindingMeta` fields 7/8). Route PROVENANCE does not cross — it embeds
+`TypeArgLocator`s and stays session-internal. Full mechanism, gates and
+acceptance: `/type-resolution` → Reactive-wrapper demand.
+
 Component-meta may use heuristics only as meaning-preserving performance gates. It must not use heuristics as semantic policy, result repair, or compatibility recovery.
 
 Forbidden patterns:

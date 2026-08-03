@@ -539,6 +539,10 @@ impl VerterHost {
             vue_api_calls: &resolved.snapshot.vue_api_calls,
             store_usages: &resolved.snapshot.store_usages,
             resolved_macros: &resolved_macros,
+            // The `base_meta` this input builds is consumed for its accepted
+            // props/events + fallthrough surface only; its bindings are
+            // discarded, so no whole-return role is demanded here.
+            resolved_binding_reactivity: &[],
             resolved_type_registry: &resolved_type_registry,
             evaluated_types: resolved.evaluated_types.as_ref(),
             file_path: canonical_id,

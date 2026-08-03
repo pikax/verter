@@ -1111,4 +1111,95 @@ describe("nativeComponentMetaToComponentMeta", () => {
     expect(registry?.get("NuxtLinkProps")).toBeDefined();
     expect(registry?.get("RouteLocationRaw")).toBeDefined();
   });
+
+  it("maps an exact, a proven-non-wrapper and a typed-degraded return wrapper role distinctly", () => {
+    const native = nativeMetaWithProp({
+      name: "value",
+      type: { kind: "primitive", name: "string" },
+      ...publishedTypeFields("string"),
+      required: true,
+      hasDefault: false,
+    });
+    native.bindings = [
+      {
+        name: "counter",
+        kind: "const",
+        reactivityKind: "ref",
+        returnWrapperRole: "ref",
+        usedInTemplate: true,
+        usedInStyle: false,
+      },
+      {
+        name: "plain",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        returnWrapperRole: "none",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+      {
+        name: "degraded",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        returnWrapperRole: "unresolved",
+        returnWrapperUnresolvedReason: "cycle",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+      {
+        name: "undemanded",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+    ];
+
+    const mapped = nativeComponentMetaToComponentMeta(native);
+
+    // EXACT — the role rides alongside the refined decoration kind.
+    expect(mapped.bindings).toEqual([
+      {
+        name: "counter",
+        kind: "const",
+        reactivityKind: "ref",
+        returnWrapperRole: "ref",
+        usedInTemplate: true,
+        usedInStyle: false,
+      },
+      // COMPLETED NON-WRAPPER PROOF — published as `"none"` while the
+      // decoration kind stays at the undecided `maybeRef`.
+      {
+        name: "plain",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        returnWrapperRole: "none",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+      // TYPED DEGRADATION — the exact reason survives the mapping and does NOT
+      // collapse onto the bare `"unresolved"` discriminant.
+      {
+        name: "degraded",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        returnWrapperRole: "unresolved",
+        returnWrapperUnresolvedReason: "cycle",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+      // UNDEMANDED — both keys stay ABSENT, never `undefined`-valued and never
+      // conflated with the `"none"` proof.
+      {
+        name: "undemanded",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+    ]);
+    expect("returnWrapperRole" in mapped.bindings[3]!).toBe(false);
+    expect("returnWrapperUnresolvedReason" in mapped.bindings[0]!).toBe(false);
+    expect(mapped.bindings[1]!.returnWrapperRole).not.toBe(mapped.bindings[3]!.returnWrapperRole);
+  });
 });

@@ -88,10 +88,6 @@ pub(super) fn wrapper_role_for_vue_export(name: &str) -> Option<ReactiveWrapperR
     }
 }
 
-/// `allow(dead_code)`: reached only from
-/// [`wrapper_role_for_value_signature_return`], whose in-tree callers are the
-/// demand-boundary acceptance tests — see that entry's note.
-#[allow(dead_code)]
 fn unresolved(
     reason: ReactiveWrapperUnresolvedReason,
 ) -> (ReactiveWrapperRole, Option<ReactiveWrapperImportProvenance>) {
@@ -125,14 +121,13 @@ fn unresolved(
 /// guessed role, and never `None` (which is reserved for a COMPLETED
 /// non-wrapper proof).
 ///
-/// `allow(dead_code)`: the shared demand entry is complete and exercised at its
-/// public demand boundary, but no production reader consumes a whole-return
-/// wrapper role yet. Publishing one is a distinct capability with its own
-/// authority question — a snapshot consumer must resolve from a view-bound,
-/// request-scoped context, per requested subject, and the context-free snapshot
-/// accessors that carry today's composable metadata satisfy neither — so it is
-/// owned separately rather than bolted onto this entry.
-#[allow(dead_code)]
+/// This ordinal-addressable form is reached in production through
+/// [`wrapper_role_for_sole_value_signature_return`], the consumer entry that
+/// first proves the declaration carries exactly one signature. The production
+/// consumer is component-meta's script-binding surface: the component-meta
+/// extract demands the role for a whole-value composable-call binding under its
+/// own request-bound `ResolverContext` and fact tracer, and publishes it on
+/// `BindingAnalysis.return_wrapper_role`.
 pub(crate) fn wrapper_role_for_value_signature_return(
     dispatch: &ProjectSemanticDispatch<'_>,
     canonical: &str,
@@ -201,10 +196,34 @@ pub(crate) fn wrapper_role_for_value_signature_return(
     }
 }
 
-/// The wrapper half of the shared identity-partial reason mapping.
+/// The role of a value declaration's SOLE function signature's authored return
+/// annotation — the CONSUMER entry.
 ///
-/// `allow(dead_code)`: same reachability as [`unresolved`].
-#[allow(dead_code)]
+/// Delegates to [`wrapper_role_for_value_signature_return`] at ordinal 0 once it
+/// has proven the declaration carries exactly one signature. That proof is a
+/// closed semantic rule, not a convenience: a declaration carrying MORE THAN one
+/// signature is a merged overload group, and which overload a call site selects
+/// requires argument-based overload resolution. Guessing ordinal 0 would publish
+/// one overload's wrapper family as if it were the call's, so this fails closed
+/// with `Unresolved { Unsupported }` instead. A declaration with NO signature at
+/// all is `AnalysisUnavailable`, at parity with the delegate.
+pub(crate) fn wrapper_role_for_sole_value_signature_return(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical: &str,
+    owner: TopLevelOwnerId,
+    symbol: &str,
+) -> (ReactiveWrapperRole, Option<ReactiveWrapperImportProvenance>) {
+    let Some(prepared) = dispatch.ctx.prepared_value_decl(canonical, owner, symbol) else {
+        return unresolved(ReactiveWrapperUnresolvedReason::AnalysisUnavailable);
+    };
+    match prepared.signatures.len() {
+        1 => wrapper_role_for_value_signature_return(dispatch, canonical, owner, symbol, 0),
+        0 => unresolved(ReactiveWrapperUnresolvedReason::AnalysisUnavailable),
+        _ => unresolved(ReactiveWrapperUnresolvedReason::Unsupported),
+    }
+}
+
+/// The wrapper half of the shared identity-partial reason mapping.
 fn wrapper_reason_from_identity(
     reason: PropCallableRoleUnresolvedReason,
 ) -> ReactiveWrapperUnresolvedReason {
@@ -295,13 +314,18 @@ mod tests {
     /// The envelope limit is settable only inside this module tree, which is why
     /// the host-boundary acceptance test
     /// (`return_wrapper_role_degrades_typed_and_is_never_warmed`) delegates this
-    /// arm here. The host entry installs no `RequestContext`, so
+    /// arm here: this test constructs its dispatch directly on the bare host, so
     /// `current_request_budget()` is `None` at the sole projection-op charge
-    /// site (`project_semantic_dispatch/mod.rs`) and `BudgetExceeded` is
-    /// structurally unreachable from that boundary at any route length — the
-    /// envelope class is proven through the connected-work limit instead. A
-    /// request-scoped consumer (T-A6b) must install a `RequestContext` for the
-    /// projection fuse to be armed on this path.
+    /// site (`project_semantic_dispatch/mod.rs`) and the envelope class is
+    /// proven through the connected-work limit rather than the projection fuse.
+    ///
+    /// The production consumer resolves under the component-meta request's
+    /// already-installed `RequestContext` instead — that the demand runs through
+    /// the request's own context, and not the bare host, is proven at the public
+    /// boundary by
+    /// `component_meta_binding_return_wrapper_role_demand_is_request_bound`
+    /// (a session overlay decides the role). No test asserts a projection-fuse
+    /// TRIP on the consumer path; the envelope class stays proven here.
     #[test]
     fn clamped_connected_work_envelope_degrades_the_return_role_typed() {
         let upsert = |host: &VerterHost, canonical: &str, source: &str| {

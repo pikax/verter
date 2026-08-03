@@ -32,7 +32,7 @@ use crate::verter::v1::{
     VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 6;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 7;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -144,6 +144,10 @@ fn component_meta_body_to_proto(
                 name_id: builder.string_id(&binding.name),
                 kind_id: builder.string_id(&binding.kind),
                 reactivity_kind_id: builder.string_id(&binding.reactivity_kind),
+                return_wrapper_role_id: builder
+                    .string_id_opt(binding.return_wrapper_role.as_deref()),
+                return_wrapper_unresolved_reason_id: builder
+                    .string_id_opt(binding.return_wrapper_unresolved_reason.as_deref()),
                 type_annotation_id: builder.string_id_opt(binding.type_annotation.as_deref()),
                 used_in_template: binding.used_in_template,
                 used_in_style: binding.used_in_style,
@@ -2233,6 +2237,98 @@ mod tests {
     };
     use verter_type_expr::TypeExpr;
 
+    /// A6-06 wire half: an EXACT whole-return wrapper role and a TYPED
+    /// degradation both survive the real encoder plus a prost decode, and stay
+    /// DISTINGUISHABLE from each other and from an undemanded binding.
+    ///
+    /// Discriminating mutations: omit the reason field (field 8) and the
+    /// degradation collapses onto the bare `"unresolved"` discriminant; intern
+    /// the role for an undemanded binding and the absent case reads as a role.
+    #[test]
+    fn binding_return_wrapper_role_survives_the_component_meta_proto_boundary() {
+        let mut meta = super::build_test_meta();
+        let binding =
+            |name: &str, role: Option<&str>, reason: Option<&str>| crate::types::FfiBindingMeta {
+                name: name.to_string(),
+                kind: "const".to_string(),
+                reactivity_kind: "maybeRef".to_string(),
+                return_wrapper_role: role.map(str::to_string),
+                return_wrapper_unresolved_reason: reason.map(str::to_string),
+                type_annotation: None,
+                used_in_template: false,
+                used_in_style: false,
+            };
+        meta.bindings = vec![
+            binding("exact", Some("ref"), None),
+            binding("degraded", Some("unresolved"), Some("cycle")),
+            binding("other_degraded", Some("unresolved"), Some("unsupported")),
+            binding("undemanded", None, None),
+        ];
+
+        let payload = super::component_meta_payload(&meta);
+        let encoded = payload.encode_to_vec();
+        let decoded =
+            ComponentMetaPayload::decode(encoded.as_slice()).expect("payload must round-trip");
+        let graph = decoded.type_graph.as_ref().expect("string table");
+        let s = |id: u32| -> Option<&str> {
+            if id == 0 {
+                None
+            } else {
+                Some(graph.strings[(id - 1) as usize].as_str())
+            }
+        };
+        let body = decoded.body.as_ref().expect("component-meta body");
+        assert_eq!(body.bindings.len(), 4, "every binding must encode");
+
+        let exact = &body.bindings[0];
+        assert_eq!(s(exact.return_wrapper_role_id), Some("ref"));
+        assert_eq!(
+            s(exact.return_wrapper_unresolved_reason_id),
+            None,
+            "an exact role carries no degradation reason"
+        );
+
+        let degraded = &body.bindings[1];
+        assert_eq!(s(degraded.return_wrapper_role_id), Some("unresolved"));
+        assert_eq!(
+            s(degraded.return_wrapper_unresolved_reason_id),
+            Some("cycle"),
+            "the exact typed reason must survive the wire, not collapse onto \
+             the bare `unresolved` discriminant"
+        );
+
+        let other = &body.bindings[2];
+        assert_eq!(s(other.return_wrapper_role_id), Some("unresolved"));
+        assert_ne!(
+            s(other.return_wrapper_unresolved_reason_id),
+            s(degraded.return_wrapper_unresolved_reason_id),
+            "two degradations with different reasons must stay distinguishable"
+        );
+
+        let undemanded = &body.bindings[3];
+        assert_eq!(
+            s(undemanded.return_wrapper_role_id),
+            None,
+            "an undemanded binding interns NO role — id 0 means absent, which is \
+             distinct from the `none` completed-non-wrapper proof"
+        );
+        assert_eq!(s(undemanded.return_wrapper_unresolved_reason_id), None);
+
+        // …and `none` (the completed non-wrapper proof) is distinct from absent.
+        meta.bindings = vec![binding("proven_non_wrapper", Some("none"), None)];
+        let decoded = ComponentMetaPayload::decode(
+            super::component_meta_payload(&meta)
+                .encode_to_vec()
+                .as_slice(),
+        )
+        .expect("payload must round-trip");
+        let graph = decoded.type_graph.as_ref().expect("string table");
+        let body = decoded.body.as_ref().expect("component-meta body");
+        let id = body.bindings[0].return_wrapper_role_id;
+        assert_ne!(id, 0, "`none` is a PRESENT role, never wire-absence");
+        assert_eq!(graph.strings[(id - 1) as usize].as_str(), "none");
+    }
+
     #[test]
     fn projection_limit_reasons_keep_distinct_wire_values() {
         assert_eq!(
@@ -2349,18 +2445,19 @@ mod tests {
         assert!(!proto.events[0].is_inline);
         assert!(proto.events[0].modifier_ids.is_empty());
 
-        // SCHEMA bump landed (2 → 3).
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 6);
+        // The wire schema version the encoder stamps and the TS decoder gate
+        // (`GRAPH_FORMAT_VERSION`, exact equality) demand in lockstep.
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 7);
     }
 
     #[test]
-    fn v6_full_body_uses_tag_26_and_roundtrips_supported_contract() {
+    fn v7_full_body_uses_tag_26_and_roundtrips_supported_contract() {
         let payload = build_test_payload();
-        assert_eq!(payload.schema_version, 6);
+        assert_eq!(payload.schema_version, 7);
         let encoded = payload.encode_to_vec();
         let decoded =
             ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
-        assert_eq!(decoded.schema_version, 6);
+        assert_eq!(decoded.schema_version, 7);
         let body = decoded.body.expect("component-meta body");
         let bytes = body.encode_to_vec();
         assert!(
@@ -2413,7 +2510,7 @@ mod tests {
     }
 
     #[test]
-    fn v6_full_body_roundtrips_typed_unsupported_contract() {
+    fn v7_full_body_roundtrips_typed_unsupported_contract() {
         let mut meta = super::build_test_meta();
         meta.component_public_contract = crate::types::FfiComponentContractAvailability::Unsupported {
             unsupported: crate::types::FfiComponentContractUnsupported {

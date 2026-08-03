@@ -17,6 +17,8 @@ import type {
   FallthroughSurface,
   FallthroughBranch,
   TypeExpansionMeta,
+  ReturnWrapperRole,
+  ReturnWrapperUnresolvedReason,
 } from "./types.js";
 import type { TypeDescriptor } from "@verter/type-ir";
 import type { NativeTypeExprLike } from "./type-expr-bridge.js";
@@ -488,6 +490,8 @@ export interface NativeBindingMeta {
   name: string;
   kind: "const" | "let" | "var" | "function" | "asyncFunction" | "class";
   reactivityKind: "none" | "ref" | "reactive" | "computed" | "maybeRef" | "mutable";
+  returnWrapperRole?: ReturnWrapperRole;
+  returnWrapperUnresolvedReason?: ReturnWrapperUnresolvedReason;
   typeAnnotation?: string;
   usedInTemplate: boolean;
   usedInStyle: boolean;
@@ -915,6 +919,12 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       name: binding.name,
       kind: binding.kind,
       reactivityKind: binding.reactivityKind,
+      ...(binding.returnWrapperRole !== undefined
+        ? { returnWrapperRole: binding.returnWrapperRole }
+        : {}),
+      ...(binding.returnWrapperUnresolvedReason !== undefined
+        ? { returnWrapperUnresolvedReason: binding.returnWrapperUnresolvedReason }
+        : {}),
       ...(binding.typeAnnotation !== undefined ? { typeAnnotation: binding.typeAnnotation } : {}),
       usedInTemplate: binding.usedInTemplate,
       usedInStyle: binding.usedInStyle,

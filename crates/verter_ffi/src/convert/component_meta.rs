@@ -24,7 +24,8 @@ use super::string_helpers::{
     expansion_stop_reason_to_string, jsdoc_to_ffi, macro_expansion_kind_to_string,
     macro_kind_to_string, materialized_publication_to_ffi, member_visibility_to_string,
     projection_mode_to_string, public_instance_completeness_to_string,
-    public_instance_member_kind_to_string, reactivity_kind_to_string,
+    public_instance_member_kind_to_string, reactive_wrapper_role_to_string,
+    reactive_wrapper_unresolved_reason_to_string, reactivity_kind_to_string,
     resolved_declaration_kind_to_string, resolved_jsdoc_tag_to_ffi, style_lang_to_string,
     vue_api_to_string,
 };
@@ -425,6 +426,14 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
                 name: binding.name,
                 kind: binding_kind_to_string(binding.kind),
                 reactivity_kind: reactivity_kind_to_string(binding.reactivity_kind),
+                return_wrapper_role: binding
+                    .return_wrapper_role
+                    .as_ref()
+                    .map(reactive_wrapper_role_to_string),
+                return_wrapper_unresolved_reason: binding
+                    .return_wrapper_role
+                    .as_ref()
+                    .and_then(reactive_wrapper_unresolved_reason_to_string),
                 type_annotation: binding.type_annotation,
                 used_in_template: binding.used_in_template,
                 used_in_style: binding.used_in_style,

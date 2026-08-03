@@ -223,6 +223,23 @@ pub struct ResolvedExposeInput {
     pub type_source: SourcePosition,
 }
 
+/// One host-resolved script binding's whole-return reactive-wrapper role.
+///
+/// The session resolves the role of a composable call's AUTHORED return
+/// annotation on demand, through the one shared type-resolution engine, and
+/// hands the closed typed answer to the extraction. `binding_index` addresses
+/// [`ComponentMetaInput::bindings`] positionally; a binding with no row was
+/// never demanded (a distinct state from a demanded-and-degraded row, which
+/// carries `ReactiveWrapperRole::Unresolved { reason }`).
+#[derive(Debug, Clone)]
+pub struct ResolvedBindingReactivityInput {
+    /// Index into [`ComponentMetaInput::bindings`].
+    pub binding_index: usize,
+    /// The resolved whole-return wrapper role — exact, a completed
+    /// non-wrapper proof, or a typed degradation.
+    pub return_wrapper_role: verter_type_expr::ReactiveWrapperRole,
+}
+
 /// Input view for component-meta extraction.
 ///
 /// All fields reference existing `verter_semantic::analysis` types.
@@ -262,6 +279,9 @@ pub struct ComponentMetaInput<'a> {
     pub vue_api_calls: &'a [VueApiCallSite],
     pub store_usages: &'a [StoreUsage],
     pub resolved_macros: &'a [ResolvedMacroInput],
+    /// Session-resolved whole-return wrapper roles for the composable-call
+    /// bindings the host demanded. Empty when nothing was demanded.
+    pub resolved_binding_reactivity: &'a [ResolvedBindingReactivityInput],
     pub resolved_type_registry: &'a [ResolvedTypeAnalysis],
     pub evaluated_types: Option<&'a crate::analysis::type_expand::ExpandedComponentTypes>,
     pub file_path: &'a str,
@@ -654,6 +674,26 @@ pub struct BindingAnalysis {
     pub name: String,
     pub kind: BindingKindAnalysis,
     pub reactivity_kind: crate::analysis::types::ReactivityKind,
+    /// The EXACTNESS carrier for a composable binding's whole-return type.
+    ///
+    /// [`Self::reactivity_kind`] is a collapsed decoration vocabulary with no
+    /// degraded arm, so it cannot distinguish "proven `Ref`" from "proven not a
+    /// Vue wrapper" from "could not be resolved, and here is why". This field
+    /// carries that distinction:
+    ///
+    /// - `None` — no whole-return role was demanded for this binding (it is not
+    ///   a whole-value composable call, or the value-space walk already decided
+    ///   it). NOT a claim about reactivity.
+    /// - `Some(Ref | ShallowRef | ComputedRef | ModelRef | Reactive |
+    ///   ShallowReactive)` — the exact package-backed `vue` wrapper family the
+    ///   callee's authored return annotation resolves to.
+    /// - `Some(ReactiveWrapperRole::None)` — a COMPLETED proof that the return
+    ///   type is not a Vue wrapper. This is not a proof of non-reactivity:
+    ///   `reactive()` returns `UnwrapNestedRefs<T>`, not `Reactive<T>`, so it
+    ///   never downgrades [`Self::reactivity_kind`].
+    /// - `Some(ReactiveWrapperRole::Unresolved { reason })` — a typed
+    ///   degradation with its exact reason.
+    pub return_wrapper_role: Option<verter_type_expr::ReactiveWrapperRole>,
     pub type_annotation: Option<String>,
     pub used_in_template: bool,
     pub used_in_style: bool,
@@ -1622,7 +1662,11 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
     let components = extract_components(input.template);
     let template_refs = extract_template_refs(input.template);
     let imports = extract_imports(input.imports);
-    let bindings = extract_bindings(input.bindings, input.template);
+    let bindings = extract_bindings(
+        input.bindings,
+        input.template,
+        input.resolved_binding_reactivity,
+    );
     let vue_api_calls = extract_vue_api_calls(input.vue_api_calls);
     let styles = extract_styles(input.styles);
 
@@ -3194,9 +3238,39 @@ fn extract_imports(imports: &[AnalyzedImport]) -> Vec<ImportAnalysis> {
         .collect()
 }
 
+/// Refine a binding's collapsed decoration kind from an EXACT resolved
+/// whole-return wrapper role — MONOTONE: it never downgrades a value-space
+/// classification.
+///
+/// - An exact wrapper family maps onto its decoration kind.
+/// - [`ReactiveWrapperRole::None`] is a proof about the WRAPPER FAMILY of the
+///   whole return type, not a proof of non-reactivity: Vue's `reactive<T>()`
+///   returns `UnwrapNestedRefs<T>`, so a non-wrapper return type does not
+///   contradict a value-space `reactive` fact. It refines nothing.
+/// - A typed degradation refines nothing; the reason is published on the
+///   binding's `return_wrapper_role` sidecar instead.
+fn refined_reactivity_kind(
+    current: crate::analysis::types::ReactivityKind,
+    role: &verter_type_expr::ReactiveWrapperRole,
+) -> crate::analysis::types::ReactivityKind {
+    use crate::analysis::types::ReactivityKind;
+    use verter_type_expr::ReactiveWrapperRole;
+    match role {
+        ReactiveWrapperRole::Ref
+        | ReactiveWrapperRole::ShallowRef
+        | ReactiveWrapperRole::ModelRef => ReactivityKind::Ref,
+        ReactiveWrapperRole::ComputedRef => ReactivityKind::Computed,
+        ReactiveWrapperRole::Reactive | ReactiveWrapperRole::ShallowReactive => {
+            ReactivityKind::Reactive
+        }
+        ReactiveWrapperRole::None | ReactiveWrapperRole::Unresolved { .. } => current,
+    }
+}
+
 fn extract_bindings(
     bindings: &[AnalyzedBinding],
     template: Option<&crate::analysis::template::TemplateAnalysisSnapshot>,
+    resolved_binding_reactivity: &[ResolvedBindingReactivityInput],
 ) -> Vec<BindingAnalysis> {
     let template_bindings: std::collections::HashSet<&str> = template
         .map(|template| {
@@ -3207,10 +3281,16 @@ fn extract_bindings(
                 .collect()
         })
         .unwrap_or_default();
+    let resolved_roles: rustc_hash::FxHashMap<usize, &verter_type_expr::ReactiveWrapperRole> =
+        resolved_binding_reactivity
+            .iter()
+            .map(|row| (row.binding_index, &row.return_wrapper_role))
+            .collect();
 
     bindings
         .iter()
-        .map(|binding| BindingAnalysis {
+        .enumerate()
+        .map(|(binding_index, binding)| BindingAnalysis {
             name: binding.name.clone(),
             kind: match binding.kind {
                 crate::analysis::types::AnalyzedBindingKind::Const => BindingKindAnalysis::Const,
@@ -3224,7 +3304,13 @@ fn extract_bindings(
                 }
                 crate::analysis::types::AnalyzedBindingKind::Class => BindingKindAnalysis::Class,
             },
-            reactivity_kind: binding.reactivity_kind,
+            reactivity_kind: match resolved_roles.get(&binding_index) {
+                Some(role) => refined_reactivity_kind(binding.reactivity_kind, role),
+                None => binding.reactivity_kind,
+            },
+            return_wrapper_role: resolved_roles
+                .get(&binding_index)
+                .map(|role| (*role).clone()),
             type_annotation: binding.type_annotation.clone(),
             used_in_template: template_bindings.contains(binding.name.as_str()),
             used_in_style: binding.used_in_style,

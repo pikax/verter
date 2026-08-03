@@ -692,6 +692,11 @@ fn extract_component_meta_from_resolved_with_evaluated(
         canonical_id,
         resolved.snapshot.macros.as_ref(),
     );
+    let resolved_binding_reactivity =
+        crate::host_manage::component_meta_extract::resolved_binding_reactivity(
+            ctx,
+            &resolved.snapshot,
+        );
     let resolved_type_registry =
         resolver_component_meta_type_registry(&resolved.resolved_type_registry);
     let input = verter_semantic::analysis::component_meta::ComponentMetaInput {
@@ -707,6 +712,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
         vue_api_calls: &resolved.snapshot.vue_api_calls,
         store_usages: &resolved.snapshot.store_usages,
         resolved_macros: &resolved_macros,
+        resolved_binding_reactivity: &resolved_binding_reactivity,
         resolved_type_registry: &resolved_type_registry,
         evaluated_types,
         file_path: canonical_id,

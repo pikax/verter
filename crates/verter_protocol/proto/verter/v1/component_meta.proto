@@ -618,6 +618,15 @@ message BindingMeta {
   uint32 type_annotation_id = 4;
   bool used_in_template = 5;
   bool used_in_style = 6;
+  // The demand-resolved whole-return reactive-wrapper role of a composable
+  // binding, interned from a CLOSED vocabulary. Id 0 means the role was never
+  // demanded for this binding — distinct from the "none" discriminant, which is
+  // a completed non-wrapper proof.
+  uint32 return_wrapper_role_id = 7;
+  // The exact typed degradation reason, present only alongside the
+  // "unresolved" role. Carried separately so a reason can never collapse onto
+  // the bare role discriminant.
+  uint32 return_wrapper_unresolved_reason_id = 8;
 }
 
 message VueApiCallMeta {

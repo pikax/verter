@@ -3052,6 +3052,7 @@ import Child from './Child.vue'
             vue_api_calls: &resolved.snapshot.vue_api_calls,
             store_usages: &resolved.snapshot.store_usages,
             resolved_macros: &[],
+            resolved_binding_reactivity: &[],
             resolved_type_registry: &[],
             evaluated_types: None,
             file_path: "/src/App.vue",
@@ -7490,6 +7491,11 @@ export interface Reactive<T> { __reactive: T }
 export interface ShallowReactive<T> { __shallowReactive: T }
 "#;
 
+/// Demand one exported value's whole-return wrapper role on the SAME
+/// request-bound rail the production consumer uses: an installed
+/// `RequestContext` (so the projection fuse is armed and
+/// `ProjectSemanticDispatch::new` sees `is_request_bound() == true` rather than
+/// counting a bare construction) over a cold-seed `HostResolverContext`.
 fn return_wrapper_role_for(
     host: &VerterHost,
     canonical: &str,
@@ -7498,11 +7504,19 @@ fn return_wrapper_role_for(
     verter_type_expr::ReactiveWrapperRole,
     Option<verter_type_expr::ReactiveWrapperImportProvenance>,
 ) {
-    host.value_signature_return_wrapper_role(
+    let _ctx_guard =
+        host.install_request_budget_context_if_none(host.next_request_id(), canonical, false);
+    let view = crate::session_view::HostViewRef::new(host);
+    let fixed = host.capture_batch_fixed_view(&view);
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::from_cold_seed(host, fixed.cold_seed(), overlay);
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
+    crate::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return(
+        &dispatch,
         canonical,
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         symbol,
-        0,
     )
 }
 
@@ -8001,13 +8015,10 @@ fn return_wrapper_role_degrades_typed_and_is_never_warmed() {
     // The connected-work / projection ENVELOPE arm is proven in the demand
     // entry's own module, where the envelope limit is settable: see
     // `project_semantic_dispatch::reactive_wrapper::tests::
-    // clamped_connected_work_envelope_degrades_the_return_role_typed`. This
-    // host entry installs no `RequestContext`, so `current_request_budget()` is
-    // `None` at the sole projection-op charge site and `BudgetExceeded` is
-    // structurally unreachable from this boundary at any route length — faking
-    // one here would assert a state the boundary cannot actually reach. A
-    // request-scoped consumer (T-A6b) must install a `RequestContext` for the
-    // projection fuse to be armed.
+    // clamped_connected_work_envelope_degrades_the_return_role_typed`. Faking a
+    // trip here would assert a state this fixture cannot actually reach — the
+    // routes are one hop long and the armed projection budget is nowhere near
+    // exhausted, so the envelope class is proven where it is reachable.
 
     // Control: the degradations are DISTINCT typed values — an implementation
     // that collapsed them onto one reason fails here.
@@ -8277,6 +8288,642 @@ fn signature_return_head_is_minted_without_extra_lowering_or_resolution() {
             .get_any("/workspace/node_modules/vue/index.d.ts")
             .is_some(),
         "control: the unindexed probe must be capable of detecting an index"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A6-06 — the component-meta consumer of the whole-return wrapper role
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A BODILESS composable declaration. This is the capability, not a convenience:
+/// the value-space authority (`build_composable_info` → `detect_composable_return
+/// _shape`) is gated on a function BODY, so a declaration with none can never be
+/// classified by it and today publishes the undecided `MaybeRef`. Only the
+/// AUTHORED RETURN TYPE can answer it, and only the shared type resolver can
+/// prove that `Ref` is `vue`'s.
+const A6_BODILESS_COMPOSABLE_DTS: &str = r#"import type { Ref, ComputedRef } from 'vue'
+export declare function useCounter(): Ref<number>
+export declare function useTotal(): ComputedRef<number>
+export declare function usePlain(): number
+export declare function useOverloaded(): Ref<number>
+export declare function useOverloaded(flag: boolean): Ref<string>
+"#;
+
+/// Wire the owner SFC's `./composables` edge plus the composable file's own
+/// `vue` edge — the two-hop route every A6-06 fixture resolves through.
+fn a6_wire_composable_host(host: &VerterHost, owner: &str, composables: &str, dts: &str) {
+    upsert_non_sfc(
+        host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    upsert_non_sfc(host, composables, dts);
+    host.set_import_dependencies(
+        composables,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    host.set_import_dependencies(owner, vec![exact_dependency("./composables", composables)]);
+}
+
+fn a6_binding<'a>(
+    meta: &'a verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    name: &str,
+) -> &'a verter_semantic::analysis::component_meta::BindingAnalysis {
+    meta.bindings
+        .iter()
+        .find(|binding| binding.name == name)
+        .unwrap_or_else(|| {
+            panic!(
+                "binding `{name}` must be published; got {:?}",
+                meta.bindings
+                    .iter()
+                    .map(|binding| binding.name.as_str())
+                    .collect::<Vec<_>>()
+            )
+        })
+}
+
+/// A6-06 — the named public-boundary acceptance test. The component-meta
+/// consumer publishes the demand-resolved whole-return wrapper role on its
+/// binding surface with its EXACTNESS intact, across three classes on one
+/// fixture: exact (from a BODILESS declaration the value path cannot reach), a
+/// completed non-wrapper proof, and a typed degradation. Warm re-reads are
+/// stable.
+///
+/// Discriminating mutations: making the demand return no rows leaves every role
+/// `None` and every kind `MaybeRef`; mapping `ReactiveWrapperRole::None` onto
+/// `ReactivityKind::None` flips the non-wrapper arm; collapsing the degradation
+/// reasons flips the overload arm.
+#[test]
+fn component_meta_binding_return_wrapper_role_is_exact_and_degrades_typed() {
+    let host = make_host();
+    let owner = "/workspace/src/App.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ counter }}{{ total }}{{ plain }}{{ ambiguous }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useCounter, useTotal, usePlain, useOverloaded } from './composables'\n\
+         const counter = useCounter()\n\
+         const total = useTotal()\n\
+         const plain = usePlain()\n\
+         const ambiguous = useOverloaded()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        A6_BODILESS_COMPOSABLE_DTS,
+    );
+
+    let meta = host
+        .get_component_meta(owner)
+        .expect("component meta must resolve");
+
+    // EXACT — a bodiless `Ref<number>` return decides the binding's reactivity,
+    // where the value-space walk publishes only `MaybeRef`.
+    let counter = a6_binding(&meta, "counter");
+    assert_eq!(
+        counter.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "the bodiless composable's authored return type must publish the exact role"
+    );
+    assert_eq!(
+        counter.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Ref,
+        "an exact role must REFINE the collapsed decoration kind"
+    );
+
+    // EXACT, second family — the vocabulary is not collapsed onto `Ref`.
+    let total = a6_binding(&meta, "total");
+    assert_eq!(
+        total.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::ComputedRef)
+    );
+    assert_eq!(
+        total.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Computed
+    );
+    assert_ne!(
+        total.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Ref,
+        "ComputedRef must not collapse onto the ref decoration"
+    );
+
+    // COMPLETED NON-WRAPPER PROOF — published as such, and it does NOT downgrade
+    // the value-space classification (see the monotonicity test for why).
+    let plain = a6_binding(&meta, "plain");
+    assert_eq!(
+        plain.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::None),
+        "a resolved non-wrapper return type is a COMPLETE proof, not a degradation"
+    );
+    assert_eq!(
+        plain.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        "a proven non-wrapper return type must NOT downgrade the reactivity kind"
+    );
+
+    // TYPED DEGRADATION — an overload group cannot be resolved without
+    // argument-based overload resolution, so it fails closed with its exact
+    // reason rather than guessing the first overload's family.
+    let ambiguous = a6_binding(&meta, "ambiguous");
+    assert_eq!(
+        ambiguous.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Unsupported
+        }),
+        "an overload group must degrade typed, never guess ordinal 0"
+    );
+    assert_eq!(
+        ambiguous.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        "a degradation must claim no reactivity"
+    );
+
+    // The four classes are mutually distinguishable on the published surface —
+    // an implementation that collapsed any pair fails here.
+    let published = [
+        counter.return_wrapper_role.clone(),
+        total.return_wrapper_role.clone(),
+        plain.return_wrapper_role.clone(),
+        ambiguous.return_wrapper_role.clone(),
+    ];
+    for index in 1..published.len() {
+        assert!(
+            !published[..index].contains(&published[index]),
+            "published role {:?} must not alias an earlier class",
+            published[index]
+        );
+    }
+
+    // Warm-hit stability: a second read serves the same exact + degraded roles.
+    let warm = host
+        .get_component_meta(owner)
+        .expect("warm component meta must resolve");
+    for name in ["counter", "total", "plain", "ambiguous"] {
+        assert_eq!(
+            a6_binding(&warm, name).return_wrapper_role,
+            a6_binding(&meta, name).return_wrapper_role,
+            "the second read must serve `{name}`'s role unchanged"
+        );
+        assert_eq!(
+            a6_binding(&warm, name).reactivity_kind,
+            a6_binding(&meta, name).reactivity_kind,
+            "the second read must serve `{name}`'s refined kind unchanged"
+        );
+    }
+}
+
+/// MONOTONE REFINEMENT — `ReactiveWrapperRole::None` is a proof about the
+/// WRAPPER FAMILY of the whole return type, never a proof of non-reactivity.
+/// Vue's `reactive<T>(t: T): UnwrapNestedRefs<T>` means a composable that
+/// returns a `reactive()` object has a return type that is NOT `Reactive<T>` —
+/// so a `None` role must not downgrade a value-space classification.
+///
+/// Discriminating mutation: map `None` onto `ReactivityKind::None` in
+/// `refined_reactivity_kind` and the `reactive`-returning binding loses its
+/// value-space answer.
+#[test]
+fn component_meta_binding_role_none_never_downgrades_value_space_reactivity() {
+    let host = make_host();
+    let owner = "/workspace/src/Monotone.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ state }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useStore } from './composables'\n\
+         const state = useStore()\n\
+         </script>\n",
+    );
+    // The composable's authored return type is a PLAIN interface — a resolvable,
+    // proven non-wrapper — exactly the shape `reactive()` produces in real Vue.
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        "export interface StoreState { count: number }\n\
+         export declare function useStore(): StoreState\n",
+    );
+
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let state = a6_binding(&meta, "state");
+    assert_eq!(
+        state.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::None),
+        "a resolvable plain return type is a completed non-wrapper proof"
+    );
+    assert_eq!(
+        state.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        "the value-space classification must survive a `None` role untouched"
+    );
+    assert_ne!(
+        state.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::None,
+        "`ReactiveWrapperRole::None` must NEVER downgrade to `ReactivityKind::None`"
+    );
+}
+
+/// PRECISION — a whole-return role answers a different question from a
+/// destructured member's reactivity, so it must never decide one. `const { count
+/// } = useCounter()` publishes NO role and keeps `MaybeRef`, while the
+/// whole-value form on the SAME composable in the SAME file resolves exactly —
+/// the control that proves the gate discriminates rather than disabling demand.
+///
+/// Discriminating mutation: drop the `binds_whole_call_result` gate (or stop
+/// clearing the flag in `extract_destructured_bindings`) and `count` becomes
+/// `Ref`.
+#[test]
+fn component_meta_destructured_member_is_not_decided_by_the_whole_return_role() {
+    let host = make_host();
+    let owner = "/workspace/src/Destructured.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ count }}{{ whole }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useCounter } from './composables'\n\
+         const { count } = useCounter()\n\
+         const whole = useCounter()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        A6_BODILESS_COMPOSABLE_DTS,
+    );
+
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let count = a6_binding(&meta, "count");
+    assert_eq!(
+        count.return_wrapper_role, None,
+        "a destructured member must never be demanded a WHOLE-return role"
+    );
+    assert_eq!(
+        count.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        "a destructured member keeps its value-space classification"
+    );
+    // Control on the same fixture: the whole-value form DOES resolve, so the
+    // gate is discriminating and not merely switching the demand off.
+    let whole = a6_binding(&meta, "whole");
+    assert_eq!(
+        whole.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "control: the whole-value binding on the same composable resolves exactly"
+    );
+}
+
+/// FAIL-CLOSED NEGATIVES — a wrapper-SHAPED but non-Vue return head publishes no
+/// reactive kind from the type path. A local `interface Ref<T>` and a `Ref` from
+/// a non-`vue` package are both completed non-wrapper proofs, never `Ref`.
+///
+/// Discriminating mutation: drop the `workspace_is_package_backed` half of
+/// `wrapper_candidate_for_route`'s gate, or accept terminal-name equality, and
+/// the local fake classifies as `Ref`.
+#[test]
+fn component_meta_binding_role_rejects_local_and_foreign_wrapper_fakes() {
+    // (a) a LOCAL `interface Ref<T>` in the composable file itself.
+    let host = make_host();
+    let owner = "/workspace/src/LocalFake.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ fake }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useFake } from './composables'\n\
+         const fake = useFake()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        "export interface Ref<T> { value: T }\n\
+         export declare function useFake(): Ref<number>\n",
+    );
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let fake = a6_binding(&meta, "fake");
+    assert_eq!(
+        fake.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::None),
+        "a LOCAL wrapper-shaped return type is proven non-Vue, not guessed"
+    );
+    assert_ne!(
+        fake.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Ref,
+        "a local fake `Ref` must publish NO reactive kind from the type path"
+    );
+
+    // (b) a `Ref` from a DIFFERENT package.
+    let host = make_host();
+    let owner = "/workspace/src/ForeignFake.vue";
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/not-vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ foreign }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useForeign } from './composables'\n\
+         const foreign = useForeign()\n\
+         </script>\n",
+    );
+    let composables = "/workspace/src/composables.d.ts";
+    upsert_non_sfc(
+        &host,
+        composables,
+        "import type { Ref } from 'not-vue'\n\
+         export declare function useForeign(): Ref<number>\n",
+    );
+    host.set_import_dependencies(
+        composables,
+        vec![exact_dependency(
+            "not-vue",
+            "/workspace/node_modules/not-vue/index.d.ts",
+        )],
+    );
+    host.set_import_dependencies(owner, vec![exact_dependency("./composables", composables)]);
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let foreign = a6_binding(&meta, "foreign");
+    assert_eq!(
+        foreign.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::None),
+        "a foreign-package `Ref` is a completed non-wrapper proof"
+    );
+    assert_ne!(
+        foreign.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Ref
+    );
+}
+
+/// A6-06 degradation rail — a typed `Unresolved` role refuses the WHOLE
+/// component-meta result warm admission (the no-poison invariant), and yet does
+/// NOT drop the row: the degraded role is still published per-binding, and the
+/// exact sibling binding in the same file still publishes its exact role.
+///
+/// Discriminating mutations: drop the `fold_result_completeness` call and the
+/// degraded result is admitted; make a degradation abort the row (or the whole
+/// meta) and the sibling's exact role disappears.
+#[test]
+fn component_meta_binding_role_degradation_refuses_warm_without_dropping_rows() {
+    let host = make_host();
+    let owner = "/workspace/src/Degraded.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ ambiguous }}{{ counter }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useOverloaded, useCounter } from './composables'\n\
+         const ambiguous = useOverloaded()\n\
+         const counter = useCounter()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        A6_BODILESS_COMPOSABLE_DTS,
+    );
+
+    let results_before = host.project_type_store().component_meta_results().len();
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let results_after = host.project_type_store().component_meta_results().len();
+
+    // The degraded row is PUBLISHED — a degradation is a per-row fail-closed
+    // answer, not a dropped row.
+    assert_eq!(
+        a6_binding(&meta, "ambiguous").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Unsupported
+        })
+    );
+    // …and one binding's degradation must NOT cost the whole meta its other
+    // answers: the exact sibling still resolves exactly.
+    assert_eq!(
+        a6_binding(&meta, "counter").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "one row's degradation must not suppress a sibling row's exact role"
+    );
+    // …nor its declared surface: the meta is a real, usable result.
+    assert_eq!(
+        meta.bindings.len(),
+        2,
+        "both bindings must be published despite the degradation"
+    );
+
+    // The no-poison rail: the degraded result is refused warm admission.
+    assert_eq!(
+        results_after, results_before,
+        "a typed whole-return degradation must refuse the component-meta result \
+         warm admission (before={results_before} after={results_after})"
+    );
+}
+
+/// ZERO REGRESSION + ZERO COST — a binding the value-space walk already decided
+/// is never demanded, and a non-call binding is never demanded at all. The
+/// value-space classification authority is untouched.
+///
+/// The fixture is deliberately RESOLVABLE: `vue` declares `ref<T>(): Ref<T>`, so
+/// dropping the `MaybeRef` gate would genuinely resolve a role for `decided` and
+/// publish it — the assertion below then goes RED. A vue surface without that
+/// declaration would make the test pass either way (the demand would find no
+/// prepared declaration), i.e. would not discriminate.
+#[test]
+fn component_meta_binding_role_is_not_demanded_when_value_space_decided() {
+    let host = make_host();
+    let owner = "/workspace/src/NoDemand.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ decided }}{{ literal }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { ref } from 'vue'\n\
+         const decided = ref(0)\n\
+         const literal = 42\n\
+         </script>\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n\
+         export declare function ref<T>(value: T): Ref<T>\n",
+    );
+    host.set_import_dependencies(
+        owner,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let decided = a6_binding(&meta, "decided");
+    assert_eq!(
+        decided.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Ref,
+        "the value-space `ref()` classification is unchanged"
+    );
+    assert_eq!(
+        decided.return_wrapper_role, None,
+        "a value-space-decided binding must never be demanded a whole-return role"
+    );
+    assert_eq!(
+        a6_binding(&meta, "literal").return_wrapper_role,
+        None,
+        "a non-call binding must never be demanded"
+    );
+}
+
+/// The FIXED MECHANISM, proven by an OBSERVABLE consequence rather than a
+/// counter: the demand resolves through the caller's request-bound
+/// `ResolverContext`, so a SESSION OVERLAY is visible to it.
+///
+/// A session overlay rewrites the composable's authored return type from
+/// `Ref<number>` to `ComputedRef<number>` WITHOUT touching the shared base. A
+/// demand routed through the request's own context reads the overlay and
+/// publishes `ComputedRef`; a demand routed through the bare `&VerterHost` (the
+/// deleted entry's shape) reads BASE content and publishes `Ref`. The base host
+/// is asserted unchanged afterwards, so the overlay cannot have leaked.
+///
+/// `bare_engine_constructions` is deliberately NOT the instrument here: the
+/// counter is snapshotted from the finalising thread's request context and does
+/// not observe this demand's dispatch construction at all, so asserting on it
+/// would be a non-discriminating assertion dressed as a mechanism proof.
+///
+/// Discriminating mutation: build the demand's dispatch from
+/// `ctx.host_for_fact_tracer_install()` instead of `ctx` and the overlay answer
+/// reverts to the base `Ref`.
+#[test]
+fn component_meta_binding_return_wrapper_role_demand_is_request_bound() {
+    let meta_host = crate::component_meta_host::ComponentMetaHost::new_standalone(HostConfig {
+        analysis_level: AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    let host = meta_host.host();
+    let owner = "/workspace/src/Overlaid.vue";
+    let composables = "/workspace/src/composables.d.ts";
+    upsert_vue(
+        host,
+        owner,
+        "<template><div>{{ counter }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useCounter } from './composables'\n\
+         const counter = useCounter()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(host, owner, composables, A6_BODILESS_COMPOSABLE_DTS);
+
+    // Baseline on the shared base: the authored `Ref<number>` return.
+    let base = host.get_component_meta(owner).expect("base component meta");
+    assert_eq!(
+        a6_binding(&base, "counter").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "baseline: the base composable returns Ref<number>"
+    );
+
+    // A session overlay rewrites ONLY the composable's return annotation.
+    let session = meta_host.open_session_batch().expect("session opens");
+    session
+        .upsert(
+            composables,
+            "import type { Ref, ComputedRef } from 'vue'\n\
+             export declare function useCounter(): ComputedRef<number>\n\
+             export declare function unused(): Ref<number>\n"
+                .to_string(),
+        )
+        .expect("overlay upsert");
+    let overlaid = session
+        .get_component_meta(owner)
+        .expect("session component meta")
+        .expect("session meta present");
+    assert_eq!(
+        a6_binding(&overlaid, "counter").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::ComputedRef),
+        "the demand must resolve through the REQUEST's context, so the session \
+         overlay decides the role — a bare-host dispatch would answer from the \
+         shared base and still report Ref"
+    );
+    assert_eq!(
+        a6_binding(&overlaid, "counter").reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Computed,
+        "and the refined decoration kind follows the overlay too"
+    );
+
+    // The overlay must not have leaked into the shared base.
+    drop(session);
+    let base_again = host.get_component_meta(owner).expect("base component meta");
+    assert_eq!(
+        a6_binding(&base_again, "counter").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "the session overlay must never poison the shared base answer"
+    );
+}
+
+/// FOOTPRINT — the demand opens only its own subject's route. An unrelated
+/// wrapper-shaped cold module in the workspace is never read, and the demand's
+/// declaration-lowering footprint does not scale with the composable file's
+/// unrelated declarations.
+///
+/// Discriminating mutation: demand for every binding regardless of the gates, or
+/// reintroduce an owner-wide scan, and the cold decoy is read.
+#[test]
+fn component_meta_binding_role_demand_does_not_read_unrelated_cold_module() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    ws.inject_file(
+        "/workspace/src/cold.ts",
+        "export interface Ref<T> { value: T }\nexport declare function useCold(): Ref<number>\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    let owner = "/workspace/src/Footprint.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ counter }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useCounter } from './composables'\n\
+         const counter = useCounter()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        A6_BODILESS_COMPOSABLE_DTS,
+    );
+
+    ws.reset_reads();
+    let meta = host.get_component_meta(owner).expect("component meta");
+    assert_eq!(
+        a6_binding(&meta, "counter").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "the requested subject must still resolve exactly"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/src/cold.ts"),
+        0,
+        "the demand must not traverse an unrelated wrapper-shaped cold module"
+    );
+    // Positive control: the probe itself CAN see a read of that path, so the
+    // zero above is a real absence and not an inert counter.
+    let _ = host.ensure_indexed_ready("/workspace/src/cold.ts");
+    assert!(
+        ws.read_count("/workspace/src/cold.ts") > 0,
+        "control: the read probe must be capable of observing this path"
     );
 }
 

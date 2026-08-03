@@ -70,6 +70,7 @@ fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
     ComponentMetaInput {
         macros,
         resolved_macros: &[],
+        resolved_binding_reactivity: &[],
         resolved_type_registry: &[],
         bindings: &[],
         imports: &[],
@@ -3445,6 +3446,7 @@ fn options_api_props_used_when_no_composition_props() {
     let input = ComponentMetaInput {
         macros: &[],
         resolved_macros: &[],
+        resolved_binding_reactivity: &[],
         resolved_type_registry: &[],
         bindings: &[],
         imports: &[],
@@ -3495,6 +3497,7 @@ fn options_api_prop_without_locator_does_not_fabricate_authored_evidence() {
     let input = ComponentMetaInput {
         macros: &[],
         resolved_macros: &[],
+        resolved_binding_reactivity: &[],
         resolved_type_registry: &[],
         bindings: &[],
         imports: &[],

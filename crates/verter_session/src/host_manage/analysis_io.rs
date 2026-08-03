@@ -114,43 +114,6 @@ impl VerterHost {
         )
     }
 
-    /// The reactive-wrapper role of one exported value's AUTHORED function
-    /// return annotation, resolved on demand through the shared route +
-    /// terminal-identity machinery.
-    ///
-    /// Host sibling of [`Self::build_template_class_semantic_facts`]: it selects
-    /// the base resolver context and delegates; the demand entry itself owns the
-    /// composition. Serving is a pure read — this entry publishes no fact set,
-    /// records no cache entry, and stamps no revision. The reads it performs are
-    /// observed by whatever fact tracer the CALLER installed, so a future
-    /// consumer that caches its own result invalidates on every dependency the
-    /// route walk touched.
-    ///
-    /// `allow(dead_code)`: see
-    /// [`crate::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_value_signature_return`]
-    /// — the capability is complete and proven at this boundary; no production
-    /// reader publishes a whole-return wrapper role yet.
-    #[allow(dead_code)]
-    pub(crate) fn value_signature_return_wrapper_role(
-        &self,
-        canonical: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol: &str,
-        signature_ordinal: usize,
-    ) -> (
-        verter_type_expr::ReactiveWrapperRole,
-        Option<verter_type_expr::ReactiveWrapperImportProvenance>,
-    ) {
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self);
-        crate::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_value_signature_return(
-            &dispatch,
-            canonical,
-            owner,
-            symbol,
-            signature_ordinal,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_template_analysis(
         &self,

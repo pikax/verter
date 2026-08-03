@@ -450,6 +450,37 @@ export interface ImportMeta {
   }[];
 }
 
+/**
+ * The reactive-wrapper family a composable binding's whole-return type resolves
+ * to — a CLOSED vocabulary.
+ *
+ * `"none"` is a COMPLETED proof that the return type is not a Vue wrapper, not a
+ * claim of non-reactivity: `reactive()` returns `UnwrapNestedRefs<T>`, so a
+ * non-wrapper return type never downgrades {@link BindingMeta.reactivityKind}.
+ * `"unresolved"` pairs with {@link BindingMeta.returnWrapperUnresolvedReason}.
+ */
+export type ReturnWrapperRole =
+  | "ref"
+  | "shallowRef"
+  | "computedRef"
+  | "modelRef"
+  | "reactive"
+  | "shallowReactive"
+  | "none"
+  | "unresolved";
+
+/** The exact reason a whole-return wrapper role could not be resolved. */
+export type ReturnWrapperUnresolvedReason =
+  | "analysisUnavailable"
+  | "revisionMismatch"
+  | "missingDependency"
+  | "cycle"
+  | "budgetExceeded"
+  | "workLimitExceeded"
+  | "cancelled"
+  | "unsupported"
+  | "fault";
+
 /** A script-level binding (variable, function, class, etc.). */
 export interface BindingMeta {
   /** Binding name. */
@@ -458,6 +489,18 @@ export interface BindingMeta {
   kind: "const" | "let" | "var" | "function" | "asyncFunction" | "class";
   /** Reactivity classification. */
   reactivityKind: "none" | "ref" | "reactive" | "computed" | "maybeRef" | "mutable";
+  /**
+   * The demand-resolved whole-return wrapper role of a composable binding, or
+   * absent when no role was demanded (the binding is not a whole-value
+   * composable call, or the value-space analysis already decided it).
+   *
+   * This is the EXACTNESS carrier: {@link BindingMeta.reactivityKind} is a
+   * collapsed decoration vocabulary with no degraded arm, so it cannot separate
+   * "proven a `Ref`" from "proven not a Vue wrapper" from "could not resolve".
+   */
+  returnWrapperRole?: ReturnWrapperRole;
+  /** Present only with `returnWrapperRole === "unresolved"`. */
+  returnWrapperUnresolvedReason?: ReturnWrapperUnresolvedReason;
   /** TS type annotation if present (e.g. `"number"`, `"Ref<string>"`). */
   typeAnnotation?: string;
   /** Whether this binding is used in the template. */

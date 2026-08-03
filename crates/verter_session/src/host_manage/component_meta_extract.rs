@@ -138,9 +138,11 @@ fn extract_component_meta_from_inputs(
     resolved_macros: &[verter_semantic::analysis::component_meta::ResolvedMacroInput],
     resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
     evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let started = component_meta_debug_enabled().then(Instant::now);
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+    let resolved_binding_reactivity = resolved_binding_reactivity(ctx, snapshot);
     component_meta_trace_custom!(
         "extract_component_meta",
         format!(
@@ -165,6 +167,7 @@ fn extract_component_meta_from_inputs(
         vue_api_calls: &snapshot.vue_api_calls,
         store_usages: &snapshot.store_usages,
         resolved_macros,
+        resolved_binding_reactivity: &resolved_binding_reactivity,
         resolved_type_registry,
         evaluated_types,
         file_path: &canonical,
@@ -192,6 +195,133 @@ fn extract_component_meta_from_inputs(
     populate_public_instance_sidecar(&mut meta);
     crate::host_resolve::populate_sfc_blocks_sidecar(host, &canonical, &mut meta);
     meta
+}
+
+/// Demand the whole-return reactive-wrapper role for every composable-call
+/// binding on the owner whose reactivity the analyzer's value-space body walk
+/// could not decide.
+///
+/// This is the component-meta consumer of the shared whole-return demand entry
+/// [`crate::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return`].
+/// It runs at the ONE demand point where the fixed mechanism already holds: the
+/// caller's `ctx` is request-bound (`is_request_bound() == true`, so the demand
+/// reads the request's own view — a session overlay included — rather than the
+/// shared base, and `ProjectSemanticDispatch::new` counts no bare construction),
+/// the request's installed `RequestContext` has the projection fuse armed, the
+/// enclosing cold compute runs under `with_fact_tracer`, and the enclosing
+/// `ColdComputeCompletenessScope` is already open. It is NOT reachable from any
+/// context-free snapshot accessor.
+///
+/// Demand is per requested subject and strictly gated — there is no owner-wide
+/// or workspace-wide scan. A binding is demanded only when ALL of the following
+/// hold:
+///
+/// 1. its reactivity is still `MaybeRef` — the analyzer's "composable call,
+///    shape undecided" state. Anything the value-space walk already decided
+///    keeps its answer and costs nothing here;
+/// 2. its initializer is a `FunctionCall` that binds the call's WHOLE result
+///    (`const c = useCounter()`, not `const { count } = useCounter()`) — a
+///    whole-return type answers nothing about a destructured member;
+/// 3. the callee is imported, and the owner's import row for that local name
+///    carries a resolved canonical id plus an imported name.
+///
+/// One shared `ProjectSemanticDispatch` serves the whole loop: each top-level
+/// route walk is its own connected-demand root, so sharing the dispatch neither
+/// pools nor leaks work budget between subjects.
+///
+/// A typed degradation folds into the enclosing cold-compute completeness, so
+/// the component-meta result is refused warm admission (the no-poison
+/// invariant) — but it is folded as a PARTIAL propagation of the whole result,
+/// never as a fatal that drops the row: the degraded role is still published on
+/// its binding, per-row and fail-closed.
+pub(crate) fn resolved_binding_reactivity(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    snapshot: &FileAnalysisSnapshot,
+) -> Vec<verter_semantic::analysis::component_meta::ResolvedBindingReactivityInput> {
+    use verter_semantic::analysis::types::{BindingInitializer, ReactivityKind};
+
+    let mut subjects: Vec<(usize, String, String)> = Vec::new();
+    for (binding_index, binding) in snapshot.bindings.iter().enumerate() {
+        if binding.reactivity_kind != ReactivityKind::MaybeRef {
+            continue;
+        }
+        let Some(BindingInitializer::FunctionCall {
+            callee,
+            callee_import_source: Some(import_source),
+            binds_whole_call_result: true,
+            ..
+        }) = binding.initializer.as_ref()
+        else {
+            continue;
+        };
+        // The owner's own import inventory is the routing authority: match the
+        // import declaration by specifier AND the specifier row by LOCAL name,
+        // so a renamed value import (`import { useCounter as useC }`) demands
+        // the imported name, never the local spelling.
+        let Some((dep_canonical, imported_name)) = snapshot
+            .imports
+            .iter()
+            .filter(|import| import.source == *import_source)
+            .find_map(|import| {
+                let dep_canonical = import.resolved_canonical_id.as_deref()?;
+                let specifier = import
+                    .bindings
+                    .iter()
+                    .find(|specifier| specifier.name == *callee)?;
+                // An imported NAME is mandatory. That requirement is also what
+                // fails a namespace import closed: `import * as ns` binds a
+                // module object and carries no imported name, so there is no
+                // exported symbol for the callee spelling to address.
+                let imported_name = specifier.imported_name.as_deref()?;
+                Some((dep_canonical.to_string(), imported_name.to_string()))
+            })
+        else {
+            continue;
+        };
+        subjects.push((binding_index, dep_canonical, imported_name));
+    }
+    if subjects.is_empty() {
+        return Vec::new();
+    }
+
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let mut rows = Vec::with_capacity(subjects.len());
+    for (binding_index, dep_canonical, imported_name) in subjects {
+        // Resolve the imported symbol's declaring ROOT through the shared
+        // name-keyed export walk (barrels and re-exports included), and record
+        // the route-chain facts onto the active tracer so a barrel retarget
+        // misses the enclosing warm component-meta entry.
+        let (root, facts) =
+            ctx.resolve_imported_type_root_with_facts(&dep_canonical, &imported_name);
+        ctx.observe_borrowed_signature(&facts);
+        let Some(root) = root else {
+            continue;
+        };
+        // The returned route provenance is DROPPED here on purpose: it embeds
+        // authored `TypeArgLocator`s and stays session-internal. Only the closed
+        // role vocabulary is published, so nothing locator-bearing can cross FFI.
+        let (role, _provenance) =
+            crate::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return(
+                &dispatch,
+                root.canonical_id.as_ref(),
+                root.owner,
+                root.symbol_name.as_ref(),
+            );
+        if let verter_type_expr::ReactiveWrapperRole::Unresolved { .. } = role {
+            crate::request_context::fold_result_completeness(
+                crate::semantic_query::ResultCompleteness::partial(
+                    crate::semantic_query::PartialReasonSet::PROPAGATED,
+                ),
+            );
+        }
+        rows.push(
+            verter_semantic::analysis::component_meta::ResolvedBindingReactivityInput {
+                binding_index,
+                return_wrapper_role: role,
+            },
+        );
+    }
+    rows
 }
 
 /// Resolve a bare type-name reference in the owner file's scope to its
@@ -361,6 +491,7 @@ pub(crate) fn extract_component_meta_from_resolved(
         &resolved_macros,
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
+        ctx,
     );
     let mut fallthrough_facts = None;
     if include_fallthrough {
@@ -444,6 +575,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         &resolved_macros,
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
+        ctx,
     );
     let mut visiting = rustc_hash::FxHashSet::default();
     // The outcome carrier centralises the per-call completeness scope: a

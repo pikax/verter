@@ -1553,6 +1553,14 @@ function decodeBinding(binding: ProtoRecord, graph: DecodedTypeGraph): Record<st
     reactivityKind: graph.getString(
       readRequiredId(binding.reactivityKindId, "binding reactivity kind"),
     ),
+    // Id 0 means the role was never demanded for this binding — the field stays
+    // absent rather than decoding to `""`. The reason rides its own id so an
+    // exact role and a typed degradation stay independently observable.
+    ...maybe("returnWrapperRole", graph.getStringMaybe(Number(binding.returnWrapperRoleId ?? 0))),
+    ...maybe(
+      "returnWrapperUnresolvedReason",
+      graph.getStringMaybe(Number(binding.returnWrapperUnresolvedReasonId ?? 0)),
+    ),
     ...maybe("typeAnnotation", graph.getStringMaybe(Number(binding.typeAnnotationId ?? 0))),
     usedInTemplate: Boolean(binding.usedInTemplate),
     usedInStyle: Boolean(binding.usedInStyle),

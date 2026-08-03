@@ -1332,6 +1332,47 @@ fn extract_destructured_bindings(
     initializer: &Option<BindingInitializer>,
     bindings: &mut Vec<AnalyzedBinding>,
 ) {
+    // A destructuring pattern binds MEMBERS of the initializer's value, never
+    // the whole value. Normalize once here — the sole entry to the leaf walk —
+    // so every member name the walk emits carries the fail-closed flag, and a
+    // consumer reading a whole-return answer cannot apply it to a member.
+    let member_initializer = initializer.as_ref().map(|initializer| match initializer {
+        BindingInitializer::FunctionCall {
+            callee,
+            callee_import_source,
+            vue_api,
+            async_component_source,
+            binds_whole_call_result: _,
+        } => BindingInitializer::FunctionCall {
+            callee: callee.clone(),
+            callee_import_source: callee_import_source.clone(),
+            vue_api: *vue_api,
+            async_component_source: async_component_source.clone(),
+            binds_whole_call_result: false,
+        },
+        other => other.clone(),
+    });
+    extract_destructured_binding_leaves(
+        pattern,
+        kind,
+        is_reactive,
+        reactivity_kind,
+        &member_initializer,
+        bindings,
+    );
+}
+
+/// The recursive leaf walk. Reached only through
+/// [`extract_destructured_bindings`], which has already normalized the shared
+/// initializer for member binding.
+fn extract_destructured_binding_leaves(
+    pattern: &BindingPattern<'_>,
+    kind: AnalyzedBindingKind,
+    is_reactive: bool,
+    reactivity_kind: ReactivityKind,
+    initializer: &Option<BindingInitializer>,
+    bindings: &mut Vec<AnalyzedBinding>,
+) {
     match pattern {
         BindingPattern::BindingIdentifier(id) => {
             bindings.push(AnalyzedBinding {
@@ -1348,7 +1389,7 @@ fn extract_destructured_bindings(
         }
         BindingPattern::ObjectPattern(obj) => {
             for prop in &obj.properties {
-                extract_destructured_bindings(
+                extract_destructured_binding_leaves(
                     &prop.value,
                     kind,
                     is_reactive,
@@ -1358,7 +1399,7 @@ fn extract_destructured_bindings(
                 );
             }
             if let Some(rest) = &obj.rest {
-                extract_destructured_bindings(
+                extract_destructured_binding_leaves(
                     &rest.argument,
                     kind,
                     is_reactive,
@@ -1370,7 +1411,7 @@ fn extract_destructured_bindings(
         }
         BindingPattern::ArrayPattern(arr) => {
             for elem in arr.elements.iter().flatten() {
-                extract_destructured_bindings(
+                extract_destructured_binding_leaves(
                     elem,
                     kind,
                     is_reactive,
@@ -1380,7 +1421,7 @@ fn extract_destructured_bindings(
                 );
             }
             if let Some(rest) = &arr.rest {
-                extract_destructured_bindings(
+                extract_destructured_binding_leaves(
                     &rest.argument,
                     kind,
                     is_reactive,
@@ -1392,7 +1433,7 @@ fn extract_destructured_bindings(
         }
         BindingPattern::AssignmentPattern(assign) => {
             // `a = default` — extract the left-hand binding
-            extract_destructured_bindings(
+            extract_destructured_binding_leaves(
                 &assign.left,
                 kind,
                 is_reactive,
@@ -1460,6 +1501,11 @@ fn classify_initializer(
                         callee_import_source,
                         vue_api,
                         async_component_source,
+                        // This classifies a declarator's WHOLE initializer
+                        // expression. The destructuring entry
+                        // (`extract_destructured_bindings`) clears the flag
+                        // before cloning the initializer onto each member name.
+                        binds_whole_call_result: true,
                     }),
                     is_reactive,
                     reactivity_kind,

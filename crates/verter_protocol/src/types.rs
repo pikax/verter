@@ -1432,6 +1432,17 @@ pub struct FfiBindingMeta {
     pub name: String,
     pub kind: String,
     pub reactivity_kind: String,
+    /// The demand-resolved whole-return reactive-wrapper role of a composable
+    /// binding, as a CLOSED vocabulary discriminant. Absent when no role was
+    /// demanded for the binding. `reactivity_kind` cannot carry this: it has no
+    /// degraded arm, so "proven not a Vue wrapper" and "could not resolve" are
+    /// indistinguishable on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_wrapper_role: Option<String>,
+    /// The exact typed reason for a `"unresolved"` role. Present only with that
+    /// role, so a degradation never collapses onto the bare discriminant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_wrapper_unresolved_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
     pub used_in_template: bool,

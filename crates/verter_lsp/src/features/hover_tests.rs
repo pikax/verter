@@ -220,6 +220,7 @@ fn test_hover_on_binding() {
                 callee_import_source: Some("vue".to_string()),
                 vue_api: Some(VueApiClassification::Ref),
                 async_component_source: None,
+                binds_whole_call_result: true,
             }),
             span: verter_span::Span::new(0, 0),
             used_in_script: false,

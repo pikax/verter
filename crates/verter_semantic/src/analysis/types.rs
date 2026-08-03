@@ -1031,6 +1031,19 @@ pub enum BindingInitializer {
         /// link a `<X>` tag bound to this binding to its `.vue` carrier.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         async_component_source: Option<String>,
+        /// Whether THIS binding name is bound to the call's WHOLE result
+        /// (`const c = useCounter()`), as opposed to one destructured member of
+        /// it (`const { count } = useCounter()`).
+        ///
+        /// Every destructured leaf name clones the same declarator initializer,
+        /// so without this flag the two forms are indistinguishable downstream.
+        /// A whole-return type answer (the callee's authored return
+        /// annotation) describes the whole call result and says nothing about
+        /// an individual member, so a consumer that refines a binding from the
+        /// callee's return type must gate on it. `false` is the fail-closed
+        /// value: no refinement.
+        #[serde(default)]
+        binds_whole_call_result: bool,
     },
     /// Created by a literal: `const x = 42`
     Literal { kind: LiteralKind },

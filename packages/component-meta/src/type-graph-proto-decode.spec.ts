@@ -8,17 +8,17 @@ import {
 import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 
 describe("decodeTypedComponentMetaPayload", () => {
-  it("accepts v6 and rejects the retired v5 response", () => {
+  it("accepts the current schema version and rejects an older response", () => {
     const current = createTestComponentMetaPayload();
-    expect(current.schemaVersion).toBe(6);
+    expect(current.schemaVersion).toBe(7);
     expect(() =>
       decodeTypedComponentMetaPayload(
         toBinary(
           ComponentMetaPayloadSchema,
-          create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 5 }),
+          create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 6 }),
         ),
       ),
-    ).toThrow(/expected 6, found 5/);
+    ).toThrow(/expected 7, found 6/);
   });
 
   it("decodes supported contract type references from the shared graph", () => {
@@ -264,5 +264,61 @@ describe("decodeTypedComponentMetaPayload", () => {
         }),
       ),
     ).toThrow(/missing its type/i);
+  });
+
+  it("decodes the binding return-wrapper role and its typed reason, keeping absence absent", () => {
+    const base = createTestComponentMetaPayload();
+    const strings = [...base.typeGraph!.strings, "const", "ref", "maybeRef", "unresolved", "cycle"];
+    const id = (text: string) => strings.indexOf(text) + 1;
+    const payload = create(ComponentMetaPayloadSchema, {
+      ...base,
+      typeGraph: { ...base.typeGraph!, strings },
+      body: {
+        ...base.body!,
+        bindings: [
+          {
+            nameId: id("root"),
+            kindId: id("const"),
+            reactivityKindId: id("ref"),
+            returnWrapperRoleId: id("ref"),
+            usedInTemplate: true,
+          },
+          {
+            nameId: id("next"),
+            kindId: id("const"),
+            reactivityKindId: id("maybeRef"),
+            returnWrapperRoleId: id("unresolved"),
+            returnWrapperUnresolvedReasonId: id("cycle"),
+          },
+          {
+            nameId: id("label"),
+            kindId: id("const"),
+            reactivityKindId: id("maybeRef"),
+            // Ids left at 0 — the undemanded case.
+          },
+        ],
+      },
+    });
+
+    const result = decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload));
+
+    // EXACT: the role decodes; the reason stays absent (never `""`).
+    expect(result.bindings[0]).toMatchObject({
+      name: "root",
+      reactivityKind: "ref",
+      returnWrapperRole: "ref",
+    });
+    expect("returnWrapperUnresolvedReason" in result.bindings[0]!).toBe(false);
+    // TYPED DEGRADATION: both ids decode, so a reason cannot collapse onto the
+    // bare `"unresolved"` discriminant.
+    expect(result.bindings[1]).toMatchObject({
+      name: "next",
+      reactivityKind: "maybeRef",
+      returnWrapperRole: "unresolved",
+      returnWrapperUnresolvedReason: "cycle",
+    });
+    // UNDEMANDED: id 0 means the key is ABSENT — never `""`, never `"none"`.
+    expect("returnWrapperRole" in result.bindings[2]!).toBe(false);
+    expect("returnWrapperUnresolvedReason" in result.bindings[2]!).toBe(false);
   });
 });
