@@ -52,6 +52,15 @@
       "inspect generated manifests and checked-in dist/bundle/unpacked extension artifacts",
       "rg tracked Rust/TypeScript/JavaScript/protobuf production sources for carrier parse/root/manual geometry/synthetic/ordinal/public override capabilities"
     ],
+    "aggregation_policy": {
+      "identity": "exact normalized repository-relative (path,symbol) pair",
+      "named_definitions": "function/type-level: a separately named scanner, parser, manual-geometry helper, override surface, or mandatory seed gets its exact symbol",
+      "lsp_named_consumers": "path-level: each path matching scan_sfc_blocks|SfcBlock|CustomBlockContentKind|find_balanced_close_tag|outer_template_content_span|find_close_tag_name gets one legacy_sfc_geometry_consumer row, or legacy_sfc_geometry_test_support for test/support paths; independently named manual helpers on that path remain additional function-level rows",
+      "path_level_families": "one row per path per matched capability family for projections, generated bindings, synthetic-source/artifact builders, ordinal DTO surfaces, packaging manifests, and checked-in shipped bundles",
+      "multi_capability_paths": "a path matching distinct capability families has one row for each family; repeated matches inside one path/family collapse to one identity",
+      "shipping_targets": "one row per declared VSIX target because each target is an independently shipped artifact",
+      "gate_reproduction": "crates/verter_session/tests/cases/scanners_replacement.rs re-runs git ls-files, cargo metadata, the documented rg families, source/manifest classification, and exact sorted set equality without using rows as discovery input"
+    },
     "revalidation": "exact same clean branch/HEAD as r1; retained hashed graph inventories; rechecked and extended source/manual matches"
   },
   "pre_registration_probe": {
@@ -3290,4 +3299,3 @@
     }
   ]
 }
-
