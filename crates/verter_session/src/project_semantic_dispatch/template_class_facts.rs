@@ -151,7 +151,7 @@ pub(crate) fn build_template_class_semantic_facts(
                         classify_binding(&dispatch, canonical, declaration.clone(), subject.clone())
                     }
                     TemplateClassSubject::Prop { ref payload, .. } => {
-                        classify_prop(&dispatch, canonical, payload, subject.clone())
+                        classify_prop(&dispatch, canonical, script, payload, subject.clone())
                     }
                     TemplateClassSubject::Unresolved { .. } => unresolved_row(
                         subject.clone(),
@@ -448,6 +448,7 @@ fn classify_binding(
 fn classify_prop(
     dispatch: &ProjectSemanticDispatch<'_>,
     canonical: &str,
+    script: TemplateClassScriptInputs<'_>,
     payload: &verter_type_expr::locators::MacroPayloadLocator,
     subject: TemplateClassSubject,
 ) -> TemplateClassSemanticFactRow {
@@ -456,20 +457,36 @@ fn classify_prop(
         canonical,
         payload.macro_index as usize,
     );
-    let route_candidate = match (payload.payload, mirror.as_ref()) {
+    // The AUTHORED head of this prop member, from whichever producer holds it.
+    //
+    // A DIRECT object-literal macro type argument (`defineProps<{ x: Ref<…> }>()`)
+    // is borrowed whole by the structural macro hot mirror, which mints the
+    // per-field head inline. A NAMED or ALIASED type argument
+    // (`defineProps<Props>()`) leases a `TypeExpr::Ref`, so the mirror mints
+    // nothing and the exact authored evidence lives on the props declaration's
+    // prepared MEMBER fact instead.
+    //
+    // Both are the same KIND of producer-minted graph-free fact, and everything
+    // after this point is ONE shared path: route → candidate → terminal demand.
+    let authored_head = match (payload.payload, mirror.as_ref()) {
         (MacroPayloadPosition::Field { field_index }, Some(mirror)) => mirror
             .prop_reference_heads
             .get(field_index as usize)
             .and_then(Option::as_ref)
-            .and_then(|head| {
-                dispatch
-                    .resolve_authored_reference_route(canonical, payload.anchor.owner, head)
-                    .ok()
-                    .flatten()
-            })
-            .and_then(|route| wrapper_candidate_for_route(dispatch.ctx, route)),
+            .cloned(),
         _ => None,
-    };
+    }
+    .or_else(|| {
+        named_type_argument_member_head(dispatch, canonical, script, payload, subject.label())
+    });
+    let route_candidate = authored_head
+        .and_then(|head| {
+            dispatch
+                .resolve_authored_reference_route(canonical, payload.anchor.owner, &head)
+                .ok()
+                .flatten()
+        })
+        .and_then(|route| wrapper_candidate_for_route(dispatch.ctx, route));
     let context =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
     let source = SemanticTypeSource::Authored(AuthoredBodyLocator::MacroPayload(payload.clone()));
@@ -489,6 +506,52 @@ fn classify_prop(
         );
     };
     classify_node(dispatch, hot.node(), subject, route_candidate.as_ref())
+}
+
+/// The AUTHORED reference head of one prop member whose macro type argument is a
+/// NAMED or ALIASED reference rather than a direct object literal.
+///
+/// Two producer-minted facts compose it, and neither is resolved here:
+///
+/// 1. `mac.resolved_local_types` — the analyzer's own record of the LOCAL type
+///    declarations this macro's type argument directly names, carrying
+///    `{ name, owner }`. Exactly ONE entry is required: a type argument naming
+///    several local roots (`defineProps<A & B>()`) has no single declaration to
+///    read a member from, and picking one would be a guess.
+/// 2. `prepared_type_decl(...).member_index[member].reference_head` — a fact
+///    COPY read of the head minted once at that declaration's lazy body
+///    lowering. No locator deref, no `Instantiate`, no re-lowering.
+///
+/// The declaration lookup is deliberately NOT routed through
+/// `resolve_authored_reference_route`: that walk returns `Ok(None)` unless an
+/// import edge was crossed, so a same-file `Props` has no route to compose. The
+/// props declaration is read directly and only the MEMBER's head is
+/// route-resolved — ONE route resolution, not two chained ones.
+///
+/// An IMPORTED props type never reaches here: it yields no analyzer prop field,
+/// so the subject joins as `Unresolved` and `classify_prop` is not called. That
+/// boundary is a ruled fail-closed negative, pinned by
+/// `template_class_imported_props_type_argument_fails_closed_with_local_control`.
+fn named_type_argument_member_head(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical: &str,
+    script: TemplateClassScriptInputs<'_>,
+    payload: &verter_type_expr::locators::MacroPayloadLocator,
+    member: &str,
+) -> Option<verter_type_expr::facts::AuthoredReferenceHeadFact> {
+    let mac = script.macros.get(payload.macro_index as usize)?;
+    let [props_decl] = mac.resolved_local_types.as_slice() else {
+        return None;
+    };
+    let head = dispatch
+        .ctx
+        .prepared_type_decl(canonical, props_decl.owner, props_decl.name.as_str())
+        .ok()
+        .flatten()?
+        .member(member)?
+        .reference_head
+        .clone();
+    Some(head)
 }
 
 fn classify_node(

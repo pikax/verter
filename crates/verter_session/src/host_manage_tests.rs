@@ -6099,100 +6099,501 @@ const variant: Selected<'primary' | 'secondary'> = null as never
         .any(|hop| hop.as_ref() == "LocalRef"));
 }
 
-/// The FAIL-CLOSED boundary of the prop-wrapper route capability this unit
-/// introduced.
+/// A5-03b — a NAMED or ALIASED `defineProps` type argument peels EXACT Vue
+/// wrapper routes, with the same proof the inline-object form produces.
 ///
-/// Prop wrapper heads are minted only for a DIRECT object-literal macro type
-/// argument. `defineProps<Props>()` with a named `interface Props` leases a
-/// `TypeExpr::Ref`, not a `TypeExpr::Object`, so no per-field authored head is
-/// projected, no route candidate exists, and no wrapper is peeled. Serving that
-/// shape requires dereferencing the field payload locator into the `Props`
-/// declaration body, which the ratified route-provenance ruling forbids here —
-/// the capability is DEFERRED (owner T-A7, gate IC-A, acceptance A5-03b, ruling
-/// `T-A5-named-prop-wrapper-ruling-RESULT.md`).
+/// `defineProps<Props>()` leases a `TypeExpr::Ref`, not a `TypeExpr::Object`, so
+/// the inline macro-mirror sidecar (`MacroHotProduct.prop_reference_heads`) mints
+/// nothing for it. The exact authored evidence lives on the props declaration's
+/// PREPARED MEMBER FACT (`PreparedMemberFact.reference_head`) — minted once at
+/// lazy decl-body lowering and copied at prepare time — and is composed through
+/// the SAME shared machinery the inline form uses:
+/// `resolve_authored_reference_route` → `wrapper_candidate_for_route` →
+/// `demand_terminal_symbol_instantiation`.
 ///
-/// What is owed NOW is the negative half of the capability that WAS built: this
-/// test fails if a future change ever fabricates a closed subset for a headless
-/// prop wrapper, or claims a wrapper route without an exact authored head. The
-/// owner block inverts it when A5-03b lands. The exact `Unresolved` reason is
-/// deliberately NOT pinned — which fail-closed arm fires is brittle detail.
+/// This test is the INVERSION of the T-A5 rider
+/// (`..._prop_wrapper_publishes_no_classes_and_no_route`), which pinned this
+/// capability's ABSENCE. Its fail-closed siblings are
+/// `template_class_imported_props_type_argument_fails_closed_with_local_control`
+/// (the ruled-negative imported arm) and the local/package fake + missing
+/// dependency arms below.
+///
+/// The published `authored_head` argument locator is asserted to be a
+/// `Value(TypeArgLocator)` rooted at the `Props` DECLARATION with a
+/// `[Member, MemberValue]` path — not a `MacroPayload` locator. That is what
+/// discriminates the member-fact producer from the inline sidecar: if the route
+/// came from the macro mirror the locator arm would differ.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn template_class_named_type_argument_prop_wrapper_publishes_no_classes_and_no_route() {
+fn template_class_named_type_argument_prop_wrappers_peel_exact_vue_routes() {
     let host = strict_host();
     upsert_non_sfc(
         &host,
         "/workspace/node_modules/vue/index.d.ts",
         "export interface Ref<T> { value: T }\n",
     );
-    let canonical = "/workspace/src/NamedPropWrapper.vue";
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/not-vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+
+    // ── (A) a named `interface Props`: one exact positive plus the two
+    // same-shape fakes that must stay fail-closed in the SAME props body.
+    let named = "/workspace/src/NamedPropWrapper.vue";
     upsert_vue(
         &host,
-        canonical,
+        named,
         r#"<script setup lang="ts">
 import type { Ref } from 'vue'
+import type { Ref as OtherRef } from 'not-vue'
+type LocalRef<T> = { value: T }
+interface Props {
+  variant: Ref<'primary' | 'secondary'>
+  localFake: LocalRef<'local'>
+  packageFake: OtherRef<'package'>
+}
+const props = defineProps<Props>()
+</script><template>
+  <div :class="props.variant" />
+  <div :class="props.localFake" />
+  <div :class="props.packageFake" />
+</template>"#,
+    );
+    host.set_import_dependencies(
+        named,
+        vec![
+            exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+            exact_dependency("not-vue", "/workspace/node_modules/not-vue/index.d.ts"),
+        ],
+    );
+
+    let template = host
+        .get_analysis(named)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        template
+            .elements
+            .iter()
+            .map(|element| element.dynamic_classes.clone())
+            .collect::<Vec<_>>(),
+        [
+            vec!["primary".to_string(), "secondary".to_string()],
+            vec![],
+            vec![],
+        ],
+        "a named-type-argument prop wrapper must peel its exact Vue route while \
+         same-shape local and foreign-package fakes stay fail-closed"
+    );
+
+    let facts = template_class_facts_for(&host, named);
+    let row = facts
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "variant")
+        .expect("the named prop subject must join to an artifact row");
+    assert_eq!(row.wrapper.role, verter_type_expr::ReactiveWrapperRole::Ref);
+    let verter_type_expr::ClosedLiteralDomain::Strings(values) = &row.wrapper.inner_domain else {
+        panic!(
+            "expected a closed wrapper inner domain, got {:?}",
+            row.wrapper.inner_domain
+        );
+    };
+    assert_eq!(
+        values.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+        ["primary", "secondary"],
+        "the TERMINAL substituted argument drives the inner closed domain"
+    );
+    let provenance = row
+        .wrapper
+        .import_provenance
+        .as_ref()
+        .expect("exact named-type-argument prop route");
+    assert_eq!(provenance.import_source.as_ref(), "vue");
+    assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+    assert_eq!(provenance.package.as_ref(), "vue");
+    assert_eq!(provenance.local_binding.as_ref(), "Ref");
+    assert!(
+        provenance.local_alias_hops.is_empty(),
+        "a direct `Ref` member annotation crosses no local alias hop, got {:?}",
+        provenance.local_alias_hops
+    );
+
+    // The authored head is the MEMBER's, addressed through the props
+    // DECLARATION anchor — the producer discriminator against the inline
+    // macro-mirror sidecar (which mints `MacroPayload` argument locators).
+    let verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, args } =
+        &provenance.authored_head
+    else {
+        panic!(
+            "expected a bare authored member head, got {:?}",
+            provenance.authored_head
+        );
+    };
+    assert_eq!(local_name.as_ref(), "Ref");
+    let [verter_type_expr::facts::AuthoredReferenceArgLocator::Value(arg)] = args.as_ref() else {
+        panic!(
+            "a named-type-argument route must publish the MEMBER's Value argument \
+             locator, not a macro-payload locator, got {args:?}"
+        );
+    };
+    assert_eq!(arg.anchor.canonical_id.as_ref(), named);
+    assert_eq!(arg.anchor.symbol.as_ref(), "Props");
+    assert_eq!(
+        arg.anchor.space,
+        verter_type_expr::locators::LocatorSymbolSpace::Type
+    );
+    assert_eq!(
+        &*arg.path,
+        &[
+            verter_type_expr::locators::TypeBodyPathStep::Member { ordinal: 0 },
+            verter_type_expr::locators::TypeBodyPathStep::MemberValue
+        ],
+        "the head argument locator must address the member's authored value position"
+    );
+    assert_eq!(arg.arg_index, 0);
+
+    // The two fakes: no route, no closed subset, no `Ref` role.
+    for label in ["localFake", "packageFake"] {
+        let fake = facts
+            .rows()
+            .iter()
+            .find(|row| row.subject.label() == label)
+            .unwrap_or_else(|| panic!("row for {label}"));
+        assert!(
+            fake.wrapper.import_provenance.is_none(),
+            "{label} must claim no import provenance"
+        );
+        assert_ne!(
+            fake.wrapper.role,
+            verter_type_expr::ReactiveWrapperRole::Ref,
+            "{label} must not be granted the `Ref` wrapper role"
+        );
+        assert!(
+            !matches!(
+                fake.wrapper.inner_domain,
+                verter_type_expr::ClosedLiteralDomain::Strings(_)
+            ),
+            "{label} must publish no closed wrapper inner domain, got {:?}",
+            fake.wrapper.inner_domain
+        );
+    }
+
+    // ── (B) an ALIASED type argument (`type AliasProps = { ... }`).
+    let aliased = "/workspace/src/AliasPropWrapper.vue";
+    upsert_vue(
+        &host,
+        aliased,
+        r#"<script setup lang="ts">
+import type { Ref } from 'vue'
+type AliasProps = { other: Ref<'x' | 'y'> }
+const props = defineProps<AliasProps>()
+</script><template><div :class="props.other" /></template>"#,
+    );
+    host.set_import_dependencies(
+        aliased,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let alias_template = host
+        .get_analysis(aliased)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        alias_template.elements[0].dynamic_classes,
+        ["x", "y"],
+        "an aliased object-literal type argument must peel the same exact route"
+    );
+    let alias_row = template_class_facts_for(&host, aliased)
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "other")
+        .cloned()
+        .expect("the aliased prop subject must join");
+    assert_eq!(
+        alias_row.wrapper.role,
+        verter_type_expr::ReactiveWrapperRole::Ref
+    );
+    let alias_provenance = alias_row
+        .wrapper
+        .import_provenance
+        .as_ref()
+        .expect("exact aliased prop route");
+    assert_eq!(alias_provenance.import_source.as_ref(), "vue");
+    assert_eq!(alias_provenance.terminal_import_source.as_ref(), "vue");
+    let verter_type_expr::facts::AuthoredReferenceHeadFact::Bare {
+        args: alias_args, ..
+    } = &alias_provenance.authored_head
+    else {
+        panic!("expected a bare authored member head for the alias arm");
+    };
+    let [verter_type_expr::facts::AuthoredReferenceArgLocator::Value(alias_arg)] =
+        alias_args.as_ref()
+    else {
+        panic!("expected the member Value argument locator for the alias arm");
+    };
+    assert_eq!(alias_arg.anchor.symbol.as_ref(), "AliasProps");
+
+    // ── (C) MISSING DEPENDENCY: the same authored member shape whose import
+    // edge resolves to a canonical the host has no state for. The routed
+    // terminal cannot be reached, so no route is claimed.
+    let unresolved = "/workspace/src/MissingDepPropWrapper.vue";
+    upsert_vue(
+        &host,
+        unresolved,
+        r#"<script setup lang="ts">
+import type { Ref } from './gone'
 interface Props { variant: Ref<'primary' | 'secondary'> }
 const props = defineProps<Props>()
 </script><template><div :class="props.variant" /></template>"#,
     );
     host.set_import_dependencies(
-        canonical,
+        unresolved,
+        vec![exact_dependency("./gone", "/workspace/src/gone.ts")],
+    );
+    let missing_template = host
+        .get_analysis(unresolved)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert!(
+        missing_template.elements[0].dynamic_classes.is_empty(),
+        "a missing `vue` dependency must publish no closed subset, got {:?}",
+        missing_template.elements[0].dynamic_classes
+    );
+    let missing_row = template_class_facts_for(&host, unresolved)
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "variant")
+        .cloned()
+        .expect("the subject must still join");
+    assert!(
+        missing_row.wrapper.import_provenance.is_none(),
+        "a missing dependency must claim no import provenance"
+    );
+    assert_ne!(
+        missing_row.wrapper.role,
+        verter_type_expr::ReactiveWrapperRole::Ref
+    );
+}
+
+/// The RULED fail-closed negative of A5-03b: an IMPORTED props type publishes no
+/// classes and claims no route, and the boundary is LOCALITY — not a broken
+/// fixture.
+///
+/// An imported `Props` yields NO analyzer prop field at all (`mac.prop_fields`
+/// is written only by the analyzer's LOCAL type-registry resolution), so
+/// `join_prop_field` returns `Unresolved` and `classify_prop` is never reached.
+/// Serving it positively needs cross-file macro prop-field materialisation or a
+/// new subject/locator vocabulary — a distinct capability, REJECTED for this
+/// campaign by ruling (`T-A7-scope-ruling-RESULT.md` Q2), not deferred.
+///
+/// The CONTROL is what makes this discriminating: the byte-identical props body,
+/// declared LOCALLY in the same test, DOES peel. Without it the negative could
+/// pass because the fixture never resolved anything at all.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn template_class_imported_props_type_argument_fails_closed_with_local_control() {
+    const PROPS_BODY: &str = "{ variant: Ref<'primary' | 'secondary'> }";
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/imported-props.ts",
+        &format!("import type {{ Ref }} from 'vue'\nexport type Props = {PROPS_BODY}\n"),
+    );
+    host.set_import_dependencies(
+        "/workspace/src/imported-props.ts",
         vec![exact_dependency(
             "vue",
             "/workspace/node_modules/vue/index.d.ts",
         )],
     );
 
-    // (i) No class is published for the headless prop wrapper.
-    let template = host
-        .get_analysis(canonical)
+    // ── The NEGATIVE: `Props` is imported.
+    let imported = "/workspace/src/ImportedProps.vue";
+    upsert_vue(
+        &host,
+        imported,
+        r#"<script setup lang="ts">
+import type { Props } from './imported-props'
+const props = defineProps<Props>()
+</script><template><div :class="props.variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        imported,
+        vec![
+            exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+            exact_dependency("./imported-props", "/workspace/src/imported-props.ts"),
+        ],
+    );
+
+    let imported_template = host
+        .get_analysis(imported)
         .expect("lazy analysis")
         .template
         .expect("template");
     assert!(
-        template.elements[0].dynamic_classes.is_empty(),
-        "a named-type-argument prop wrapper must publish no closed subset, got {:?}",
-        template.elements[0].dynamic_classes
+        imported_template.elements[0].dynamic_classes.is_empty(),
+        "an imported props type must publish no closed subset, got {:?}",
+        imported_template.elements[0].dynamic_classes
     );
-
-    // (ii) The subject still JOINS — it is not silently dropped. A missing row
-    // would mean the shape failed earlier than the wrapper boundary, and this
-    // test would then be pinning the wrong thing.
-    let facts = template_class_facts_for(&host, canonical);
-    let row = facts
+    let imported_row = template_class_facts_for(&host, imported)
         .rows()
         .iter()
         .find(|row| row.subject.label() == "variant")
-        .expect("the prop subject must still join to an artifact row");
-
-    // (iii) No route is claimed without an exact authored head.
+        .cloned()
+        .expect("the requested subject must produce a row, not vanish");
     assert!(
-        row.wrapper.import_provenance.is_none(),
-        "a headless prop wrapper must claim NO import provenance"
+        imported_row.wrapper.import_provenance.is_none(),
+        "an imported props member must claim NO import provenance"
     );
     assert_ne!(
-        row.wrapper.role,
+        imported_row.wrapper.role,
         verter_type_expr::ReactiveWrapperRole::Ref,
-        "a headless prop wrapper must not be granted the `Ref` wrapper role"
+        "an imported props member must not be granted the `Ref` wrapper role"
     );
-
-    // (iv) Neither the subject domain nor the wrapper inner domain may be a
-    // closed string set — the two ways a fabricated subset could surface.
     assert!(
         !matches!(
-            row.domain,
+            imported_row.domain,
             verter_type_expr::ClosedLiteralDomain::Strings(_)
         ),
         "the subject domain must not be a closed string set, got {:?}",
-        row.domain
+        imported_row.domain
     );
     assert!(
         !matches!(
-            row.wrapper.inner_domain,
+            imported_row.wrapper.inner_domain,
             verter_type_expr::ClosedLiteralDomain::Strings(_)
         ),
         "the wrapper inner domain must not be a closed string set, got {:?}",
-        row.wrapper.inner_domain
+        imported_row.wrapper.inner_domain
+    );
+
+    // ── The CONTROL: the SAME props body, declared locally, DOES peel. This is
+    // what proves the negative above discriminates locality rather than passing
+    // vacuously on a broken fixture.
+    let local = "/workspace/src/LocalPropsControl.vue";
+    upsert_vue(
+        &host,
+        local,
+        &format!(
+            r#"<script setup lang="ts">
+import type {{ Ref }} from 'vue'
+type Props = {PROPS_BODY}
+const props = defineProps<Props>()
+</script><template><div :class="props.variant" /></template>"#
+        ),
+    );
+    host.set_import_dependencies(
+        local,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let local_template = host
+        .get_analysis(local)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        local_template.elements[0].dynamic_classes,
+        ["primary", "secondary"],
+        "CONTROL: the byte-identical props body declared LOCALLY must peel — \
+         otherwise the imported negative above proves nothing"
+    );
+    let local_row = template_class_facts_for(&host, local)
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "variant")
+        .cloned()
+        .expect("the control subject must join");
+    assert_eq!(
+        local_row.wrapper.role,
+        verter_type_expr::ReactiveWrapperRole::Ref,
+        "CONTROL: the local arm must be granted the exact `Ref` role"
+    );
+    assert_eq!(
+        local_row
+            .wrapper
+            .import_provenance
+            .as_ref()
+            .expect("CONTROL: the local arm must publish an exact route")
+            .terminal_import_source
+            .as_ref(),
+        "vue"
+    );
+}
+
+/// Classifying ONE named-type-argument prop subject must not open unrelated
+/// wrapper-shaped imports. The member-head route resolves only the requested
+/// member's own authored reference; there is no owner-wide candidate scan and no
+/// whole-props-surface materialisation.
+///
+/// Mirrors `template_class_requested_subject_does_not_read_unrelated_cold_wrapper_import`
+/// for the member-fact producer: the decoy is imported by the props DECLARATION's
+/// file and referenced by a SIBLING member the template never requests.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn template_class_named_type_argument_subject_does_not_read_unrelated_cold_wrapper_import() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/cold-pkg/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    let canonical = "/workspace/src/ColdMemberDecoy.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+import type { Ref } from 'vue'
+import type { Ref as ColdRef } from 'cold-pkg'
+interface Props {
+  variant: Ref<'primary' | 'secondary'>
+  unrequested: ColdRef<'cold-a' | 'cold-b'>
+}
+const props = defineProps<Props>()
+</script><template><div :class="props.variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![
+            exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+            exact_dependency("cold-pkg", "/workspace/node_modules/cold-pkg/index.d.ts"),
+        ],
+    );
+    ws.reset_reads();
+
+    let template = host
+        .get_analysis(canonical)
+        .expect("analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        template.elements[0].dynamic_classes,
+        ["primary", "secondary"],
+        "the requested member must still peel its exact route"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/cold-pkg/index.d.ts"),
+        0,
+        "classifying one named-type-argument prop member must not traverse an \
+         unrelated sibling member's wrapper-shaped import"
     );
 }
 
@@ -6983,8 +7384,13 @@ const localNamespace: Local.Ref<'bad'> = null as never
 #[test]
 fn template_class_requested_subject_does_not_read_unrelated_cold_wrapper_import() {
     let ws = Arc::new(CountingWorkspace::new());
+    // The decoy must be PACKAGE-BACKED: a relative `./cold` decoy is invisible
+    // to an owner-wide scan by construction (proven by the T-A5b M8 mutation —
+    // the same plant that stayed GREEN against a relative decoy REDs against
+    // this one), so only a node_modules decoy makes this footprint rail
+    // load-bearing.
     ws.inject_file(
-        "/workspace/src/cold.ts",
+        "/workspace/node_modules/cold-pkg/index.d.ts",
         "export interface Ref<T> { value: T }\n",
     );
     let host = VerterHost::new(HostConfig::default(), ws.clone());
@@ -6993,14 +7399,17 @@ fn template_class_requested_subject_does_not_read_unrelated_cold_wrapper_import(
         &host,
         canonical,
         r#"<script setup lang="ts">
-import type { Ref as ColdRef } from './cold'
+import type { Ref as ColdRef } from 'cold-pkg'
 type Variant = 'primary' | 'secondary'
 const variant: Variant = 'primary'
 </script><template><div :class="variant" /></template>"#,
     );
     host.set_import_dependencies(
         canonical,
-        vec![exact_dependency("./cold", "/workspace/src/cold.ts")],
+        vec![exact_dependency(
+            "cold-pkg",
+            "/workspace/node_modules/cold-pkg/index.d.ts",
+        )],
     );
     ws.reset_reads();
 
@@ -7014,7 +7423,7 @@ const variant: Variant = 'primary'
         ["primary", "secondary"]
     );
     assert_eq!(
-        ws.read_count("/workspace/src/cold.ts"),
+        ws.read_count("/workspace/node_modules/cold-pkg/index.d.ts"),
         0,
         "requested-subject classification must not traverse unrelated wrapper-shaped imports"
     );

@@ -569,6 +569,81 @@ fn return_reference_head_participates_in_signature_fact_identity() {
     );
 }
 
+/// A prepared type-decl MEMBER's authored reference head is producer-owned
+/// route evidence on the SAME footing as the signature-return head: two members
+/// that differ ONLY in the authored head are DISTINCT facts, so a cache slot can
+/// never collapse `variant: Ref<T>` with `variant: ShallowRef<T>`, nor either
+/// with a member that mints no head at all (a method's `Unavailable`, an
+/// authored non-reference annotation's `NotReference`).
+#[test]
+fn prepared_member_reference_head_participates_in_member_fact_identity() {
+    let with_head = |head: AuthoredReferenceHeadFact| PreparedMemberFact {
+        optional: false,
+        readonly: false,
+        is_method: false,
+        visibility: MemberVisibility::Public,
+        declaration_origin: DeclarationOrigin::Declared(std::sync::Arc::from("/ws/props.ts")),
+        ty: slot(),
+        span_origin: member_origin(0),
+        reference_head: head,
+    };
+    let bare = |local_name: &str| AuthoredReferenceHeadFact::Bare {
+        local_name: std::sync::Arc::from(local_name),
+        args: std::sync::Arc::from(Vec::<AuthoredReferenceArgLocator>::new().into_boxed_slice()),
+    };
+    let referenced = with_head(bare("Ref"));
+    let shallow = with_head(bare("ShallowRef"));
+    assert_ne!(
+        referenced, shallow,
+        "the authored member head must discriminate member fact identity"
+    );
+    assert_eq!(referenced, with_head(bare("Ref")));
+
+    // The two mint-gate absences are distinct identities too: a METHOD member
+    // (no authored member type annotation at all ⇒ `Unavailable`) must never
+    // alias an authored non-reference property annotation (`NotReference`), nor
+    // an authored reference head.
+    let method_member = with_head(AuthoredReferenceHeadFact::Unavailable);
+    let authored_non_reference = with_head(AuthoredReferenceHeadFact::NotReference);
+    assert_ne!(method_member, authored_non_reference);
+    assert_ne!(method_member, referenced);
+    assert_ne!(authored_non_reference, referenced);
+
+    // Hash identity agrees on the recorded hash INPUT STREAM.
+    assert_ne!(
+        hash_input_stream(&referenced),
+        hash_input_stream(&shallow),
+        "the authored member head must feed distinct hash input streams"
+    );
+    assert_ne!(
+        hash_input_stream(&method_member),
+        hash_input_stream(&authored_non_reference),
+        "Unavailable and NotReference member heads must feed distinct hash input streams"
+    );
+    assert_eq!(
+        hash_input_stream(&referenced),
+        hash_input_stream(&with_head(bare("Ref"))),
+        "equal member facts must feed identical hash input streams"
+    );
+
+    // A previously persisted member fact carries no head key at all, and "no
+    // head was produced" is exactly `Unavailable` — never a fabricated head.
+    let json = serde_json::to_value(&referenced).expect("serialize member fact");
+    let mut without_head = json.as_object().expect("object").clone();
+    assert!(
+        without_head.remove("reference_head").is_some(),
+        "the member head must be part of the persisted schema"
+    );
+    let restored: PreparedMemberFact =
+        serde_json::from_value(serde_json::Value::Object(without_head))
+            .expect("an absent head key must deserialize");
+    assert_eq!(
+        restored.reference_head,
+        AuthoredReferenceHeadFact::Unavailable,
+        "an absent persisted head must default to Unavailable, never a fabricated head"
+    );
+}
+
 /// Deep-walk completeness of the producer-local anchor absolutization family:
 /// a return head's ARGUMENT locators sit at a nesting depth the family had no
 /// arm for, so a producer-local (empty-`canonical_id`) argument anchor would

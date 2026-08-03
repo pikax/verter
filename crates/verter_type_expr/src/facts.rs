@@ -19,7 +19,7 @@ use verter_no_typeexpr::NoTypeExpr;
 
 use crate::locators::{
     AuthoredAnchor, AuthoredBodyLocator, AuthoredTypePayloadRef, MacroPayloadLocator,
-    SymbolBodyLocator, TypeArgLocator, TypeBodySlot,
+    SymbolBodyLocator, TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
 };
 use crate::span_origins::{
     FunctionParamSpanOrigin, FunctionSpansOrigin, IndexSignatureSpansOrigin, MemberSpansOrigin,
@@ -2140,6 +2140,22 @@ pub struct PreparedMemberFact {
     pub ty: TypeBodySlot,
     /// Origin locator recovering the member's `MemberSpans`.
     pub span_origin: MemberSpansOrigin,
+    /// Producer-owned authored reference head of this member's AUTHORED type
+    /// annotation, for exact demand-time route provenance — the member-position
+    /// peer of [`ValueTypeAnnotationFact::reference_head`] and
+    /// [`FunctionSignatureFact::return_reference_head`].
+    ///
+    /// Minted ONLY from a PROPERTY member's authored annotation, whose argument
+    /// locators are rooted at the member's own `[.., Member, MemberValue]` value
+    /// path so a deref addresses the authored annotation rather than the
+    /// declaration body root. A METHOD member has no authored member type
+    /// ANNOTATION at all — its surface is a function signature, whose authored
+    /// return head is the separate `return_reference_head` peer — so it
+    /// publishes [`AuthoredReferenceHeadFact::Unavailable`] rather than a head
+    /// fabricated from its shape. An authored annotation that is not a type
+    /// reference publishes [`AuthoredReferenceHeadFact::NotReference`].
+    #[serde(default = "authored_reference_head_unavailable")]
+    pub reference_head: AuthoredReferenceHeadFact,
 }
 
 /// The `PreparedValueMember.ty` narrowing (+ `is_method`).
@@ -3742,6 +3758,72 @@ impl AuthoredReferenceArgLocator {
 }
 
 impl AuthoredReferenceHeadFact {
+    /// Prefix every VALUE argument locator's body path with `prefix`, leaving the
+    /// authored local spelling and every anchor untouched.
+    ///
+    /// The MERGED-declaration path is what needs this. A merged group's members
+    /// are indexed per contributor against that contributor's OWN body and then
+    /// re-rooted under a [`TypeBodyPathStep::MergedContributor`] step; a head
+    /// minted against the contributor body would otherwise address the merged
+    /// body's top level and deref the WRONG contributor — a silently wrong
+    /// authored argument rather than a typed miss.
+    ///
+    /// Macro-payload argument locators address a macro position rather than a
+    /// declaration body path, so they carry no prefixable path and pass through.
+    /// The head-shaped absences (`NotReference` / `Unavailable`) hold no
+    /// locators and are returned unchanged.
+    #[must_use]
+    pub fn with_arg_path_prefix(&self, prefix: &[TypeBodyPathStep]) -> Self {
+        if prefix.is_empty() {
+            return self.clone();
+        }
+        let prefixed = |args: &Arc<[AuthoredReferenceArgLocator]>| {
+            args.iter()
+                .map(|arg| match arg {
+                    AuthoredReferenceArgLocator::Value(locator) => {
+                        let mut path = Vec::with_capacity(prefix.len() + locator.path.len());
+                        path.extend_from_slice(prefix);
+                        path.extend(locator.path.iter().cloned());
+                        AuthoredReferenceArgLocator::Value(TypeArgLocator {
+                            anchor: locator.anchor.clone(),
+                            path: path.into(),
+                            arg_index: locator.arg_index,
+                        })
+                    }
+                    AuthoredReferenceArgLocator::MacroPayload { .. } => arg.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        match self {
+            AuthoredReferenceHeadFact::Bare { local_name, args } => {
+                AuthoredReferenceHeadFact::Bare {
+                    local_name: Arc::clone(local_name),
+                    args: Arc::from(prefixed(args)),
+                }
+            }
+            AuthoredReferenceHeadFact::Qualified {
+                local_root,
+                member_path,
+                args,
+            } => AuthoredReferenceHeadFact::Qualified {
+                local_root: Arc::clone(local_root),
+                member_path: Arc::clone(member_path),
+                args: Arc::from(prefixed(args)),
+            },
+            AuthoredReferenceHeadFact::ImportType {
+                specifier,
+                member_path,
+                args,
+            } => AuthoredReferenceHeadFact::ImportType {
+                specifier: Arc::clone(specifier),
+                member_path: Arc::clone(member_path),
+                args: Arc::from(prefixed(args)),
+            },
+            AuthoredReferenceHeadFact::NotReference => AuthoredReferenceHeadFact::NotReference,
+            AuthoredReferenceHeadFact::Unavailable => AuthoredReferenceHeadFact::Unavailable,
+        }
+    }
+
     /// Written generically over the head fact — every head-bearing position
     /// (value annotation, value-signature return, and any future member
     /// position) reuses this one walk rather than inlining an arm-specific copy.

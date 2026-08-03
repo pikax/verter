@@ -88,6 +88,165 @@ export interface Props extends /* @vue-ignore */ Imported<string> { own: number 
     );
 }
 
+/// The member authored reference head is minted ONCE at lazy decl-body lowering
+/// and COPIED onto the prepared surface — no re-lowering, no locator deref, and
+/// no resolution at prepare time.
+///
+/// This is the producer half of the named prop-wrapper route: for
+/// `defineProps<Props>()` the macro leases a `TypeExpr::Ref`, so the inline
+/// macro-mirror sidecar mints nothing and the member's own head is the only
+/// exact authored evidence available.
+#[test]
+fn prepared_member_reference_head_survives_the_prepare_copy() {
+    use verter_type_expr::facts::{AuthoredReferenceArgLocator, AuthoredReferenceHeadFact};
+    use verter_type_expr::locators::TypeBodyPathStep;
+
+    let source = r#"
+import type { Ref } from 'vue'
+export interface Props { variant: Ref<'primary' | 'secondary'>; plain: string }
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let dep_edges = FxHashMap::from_iter([(
+        "vue".to_string(),
+        "/node_modules/vue/index.d.ts".to_string(),
+    )]);
+    let import_canonicalization =
+        ordinary_import_canonicalization(&[("Ref", "/node_modules/vue/index.d.ts", "Ref")]);
+
+    let prepared = prepare_local_type_decl(
+        "/src/props.ts",
+        &state,
+        "Props",
+        Some(&dep_edges),
+        &import_canonicalization,
+        &test_interner(),
+    )
+    .expect("Props preparation should succeed")
+    .expect("Props should be present");
+
+    let variant = prepared
+        .member_index
+        .get("variant")
+        .expect("variant member indexed");
+    let AuthoredReferenceHeadFact::Bare { local_name, args } = &variant.reference_head else {
+        panic!(
+            "an authored reference member annotation must carry a Bare head, got {:?}",
+            variant.reference_head
+        );
+    };
+    assert_eq!(
+        local_name.as_ref(),
+        "Ref",
+        "the head must carry the AUTHORED local spelling"
+    );
+    let [AuthoredReferenceArgLocator::Value(arg)] = args.as_ref() else {
+        panic!("expected exactly one Value argument locator, got {args:?}");
+    };
+    assert_eq!(
+        arg.anchor, variant.ty.anchor,
+        "the head argument anchor must be the member's own declaration anchor"
+    );
+    assert_eq!(
+        &*arg.path,
+        &[
+            TypeBodyPathStep::Member { ordinal: 0 },
+            TypeBodyPathStep::MemberValue
+        ],
+        "the head argument locator must address the member's authored value position"
+    );
+
+    // An authored NON-reference annotation is a complete non-reference proof.
+    let plain = prepared
+        .member_index
+        .get("plain")
+        .expect("plain member indexed");
+    assert_eq!(
+        plain.reference_head,
+        AuthoredReferenceHeadFact::NotReference,
+        "an authored non-reference member annotation must publish NotReference"
+    );
+}
+
+/// A MERGED declaration's member head locator must carry the same
+/// `MergedContributor` prefix its `ty` locator carries. Without it the head
+/// derefs the wrong contributor's body — a silently wrong authored argument
+/// rather than a typed miss.
+#[test]
+fn merged_interface_member_reference_head_locator_carries_the_contributor_prefix() {
+    use verter_type_expr::facts::{AuthoredReferenceArgLocator, AuthoredReferenceHeadFact};
+    use verter_type_expr::locators::TypeBodyPathStep;
+
+    let source = r#"
+import type { Ref } from 'vue'
+export interface Props { first: Ref<'a'> }
+export interface Props { second: Ref<'b'> }
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let dep_edges = FxHashMap::from_iter([(
+        "vue".to_string(),
+        "/node_modules/vue/index.d.ts".to_string(),
+    )]);
+    let import_canonicalization =
+        ordinary_import_canonicalization(&[("Ref", "/node_modules/vue/index.d.ts", "Ref")]);
+
+    let prepared = prepare_local_type_decl(
+        "/src/props.ts",
+        &state,
+        "Props",
+        Some(&dep_edges),
+        &import_canonicalization,
+        &test_interner(),
+    )
+    .expect("Props preparation should succeed")
+    .expect("Props should be present");
+
+    // Contributor ordinals are the source-order declaration positions; both
+    // members are contributed by DIFFERENT statements, so a shared prefix would
+    // prove the prefix is not per-contributor.
+    let mut seen_ordinals = Vec::new();
+    for name in ["first", "second"] {
+        let member = prepared
+            .member_index
+            .get(name)
+            .expect("merged contributor member indexed");
+        let Some(TypeBodyPathStep::MergedContributor { ordinal }) = member.ty.path.first().copied()
+        else {
+            panic!(
+                "the member `ty` locator must be contributor-prefixed, got {:?}",
+                member.ty.path
+            );
+        };
+        seen_ordinals.push(ordinal);
+
+        let AuthoredReferenceHeadFact::Bare { args, .. } = &member.reference_head else {
+            panic!(
+                "expected a Bare head for {name}, got {:?}",
+                member.reference_head
+            );
+        };
+        let [AuthoredReferenceArgLocator::Value(arg)] = args.as_ref() else {
+            panic!("expected one Value argument locator for {name}");
+        };
+        assert_eq!(
+            &*arg.path, &*member.ty.path,
+            "the head argument locator must carry the SAME contributor-prefixed path \
+             as the member `ty` locator for {name}"
+        );
+        assert_eq!(
+            arg.path.first().copied(),
+            Some(TypeBodyPathStep::MergedContributor { ordinal }),
+            "the head must be prefixed with its OWN contributor ordinal for {name}"
+        );
+    }
+    seen_ordinals.sort_unstable();
+    assert_eq!(
+        seen_ordinals,
+        vec![0, 1],
+        "the two contributors must record DISTINCT ordinals, otherwise the \
+         per-contributor prefix is not proven"
+    );
+}
+
 #[test]
 fn prepares_local_value_decl_from_shallow_file_state() {
     let source = r#"

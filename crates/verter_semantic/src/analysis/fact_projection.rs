@@ -169,6 +169,38 @@ pub(crate) fn signature_return_reference_head_fact(
     })
 }
 
+/// Mint the closed authored reference head of ONE prepared type-decl MEMBER's
+/// AUTHORED annotation, while the member indexer already holds the transient
+/// declaration body.
+///
+/// `anchor` is the owning declaration's authored anchor and `member_value_path`
+/// is the member's own body path (`[..prefix, Member { ordinal }, MemberValue]`)
+/// — the SAME `(anchor, path)` pair the member's `ty` body locator carries — so
+/// the head's arguments address the authored annotation itself rather than the
+/// declaration body root.
+///
+/// The CALLER owns the authorship gate: this entry must be reached only for a
+/// property member whose `spans.type_annotation` is `Some` — a property's `ty`
+/// is NOT always authored (an initializer-only class field carries an INFERRED
+/// type), and an unauthored member publishes
+/// [`AuthoredReferenceHeadFact::Unavailable`] without reaching here, exactly as
+/// a method member (which has no member type annotation at all) does. Reading
+/// the transient `TypeExpr` here is producer-legal; the produced fact carries
+/// none.
+pub(crate) fn member_annotation_reference_head_fact(
+    annotation: &TypeExpr,
+    anchor: &AuthoredAnchor,
+    member_value_path: &[TypeBodyPathStep],
+) -> AuthoredReferenceHeadFact {
+    authored_reference_head_fact_with(annotation, |arg_index| {
+        Some(AuthoredReferenceArgLocator::Value(TypeArgLocator {
+            anchor: anchor.clone(),
+            path: Arc::from(member_value_path.to_vec()),
+            arg_index: u32::try_from(arg_index).ok()?,
+        }))
+    })
+}
+
 /// Mint the closed authored reference head for a macro field while the macro
 /// hot-mirror producer already holds the transient payload body.
 #[doc(hidden)]

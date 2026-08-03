@@ -2528,16 +2528,26 @@ fn lowered_type_decl_from_group(
                     if merged_index.contains_key(&name) {
                         continue;
                     }
+                    let contributor_step = TypeBodyPathStep::MergedContributor {
+                        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                    };
                     let mut path: Vec<TypeBodyPathStep> =
                         Vec::with_capacity(fact.ty.path.len() + 1);
-                    path.push(TypeBodyPathStep::MergedContributor {
-                        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                    });
+                    path.push(contributor_step);
                     path.extend(fact.ty.path.iter().cloned());
                     fact.ty = TypeBodySlot {
                         anchor: fact.ty.anchor.clone(),
                         path: path.into(),
                     };
+                    // The member's AUTHORED head argument locators address the
+                    // same body position as `fact.ty` and were minted against
+                    // this contributor's OWN body, so they take the SAME
+                    // contributor step. Without it the head derefs the wrong
+                    // contributor — a silently wrong authored argument rather
+                    // than a typed miss.
+                    fact.reference_head = fact
+                        .reference_head
+                        .with_arg_path_prefix(&[contributor_step]);
                     merged_index.insert(name, fact);
                 }
             }
