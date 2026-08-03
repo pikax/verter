@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("vscode", () => {
   const textDocuments: Array<{ uri: { toString(): string }; version: number }> = [];
   const diagnosticSets: Array<{ uri: string; count: number }> = [];
+  const warningMessages: string[] = [];
   class Position {
     constructor(
       public line: number,
@@ -30,9 +31,13 @@ vi.mock("vscode", () => {
   return {
     __textDocuments: textDocuments,
     __diagnosticSets: diagnosticSets,
+    __warningMessages: warningMessages,
     workspace: { textDocuments },
     window: {
-      showWarningMessage: async () => undefined,
+      showWarningMessage: async (message: string) => {
+        warningMessages.push(message);
+        return undefined;
+      },
     },
     languages: {
       createDiagnosticCollection: () => ({
@@ -53,11 +58,17 @@ vi.mock("vscode", () => {
   };
 });
 
-const transpileGate: { block?: Promise<void>; started?: () => void } = {};
+const transpileGate: {
+  block?: Promise<void>;
+  started?: () => void;
+  /** `null` simulates a MISSING preprocessor (transpile unavailable). */
+  result?: { css: string; sourceMap: undefined } | null;
+} = {};
 vi.mock("./transpiler", () => ({
   transpile: async () => {
     transpileGate.started?.();
     if (transpileGate.block) await transpileGate.block;
+    if (transpileGate.result !== undefined) return transpileGate.result;
     return { css: ".compiled { color: blue }", sourceMap: undefined };
   },
 }));
@@ -81,6 +92,10 @@ function diagnosticSets(): Array<{ uri: string; count: number }> {
     uri: string;
     count: number;
   }>;
+}
+
+function warningMessages(): string[] {
+  return (vscode as unknown as Record<string, unknown>).__warningMessages as string[];
 }
 
 function styleSection(source: string, opts?: { dialect?: string; src?: boolean }) {
@@ -328,6 +343,55 @@ describe("CssService doValidation availability fail-closed (TE-C-11)", () => {
     expect(requests.filter((r) => r.type === RequestType.GetDocumentStructure)).toHaveLength(
       structureRequestsAfterV2,
     );
+  });
+
+  it("a stale invocation neither warns about a missing preprocessor nor suppresses a later current warning (R4-B-02)", async () => {
+    const inline = '<style lang="sass">.a\n  color: red\n</style>';
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    warningMessages().splice(0, warningMessages().length);
+    const svc = service((params) => available(params, inline, { dialect: "sass" }));
+    try {
+      // The preprocessor is MISSING for every transpile in this test.
+      transpileGate.result = null;
+
+      // Gate revision 1's transpile so its post-await missing-preprocessor
+      // handling runs after the document has moved on.
+      let startedResolve!: () => void;
+      const started = new Promise<void>((resolve) => {
+        startedResolve = resolve;
+      });
+      transpileGate.started = () => startedResolve();
+      let release!: () => void;
+      transpileGate.block = new Promise((resolve) => {
+        release = resolve;
+      });
+      const pendingV1 = svc.doValidation(URI, inline, 1);
+      await started;
+      transpileGate.block = undefined;
+      transpileGate.started = undefined;
+
+      // Commit revision 2 while revision 1's transpile is in flight, THEN
+      // release the stale invocation.
+      liveDocuments().splice(0, liveDocuments().length, {
+        uri: { toString: () => URI },
+        version: 2,
+      });
+      release();
+      await pendingV1;
+
+      // The STALE invocation must NOT warn…
+      expect(warningMessages()).toHaveLength(0);
+
+      // …and must NOT poison the one-time guard: a CURRENT invocation with
+      // the preprocessor still missing owes the warning.
+      await svc.doValidation(URI, inline, 2);
+      expect(warningMessages()).toHaveLength(1);
+      expect(warningMessages()[0]).toContain('"sass" is not installed');
+    } finally {
+      transpileGate.result = undefined;
+      transpileGate.block = undefined;
+      transpileGate.started = undefined;
+    }
   });
 
   it("re-queries a transient non-available structure on the next demand (R3-B-04)", async () => {

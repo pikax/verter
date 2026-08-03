@@ -163,13 +163,14 @@ export type RequestParams = {
     uri: string;
     overrides: StyleOverrideParam[];
     /** `documentRevisionToken` of the structure the override was computed
-     * against (additive). When present, the server refuses a
-     * mismatched-revision apply — a slow transpile bound to revision A must
+     * against — REQUIRED. The server refuses an absent or partial token
+     * pair (`missingTokens`) and a mismatched-revision apply
+     * (`revisionMismatch`) — a slow transpile bound to revision A must
      * never overwrite revision B's state. */
-    documentRevisionToken?: string;
-    /** `artifactToken` of the same captured structure (additive), same
+    documentRevisionToken: string;
+    /** `artifactToken` of the same captured structure — REQUIRED, same
      * refusal semantics. */
-    artifactToken?: string;
+    artifactToken: string;
   };
   [RequestType.GetRouteTree]: Record<string, never>;
   [RequestType.GetComponentMeta]: { uri: string };
@@ -204,8 +205,11 @@ export type RequestResponse = {
   [RequestType.GetComponentParents]: ComponentParentsResponse;
   [RequestType.ApplyStyleOverrides]: {
     success: boolean;
-    /** Present only when the apply was refused without mutation (additive). */
-    refusal?: "revisionMismatch";
+    /** Present only when the apply was refused without mutation:
+     * `revisionMismatch` when a captured token no longer matches the live
+     * document, `missingTokens` when the request carried no (or only one)
+     * captured structure token. */
+    refusal?: "revisionMismatch" | "missingTokens";
   };
   [RequestType.GetRouteTree]: RouteAnalysisSnapshot;
   /** Full Volar-shape payload, JSON-projected. `null` when not a component. */

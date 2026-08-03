@@ -436,6 +436,18 @@ export class CssService {
     // Collect missing-preprocessor diagnostics for this URI atomically.
     const missingDiags: vscode.Diagnostic[] = [];
 
+    // Every post-transpile-await side effect (warning, diagnostics publish,
+    // cache write) runs only for a still-current invocation: the document
+    // may have moved (or been reopened) while an await was in flight, and a
+    // STALE invocation must never warn, clear, or replace a newer
+    // revision's state.
+    const stillCurrent = () => {
+      const liveNow = vscode.workspace.textDocuments.find(
+        (document) => document.uri.toString() === uri,
+      );
+      return liveNow?.version === version && this.getOpenEpoch(uri) === openEpoch;
+    };
+
     for (const block of blocks) {
       // External-src blocks have no inline content to transpile — the
       // inline slice is framework-ignored and the host REJECTS overrides
@@ -484,8 +496,11 @@ export class CssService {
           missingDiags.push(diag);
         }
 
-        // Show a one-time warning message as secondary guidance
-        if (!this.warnedMissing.has(block.lang)) {
+        // Show a one-time warning message as secondary guidance — only from
+        // a still-current invocation: a stale post-transpile invocation must
+        // neither warn nor mark the lang as warned, which would permanently
+        // suppress a later relevant warning.
+        if (stillCurrent() && !this.warnedMissing.has(block.lang)) {
           this.warnedMissing.add(block.lang);
           vscode.window.showWarningMessage(
             `Verter: "${block.lang}" is not installed in the workspace. ` +
@@ -495,17 +510,6 @@ export class CssService {
         }
       }
     }
-
-    // Everything below the transpile awaits publishes/persists only for a
-    // still-current invocation: the document may have moved (or been
-    // reopened) while an await was in flight, and a STALE invocation must
-    // never clear or replace a newer revision's diagnostics or cache entry.
-    const stillCurrent = () => {
-      const liveNow = vscode.workspace.textDocuments.find(
-        (document) => document.uri.toString() === uri,
-      );
-      return liveNow?.version === version && this.getOpenEpoch(uri) === openEpoch;
-    };
 
     // Update diagnostics atomically for this URI (clears stale entries) —
     // only from a current, admitted-available invocation. A non-available
