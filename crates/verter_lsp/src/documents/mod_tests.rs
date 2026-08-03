@@ -162,6 +162,38 @@ mod source_identity_fence {
         );
     }
 
+    /// The `get_ide` FAST path (host cache hit) reads the host cache with no
+    /// lock held; an edit committed in the read→install window must neither
+    /// install the stale mapper nor return the stale IDE output (R2-B-01).
+    #[test]
+    fn get_ide_fast_path_discards_cached_output_when_source_moves_before_install() {
+        let (registry, uri) = projectionless_registry();
+        // The host cache still holds revision A's IDE surface (did_open
+        // compiled it), so `get_ide` takes its FAST path. Revision B commits
+        // in the read→install window.
+        registry.set_before_projection_install_hook(Box::new(|registry, uri| {
+            let _ = registry.did_change(uri, 2, REVISION_B);
+        }));
+
+        let response = registry.get_ide(&uri);
+
+        assert!(
+            registry
+                .get(&uri)
+                .is_some_and(|doc| doc.source.as_ref() == REVISION_B),
+            "the interleaved edit must commit revision B"
+        );
+        assert!(
+            response.is_none(),
+            "revision A's cached IDE output must be discarded, not returned \
+             as revision B's surface"
+        );
+        assert!(
+            registry.get_projection(&uri).is_none(),
+            "revision A's mapper must not be installed over revision B"
+        );
+    }
+
     /// `install_missing_carrier_projection` reads the host cache with no
     /// compile; an edit committed in the read→install window must reject the
     /// now-stale mapper (TE-C-15 window b).
@@ -244,6 +276,138 @@ mod source_identity_fence {
             registry.carrier_ide_compile_has_content_verdict(CANONICAL, SOURCE),
             "the seam must still bind a deterministic compiler verdict"
         );
+    }
+}
+
+mod style_override_revision_fence {
+    use super::*;
+    use crate::documents::StyleOverrideApplyOutcome;
+
+    const V1: &str = "<template><div class=\"x\"/></template>\n<style>.x { color: red }</style>\n";
+    const V2: &str = "<template><div class=\"y\"/></template>\n<style>.y { color: blue }</style>\n";
+
+    fn overrides() -> Vec<verter_session::StyleOverrideEntry> {
+        vec![verter_session::StyleOverrideEntry {
+            index: 0,
+            code: Arc::from(".compiled { color: green }"),
+            source_map: None,
+        }]
+    }
+
+    fn open_doc() -> (DocumentRegistry, Uri) {
+        let registry = DocumentRegistry::new(Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        )));
+        let uri: Uri = "file:///x/Styled.vue".parse().expect("uri");
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".into(),
+            version: 1,
+            text: V1.into(),
+        });
+        (registry, uri)
+    }
+
+    /// R2-B-04: revision A's slow transpile result must not overwrite
+    /// revision B's state — a stale captured revision token is refused
+    /// typed, with no host mutation.
+    #[test]
+    fn stale_revision_token_is_refused() {
+        let (registry, uri) = open_doc();
+        let stale_revision = registry
+            .get(&uri)
+            .expect("doc")
+            .document_revision
+            .public_token();
+        let _ = registry.did_change(&uri, 2, V2);
+        let outcome =
+            registry.apply_style_overrides(&uri, overrides(), Some(&stale_revision), None);
+        assert_eq!(
+            outcome,
+            StyleOverrideApplyOutcome::RevisionMismatch,
+            "a stale captured revision token must refuse the apply"
+        );
+    }
+
+    /// The artifact token is an independent fence dimension: a stale
+    /// captured artifact refuses the apply even at a matching revision claim.
+    #[test]
+    fn stale_artifact_token_is_refused() {
+        let (registry, uri) = open_doc();
+        let (stale_artifact, _) = {
+            let doc = registry.get(&uri).expect("doc");
+            (
+                doc.feature_snapshot
+                    .as_ref()
+                    .expect("carrier snapshot")
+                    .structure()
+                    .public_artifact_token(),
+                (),
+            )
+        };
+        let _ = registry.did_change(&uri, 2, V2);
+        let current_revision = registry
+            .get(&uri)
+            .expect("doc")
+            .document_revision
+            .public_token();
+        let outcome = registry.apply_style_overrides(
+            &uri,
+            overrides(),
+            Some(&current_revision),
+            Some(stale_artifact.as_str()),
+        );
+        assert_eq!(
+            outcome,
+            StyleOverrideApplyOutcome::RevisionMismatch,
+            "a stale captured artifact token must refuse the apply"
+        );
+    }
+
+    /// Matching captured tokens apply normally.
+    #[test]
+    fn current_tokens_apply_normally() {
+        let (registry, uri) = open_doc();
+        let (revision, artifact) = {
+            let doc = registry.get(&uri).expect("doc");
+            (
+                doc.document_revision.public_token(),
+                doc.feature_snapshot
+                    .as_ref()
+                    .expect("carrier snapshot")
+                    .structure()
+                    .public_artifact_token(),
+            )
+        };
+        let outcome = registry.apply_style_overrides(
+            &uri,
+            overrides(),
+            Some(&revision),
+            Some(artifact.as_str()),
+        );
+        assert_eq!(outcome, StyleOverrideApplyOutcome::Applied);
+    }
+
+    /// Tokenless applies (older clients) keep the legacy unfenced behavior.
+    #[test]
+    fn absent_tokens_keep_legacy_behavior() {
+        let (registry, uri) = open_doc();
+        let outcome = registry.apply_style_overrides(&uri, overrides(), None, None);
+        assert_eq!(outcome, StyleOverrideApplyOutcome::Applied);
+    }
+
+    /// A closed document cannot match any captured token: refused.
+    #[test]
+    fn closed_document_with_token_is_refused() {
+        let (registry, uri) = open_doc();
+        let revision = registry
+            .get(&uri)
+            .expect("doc")
+            .document_revision
+            .public_token();
+        registry.did_close(&uri);
+        let outcome = registry.apply_style_overrides(&uri, overrides(), Some(&revision), None);
+        assert_eq!(outcome, StyleOverrideApplyOutcome::RevisionMismatch);
     }
 }
 

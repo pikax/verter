@@ -1489,23 +1489,26 @@ impl SvelteControlBlockSyntax {
         v
     }
 }
+/// Head expressions are parser-owned facts: an EMPTY authored head (`{#if}`,
+/// `{#each}`, `{#await}`, `{#key}` — ordinary mid-typing states) carries
+/// `None`, the typed recovery. Consumers must not fabricate a span for it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SvelteControlBlockHead {
     If {
-        condition: SourceSpan,
+        condition: Option<SourceSpan>,
     },
     Each {
-        iterable: SourceSpan,
+        iterable: Option<SourceSpan>,
         item: Option<SourceSpan>,
         index: Option<SourceSpan>,
         key: Option<SourceSpan>,
     },
     Await {
-        promise: SourceSpan,
+        promise: Option<SourceSpan>,
         inline_branch: SvelteAwaitInlineBranch,
     },
     Key {
-        expression: SourceSpan,
+        expression: Option<SourceSpan>,
     },
     Snippet {
         authored_name: SourceSlice,
@@ -1519,14 +1522,15 @@ impl SvelteControlBlockHead {
             Self::If { condition }
             | Self::Key {
                 expression: condition,
-            } => vec![*condition],
+            } => condition.iter().copied().collect(),
             Self::Each {
                 iterable,
                 item,
                 index,
                 key,
             } => {
-                let mut v = vec![*iterable];
+                let mut v = Vec::new();
+                v.extend(*iterable);
                 v.extend(*item);
                 v.extend(*index);
                 v.extend(*key);
@@ -1536,7 +1540,8 @@ impl SvelteControlBlockHead {
                 promise,
                 inline_branch,
             } => {
-                let mut v = vec![*promise];
+                let mut v = Vec::new();
+                v.extend(*promise);
                 v.extend(inline_branch.spans());
                 v
             }
@@ -1566,10 +1571,12 @@ impl SvelteClauseSyntax {
         v
     }
 }
+/// `ElseIf.condition` is `None` for an authored empty condition
+/// (`{:else if}`) — the same typed recovery as the control-block heads.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SvelteClauseHead {
     Else,
-    ElseIf { condition: SourceSpan },
+    ElseIf { condition: Option<SourceSpan> },
     Then { binding: Option<SourceSpan> },
     Catch { binding: Option<SourceSpan> },
 }
@@ -1577,7 +1584,7 @@ impl SvelteClauseHead {
     fn spans(&self) -> Vec<SourceSpan> {
         match self {
             Self::Else => vec![],
-            Self::ElseIf { condition } => vec![*condition],
+            Self::ElseIf { condition } => condition.iter().copied().collect(),
             Self::Then { binding } | Self::Catch { binding } => binding.iter().copied().collect(),
         }
     }

@@ -49,8 +49,18 @@ vi.mock("vscode", () => {
   };
 });
 
+const transpileGate: { block?: Promise<void>; started?: () => void } = {};
+vi.mock("./transpiler", () => ({
+  transpile: async () => {
+    transpileGate.started?.();
+    if (transpileGate.block) await transpileGate.block;
+    return { css: ".compiled { color: blue }", sourceMap: undefined };
+  },
+}));
+
 import * as vscode from "vscode";
 import { CssService } from "./cssService";
+import { RequestType } from "@verter/language-shared";
 import type { DocumentStructureResponseV1 } from "@verter/language-shared";
 
 const URI = "file:///workspace/App.vue";
@@ -62,22 +72,33 @@ function liveDocuments(): Array<{ uri: { toString(): string }; version: number }
   }>;
 }
 
-function styleSection(source: string) {
+function styleSection(source: string, opts?: { dialect?: string; src?: boolean }) {
   const contentStart = source.indexOf(">") + 1;
   const contentEnd = source.indexOf("</style>");
   const range = (start: number, end: number) => ({ sourceSpaceToken: "s0", start, end });
+  const attributes: unknown[] = [];
+  if (opts?.src) {
+    const srcStart = source.indexOf("src=");
+    attributes.push({
+      attributeToken: "src-0",
+      kind: "named",
+      name: { spelling: "src", normalized: "src", range: range(srcStart, srcStart + 3) },
+      value: "./theme.css",
+      fullRange: range(srcStart, srcStart + 17),
+    });
+  }
   return {
     kind: "section",
     markupRootTokens: [],
     section: {
       blockToken: "style-0",
-      role: { kind: "style", dialect: "css", scoped: false, module: "none" },
+      role: { kind: "style", dialect: opts?.dialect ?? "css", scoped: false, module: "none" },
       openingRange: range(0, contentStart),
       contentRange: range(contentStart, contentEnd),
       closingRange: range(contentEnd, source.length),
       fullRange: range(0, source.length),
       attributeInsertionAnchor: range(contentStart - 1, contentStart - 1),
-      attributes: [],
+      attributes,
     },
   };
 }
@@ -88,16 +109,22 @@ type Responder = (params: {
   expectedClientVersion: number;
 }) => DocumentStructureResponseV1 | Promise<DocumentStructureResponseV1>;
 
-function service(respond: Responder): CssService {
+function service(
+  respond: Responder,
+  requests?: Array<{ type: unknown; params: unknown }>,
+): CssService {
   const client = {
-    sendRequest: async (_type: unknown, params: unknown) =>
-      respond(
+    sendRequest: async (type: unknown, params: unknown) => {
+      requests?.push({ type, params });
+      if (type === RequestType.ApplyStyleOverrides) return { success: true };
+      return respond(
         params as {
           requestToken: string;
           clientOpenEpoch: string;
           expectedClientVersion: number;
         },
-      ),
+      );
+    },
   };
   return new CssService(
     () => client as never,
@@ -109,6 +136,7 @@ function service(respond: Responder): CssService {
 function available(
   params: { requestToken: string; clientOpenEpoch: string; expectedClientVersion: number },
   source: string,
+  opts?: { dialect?: string; src?: boolean },
 ): DocumentStructureResponseV1 {
   return {
     kind: "available",
@@ -119,7 +147,7 @@ function available(
       schemaVersion: 1,
       documentRevisionToken: "rev-1",
       artifactToken: "artifact-1",
-      blocks: [styleSection(source)],
+      blocks: [styleSection(source, opts)],
       markupNodes: [],
     },
   } as unknown as DocumentStructureResponseV1;
@@ -170,6 +198,79 @@ describe("CssService doValidation availability fail-closed (TE-C-11)", () => {
     const results = await svc.doValidation(URI, source, 1);
     expect(results).not.toBeNull();
     expect(results).toEqual([]);
+  });
+
+  it("treats external-src stray inline content as unavailable, not validatable CSS (R2-B-03)", async () => {
+    // The stray inline bytes inside a `src` block are framework-IGNORED: the
+    // external file replaces the block content. Validating them fabricates
+    // diagnostics for content Vue never uses.
+    const dirty = '<style src="./theme.css">.bad{color:}</style>';
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    const svc = service((params) => available(params, dirty, { src: true }));
+    const results = await svc.doValidation(URI, dirty, 1);
+    expect(results).toEqual([]);
+  });
+
+  it("sends no style override for an external-src preprocessor block (R2-B-03)", async () => {
+    const external = '<style src="./theme.sass" lang="sass"></style>';
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    const requests: Array<{ type: unknown; params: unknown }> = [];
+    const svc = service(
+      (params) => available(params, external, { dialect: "sass", src: true }),
+      requests,
+    );
+    await svc.doValidation(URI, external, 1);
+    expect(requests.filter((r) => r.type === RequestType.ApplyStyleOverrides)).toHaveLength(0);
+  });
+
+  it("still sends the override for an INLINE preprocessor block (negative control)", async () => {
+    const inline = '<style lang="sass">.a\n  color: red\n</style>';
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    const requests: Array<{ type: unknown; params: unknown }> = [];
+    const svc = service((params) => available(params, inline, { dialect: "sass" }), requests);
+    await svc.doValidation(URI, inline, 1);
+    expect(requests.filter((r) => r.type === RequestType.ApplyStyleOverrides)).toHaveLength(1);
+  });
+
+  it("binds the override to the captured revision/artifact tokens (R2-B-04)", async () => {
+    const inline = '<style lang="sass">.a\n  color: red\n</style>';
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    const requests: Array<{ type: unknown; params: unknown }> = [];
+    const svc = service((params) => available(params, inline, { dialect: "sass" }), requests);
+    await svc.doValidation(URI, inline, 1);
+    const override = requests.find((r) => r.type === RequestType.ApplyStyleOverrides);
+    expect(override).toBeDefined();
+    expect(override?.params).toMatchObject({
+      uri: URI,
+      documentRevisionToken: "rev-1",
+      artifactToken: "artifact-1",
+    });
+  });
+
+  it("drops a transpile result whose document moved before the send (R2-B-04)", async () => {
+    const inline = '<style lang="sass">.a\n  color: red\n</style>';
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
+    const requests: Array<{ type: unknown; params: unknown }> = [];
+    const svc = service((params) => available(params, inline, { dialect: "sass" }), requests);
+    let startedResolve!: () => void;
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+    transpileGate.started = () => startedResolve();
+    let release!: () => void;
+    transpileGate.block = new Promise((resolve) => {
+      release = resolve;
+    });
+    const pending = svc.doValidation(URI, inline, 1);
+    // Wait until revision A's transpile is genuinely in flight (admission
+    // already passed), THEN commit revision B and release the transpile.
+    await started;
+    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 2 });
+    release();
+    transpileGate.block = undefined;
+    transpileGate.started = undefined;
+    await pending;
+    expect(requests.filter((r) => r.type === RequestType.ApplyStyleOverrides)).toHaveLength(0);
   });
 
   it("keeps real diagnostics distinguishable: dirty CSS yields diagnostics, a later unavailable yields null", async () => {

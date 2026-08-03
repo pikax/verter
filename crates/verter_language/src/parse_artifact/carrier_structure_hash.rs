@@ -275,7 +275,7 @@ fn push_control_head(
     match head {
         SvelteControlBlockHead::If { condition } => {
             out.push(1);
-            push_span_text(out, inventory, *condition);
+            push_optional_span_text(out, inventory, *condition);
         }
         SvelteControlBlockHead::Each {
             iterable,
@@ -284,7 +284,7 @@ fn push_control_head(
             key,
         } => {
             out.push(2);
-            push_span_text(out, inventory, *iterable);
+            push_optional_span_text(out, inventory, *iterable);
             push_optional_span_text(out, inventory, *item);
             push_optional_span_text(out, inventory, *index);
             push_optional_span_text(out, inventory, *key);
@@ -294,12 +294,12 @@ fn push_control_head(
             inline_branch,
         } => {
             out.push(3);
-            push_span_text(out, inventory, *promise);
+            push_optional_span_text(out, inventory, *promise);
             push_inline_branch(out, inventory, inline_branch);
         }
         SvelteControlBlockHead::Key { expression } => {
             out.push(4);
-            push_span_text(out, inventory, *expression);
+            push_optional_span_text(out, inventory, *expression);
         }
         SvelteControlBlockHead::Snippet {
             authored_name,
@@ -317,7 +317,7 @@ fn push_clause_head(out: &mut Vec<u8>, inventory: &CarrierBlockInventory, head: 
         SvelteClauseHead::Else => out.push(1),
         SvelteClauseHead::ElseIf { condition } => {
             out.push(2);
-            push_span_text(out, inventory, *condition);
+            push_optional_span_text(out, inventory, *condition);
         }
         SvelteClauseHead::Then { binding } => {
             out.push(3);

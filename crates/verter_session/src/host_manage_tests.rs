@@ -2939,6 +2939,84 @@ fn external_src_style_defers_content_and_fails_open_on_binding_liveness() {
     );
 }
 
+/// R2-B-03: `apply_style_overrides` must REJECT an override targeting an
+/// external-`src` deferred block. Accepting it would rebuild an `Inline` CSS
+/// analysis (and virtual style bytes) for content the framework never uses,
+/// bypassing the typed deferred state (B-23).
+#[test]
+fn apply_style_overrides_rejects_external_src_deferred_block() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    let src = r#"<template><div class="x"/></template>
+<style src="./theme.css"></style>
+<style>.local { color: red }</style>
+"#;
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/src/Themed.vue".to_string(),
+            source: Arc::from(src),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let analysis = host.get_analysis("/workspace/src/Themed.vue").unwrap();
+    assert!(analysis.styles[0].is_external_src_deferred());
+    assert!(!analysis.styles[1].is_external_src_deferred());
+
+    // An override targeting the DEFERRED block (index 0) is refused with the
+    // typed external-content error and mutates nothing.
+    let rejected = host.apply_style_overrides(crate::StyleOverrideRequest {
+        canonical_id: "/workspace/src/Themed.vue".to_string(),
+        compile_profile: crate::CompileProfile::default(),
+        overrides: vec![crate::StyleOverrideEntry {
+            index: 0,
+            code: Arc::from(".injected { color: blue }"),
+            source_map: None,
+        }],
+    });
+    assert!(
+        matches!(
+            rejected,
+            Err(crate::HostError::ExternalBlockContentDeferred(_))
+        ),
+        "override on an external-src deferred block must be refused typed, got: {rejected:?}"
+    );
+    let after = host.get_analysis("/workspace/src/Themed.vue").unwrap();
+    assert!(
+        after.styles[0].is_external_src_deferred(),
+        "the deferred state must survive the refused override"
+    );
+    assert!(
+        after.styles[0].css.is_none(),
+        "no Inline CSS analysis may be fabricated for the deferred block"
+    );
+
+    // Negative control: an override targeting the INLINE block (index 1)
+    // still applies normally.
+    let accepted = host.apply_style_overrides(crate::StyleOverrideRequest {
+        canonical_id: "/workspace/src/Themed.vue".to_string(),
+        compile_profile: crate::CompileProfile::default(),
+        overrides: vec![crate::StyleOverrideEntry {
+            index: 1,
+            code: Arc::from(".local { color: green }"),
+            source_map: None,
+        }],
+    });
+    assert!(
+        accepted.is_ok(),
+        "inline-block overrides must keep working: {accepted:?}"
+    );
+}
+
 #[test]
 fn resolve_dep_source_reuses_cached_source_without_loading_dependency_into_host_state() {
     let ws = Arc::new(CountingWorkspace::new());

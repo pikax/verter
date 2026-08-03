@@ -1060,24 +1060,22 @@ fn classify_style_context(
 ) -> CursorContext {
     if let Some(analysis) = analysis {
         // Check all style blocks for v-bind() expressions
-        for (i, style_block) in blocks
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| b.tag_name == "style")
-        {
+        for style_block in blocks.iter().filter(|b| b.tag_name == "style") {
             let (cs, ce) = style_block.content_range();
             if offset < cs || offset > ce {
                 continue;
             }
-            // Find the corresponding style analysis
-            // Style blocks are indexed in order they appear
-            let style_idx = blocks
+            // The sealed block ref is the association authority: a
+            // full-identity join (artifact identity + block id). Missing or
+            // foreign producer identity fails closed — never a recounted
+            // style ordinal, which mis-attaches a reordered or stale
+            // analysis's v_binds.
+            let block_ref = style_block.block_ref.artifact_block_ref();
+            if let Some(style_analysis) = analysis
+                .styles
                 .iter()
-                .take(i + 1)
-                .filter(|b| b.tag_name == "style")
-                .count()
-                - 1;
-            if let Some(style_analysis) = analysis.styles.get(style_idx) {
+                .find(|style| style.block_ref.as_ref() == Some(block_ref))
+            {
                 for vb in &style_analysis.v_binds {
                     // Inclusive end: the caret sits AT the expression end while
                     // typing, and an empty `v-bind(|)` has start == end.

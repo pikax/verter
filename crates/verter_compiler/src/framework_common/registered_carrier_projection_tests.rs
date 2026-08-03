@@ -580,7 +580,10 @@ fn registered_projector_closed_variant_matrix_is_exhaustive_for_live_parsers() {
     else {
         panic!("inline then head")
     };
-    assert_eq!(span_range(*promise), (then_start + 8, then_start + 15));
+    assert_eq!(
+        span_range(promise.expect("authored promise span")),
+        (then_start + 8, then_start + 15)
+    );
     assert_eq!(span_range(*marker_span), (then_start + 16, then_start + 20));
     assert_eq!(span_range(*head_span), (then_start + 16, then_start + 26));
     assert_eq!(span_range(*binding), (then_start + 21, then_start + 26));
@@ -617,7 +620,10 @@ fn registered_projector_closed_variant_matrix_is_exhaustive_for_live_parsers() {
     else {
         panic!("inline catch head")
     };
-    assert_eq!(span_range(*promise), (catch_start + 8, catch_start + 15));
+    assert_eq!(
+        span_range(promise.expect("authored promise span")),
+        (catch_start + 8, catch_start + 15)
+    );
     assert_eq!(
         span_range(*marker_span),
         (catch_start + 16, catch_start + 21)
@@ -1399,6 +1405,121 @@ fn svelte_unclosed_control_block_projects_recovered_not_fabricated_closed() {
             recovery_span: None,
         },
         "a missing close marker must project recovery, not a fabricated Closed"
+    );
+}
+
+/// R2-C-01: parser-producible EMPTY block heads (`{#if}` and friends — the
+/// ordinary mid-typing states) must project typed recovery (`None` head
+/// expression), never panic the projector.
+fn svelte_control_block_head(source: &str) -> verter_language::SvelteControlBlockHead {
+    let (_, _, accepted) = accepted(
+        "file:///workspace/EmptyHead.svelte",
+        verter_language::FileLanguage::svelte(),
+        source,
+    );
+    let projection = project(&accepted);
+    let inventory = projection.inventory();
+    inventory.validate().expect("empty-head inventory");
+    inventory
+        .markup()
+        .nodes()
+        .iter()
+        .find_map(|node| match node.kind() {
+            MarkupNodeKind::SvelteControlBlock(block) => Some(block.head.clone()),
+            _ => None,
+        })
+        .expect("control block node")
+}
+
+#[test]
+fn svelte_empty_if_head_projects_typed_recovery_not_panic() {
+    use verter_language::SvelteControlBlockHead;
+    for source in ["{#if}{/if}", "{#if }{/if}"] {
+        let head = svelte_control_block_head(source);
+        assert!(
+            matches!(head, SvelteControlBlockHead::If { condition: None }),
+            "an empty `{{#if}}` head must project `condition: None`, got: {head:?}"
+        );
+    }
+    // Negative control: a non-empty head still projects its authored span.
+    let head = svelte_control_block_head("{#if cond}{/if}");
+    assert!(
+        matches!(
+            head,
+            verter_language::SvelteControlBlockHead::If { condition: Some(_) }
+        ),
+        "a non-empty `{{#if cond}}` head must keep its condition span, got: {head:?}"
+    );
+}
+
+#[test]
+fn svelte_empty_each_head_projects_typed_recovery_not_panic() {
+    use verter_language::SvelteControlBlockHead;
+    let head = svelte_control_block_head("{#each}{/each}");
+    assert!(
+        matches!(
+            head,
+            SvelteControlBlockHead::Each {
+                iterable: None,
+                item: None,
+                index: None,
+                key: None,
+            }
+        ),
+        "an empty `{{#each}}` head must project `iterable: None`, got: {head:?}"
+    );
+}
+
+#[test]
+fn svelte_empty_await_head_projects_typed_recovery_not_panic() {
+    use verter_language::{SvelteAwaitInlineBranch, SvelteControlBlockHead};
+    let head = svelte_control_block_head("{#await}{/await}");
+    assert!(
+        matches!(
+            head,
+            SvelteControlBlockHead::Await {
+                promise: None,
+                inline_branch: SvelteAwaitInlineBranch::None,
+            }
+        ),
+        "an empty `{{#await}}` head must project `promise: None`, got: {head:?}"
+    );
+}
+
+#[test]
+fn svelte_empty_key_head_projects_typed_recovery_not_panic() {
+    use verter_language::SvelteControlBlockHead;
+    let head = svelte_control_block_head("{#key}{/key}");
+    assert!(
+        matches!(head, SvelteControlBlockHead::Key { expression: None }),
+        "an empty `{{#key}}` head must project `expression: None`, got: {head:?}"
+    );
+}
+
+#[test]
+fn svelte_empty_else_if_condition_projects_typed_recovery_not_panic() {
+    use verter_language::SvelteClauseHead;
+    let source = "{#if x}a{:else if}b{/if}";
+    let (_, _, accepted) = accepted(
+        "file:///workspace/EmptyElseIf.svelte",
+        verter_language::FileLanguage::svelte(),
+        source,
+    );
+    let projection = project(&accepted);
+    let inventory = projection.inventory();
+    inventory.validate().expect("empty else-if inventory");
+    let head = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .find_map(|node| match node.kind() {
+            MarkupNodeKind::SvelteClause(clause) => Some(clause.head.clone()),
+            _ => None,
+        })
+        .expect("clause node");
+    assert!(
+        matches!(head, SvelteClauseHead::ElseIf { condition: None }),
+        "an empty `{{:else if}}` condition must project `condition: None`, got: {head:?}"
     );
 }
 

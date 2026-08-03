@@ -424,15 +424,21 @@ impl VerterLanguageServer {
         &self,
         params: ApplyStyleOverridesParams,
     ) -> Result<ApplyStyleOverridesResponse> {
+        use crate::documents::StyleOverrideApplyOutcome;
+
         let uri = &params.uri;
         tracing::debug!("$/verter/applyStyleOverrides: {uri}");
 
         let parsed_uri: Uri = match uri.parse() {
             Ok(u) => u,
-            Err(_) => return Ok(ApplyStyleOverridesResponse { success: false }),
+            Err(_) => {
+                return Ok(ApplyStyleOverridesResponse {
+                    success: false,
+                    refusal: None,
+                })
+            }
         };
 
-        let canonical_id = uri_to_canonical_id(&parsed_uri);
         let overrides = params
             .overrides
             .into_iter()
@@ -443,16 +449,32 @@ impl VerterLanguageServer {
             })
             .collect();
 
-        let result = self
-            .documents
-            .apply_style_overrides(&canonical_id, overrides);
+        let outcome = self.documents.apply_style_overrides(
+            &parsed_uri,
+            overrides,
+            params.document_revision_token.as_deref(),
+            params.artifact_token.as_deref(),
+        );
 
-        if result {
+        if outcome == StyleOverrideApplyOutcome::Applied {
             // Re-publish diagnostics since analysis has changed
             self.publish_full_diagnostics_with_audit(&parsed_uri).await;
         }
 
-        Ok(ApplyStyleOverridesResponse { success: result })
+        Ok(match outcome {
+            StyleOverrideApplyOutcome::Applied => ApplyStyleOverridesResponse {
+                success: true,
+                refusal: None,
+            },
+            StyleOverrideApplyOutcome::Failed => ApplyStyleOverridesResponse {
+                success: false,
+                refusal: None,
+            },
+            StyleOverrideApplyOutcome::RevisionMismatch => ApplyStyleOverridesResponse {
+                success: false,
+                refusal: Some(StyleOverrideRefusal::RevisionMismatch),
+            },
+        })
     }
 
     /// Handle `$/verter/getAnalysis` request.

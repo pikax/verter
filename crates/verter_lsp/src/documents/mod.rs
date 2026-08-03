@@ -1066,8 +1066,19 @@ impl DocumentRegistry {
         let canonical_id = self.get_canonical_id(uri)?;
         let profile = self.tsx_profile.read().clone();
 
+        // SOURCE-IDENTITY FENCE: the host-cache read below happens with no
+        // lock held, so a `didChange` can commit a newer revision in the
+        // read→install/return window. Capture the revision this cached
+        // surface is being served FOR, compare under the shard write guard
+        // before installing, and re-check before returning — never install a
+        // mapper (or hand back IDE output) over bytes the document no longer
+        // holds.
+        let fast_path_attempted = self.snapshot_identity(uri)?;
+
         // Fast path: cache hit
         if let Some(resp) = self.host.get_ide(&canonical_id, &profile) {
+            #[cfg(test)]
+            self.run_before_projection_install_hook(uri);
             // Lazily rebuild position mapper if it was None (startup race:
             // did_open runs before background_init completes, so the mapper
             // may not have been built, but the workspace scanner later compiles
@@ -1077,7 +1088,10 @@ impl DocumentRegistry {
                 if entry.projection.is_none() {
                     drop(entry);
                     if let Some(mut entry) = self.documents.get_mut(uri.as_str()) {
-                        if entry.projection.is_none() {
+                        if entry.version == fast_path_attempted.version
+                            && entry.document_revision == fast_path_attempted.revision
+                            && entry.projection.is_none()
+                        {
                             if let Some(mapper) = resp
                                 .source_map
                                 .as_ref()
@@ -1094,6 +1108,12 @@ impl DocumentRegistry {
             if installed {
                 self.failed_carrier_ide_content_verdicts
                     .remove(&canonical_id);
+            }
+            // A `didChange` that committed after the host-cache read makes
+            // this response describe a superseded revision: return nothing;
+            // the newer revision owes its own repair.
+            if !self.snapshot_identity_is_current(uri, &fast_path_attempted) {
+                return None;
             }
             return Some(resp);
         }
@@ -1433,22 +1453,51 @@ impl DocumentRegistry {
 
     /// Apply preprocessor-compiled style overrides for a document.
     ///
-    /// Returns `true` if the overrides were applied successfully.
+    /// When the client supplies the captured `documentRevisionToken` /
+    /// `artifactToken` of the structure the override was computed against,
+    /// the apply is REVISION-BOUND: a token that no longer matches the live
+    /// document is refused typed, with no host mutation — an async transpile
+    /// result bound to revision A must never overwrite revision B's state.
     pub fn apply_style_overrides(
         &self,
-        canonical_id: &str,
+        uri: &Uri,
         overrides: Vec<StyleOverrideEntry>,
-    ) -> bool {
+        expected_revision_token: Option<&str>,
+        expected_artifact_token: Option<&str>,
+    ) -> StyleOverrideApplyOutcome {
+        if expected_revision_token.is_some() || expected_artifact_token.is_some() {
+            // Compare against the LIVE document in a scoped guard (dropped
+            // before the host call). A closed document matches no token.
+            let matched = {
+                match self.documents.get(uri.as_str()) {
+                    Some(doc) => {
+                        let revision_ok = expected_revision_token
+                            .is_none_or(|token| token == doc.document_revision.public_token());
+                        let artifact_ok = expected_artifact_token.is_none_or(|token| {
+                            doc.feature_snapshot.as_ref().is_some_and(|snapshot| {
+                                snapshot.structure().public_artifact_token().as_str() == token
+                            })
+                        });
+                        revision_ok && artifact_ok
+                    }
+                    None => false,
+                }
+            };
+            if !matched {
+                return StyleOverrideApplyOutcome::RevisionMismatch;
+            }
+        }
+        let canonical_id = uri_to_canonical_id(uri);
         let req = StyleOverrideRequest {
-            canonical_id: canonical_id.to_string(),
+            canonical_id,
             compile_profile: self.tsx_profile.read().clone(),
             overrides,
         };
         match self.host.apply_style_overrides(req) {
-            Ok(_) => true,
+            Ok(_) => StyleOverrideApplyOutcome::Applied,
             Err(e) => {
                 tracing::warn!("apply_style_overrides failed: {e:?}");
-                false
+                StyleOverrideApplyOutcome::Failed
             }
         }
     }
@@ -1467,6 +1516,18 @@ impl DocumentRegistry {
     pub fn host_arc(&self) -> Arc<VerterHost> {
         Arc::clone(&self.host)
     }
+}
+
+/// Outcome of a revision-bound style-override apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleOverrideApplyOutcome {
+    /// The host accepted and applied the overrides.
+    Applied,
+    /// The host refused or failed the apply (typed host error).
+    Failed,
+    /// The captured revision/artifact token no longer matches the live
+    /// document: refused BEFORE any host mutation.
+    RevisionMismatch,
 }
 
 // ── Analysis span conversion ─────────────────────────────────────────

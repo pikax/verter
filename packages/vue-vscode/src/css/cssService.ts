@@ -66,6 +66,10 @@ interface DocumentCache {
   availability: DocumentStructureResponseV1["kind"] | "transportUnavailable";
   blocks: StyleBlockInfo[];
   source: string;
+  /** Captured from the admitted `available` structure (R2-B-04): style
+   * overrides computed against this structure are revision-bound to it. */
+  documentRevisionToken?: string;
+  artifactToken?: string;
   /** Keyed by style block index — transpiled CSS for preprocessors */
   transpiled: Map<number, TranspileResult>;
 }
@@ -322,6 +326,11 @@ export class CssService {
     entry: DocumentCache,
     sfcUri: string,
   ): CSSTextDocument | null {
+    // External-src blocks yield NO inline slice (R2-B-03): the inline bytes
+    // are framework-ignored — never validate, hover, or color them as if
+    // they were available content. Typed unavailable, fail closed.
+    if (block.externalSrc) return null;
+
     // For transpiled languages, use transpiled CSS
     if (block.lang === "sass" || block.lang === "stylus") {
       const transpiled = entry.transpiled.get(block.legacyPreprocessorIndex);
@@ -413,6 +422,13 @@ export class CssService {
       live?.version === version &&
       this.getOpenEpoch(uri) === openEpoch;
     const blocks = admitted && response ? styleBlocksFromStructure(source, response) : [];
+    const captured =
+      admitted && response !== null && response.kind === "available"
+        ? {
+            documentRevisionToken: response.structure.documentRevisionToken,
+            artifactToken: response.structure.artifactToken,
+          }
+        : undefined;
     const transpiled = new Map<number, TranspileResult>();
 
     // Transpile preprocessors if needed (resolved from workspace node_modules)
@@ -420,6 +436,10 @@ export class CssService {
     const missingDiags: vscode.Diagnostic[] = [];
 
     for (const block of blocks) {
+      // External-src blocks have no inline content to transpile — the
+      // inline slice is framework-ignored and the host REJECTS overrides
+      // targeting a deferred block (R2-B-03). Send nothing.
+      if (block.externalSrc) continue;
       if (block.lang !== "sass" && block.lang !== "stylus") continue;
 
       // Re-resolve if workspace path changed or wasn't available at construction
@@ -432,8 +452,17 @@ export class CssService {
       if (result) {
         transpiled.set(block.legacyPreprocessorIndex, result);
 
-        // Send transpiled CSS back to the host for analysis
-        await this.applyStyleOverride(uri, block.legacyPreprocessorIndex, result);
+        // Send transpiled CSS back to the host for analysis — bound to the
+        // captured structure tokens, and only while the document is still
+        // the exact revision the transpile ran against (R2-B-04).
+        await this.applyStyleOverride(
+          uri,
+          block.legacyPreprocessorIndex,
+          result,
+          version,
+          openEpoch,
+          captured,
+        );
       } else {
         // Emit an inline diagnostic on the lang="..." attribute
         if (block.langAttributeRange) {
@@ -480,6 +509,7 @@ export class CssService {
       availability: admitted && response ? response.kind : "transportUnavailable",
       blocks,
       source,
+      ...(captured ?? {}),
       transpiled,
     };
     this.cache.set(uri, entry);
@@ -489,12 +519,27 @@ export class CssService {
   /**
    * Send a preprocessor-compiled style override to the Rust LSP host.
    * This updates the host's analysis with the transpiled CSS.
+   *
+   * Revision-bound (R2-B-04): the transpile is async, so the document may
+   * have moved while it ran. The result is dropped client-side when the live
+   * document no longer matches the captured version/epoch, and the request
+   * carries the captured structure tokens so the server independently
+   * refuses a mismatched-revision apply.
    */
   private async applyStyleOverride(
     uri: string,
     index: number,
     result: TranspileResult,
+    version: number,
+    openEpoch: string,
+    captured?: { documentRevisionToken: string; artifactToken: string },
   ): Promise<void> {
+    const live = vscode.workspace.textDocuments.find((document) => document.uri.toString() === uri);
+    if (live?.version !== version || this.getOpenEpoch(uri) !== openEpoch) {
+      // Revision A's slow transpile result must not overwrite revision B's
+      // state: the newer revision owes its own transpile.
+      return;
+    }
     try {
       const client = this.getClient();
       await client.sendRequest(RequestType.ApplyStyleOverrides, {
@@ -506,6 +551,7 @@ export class CssService {
             sourceMap: result.sourceMap ? JSON.stringify(result.sourceMap) : undefined,
           },
         ],
+        ...(captured ?? {}),
       });
     } catch {
       // Silently fail — LSP might not support this yet

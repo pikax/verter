@@ -162,6 +162,14 @@ export type RequestParams = {
   [RequestType.ApplyStyleOverrides]: {
     uri: string;
     overrides: StyleOverrideParam[];
+    /** `documentRevisionToken` of the structure the override was computed
+     * against (additive). When present, the server refuses a
+     * mismatched-revision apply — a slow transpile bound to revision A must
+     * never overwrite revision B's state. */
+    documentRevisionToken?: string;
+    /** `artifactToken` of the same captured structure (additive), same
+     * refusal semantics. */
+    artifactToken?: string;
   };
   [RequestType.GetRouteTree]: Record<string, never>;
   [RequestType.GetComponentMeta]: { uri: string };
@@ -194,7 +202,11 @@ export type RequestResponse = {
    */
   [RequestType.GetBindingTypes]: Record<string, { displaySignature: string } | null>;
   [RequestType.GetComponentParents]: ComponentParentsResponse;
-  [RequestType.ApplyStyleOverrides]: { success: boolean };
+  [RequestType.ApplyStyleOverrides]: {
+    success: boolean;
+    /** Present only when the apply was refused without mutation (additive). */
+    refusal?: "revisionMismatch";
+  };
   [RequestType.GetRouteTree]: RouteAnalysisSnapshot;
   /** Full Volar-shape payload, JSON-projected. `null` when not a component. */
   [RequestType.GetComponentMeta]: unknown;

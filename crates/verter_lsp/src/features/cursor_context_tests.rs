@@ -298,25 +298,41 @@ fn test_style_block_general() {
     );
 }
 
+fn vbind_analysis_for(
+    expression: &str,
+    start: u32,
+    end: u32,
+    block_ref: Option<verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef>,
+) -> verter_semantic::analysis::StyleBlockAnalysis {
+    verter_semantic::analysis::StyleBlockAnalysis {
+        v_binds: vec![verter_semantic::analysis::style::AnalyzedVBind {
+            expression: expression.to_string(),
+            quoted: false,
+            start,
+            end,
+            generated_var_name: None,
+            expr_roots: vec![expression.to_string()],
+            roots_complete: true,
+        }],
+        block_ref,
+        ..Default::default()
+    }
+}
+
 #[test]
 fn test_style_block_vbind() {
     let source = "<template><div></div></template>\n<style scoped>\n.foo { color: v-bind(color); }\n</style>\n";
     let blocks = test_carrier_blocks(source);
+    let style_ref = blocks
+        .iter()
+        .find(|b| b.tag_name == "style")
+        .expect("style block")
+        .block_ref
+        .artifact_block_ref()
+        .clone();
 
     let analysis = FileAnalysisSnapshot {
-        styles: (vec![verter_semantic::analysis::StyleBlockAnalysis {
-            v_binds: vec![verter_semantic::analysis::style::AnalyzedVBind {
-                expression: "color".to_string(),
-                quoted: false,
-                start: 68,
-                end: 73,
-                generated_var_name: None,
-                expr_roots: vec!["color".to_string()],
-                roots_complete: true,
-            }],
-            ..Default::default()
-        }])
-        .into(),
+        styles: (vec![vbind_analysis_for("color", 68, 73, Some(style_ref))]).into(),
         ..Default::default()
     };
 
@@ -324,6 +340,67 @@ fn test_style_block_vbind() {
     assert!(
         matches!(ctx, CursorContext::Style(StyleCursorContext::VBind)),
         "should be Style(VBind) inside v-bind() expression, got: {:?}",
+        ctx
+    );
+}
+
+/// R2-B-02: the sealed `block_ref` is the SOLE association key between a
+/// structure style block and its analysis. A styles vector arriving in a
+/// different order than the document must still attach the right `v_binds`
+/// — never the recounted style ordinal's.
+#[test]
+fn test_style_vbind_joins_by_sealed_block_ref_not_ordinal() {
+    let source = "<style>.a { color: red; }</style>\n<style>.b { color: v-bind(color); }</style>\n";
+    let blocks = test_carrier_blocks(source);
+    let style_refs: Vec<_> = blocks
+        .iter()
+        .filter(|b| b.tag_name == "style")
+        .map(|b| b.block_ref.artifact_block_ref().clone())
+        .collect();
+    assert_eq!(style_refs.len(), 2, "two style blocks");
+    let vb_start = source.rfind("v-bind(").expect("v-bind") as u32 + 7;
+    let vb_end = vb_start + 5;
+
+    // REORDERED: the SECOND block's analysis sits at ordinal 0.
+    let analysis = FileAnalysisSnapshot {
+        styles: (vec![
+            vbind_analysis_for("color", vb_start, vb_end, Some(style_refs[1].clone())),
+            verter_semantic::analysis::StyleBlockAnalysis {
+                block_ref: Some(style_refs[0].clone()),
+                ..Default::default()
+            },
+        ])
+        .into(),
+        ..Default::default()
+    };
+
+    let ctx = classify_cursor_context(vb_start + 2, source, &blocks, Some(&analysis));
+    assert!(
+        matches!(ctx, CursorContext::Style(StyleCursorContext::VBind)),
+        "the sealed-ref join must attach the second block's v_binds despite \
+         the reordered styles vector, got: {:?}",
+        ctx
+    );
+}
+
+/// R2-B-02 fail-closed arm: an analysis carrier with NO sealed `block_ref`
+/// (e.g. a deserialized snapshot — the field is `#[serde(skip)]`) must not
+/// attach `v_binds` by ordinal; classification fails closed to General.
+#[test]
+fn test_style_vbind_fails_closed_without_sealed_block_ref() {
+    let source = "<template><div></div></template>\n<style scoped>\n.foo { color: v-bind(color); }\n</style>\n";
+    let blocks = test_carrier_blocks(source);
+
+    let analysis = FileAnalysisSnapshot {
+        styles: (vec![vbind_analysis_for("color", 68, 73, None)]).into(),
+        ..Default::default()
+    };
+
+    let ctx = classify_cursor_context(70, source, &blocks, Some(&analysis));
+    assert!(
+        matches!(ctx, CursorContext::Style(StyleCursorContext::General)),
+        "a ref-less analysis must fail closed to General, never ordinal-attach \
+         v_binds, got: {:?}",
         ctx
     );
 }

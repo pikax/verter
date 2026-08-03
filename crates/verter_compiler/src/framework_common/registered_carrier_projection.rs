@@ -1420,7 +1420,10 @@ fn project_svelte_node(
                 let head = match clause.kind {
                     SvelteClauseKind::Else => SvelteClauseHead::Else,
                     SvelteClauseKind::ElseIf => SvelteClauseHead::ElseIf {
-                        condition: builder.span(clause.expr.expect("else-if condition")),
+                        // Parser-owned fact: an authored empty condition
+                        // (`{:else if}`) is `None` — typed recovery, never a
+                        // panic or a fabricated span.
+                        condition: clause.expr.map(|s| builder.span(s)),
                     },
                     SvelteClauseKind::Then => SvelteClauseHead::Then {
                         binding: clause.expr.map(|s| builder.span(s)),
@@ -1482,18 +1485,22 @@ fn project_svelte_node(
                 };
                 return placeholder;
             }
+            // Parser-owned head facts: an EMPTY authored head (`{#if}`,
+            // `{#each}`, `{#await}`, `{#key}` — ordinary mid-typing states)
+            // yields `head_expr: None` from the tokenizer and projects the
+            // typed `None` recovery — never a panic, never a fabricated span.
             let head = match &v.kind {
                 SvelteBlockKind::If => SvelteControlBlockHead::If {
-                    condition: builder.span(v.head_expr.expect("if head")),
+                    condition: v.head_expr.map(|s| builder.span(s)),
                 },
                 SvelteBlockKind::Each { item, index, key } => SvelteControlBlockHead::Each {
-                    iterable: builder.span(v.head_expr.expect("each head")),
+                    iterable: v.head_expr.map(|s| builder.span(s)),
                     item: item.map(|s| builder.span(s)),
                     index: index.map(|s| builder.span(s)),
                     key: key.map(|s| builder.span(s)),
                 },
                 SvelteBlockKind::Await { inline_branch, .. } => SvelteControlBlockHead::Await {
-                    promise: builder.span(v.head_expr.expect("await head")),
+                    promise: v.head_expr.map(|s| builder.span(s)),
                     inline_branch: match inline_branch {
                         crate::svelte::parser::SvelteAwaitInline::None => {
                             SvelteAwaitInlineBranch::None
@@ -1519,7 +1526,7 @@ fn project_svelte_node(
                     },
                 },
                 SvelteBlockKind::Key => SvelteControlBlockHead::Key {
-                    expression: builder.span(v.head_expr.expect("key head")),
+                    expression: v.head_expr.map(|s| builder.span(s)),
                 },
                 SvelteBlockKind::Snippet {
                     name,

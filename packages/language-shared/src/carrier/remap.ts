@@ -43,9 +43,12 @@ const parsedMapCache = new Map<string, TraceMap | null>();
 export interface CarrierSourceStructureStamp {
   schemaVersion: 1;
   artifactToken: string;
+  /** UTF-8 BYTE offset spans (Rust inventory geometry). Consumers comparing
+   * against UTF-16 provider positions MUST convert first. */
   scriptContentRanges: readonly (readonly [number, number])[];
-  /** Parser-identified markup opening-tag spans (empty for stamps written
-   * before the field existed — consumers then fail closed). */
+  /** Parser-identified markup opening-tag spans, UTF-8 BYTE offsets (empty
+   * for stamps written before the field existed — consumers then fail
+   * closed). Convert before comparing against UTF-16 positions. */
   markupOpeningRanges: readonly (readonly [number, number])[];
 }
 

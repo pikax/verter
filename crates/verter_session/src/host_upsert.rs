@@ -1078,6 +1078,22 @@ impl VerterHost {
                     .map(|ad| Arc::clone(&ad.style_analyses))
                     .unwrap_or_default();
 
+            // External-`src` blocks defer their content (B-23): an override
+            // targeting a deferred block would rebuild an `Inline` CSS
+            // analysis and virtual style bytes for content the framework
+            // never uses. Refuse the whole request typed, before any cache
+            // mutation — never fabricate inline state for a deferred block.
+            for &idx in by_index.keys() {
+                if raw_style_analyses
+                    .get(idx)
+                    .is_some_and(|analysis| analysis.is_external_src_deferred())
+                {
+                    return Err(HostError::ExternalBlockContentDeferred(
+                        crate::carrier_publication_store::ExternalBlockContentDeferred::B23,
+                    ));
+                }
+            }
+
             // Check previous hash
             let previous_hash = self
                 .compile_cache()

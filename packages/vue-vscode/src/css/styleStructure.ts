@@ -8,6 +8,14 @@ export interface StyleBlockInfo {
   legacyPreprocessorIndex: number;
   lang: StyleLang;
   scoped: boolean;
+  /**
+   * Parser-owned `src` attribute: the block's content is an EXTERNAL file
+   * and the inline slice is framework-IGNORED. External-src blocks yield NO
+   * inline slice — consumers must not slice, validate, transpile, or send
+   * overrides for them (typed unavailable, mirroring the host's
+   * `ExternalSrcDeferred` state).
+   */
+  externalSrc: boolean;
   contentStartLine: number;
   contentStartColumn: number;
   contentStartOffset: number;
@@ -78,11 +86,15 @@ export function styleBlocksFromStructure(
       start: lineCol(source, toOffset(source, langAttribute.fullRange)),
       end: lineCol(source, utf8OffsetToUtf16(source, langAttribute.fullRange.end)),
     };
+    const externalSrc = block.section.attributes.some(
+      (attribute) => attribute.kind === "named" && attribute.name?.normalized === "src",
+    );
     result.push({
       blockToken: block.section.blockToken,
       legacyPreprocessorIndex: result.length,
       lang: styleLang(block.section.role.dialect),
       scoped: block.section.role.scoped,
+      externalSrc,
       contentStartLine: start.line,
       contentStartColumn: start.col,
       contentStartOffset,

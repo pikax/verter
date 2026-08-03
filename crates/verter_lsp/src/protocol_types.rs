@@ -296,6 +296,16 @@ pub struct GetVirtualFilesParams {
 pub struct ApplyStyleOverridesParams {
     pub uri: String,
     pub overrides: Vec<StyleOverrideParam>,
+    /// The `documentRevisionToken` of the structure the override was computed
+    /// against (additive; absent from older clients). When present, the
+    /// handler REFUSES a mismatched-revision apply — an async transpile
+    /// result bound to revision A must never overwrite revision B's state.
+    #[serde(default)]
+    pub document_revision_token: Option<String>,
+    /// The `artifactToken` of the same captured structure (additive). Same
+    /// refusal semantics as `document_revision_token`.
+    #[serde(default)]
+    pub artifact_token: Option<String>,
 }
 
 /// A single style override entry from the client.
@@ -307,10 +317,23 @@ pub struct StyleOverrideParam {
     pub source_map: Option<String>,
 }
 
+/// Typed refusal reason for `$/verter/applyStyleOverrides` (additive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StyleOverrideRefusal {
+    /// The captured revision/artifact token no longer matches the live
+    /// document: the override describes superseded bytes and was NOT applied.
+    RevisionMismatch,
+}
+
 /// Response for `$/verter/applyStyleOverrides` request.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApplyStyleOverridesResponse {
     pub success: bool,
+    /// Present only when the apply was refused without mutation (additive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<StyleOverrideRefusal>,
 }
 
 /// Params for `$/verter/getAnalysis` (and `$/verter/getBindingTypes`) request.
