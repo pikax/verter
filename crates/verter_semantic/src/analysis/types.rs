@@ -1183,6 +1183,150 @@ pub struct AnalyzedEmitField {
     pub tags: Vec<JsdocTag>,
 }
 
+/// The position at which a new member may be appended to an authored member
+/// list, plus whether that list is currently empty.
+///
+/// The offset is SFC-ABSOLUTE and always the byte offset of the list's closing
+/// delimiter, so an insertion at this offset lands as the list's LAST member.
+///
+/// The field is private and the constructor is crate-private: an edit position
+/// for a macro member list is only ever minted by this crate's analyzer from a
+/// live OXC node. A consumer that wanted to derive one from `span.end - N`
+/// arithmetic cannot — it is a compile error, not a convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberListAnchor {
+    insert_offset: u32,
+    is_empty: bool,
+}
+
+impl MemberListAnchor {
+    /// Mint an anchor from a live OXC node's span. Crate-private by design
+    /// (see the type docs).
+    pub(crate) fn new(insert_offset: u32, is_empty: bool) -> Self {
+        Self {
+            insert_offset,
+            is_empty,
+        }
+    }
+
+    /// SFC-absolute byte offset of the member list's closing delimiter.
+    pub fn insert_offset(&self) -> u32 {
+        self.insert_offset
+    }
+
+    /// Whether the member list currently has no members (drives the separator
+    /// a consumer must emit).
+    pub fn is_empty(&self) -> bool {
+        self.is_empty
+    }
+}
+
+/// Why a macro member list has no appendable position.
+///
+/// One variant per verified authored shape — reasons never collapse into a
+/// single "unavailable" value.
+///
+/// `Default` is [`Self::NoTypeArgument`]: an anchor that was never published is
+/// indistinguishable from a macro that carries no anchorable type argument, and
+/// both must yield zero actions.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, Hash,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum MacroAnchorUnsupported {
+    /// The macro carries no type argument at all (`defineSlots<>()`), or no
+    /// anchor was published for this position.
+    #[default]
+    NoTypeArgument,
+    /// The macro is not type-based, so it has no type-argument member list.
+    NotTypeBased,
+    /// The type argument is a bare type reference (`defineSlots<S>()`): the
+    /// member list lives in another declaration, not at this position.
+    NamedTypeArgument,
+    /// The type argument is an intersection: a merged member list has no single
+    /// closing delimiter.
+    IntersectionTypeArgument,
+    /// The authored shape at this position carries no appendable member list —
+    /// a `Pick<Object, Keys>` props surface, a runtime object argument where an
+    /// array element list was required, or any other non-literal shape.
+    NoMemberList,
+}
+
+/// A macro edit position: an analyzer-minted anchor, or the typed reason there
+/// is none.
+///
+/// Deliberately NOT `Option<u32>`: absence carries a reason, and a consumer
+/// must never substitute an arithmetic fallback for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MacroAnchor {
+    /// The member list is appendable at this anchor.
+    Available(MemberListAnchor),
+    /// No appendable position exists, for this reason.
+    Unsupported(MacroAnchorUnsupported),
+}
+
+impl Default for MacroAnchor {
+    fn default() -> Self {
+        Self::Unsupported(MacroAnchorUnsupported::default())
+    }
+}
+
+impl MacroAnchor {
+    /// The anchor when one is available.
+    pub fn available(&self) -> Option<&MemberListAnchor> {
+        match self {
+            Self::Available(anchor) => Some(anchor),
+            Self::Unsupported(_) => None,
+        }
+    }
+
+    /// The typed reason no anchor is available.
+    pub fn unsupported_reason(&self) -> Option<MacroAnchorUnsupported> {
+        match self {
+            Self::Available(_) => None,
+            Self::Unsupported(reason) => Some(*reason),
+        }
+    }
+
+    /// Whether this position carries an anchor.
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available(_))
+    }
+
+    /// Whether this is the `Default` typed absence (nothing was published).
+    /// Drives populated-only serialization.
+    pub fn is_absent(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Edit anchors for a macro call's own authored member lists.
+///
+/// The sole authority for macro edit PLACEMENT. Per-slot props anchors live on
+/// [`AnalyzedSlotField::props_anchor`], structurally paired with the member
+/// they anchor rather than in a parallel array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacroEditAnchors {
+    /// The type argument's type-literal member list
+    /// (`defineSlots<{ … }>()`, `defineEmits<{ … }>()`, `defineProps<{ … }>()`).
+    pub type_literal: MacroAnchor,
+    /// The runtime ARRAY argument's element list (`defineEmits(['a'])`).
+    /// A runtime OBJECT argument is `Unsupported(NoMemberList)`: it has no
+    /// array element list, and appending an array entry to it would emit
+    /// invalid code.
+    pub runtime_array: MacroAnchor,
+}
+
+impl MacroEditAnchors {
+    /// Whether every position is a typed absence (the `Default` shape).
+    pub(crate) fn is_absent(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// An individual slot field from `defineSlots`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1197,6 +1341,13 @@ pub struct AnalyzedSlotField {
     /// E.g., `default(props: { item: string })` → `[{name: "item", type_annotation: Some("string")}]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<AnalyzedSlotFieldBinding>,
+    /// Edit anchor for THIS slot's props-object member list — the position a
+    /// new binding is appended at. Structurally paired with the slot it
+    /// anchors, so no ordinal can drift. `Unsupported` when the props surface
+    /// carries no appendable member list (a `Pick<…>` surface, a parameterless
+    /// slot, a resolver-published slot with no authored position in this file).
+    #[serde(default, skip_serializing_if = "MacroAnchor::is_absent")]
+    pub props_anchor: MacroAnchor,
     /// Return type text of the slot function (e.g., `"VNode[]"`, `"any"`).
     /// Used by strict slots to validate slot children types.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1514,6 +1665,11 @@ pub struct AnalyzedMacro {
     /// macro is always parsed in the local SFC's scope, but explicit
     /// pairing is required for the §3.1 invariant).
     pub parsed_type_argument_scope: Option<TypeExprScope>,
+    /// Edit anchors for the macro's own authored member lists — the SOLE
+    /// authority for macro edit placement. Minted in place during shallow
+    /// analysis from the live OXC nodes already in scope at the extraction
+    /// sites, so publication costs zero resolution.
+    pub edit_anchors: MacroEditAnchors,
     /// SFC-absolute byte span of the macro call.
     pub span: Span,
 }
@@ -1531,7 +1687,8 @@ impl serde::Serialize for AnalyzedMacro {
             + usize::from(!self.expose_fields.is_empty())
             + usize::from(!self.resolved_local_types.is_empty())
             + usize::from(self.parsed_type_argument.is_some())
-            + usize::from(self.parsed_type_argument_scope.is_some());
+            + usize::from(self.parsed_type_argument_scope.is_some())
+            + usize::from(!self.edit_anchors.is_absent());
         let mut s = serializer.serialize_struct("AnalyzedMacro", count)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("owner", &self.owner)?;
@@ -1573,6 +1730,11 @@ impl serde::Serialize for AnalyzedMacro {
         }
         if let Some(scope) = self.parsed_type_argument_scope.as_ref() {
             s.serialize_field("parsedTypeArgumentScope", scope)?;
+        }
+        // Populated-only: a macro with no anchorable member list adds no key,
+        // so the hot payload does not grow for anchor-less macros.
+        if !self.edit_anchors.is_absent() {
+            s.serialize_field("editAnchors", &self.edit_anchors)?;
         }
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
@@ -1617,6 +1779,11 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             parsed_type_argument: Option<MacroPayloadLocator>,
             #[serde(default)]
             parsed_type_argument_scope: Option<TypeExprScope>,
+            // Absent-key back-compat: a payload with no editAnchors key
+            // deserializes to the typed unsupported default, matching the
+            // parsedTypeArgument convention above.
+            #[serde(default)]
+            edit_anchors: MacroEditAnchors,
             #[serde(default)]
             span_start: u32,
             #[serde(default)]
@@ -1640,6 +1807,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             resolved_local_types: w.resolved_local_types,
             parsed_type_argument: w.parsed_type_argument,
             parsed_type_argument_scope: w.parsed_type_argument_scope,
+            edit_anchors: w.edit_anchors,
             span: Span::new(w.span_start, w.span_end),
         })
     }
@@ -2127,7 +2295,10 @@ mod analyzed_macro_serde_tests {
     //! — discriminating because if the deserializer's `Wire` struct were
     //! to drop `#[serde(default)]` on the field, the test would fail with
     //! "missing field" error.
-    use super::{AnalyzedMacro, AnalyzedMacroKind};
+    use super::{
+        AnalyzedMacro, AnalyzedMacroKind, MacroAnchor, MacroAnchorUnsupported, MacroEditAnchors,
+        MemberListAnchor,
+    };
     use std::sync::Arc;
     use verter_span::Span;
     use verter_type_expr::locators::{
@@ -2150,6 +2321,7 @@ mod analyzed_macro_serde_tests {
 
     fn empty_macro() -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineProps,
             owner: TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
@@ -2223,6 +2395,109 @@ mod analyzed_macro_serde_tests {
             "old-shape payload (no parsedTypeArgument key) must \
              deserialize with parsed_type_argument: None"
         );
+    }
+
+    // ── AnalyzedMacro edit anchors: wire back-compat ──
+
+    /// An anchor-less macro adds no key (P4: no hot-payload growth), and a
+    /// payload with no `editAnchors` key deserializes to the typed unsupported
+    /// default rather than a fabricated position.
+    #[test]
+    fn analyzed_macro_serde_roundtrip_omits_absent_anchor_keys() {
+        let m = empty_macro();
+        assert!(m.edit_anchors.is_absent(), "fixture carries no anchors");
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("editAnchors"),
+            "an anchor-less macro must not grow the payload; JSON: {json}"
+        );
+
+        let old_json = r#"{
+            "kind": "DefineSlots",
+            "isTypeBased": true,
+            "typeReferences": [],
+            "bindingName": null,
+            "hasInheritAttrsFalse": false,
+            "spanStart": 0,
+            "spanEnd": 0
+        }"#;
+        let parsed: AnalyzedMacro = serde_json::from_str(old_json).unwrap();
+        assert_eq!(
+            parsed.edit_anchors,
+            MacroEditAnchors::default(),
+            "an absent editAnchors key must deserialize to the typed unsupported default"
+        );
+        assert_eq!(
+            parsed.edit_anchors.type_literal.unsupported_reason(),
+            Some(MacroAnchorUnsupported::NoTypeArgument),
+            "the default is an honest typed absence, not an available anchor"
+        );
+        assert!(
+            parsed.edit_anchors.type_literal.available().is_none(),
+            "an absent key must never yield an editable position"
+        );
+    }
+
+    /// A populated anchor round-trips its offset, its emptiness flag, and each
+    /// distinct unsupported reason without collapsing them.
+    #[test]
+    fn analyzed_macro_serde_roundtrip_preserves_anchor_values() {
+        let mut m = empty_macro();
+        m.edit_anchors = MacroEditAnchors {
+            type_literal: MacroAnchor::Available(MemberListAnchor::new(41, false)),
+            runtime_array: MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            json.contains("\"editAnchors\":"),
+            "a populated anchor set must be emitted; JSON: {json}"
+        );
+
+        let back: AnalyzedMacro = serde_json::from_str(&json).unwrap();
+        assert_eq!(m.edit_anchors, back.edit_anchors);
+        let anchor = back
+            .edit_anchors
+            .type_literal
+            .available()
+            .expect("round-trip keeps the available arm");
+        assert_eq!(anchor.insert_offset(), 41);
+        assert!(!anchor.is_empty());
+        // Negative: the sibling reason survives distinctly, not collapsed into
+        // the `NoTypeArgument` default.
+        assert_eq!(
+            back.edit_anchors.runtime_array.unsupported_reason(),
+            Some(MacroAnchorUnsupported::NoMemberList)
+        );
+        assert_ne!(
+            back.edit_anchors.runtime_array.unsupported_reason(),
+            Some(MacroAnchorUnsupported::NoTypeArgument)
+        );
+    }
+
+    /// Each producer reason is a distinct wire value — reasons never collapse.
+    #[test]
+    fn macro_anchor_unsupported_reasons_are_distinct_on_the_wire() {
+        let reasons = [
+            MacroAnchorUnsupported::NoTypeArgument,
+            MacroAnchorUnsupported::NotTypeBased,
+            MacroAnchorUnsupported::NamedTypeArgument,
+            MacroAnchorUnsupported::IntersectionTypeArgument,
+            MacroAnchorUnsupported::NoMemberList,
+        ];
+        let encoded: Vec<String> = reasons
+            .iter()
+            .map(|r| serde_json::to_string(r).unwrap())
+            .collect();
+        let unique: std::collections::BTreeSet<&String> = encoded.iter().collect();
+        assert_eq!(
+            unique.len(),
+            reasons.len(),
+            "every reason must encode distinctly; got {encoded:?}"
+        );
+        for (reason, json) in reasons.iter().zip(encoded.iter()) {
+            let back: MacroAnchorUnsupported = serde_json::from_str(json).unwrap();
+            assert_eq!(&back, reason);
+        }
     }
 
     #[test]

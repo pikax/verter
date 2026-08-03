@@ -4983,6 +4983,7 @@ const pageTitle: string = 'Hello'
 
     let actions = crate::features::macro_actions::macro_code_actions(
         &doc.source,
+        verter_session::AnalysisSourceRevision::of_source(&doc.source),
         analysis.as_ref(),
         &blocks,
         &doc.line_index,
@@ -5047,6 +5048,7 @@ const x = 1
 
     let actions = crate::features::macro_actions::macro_code_actions(
         &doc.source,
+        verter_session::AnalysisSourceRevision::of_source(&doc.source),
         analysis.as_ref(),
         &blocks,
         &doc.line_index,
@@ -5061,6 +5063,95 @@ const x = 1
     assert!(
         !has_slots_action,
         "should not offer defineSlots action without slot elements"
+    );
+}
+
+/// A7-03 through the REAL registry: `DocumentRegistry::get_analysis` falls back
+/// to the host without gating on the document's version or content
+/// (`documents/analysis.rs`, the `AnalysisScope::BUILD` branch), and that
+/// fallback is the path taken after every edit until async re-publish. An
+/// analysis obtained for one revision must produce no edit against another.
+///
+/// Pre-change, the same pairing sliced `&doc.source[mac.span]` with the older
+/// revision's span and either panicked or produced a misplaced edit.
+#[test]
+fn code_action_returns_nothing_for_stale_host_fallback_analysis() {
+    let v1 = r#"<script setup lang="ts">
+defineSlots<{
+    header(props: {}): any
+}>()
+</script>
+
+<template>
+  <slot name="header" />
+  <slot name="footer" />
+</template>
+"#;
+    let (registry, uri) = open_vue_file(v1);
+
+    // Control: the host-served analysis for the CURRENT buffer DOES serve the
+    // "add footer" action — so the negative below is a rejection, not a
+    // never-offered no-op.
+    let doc = document_snapshot(&registry, &uri);
+    let analysis_v1 = registry
+        .get_analysis(&uri)
+        .expect("host fallback serves an analysis");
+    let blocks = scan_sfc_blocks(&doc.source);
+    let control = crate::features::macro_actions::macro_code_actions(
+        &doc.source,
+        verter_session::AnalysisSourceRevision::of_source(&doc.source),
+        Some(&analysis_v1),
+        &blocks,
+        &doc.line_index,
+        None,
+    );
+    let control_titles: Vec<String> = control
+        .iter()
+        .map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.title.clone(),
+            _ => "command".to_string(),
+        })
+        .collect();
+    assert!(
+        control_titles.iter().any(|t| t.contains("footer")),
+        "control: a host-served analysis paired with its own bytes serves the \
+         action; titles: {control_titles:?}"
+    );
+
+    // Now edit the document. `analysis_v1` is the snapshot a request that
+    // raced the re-publish would hold.
+    let v2 = r#"<script setup lang="ts">
+defineSlots<{}>()
+</script>
+
+<template>
+  <slot name="footer" />
+</template>
+"#;
+    registry.did_change(&uri, 2, v2);
+    let doc_v2 = document_snapshot(&registry, &uri);
+    assert_eq!(&*doc_v2.source, v2, "the document must hold the new bytes");
+    let blocks_v2 = scan_sfc_blocks(&doc_v2.source);
+
+    let actions = crate::features::macro_actions::macro_code_actions(
+        &doc_v2.source,
+        verter_session::AnalysisSourceRevision::of_source(&doc_v2.source),
+        Some(&analysis_v1),
+        &blocks_v2,
+        &doc_v2.line_index,
+        None,
+    );
+    let titles: Vec<String> = actions
+        .iter()
+        .map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.title.clone(),
+            _ => "command".to_string(),
+        })
+        .collect();
+    assert!(
+        actions.is_empty(),
+        "an analysis from another revision must produce no edit and no panic; \
+         titles: {titles:?}"
     );
 }
 

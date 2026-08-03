@@ -86,6 +86,7 @@ fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
 
 fn make_define_props(fields: Vec<AnalyzedPropField>) -> AnalyzedMacro {
     AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineProps,
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         is_type_based: true,
@@ -663,6 +664,7 @@ fn with_defaults_marks_props_as_having_defaults() {
         make_prop("count", Some("number"), true),
     ]);
     let with_defaults = AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::WithDefaults,
         default_keys: vec!["label".to_string()],
         default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
@@ -689,6 +691,7 @@ fn with_defaults_marks_props_as_having_defaults() {
 #[test]
 fn runtime_define_props_defaults_are_preserved() {
     let define_props = AnalyzedMacro {
+        edit_anchors: Default::default(),
         default_keys: vec!["hello".to_string()],
         default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
             key: "hello".to_string(),
@@ -722,6 +725,7 @@ fn runtime_define_props_defaults_are_preserved() {
 #[test]
 fn extracts_events_from_define_emits() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![
             crate::analysis::types::AnalyzedEmitField {
@@ -767,6 +771,7 @@ fn extracts_events_from_define_emits() {
 #[test]
 fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
             name: "update:searchTerm".to_string(),
@@ -882,6 +887,7 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
 #[test]
 fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineEmits,
         ..make_define_props(vec![])
     }];
@@ -994,8 +1000,10 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
 #[test]
 fn extracts_slots_from_define_slots() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: "default".to_string(),
             is_required: true,
             span: verter_span::Span::default(),
@@ -1031,6 +1039,7 @@ fn extracts_slots_from_define_slots() {
 #[test]
 fn evaluated_slots_take_bindings_from_the_per_binding_channel_only() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         ..make_define_props(vec![])
     }];
@@ -1142,6 +1151,7 @@ fn evaluated_slots_take_bindings_from_the_per_binding_channel_only() {
 
 fn test_slot(name: &str) -> crate::analysis::types::AnalyzedSlotField {
     crate::analysis::types::AnalyzedSlotField {
+        props_anchor: Default::default(),
         name: name.to_string(),
         is_required: false,
         span: verter_span::Span::default(),
@@ -1191,6 +1201,7 @@ fn test_expanded_slot(
 #[test]
 fn graph_binding_rows_join_authored_slots_when_the_expanded_shape_is_empty() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![test_slot("leading"), test_slot("content")],
         ..make_define_props(vec![])
@@ -1244,6 +1255,7 @@ fn partial_slot_shape_merges_authored_expanded_and_binding_lanes_deterministical
     content.is_required = true;
     content.description = Some("Authored content slot".to_string());
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![test_slot("leading"), default, content],
         ..make_define_props(vec![])
@@ -1365,8 +1377,10 @@ fn partial_slot_shape_merges_authored_expanded_and_binding_lanes_deterministical
 #[test]
 fn partial_slot_expansion_without_binding_channel_keeps_authored_binding_source() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: "day".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
@@ -1451,8 +1465,10 @@ fn partial_slot_expansion_without_binding_channel_keeps_authored_binding_source(
 #[test]
 fn incomplete_per_binding_evaluation_keeps_authority_and_evidence_separate() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: "default".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
@@ -1540,8 +1556,10 @@ fn incomplete_per_binding_evaluation_keeps_authority_and_evidence_separate() {
 #[test]
 fn define_slots_prefer_exact_evaluated_slot_bindings_over_authored_sources() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: "default".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
@@ -1618,8 +1636,10 @@ fn define_slots_prefer_exact_evaluated_slot_bindings_over_authored_sources() {
 #[test]
 fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: "day".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
@@ -2298,6 +2318,7 @@ fn large_partial_props_keep_resolved_authority_and_authored_evidence() {
 #[test]
 fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
             name: "update:modelValue".to_string(),
@@ -2362,6 +2383,7 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
             true,
         )]),
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineEmits,
             emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
                 name: "update:modelValue".to_string(),
@@ -2455,6 +2477,7 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
 #[test]
 fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
             name: "update:modelValue".to_string(),
@@ -2515,8 +2538,10 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
 #[test]
 fn expanded_slot_bindings_preserve_source_binding_order() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: "default".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
@@ -2599,8 +2624,10 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
 #[test]
 fn resolved_slots_merge_local_details_and_append_new_slots() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: "default".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
@@ -2628,6 +2655,7 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
         slot_return_publications: Vec::new(),
         slots: vec![
             crate::analysis::types::AnalyzedSlotField {
+                props_anchor: Default::default(),
                 name: "default".to_string(),
                 is_required: true,
                 span: verter_span::Span::default(),
@@ -2645,6 +2673,7 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                 return_expr_scope: lower_for_test(Some("VNode[]")).1,
             },
             crate::analysis::types::AnalyzedSlotField {
+                props_anchor: Default::default(),
                 name: "header".to_string(),
                 is_required: false,
                 span: verter_span::Span::default(),
@@ -2716,6 +2745,7 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
 #[test]
 fn extracts_model_from_define_model() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineModel,
         model_name: None, // default model → "modelValue"
         prop_fields: vec![make_prop("modelValue", Some("string"), true)],
@@ -2743,6 +2773,7 @@ fn extracts_model_from_define_model() {
 #[test]
 fn define_model_without_default_stays_optional_in_component_meta() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineModel,
         model_name: None, // default model → "modelValue"
         prop_fields: vec![make_prop("modelValue", Some("string"), true)],
@@ -2791,6 +2822,7 @@ fn define_model_with_default_emits_bare_update_event_payload() {
     // `defineModel<string>('title', { default: 'untitled' })` — the
     // analyzer always pairs a default key with its authored value entry.
     let defaulted = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineModel,
         model_name: Some("title".to_string()),
         prop_fields: vec![make_prop("title", Some("string"), true)],
@@ -2833,6 +2865,7 @@ fn define_model_with_default_emits_bare_update_event_payload() {
     // Control: an UNDEFAULTED optional model keeps the optionalized
     // event display.
     let undefaulted = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineModel,
         model_name: Some("draft".to_string()),
         prop_fields: vec![make_prop("draft", Some("string"), true)],
@@ -2860,6 +2893,7 @@ fn define_model_with_default_emits_bare_update_event_payload() {
 fn define_model_threads_default_value_into_synthesized_prop() {
     // `defineModel<boolean>('defaulted', { default: false })`
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineModel,
         model_name: Some("defaulted".to_string()),
         prop_fields: vec![make_prop("defaulted", Some("boolean"), true)],
@@ -2899,6 +2933,7 @@ fn define_model_threads_default_value_into_synthesized_prop() {
 #[test]
 fn untyped_define_model_threads_default_value_into_synthesized_prop() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineModel,
         model_name: Some("flag".to_string()),
         default_keys: vec!["flag".to_string()],
@@ -2933,10 +2968,12 @@ fn untyped_define_model_threads_default_value_into_synthesized_prop() {
 fn define_model_default_value_updates_existing_prop() {
     let macros = vec![
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineProps,
             ..make_define_props(vec![make_prop("modelValue", Some("string"), true)])
         },
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineModel,
             model_name: None,
             prop_fields: vec![make_prop("modelValue", Some("string"), true)],
@@ -2978,6 +3015,7 @@ fn define_model_default_value_updates_existing_prop() {
 #[test]
 fn define_model_without_default_keeps_default_value_none() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineModel,
         model_name: Some("plain".to_string()),
         prop_fields: vec![make_prop("plain", Some("string"), true)],
@@ -3006,10 +3044,12 @@ fn define_model_without_default_keeps_default_value_none() {
 fn define_model_reconciles_existing_model_value_prop_from_define_props() {
     let macros = vec![
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineProps,
             ..make_define_props(vec![])
         },
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineModel,
             model_name: None,
             prop_fields: vec![make_prop("modelValue", Some("string"), true)],
@@ -3132,6 +3172,7 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
 #[test]
 fn extracts_named_model() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineModel,
         model_name: Some("title".to_string()),
         prop_fields: vec![make_prop("title", Some("string"), true)],
@@ -3151,6 +3192,7 @@ fn extracts_named_model() {
 #[test]
 fn extracts_exposed_from_define_expose() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineExpose,
         expose_fields: vec![AnalyzedExposeField {
             name: "focus".to_string(),
@@ -3305,6 +3347,7 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
             }),
         ],
         slots: vec![crate::analysis::types::AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: "itemRow".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
@@ -3493,6 +3536,7 @@ fn options_api_prop_without_locator_does_not_fabricate_authored_evidence() {
 #[test]
 fn inherit_attrs_false_flag_is_set() {
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineOptions,
         has_inherit_attrs_false: true,
         ..make_define_props(vec![])
@@ -4912,6 +4956,7 @@ fn define_emits_evaluator_call_signatures_do_not_create_event_occurrences() {
     // Setup: defineEmits with call-signature style (e.g. (e: 'change', value: string) => void)
     // with 2 diagnostics: one global (property_name=None), one for property "change"
     let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineEmits,
         ..make_define_props(vec![])
     }];
@@ -5009,6 +5054,7 @@ fn define_emits_evaluator_call_signatures_do_not_create_event_occurrences() {
 fn synthesizes_default_value_tag_from_with_defaults() {
     let define_props = make_define_props(vec![make_prop("label", Some("string"), true)]);
     let with_defaults = AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::WithDefaults,
         default_keys: vec!["label".to_string()],
         default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
@@ -5044,6 +5090,7 @@ fn does_not_duplicate_existing_default_value_tag() {
     }];
     let define_props = make_define_props(vec![field]);
     let with_defaults = AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::WithDefaults,
         default_keys: vec!["as".to_string()],
         default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
@@ -5098,6 +5145,7 @@ fn synthesizes_default_value_tag_for_runtime_define_props() {
     // Runtime defineProps({ msg: { default: 'hi' } }) stores defaults on the
     // DefineProps macro itself, not on a wrapping WithDefaults.
     let define_props = AnalyzedMacro {
+        edit_anchors: Default::default(),
         default_keys: vec!["msg".to_string()],
         default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
             key: "msg".to_string(),

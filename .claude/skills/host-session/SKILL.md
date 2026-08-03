@@ -181,6 +181,72 @@ One provider SHAPE runs at a time; on the tsserver tier that shape owns N engine
 Request (stdio) -> server/mod.rs -> Find document in host cache -> Feature handler -> Response (stdio)
 ```
 
+### Macro Code-Action Authority: Membership, Placement, Revision
+
+Vue macro code actions (`features/macro_actions.rs` B3/B4/B5, and the cross-file
+arm `features/cross_file.rs::make_insert_into_macro` reached from
+`features/component_actions.rs`) read **no macro source text**. Three separate
+authorities:
+
+| Question | Sole authority | Forbidden |
+| --- | --- | --- |
+| **Membership** — which slots / slot-props / emits exist | analysis rows: `AnalyzedMacro.{slot_fields,emit_fields,prop_fields}`, `AnalyzedSlotField.bindings` | any read of macro source text for a decision |
+| **Placement** — where an insertion goes | an analyzer-minted `MacroAnchor`, SFC-absolute | `rfind`, brace-depth counting, `span.end ± N`, any offset not carried by an anchor |
+| **Revision** — may these anchors be applied to this buffer? | the **consumer boundary**, comparing `FileAnalysisSnapshot.anchor_revision` against `AnalysisSourceRevision::of_source(live_buffer)` | trusting `DocumentRegistry::get_analysis` to have matched (its host-fallback branch is gated on `AnalysisScope::BUILD` only, not on document version or content) |
+
+**Anchor vocabulary** (`verter_semantic::analysis::types`, re-exported from
+`analysis::mod`):
+
+- `MemberListAnchor` — a private SFC-absolute `insert_offset` (the member list's
+  closing delimiter) plus `is_empty` (drives a consumer's separator choice).
+- `MacroAnchor::{Available(MemberListAnchor), Unsupported(MacroAnchorUnsupported)}`
+  — typed absence, never `Option<u32>`.
+- `MacroAnchorUnsupported::{NoTypeArgument, NotTypeBased, NamedTypeArgument,
+  IntersectionTypeArgument, NoMemberList}` — one variant per authored shape;
+  reasons never collapse. `NoTypeArgument` is the `Default`, so an anchor that
+  was never published is indistinguishable from "nothing to anchor" and both
+  yield zero actions. A bounds / char-boundary failure is NOT a producer variant
+  — the producer cannot know the live buffer; it is a consumer-side typed miss.
+- `MacroEditAnchors { type_literal, runtime_array }` on `AnalyzedMacro`, plus the
+  per-slot `AnalyzedSlotField.props_anchor` — structurally paired with the member
+  it anchors, so no parallel-array ordinal can drift.
+
+Minted in `analysis/macros.rs` at the single `AnalyzedMacro` construction site
+from the OXC nodes already in scope (`type_argument_member_list_anchor`,
+`runtime_argument_array_anchor`) and inside `extract_slot_bindings_from_params`
+(`object_member_list_anchor`). Publication is a pure `match` — no traversal, no
+locator deref, no resolution, and no final-index stamping pass.
+
+`FileAnalysisSnapshot.anchor_revision: AnalysisSourceRevision` (a newtype over
+`Hash16`) is stamped at every producer from the source node's own
+`ParseSnapshot::whole_hash` — already `hash_16` of the whole file, so no
+producer re-hashes. A torn generation join leaves it `Default` (unstamped), which
+matches no live buffer and therefore fails closed.
+
+**Two structural rails** (no name-keyed scanner guard lands — `CLAUDE.md` →
+landed-scanner bar):
+
+1. The membership/placement decision functions take **no `&str`**. They receive
+   `action_utils::LiveEditTarget`, whose only capability is
+   `anchor_position(&MemberListAnchor) -> Option<Position>`. With no `&str` in
+   scope a brace scan is a compile error, not a convention.
+2. `MemberListAnchor`'s offset field is private and its constructor is
+   `pub(crate)` to `verter_semantic`, so no `verter_lsp` path — production or
+   test — can synthesize one via the ctor or a struct literal (`E0624`/`E0451`;
+   witnessed by the `member_list_anchor_*` trybuild fixtures under
+   `verter_session/tests/cases/compile-fail/`). One cross-crate construction
+   path DOES exist by wire mandate: the type derives `Deserialize`, so
+   `serde_json` can materialise an anchor from arbitrary bytes — deliberate
+   (protocol row), and the reason `LiveEditTarget::anchor_position`'s bounds +
+   char-boundary checks stay load-bearing rather than decorative. LSP fixtures
+   obtain anchors by running the real analyzer over fixture source
+   (`features/macro_fixture.rs`).
+
+`LiveEditTarget::anchor_position` is the single conversion point and fails closed
+on BOTH an offset past the live source's end and an offset off a UTF-8 character
+boundary. Absent anchor, unsupported anchor, or a failed conversion ⇒ **zero
+actions**, never a fallback offset.
+
 ## TypeProvider Architecture
 
 The LSP delegates TypeScript type checking to an external **TypeProvider** process. Two backends:

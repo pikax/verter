@@ -358,3 +358,19 @@ fn instantiate_key_shape_is_sealed_against_forgery_and_extraction() {
     t.compile_fail("tests/cases/compile-fail/instantiate_key_seal_no_features.rs");
     t.compile_fail("tests/cases/compile-fail/instantiate_key_context_not_extractable.rs");
 }
+
+/// T-A7 Rail 2 witness (review-B P2-1): `MemberListAnchor` is analyzer-minted
+/// only — the ctor is `pub(crate)` to `verter_semantic` and the fields are
+/// private, so an external unit can neither call `new` nor build the struct
+/// literal. If either seal regressed (the ctor widened to `pub`, or a field
+/// made public), the corresponding line would COMPILE and trybuild would fail.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn member_list_anchor_is_sealed_against_forgery() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/member_list_anchor_forge.rs");
+    t.compile_fail("tests/cases/compile-fail/member_list_anchor_struct_literal.rs");
+}

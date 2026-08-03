@@ -481,6 +481,10 @@ impl VerterHost {
         // `unwrap_or_clone` moves the inner value out without copying (it only
         // deep-copies in the rare case the snapshot is still shared).
         let script_analysis = Arc::unwrap_or_clone(parse.script_analysis);
+        // `whole_hash` is already `hash_16` of the exact bytes this parse (and
+        // therefore this analysis) observed.
+        let anchor_revision =
+            crate::types::AnalysisSourceRevision::from_whole_hash(parse.whole_hash);
         FileAnalysisSnapshot {
             imports: script_analysis.imports,
             bindings: script_analysis.bindings,
@@ -502,6 +506,7 @@ impl VerterHost {
             store_usages: Arc::new(script_analysis.store_usages),
             store_definitions: Arc::new(script_analysis.store_definitions),
             is_typescript: script_analysis.is_typescript,
+            anchor_revision,
         }
     }
 

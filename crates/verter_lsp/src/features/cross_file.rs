@@ -123,27 +123,30 @@ impl ChildComponentContext {
         ))
     }
 
-    /// Build a `WorkspaceEdit` that inserts text into an existing macro's type literal.
+    /// Build a `WorkspaceEdit` that appends a member to an existing macro's
+    /// authored type literal in the CHILD file.
     ///
-    /// Inserts before the closing `}>()` of the macro. Returns `None` if the macro
-    /// doesn't exist or isn't type-based.
+    /// Placement comes from the child's own `type_literal` anchor, so a macro
+    /// whose member list is not authored at that position — a runtime macro
+    /// (`NotTypeBased`), a bare type reference (`NamedTypeArgument`), an
+    /// intersection — yields `None` rather than a guessed offset.
+    ///
+    /// `ChildComponentContext` pairs a source read and an analysis read taken
+    /// independently from the host, so the two are proven to describe the same
+    /// bytes before any edit is produced (R5).
     pub fn make_insert_into_macro(
         &self,
         macro_kind: AnalyzedMacroKind,
         text: &str,
     ) -> Option<WorkspaceEdit> {
-        let mac = self.find_macro(macro_kind)?;
-        if !mac.is_type_based {
+        let edit_target = action_utils::LiveEditTarget::new(&self.source, &self.line_index);
+        if self.analysis.anchor_revision != edit_target.revision() {
             return None;
         }
 
-        // Insert before `}>()` — approximate at span_end - 4
-        let insert_offset = if mac.span.end >= 4 {
-            mac.span.end - 4
-        } else {
-            mac.span.end
-        };
-        let position = self.line_index.offset_to_position(insert_offset)?;
+        let mac = self.find_macro(macro_kind)?;
+        let anchor = mac.edit_anchors.type_literal.available()?;
+        let position = edit_target.anchor_position(anchor)?;
         Some(action_utils::make_insert_edit(
             &self.uri,
             position,
@@ -228,6 +231,7 @@ mod tests {
     fn find_macro_by_kind() {
         let analysis = FileAnalysisSnapshot {
             macros: (vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
@@ -410,38 +414,47 @@ mod tests {
         }
     }
 
+    /// A child analysis whose macros AND edit anchors come from the real
+    /// analyzer over the child's own source, stamped with that source's
+    /// revision — the shape `resolve_component_context` produces.
+    fn producer_backed_child_analysis(source: &str) -> FileAnalysisSnapshot {
+        let script = crate::features::macro_fixture::analyze_sfc_script(source);
+        FileAnalysisSnapshot {
+            imports: script.imports.clone(),
+            bindings: script.bindings.clone(),
+            macros: script.macros.clone().into(),
+            script_flags: script.flags.bits(),
+            anchor_revision: verter_session::AnalysisSourceRevision::of_source(source),
+            ..Default::default()
+        }
+    }
+
+    /// Apply the single insertion edit to `source`.
+    fn apply_child_edit(source: &str, line_index: &LineIndex, edit: &WorkspaceEdit) -> String {
+        let Some(DocumentChanges::Edits(doc_edits)) = &edit.document_changes else {
+            panic!("expected DocumentChanges::Edits");
+        };
+        let OneOf::Left(te) = &doc_edits[0].edits[0] else {
+            panic!("expected a TextEdit");
+        };
+        let offset = line_index
+            .position_to_offset(&te.range.start)
+            .expect("edit position maps back to a byte offset") as usize;
+        format!("{}{}{}", &source[..offset], te.new_text, &source[offset..])
+    }
+
     #[test]
     fn make_insert_into_macro_targets_type_literal() {
         let source = "<script setup lang=\"ts\">\ndefineProps<{\n  msg: string\n}>()\n</script>";
-        let analysis = FileAnalysisSnapshot {
-            macros: (vec![AnalyzedMacro {
-                kind: AnalyzedMacroKind::DefineProps,
-                owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                is_type_based: true,
-                type_references: vec![],
-                binding_name: None,
-                model_name: None,
-                has_inherit_attrs_false: false,
-                prop_fields: vec![],
-                emit_fields: vec![],
-                slot_fields: vec![],
-                default_keys: vec![],
-                expose_fields: vec![],
-                default_values: Vec::new(),
-                resolved_local_types: Vec::new(),
-                parsed_type_argument: None,
-                parsed_type_argument_scope: None,
-                span: verter_span::Span::new(24, 57), // past the closing `)`
-            }])
-            .into(),
-            ..Default::default()
-        };
-        let ctx = make_child_context(source, analysis);
+        let ctx = make_child_context(source, producer_backed_child_analysis(source));
 
-        let edit = ctx.make_insert_into_macro(AnalyzedMacroKind::DefineProps, "  count: number\n");
-        assert!(
-            edit.is_some(),
-            "should produce edit for existing type-based macro"
+        let edit = ctx
+            .make_insert_into_macro(AnalyzedMacroKind::DefineProps, "  count: number\n")
+            .expect("should produce edit for existing type-based macro");
+        assert_eq!(
+            apply_child_edit(source, &ctx.line_index, &edit),
+            "<script setup lang=\"ts\">\ndefineProps<{\n  msg: string\n  count: number\n}>()\n</script>",
+            "the member must land before the type literal's closing delimiter"
         );
 
         // Negative: non-existent macro returns None
@@ -450,33 +463,89 @@ mod tests {
         assert!(edit2.is_none(), "should return None for absent macro");
     }
 
+    /// A7-02, cross-file arm: the offset comes from the CHILD's anchor, which
+    /// stays exact where `span.end - 4` moved with the macro's trailing text.
+    #[test]
+    fn cross_file_child_macro_insert_offset_comes_from_child_anchor() {
+        let source =
+            "<script setup lang=\"ts\">\ndefineProps<{\n  msg: string\n} /* keep */>()\n</script>";
+        let ctx = make_child_context(source, producer_backed_child_analysis(source));
+
+        let edit = ctx
+            .make_insert_into_macro(AnalyzedMacroKind::DefineProps, "  count: number\n")
+            .expect("a type-literal type argument is appendable");
+        assert_eq!(
+            apply_child_edit(source, &ctx.line_index, &edit),
+            "<script setup lang=\"ts\">\ndefineProps<{\n  msg: string\n  count: number\n} /* keep */>()\n</script>",
+            "pre-change `span.end - 4` landed inside `/* keep */`"
+        );
+    }
+
+    /// A7-04, cross-file arm: a bare type reference is fail-closed. Pre-change
+    /// `span.end - 4` inserted the member INSIDE the identifier `Props`.
+    #[test]
+    fn make_insert_into_macro_none_for_named_type_argument() {
+        let source = "<script setup lang=\"ts\">\ntype Props = { msg: string }\ndefineProps<Props>()\n</script>";
+        let ctx = make_child_context(source, producer_backed_child_analysis(source));
+
+        assert!(
+            ctx.make_insert_into_macro(AnalyzedMacroKind::DefineProps, "  count: number\n")
+                .is_none(),
+            "the member list lives in another declaration ⇒ no edit, never a guessed offset"
+        );
+    }
+
+    /// R5: `ChildComponentContext` pairs the child's analysis and the child's
+    /// source from two INDEPENDENT host reads, so a mismatch produces no edit.
+    ///
+    /// The two fixtures are the same byte LENGTH and differ only outside the
+    /// macro, so the stale anchor is in-bounds and on a character boundary: the
+    /// bounds/char-boundary guard cannot catch this, only the revision gate can.
+    /// This is the silent-miscarry class, and F2 forbids the edit regardless of
+    /// whether the offset happens to still be correct.
+    #[test]
+    fn make_insert_into_macro_none_when_child_revision_differs() {
+        let analyzed =
+            "<script setup lang=\"ts\">\ndefineProps<{ msg: string }>()\n// aaa\n</script>";
+        let stored =
+            "<script setup lang=\"ts\">\ndefineProps<{ msg: string }>()\n// bbb\n</script>";
+        assert_eq!(stored.len(), analyzed.len(), "fixtures must match length");
+        assert_ne!(stored, analyzed, "fixtures must differ in content");
+
+        let analysis = producer_backed_child_analysis(analyzed);
+        let anchor_offset = analysis.macros[0]
+            .edit_anchors
+            .type_literal
+            .available()
+            .expect("the fixture mints an available anchor")
+            .insert_offset() as usize;
+        assert!(
+            anchor_offset < stored.len() && stored.is_char_boundary(anchor_offset),
+            "the stale anchor must be in-bounds and on a boundary in the stored bytes, \
+             so only the revision gate can refuse it"
+        );
+
+        let ctx = make_child_context(stored, analysis);
+        assert!(
+            ctx.make_insert_into_macro(AnalyzedMacroKind::DefineProps, "  count: number\n")
+                .is_none(),
+            "an analysis paired with different child bytes must produce no edit"
+        );
+
+        // Control: the same analysis against ITS OWN bytes does produce one.
+        let matched = make_child_context(analyzed, producer_backed_child_analysis(analyzed));
+        assert!(
+            matched
+                .make_insert_into_macro(AnalyzedMacroKind::DefineProps, "  count: number\n")
+                .is_some(),
+            "control: matching bytes serve the edit"
+        );
+    }
+
     #[test]
     fn make_insert_into_macro_none_for_runtime_macro() {
         let source = "<script setup>\ndefineProps(['msg'])\n</script>";
-        let analysis = FileAnalysisSnapshot {
-            macros: (vec![AnalyzedMacro {
-                kind: AnalyzedMacroKind::DefineProps,
-                owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                is_type_based: false,
-                type_references: vec![],
-                binding_name: None,
-                model_name: None,
-                has_inherit_attrs_false: false,
-                prop_fields: vec![],
-                emit_fields: vec![],
-                slot_fields: vec![],
-                default_keys: vec![],
-                expose_fields: vec![],
-                default_values: Vec::new(),
-                resolved_local_types: Vec::new(),
-                parsed_type_argument: None,
-                parsed_type_argument_scope: None,
-                span: verter_span::Span::new(15, 35),
-            }])
-            .into(),
-            ..Default::default()
-        };
-        let ctx = make_child_context(source, analysis);
+        let ctx = make_child_context(source, producer_backed_child_analysis(source));
 
         let edit = ctx.make_insert_into_macro(AnalyzedMacroKind::DefineProps, "  foo: string\n");
         // Runtime-based macro can't have type members inserted

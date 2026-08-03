@@ -3855,6 +3855,7 @@ const count = ref(0)
         let script = verter_semantic::analysis::types::ScriptAnalysisSnapshot {
             module_references: Vec::new(),
             macros: vec![verter_semantic::analysis::types::AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,

@@ -475,6 +475,7 @@ mod tests {
 
     fn make_props_macro(props: Vec<AnalyzedPropField>) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineProps,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
@@ -545,6 +546,7 @@ mod tests {
     #[test]
     fn extracts_events_from_define_emits() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineEmits,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             emit_fields: vec![
@@ -589,6 +591,7 @@ mod tests {
     #[test]
     fn extracts_model_with_default_name() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineModel,
             model_name: None,
             prop_fields: vec![make_prop("modelValue", false)],
@@ -605,6 +608,7 @@ mod tests {
     #[test]
     fn extracts_model_with_custom_name() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineModel,
             model_name: Some("checked".to_string()),
             ..make_props_macro(vec![])
@@ -619,8 +623,10 @@ mod tests {
     #[test]
     fn extracts_slots() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineSlots,
             slot_fields: vec![AnalyzedSlotField {
+                props_anchor: Default::default(),
                 name: "header".to_string(),
                 is_required: true,
                 span: Span::new(10, 20),
@@ -652,6 +658,7 @@ mod tests {
     #[test]
     fn extracts_expose() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineExpose,
             expose_fields: vec![
                 AnalyzedExposeField {
@@ -684,6 +691,7 @@ mod tests {
     #[test]
     fn component_surface_sets_inherit_attrs() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineOptions,
             has_inherit_attrs_false: true,
             ..make_props_macro(vec![])
@@ -717,6 +725,7 @@ mod tests {
             make_prop("size", true),   // optional
         ]);
         let defaults_mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::WithDefaults,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
@@ -759,6 +768,7 @@ mod tests {
     #[test]
     fn multiple_define_emits_merged() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineEmits,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             emit_fields: vec![

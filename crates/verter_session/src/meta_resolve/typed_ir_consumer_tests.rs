@@ -30,6 +30,7 @@ fn slot_with_payload(
     payload: Option<verter_type_expr::locators::MacroPayloadLocator>,
 ) -> verter_semantic::analysis::AnalyzedSlotField {
     verter_semantic::analysis::AnalyzedSlotField {
+        props_anchor: Default::default(),
         name: "default".to_string(),
         is_required: true,
         bindings: vec![verter_semantic::analysis::AnalyzedSlotFieldBinding {

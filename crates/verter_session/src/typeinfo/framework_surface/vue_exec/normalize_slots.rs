@@ -136,6 +136,12 @@ pub(crate) fn slots_from_typeinfo_surface(
                 is_required: !member.optional,
                 span: verter_span::Span::default(),
                 bindings,
+                // A resolved-surface slot has no authored props-object member
+                // list at an addressable position in the consuming file — the
+                // honest typed miss, paired with the `None` payload below.
+                props_anchor: verter_semantic::analysis::types::MacroAnchor::Unsupported(
+                    verter_semantic::analysis::types::MacroAnchorUnsupported::NoMemberList,
+                ),
                 return_type,
                 // A resolved-surface slot has no flat authored macro-payload
                 // position — the honest locator-less form, paired with a

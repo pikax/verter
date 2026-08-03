@@ -644,6 +644,11 @@ impl VerterHost {
                 let template =
                     self.validated_raw_template_analysis(canonical, source_snap.generation);
                 let export_sigs = hd.parse.export_signatures.clone();
+                // The exact bytes this branch's analyzer observes, taken from
+                // the SAME held source read (`whole_hash` is already
+                // `hash_16` of the whole file — no re-hash here).
+                let anchor_revision =
+                    crate::types::AnalysisSourceRevision::from_whole_hash(hd.parse.whole_hash);
                 drop(source_snap);
 
                 let mut script_analysis = if !scope.needs_script_analysis() {
@@ -698,6 +703,7 @@ impl VerterHost {
                     store_usages: Arc::new(script_analysis.store_usages),
                     store_definitions: Arc::new(script_analysis.store_definitions),
                     is_typescript: script_analysis.is_typescript,
+                    anchor_revision,
                 };
                 return Some(self.finalize_analysis_snapshot(
                     canonical,
@@ -1654,6 +1660,24 @@ impl VerterHost {
         // current.
         let template = self.validated_raw_template_analysis(canonical, analysis_snap.generation);
 
+        // Same generation rail for the anchor revision: the identity is the
+        // source node's own `parse.whole_hash` (already `hash_16` of the whole
+        // file bytes — no re-hash here), accepted ONLY at this analysis
+        // snapshot's generation. A torn join leaves the revision UNSTAMPED, and
+        // an unstamped revision matches no live buffer, so an anchor consumer
+        // fails closed rather than editing from unpaired geometry.
+        let anchor_revision = self
+            .scheduler
+            .try_get_source(canonical)
+            .filter(|source_snap| source_snap.generation == analysis_snap.generation)
+            .and_then(|source_snap| {
+                let hd = source_snap.downcast_data::<crate::host_executor::HostSourceData>()?;
+                Some(crate::types::AnalysisSourceRevision::from_whole_hash(
+                    hd.parse.whole_hash,
+                ))
+            })
+            .unwrap_or_default();
+
         Some(FileAnalysisSnapshot {
             imports: ad.script_analysis.imports.clone(),
             bindings: ad.script_analysis.bindings.clone(),
@@ -1675,6 +1699,7 @@ impl VerterHost {
             store_usages: Arc::clone(&ad.arcs.store_usages),
             store_definitions: Arc::clone(&ad.arcs.store_definitions),
             is_typescript: ad.script_analysis.is_typescript,
+            anchor_revision,
         })
     }
 

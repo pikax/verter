@@ -204,6 +204,7 @@ mod tests {
     fn make_script_with_props(prop_names: &[&str]) -> ScriptAnalysisSnapshot {
         ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,

@@ -3240,6 +3240,7 @@ fn make_synth_typed_emit(name: &str, field_index: u32) -> AnalyzedEmitField {
 
 fn make_synth_typed_slot(name: &str, binding_name: &str) -> AnalyzedSlotField {
     AnalyzedSlotField {
+        props_anchor: Default::default(),
         name: name.to_string(),
         is_required: false,
         span: verter_span::Span::default(),
@@ -3267,6 +3268,7 @@ fn make_synth_macro(
     slots: Vec<AnalyzedSlotField>,
 ) -> AnalyzedMacro {
     AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind,
         owner: TopLevelOwnerId::ordinary_file(),
         is_type_based: true,

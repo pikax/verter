@@ -805,6 +805,12 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                 is_required: !member.optional,
                 span: verter_span::Span::default(),
                 bindings,
+                // A resolved-surface snippet slot has no authored props-object
+                // member list at an addressable position in this file — the
+                // honest typed miss, never a guessed offset.
+                props_anchor: verter_semantic::analysis::types::MacroAnchor::Unsupported(
+                    verter_semantic::analysis::types::MacroAnchorUnsupported::NoMemberList,
+                ),
                 return_type,
                 payload: None,
                 return_expr_scope: return_node.map(|_| member_scope),
@@ -1015,6 +1021,11 @@ fn collect_slot_elements(
                             is_required: false,
                             span: verter_span::Span::default(),
                             bindings,
+                            // A markup `<slot>` element declares no authored
+                            // props-object member list: honest typed miss.
+                            props_anchor: verter_semantic::analysis::types::MacroAnchor::Unsupported(
+                                verter_semantic::analysis::types::MacroAnchorUnsupported::NoMemberList,
+                            ),
                             return_type: None,
                             payload: None,
                             return_expr_scope: None,

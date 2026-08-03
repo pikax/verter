@@ -986,6 +986,7 @@ fn make_macro(
     span: Span,
 ) -> AnalyzedMacro {
     AnalyzedMacro {
+        edit_anchors: Default::default(),
         owner: setup_owner(),
         kind,
         is_type_based: true,

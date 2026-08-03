@@ -157,6 +157,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             flags: AnalysisFlags::HAS_DEFINE_SLOTS,
             macros: vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineSlots,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,

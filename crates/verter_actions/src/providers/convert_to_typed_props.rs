@@ -164,6 +164,7 @@ mod tests {
 
     fn make_macro_struct(prop_fields: Vec<AnalyzedPropField>, span: Span) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: false,

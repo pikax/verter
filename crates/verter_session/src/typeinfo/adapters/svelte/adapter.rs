@@ -328,6 +328,7 @@ mod tests {
     /// One slot field with the given name (an otherwise-empty fixture).
     fn slot_field(name: &str) -> verter_semantic::analysis::types::AnalyzedSlotField {
         verter_semantic::analysis::types::AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: name.to_string(),
             is_required: false,
             span: verter_span::Span::default(),

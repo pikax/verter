@@ -5,9 +5,53 @@
 // component_actions, event_type_hints, etc.
 
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_semantic::analysis::types::MemberListAnchor;
+use verter_session::{AnalysisSourceRevision, FileAnalysisSnapshot};
 
+use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
+
+/// The live document buffer a macro edit will be applied to.
+///
+/// Its ONLY capability is turning an analyzer-minted [`MemberListAnchor`] into a
+/// position in these exact bytes. It hands out no `&str`, so a function that
+/// holds one cannot read macro source text: re-deriving membership or placement
+/// by scanning braces is not merely forbidden, it is unexpressible.
+pub struct LiveEditTarget<'a> {
+    source: &'a str,
+    line_index: &'a LineIndex,
+}
+
+impl<'a> LiveEditTarget<'a> {
+    /// Bind the live buffer and the line index built from those same bytes.
+    pub fn new(source: &'a str, line_index: &'a LineIndex) -> Self {
+        Self { source, line_index }
+    }
+
+    /// Content identity of these exact bytes.
+    pub fn revision(&self) -> AnalysisSourceRevision {
+        AnalysisSourceRevision::of_source(self.source)
+    }
+
+    /// Convert an anchor into an LSP position in the live buffer, or `None`
+    /// when the anchor cannot be proven to address it.
+    ///
+    /// Fail-closed on BOTH failure modes: an offset past the live source's end,
+    /// and an offset that is not on a UTF-8 character boundary. Either means the
+    /// anchor was minted against different bytes, and an edit there would
+    /// corrupt the document — so there is no fallback offset, only `None`.
+    ///
+    /// One predicate covers both: `str::is_char_boundary` is `false` for any
+    /// index greater than the string's length, so a separate bounds comparison
+    /// would be redundant rather than additional.
+    pub fn anchor_position(&self, anchor: &MemberListAnchor) -> Option<Position> {
+        let offset = anchor.insert_offset();
+        if !self.source.is_char_boundary(offset as usize) {
+            return None;
+        }
+        self.line_index.offset_to_position(offset)
+    }
+}
 
 /// Find the byte offset to insert a new statement in `<script setup>`.
 ///
@@ -192,247 +236,6 @@ pub fn make_insert_action(
 /// Re-export for backwards compatibility.
 pub use super::sentinel_uris::PLACEHOLDER_URI_STR as SAME_FILE_URI;
 pub use super::sentinel_uris::{PLACEHOLDER_URI, PLACEHOLDER_URI_STR};
-
-/// A slot definition parsed from a `defineSlots<{ ... }>()` type literal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedSlotDef {
-    pub name: String,
-    pub prop_names: Vec<String>,
-}
-
-/// Extract slot names and their prop names from a `defineSlots<{ ... }>()` type literal.
-///
-/// Returns each slot with its declared prop names. For example:
-/// ```text
-/// defineSlots<{
-///     header(props: { title: string, count: number }): any
-///     default(props: {}): any
-/// }>()
-/// ```
-/// Returns `[("header", ["title", "count"]), ("default", [])]`.
-pub fn extract_slots_with_props_from_type_literal(macro_text: &str) -> Vec<ParsedSlotDef> {
-    let mut results = Vec::new();
-
-    // Find the type parameter body between `<{` and `}>`
-    let body = match macro_text.find("<{") {
-        Some(start) => {
-            let end = macro_text.rfind("}>").unwrap_or(macro_text.len());
-            &macro_text[start + 2..end]
-        }
-        None => return results,
-    };
-
-    // Split into slot member lines by finding each `name(props:` pattern
-    let bytes = body.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        // Skip whitespace
-        while i < bytes.len()
-            && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r')
-        {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            break;
-        }
-
-        let slot_name;
-        if bytes[i] == b'\'' || bytes[i] == b'"' {
-            // Quoted name
-            let quote = bytes[i];
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i] != quote {
-                i += 1;
-            }
-            if i >= bytes.len() {
-                break;
-            }
-            slot_name = body[start..i].to_string();
-            i += 1;
-        } else if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] == b'$' {
-            let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
-            {
-                i += 1;
-            }
-            slot_name = body[start..i].to_string();
-        } else {
-            i += 1;
-            continue;
-        }
-
-        // Skip whitespace
-        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
-            i += 1;
-        }
-
-        // Must be followed by `(`
-        if i >= bytes.len() || bytes[i] != b'(' {
-            continue;
-        }
-        i += 1; // skip `(`
-
-        // Now find the props inside `props: { ... }`
-        // First find `{` after `props:`
-        let mut prop_names = Vec::new();
-        let mut depth = 1; // we're inside the outer `(`
-        while i < bytes.len() && depth > 0 {
-            if bytes[i] == b'{' {
-                i += 1;
-                // Now extract prop names from inside the braces
-                let mut brace_depth = 1;
-                while i < bytes.len() && brace_depth > 0 {
-                    // Skip whitespace
-                    while i < bytes.len()
-                        && (bytes[i] == b' '
-                            || bytes[i] == b'\t'
-                            || bytes[i] == b'\n'
-                            || bytes[i] == b'\r')
-                    {
-                        i += 1;
-                    }
-                    if i >= bytes.len() || brace_depth == 0 {
-                        break;
-                    }
-
-                    if bytes[i] == b'}' {
-                        brace_depth -= 1;
-                        i += 1;
-                        continue;
-                    }
-                    if bytes[i] == b'{' {
-                        brace_depth += 1;
-                        i += 1;
-                        continue;
-                    }
-
-                    // Try to read an identifier followed by `:`
-                    if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] == b'$' {
-                        let start = i;
-                        while i < bytes.len()
-                            && (bytes[i].is_ascii_alphanumeric()
-                                || bytes[i] == b'_'
-                                || bytes[i] == b'$')
-                        {
-                            i += 1;
-                        }
-                        let ident = &body[start..i];
-                        // Skip whitespace
-                        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
-                            i += 1;
-                        }
-                        // If followed by `:`, this is a prop name
-                        if i < bytes.len() && bytes[i] == b':' && brace_depth == 1 {
-                            prop_names.push(ident.to_string());
-                        }
-                    } else {
-                        i += 1;
-                    }
-                }
-                // After props brace, skip to end of the slot member
-                while i < bytes.len() && depth > 0 {
-                    if bytes[i] == b'(' {
-                        depth += 1;
-                    } else if bytes[i] == b')' {
-                        depth -= 1;
-                    }
-                    i += 1;
-                }
-                break;
-            }
-            if bytes[i] == b'(' {
-                depth += 1;
-            } else if bytes[i] == b')' {
-                depth -= 1;
-            }
-            i += 1;
-        }
-
-        results.push(ParsedSlotDef {
-            name: slot_name,
-            prop_names,
-        });
-    }
-
-    results
-}
-
-/// Extract slot names from a `defineSlots<{ ... }>()` type literal.
-///
-/// Scans the type parameter body for identifiers or quoted names before `(`.
-/// E.g. from `defineSlots<{ header(props: {}): any\n 'nav-bar'(props: {}): any }>()`,
-/// extracts `["header", "nav-bar"]`.
-pub fn extract_slot_names_from_type_literal(macro_text: &str) -> Vec<String> {
-    let mut names = Vec::new();
-
-    // Find the type parameter body between `<{` and `}>`
-    let body = match macro_text.find("<{") {
-        Some(start) => {
-            let end = macro_text.rfind("}>").unwrap_or(macro_text.len());
-            &macro_text[start + 2..end]
-        }
-        None => return names,
-    };
-
-    // Scan for slot names: identifier or 'quoted-name' followed by `(`
-    let bytes = body.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        // Skip whitespace
-        while i < bytes.len()
-            && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r')
-        {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            break;
-        }
-
-        if bytes[i] == b'\'' || bytes[i] == b'"' {
-            // Quoted name: 'nav-bar' or "nav-bar"
-            let quote = bytes[i];
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i] != quote {
-                i += 1;
-            }
-            if i < bytes.len() {
-                let name = &body[start..i];
-                i += 1; // skip closing quote
-                        // Skip whitespace before (
-                while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
-                    i += 1;
-                }
-                if i < bytes.len() && bytes[i] == b'(' {
-                    names.push(name.to_string());
-                }
-            }
-        } else if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] == b'$' {
-            // Unquoted identifier
-            let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
-            {
-                i += 1;
-            }
-            let name = &body[start..i];
-            // Skip whitespace before (
-            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
-                i += 1;
-            }
-            if i < bytes.len() && bytes[i] == b'(' {
-                names.push(name.to_string());
-            }
-        } else {
-            // Skip any other character (e.g., inside props: { ... }: any)
-            i += 1;
-        }
-    }
-
-    names
-}
 
 #[cfg(test)]
 mod tests {
@@ -724,67 +527,88 @@ mod tests {
         }
     }
 
-    // ── extract_slot_names_from_type_literal ───────────────────────────
+    // ── LiveEditTarget::anchor_position (F3) ────────────────────────────
+    //
+    // Anchors are minted by `verter_semantic` from live OXC spans, so these
+    // cases exercise the conversion boundary directly: it is the single point
+    // where a macro anchor becomes an editable position, and it must refuse an
+    // offset it cannot prove addresses the live bytes.
 
-    #[test]
-    fn extract_slot_names_basic() {
-        let names =
-            extract_slot_names_from_type_literal("defineSlots<{ header(props: {}): any }>()");
-        assert_eq!(names, vec!["header"]);
+    /// Build an anchor by running the real analyzer over a `defineSlots` source
+    /// and taking the type-literal anchor it mints.
+    fn minted_type_literal_anchor(source: &str) -> MemberListAnchor {
+        let script = crate::features::macro_fixture::analyze_sfc_script(source);
+        *script.macros[0]
+            .edit_anchors
+            .type_literal
+            .available()
+            .expect("a type-literal type argument mints an available anchor")
     }
 
     #[test]
-    fn extract_slot_names_quoted() {
-        let names =
-            extract_slot_names_from_type_literal("defineSlots<{ 'nav-bar'(props: {}): any }>()");
-        assert_eq!(names, vec!["nav-bar"]);
+    fn anchor_position_maps_an_in_bounds_anchor() {
+        let source = "<script setup lang=\"ts\">\ndefineSlots<{}>()\n</script>";
+        let anchor = minted_type_literal_anchor(source);
+        let line_index = LineIndex::new_utf16(source);
+        let target = LiveEditTarget::new(source, &line_index);
+
+        let position = target
+            .anchor_position(&anchor)
+            .expect("an anchor minted from these bytes must map");
+        // Positive: the anchor addresses the type literal's `}`.
+        let offset = line_index.position_to_offset(&position).unwrap() as usize;
+        assert_eq!(&source[offset..offset + 1], "}");
+        // Negative: it is NOT the `)` the old `span.end - 4` arithmetic found.
+        assert_ne!(&source[offset..offset + 1], ")");
     }
 
+    /// Contract test for the out-of-range half of F3. `LineIndex` independently
+    /// refuses an out-of-range offset, so this case is satisfied by two guards
+    /// and does not by itself discriminate the `is_char_boundary` predicate —
+    /// the char-boundary case below does that. It is retained because the
+    /// REQUIRED observable is "no position from an out-of-range anchor",
+    /// whichever guard supplies it.
     #[test]
-    fn extract_slot_names_multiple() {
-        let names = extract_slot_names_from_type_literal(
-            "defineSlots<{\n    header(props: {}): any\n    default(props: {}): any\n    'nav-bar'(props: { item: string }): any\n}>()",
+    fn anchor_position_out_of_bounds_returns_none() {
+        let analyzed =
+            "<script setup lang=\"ts\">\ndefineSlots<{}>()\nconst padding = 1\n</script>";
+        let anchor = minted_type_literal_anchor(analyzed);
+        let live = "<";
+        assert!(
+            anchor.insert_offset() as usize > live.len(),
+            "fixture must be out of range"
         );
-        assert_eq!(names, vec!["header", "default", "nav-bar"]);
-        // Negative: should not include prop names like "item" or type names
-        assert!(!names.contains(&"item".to_string()));
-        assert!(!names.contains(&"string".to_string()));
-        assert!(!names.contains(&"props".to_string()));
-    }
+        let line_index = LineIndex::new_utf16(live);
+        let target = LiveEditTarget::new(live, &line_index);
 
-    #[test]
-    fn extract_slot_names_empty_type() {
-        let names = extract_slot_names_from_type_literal("defineSlots<{}>()");
-        assert!(names.is_empty());
-    }
-
-    #[test]
-    fn extract_slot_names_no_type_parameter() {
-        let names = extract_slot_names_from_type_literal("defineSlots()");
-        assert!(names.is_empty());
-    }
-
-    // ── extract_slots_with_props_from_type_literal ─────────────────────
-
-    #[test]
-    fn extract_slots_with_props_basic() {
-        let slots = extract_slots_with_props_from_type_literal(
-            "defineSlots<{\n    header(props: { title: string, count: number }): any\n    default(props: {}): any\n}>()",
+        assert!(
+            target.anchor_position(&anchor).is_none(),
+            "an offset past the live buffer's end is a typed miss, never a clamped position"
         );
-        assert_eq!(slots.len(), 2);
-        assert_eq!(slots[0].name, "header");
-        assert_eq!(slots[0].prop_names, vec!["title", "count"]);
-        assert_eq!(slots[1].name, "default");
-        assert!(slots[1].prop_names.is_empty());
     }
 
     #[test]
-    fn extract_slots_with_props_quoted_name() {
-        let slots = extract_slots_with_props_from_type_literal(
-            "defineSlots<{ 'nav-bar'(props: { item: Item }): any }>()",
+    fn anchor_position_off_char_boundary_returns_none() {
+        let analyzed = "<script setup lang=\"ts\">\ndefineSlots<{}>()\n</script>";
+        let anchor = minted_type_literal_anchor(analyzed);
+        let offset = anchor.insert_offset() as usize;
+        // Same byte length, but a 3-byte character now straddles the anchor
+        // offset — an in-bounds offset that addresses no character boundary.
+        let mut live = analyzed.as_bytes()[..offset - 1].to_vec();
+        live.extend_from_slice("★".as_bytes());
+        live.extend_from_slice(&analyzed.as_bytes()[offset + 2..]);
+        let live = String::from_utf8(live).expect("valid utf-8");
+        assert_eq!(live.len(), analyzed.len(), "byte length must be preserved");
+        assert!(
+            !live.is_char_boundary(offset),
+            "fixture must actually straddle the anchor offset"
         );
-        assert_eq!(slots.len(), 1);
-        assert_eq!(slots[0].name, "nav-bar");
-        assert_eq!(slots[0].prop_names, vec!["item"]);
+
+        let line_index = LineIndex::new_utf16(&live);
+        let target = LiveEditTarget::new(&live, &line_index);
+        assert!(
+            target.anchor_position(&anchor).is_none(),
+            "an offset off a UTF-8 character boundary is a typed miss"
+        );
     }
 }

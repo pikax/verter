@@ -9,7 +9,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::analysis::types::{
     AnalyzedDefaultValue, AnalyzedEmitField, AnalyzedExposeField, AnalyzedMacro, AnalyzedMacroKind,
-    AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag, MacroTypeDepUsage,
+    AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag, MacroAnchor,
+    MacroAnchorUnsupported, MacroEditAnchors, MacroTypeDepUsage, MemberListAnchor,
     ResolvedLocalType, TypeResolutionSource,
 };
 
@@ -2694,6 +2695,14 @@ fn try_extract_macro(
                 Vec::new()
             };
 
+            // Edit anchors: one shared derivation for every macro kind, minted
+            // in place from the OXC nodes already in scope here. A pure `match`
+            // — no traversal, no locator deref, no resolution.
+            let edit_anchors = MacroEditAnchors {
+                type_literal: type_argument_member_list_anchor(call),
+                runtime_array: runtime_argument_array_anchor(call),
+            };
+
             Some(AnalyzedMacro {
                 kind,
                 owner,
@@ -2711,6 +2720,7 @@ fn try_extract_macro(
                 resolved_local_types: Vec::new(),
                 parsed_type_argument,
                 parsed_type_argument_scope,
+                edit_anchors,
                 span: call.span.into(),
             })
         }
@@ -3570,11 +3580,14 @@ fn extract_slot_fields_from_members(
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 };
-                let bindings = prop
+                let (bindings, props_anchor) = prop
                     .type_annotation
                     .as_ref()
                     .map(|ta| extract_slot_bindings_from_fn_type(&ta.type_annotation, source))
-                    .unwrap_or_default();
+                    .unwrap_or((
+                        Vec::new(),
+                        MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList),
+                    ));
                 let (return_type, has_authored_return) = prop
                     .type_annotation
                     .as_ref()
@@ -3588,6 +3601,7 @@ fn extract_slot_fields_from_members(
                     is_required: !prop.optional,
                     span: prop.key.span().into(),
                     bindings,
+                    props_anchor,
                     return_type,
                     description,
                     tags,
@@ -3601,7 +3615,8 @@ fn extract_slot_fields_from_members(
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 };
-                let bindings = extract_slot_bindings_from_params(&method.params, source);
+                let (bindings, props_anchor) =
+                    extract_slot_bindings_from_params(&method.params, source);
                 let (return_type, has_authored_return) = match method.return_type.as_ref() {
                     Some(rt) => {
                         let start = rt.type_annotation.span().start as usize;
@@ -3624,6 +3639,7 @@ fn extract_slot_fields_from_members(
                     is_required: !method.optional,
                     span: method.key.span().into(),
                     bindings,
+                    props_anchor,
                     return_type,
                     description,
                     tags,
@@ -3664,34 +3680,116 @@ fn extract_slot_return_from_fn(ts_type: &TSType<'_>, source: &str) -> (Option<St
 fn extract_slot_bindings_from_fn_type(
     ts_type: &TSType<'_>,
     source: &str,
-) -> Vec<AnalyzedSlotFieldBinding> {
+) -> (Vec<AnalyzedSlotFieldBinding>, MacroAnchor) {
     if let TSType::TSFunctionType(fn_type) = ts_type {
         extract_slot_bindings_from_params(&fn_type.params, source)
     } else {
-        Vec::new()
+        (
+            Vec::new(),
+            MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList),
+        )
     }
 }
 
-/// Extract slot binding names and types from a function's first parameter type annotation.
+/// Extract slot binding names and types from a function's first parameter type
+/// annotation, plus that parameter's props-object member-list anchor.
 ///
 /// Given `(props: { item: string, index: number })`, extracts:
 /// `[{name: "item", type_annotation: Some("string")}, {name: "index", type_annotation: Some("number")}]`
 fn extract_slot_bindings_from_params(
     params: &FormalParameters<'_>,
     source: &str,
-) -> Vec<AnalyzedSlotFieldBinding> {
+) -> (Vec<AnalyzedSlotFieldBinding>, MacroAnchor) {
+    let no_member_list = MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList);
     let Some(first_param) = params.items.first() else {
-        return Vec::new();
+        return (Vec::new(), no_member_list);
     };
     let Some(ref ta) = first_param.type_annotation else {
-        return Vec::new();
+        return (Vec::new(), no_member_list);
     };
+    let anchor = object_member_list_anchor(&ta.type_annotation);
     let bindings = extract_slot_bindings_from_type_literal(&ta.type_annotation, source);
     if !bindings.is_empty() {
-        return bindings;
+        return (bindings, anchor);
     }
     // Fall back to recovering bindings from a `Pick<Object, Keys>` AST shape.
-    extract_slot_bindings_from_pick_ast(&ta.type_annotation, source)
+    // That surface has no appendable member list, so the anchor stays the
+    // typed `NoMemberList` this helper already computed.
+    (
+        extract_slot_bindings_from_pick_ast(&ta.type_annotation, source),
+        anchor,
+    )
+}
+
+/// Mint a member-list anchor from a live OXC node whose span ENDS with the
+/// list's single closing delimiter (`}` for an object type / object literal,
+/// `]` for an array literal).
+fn closing_delimiter_anchor(span: oxc_span::Span, is_empty: bool) -> MacroAnchor {
+    if span.end <= span.start {
+        return MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList);
+    }
+    MacroAnchor::Available(MemberListAnchor::new(span.end - 1, is_empty))
+}
+
+/// The appendable member-list anchor of an object TYPE at this position.
+///
+/// Every other shape — a `Pick<Object, Keys>` reference, a mapped type, a
+/// union — carries no single appendable member list and is an honest typed
+/// miss, never a guessed offset.
+fn object_member_list_anchor(ts_type: &TSType<'_>) -> MacroAnchor {
+    match ts_type {
+        TSType::TSTypeLiteral(literal) => {
+            closing_delimiter_anchor(literal.span, literal.members.is_empty())
+        }
+        _ => MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList),
+    }
+}
+
+/// The macro call's TYPE-ARGUMENT member-list anchor.
+///
+/// One shared derivation for every macro kind — `defineProps`, `defineEmits`,
+/// `defineSlots` alike. A pure `match` on the OXC node already in scope at the
+/// single `AnalyzedMacro` construction site: no traversal, no resolution.
+fn type_argument_member_list_anchor(call: &CallExpression<'_>) -> MacroAnchor {
+    let Some(ref type_args) = call.type_arguments else {
+        return MacroAnchor::Unsupported(MacroAnchorUnsupported::NotTypeBased);
+    };
+    let Some(first) = type_args.params.first() else {
+        return MacroAnchor::Unsupported(MacroAnchorUnsupported::NoTypeArgument);
+    };
+    match first {
+        TSType::TSTypeLiteral(literal) => {
+            closing_delimiter_anchor(literal.span, literal.members.is_empty())
+        }
+        // The member list lives in another declaration, not at this position.
+        TSType::TSTypeReference(_) => {
+            MacroAnchor::Unsupported(MacroAnchorUnsupported::NamedTypeArgument)
+        }
+        // A merged member list has no single closing delimiter.
+        TSType::TSIntersectionType(_) => {
+            MacroAnchor::Unsupported(MacroAnchorUnsupported::IntersectionTypeArgument)
+        }
+        _ => MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList),
+    }
+}
+
+/// The macro call's runtime ARRAY-argument element-list anchor
+/// (`defineEmits(['a'])`).
+///
+/// A runtime OBJECT argument (`defineEmits({ a: null })`) has no array element
+/// list: appending an array entry there would emit invalid code, so it is an
+/// honest typed miss.
+fn runtime_argument_array_anchor(call: &CallExpression<'_>) -> MacroAnchor {
+    let no_member_list = MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList);
+    if call.type_arguments.is_some() {
+        return no_member_list;
+    }
+    match call.arguments.first().and_then(|arg| arg.as_expression()) {
+        Some(Expression::ArrayExpression(arr)) => {
+            closing_delimiter_anchor(arr.span, arr.elements.is_empty())
+        }
+        _ => no_member_list,
+    }
 }
 
 /// Extract binding names and types from a `TSTypeLiteral` (object type).

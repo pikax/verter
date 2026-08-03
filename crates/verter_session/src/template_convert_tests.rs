@@ -856,6 +856,7 @@ mod unused_declaration_population {
 
     fn macro_of(kind: AnalyzedMacroKind) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
@@ -906,6 +907,7 @@ mod unused_declaration_population {
 
     fn slot_field(name: &str, start: u32) -> AnalyzedSlotField {
         AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: name.to_string(),
             is_required: false,
             span: verter_span::Span::new(start, start + name.len() as u32),

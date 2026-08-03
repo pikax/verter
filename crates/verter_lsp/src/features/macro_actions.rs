@@ -2,11 +2,13 @@
 
 use tower_lsp_server::ls_types::*;
 use verter_semantic::analysis::types::{AnalysisFlags, AnalyzedBinding, AnalyzedMacroKind};
-use verter_session::FileAnalysisSnapshot;
+use verter_session::{AnalysisSourceRevision, FileAnalysisSnapshot};
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
-use crate::features::action_utils::{find_script_insert_offset, make_insert_action, needs_quoting};
+use crate::features::action_utils::{
+    find_script_insert_offset, make_insert_action, needs_quoting, LiveEditTarget,
+};
 
 /// Context for resolving slot binding types.
 ///
@@ -86,8 +88,15 @@ fn build_slot_member(
 /// are returned. Slot actions appear when the cursor is on a `<slot>` element or
 /// on the `defineSlots` macro. Emit actions appear when the cursor is on an undeclared
 /// emit usage or on the `defineEmits` macro. When `None`, all actions are returned.
+///
+/// `live_revision` is the content identity of the `source` bytes an edit will be
+/// applied to. Every offset these actions carry — an anchor, an import span end —
+/// was minted against the bytes the ANALYSIS observed, so the two identities must
+/// agree before any edit is produced: an offset from another revision can be
+/// perfectly in-bounds and still land in the wrong place.
 pub fn macro_code_actions(
     source: &str,
+    live_revision: AnalysisSourceRevision,
     analysis: Option<&FileAnalysisSnapshot>,
     blocks: &[SfcBlock],
     line_index: &LineIndex,
@@ -97,6 +106,13 @@ pub fn macro_code_actions(
         Some(a) => a,
         None => return vec![],
     };
+
+    // Revision gate, once and up front. An unstamped analysis also fails here,
+    // so a snapshot whose producer never recorded its source identity yields no
+    // edits rather than edits from unpaired geometry.
+    if analysis.anchor_revision != live_revision {
+        return vec![];
+    }
 
     // Must have a <script setup> block
     let setup_block = match blocks.iter().find(|b| b.is_setup()) {
@@ -147,6 +163,9 @@ pub fn macro_code_actions(
     };
 
     let mut actions = Vec::new();
+    // The only capability the macro-augmentation flows get over the live
+    // buffer: anchor → position. No `&str` reaches them.
+    let edit_target = LiveEditTarget::new(source, line_index);
 
     // B1: Generate defineSlots (no existing defineSlots, template has <slot> tags)
     if show_slot_actions
@@ -184,8 +203,7 @@ pub fn macro_code_actions(
 
     // B3: Add missing slots to existing defineSlots
     if show_slot_actions && flags.contains(AnalysisFlags::HAS_DEFINE_SLOTS) {
-        if let Some(action) =
-            add_missing_slots_action(source, analysis, template, line_index, &type_ctx)
+        if let Some(action) = add_missing_slots_action(analysis, template, &edit_target, &type_ctx)
         {
             actions.push(action);
         }
@@ -194,13 +212,16 @@ pub fn macro_code_actions(
     // B5: Prop mismatch detection (missing props in defineSlots)
     if show_slot_actions && flags.contains(AnalysisFlags::HAS_DEFINE_SLOTS) {
         actions.extend(prop_mismatch_actions(
-            source, analysis, template, line_index, &type_ctx,
+            analysis,
+            template,
+            &edit_target,
+            &type_ctx,
         ));
     }
 
     // B4: Add missing emits to existing defineEmits
     if show_emit_actions && flags.contains(AnalysisFlags::HAS_DEFINE_EMITS) {
-        if let Some(action) = add_missing_emits_action(source, analysis, template, line_index) {
+        if let Some(action) = add_missing_emits_action(analysis, template, &edit_target) {
             actions.push(action);
         }
     }
@@ -276,11 +297,13 @@ fn generate_define_emits_action(
 
 // ── B3: Add missing slots to existing defineSlots ────────────────────────
 
+/// Membership from `slot_fields`; placement from the macro's type-literal
+/// anchor. An unsupported anchor (a bare type reference, an intersection, a
+/// runtime macro) yields no action — never a fallback offset.
 fn add_missing_slots_action(
-    source: &str,
     analysis: &FileAnalysisSnapshot,
     template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
-    line_index: &LineIndex,
+    edit_target: &LiveEditTarget<'_>,
     type_ctx: &SlotTypeContext<'_>,
 ) -> Option<CodeActionOrCommand> {
     // Find the defineSlots macro
@@ -289,15 +312,14 @@ fn add_missing_slots_action(
         .iter()
         .find(|m| m.kind == AnalyzedMacroKind::DefineSlots)?;
 
-    // Parse existing slot names from the defineSlots source text
-    let macro_text = &source[slots_macro.span.start as usize..slots_macro.span.end as usize];
-    let existing_names =
-        crate::features::action_utils::extract_slot_names_from_type_literal(macro_text);
+    // The macro's own authored member list must be appendable at a known
+    // position before any member may be offered.
+    let anchor = slots_macro.edit_anchors.type_literal.available()?;
 
     let missing: Vec<_> = template
         .defined_slots
         .iter()
-        .filter(|s| !existing_names.iter().any(|n| n == &s.name))
+        .filter(|s| !slots_macro.slot_fields.iter().any(|f| f.name == s.name))
         .collect();
 
     if missing.is_empty() {
@@ -310,18 +332,7 @@ fn add_missing_slots_action(
         new_members.push_str(&build_slot_member(slot, Some(type_ctx)));
     }
 
-    // Find insertion offset: scan backwards from span end to find the `}` before `>()`
-    let insert_offset = find_type_literal_close(macro_text)
-        .map(|rel| slots_macro.span.start + rel as u32)
-        .unwrap_or_else(|| {
-            // Fallback: span_end - 4 heuristic
-            if slots_macro.span.end >= 4 {
-                slots_macro.span.end - 4
-            } else {
-                slots_macro.span.end
-            }
-        });
-    let position = line_index.offset_to_position(insert_offset)?;
+    let position = edit_target.anchor_position(anchor)?;
 
     let title = if missing.len() == 1 {
         format!("Add slot '{}' to defineSlots", missing[0].name)
@@ -337,20 +348,15 @@ fn add_missing_slots_action(
     ))
 }
 
-/// Find the offset of the closing `}` before `>()` in a defineSlots macro text.
-/// Returns the byte offset relative to the start of `macro_text`.
-fn find_type_literal_close(macro_text: &str) -> Option<usize> {
-    // Look for `}>()` and return the position of `}`
-    macro_text.rfind("}>()").or_else(|| macro_text.rfind("}>"))
-}
-
 // ── B5: Prop mismatch detection ──────────────────────────────────────────
 
+/// Declared props come from `slot_field.bindings`; placement comes from that
+/// slot's own `props_anchor`, so a prop can only ever land in the props object
+/// of the slot it belongs to.
 fn prop_mismatch_actions(
-    source: &str,
     analysis: &FileAnalysisSnapshot,
     template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
-    line_index: &LineIndex,
+    edit_target: &LiveEditTarget<'_>,
     type_ctx: &SlotTypeContext<'_>,
 ) -> Vec<CodeActionOrCommand> {
     let mut actions = Vec::new();
@@ -364,127 +370,105 @@ fn prop_mismatch_actions(
         None => return actions,
     };
 
-    let macro_text = &source[slots_macro.span.start as usize..slots_macro.span.end as usize];
-    let parsed_slots =
-        crate::features::action_utils::extract_slots_with_props_from_type_literal(macro_text);
+    // The slot members must be authored inline in this macro's own type
+    // literal. When the member list lives elsewhere (a bare type reference, an
+    // intersection) the macro is fail-closed for every augmentation.
+    if !slots_macro.edit_anchors.type_literal.is_available() {
+        return actions;
+    }
 
     // For each template slot that also exists in defineSlots, compare props
     for template_slot in &template.defined_slots {
-        let parsed = match parsed_slots.iter().find(|p| p.name == template_slot.name) {
-            Some(p) => p,
+        let slot_field = match slots_macro
+            .slot_fields
+            .iter()
+            .find(|f| f.name == template_slot.name)
+        {
+            Some(f) => f,
             None => continue, // slot not in defineSlots — handled by B3
         };
 
-        // Missing props: template has `:prop` but defineSlots doesn't
+        // Missing props: template has `:prop` but the slot's declared bindings
+        // do not carry it.
         let missing_props: Vec<&str> = template_slot
             .binding_names
             .iter()
-            .filter(|name| !parsed.prop_names.iter().any(|p| p == *name))
+            .filter(|name| !slot_field.bindings.iter().any(|b| &&b.name == name))
             .map(|s| s.as_str())
             .collect();
 
-        if !missing_props.is_empty() {
-            // Build insertion text for missing props
-            let mut new_props = String::new();
-            for prop_name in &missing_props {
-                if !new_props.is_empty() {
-                    new_props.push_str(", ");
-                }
-                new_props.push_str(prop_name);
-                new_props.push_str(": ");
-                // Resolve type from binding expression
-                let expr = template_slot
-                    .binding_expressions
-                    .iter()
-                    .zip(template_slot.binding_names.iter())
-                    .find(|(_, name)| name.as_str() == *prop_name)
-                    .map(|(expr, _)| expr.as_str())
-                    .unwrap_or(prop_name);
-                new_props.push_str(&resolve_binding_type(Some(type_ctx), expr));
-            }
-
-            // Find the props `{ ... }` for this slot in the macro text
-            // We need to insert before the closing `}` of the props object
-            if let Some(insert_offset) = find_slot_props_close(macro_text, &template_slot.name) {
-                let abs_offset = slots_macro.span.start + insert_offset as u32;
-                if let Some(position) = line_index.offset_to_position(abs_offset) {
-                    let insert_text = if parsed.prop_names.is_empty() {
-                        format!(" {} ", new_props)
-                    } else {
-                        format!(", {}", new_props)
-                    };
-
-                    let title = if missing_props.len() == 1 {
-                        format!(
-                            "Add prop '{}' to slot '{}' in defineSlots",
-                            missing_props[0], template_slot.name
-                        )
-                    } else {
-                        format!(
-                            "Add {} missing props to slot '{}' in defineSlots",
-                            missing_props.len(),
-                            template_slot.name
-                        )
-                    };
-
-                    actions.push(make_insert_action(
-                        &title,
-                        CodeActionKind::QUICKFIX,
-                        &insert_text,
-                        position,
-                    ));
-                }
-            }
+        if missing_props.is_empty() {
+            continue;
         }
+
+        // This slot's props surface must be an appendable member list. A
+        // `Pick<…>` surface, or a slot declared without a props parameter, is a
+        // typed miss: no action, never a neighbouring slot's object.
+        let Some(anchor) = slot_field.props_anchor.available() else {
+            continue;
+        };
+        let Some(position) = edit_target.anchor_position(anchor) else {
+            continue;
+        };
+
+        // Build insertion text for missing props
+        let mut new_props = String::new();
+        for prop_name in &missing_props {
+            if !new_props.is_empty() {
+                new_props.push_str(", ");
+            }
+            new_props.push_str(prop_name);
+            new_props.push_str(": ");
+            // Resolve type from binding expression
+            let expr = template_slot
+                .binding_expressions
+                .iter()
+                .zip(template_slot.binding_names.iter())
+                .find(|(_, name)| name.as_str() == *prop_name)
+                .map(|(expr, _)| expr.as_str())
+                .unwrap_or(prop_name);
+            new_props.push_str(&resolve_binding_type(Some(type_ctx), expr));
+        }
+
+        let insert_text = if anchor.is_empty() {
+            format!(" {} ", new_props)
+        } else {
+            format!(", {}", new_props)
+        };
+
+        let title = if missing_props.len() == 1 {
+            format!(
+                "Add prop '{}' to slot '{}' in defineSlots",
+                missing_props[0], template_slot.name
+            )
+        } else {
+            format!(
+                "Add {} missing props to slot '{}' in defineSlots",
+                missing_props.len(),
+                template_slot.name
+            )
+        };
+
+        actions.push(make_insert_action(
+            &title,
+            CodeActionKind::QUICKFIX,
+            &insert_text,
+            position,
+        ));
     }
 
     actions
 }
 
-/// Find the byte offset of the closing `}` of a specific slot's `props: { ... }` in the macro text.
-fn find_slot_props_close(macro_text: &str, slot_name: &str) -> Option<usize> {
-    // Find the slot name in the macro text
-    let name_pattern = if needs_quoting(slot_name) {
-        format!("'{}'", slot_name)
-    } else {
-        slot_name.to_string()
-    };
-
-    let name_pos = macro_text.find(&name_pattern)?;
-    // Find the `(` after the name
-    let after_name = &macro_text[name_pos + name_pattern.len()..];
-    let paren_pos = after_name.find('(')?;
-    let after_paren = &macro_text[name_pos + name_pattern.len() + paren_pos + 1..];
-
-    // Find the `{` opening the props object
-    let brace_pos = after_paren.find('{')?;
-    let props_start = name_pos + name_pattern.len() + paren_pos + 1 + brace_pos + 1;
-
-    // Find the matching closing `}`
-    let rest = &macro_text[props_start..];
-    let mut depth = 1;
-    for (i, ch) in rest.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(props_start + i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 // ── B4: Add missing emits to existing defineEmits ────────────────────────
 
+/// Type-based emits append to the type literal's anchor; runtime emits append to
+/// the runtime ARRAY's element-list anchor. A runtime OBJECT argument has no
+/// element list, so it is fail-closed rather than emitting invalid code.
 fn add_missing_emits_action(
-    _source: &str,
     analysis: &FileAnalysisSnapshot,
     template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
-    line_index: &LineIndex,
+    edit_target: &LiveEditTarget<'_>,
 ) -> Option<CodeActionOrCommand> {
     // Find the defineEmits macro
     let emits_macro = analysis
@@ -504,27 +488,23 @@ fn add_missing_emits_action(
         return None;
     }
 
+    let title = if undeclared.len() == 1 {
+        format!("Add emit '{}' to defineEmits", undeclared[0])
+    } else {
+        format!("Add {} missing emits to defineEmits", undeclared.len())
+    };
+
     if emits_macro.is_type_based {
-        // Type-based: insert new call signatures before `}>`
+        // Type-based: append new call signatures to the type literal's members.
+        let anchor = emits_macro.edit_anchors.type_literal.available()?;
+        let position = edit_target.anchor_position(anchor)?;
+
         let mut new_members = String::new();
         for event in &undeclared {
             new_members.push_str("    (e: '");
             new_members.push_str(event);
             new_members.push_str("', ...args: any[]): void\n");
         }
-
-        let insert_offset = if emits_macro.span.end >= 4 {
-            emits_macro.span.end - 4
-        } else {
-            emits_macro.span.end
-        };
-        let position = line_index.offset_to_position(insert_offset)?;
-
-        let title = if undeclared.len() == 1 {
-            format!("Add emit '{}' to defineEmits", undeclared[0])
-        } else {
-            format!("Add {} missing emits to defineEmits", undeclared.len())
-        };
 
         Some(make_insert_action(
             &title,
@@ -533,23 +513,22 @@ fn add_missing_emits_action(
             position,
         ))
     } else {
-        // Runtime array form: defineEmits(['existing', ...])
-        // Insert new strings before the closing `]`
-        let new_entries: String = undeclared.iter().map(|e| format!(", '{}'", e)).collect();
+        // Runtime array form: defineEmits(['existing', ...]) — append to the
+        // array's element list.
+        let anchor = emits_macro.edit_anchors.runtime_array.available()?;
+        let position = edit_target.anchor_position(anchor)?;
 
-        // Insert before the `]` in the array — approximate at span_end - 2
-        let insert_offset = if emits_macro.span.end >= 2 {
-            emits_macro.span.end - 2
-        } else {
-            emits_macro.span.end
-        };
-        let position = line_index.offset_to_position(insert_offset)?;
-
-        let title = if undeclared.len() == 1 {
-            format!("Add emit '{}' to defineEmits", undeclared[0])
-        } else {
-            format!("Add {} missing emits to defineEmits", undeclared.len())
-        };
+        let new_entries: String = undeclared
+            .iter()
+            .enumerate()
+            .map(|(index, event)| {
+                if index == 0 && anchor.is_empty() {
+                    format!("'{}'", event)
+                } else {
+                    format!(", '{}'", event)
+                }
+            })
+            .collect();
 
         Some(make_insert_action(
             &title,

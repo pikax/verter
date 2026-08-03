@@ -386,8 +386,14 @@ pub(super) async fn handle_code_action(
 
             // Macro code actions (defineSlots, defineEmits generation/augmentation)
             let cursor_offset = doc.line_index.position_to_offset(&range.start);
+            // The live buffer's content identity, minted once per request: every
+            // macro edit offset is analyzer-minted against the bytes the
+            // ANALYSIS saw, so the two identities must agree before an edit is
+            // produced.
+            let live_revision = verter_session::AnalysisSourceRevision::of_source(&doc.source);
             let mut macro_actions = crate::features::macro_actions::macro_code_actions(
                 &doc.source,
+                live_revision,
                 analysis.as_ref(),
                 &blocks,
                 &doc.line_index,

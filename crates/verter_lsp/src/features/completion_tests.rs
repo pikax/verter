@@ -2616,6 +2616,7 @@ fn test_component_prop_completions_from_macros() {
     let child_analysis = FileAnalysisSnapshot {
         macros: std::sync::Arc::new(vec![
             AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
@@ -2662,6 +2663,7 @@ fn test_component_prop_completions_from_macros() {
                 span: verter_span::Span::new(0, 0),
             },
             AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineEmits,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
@@ -2944,6 +2946,7 @@ fn d5_slot_field(
     bindings: Vec<(&str, &str)>,
 ) -> verter_semantic::analysis::types::AnalyzedSlotField {
     verter_semantic::analysis::types::AnalyzedSlotField {
+        props_anchor: Default::default(),
         name: name.to_string(),
         is_required: false,
         span: verter_span::Span::new(0, 0),
@@ -2971,6 +2974,7 @@ fn d5_child_with_slots(
     fields: Vec<verter_semantic::analysis::types::AnalyzedSlotField>,
 ) -> FileAnalysisSnapshot {
     let mac = AnalyzedMacro {
+        edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
         owner: verter_type_expr::TopLevelOwnerId::instance(0),
         is_type_based: true,

@@ -114,6 +114,7 @@ mod tests {
 
     fn make_macro(emit_fields: Vec<AnalyzedEmitField>, span: Span) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: false,

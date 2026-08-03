@@ -5,7 +5,6 @@ use verter_semantic::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
 };
-use verter_semantic::analysis::types::AnalyzedMacro;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_session::FileAnalysisSnapshot;
 
@@ -58,6 +57,15 @@ fn make_prop(name: &str) -> TemplatePropUsage {
     }
 }
 
+/// Macros (with their edit anchors) minted by the REAL analyzer over `source`.
+fn producer_backed_macros(
+    source: &str,
+) -> std::sync::Arc<Vec<verter_semantic::analysis::types::AnalyzedMacro>> {
+    crate::features::macro_fixture::analyze_sfc_script(source)
+        .macros
+        .into()
+}
+
 fn make_child_context(source: &str, analysis: FileAnalysisSnapshot) -> ChildComponentContext {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
@@ -100,26 +108,12 @@ fn add_prop_to_type_based_define_props() {
             })
             .into(),
         ),
-        macros: (vec![AnalyzedMacro {
-            kind: AnalyzedMacroKind::DefineProps,
-            owner: verter_type_expr::TopLevelOwnerId::instance(0),
-            is_type_based: true,
-            type_references: vec![],
-            binding_name: None,
-            model_name: None,
-            has_inherit_attrs_false: false,
-            prop_fields: vec![],
-            emit_fields: vec![],
-            slot_fields: vec![],
-            default_keys: vec![],
-            expose_fields: vec![],
-            default_values: Vec::new(),
-            resolved_local_types: Vec::new(),
-            parsed_type_argument: None,
-            parsed_type_argument_scope: None,
-            span: verter_span::Span::new(24, 56),
-        }])
-        .into(),
+        // Macros AND edit anchors from the real analyzer over the child's own
+        // source, stamped with that source's revision — the shape
+        // `resolve_component_context` produces. A hand-forged anchor could not
+        // discriminate a mint bug.
+        macros: producer_backed_macros(child_source),
+        anchor_revision: verter_session::AnalysisSourceRevision::of_source(child_source),
         ..Default::default()
     };
     let child_ctx = make_child_context(child_source, child_analysis);
@@ -242,26 +236,8 @@ fn no_action_for_runtime_based_define_props() {
 
     let child_source = "<script setup>\ndefineProps(['msg'])\n</script>";
     let child_analysis = FileAnalysisSnapshot {
-        macros: (vec![AnalyzedMacro {
-            kind: AnalyzedMacroKind::DefineProps,
-            owner: verter_type_expr::TopLevelOwnerId::instance(0),
-            is_type_based: false,
-            type_references: vec![],
-            binding_name: None,
-            model_name: None,
-            has_inherit_attrs_false: false,
-            prop_fields: vec![],
-            emit_fields: vec![],
-            slot_fields: vec![],
-            default_keys: vec![],
-            expose_fields: vec![],
-            default_values: Vec::new(),
-            resolved_local_types: Vec::new(),
-            parsed_type_argument: None,
-            parsed_type_argument_scope: None,
-            span: verter_span::Span::new(15, 35),
-        }])
-        .into(),
+        macros: producer_backed_macros(child_source),
+        anchor_revision: verter_session::AnalysisSourceRevision::of_source(child_source),
         ..Default::default()
     };
     let child_ctx = make_child_context(child_source, child_analysis);

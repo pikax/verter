@@ -127,6 +127,7 @@ mod tests {
 
     fn make_define_slots(slot_fields: Vec<AnalyzedSlotField>) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineSlots,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
@@ -155,6 +156,7 @@ mod tests {
         };
         let script = ScriptAnalysisSnapshot {
             macros: vec![make_define_slots(vec![AnalyzedSlotField {
+                props_anchor: Default::default(),
                 name: "header".to_string(),
                 is_required: true,
                 span: Span::new(20, 26),
@@ -194,6 +196,7 @@ mod tests {
         };
         let script = ScriptAnalysisSnapshot {
             macros: vec![make_define_slots(vec![AnalyzedSlotField {
+                props_anchor: Default::default(),
                 name: "header".to_string(),
                 is_required: false,
                 span: Span::new(20, 26),
@@ -229,6 +232,7 @@ mod tests {
         };
         let script = ScriptAnalysisSnapshot {
             macros: vec![make_define_slots(vec![AnalyzedSlotField {
+                props_anchor: Default::default(),
                 name: "header".to_string(),
                 is_required: true,
                 span: Span::new(20, 26),
@@ -290,6 +294,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             macros: vec![make_define_slots(vec![
                 AnalyzedSlotField {
+                    props_anchor: Default::default(),
                     name: "header".to_string(),
                     is_required: true,
                     span: Span::new(20, 26),
@@ -301,6 +306,7 @@ mod tests {
                     return_expr_scope: None,
                 },
                 AnalyzedSlotField {
+                    props_anchor: Default::default(),
                     name: "footer".to_string(),
                     is_required: false,
                     span: Span::new(30, 36),
@@ -312,6 +318,7 @@ mod tests {
                     return_expr_scope: None,
                 },
                 AnalyzedSlotField {
+                    props_anchor: Default::default(),
                     name: "sidebar".to_string(),
                     is_required: true,
                     span: Span::new(40, 47),
