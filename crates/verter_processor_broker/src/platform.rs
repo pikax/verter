@@ -68,9 +68,10 @@ impl<'a> DeadlineStream<'a> {
 
 #[cfg(test)]
 pub(crate) use imp::wait_pid_gone_for_test;
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use imp::{enforced_linux_sandbox_policy, hash_linux_sandbox_policy};
 #[cfg(all(test, windows))]
 pub(crate) use imp::{
+    applied_policy::take_applied_for_test as take_applied_app_container_policy_for_test,
     hash_app_container_policy, AppContainerPolicyMaterial, ENFORCED_APP_CONTAINER_POLICY,
 };
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use imp::{enforced_linux_sandbox_policy, hash_linux_sandbox_policy};

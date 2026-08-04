@@ -11,7 +11,9 @@ use crate::channel::{
     build_handshake, generate_ephemeral_keypair, read_handshake_message, write_handshake_message,
     ChannelBindingInputs, ChannelError, TrustedBrokerChannelBindingV1, ValidatedBrokerChannel,
 };
-use crate::correlation::{CorrelationError, CorrelationRegistry, DependencyRequestIdV1};
+use crate::correlation::{
+    CorrelationAuditSink, CorrelationError, CorrelationRegistry, DependencyRequestIdV1,
+};
 use crate::execution::{WorkerExecutionEnvelope, WorkerExecutionEvent, WorkerExecutionMachine};
 use crate::platform::{self, DeadlineStream, PlatformChild, PlatformStream};
 use crate::policy::{ProcessorSandboxKindV1, TrustedProcessorCapabilityManifest};
@@ -377,6 +379,13 @@ impl DeniedWorkerSession {
         &self.channel
     }
 
+    /// Installs the production sink that observes this session's correlation eviction
+    /// and destruction audit events, including the destruction event recorded by
+    /// normal session teardown on `Drop`.
+    pub fn install_correlation_audit_sink(&mut self, sink: CorrelationAuditSink) {
+        self.correlation.install_audit_sink(sink);
+    }
+
     /// Terminates this session: the worker tree is killed, the correlation registry is
     /// destroyed, and every later entry point refuses with `SessionTerminated`.
     fn teardown(&mut self) {
@@ -692,12 +701,16 @@ impl DeniedWorkerSession {
         started: Instant,
         timeout: Duration,
     ) -> Result<WorkerToBrokerFrame, BrokerError> {
-        let remaining = timeout
+        let deadline = match timeout
             .checked_sub(started.elapsed())
-            .ok_or(BrokerError::WorkerTimeout)?;
-        let deadline = Instant::now()
-            .checked_add(remaining)
-            .ok_or(BrokerError::WorkerTimeout)?;
+            .and_then(|remaining| Instant::now().checked_add(remaining))
+        {
+            Some(deadline) => deadline,
+            // A budget that elapsed before the read even started is an expiry like
+            // any other: it terminates the session instead of leaving the worker
+            // alive behind a typed timeout.
+            None => return Err(self.channel_failure(ChannelError::ReadDeadlineExceeded)),
+        };
         let mut reader = DeadlineStream::new(&mut self._stream, Some(&mut self.worker.child));
         let payload = match self.channel.read_frame(&mut reader, deadline) {
             Ok(payload) => payload,
@@ -846,9 +859,10 @@ impl DeniedWorkerSession {
         self.ensure_live()?;
         self.recheck_or_teardown()?;
         self.write_application_frame(&BrokerToWorkerFrame::Probe(probe))?;
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or(BrokerError::WorkerTimeout)?;
+        let deadline = match Instant::now().checked_add(timeout) {
+            Some(deadline) => deadline,
+            None => return Err(self.channel_failure(ChannelError::ReadDeadlineExceeded)),
+        };
         let mut reader = DeadlineStream::new(&mut self._stream, Some(&mut self.worker.child));
         let response = match self.channel.read_frame(&mut reader, deadline) {
             Ok(response) => response,
@@ -926,8 +940,13 @@ fn decode_worker_application_payload(payload: &[u8]) -> Result<WorkerToBrokerFra
 
 impl Drop for DeniedWorkerSession {
     fn drop(&mut self) {
-        self.worker.child.kill_tree();
-        self.worker.child.wait_bounded(Duration::from_secs(5));
+        // Normal teardown is the same terminal path as a fatal failure: kill the
+        // worker tree AND destroy the correlation registry with its typed audit
+        // event. A session already torn down by a fatal path skips the repeat (the
+        // worker is gone and its registry destruction is already recorded).
+        if !self.terminated {
+            self.teardown();
+        }
     }
 }
 

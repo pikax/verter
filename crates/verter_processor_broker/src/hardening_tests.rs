@@ -63,6 +63,43 @@ fn a_worker_stalling_mid_frame_is_bounded_by_a_read_deadline_and_torn_down() {
 }
 
 #[test]
+fn a_pre_elapsed_work_budget_is_a_terminal_timeout_that_tears_the_worker_down() {
+    let mut session = launch_required();
+    let pid = session.worker().pid();
+    let mut authority =
+        dependency_read_authority(|_| panic!("an expired budget resolves no dependency reads"));
+    let outcome = session.submit_work(
+        echo_work(141, 142, b"zero budget"),
+        &mut authority,
+        Duration::ZERO,
+    );
+    assert!(
+        matches!(outcome, Err(BrokerError::WorkerTimeout)),
+        "a work budget that elapsed before the first frame read must be a typed timeout: \
+         {outcome:?}"
+    );
+    assert!(
+        wait_pid_gone_for_test(pid, Duration::from_secs(10)),
+        "a pre-read budget expiry must tear the worker down, not leave it running"
+    );
+    assert_eq!(
+        session.probe_for_test(WorkerProbe::Environment, Duration::from_secs(5)),
+        Err(BrokerError::SessionTerminated),
+        "the session must be terminal after any timeout, exactly like a mid-frame expiry"
+    );
+    let mut refused_authority =
+        dependency_read_authority(|_| panic!("terminated session runs no work"));
+    assert_eq!(
+        session.submit_work(
+            echo_work(143, 144, b"after expiry"),
+            &mut refused_authority,
+            Duration::from_secs(5),
+        ),
+        Err(BrokerError::SessionTerminated)
+    );
+}
+
+#[test]
 fn a_bounded_read_deadline_does_not_disturb_a_responsive_worker() {
     let mut session = launch_required();
     let mut authority = dependency_read_authority(|_| panic!("control has no dependencies"));
@@ -169,6 +206,11 @@ fn windows_sandbox_profile_hash_digests_the_enforced_app_container_policy() {
             policy.environment_block_u16s = 64;
             policy
         }),
+        ("lowbox_handle_count", {
+            let mut policy = ENFORCED_APP_CONTAINER_POLICY;
+            policy.lowbox_handle_count = 1;
+            policy
+        }),
         ("profile_access_mask", {
             let mut policy = ENFORCED_APP_CONTAINER_POLICY;
             policy.profile_access_mask = u32::MAX;
@@ -237,9 +279,14 @@ fn linux_sandbox_profile_hash_digests_the_enforced_namespace_and_seccomp_policy(
             policy.setgroups_denied = false;
             policy
         }),
-        ("close_range_first_retained_fd", {
+        ("close_range_first_swept_fd", {
             let mut policy = enforced.clone();
-            policy.close_range_first_retained_fd = 1024;
+            policy.close_range_first_swept_fd = 1024;
+            policy
+        }),
+        ("close_range_flags", {
+            let mut policy = enforced.clone();
+            policy.close_range_flags = 0;
             policy
         }),
         ("launch_filter", {
@@ -265,6 +312,29 @@ fn linux_sandbox_profile_hash_digests_the_enforced_namespace_and_seccomp_policy(
             "relaxing {label} must change the attested sandbox profile hash"
         );
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_launch_enforcement_applies_the_exact_policy_material_the_attested_hash_digests() {
+    use crate::platform::{
+        hash_app_container_policy, take_applied_app_container_policy_for_test,
+        ENFORCED_APP_CONTAINER_POLICY,
+    };
+
+    let session = launch_required();
+    drop(session);
+    let applied = take_applied_app_container_policy_for_test();
+    assert_eq!(
+        applied, ENFORCED_APP_CONTAINER_POLICY,
+        "launch enforcement must consume exactly the policy material the attested hash digests \
+         — a diverging enforcement literal is the false-stability defect this guards against"
+    );
+    assert_eq!(
+        hash_app_container_policy(&applied),
+        crate::platform::sandbox_profile_hash(),
+        "the attested sandbox profile hash must digest the values enforcement actually applied"
+    );
 }
 
 // (d) Live recheck comparisons against independently recorded launch facts.
@@ -492,6 +562,76 @@ fn correlation_registry_destruction_clears_every_entry_with_audit() {
             pending: 1,
             consumed: 1,
         }]
+    );
+}
+
+#[test]
+fn correlation_registry_delivers_eviction_audit_through_the_installed_production_sink() {
+    let binding = [9_u8; 32];
+    let mut registry = CorrelationRegistry::with_limits_for_test(binding, 1, Duration::ZERO);
+    let (sender, receiver) = mpsc::channel();
+    registry.install_audit_sink(Box::new(move |event| {
+        let _ = sender.send(event);
+    }));
+    let context = context(2);
+    let work = work_token(3);
+    let expired = registry_id(1);
+    registry.register(expired, context, work).expect("pending");
+    registry
+        .consume(expired, context, work, binding)
+        .expect("consume");
+    registry
+        .register(registry_id(2), context, work)
+        .expect("second registration");
+
+    let delivered: Vec<_> = receiver.try_iter().collect();
+    assert!(
+        delivered.iter().any(|event| matches!(
+            event,
+            CorrelationAuditEvent::ConsumedEvictedByTtl { id } if *id == expired
+        )),
+        "eviction audit must be observable through the production sink, not only through \
+         the test-only drain: {delivered:?}"
+    );
+}
+
+#[test]
+fn normal_session_drop_destroys_the_correlation_registry_through_the_production_audit_sink() {
+    let mut session = launch_required();
+    let pid = session.worker().pid();
+    let (sender, receiver) = mpsc::channel();
+    session.install_correlation_audit_sink(Box::new(move |event| {
+        let _ = sender.send(event);
+    }));
+    let mut authority =
+        dependency_read_authority(|_| DependencyReadDecision::resolved(b"dependency".to_vec()));
+    let work = TrustedBrokerWork::new(
+        context(151),
+        work_token(152),
+        execution_descriptor(b"", &[(DependencyReadKind::Source, b"./theme.css")]),
+    )
+    .expect("dependency work");
+    assert!(matches!(
+        session.submit_work(work, &mut authority, Duration::from_secs(10)),
+        Ok(TrustedBrokerWorkResult::Success(_))
+    ));
+    drop(session);
+
+    let delivered: Vec<_> = receiver.try_iter().collect();
+    assert!(
+        delivered.iter().any(|event| matches!(
+            event,
+            CorrelationAuditEvent::DestroyedOnTeardown {
+                pending: 0,
+                consumed: 1,
+            }
+        )),
+        "normal session teardown on Drop must destroy the correlation registry and deliver \
+         the typed destruction audit event through the production sink: {delivered:?}"
+    );
+    assert!(
+        wait_pid_gone_for_test(pid, Duration::from_secs(10)),
+        "normal session drop must still tear the worker tree down"
     );
 }
 

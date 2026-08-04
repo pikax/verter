@@ -17,8 +17,8 @@ pub use attestation::{
 pub use channel::{ChannelError, TrustedBrokerChannelBindingV1, ValidatedBrokerChannel};
 pub use correlation::{
     BlockContentResolveContextTokenV1, BlockContentWorkTokenV1, CorrelationAuditEvent,
-    CorrelationError, CorrelationRegistry, DependencyRequestIdV1, CONSUMED_CORRELATION_TTL,
-    MAX_CORRELATION_ENTRIES,
+    CorrelationAuditSink, CorrelationError, CorrelationRegistry, DependencyRequestIdV1,
+    CONSUMED_CORRELATION_TTL, MAX_CORRELATION_ENTRIES,
 };
 pub use lifecycle::{
     AttestedDeniedWorker, BrokerError, DeniedWorkerBroker, DeniedWorkerLaunch, DeniedWorkerSession,

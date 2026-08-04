@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Maximum live correlation entries one registry retains.
@@ -32,6 +33,14 @@ pub enum CorrelationError {
     /// The registry is at capacity with only pending entries; registration is refused.
     CapacityExhausted,
 }
+
+/// Production sink for correlation eviction and destruction audit events.
+///
+/// The session owner supplies it; every [`CorrelationAuditEvent`] is delivered to it
+/// synchronously as it is recorded — including the destruction event recorded by
+/// normal session teardown on `Drop` — so eviction and destruction stay observable
+/// outside test builds.
+pub type CorrelationAuditSink = Box<dyn FnMut(CorrelationAuditEvent) + Send>;
 
 /// Typed audit record for every correlation-entry eviction or destruction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,7 +135,6 @@ impl BlockContentWorkTokenV1 {
     }
 }
 
-#[derive(Debug)]
 pub struct CorrelationRegistry {
     channel_binding_hash: [u8; 32],
     entries: HashMap<DependencyRequestIdV1, CorrelationState>,
@@ -134,6 +142,21 @@ pub struct CorrelationRegistry {
     consumed_ttl: Duration,
     audit_events: VecDeque<CorrelationAuditEvent>,
     audit_events_dropped: u64,
+    audit_sink: Option<CorrelationAuditSink>,
+}
+
+impl fmt::Debug for CorrelationRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CorrelationRegistry")
+            .field("entries", &self.entries.len())
+            .field("capacity", &self.capacity)
+            .field("consumed_ttl", &self.consumed_ttl)
+            .field("audit_events", &self.audit_events.len())
+            .field("audit_events_dropped", &self.audit_events_dropped)
+            .field("audit_sink_installed", &self.audit_sink.is_some())
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -169,7 +192,14 @@ impl CorrelationRegistry {
             consumed_ttl,
             audit_events: VecDeque::new(),
             audit_events_dropped: 0,
+            audit_sink: None,
         }
+    }
+
+    /// Installs the production sink that observes every eviction and destruction
+    /// audit event from now on, delivered synchronously as it is recorded.
+    pub fn install_audit_sink(&mut self, sink: CorrelationAuditSink) {
+        self.audit_sink = Some(sink);
     }
 
     #[cfg(test)]
@@ -251,6 +281,9 @@ impl CorrelationRegistry {
     }
 
     fn record_audit(&mut self, event: CorrelationAuditEvent) {
+        if let Some(sink) = self.audit_sink.as_mut() {
+            sink(event);
+        }
         if self.audit_events.len() >= MAX_CORRELATION_AUDIT_EVENTS {
             self.audit_events.pop_front();
             self.audit_events_dropped = self.audit_events_dropped.saturating_add(1);

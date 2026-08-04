@@ -14,13 +14,6 @@ use crate::lifecycle::{BrokerError, SandboxUnavailableEvidence};
 use crate::platform::SpawnedWorker;
 use crate::policy::ProcessorSandboxKindV1;
 
-/// tmpfs mount data for the private empty worker root.
-const ROOT_TMPFS_DATA: &str = "size=32m,mode=0755\0";
-/// `PR_SET_NO_NEW_PRIVS` value applied at both sandbox stages.
-const NO_NEW_PRIVILEGES_VALUE: i32 = 1;
-/// First file descriptor the `close_range` sweep retains.
-const CLOSE_RANGE_FIRST_RETAINED_FD: u32 = 4;
-
 pub(crate) type PlatformStream = UnixStream;
 
 pub(crate) struct PlatformChild {
@@ -95,15 +88,16 @@ pub(crate) fn random_fill(bytes: &mut [u8]) -> Result<(), BrokerError> {
 
 /// The concrete namespace/seccomp configuration the launch path actually enforces.
 ///
-/// Every field is consumed by an enforcement site in this module, so the profile
-/// hash changes iff the enforced policy changes.
+/// This struct is the single source of truth: every enforcement site consumes its
+/// value from these fields (there are no parallel enforcement literals), so the
+/// profile hash changes iff the enforced policy changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LinuxSandboxPolicyMaterial {
     /// `unshare` flags applied in `pre_exec`.
     pub(crate) unshare_flags: i32,
     /// `mount` flags for the private empty root tmpfs.
     pub(crate) root_mount_flags: u64,
-    /// tmpfs mount data for that root.
+    /// NUL-terminated tmpfs mount data for that root.
     pub(crate) root_mount_data: &'static str,
     /// Remount flags applied to every read-only bind mount.
     pub(crate) bind_remount_flags: u64,
@@ -111,8 +105,12 @@ pub(crate) struct LinuxSandboxPolicyMaterial {
     pub(crate) no_new_privileges: i32,
     /// Whether supplementary groups are denied before the uid/gid maps are written.
     pub(crate) setgroups_denied: bool,
-    /// First fd retained by the `close_range` sweep.
-    pub(crate) close_range_first_retained_fd: u32,
+    /// First fd the `close_range` sweep covers; the null stdio triple (0-2) is the
+    /// only inherited state below it and survives the exec.
+    pub(crate) close_range_first_swept_fd: u32,
+    /// `close_range` flags for that sweep: `CLOSE_RANGE_CLOEXEC`, so every swept fd
+    /// except the explicitly retained broker socket closes at exec.
+    pub(crate) close_range_flags: u32,
     /// The launch-stage seccomp filter program bytes.
     pub(crate) launch_filter: Vec<u8>,
     /// The worker-stage seccomp filter program bytes.
@@ -125,15 +123,16 @@ pub(crate) fn enforced_linux_sandbox_policy() -> LinuxSandboxPolicyMaterial {
     LinuxSandboxPolicyMaterial {
         unshare_flags: libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWNET,
         root_mount_flags: libc::MS_NOSUID | libc::MS_NODEV,
-        root_mount_data: ROOT_TMPFS_DATA,
+        root_mount_data: "size=32m,mode=0755\0",
         bind_remount_flags: libc::MS_BIND
             | libc::MS_REMOUNT
             | libc::MS_RDONLY
             | libc::MS_NOSUID
             | libc::MS_NODEV,
-        no_new_privileges: NO_NEW_PRIVILEGES_VALUE,
+        no_new_privileges: 1,
         setgroups_denied: true,
-        close_range_first_retained_fd: CLOSE_RANGE_FIRST_RETAINED_FD,
+        close_range_first_swept_fd: 3,
+        close_range_flags: libc::CLOSE_RANGE_CLOEXEC,
         launch_filter: encode_seccomp_filter(SeccompStage::Launch),
         worker_filter: encode_seccomp_filter(SeccompStage::Worker),
         audit_arch: native_audit_arch(),
@@ -162,7 +161,8 @@ pub(crate) fn hash_linux_sandbox_policy(material: &LinuxSandboxPolicyMaterial) -
     encoded.extend_from_slice(&material.bind_remount_flags.to_be_bytes());
     encoded.extend_from_slice(&material.no_new_privileges.to_be_bytes());
     encoded.push(u8::from(material.setgroups_denied));
-    encoded.extend_from_slice(&material.close_range_first_retained_fd.to_be_bytes());
+    encoded.extend_from_slice(&material.close_range_first_swept_fd.to_be_bytes());
+    encoded.extend_from_slice(&material.close_range_flags.to_be_bytes());
     encoded.extend_from_slice(&(material.launch_filter.len() as u32).to_be_bytes());
     encoded.extend_from_slice(&material.launch_filter);
     encoded.extend_from_slice(&(material.worker_filter.len() as u32).to_be_bytes());
@@ -191,6 +191,7 @@ pub(crate) fn spawn_denied_worker(
         .map_err(|_| BrokerError::Protocol("worker path contains NUL"))?;
     let inherited_uid = unsafe { libc::geteuid() };
     let inherited_gid = unsafe { libc::getegid() };
+    let policy = enforced_linux_sandbox_policy();
     let mut command = Command::new("/worker");
     command
         .arg("--broker-fd")
@@ -204,6 +205,7 @@ pub(crate) fn spawn_denied_worker(
     unsafe {
         command.pre_exec(move || {
             setup_namespaces_and_root(
+                &policy,
                 &root_for_child,
                 &executable_for_child,
                 inherited_uid,
@@ -284,7 +286,8 @@ pub(crate) fn worker_stream_from_args() -> Result<(PlatformStream, PathBuf), Bro
 }
 
 pub(crate) fn apply_worker_sandbox() -> Result<(), BrokerError> {
-    set_no_new_privileges()
+    let policy = enforced_linux_sandbox_policy();
+    set_no_new_privileges(policy.no_new_privileges)
         .map_err(|error| unavailable("PR_SET_NO_NEW_PRIVS(worker)", error.raw_os_error()))?;
     install_seccomp(SeccompStage::Worker)
         .map_err(|error| unavailable("seccomp filter(worker)", error.raw_os_error()))
@@ -363,6 +366,7 @@ pub(crate) fn wait_pid_gone_for_test(pid: u32, timeout: Duration) -> bool {
 }
 
 unsafe fn setup_namespaces_and_root(
+    policy: &LinuxSandboxPolicyMaterial,
     root: &CString,
     executable: &CString,
     uid: libc::uid_t,
@@ -372,10 +376,12 @@ unsafe fn setup_namespaces_and_root(
     if libc::setsid() < 0 {
         return Err(io::Error::last_os_error());
     }
-    if libc::unshare(enforced_linux_sandbox_policy().unshare_flags) != 0 {
+    if libc::unshare(policy.unshare_flags) != 0 {
         return Err(io::Error::last_os_error());
     }
-    write_proc(b"/proc/self/setgroups\0", b"deny")?;
+    if policy.setgroups_denied {
+        write_proc(b"/proc/self/setgroups\0", b"deny")?;
+    }
     let uid_map = format!("0 {uid} 1");
     write_proc(b"/proc/self/uid_map\0", uid_map.as_bytes())?;
     let gid_map = format!("0 {gid} 1");
@@ -393,18 +399,22 @@ unsafe fn setup_namespaces_and_root(
     {
         return Err(io::Error::last_os_error());
     }
+    if !policy.root_mount_data.ends_with('\0') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     if libc::mount(
         cstr(b"tmpfs\0"),
         root.as_ptr(),
         cstr(b"tmpfs\0"),
-        enforced_linux_sandbox_policy().root_mount_flags as libc::c_ulong,
-        cstr(ROOT_TMPFS_DATA.as_bytes()).cast(),
+        policy.root_mount_flags as libc::c_ulong,
+        cstr(policy.root_mount_data.as_bytes()).cast(),
     ) != 0
     {
         return Err(io::Error::last_os_error());
     }
     create_under(root, b"worker\0", false)?;
     bind_mount(
+        policy,
         executable.as_ptr(),
         joined(root, b"worker\0")?.as_ptr(),
         false,
@@ -413,7 +423,7 @@ unsafe fn setup_namespaces_and_root(
         if libc::access(cstr(source), libc::F_OK) == 0 {
             let relative = &source[1..];
             create_under(root, relative, true)?;
-            bind_mount(cstr(source), joined(root, relative)?.as_ptr(), true)?;
+            bind_mount(policy, cstr(source), joined(root, relative)?.as_ptr(), true)?;
         }
     }
     if libc::chroot(root.as_ptr()) != 0 || libc::chdir(cstr(b"/\0")) != 0 {
@@ -421,22 +431,22 @@ unsafe fn setup_namespaces_and_root(
     }
     let close_result = libc::syscall(
         libc::SYS_close_range,
-        0_u32,
+        policy.close_range_first_swept_fd,
         u32::MAX,
-        CLOSE_RANGE_FIRST_RETAINED_FD,
+        policy.close_range_flags,
     );
     if close_result != 0 && last_errno() != Some(libc::ENOSYS) {
         return Err(io::Error::last_os_error());
     }
     if close_result != 0 {
-        for fd in 0..1024 {
+        for fd in policy.close_range_first_swept_fd as libc::c_int..1024 {
             libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         }
     }
     if libc::fcntl(worker_fd, libc::F_SETFD, 0) != 0 {
         return Err(io::Error::last_os_error());
     }
-    set_no_new_privileges()?;
+    set_no_new_privileges(policy.no_new_privileges)?;
     install_seccomp(SeccompStage::Launch)?;
     Ok(())
 }
@@ -472,15 +482,20 @@ unsafe fn create_under(root: &CString, relative: &[u8], directory: bool) -> io::
     Ok(())
 }
 
-unsafe fn bind_mount(source: *const i8, target: *const i8, recursive: bool) -> io::Result<()> {
+unsafe fn bind_mount(
+    policy: &LinuxSandboxPolicyMaterial,
+    source: *const i8,
+    target: *const i8,
+    recursive: bool,
+) -> io::Result<()> {
     let flags = libc::MS_BIND | if recursive { libc::MS_REC } else { 0 };
     if libc::mount(source, target, std::ptr::null(), flags, std::ptr::null()) != 0 {
         return Err(io::Error::last_os_error());
     }
     let remount = if recursive {
-        enforced_linux_sandbox_policy().bind_remount_flags as libc::c_ulong | libc::MS_REC
+        policy.bind_remount_flags as libc::c_ulong | libc::MS_REC
     } else {
-        enforced_linux_sandbox_policy().bind_remount_flags as libc::c_ulong
+        policy.bind_remount_flags as libc::c_ulong
     };
     if libc::mount(
         std::ptr::null(),
@@ -508,8 +523,8 @@ enum SeccompStage {
     Worker,
 }
 
-fn set_no_new_privileges() -> io::Result<()> {
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, NO_NEW_PRIVILEGES_VALUE, 0, 0, 0) } == 0 {
+fn set_no_new_privileges(value: i32) -> io::Result<()> {
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, value, 0, 0, 0) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())

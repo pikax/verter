@@ -137,8 +137,10 @@ pub(crate) fn random_fill(bytes: &mut [u8]) -> Result<(), BrokerError> {
 
 /// The concrete AppContainer policy dimensions the spawn path actually enforces.
 ///
-/// Every field is read by the enforcement sites in this module; the profile hash
-/// digests exactly these values, so it changes iff the enforced policy changes.
+/// This struct is the single source of truth: every enforcement site in this module
+/// reads its value from these fields (there are no parallel enforcement literals),
+/// and the attested profile hash digests exactly these values, so it changes iff the
+/// enforced policy changes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AppContainerPolicyMaterial {
     /// Capability SIDs granted to the AppContainer profile and lowbox token.
@@ -153,6 +155,8 @@ pub(crate) struct AppContainerPolicyMaterial {
     pub(crate) inherited_handle_count: u32,
     /// UTF-16 units in the environment block passed to `CreateProcessAsUserW`.
     pub(crate) environment_block_u16s: u32,
+    /// Handles passed into the lowbox token at `NtCreateLowBoxToken`.
+    pub(crate) lowbox_handle_count: u32,
     /// Access mask granted to the profile SID on the staged executable directory.
     pub(crate) profile_access_mask: u32,
     /// ACE inheritance flags on that grant.
@@ -169,23 +173,192 @@ pub(crate) const ENFORCED_APP_CONTAINER_POLICY: AppContainerPolicyMaterial =
         job_active_process_limit: 1,
         inherited_handle_count: 1,
         environment_block_u16s: 2,
+        lowbox_handle_count: 0,
         profile_access_mask: FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
         profile_ace_inheritance: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
     };
 
 impl AppContainerPolicyMaterial {
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(36);
+        let mut out = Vec::with_capacity(40);
         out.extend_from_slice(&self.capability_count.to_be_bytes());
         out.extend_from_slice(&self.process_mitigation_policy.to_be_bytes());
         out.extend_from_slice(&self.job_limit_flags.to_be_bytes());
         out.extend_from_slice(&self.job_active_process_limit.to_be_bytes());
         out.extend_from_slice(&self.inherited_handle_count.to_be_bytes());
         out.extend_from_slice(&self.environment_block_u16s.to_be_bytes());
+        out.extend_from_slice(&self.lowbox_handle_count.to_be_bytes());
         out.extend_from_slice(&self.profile_access_mask.to_be_bytes());
         out.extend_from_slice(&self.profile_ace_inheritance.to_be_bytes());
         out
     }
+}
+
+/// Test-build recorder capturing the policy values the launch path actually hands to
+/// the enforcement syscalls, assembled back into an [`AppContainerPolicyMaterial`] so
+/// tests can compare it against the material the attested hash digests.
+#[cfg(test)]
+pub(crate) mod applied_policy {
+    use std::cell::RefCell;
+
+    use super::AppContainerPolicyMaterial;
+
+    #[derive(Default)]
+    struct Recorded {
+        capability_count: Option<u32>,
+        process_mitigation_policy: Option<u64>,
+        job_limit_flags: Option<u32>,
+        job_active_process_limit: Option<u32>,
+        inherited_handle_count: Option<u32>,
+        environment_block_u16s: Option<u32>,
+        lowbox_handle_count: Option<u32>,
+        profile_access_mask: Option<u32>,
+        profile_ace_inheritance: Option<u32>,
+    }
+
+    thread_local! {
+        static RECORDED: RefCell<Recorded> = RefCell::new(Recorded::default());
+    }
+
+    fn set<T: Copy + PartialEq + std::fmt::Debug>(
+        slot: &mut Option<T>,
+        value: T,
+        label: &'static str,
+    ) {
+        if let Some(existing) = *slot {
+            assert_eq!(
+                existing, value,
+                "launch enforcement sites disagree on {label}"
+            );
+        }
+        *slot = Some(value);
+    }
+
+    pub(super) fn record_capability_count(value: u32) {
+        RECORDED.with(|recorded| {
+            set(
+                &mut recorded.borrow_mut().capability_count,
+                value,
+                "capability_count",
+            );
+        });
+    }
+
+    pub(super) fn record_process_mitigation_policy(value: u64) {
+        RECORDED.with(|recorded| {
+            set(
+                &mut recorded.borrow_mut().process_mitigation_policy,
+                value,
+                "process_mitigation_policy",
+            );
+        });
+    }
+
+    pub(super) fn record_job_limits(flags: u32, active_process_limit: u32) {
+        RECORDED.with(|recorded| {
+            let mut recorded = recorded.borrow_mut();
+            set(&mut recorded.job_limit_flags, flags, "job_limit_flags");
+            set(
+                &mut recorded.job_active_process_limit,
+                active_process_limit,
+                "job_active_process_limit",
+            );
+        });
+    }
+
+    pub(super) fn record_inherited_handle_count(value: u32) {
+        RECORDED.with(|recorded| {
+            set(
+                &mut recorded.borrow_mut().inherited_handle_count,
+                value,
+                "inherited_handle_count",
+            );
+        });
+    }
+
+    pub(super) fn record_environment_block_u16s(value: u32) {
+        RECORDED.with(|recorded| {
+            set(
+                &mut recorded.borrow_mut().environment_block_u16s,
+                value,
+                "environment_block_u16s",
+            );
+        });
+    }
+
+    pub(super) fn record_lowbox_handle_count(value: u32) {
+        RECORDED.with(|recorded| {
+            set(
+                &mut recorded.borrow_mut().lowbox_handle_count,
+                value,
+                "lowbox_handle_count",
+            );
+        });
+    }
+
+    pub(super) fn record_profile_acl(access_mask: u32, ace_inheritance: u32) {
+        RECORDED.with(|recorded| {
+            let mut recorded = recorded.borrow_mut();
+            set(
+                &mut recorded.profile_access_mask,
+                access_mask,
+                "profile_access_mask",
+            );
+            set(
+                &mut recorded.profile_ace_inheritance,
+                ace_inheritance,
+                "profile_ace_inheritance",
+            );
+        });
+    }
+
+    /// The AppContainer policy material the most recent launch on this thread
+    /// actually handed to the enforcement syscalls.
+    pub(crate) fn take_applied_for_test() -> AppContainerPolicyMaterial {
+        RECORDED.with(|recorded| {
+            let recorded = std::mem::take(&mut *recorded.borrow_mut());
+            AppContainerPolicyMaterial {
+                capability_count: recorded
+                    .capability_count
+                    .expect("launch recorded capability_count"),
+                process_mitigation_policy: recorded
+                    .process_mitigation_policy
+                    .expect("launch recorded process_mitigation_policy"),
+                job_limit_flags: recorded
+                    .job_limit_flags
+                    .expect("launch recorded job_limit_flags"),
+                job_active_process_limit: recorded
+                    .job_active_process_limit
+                    .expect("launch recorded job_active_process_limit"),
+                inherited_handle_count: recorded
+                    .inherited_handle_count
+                    .expect("launch recorded inherited_handle_count"),
+                environment_block_u16s: recorded
+                    .environment_block_u16s
+                    .expect("launch recorded environment_block_u16s"),
+                lowbox_handle_count: recorded
+                    .lowbox_handle_count
+                    .expect("launch recorded lowbox_handle_count"),
+                profile_access_mask: recorded
+                    .profile_access_mask
+                    .expect("launch recorded profile_access_mask"),
+                profile_ace_inheritance: recorded
+                    .profile_ace_inheritance
+                    .expect("launch recorded profile_ace_inheritance"),
+            }
+        })
+    }
+}
+
+#[cfg(not(test))]
+mod applied_policy {
+    pub(super) fn record_capability_count(_value: u32) {}
+    pub(super) fn record_process_mitigation_policy(_value: u64) {}
+    pub(super) fn record_job_limits(_flags: u32, _active_process_limit: u32) {}
+    pub(super) fn record_inherited_handle_count(_value: u32) {}
+    pub(super) fn record_environment_block_u16s(_value: u32) {}
+    pub(super) fn record_lowbox_handle_count(_value: u32) {}
+    pub(super) fn record_profile_acl(_access_mask: u32, _ace_inheritance: u32) {}
 }
 
 pub(crate) fn hash_app_container_policy(material: &AppContainerPolicyMaterial) -> [u8; 32] {
@@ -208,13 +381,15 @@ pub(crate) fn spawn_denied_worker(
     let profile_string = format!("Verter.Processor.{}", hex(launch_nonce));
     let profile_name = wide(&profile_string);
     let mut sid = null_mut();
+    let profile_capability_count = ENFORCED_APP_CONTAINER_POLICY.capability_count;
+    applied_policy::record_capability_count(profile_capability_count);
     let hr = unsafe {
         CreateAppContainerProfile(
             profile_name.as_ptr(),
             profile_name.as_ptr(),
             profile_name.as_ptr(),
             null(),
-            0,
+            profile_capability_count,
             &mut sid,
         )
     };
@@ -272,15 +447,22 @@ pub(crate) fn spawn_denied_worker(
     let job_guard = OwnedHandle(job);
     let mut attributes = AttributeList::new(2)?;
     let handles = [client];
+    if handles.len() != ENFORCED_APP_CONTAINER_POLICY.inherited_handle_count as usize {
+        return Err(BrokerError::Protocol(
+            "inherited handle list diverges from the enforced AppContainer policy",
+        ));
+    }
+    let handle_list_bytes = std::mem::size_of_val(&handles);
+    applied_policy::record_inherited_handle_count(
+        (handle_list_bytes / std::mem::size_of::<HANDLE>()) as u32,
+    );
     attributes.update(
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
         handles.as_ptr().cast(),
-        std::mem::size_of_val(&handles),
+        handle_list_bytes,
     )?;
-    let mitigations = u64::from(
-        PROCESS_CREATION_MITIGATION_POLICY_DEP_ENABLE
-            | PROCESS_CREATION_MITIGATION_POLICY_SEHOP_ENABLE,
-    );
+    let mitigations = ENFORCED_APP_CONTAINER_POLICY.process_mitigation_policy;
+    applied_policy::record_process_mitigation_policy(mitigations);
     attributes.update(
         PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY as usize,
         (&raw const mitigations).cast(),
@@ -297,7 +479,14 @@ pub(crate) fn spawn_denied_worker(
         executable.path().display()
     ));
     let mut process = PROCESS_INFORMATION::default();
-    let mut empty_environment = [0_u16; 2];
+    if ENFORCED_APP_CONTAINER_POLICY.environment_block_u16s < 2 {
+        return Err(BrokerError::Protocol(
+            "enforced environment block cannot terminate a unicode environment",
+        ));
+    }
+    let mut empty_environment =
+        vec![0_u16; ENFORCED_APP_CONTAINER_POLICY.environment_block_u16s as usize];
+    applied_policy::record_environment_block_u16s(empty_environment.len() as u32);
     let current_directory = wide(
         executable
             .path()
@@ -372,6 +561,10 @@ fn create_lowbox_token(
     }
     let current_token = OwnedHandle(current_token);
     let mut lowbox_token = null_mut();
+    let lowbox_capability_count = ENFORCED_APP_CONTAINER_POLICY.capability_count;
+    let lowbox_handle_count = ENFORCED_APP_CONTAINER_POLICY.lowbox_handle_count;
+    applied_policy::record_capability_count(lowbox_capability_count);
+    applied_policy::record_lowbox_handle_count(lowbox_handle_count);
     let status = unsafe {
         NtCreateLowBoxToken(
             &mut lowbox_token,
@@ -379,9 +572,9 @@ fn create_lowbox_token(
             TOKEN_ALL_ACCESS,
             null(),
             profile_sid,
-            0,
+            lowbox_capability_count,
             null(),
-            0,
+            lowbox_handle_count,
             null(),
         )
     };
@@ -541,9 +734,13 @@ fn create_job() -> Result<HANDLE, BrokerError> {
         return Err(io_error("CreateJobObjectW"));
     }
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-    limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    limits.BasicLimitInformation.LimitFlags = ENFORCED_APP_CONTAINER_POLICY.job_limit_flags;
+    limits.BasicLimitInformation.ActiveProcessLimit =
+        ENFORCED_APP_CONTAINER_POLICY.job_active_process_limit;
+    applied_policy::record_job_limits(
+        limits.BasicLimitInformation.LimitFlags,
+        limits.BasicLimitInformation.ActiveProcessLimit,
+    );
     if unsafe {
         SetInformationJobObject(
             job,
@@ -603,9 +800,9 @@ fn grant_profile_read_execute(
     }
     let security_descriptor = LocalAllocation(security_descriptor);
     let access = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+        grfAccessPermissions: ENFORCED_APP_CONTAINER_POLICY.profile_access_mask,
         grfAccessMode: GRANT_ACCESS,
-        grfInheritance: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
+        grfInheritance: ENFORCED_APP_CONTAINER_POLICY.profile_ace_inheritance,
         Trustee: TRUSTEE_W {
             pMultipleTrustee: null_mut(),
             MultipleTrusteeOperation: 0,
@@ -614,6 +811,7 @@ fn grant_profile_read_execute(
             ptstrName: profile_sid.cast(),
         },
     };
+    applied_policy::record_profile_acl(access.grfAccessPermissions, access.grfInheritance);
     let mut new_dacl = null_mut();
     let status = unsafe { SetEntriesInAclW(1, &access, old_dacl, &mut new_dacl) };
     if status != 0 {
