@@ -182,21 +182,58 @@ fn launch() -> Result<DeniedWorkerSession, BrokerError> {
     DeniedWorkerBroker::new()?.launch(launch, Duration::from_secs(10))
 }
 
-fn launch_or_skip() -> Option<DeniedWorkerSession> {
-    match launch() {
-        Ok(session) => Some(session),
-        Err(BrokerError::SandboxUnavailable(evidence)) => {
-            assert!(evidence.is_typed_and_fail_closed());
-            #[cfg(windows)]
-            panic!("Windows AppContainer must run: {evidence:?}");
-            #[cfg(not(windows))]
-            {
-                eprintln!("typed sandbox unavailable: {evidence:?}");
-                None
-            }
-        }
-        Err(error) => panic!("launch failed: {error:?}"),
+/// The complete set of outcomes a sandbox-dependent test may take from a launch.
+///
+/// There is deliberately no `Skip` variant: `verter_processor_broker` compiles only
+/// on Windows, Linux and macOS (`ProcessorSandboxKindV1::current`), all three of
+/// which are supported sandbox platforms, so a launch that does not produce a live
+/// denied worker is a test FAILURE. Platforms without a sandbox implementation are
+/// excluded at compile time, never skipped at run time.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum LaunchGate {
+    Run,
+    Fail,
+}
+
+pub(crate) fn launch_gate(outcome: &Result<DeniedWorkerSession, BrokerError>) -> LaunchGate {
+    match outcome {
+        Ok(_) => LaunchGate::Run,
+        Err(_) => LaunchGate::Fail,
     }
+}
+
+/// Launches a real denied worker on this platform, failing the test if it cannot.
+pub(crate) fn launch_required() -> DeniedWorkerSession {
+    let outcome = launch();
+    match (launch_gate(&outcome), outcome) {
+        (LaunchGate::Run, Ok(session)) => session,
+        (_, Err(BrokerError::SandboxUnavailable(evidence))) => {
+            assert!(evidence.is_typed_and_fail_closed());
+            panic!(
+                "{:?} sandbox must run on this supported platform, never skip: {evidence:?}",
+                ProcessorSandboxKindV1::current()
+            );
+        }
+        (_, Err(error)) => panic!("launch failed: {error:?}"),
+        (LaunchGate::Fail, Ok(_)) => unreachable!("gate is total over the outcome"),
+    }
+}
+
+#[test]
+fn sandbox_launch_outcomes_have_no_passing_skip_on_a_supported_platform() {
+    assert!(matches!(
+        ProcessorSandboxKindV1::current(),
+        ProcessorSandboxKindV1::LinuxNamespaceSeccomp
+            | ProcessorSandboxKindV1::MacSandbox
+            | ProcessorSandboxKindV1::WindowsAppContainer
+    ));
+    let unavailable = BrokerError::SandboxUnavailable(SandboxUnavailableEvidence::new(
+        ProcessorSandboxKindV1::current(),
+        "synthetic unavailable outcome",
+        None,
+    ));
+    assert_eq!(launch_gate(&Err(unavailable)), LaunchGate::Fail);
+    assert_eq!(launch_gate(&launch()), LaunchGate::Run);
 }
 
 fn execution_descriptor(
@@ -218,9 +255,7 @@ fn execution_descriptor(
 
 #[test]
 fn work_round_trip_over_real_denied_worker() {
-    let Some(mut session) = launch_or_skip() else {
-        return;
-    };
+    let mut session = launch_required();
     let output = vec![0x5a; 96 * 1024];
     let work = TrustedBrokerWork::new(
         BlockContentResolveContextTokenV1::from_bytes([11; 16]),
@@ -242,9 +277,7 @@ fn work_round_trip_over_real_denied_worker() {
 
 #[test]
 fn dependency_read_suspends_and_resumes_with_worker_minted_correlation() {
-    let Some(mut session) = launch_or_skip() else {
-        return;
-    };
+    let mut session = launch_required();
     let context = BlockContentResolveContextTokenV1::from_bytes([21; 16]);
     let work_token = BlockContentWorkTokenV1::from_bytes([22; 16]);
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -305,9 +338,7 @@ fn dependency_read_suspends_and_resumes_with_worker_minted_correlation() {
 
 #[test]
 fn dependency_ids_are_worker_minted_nonzero_and_not_broker_selected() {
-    let Some(mut session) = launch_or_skip() else {
-        return;
-    };
+    let mut session = launch_required();
     let broker_selected_collision = [33; 16];
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen_for_authority = Arc::clone(&seen);
@@ -393,9 +424,7 @@ fn assert_evidence_mutation_rejected(
     label: &[u8],
     force_frame_rejection: bool,
 ) {
-    let Some(mut session) = launch_or_skip() else {
-        return;
-    };
+    let mut session = launch_required();
     let pid = session.worker().pid();
     session.mutate_evidence_for_test(point);
     if force_frame_rejection {
@@ -444,9 +473,7 @@ fn work_frame_bounds_and_unknown_descriptors_fail_typed() {
         Err(TrustedBrokerWorkError::DescriptorTooLarge)
     );
 
-    let Some(mut session) = launch_or_skip() else {
-        return;
-    };
+    let mut session = launch_required();
     let mut authority =
         dependency_read_authority(|_| panic!("unknown work must not request a dependency"));
     let malformed = TrustedBrokerWork::new(
@@ -494,9 +521,7 @@ fn work_frame_bounds_and_unknown_descriptors_fail_typed() {
 fn worker_rejects_malformed_unknown_and_out_of_window_frames_without_teardown() {
     use crate::protocol::{BrokerToWorkerFrame, WorkScope};
 
-    let Some(mut session) = launch_or_skip() else {
-        return;
-    };
+    let mut session = launch_required();
     assert_eq!(
         session.raw_application_frame_for_test(vec![2], Duration::from_secs(5)),
         Ok(WorkerFrameRejection::TruncatedPayload)
@@ -550,9 +575,7 @@ fn broker_typed_rejects_malformed_unknown_and_out_of_window_worker_frames_with_t
         ),
     ];
     for (payload, expected) in injections {
-        let Some(mut session) = launch_or_skip() else {
-            return;
-        };
+        let mut session = launch_required();
         let pid = session.worker().pid();
         assert_eq!(
             session.inject_worker_frame_for_test(payload),
@@ -564,9 +587,7 @@ fn broker_typed_rejects_malformed_unknown_and_out_of_window_worker_frames_with_t
         ));
     }
 
-    let Some(mut control) = launch_or_skip() else {
-        return;
-    };
+    let mut control = launch_required();
     let mut authority = dependency_read_authority(|_| panic!("control has no dependencies"));
     let work = TrustedBrokerWork::new(
         BlockContentResolveContextTokenV1::from_bytes([73; 16]),
@@ -582,9 +603,7 @@ fn broker_typed_rejects_malformed_unknown_and_out_of_window_worker_frames_with_t
 
 #[test]
 fn execution_envelope_supports_256_reads_and_denies_257_before_authority() {
-    let Some(mut session) = launch_or_skip() else {
-        return;
-    };
+    let mut session = launch_required();
     let request = b"same-request".as_slice();
     let exact_dependencies =
         vec![(DependencyReadKind::Source, request); MAX_DEPENDENCY_READS_PER_WORK];
@@ -636,9 +655,7 @@ fn execution_envelope_supports_256_reads_and_denies_257_before_authority() {
 
 #[test]
 fn real_worker_enforces_exact_and_plus_one_dependency_and_output_bounds() {
-    let Some(mut session) = launch_or_skip() else {
-        return;
-    };
+    let mut session = launch_required();
 
     let exact = TrustedBrokerWork::new(
         BlockContentResolveContextTokenV1::from_bytes([91; 16]),
@@ -738,20 +755,7 @@ fn windows_worker_starts_with_empty_environment_before_admission() {
 
 #[test]
 fn sandbox_denies_filesystem_network_child_and_environment() {
-    let mut session = match launch() {
-        Ok(session) => session,
-        Err(BrokerError::SandboxUnavailable(evidence)) => {
-            assert!(evidence.is_typed_and_fail_closed());
-            #[cfg(windows)]
-            panic!("Windows AppContainer must run: {evidence:?}");
-            #[cfg(not(windows))]
-            {
-                eprintln!("typed sandbox unavailable: {evidence:?}");
-                return;
-            }
-        }
-        Err(error) => panic!("launch failed: {error:?}"),
-    };
+    let mut session = launch_required();
 
     let outside_grant = PathBuf::from_platform_outside_grant();
     assert!(
@@ -786,20 +790,7 @@ fn sandbox_denies_filesystem_network_child_and_environment() {
 
 #[test]
 fn worker_timeout_crash_and_drop_are_bounded() {
-    let mut session = match launch() {
-        Ok(session) => session,
-        Err(BrokerError::SandboxUnavailable(evidence)) => {
-            assert!(evidence.is_typed_and_fail_closed());
-            #[cfg(windows)]
-            panic!("Windows AppContainer must run: {evidence:?}");
-            #[cfg(not(windows))]
-            {
-                eprintln!("typed sandbox unavailable: {evidence:?}");
-                return;
-            }
-        }
-        Err(error) => panic!("launch failed: {error:?}"),
-    };
+    let mut session = launch_required();
     let pid = session.worker().pid();
     assert!(matches!(
         session.probe_for_test(WorkerProbe::Hang, Duration::from_millis(100)),
@@ -810,22 +801,14 @@ fn worker_timeout_crash_and_drop_are_bounded() {
         Duration::from_secs(5)
     ));
 
-    let mut crashed = match launch() {
-        Ok(session) => session,
-        Err(BrokerError::SandboxUnavailable(_)) => return,
-        Err(error) => panic!("launch failed: {error:?}"),
-    };
+    let mut crashed = launch_required();
     let crash_result = crashed.probe_for_test(WorkerProbe::Crash, Duration::from_secs(5));
     assert!(
         matches!(crash_result, Err(BrokerError::WorkerCrashed(_))),
         "crash must be typed: {crash_result:?}"
     );
 
-    let dropped = match launch() {
-        Ok(session) => session,
-        Err(BrokerError::SandboxUnavailable(_)) => return,
-        Err(error) => panic!("launch failed: {error:?}"),
-    };
+    let dropped = launch_required();
     let pid = dropped.worker().pid();
     drop(dropped);
     assert!(crate::platform::wait_pid_gone_for_test(
